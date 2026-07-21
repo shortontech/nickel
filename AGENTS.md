@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-Citrius is an all-Rust, cross-platform desktop shell targeting Windows, Linux, and macOS. Organize it as a Cargo workspace with small crates under `crates/`:
+Nickel is an all-Rust, cross-platform desktop shell targeting Windows, Linux, and macOS. Organize it as a Cargo workspace with small crates under `crates/`:
 
 - `crates/citrius-core/`: platform-neutral application state and domain logic.
 - `crates/citrius-search/`: indexing, fuzzy matching, and result ranking.
@@ -30,7 +30,7 @@ Add platform-specific commands here when packaging and test harnesses are introd
 
 Use stable Rust and standard `rustfmt` formatting. Name modules, functions, and files in `snake_case`; types and traits in `UpperCamelCase`; constants in `SCREAMING_SNAKE_CASE`. Prefer explicit platform boundaries using `cfg(target_os = "...")`. Keep unsafe code localized, documented with a `SAFETY:` justification, and covered by focused tests.
 
-Citrius application code and shipped tooling must remain Rust: do not introduce JavaScript, TypeScript, Lua, Go, C, or C++ application components.
+Nickel application code and shipped tooling must remain Rust: do not introduce JavaScript, TypeScript, Lua, Go, C, or C++ application components.
 
 ## Testing Guidelines
 
