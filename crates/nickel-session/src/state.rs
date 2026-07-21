@@ -296,14 +296,19 @@ impl NickelSession {
             Some(window.toplevel().unwrap().wl_surface().clone()),
             SERIAL_COUNTER.next_serial(),
         );
+        self.space.elements().for_each(|window| {
+            window.toplevel().unwrap().send_pending_configure();
+        });
         self.space.raise_element(&window, true);
         self.raise_panel();
+        eprintln!("nickel-session: context menu shown at {x},{y}");
     }
 
     pub fn hide_context_menu(&mut self) {
         if let Some(window) = self.context_menu_window.clone() {
             self.space.unmap_elem(&window);
         }
+        eprintln!("nickel-session: context menu hidden");
     }
 
     pub fn close_window(&mut self, id: WindowId) {

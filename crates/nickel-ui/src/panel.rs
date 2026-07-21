@@ -7,7 +7,7 @@ use glyphon::{
 };
 use winit::window::Window;
 
-use crate::{icons, rectangles::RectangleRenderer};
+use crate::{graphics::SharedGraphics, icons, rectangles::RectangleRenderer};
 
 const LAUNCHER_BUTTON_WIDTH: f64 = 56.0;
 const TASKS_LEFT: f64 = 64.0;
@@ -22,8 +22,7 @@ pub struct PanelTask {
 
 pub struct PanelGpu {
     surface: wgpu::Surface<'static>,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    graphics: Arc<SharedGraphics>,
     config: wgpu::SurfaceConfiguration,
     font_system: FontSystem,
     swash_cache: SwashCache,
@@ -39,39 +38,24 @@ pub struct PanelGpu {
 }
 
 impl PanelGpu {
-    pub async fn new(window: Arc<Window>) -> Result<Self, String> {
-        let instance = wgpu::Instance::default();
-        let surface = instance
-            .create_surface(window.clone())
-            .map_err(|error| error.to_string())?;
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::LowPower,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-                ..Default::default()
-            })
-            .await
-            .map_err(|error| error.to_string())?;
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: Some("Nickel panel device"),
-                ..Default::default()
-            })
-            .await
-            .map_err(|error| error.to_string())?;
+    pub fn new(window: Arc<Window>, graphics: Arc<SharedGraphics>) -> Result<Self, String> {
+        let surface = graphics.create_surface(window.clone())?;
         let size = window.inner_size();
         let config = surface
-            .get_default_config(&adapter, size.width.max(1), size.height.max(1))
+            .get_default_config(&graphics.adapter, size.width.max(1), size.height.max(1))
             .ok_or_else(|| "panel surface has no supported configuration".to_owned())?;
-        surface.configure(&device, &config);
+        surface.configure(&graphics.device, &config);
 
         let mut font_system = FontSystem::new();
-        let cache = Cache::new(&device);
-        let viewport = Viewport::new(&device, &cache);
-        let mut atlas = TextAtlas::new(&device, &queue, &cache, config.format);
-        let renderer =
-            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
+        let cache = Cache::new(&graphics.device);
+        let viewport = Viewport::new(&graphics.device, &cache);
+        let mut atlas = TextAtlas::new(&graphics.device, &graphics.queue, &cache, config.format);
+        let renderer = TextRenderer::new(
+            &mut atlas,
+            &graphics.device,
+            wgpu::MultisampleState::default(),
+            None,
+        );
         let clock_text = local_time_text();
         let mut clock = Buffer::new(&mut font_system, Metrics::new(20.0, 44.0));
         clock.set_size(
@@ -87,7 +71,7 @@ impl PanelGpu {
         clock.shape_until_scroll(&mut font_system, false);
         let mut icon_buffer = Buffer::new(&mut font_system, Metrics::new(1.0, 1.0));
         icon_buffer.set_size(Some(config.width as f32), Some(config.height as f32));
-        let rectangles = RectangleRenderer::new(&device, config.format);
+        let rectangles = RectangleRenderer::new(&graphics.device, config.format);
         let panel_icon = tinted_panel_icon(
             image::load_from_memory(include_bytes!("../../../assets/icons/nickel-panel.png"))
                 .map_err(|error| format!("failed to decode Nickel panel icon: {error}"))?
@@ -96,8 +80,7 @@ impl PanelGpu {
 
         Ok(Self {
             surface,
-            device,
-            queue,
+            graphics,
             config,
             font_system,
             swash_cache: SwashCache::new(),
@@ -119,7 +102,7 @@ impl PanelGpu {
         }
         self.config.width = width;
         self.config.height = height;
-        self.surface.configure(&self.device, &self.config);
+        self.surface.configure(&self.graphics.device, &self.config);
         self.clock
             .set_size(Some(width.saturating_sub(24) as f32), Some(height as f32));
         self.icon_buffer
@@ -193,12 +176,12 @@ impl PanelGpu {
             }
         }
         self.rectangles.update_raw(
-            &self.queue,
+            &self.graphics.queue,
             (self.config.width, self.config.height),
             &rectangles,
         );
         self.viewport.update(
-            &self.queue,
+            &self.graphics.queue,
             Resolution {
                 width: self.config.width,
                 height: self.config.height,
@@ -206,8 +189,8 @@ impl PanelGpu {
         );
         self.renderer
             .prepare_with_custom(
-                &self.device,
-                &self.queue,
+                &self.graphics.device,
+                &self.graphics.queue,
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
@@ -265,7 +248,7 @@ impl PanelGpu {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                self.surface.configure(&self.device, &self.config);
+                self.surface.configure(&self.graphics.device, &self.config);
                 return;
             }
             _ => return,
@@ -273,11 +256,12 @@ impl PanelGpu {
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Nickel panel encoder"),
-            });
+        let mut encoder =
+            self.graphics
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("Nickel panel encoder"),
+                });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Nickel panel pass"),
@@ -302,8 +286,8 @@ impl PanelGpu {
                 .render(&self.atlas, &self.viewport, &mut pass)
                 .expect("panel text rendering succeeds");
         }
-        self.queue.submit([encoder.finish()]);
-        self.queue.present(frame);
+        self.graphics.queue.submit([encoder.finish()]);
+        self.graphics.queue.present(frame);
     }
 }
 

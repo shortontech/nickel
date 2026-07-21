@@ -21,6 +21,7 @@ use winit::monitor::MonitorHandle;
 use winit::window::{CursorIcon, Window, WindowAttributes, WindowId};
 
 mod context_menu;
+mod graphics;
 mod icons;
 mod launcher;
 mod layout;
@@ -289,8 +290,7 @@ impl Nickel {
 
 struct Gpu {
     surface: wgpu::Surface<'static>,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    graphics: Arc<graphics::SharedGraphics>,
     config: wgpu::SurfaceConfiguration,
     font_system: FontSystem,
     swash_cache: SwashCache,
@@ -308,40 +308,26 @@ struct Gpu {
 
 impl Gpu {
     async fn new(window: Arc<Window>) -> Result<Self, String> {
-        let instance = wgpu::Instance::default();
-        let surface = instance
-            .create_surface(window.clone())
-            .map_err(|error| format!("failed to create graphics surface: {error}"))?;
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::LowPower,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-                ..Default::default()
-            })
-            .await
-            .map_err(|error| format!("failed to find a graphics adapter: {error}"))?;
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: Some("nickel device"),
-                ..Default::default()
-            })
-            .await
-            .map_err(|error| format!("failed to create graphics device: {error}"))?;
+        let (graphics, surface) = graphics::SharedGraphics::new(window.clone()).await?;
         let size = window.inner_size();
         let config = surface
-            .get_default_config(&adapter, size.width.max(1), size.height.max(1))
+            .get_default_config(&graphics.adapter, size.width.max(1), size.height.max(1))
             .ok_or_else(|| "graphics surface has no supported configuration".to_owned())?;
-        surface.configure(&device, &config);
+        surface.configure(&graphics.device, &config);
 
         let mut font_system = FontSystem::new();
         let swash_cache = SwashCache::new();
-        let cache = Cache::new(&device);
-        let viewport = Viewport::new(&device, &cache);
-        let mut atlas = TextAtlas::new(&device, &queue, &cache, config.format);
-        let text_renderer =
-            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
-        let rectangle_renderer = rectangles::RectangleRenderer::new(&device, config.format);
+        let cache = Cache::new(&graphics.device);
+        let viewport = Viewport::new(&graphics.device, &cache);
+        let mut atlas = TextAtlas::new(&graphics.device, &graphics.queue, &cache, config.format);
+        let text_renderer = TextRenderer::new(
+            &mut atlas,
+            &graphics.device,
+            wgpu::MultisampleState::default(),
+            None,
+        );
+        let rectangle_renderer =
+            rectangles::RectangleRenderer::new(&graphics.device, config.format);
         let mut search_buffer = Buffer::new(&mut font_system, Metrics::new(30.0, 44.0));
         search_buffer.set_size(Some(config.width.saturating_sub(112) as f32), Some(56.0));
         let result_buffers = (0..9)
@@ -364,8 +350,7 @@ impl Gpu {
 
         Ok(Self {
             surface,
-            device,
-            queue,
+            graphics,
             config,
             font_system,
             swash_cache,
@@ -388,7 +373,7 @@ impl Gpu {
         }
         self.config.width = width;
         self.config.height = height;
-        self.surface.configure(&self.device, &self.config);
+        self.surface.configure(&self.graphics.device, &self.config);
         let text_width = width.saturating_sub(112) as f32;
         self.search_buffer.set_size(Some(text_width), Some(56.0));
     }
@@ -489,7 +474,7 @@ impl Gpu {
         }
 
         self.viewport.update(
-            &self.queue,
+            &self.graphics.queue,
             Resolution {
                 width: self.config.width,
                 height: self.config.height,
@@ -504,7 +489,7 @@ impl Gpu {
         );
         let hovered_row = hovered_result.and_then(|index| index.checked_sub(scroll_offset));
         self.rectangle_renderer.update(
-            &self.queue,
+            &self.graphics.queue,
             (self.config.width, self.config.height),
             hovered_row.filter(|index| *index < visible_count),
             scrollbar,
@@ -544,8 +529,8 @@ impl Gpu {
         }
         self.text_renderer
             .prepare_with_custom(
-                &self.device,
-                &self.queue,
+                &self.graphics.device,
+                &self.graphics.queue,
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
@@ -566,7 +551,7 @@ impl Gpu {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                self.surface.configure(&self.device, &self.config);
+                self.surface.configure(&self.graphics.device, &self.config);
                 return;
             }
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return,
@@ -578,11 +563,12 @@ impl Gpu {
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("nickel frame encoder"),
-            });
+        let mut encoder =
+            self.graphics
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("nickel frame encoder"),
+                });
 
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -609,8 +595,8 @@ impl Gpu {
                 .expect("text rendering should succeed");
         }
 
-        self.queue.submit([encoder.finish()]);
-        self.queue.present(frame);
+        self.graphics.queue.submit([encoder.finish()]);
+        self.graphics.queue.present(frame);
     }
 }
 
@@ -656,13 +642,15 @@ impl ApplicationHandler for Nickel {
             event_loop.exit();
             return;
         };
+        let shared_graphics = launcher_gpu.graphics.clone();
         let Ok(panel_window) = event_loop.create_window(panel_attributes) else {
             eprintln!("failed to create Nickel panel window");
             event_loop.exit();
             return;
         };
         let panel_window = Arc::new(panel_window);
-        let Ok(panel_gpu) = pollster::block_on(panel::PanelGpu::new(panel_window.clone())) else {
+        let Ok(panel_gpu) = panel::PanelGpu::new(panel_window.clone(), shared_graphics.clone())
+        else {
             eprintln!("failed to initialize Nickel panel renderer");
             event_loop.exit();
             return;
@@ -673,13 +661,14 @@ impl ApplicationHandler for Nickel {
             return;
         };
         let context_menu_window = Arc::new(context_menu_window);
-        let Ok(context_menu_gpu) = pollster::block_on(context_menu::ContextMenuGpu::new(
-            context_menu_window.clone(),
-        )) else {
+        let Ok(mut context_menu_gpu) =
+            context_menu::ContextMenuGpu::new(context_menu_window.clone(), shared_graphics)
+        else {
             eprintln!("failed to initialize Nickel context menu renderer");
             event_loop.exit();
             return;
         };
+        context_menu_gpu.render(false);
 
         launcher_window.set_title("Nickel Launcher");
         panel_window.request_redraw();
@@ -699,9 +688,7 @@ impl ApplicationHandler for Nickel {
     ) {
         if self.context_menu_window.as_ref().map(|window| window.id()) == Some(window_id) {
             match event {
-                WindowEvent::CloseRequested | WindowEvent::Focused(false) => {
-                    self.hide_context_menu()
-                }
+                WindowEvent::CloseRequested => self.hide_context_menu(),
                 WindowEvent::Resized(size) => {
                     if let Some(gpu) = &mut self.context_menu_gpu {
                         gpu.resize(size.width, size.height);
