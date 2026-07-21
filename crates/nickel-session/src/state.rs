@@ -56,6 +56,7 @@ pub struct NickelSession {
     pub panel_window: Option<Window>,
     maximized_restore: HashMap<ObjectId, Geometry>,
     pub last_titlebar_click: Option<(ObjectId, u32, Point<f64, Logical>)>,
+    pub suppress_left_button_release: bool,
     control_socket_path: PathBuf,
 }
 
@@ -121,6 +122,7 @@ impl NickelSession {
             panel_window: None,
             maximized_restore: HashMap::new(),
             last_titlebar_click: None,
+            suppress_left_button_release: false,
             control_socket_path,
         }
     }
@@ -260,17 +262,17 @@ impl NickelSession {
 
     pub fn unmaximize_toplevel(&mut self, surface: &ToplevelSurface) {
         let restore = self.maximized_restore.remove(&surface.wl_surface().id());
+        let Some(restore) = restore else {
+            return;
+        };
         surface.with_pending_state(|state| {
             state
                 .states
                 .unset(smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Maximized);
-            state.size = restore.map(|geometry| Size::from((geometry.width, geometry.height)));
+            state.size = Some(Size::from((restore.width, restore.height)));
         });
-        if let Some(geometry) = restore
-            && let Some(window) = self.window_for_surface(surface.wl_surface())
-        {
-            self.space
-                .map_element(window, (geometry.x, geometry.y), true);
+        if let Some(window) = self.window_for_surface(surface.wl_surface()) {
+            self.space.map_element(window, (restore.x, restore.y), true);
         }
         self.raise_panel();
         surface.send_pending_configure();

@@ -68,6 +68,7 @@ impl NickelSession {
                 const DOUBLE_CLICK_MS: u32 = 500;
                 const DOUBLE_CLICK_DISTANCE: f64 = 6.0;
                 const TITLEBAR_HEIGHT: f64 = 40.0;
+                let mut suppress_pointer_event = false;
 
                 if button == BTN_LEFT && button_state == ButtonState::Pressed {
                     let location = pointer.current_location();
@@ -103,6 +104,8 @@ impl NickelSession {
 
                         if is_double_click {
                             self.last_titlebar_click = None;
+                            self.suppress_left_button_release = true;
+                            suppress_pointer_event = true;
                             self.toggle_maximized_toplevel(&surface);
                         } else {
                             self.last_titlebar_click = Some((id, event.time_msec(), location));
@@ -110,6 +113,12 @@ impl NickelSession {
                     } else {
                         self.last_titlebar_click = None;
                     }
+                } else if button == BTN_LEFT
+                    && button_state == ButtonState::Released
+                    && self.suppress_left_button_release
+                {
+                    self.suppress_left_button_release = false;
+                    suppress_pointer_event = true;
                 }
 
                 if ButtonState::Pressed == button_state && !pointer.is_grabbed() {
@@ -143,15 +152,17 @@ impl NickelSession {
                     }
                 };
 
-                pointer.button(
-                    self,
-                    &ButtonEvent {
-                        button,
-                        state: button_state,
-                        serial,
-                        time: event.time_msec(),
-                    },
-                );
+                if !suppress_pointer_event {
+                    pointer.button(
+                        self,
+                        &ButtonEvent {
+                            button,
+                            state: button_state,
+                            serial,
+                            time: event.time_msec(),
+                        },
+                    );
+                }
                 pointer.frame(self);
             }
             InputEvent::PointerAxis { event, .. } => {
