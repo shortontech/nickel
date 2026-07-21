@@ -1,6 +1,8 @@
 use std::{
     collections::HashMap,
+    io,
     path::{Path, PathBuf},
+    process::{Child, Command},
 };
 
 use nucleo_matcher::{
@@ -14,7 +16,7 @@ pub struct Application {
     name: String,
     icon: Option<String>,
     icon_path: Option<PathBuf>,
-    exec: Option<String>,
+    exec: Option<Vec<String>>,
 }
 
 impl Application {
@@ -23,7 +25,7 @@ impl Application {
         name: String,
         icon: Option<String>,
         icon_path: Option<PathBuf>,
-        exec: Option<String>,
+        exec: Option<Vec<String>>,
     ) -> Self {
         Self {
             id,
@@ -50,8 +52,16 @@ impl Application {
         self.icon_path.as_deref()
     }
 
-    pub fn exec(&self) -> Option<&str> {
+    pub fn exec(&self) -> Option<&[String]> {
         self.exec.as_deref()
+    }
+
+    pub fn launch(&self) -> io::Result<Child> {
+        let (program, arguments) = self
+            .exec()
+            .and_then(|command| command.split_first())
+            .ok_or_else(|| io::Error::other("application has no executable command"))?;
+        Command::new(program).args(arguments).spawn()
     }
 }
 
@@ -270,5 +280,23 @@ mod tests {
             Some("Firefox")
         );
         assert!(launcher.is_pinned("discover"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn launch_spawns_the_parsed_command_without_a_shell() {
+        let application = Application::new(
+            "test".into(),
+            "Test".into(),
+            None,
+            None,
+            Some(vec!["true".into()]),
+        );
+        let status = application
+            .launch()
+            .expect("command starts")
+            .wait()
+            .expect("command exits");
+        assert!(status.success());
     }
 }

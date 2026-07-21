@@ -23,6 +23,7 @@ winit.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 freedesktop-desktop-entry.workspace = true
 freedesktop-icons.workspace = true
+shlex.workspace = true
 wayland-client = { workspace = true, optional = true }
 wayland-protocols-plasma = { workspace = true, features = ["client"], optional = true }
 
