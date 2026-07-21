@@ -17,6 +17,7 @@ mod icons;
 mod launcher;
 mod layout;
 mod rectangles;
+mod storage;
 
 #[cfg(target_os = "linux")]
 mod desktop_entries;
@@ -30,6 +31,7 @@ struct Nickel {
     gpu: Option<Gpu>,
     launcher: Launcher,
     hovered_result: Option<usize>,
+    pin_store: Option<storage::PinStore>,
 }
 
 impl Default for Nickel {
@@ -39,16 +41,30 @@ impl Default for Nickel {
         #[cfg(not(target_os = "linux"))]
         let applications = Vec::new();
 
-        let launcher = if applications.is_empty() {
+        let mut launcher = if applications.is_empty() {
             Launcher::default()
         } else {
             Launcher::new(applications)
+        };
+        let pin_store = match storage::PinStore::open_default() {
+            Ok(store) => {
+                match store.pins() {
+                    Ok(pins) => launcher.set_pins(pins),
+                    Err(error) => eprintln!("failed to read pins: {error}"),
+                }
+                Some(store)
+            }
+            Err(error) => {
+                eprintln!("persistent pin storage unavailable: {error}");
+                None
+            }
         };
         Self {
             window: None,
             gpu: None,
             launcher,
             hovered_result: None,
+            pin_store,
         }
     }
 }
@@ -168,11 +184,17 @@ impl Gpu {
             let text = launcher
                 .result_at(index)
                 .map_or("No applications found", |result| result.name());
-            let text = if launcher.result_count() > 0 && index == launcher.selected_index() {
-                format!("›  {text}")
-            } else {
-                format!("   {text}")
+            let selected = launcher.result_count() > 0 && index == launcher.selected_index();
+            let pinned = launcher
+                .result_at(index)
+                .is_some_and(|application| launcher.is_pinned(application.id()));
+            let marker = match (selected, pinned) {
+                (true, true) => "› ★",
+                (true, false) => "›  ",
+                (false, true) => "  ★",
+                (false, false) => "   ",
             };
+            let text = format!("{marker} {text}");
             buffer.set_size(Some(row.label.width), Some(row.label.height));
             buffer.set_text(
                 &text,
@@ -439,6 +461,31 @@ impl ApplicationHandler for Nickel {
                         .as_ref()
                         .expect("window exists")
                         .request_redraw();
+                }
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Right,
+                ..
+            } => {
+                if let Some(index) = self.hovered_result
+                    && let Some(application_id) = self
+                        .launcher
+                        .result_at(index)
+                        .map(|application| application.id().to_owned())
+                    && let Some(store) = &self.pin_store
+                {
+                    match store.toggle(&application_id).and_then(|_| store.pins()) {
+                        Ok(pins) => {
+                            self.launcher.set_pins(pins);
+                            self.hovered_result = None;
+                            self.window
+                                .as_ref()
+                                .expect("window exists")
+                                .request_redraw();
+                        }
+                        Err(error) => eprintln!("failed to update pin: {error}"),
+                    }
                 }
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {

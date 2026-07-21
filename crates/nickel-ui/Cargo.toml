@@ -11,6 +11,7 @@ glyphon.workspace = true
 image.workspace = true
 nucleo-matcher.workspace = true
 pollster.workspace = true
+redb.workspace = true
 resvg.workspace = true
 wgpu.workspace = true
 winit.workspace = true
@@ -18,3 +19,6 @@ winit.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 freedesktop-desktop-entry.workspace = true
 freedesktop-icons.workspace = true
+
+[dev-dependencies]
+tempfile = "3.25.0"

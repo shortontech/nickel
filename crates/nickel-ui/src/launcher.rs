@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 use nucleo_matcher::{
     Config, Matcher,
@@ -71,6 +74,7 @@ pub struct Launcher {
     query: String,
     applications: Vec<Application>,
     results: Vec<usize>,
+    pins: HashMap<String, u64>,
     selected: usize,
 }
 
@@ -96,13 +100,15 @@ impl Default for Launcher {
 
 impl Launcher {
     pub fn new(applications: Vec<Application>) -> Self {
-        let results = (0..applications.len().min(MAX_RESULTS)).collect();
-        Self {
+        let mut launcher = Self {
             query: String::new(),
             applications,
-            results,
+            results: Vec::new(),
+            pins: HashMap::new(),
             selected: 0,
-        }
+        };
+        launcher.refresh();
+        launcher
     }
 
     pub fn query(&self) -> &str {
@@ -125,6 +131,15 @@ impl Launcher {
 
     pub fn selected_result(&self) -> Option<&Application> {
         self.result_at(self.selected)
+    }
+
+    pub fn is_pinned(&self, application_id: &str) -> bool {
+        self.pins.contains_key(application_id)
+    }
+
+    pub fn set_pins(&mut self, pins: Vec<(String, u64)>) {
+        self.pins = pins.into_iter().collect();
+        self.refresh();
     }
 
     pub fn insert(&mut self, text: &str) {
@@ -165,6 +180,18 @@ impl Launcher {
     }
 
     fn refresh(&mut self) {
+        if self.query.is_empty() {
+            let mut results: Vec<_> = (0..self.applications.len()).collect();
+            results.sort_by_key(|index| {
+                self.pins
+                    .get(self.applications[*index].id())
+                    .map_or((1, *index as u64), |order| (0, *order))
+            });
+            results.truncate(MAX_RESULTS);
+            self.results = results;
+            self.selected = 0;
+            return;
+        }
         let pattern = Pattern::new(
             &self.query,
             CaseMatching::Ignore,
@@ -232,5 +259,20 @@ mod tests {
         );
         launcher.backspace();
         assert_eq!(launcher.query(), "ca");
+    }
+
+    #[test]
+    fn pins_lead_empty_query_in_persisted_order() {
+        let mut launcher = Launcher::default();
+        launcher.set_pins(vec![("discover".into(), 1), ("firefox".into(), 2)]);
+        assert_eq!(
+            launcher.result_at(0).map(Application::name),
+            Some("Discover")
+        );
+        assert_eq!(
+            launcher.result_at(1).map(Application::name),
+            Some("Firefox")
+        );
+        assert!(launcher.is_pinned("discover"));
     }
 }
