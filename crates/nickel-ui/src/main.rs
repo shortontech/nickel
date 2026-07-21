@@ -32,8 +32,8 @@ mod rectangles;
 mod storage;
 
 use launcher::Launcher;
-use model::{OpenWindow, WindowId as ShellWindowId};
-use platform::{ShellCommand, WindowAction, WindowFeed};
+use model::{OpenWindow, TrayItem, WindowId as ShellWindowId};
+use platform::{ShellCommand, TrayFeed, TraySource, WindowAction, WindowFeed};
 
 const SECONDARY_DISPLAY_ENV: &str = "NICKEL_USE_SECONDARY_DISPLAY";
 
@@ -69,15 +69,18 @@ struct Nickel {
     panel_gpu: Option<panel::PanelGpu>,
     panel_hovered: bool,
     panel_task_hovered: Option<usize>,
+    panel_tray_hovered: Option<usize>,
     context_menu_window: Option<Arc<Window>>,
     context_menu_gpu: Option<context_menu::ContextMenuGpu>,
     context_menu_hovered: bool,
     context_menu_target: Option<ShellWindowId>,
     task_windows: Vec<OpenWindow>,
+    tray_items: Vec<TrayItem>,
     launcher_visibility: LauncherVisibility,
     clock_deadline: Instant,
     window_deadline: Instant,
     window_feed: WindowFeed,
+    tray_feed: TrayFeed,
     launcher: Launcher,
     hovered_result: Option<usize>,
     pin_store: Option<storage::PinStore>,
@@ -115,15 +118,18 @@ impl Default for Nickel {
             panel_gpu: None,
             panel_hovered: false,
             panel_task_hovered: None,
+            panel_tray_hovered: None,
             context_menu_window: None,
             context_menu_gpu: None,
             context_menu_hovered: false,
             context_menu_target: None,
             task_windows: Vec::new(),
+            tray_items: Vec::new(),
             launcher_visibility: LauncherVisibility::default(),
             clock_deadline: next_minute_deadline(Instant::now(), SystemTime::now()),
             window_deadline: Instant::now(),
             window_feed: WindowFeed::new(),
+            tray_feed: TrayFeed::new(),
             launcher,
             hovered_result: None,
             pin_store,
@@ -253,6 +259,27 @@ impl Nickel {
         }
         if let Some(gpu) = &mut self.panel_gpu {
             gpu.set_tasks(tasks);
+        }
+        if let Some(window) = &self.panel_window {
+            window.request_redraw();
+        }
+    }
+
+    fn refresh_tray_items(&mut self) {
+        let items = self.tray_feed.snapshot();
+        if items == self.tray_items {
+            return;
+        }
+        eprintln!("nickel-ui: tray items updated: {}", items.len());
+        let rendered = items
+            .iter()
+            .map(|item| panel::PanelTrayItem {
+                icon: item.icon.clone(),
+            })
+            .collect();
+        self.tray_items = items;
+        if let Some(gpu) = &mut self.panel_gpu {
+            gpu.set_tray_items(rendered);
         }
         if let Some(window) = &self.panel_window {
             window.request_redraw();
@@ -782,22 +809,32 @@ impl ApplicationHandler for Nickel {
                 WindowEvent::CursorMoved { position, .. } => {
                     let hovered = panel::launcher_button_contains(position);
                     let task_hovered = panel::task_at(position, self.task_windows.len());
-                    if hovered == self.panel_hovered && task_hovered == self.panel_task_hovered {
+                    let tray_hovered = self.panel_window.as_ref().and_then(|window| {
+                        panel::tray_at(position, window.inner_size().width, self.tray_items.len())
+                    });
+                    if hovered == self.panel_hovered
+                        && task_hovered == self.panel_task_hovered
+                        && tray_hovered == self.panel_tray_hovered
+                    {
                         return;
                     }
                     self.panel_hovered = hovered;
                     self.panel_task_hovered = task_hovered;
+                    self.panel_tray_hovered = tray_hovered;
                     let window = self.panel_window.as_ref().expect("panel window exists");
-                    window.set_cursor(if hovered || task_hovered.is_some() {
-                        CursorIcon::Pointer
-                    } else {
-                        CursorIcon::Default
-                    });
+                    window.set_cursor(
+                        if hovered || task_hovered.is_some() || tray_hovered.is_some() {
+                            CursorIcon::Pointer
+                        } else {
+                            CursorIcon::Default
+                        },
+                    );
                     window.request_redraw();
                 }
                 WindowEvent::CursorLeft { .. } => {
                     self.panel_hovered = false;
                     self.panel_task_hovered = None;
+                    self.panel_tray_hovered = None;
                     let window = self.panel_window.as_ref().expect("panel window exists");
                     window.set_cursor(CursorIcon::Default);
                     window.request_redraw();
@@ -807,6 +844,16 @@ impl ApplicationHandler for Nickel {
                     button: MouseButton::Left,
                     ..
                 } if self.panel_hovered => self.toggle_launcher(),
+                WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    button: MouseButton::Left,
+                    ..
+                } if self.panel_tray_hovered.is_some() => {
+                    let index = self.panel_tray_hovered.expect("tray item is hovered");
+                    if let Some(item) = self.tray_items.get(index) {
+                        self.tray_feed.activate(&item.id);
+                    }
+                }
                 WindowEvent::MouseInput {
                     state: ElementState::Pressed,
                     button: MouseButton::Right,
@@ -1025,6 +1072,7 @@ impl ApplicationHandler for Nickel {
         let now = Instant::now();
         if now >= self.window_deadline {
             self.refresh_task_windows();
+            self.refresh_tray_items();
             self.window_deadline = now + Duration::from_millis(250);
         }
         if now >= self.clock_deadline {

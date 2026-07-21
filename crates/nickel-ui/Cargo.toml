@@ -22,6 +22,7 @@ winit.workspace = true
 freedesktop-desktop-entry.workspace = true
 freedesktop-icons.workspace = true
 shlex.workspace = true
+zbus.workspace = true
 
 [dev-dependencies]
 tempfile = "3.25.0"

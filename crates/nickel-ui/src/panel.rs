@@ -13,10 +13,17 @@ const LAUNCHER_BUTTON_WIDTH: f64 = 56.0;
 const TASKS_LEFT: f64 = 64.0;
 const TASK_WIDTH: f64 = 48.0;
 const PANEL_ICON_GLYPH_ID: u16 = u16::MAX - 1;
+const TRAY_GLYPH_BASE: u16 = 60_000;
+const TRAY_WIDTH: f64 = 40.0;
+const CLOCK_WIDTH: f64 = 100.0;
 
 pub struct PanelTask {
     pub id: u64,
     pub active: bool,
+    pub icon: image::RgbaImage,
+}
+
+pub struct PanelTrayItem {
     pub icon: image::RgbaImage,
 }
 
@@ -33,6 +40,7 @@ pub struct PanelGpu {
     clock_text: String,
     icon_buffer: Buffer,
     tasks: Vec<PanelTask>,
+    tray_items: Vec<PanelTrayItem>,
     rectangles: RectangleRenderer,
     panel_icon: image::RgbaImage,
 }
@@ -91,6 +99,7 @@ impl PanelGpu {
             clock_text,
             icon_buffer,
             tasks: Vec::new(),
+            tray_items: Vec::new(),
             rectangles,
             panel_icon,
         })
@@ -129,6 +138,10 @@ impl PanelGpu {
         self.tasks = tasks;
     }
 
+    pub fn set_tray_items(&mut self, items: Vec<PanelTrayItem>) {
+        self.tray_items = items;
+    }
+
     pub fn render(&mut self, launcher_hovered: bool, task_hovered: Option<usize>) {
         let mut custom_glyphs = vec![CustomGlyph {
             id: PANEL_ICON_GLYPH_ID,
@@ -155,6 +168,18 @@ impl PanelGpu {
                     metadata: 0,
                 }),
         );
+        custom_glyphs.extend(self.tray_items.iter().enumerate().filter_map(|(index, _)| {
+            Some(CustomGlyph {
+                id: TRAY_GLYPH_BASE.checked_add(u16::try_from(index).ok()?)?,
+                left: tray_left(self.config.width, self.tray_items.len(), index) as f32 + 4.0,
+                top: 12.0,
+                width: 32.0,
+                height: 32.0,
+                color: None,
+                snap_to_physical_pixel: true,
+                metadata: 0,
+            })
+        }));
         let mut rectangles = Vec::new();
         if launcher_hovered {
             rectangles.push(([4.0, 4.0, 52.0, 52.0], [0.12, 0.15, 0.21, 1.0]));
@@ -228,6 +253,11 @@ impl PanelGpu {
                 &|request: RasterizeCustomGlyphRequest| {
                     let source = if request.id == PANEL_ICON_GLYPH_ID {
                         &self.panel_icon
+                    } else if request.id >= TRAY_GLYPH_BASE {
+                        &self
+                            .tray_items
+                            .get(usize::from(request.id - TRAY_GLYPH_BASE))?
+                            .icon
                     } else {
                         &self
                             .tasks
@@ -303,6 +333,24 @@ pub fn task_menu_x(index: usize) -> i32 {
     (TASKS_LEFT + index as f64 * TASK_WIDTH) as i32
 }
 
+fn tray_left(panel_width: u32, count: usize, index: usize) -> f64 {
+    f64::from(panel_width) - CLOCK_WIDTH - (count - index) as f64 * TRAY_WIDTH
+}
+
+pub fn tray_at(
+    position: winit::dpi::PhysicalPosition<f64>,
+    panel_width: u32,
+    count: usize,
+) -> Option<usize> {
+    (0..count).find(|index| {
+        let left = tray_left(panel_width, count, *index);
+        position.x >= left
+            && position.x < left + TRAY_WIDTH
+            && position.y >= 0.0
+            && position.y < 56.0
+    })
+}
+
 pub fn fallback_icon() -> image::RgbaImage {
     image::RgbaImage::from_fn(32, 32, |x, y| {
         let border = x <= 2 || y <= 2 || x >= 29 || y >= 29;
@@ -336,7 +384,7 @@ fn local_time_text() -> String {
 mod tests {
     use winit::dpi::PhysicalPosition;
 
-    use super::{launcher_button_contains, local_time_text, task_at, tinted_panel_icon};
+    use super::{launcher_button_contains, local_time_text, task_at, tinted_panel_icon, tray_at};
 
     #[test]
     fn local_clock_uses_zero_padded_hour_and_minute() {
@@ -372,5 +420,18 @@ mod tests {
             tinted_panel_icon(source).get_pixel(0, 0).0,
             [238, 241, 248, 127]
         );
+    }
+
+    #[test]
+    fn tray_hit_testing_uses_space_before_clock() {
+        assert_eq!(
+            tray_at(PhysicalPosition::new(1110.0, 28.0), 1280, 2),
+            Some(0)
+        );
+        assert_eq!(
+            tray_at(PhysicalPosition::new(1150.0, 28.0), 1280, 2),
+            Some(1)
+        );
+        assert_eq!(tray_at(PhysicalPosition::new(1190.0, 28.0), 1280, 2), None);
     }
 }

@@ -1,5 +1,7 @@
 # Linux Status Notifier Tray
 
+Status: complete.
+
 ## Goal
 
 Display Linux StatusNotifierItem tray icons in Nickel's panel without exposing D-Bus or Linux protocol types to portable UI code. Provide an all-Rust test item so registration, display, activation, and removal can be exercised under `nickel-session`.

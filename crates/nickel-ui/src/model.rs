@@ -4,6 +4,13 @@ use std::{
     process::{Child, Command},
 };
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct TrayItem {
+    pub id: String,
+    pub title: String,
+    pub icon: image::RgbaImage,
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ApplicationId(String);
 
