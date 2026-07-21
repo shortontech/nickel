@@ -22,6 +22,7 @@ use winit::window::{CursorIcon, Window, WindowAttributes, WindowId};
 mod icons;
 mod launcher;
 mod layout;
+mod panel;
 mod rectangles;
 mod storage;
 
@@ -34,10 +35,41 @@ mod desktop_entries;
 use launcher::Launcher;
 
 const SECONDARY_DISPLAY_ENV: &str = "NICKEL_USE_SECONDARY_DISPLAY";
+#[cfg(unix)]
+const SESSION_CONTROL_ENV: &str = "NICKEL_SESSION_CONTROL";
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum LauncherVisibility {
+    #[default]
+    Hidden,
+    Visible,
+}
+
+impl LauncherVisibility {
+    fn is_visible(self) -> bool {
+        self == Self::Visible
+    }
+
+    fn toggle(&mut self) -> bool {
+        *self = match *self {
+            Self::Hidden => Self::Visible,
+            Self::Visible => Self::Hidden,
+        };
+        self.is_visible()
+    }
+
+    fn set(&mut self, visible: bool) {
+        *self = if visible { Self::Visible } else { Self::Hidden };
+    }
+}
 
 struct Nickel {
     window: Option<Arc<Window>>,
     gpu: Option<Gpu>,
+    panel_window: Option<Arc<Window>>,
+    panel_gpu: Option<panel::PanelGpu>,
+    panel_hovered: bool,
+    launcher_visibility: LauncherVisibility,
     launcher: Launcher,
     hovered_result: Option<usize>,
     pin_store: Option<storage::PinStore>,
@@ -74,6 +106,10 @@ impl Default for Nickel {
         Self {
             window: None,
             gpu: None,
+            panel_window: None,
+            panel_gpu: None,
+            panel_hovered: false,
+            launcher_visibility: LauncherVisibility::default(),
             launcher,
             hovered_result: None,
             pin_store,
@@ -85,6 +121,31 @@ impl Default for Nickel {
 }
 
 impl Nickel {
+    fn set_launcher_visible(&mut self, visible: bool) {
+        self.launcher_visibility.set(visible);
+        if send_session_command(if visible {
+            b"show-launcher"
+        } else {
+            b"hide-launcher"
+        }) {
+            return;
+        }
+        if let Some(window) = &self.window {
+            window.set_visible(visible);
+            if visible {
+                window.focus_window();
+                window.request_redraw();
+            }
+        }
+    }
+
+    fn toggle_launcher(&mut self) {
+        let visible = self.launcher_visibility.toggle();
+        if !send_session_command(b"toggle-launcher") {
+            self.set_launcher_visible(visible);
+        }
+    }
+
     fn viewport_metrics(&self) -> (u32, u32, usize) {
         let size = self.window.as_ref().expect("window exists").inner_size();
         (
@@ -465,35 +526,52 @@ impl ApplicationHandler for Nickel {
         let primary = event_loop.primary_monitor();
         let target = select_monitor(&monitors, primary.as_ref(), use_secondary);
 
-        let mut attributes = WindowAttributes::default()
-            .with_title("Nickel")
+        let mut launcher_attributes = WindowAttributes::default()
+            .with_title("Nickel Launcher Initializing")
             .with_inner_size(LogicalSize::new(960, 640))
             .with_min_inner_size(LogicalSize::new(480, 320));
+        let mut panel_attributes = WindowAttributes::default()
+            .with_title("Nickel Panel")
+            .with_inner_size(LogicalSize::new(220, 64))
+            .with_min_inner_size(LogicalSize::new(220, 64))
+            .with_max_inner_size(LogicalSize::new(220, 64))
+            .with_resizable(false);
 
         if let Some(monitor) = target {
-            attributes = attributes.with_position(centered_position(&monitor, (960, 640)));
+            launcher_attributes =
+                launcher_attributes.with_position(centered_position(&monitor, (960, 640)));
+            panel_attributes = panel_attributes.with_position(panel_position(&monitor, (220, 64)));
         }
 
-        match event_loop.create_window(attributes) {
-            Ok(window) => {
-                let window = Arc::new(window);
-                match pollster::block_on(Gpu::new(window.clone())) {
-                    Ok(gpu) => {
-                        window.request_redraw();
-                        self.window = Some(window);
-                        self.gpu = Some(gpu);
-                    }
-                    Err(error) => {
-                        eprintln!("{error}");
-                        event_loop.exit();
-                    }
-                }
-            }
-            Err(error) => {
-                eprintln!("failed to create nickel window: {error}");
-                event_loop.exit();
-            }
-        }
+        let Ok(launcher_window) = event_loop.create_window(launcher_attributes) else {
+            eprintln!("failed to create Nickel launcher window");
+            event_loop.exit();
+            return;
+        };
+        let launcher_window = Arc::new(launcher_window);
+        let Ok(launcher_gpu) = pollster::block_on(Gpu::new(launcher_window.clone())) else {
+            eprintln!("failed to initialize Nickel launcher renderer");
+            event_loop.exit();
+            return;
+        };
+        let Ok(panel_window) = event_loop.create_window(panel_attributes) else {
+            eprintln!("failed to create Nickel panel window");
+            event_loop.exit();
+            return;
+        };
+        let panel_window = Arc::new(panel_window);
+        let Ok(panel_gpu) = pollster::block_on(panel::PanelGpu::new(panel_window.clone())) else {
+            eprintln!("failed to initialize Nickel panel renderer");
+            event_loop.exit();
+            return;
+        };
+
+        launcher_window.set_title("Nickel Launcher");
+        panel_window.request_redraw();
+        self.window = Some(launcher_window);
+        self.gpu = Some(launcher_gpu);
+        self.panel_window = Some(panel_window);
+        self.panel_gpu = Some(panel_gpu);
     }
 
     fn window_event(
@@ -502,12 +580,51 @@ impl ApplicationHandler for Nickel {
         window_id: WindowId,
         event: WindowEvent,
     ) {
+        if self.panel_window.as_ref().map(|window| window.id()) == Some(window_id) {
+            match event {
+                WindowEvent::CloseRequested => event_loop.exit(),
+                WindowEvent::Resized(size) => {
+                    if let Some(gpu) = &mut self.panel_gpu {
+                        gpu.resize(size.width, size.height);
+                    }
+                    self.panel_window
+                        .as_ref()
+                        .expect("panel window exists")
+                        .request_redraw();
+                }
+                WindowEvent::RedrawRequested => {
+                    if let Some(gpu) = &mut self.panel_gpu {
+                        gpu.render(self.panel_hovered);
+                    }
+                }
+                WindowEvent::CursorMoved { .. } if !self.panel_hovered => {
+                    self.panel_hovered = true;
+                    let window = self.panel_window.as_ref().expect("panel window exists");
+                    window.set_cursor(CursorIcon::Pointer);
+                    window.request_redraw();
+                }
+                WindowEvent::CursorLeft { .. } => {
+                    self.panel_hovered = false;
+                    let window = self.panel_window.as_ref().expect("panel window exists");
+                    window.set_cursor(CursorIcon::Default);
+                    window.request_redraw();
+                }
+                WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    button: MouseButton::Left,
+                    ..
+                } => self.toggle_launcher(),
+                _ => {}
+            }
+            return;
+        }
+
         if self.window.as_ref().map(|window| window.id()) != Some(window_id) {
             return;
         }
 
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => self.set_launcher_visible(false),
             WindowEvent::Resized(size) => {
                 if let Some(gpu) = &mut self.gpu {
                     gpu.resize(size.width, size.height);
@@ -672,7 +789,7 @@ impl ApplicationHandler for Nickel {
                     Key::Named(NamedKey::ArrowUp) => self.launcher.select_previous(),
                     Key::Named(NamedKey::Backspace) => self.launcher.backspace(),
                     Key::Named(NamedKey::Escape) if self.launcher.query().is_empty() => {
-                        event_loop.exit();
+                        self.set_launcher_visible(false);
                     }
                     Key::Named(NamedKey::Escape) => self.launcher.clear(),
                     Key::Named(NamedKey::Enter) => {
@@ -738,6 +855,23 @@ fn env_flag(name: &str) -> bool {
     })
 }
 
+#[cfg(unix)]
+fn send_session_command(command: &[u8]) -> bool {
+    use std::os::unix::net::UnixDatagram;
+
+    let Some(path) = env::var_os(SESSION_CONTROL_ENV) else {
+        return false;
+    };
+    UnixDatagram::unbound()
+        .and_then(|socket| socket.send_to(command, path))
+        .is_ok()
+}
+
+#[cfg(not(unix))]
+fn send_session_command(_: &[u8]) -> bool {
+    false
+}
+
 fn select_monitor(
     monitors: &[MonitorHandle],
     primary: Option<&MonitorHandle>,
@@ -762,6 +896,14 @@ fn centered_position(monitor: &MonitorHandle, window_size: (u32, u32)) -> Physic
     PhysicalPosition::new(x, y)
 }
 
+fn panel_position(monitor: &MonitorHandle, panel_size: (u32, u32)) -> PhysicalPosition<i32> {
+    let origin = monitor.position();
+    let size = monitor.size();
+    let x = origin.x + (size.width.saturating_sub(panel_size.0) / 2) as i32;
+    let y = origin.y + size.height.saturating_sub(panel_size.1) as i32;
+    PhysicalPosition::new(x, y)
+}
+
 fn hit_test_result(
     position: PhysicalPosition<f64>,
     window_width: u32,
@@ -772,7 +914,17 @@ fn hit_test_result(
 
 #[cfg(test)]
 mod tests {
-    use super::env_flag;
+    use super::{LauncherVisibility, env_flag};
+
+    #[test]
+    fn launcher_visibility_toggles_without_recreation() {
+        let mut visibility = LauncherVisibility::default();
+        assert!(!visibility.is_visible());
+        assert!(visibility.toggle());
+        assert!(!visibility.toggle());
+        visibility.set(true);
+        assert!(visibility.is_visible());
+    }
 
     #[test]
     fn missing_environment_flag_is_disabled() {

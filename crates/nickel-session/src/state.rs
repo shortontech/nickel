@@ -1,4 +1,6 @@
-use std::{collections::HashMap, ffi::OsString, sync::Arc};
+use std::{
+    collections::HashMap, ffi::OsString, os::unix::net::UnixDatagram, path::PathBuf, sync::Arc,
+};
 
 use smithay::{
     desktop::{PopupManager, Space, Window, WindowSurfaceType},
@@ -46,6 +48,9 @@ pub struct NickelSession {
     pub seat: Seat<Self>,
     pub windows: WindowRegistry,
     pub surface_windows: HashMap<ObjectId, WindowId>,
+    pub launcher_window: Option<Window>,
+    pub launcher_visible: bool,
+    control_socket_path: PathBuf,
 }
 
 impl NickelSession {
@@ -80,6 +85,8 @@ impl NickelSession {
         // Outputs become views of a part of the Space and can be rendered via Space::render_output.
         let space = Space::default();
 
+        let control_socket_path = Self::init_control_socket(event_loop);
+
         let socket_name = Self::init_wayland_listener(display, event_loop);
 
         // Get the loop signal, used to stop the event loop
@@ -103,7 +110,67 @@ impl NickelSession {
             seat,
             windows: WindowRegistry::default(),
             surface_windows: HashMap::new(),
+            launcher_window: None,
+            launcher_visible: false,
+            control_socket_path,
         }
+    }
+
+    fn init_control_socket(event_loop: &mut EventLoop<CalloopData>) -> PathBuf {
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let path = runtime.join(format!("nickel-session-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let socket =
+            UnixDatagram::bind(&path).expect("failed to bind Nickel session control socket");
+        socket
+            .set_nonblocking(true)
+            .expect("failed to make Nickel session control socket nonblocking");
+
+        // SAFETY: session initialization is single-threaded and happens before
+        // the shell child is spawned.
+        unsafe { std::env::set_var("NICKEL_SESSION_CONTROL", &path) };
+
+        event_loop
+            .handle()
+            .insert_source(
+                Generic::new(socket, Interest::READ, Mode::Level),
+                |_, socket, data| {
+                    let mut command = [0_u8; 64];
+                    while let Ok(length) = socket.as_ref().recv(&mut command) {
+                        match &command[..length] {
+                            b"toggle-launcher" => data.state.toggle_launcher(),
+                            b"hide-launcher" => data.state.set_launcher_visible(false),
+                            b"show-launcher" => data.state.set_launcher_visible(true),
+                            _ => {}
+                        }
+                    }
+                    Ok(PostAction::Continue)
+                },
+            )
+            .expect("failed to register Nickel session control socket");
+        path
+    }
+
+    pub fn toggle_launcher(&mut self) {
+        self.set_launcher_visible(!self.launcher_visible);
+    }
+
+    pub fn set_launcher_visible(&mut self, visible: bool) {
+        let Some(window) = self.launcher_window.clone() else {
+            return;
+        };
+        if visible {
+            self.space.map_element(window, (64, 64), true);
+        } else {
+            self.space.unmap_elem(&window);
+        }
+        self.launcher_visible = visible;
+        eprintln!(
+            "nickel-session: launcher {}",
+            if visible { "shown" } else { "hidden" }
+        );
     }
 
     fn init_wayland_listener(
@@ -162,6 +229,12 @@ impl NickelSession {
                     .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
                     .map(|(s, p)| (s, (p + location).to_f64()))
             })
+    }
+}
+
+impl Drop for NickelSession {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.control_socket_path);
     }
 }
 

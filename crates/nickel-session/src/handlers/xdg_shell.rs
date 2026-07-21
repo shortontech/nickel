@@ -43,6 +43,14 @@ impl XdgShellHandler for NickelSession {
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
+        if self
+            .launcher_window
+            .as_ref()
+            .is_some_and(|window| window.toplevel().unwrap().wl_surface() == surface.wl_surface())
+        {
+            self.launcher_window = None;
+            self.launcher_visible = false;
+        }
         if let Some(id) = self.surface_windows.remove(&surface.wl_surface().id()) {
             self.windows.remove(id);
         }
@@ -223,12 +231,25 @@ impl NickelSession {
                 .expect("xdg toplevel attributes are not poisoned");
             (attributes.title.clone(), attributes.app_id.clone())
         });
+        let is_launcher = title.as_deref() == Some("Nickel Launcher");
         if let Some(id) = self
             .surface_windows
             .get(&surface.wl_surface().id())
             .copied()
         {
             self.windows.update_metadata(id, title, app_id);
+        }
+        if is_launcher && self.launcher_window.is_none() {
+            let launcher = self
+                .space
+                .elements()
+                .find(|window| window.toplevel().unwrap().wl_surface() == surface.wl_surface())
+                .cloned();
+            if let Some(launcher) = launcher {
+                self.space.unmap_elem(&launcher);
+                self.launcher_window = Some(launcher);
+                self.launcher_visible = false;
+            }
         }
     }
 
