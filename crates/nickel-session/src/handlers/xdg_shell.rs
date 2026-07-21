@@ -27,7 +27,6 @@ use smithay::{
 use crate::{
     NickelSession,
     grabs::{MoveSurfaceGrab, ResizeSurfaceGrab},
-    window_registry::WindowId,
 };
 
 impl XdgShellHandler for NickelSession {
@@ -37,13 +36,16 @@ impl XdgShellHandler for NickelSession {
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
         let cascade = i32::try_from(self.windows.len() % 8).unwrap_or(0) * 32;
-        self.windows.insert(window_id(&surface));
+        let id = self.windows.insert();
+        self.surface_windows.insert(surface.wl_surface().id(), id);
         let window = Window::new_wayland_window(surface);
         self.space.map_element(window, (cascade, cascade), true);
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
-        self.windows.remove(window_id(&surface));
+        if let Some(id) = self.surface_windows.remove(&surface.wl_surface().id()) {
+            self.windows.remove(id);
+        }
     }
 
     fn app_id_changed(&mut self, surface: ToplevelSurface) {
@@ -221,8 +223,13 @@ impl NickelSession {
                 .expect("xdg toplevel attributes are not poisoned");
             (attributes.title.clone(), attributes.app_id.clone())
         });
-        self.windows
-            .update_metadata(window_id(surface), title, app_id);
+        if let Some(id) = self
+            .surface_windows
+            .get(&surface.wl_surface().id())
+            .copied()
+        {
+            self.windows.update_metadata(id, title, app_id);
+        }
     }
 
     fn unconstrain_popup(&self, popup: &PopupSurface) {
@@ -251,8 +258,4 @@ impl NickelSession {
             state.geometry = state.positioner.get_unconstrained_geometry(target);
         });
     }
-}
-
-fn window_id(surface: &ToplevelSurface) -> WindowId {
-    WindowId(surface.wl_surface().id().protocol_id())
 }
