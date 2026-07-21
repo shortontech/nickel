@@ -163,9 +163,12 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
         ShellCommand::Toggle => "toggle-launcher".to_owned(),
         ShellCommand::Show => "show-launcher".to_owned(),
         ShellCommand::Hide => "hide-launcher".to_owned(),
-        ShellCommand::ShowContextMenu { x } => format!("show-context-menu\t{x}"),
+        ShellCommand::ShowContextMenu { x, height } => {
+            format!("show-context-menu\t{x}\t{height}")
+        }
         ShellCommand::HideContextMenu => "hide-context-menu".to_owned(),
         ShellCommand::WindowAction { window, action } => match action {
+            WindowAction::Activate => format!("activate-window\t{}", window.0),
             WindowAction::Close => format!("close-window\t{}", window.0),
         },
     };
@@ -213,14 +216,16 @@ impl Drop for WindowFeed {
 }
 
 fn parse_window(line: &str, launcher: &Launcher) -> Option<OpenWindow> {
-    let mut fields = line.splitn(3, '\t');
+    let mut fields = line.splitn(4, '\t');
     let id = WindowId(fields.next()?.parse().ok()?);
     let active = fields.next()? == "1";
     let native_app_id = fields.next()?;
+    let title = fields.next().unwrap_or_default().to_owned();
     Some(OpenWindow {
         id,
         application_id: resolve_application_id(native_app_id, launcher),
         active,
+        title,
     })
 }
 
@@ -241,7 +246,7 @@ fn resolve_application_id(native_app_id: &str, launcher: &Launcher) -> Option<Ap
 mod tests {
     use crate::{launcher::Launcher, model::Application};
 
-    use super::{pixmap_to_rgba, resolve_application_id};
+    use super::{parse_window, pixmap_to_rgba, resolve_application_id};
 
     #[test]
     fn wayland_app_id_resolution_stays_in_linux_adapter() {
@@ -262,5 +267,20 @@ mod tests {
     fn status_notifier_argb_pixmap_becomes_rgba() {
         let image = pixmap_to_rgba((1, 1, vec![128, 10, 20, 30])).expect("valid pixmap");
         assert_eq!(image.get_pixel(0, 0).0, [10, 20, 30, 128]);
+    }
+
+    #[test]
+    fn window_snapshot_keeps_title() {
+        let launcher = Launcher::new(vec![Application::new(
+            "org.kde.konsole.desktop".into(),
+            "Konsole".into(),
+            None,
+            None,
+            None,
+        )]);
+        let window = parse_window("7\t1\torg.kde.konsole\tProject shell", &launcher)
+            .expect("valid window snapshot");
+        assert_eq!(window.title, "Project shell");
+        assert!(window.active);
     }
 }

@@ -166,11 +166,20 @@ impl NickelSession {
                             }
                             _ => {
                                 if let Ok(message) = std::str::from_utf8(message)
-                                    && let Some(x) = message
+                                    && let Some((x, height)) = message
                                         .strip_prefix("show-context-menu\t")
+                                        .and_then(|value| value.split_once('\t'))
+                                        .and_then(|(x, height)| {
+                                            Some((x.parse().ok()?, height.parse().ok()?))
+                                        })
+                                {
+                                    data.state.show_context_menu(x, height);
+                                } else if let Ok(message) = std::str::from_utf8(message)
+                                    && let Some(id) = message
+                                        .strip_prefix("activate-window\t")
                                         .and_then(|value| value.parse().ok())
                                 {
-                                    data.state.show_context_menu(x);
+                                    data.state.activate_window(WindowId(id));
                                 } else if let Ok(message) = std::str::from_utf8(message)
                                     && let Some(id) = message
                                         .strip_prefix("close-window\t")
@@ -212,10 +221,11 @@ impl NickelSession {
             .filter(|window| !shell_ids.contains(&window.id))
             .map(|window| {
                 format!(
-                    "{}\t{}\t{}\n",
+                    "{}\t{}\t{}\t{}\n",
                     window.id.0,
                     u8::from(window.active),
-                    window.app_id.replace(['\t', '\n', '\r'], "")
+                    window.app_id.replace(['\t', '\n', '\r'], ""),
+                    window.title.replace(['\t', '\n', '\r'], " ")
                 )
             })
             .collect()
@@ -270,14 +280,15 @@ impl NickelSession {
         self.context_menu_window = Some(window);
     }
 
-    pub fn show_context_menu(&mut self, x: i32) {
+    pub fn show_context_menu(&mut self, x: i32, requested_height: i32) {
         let (Some(window), Some(output)) =
             (self.context_menu_window.clone(), self.output_geometry())
         else {
             return;
         };
-        let width = 200;
-        let height = 52;
+        let width = 320;
+        let maximum_height = (output.height - shell_layout::PANEL_HEIGHT).max(52);
+        let height = requested_height.clamp(52, maximum_height);
         let x = (output.x + x).clamp(output.x, output.x + output.width - width);
         let y = output.y + output.height - shell_layout::PANEL_HEIGHT - height - 4;
         Self::configure_window(
@@ -327,6 +338,39 @@ impl NickelSession {
             surface.send_close();
         }
         self.hide_context_menu();
+    }
+
+    pub fn activate_window(&mut self, id: WindowId) {
+        let Some(surface_id) = self
+            .surface_windows
+            .iter()
+            .find_map(|(surface, window)| (*window == id).then_some(surface.clone()))
+        else {
+            return;
+        };
+        let Some(window) = self
+            .space
+            .elements()
+            .find(|window| {
+                window
+                    .toplevel()
+                    .is_some_and(|surface| surface.wl_surface().id() == surface_id)
+            })
+            .cloned()
+        else {
+            return;
+        };
+        self.space.raise_element(&window, true);
+        self.windows.raise(id);
+        self.seat.get_keyboard().unwrap().set_focus(
+            self,
+            Some(window.toplevel().unwrap().wl_surface().clone()),
+            SERIAL_COUNTER.next_serial(),
+        );
+        self.space.elements().for_each(|window| {
+            window.toplevel().unwrap().send_pending_configure();
+        });
+        self.raise_panel();
     }
 
     pub fn relayout_shell_surfaces(&mut self) {

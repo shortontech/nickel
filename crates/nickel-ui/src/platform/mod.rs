@@ -7,6 +7,7 @@ pub trait TraySource {
 
 #[derive(Clone, Copy)]
 pub enum WindowAction {
+    Activate,
     Close,
 }
 
@@ -17,6 +18,7 @@ pub enum ShellCommand {
     Hide,
     ShowContextMenu {
         x: i32,
+        height: i32,
     },
     HideContextMenu,
     WindowAction {

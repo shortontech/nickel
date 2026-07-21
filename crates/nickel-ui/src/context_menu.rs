@@ -8,8 +8,9 @@ use winit::{dpi::PhysicalPosition, window::Window};
 
 use crate::{graphics::SharedGraphics, rectangles::RectangleRenderer};
 
-pub const WIDTH: u32 = 200;
+pub const WIDTH: u32 = 320;
 pub const HEIGHT: u32 = 52;
+const ROW_HEIGHT: u32 = 44;
 
 pub struct ContextMenuGpu {
     surface: wgpu::Surface<'static>,
@@ -20,7 +21,7 @@ pub struct ContextMenuGpu {
     viewport: Viewport,
     atlas: TextAtlas,
     renderer: TextRenderer,
-    label: Buffer,
+    labels: Vec<Buffer>,
     rectangles: RectangleRenderer,
 }
 
@@ -31,7 +32,7 @@ impl ContextMenuGpu {
             .get_default_config(&graphics.adapter, WIDTH, HEIGHT)
             .ok_or_else(|| "context menu surface has no supported configuration".to_owned())?;
         surface.configure(&graphics.device, &config);
-        let mut font_system = FontSystem::new();
+        let font_system = FontSystem::new();
         let cache = Cache::new(&graphics.device);
         let viewport = Viewport::new(&graphics.device, &cache);
         let mut atlas = TextAtlas::new(&graphics.device, &graphics.queue, &cache, config.format);
@@ -41,15 +42,7 @@ impl ContextMenuGpu {
             wgpu::MultisampleState::default(),
             None,
         );
-        let mut label = Buffer::new(&mut font_system, Metrics::new(18.0, 36.0));
-        label.set_size(Some(WIDTH as f32 - 24.0), Some(HEIGHT as f32));
-        label.set_text(
-            "Close window",
-            &Attrs::new().family(Family::SansSerif),
-            Shaping::Advanced,
-            None,
-        );
-        label.shape_until_scroll(&mut font_system, false);
+        let labels = Vec::new();
         let rectangles = RectangleRenderer::new(&graphics.device, config.format);
         Ok(Self {
             surface,
@@ -60,7 +53,7 @@ impl ContextMenuGpu {
             viewport,
             atlas,
             renderer,
-            label,
+            labels,
             rectangles,
         })
     }
@@ -74,7 +67,25 @@ impl ContextMenuGpu {
         self.surface.configure(&self.graphics.device, &self.config);
     }
 
-    pub fn render(&mut self, hovered: bool) {
+    pub fn set_labels(&mut self, labels: &[String]) {
+        self.labels = labels
+            .iter()
+            .map(|label| {
+                let mut buffer = Buffer::new(&mut self.font_system, Metrics::new(18.0, 36.0));
+                buffer.set_size(Some(WIDTH as f32 - 24.0), Some(ROW_HEIGHT as f32));
+                buffer.set_text(
+                    label,
+                    &Attrs::new().family(Family::SansSerif),
+                    Shaping::Advanced,
+                    None,
+                );
+                buffer.shape_until_scroll(&mut self.font_system, false);
+                buffer
+            })
+            .collect();
+    }
+
+    pub fn render(&mut self, hovered: Option<usize>) {
         self.viewport.update(
             &self.graphics.queue,
             Resolution {
@@ -85,12 +96,35 @@ impl ContextMenuGpu {
         self.rectangles.update_raw(
             &self.graphics.queue,
             (self.config.width, self.config.height),
-            if hovered {
-                &[([4.0, 4.0, 196.0, 48.0], [0.14, 0.18, 0.25, 1.0])]
-            } else {
-                &[]
-            },
+            &hovered
+                .map(|index| {
+                    let top = 4.0 + index as f32 * ROW_HEIGHT as f32;
+                    vec![(
+                        [4.0, top, WIDTH as f32 - 4.0, top + ROW_HEIGHT as f32],
+                        [0.14, 0.18, 0.25, 1.0],
+                    )]
+                })
+                .unwrap_or_default(),
         );
+        let areas: Vec<_> = self
+            .labels
+            .iter()
+            .enumerate()
+            .map(|(index, label)| TextArea {
+                buffer: label,
+                left: 16.0,
+                top: 8.0 + index as f32 * ROW_HEIGHT as f32,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: 4,
+                    top: 4,
+                    right: self.config.width as i32 - 4,
+                    bottom: self.config.height as i32 - 4,
+                },
+                default_color: Color::rgb(238, 241, 248),
+                custom_glyphs: &[],
+            })
+            .collect();
         self.renderer
             .prepare(
                 &self.graphics.device,
@@ -98,20 +132,7 @@ impl ContextMenuGpu {
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
-                [TextArea {
-                    buffer: &self.label,
-                    left: 16.0,
-                    top: 8.0,
-                    scale: 1.0,
-                    bounds: TextBounds {
-                        left: 4,
-                        top: 4,
-                        right: self.config.width as i32 - 4,
-                        bottom: self.config.height as i32 - 4,
-                    },
-                    default_color: Color::rgb(238, 241, 248),
-                    custom_glyphs: &[],
-                }],
+                areas,
                 &mut self.swash_cache,
             )
             .expect("context menu text preparation succeeds");
@@ -158,25 +179,33 @@ impl ContextMenuGpu {
     }
 }
 
-pub fn item_contains(position: PhysicalPosition<f64>) -> bool {
-    position.x >= 4.0
-        && position.x < f64::from(WIDTH - 4)
-        && position.y >= 4.0
-        && position.y < f64::from(HEIGHT - 4)
+pub fn height_for(count: usize) -> u32 {
+    8 + ROW_HEIGHT * u32::try_from(count.max(1)).unwrap_or(u32::MAX / ROW_HEIGHT)
+}
+
+pub fn item_at(position: PhysicalPosition<f64>, count: usize) -> Option<usize> {
+    if position.x < 4.0 || position.x >= f64::from(WIDTH - 4) || position.y < 4.0 {
+        return None;
+    }
+    let index = ((position.y - 4.0) / f64::from(ROW_HEIGHT)) as usize;
+    (index < count).then_some(index)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{HEIGHT, WIDTH, item_contains};
+    use super::{HEIGHT, WIDTH, item_at};
     use winit::dpi::PhysicalPosition;
 
     #[test]
     fn close_item_respects_menu_padding() {
-        assert!(item_contains(PhysicalPosition::new(20.0, 20.0)));
-        assert!(!item_contains(PhysicalPosition::new(0.0, 20.0)));
-        assert!(!item_contains(PhysicalPosition::new(
-            f64::from(WIDTH),
-            f64::from(HEIGHT)
-        )));
+        assert_eq!(item_at(PhysicalPosition::new(20.0, 20.0), 1), Some(0));
+        assert_eq!(item_at(PhysicalPosition::new(0.0, 20.0), 1), None);
+        assert_eq!(
+            item_at(
+                PhysicalPosition::new(f64::from(WIDTH), f64::from(HEIGHT)),
+                1
+            ),
+            None
+        );
     }
 }

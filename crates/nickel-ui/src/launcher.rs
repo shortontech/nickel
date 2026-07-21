@@ -6,7 +6,7 @@ use nucleo_matcher::{
 };
 
 pub use crate::model::Application;
-use crate::model::ApplicationId;
+use crate::model::{ApplicationId, OpenWindow, WindowGroup};
 
 #[derive(Clone, Copy)]
 struct Candidate<'a> {
@@ -93,6 +93,34 @@ impl Launcher {
 
     pub fn applications(&self) -> impl Iterator<Item = &Application> {
         self.applications.iter()
+    }
+
+    pub fn group_windows(&self, windows: &[OpenWindow]) -> Vec<WindowGroup> {
+        let mut groups: Vec<WindowGroup> = Vec::new();
+        for window in windows {
+            let existing = window.application_id.as_ref().and_then(|id| {
+                groups
+                    .iter()
+                    .position(|group| group.application_id.as_ref() == Some(id))
+            });
+            if let Some(index) = existing {
+                groups[index].windows.push(window.clone());
+                continue;
+            }
+            let application_name = window
+                .application_id
+                .as_ref()
+                .and_then(|id| self.application(id))
+                .map(|application| application.name().to_owned())
+                .or_else(|| (!window.title.is_empty()).then(|| window.title.clone()))
+                .unwrap_or_else(|| "Untitled window".into());
+            groups.push(WindowGroup {
+                application_id: window.application_id.clone(),
+                application_name,
+                windows: vec![window.clone()],
+            });
+        }
+        groups
     }
 
     pub fn is_pinned(&self, application_id: &str) -> bool {
@@ -246,6 +274,47 @@ mod tests {
 
         assert_eq!(launcher.query(), "");
         assert_eq!(launcher.selected_index(), 0);
+    }
+
+    #[test]
+    fn windows_group_by_resolved_application_and_keep_titles() {
+        use crate::model::{ApplicationId, OpenWindow, WindowId};
+
+        let launcher = Launcher::new(vec![Application::new(
+            "org.example.Editor.desktop".into(),
+            "Editor".into(),
+            None,
+            None,
+            None,
+        )]);
+        let application_id = ApplicationId::new("org.example.Editor.desktop");
+        let groups = launcher.group_windows(&[
+            OpenWindow {
+                id: WindowId(1),
+                application_id: Some(application_id.clone()),
+                active: false,
+                title: "First document".into(),
+            },
+            OpenWindow {
+                id: WindowId(2),
+                application_id: Some(application_id),
+                active: true,
+                title: "Second document".into(),
+            },
+            OpenWindow {
+                id: WindowId(3),
+                application_id: None,
+                active: false,
+                title: String::new(),
+            },
+        ]);
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].application_name, "Editor");
+        assert_eq!(groups[0].windows.len(), 2);
+        assert!(groups[0].active());
+        assert_eq!(groups[0].windows[1].title, "Second document");
+        assert_eq!(groups[1].application_name, "Untitled window");
     }
 
     #[cfg(unix)]
