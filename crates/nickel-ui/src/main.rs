@@ -1,4 +1,10 @@
-use std::{collections::HashMap, env, path::PathBuf, sync::Arc};
+use std::{
+    collections::HashMap,
+    env,
+    path::PathBuf,
+    sync::{Arc, mpsc},
+    thread,
+};
 
 use glyphon::{
     Attrs, Buffer, Cache, Color, ContentType, CustomGlyph, Family, FontSystem, Metrics,
@@ -132,6 +138,8 @@ struct Gpu {
     result_buffers: Vec<Buffer>,
     icon_ids: HashMap<PathBuf, u16>,
     icon_images: Vec<Option<image::RgbaImage>>,
+    icon_requests: mpsc::Sender<(u16, PathBuf)>,
+    icon_results: mpsc::Receiver<(u16, Option<image::RgbaImage>)>,
     rectangle_renderer: rectangles::RectangleRenderer,
 }
 
@@ -176,6 +184,20 @@ impl Gpu {
         let result_buffers = (0..9)
             .map(|_| Buffer::new(&mut font_system, Metrics::new(24.0, 48.0)))
             .collect();
+        let (icon_requests, worker_requests) = mpsc::channel::<(u16, PathBuf)>();
+        let (worker_results, icon_results) = mpsc::channel();
+        let redraw_window = window.clone();
+        thread::Builder::new()
+            .name("nickel-icon-loader".into())
+            .spawn(move || {
+                while let Ok((id, path)) = worker_requests.recv() {
+                    if worker_results.send((id, icons::load(&path))).is_err() {
+                        break;
+                    }
+                    redraw_window.request_redraw();
+                }
+            })
+            .map_err(|error| format!("failed to start icon loader: {error}"))?;
 
         Ok(Self {
             surface,
@@ -191,6 +213,8 @@ impl Gpu {
             result_buffers,
             icon_ids: HashMap::new(),
             icon_images: Vec::new(),
+            icon_requests,
+            icon_results,
             rectangle_renderer,
         })
     }
@@ -207,6 +231,11 @@ impl Gpu {
     }
 
     fn render(&mut self, launcher: &Launcher, hovered_result: Option<usize>, scroll_offset: usize) {
+        while let Ok((id, image)) = self.icon_results.try_recv() {
+            if let Some(slot) = self.icon_images.get_mut(id as usize) {
+                *slot = image;
+            }
+        }
         let search_text = if launcher.query().is_empty() {
             "Search applications…".to_owned()
         } else {
@@ -276,7 +305,10 @@ impl Gpu {
                     continue;
                 };
                 self.icon_ids.insert(path.to_owned(), id);
-                self.icon_images.push(icons::load(path));
+                self.icon_images.push(None);
+                if self.icon_requests.send((id, path.to_owned())).is_err() {
+                    eprintln!("icon loader stopped before loading {}", path.display());
+                }
                 id
             };
             if self.icon_images[glyph_id as usize].is_some() {
@@ -416,7 +448,6 @@ impl Gpu {
 
         self.queue.submit([encoder.finish()]);
         self.queue.present(frame);
-        self.atlas.trim();
     }
 }
 
