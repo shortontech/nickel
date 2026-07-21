@@ -15,6 +15,7 @@ use winit::window::{CursorIcon, Window, WindowAttributes, WindowId};
 
 mod icons;
 mod launcher;
+mod layout;
 mod rectangles;
 
 #[cfg(target_os = "linux")]
@@ -204,10 +205,10 @@ impl Gpu {
             if self.icon_images[glyph_id as usize].is_some() {
                 custom_glyphs.push(CustomGlyph {
                     id: glyph_id,
-                    left: -52.0,
-                    top: 5.0 + index as f32 * 52.0,
-                    width: 36.0,
-                    height: 36.0,
+                    left: layout::ICON_LEFT - layout::RESULT_TEXT_LEFT,
+                    top: layout::icon_top_offset() + index as f32 * layout::RESULT_STRIDE,
+                    width: layout::ICON_SIZE,
+                    height: layout::ICON_SIZE,
                     color: None,
                     snap_to_physical_pixel: true,
                     metadata: 0,
@@ -252,12 +253,12 @@ impl Gpu {
                     },
                     TextArea {
                         buffer: &self.results_buffer,
-                        left: 108.0,
-                        top: 136.0,
+                        left: layout::RESULT_TEXT_LEFT,
+                        top: layout::RESULT_TOP,
                         scale: 1.0,
                         bounds: TextBounds {
                             left: 0,
-                            top: 136,
+                            top: layout::RESULT_TOP as i32,
                             right: self.config.width.saturating_sub(56) as i32,
                             bottom: self.config.height.saturating_sub(32) as i32,
                         },
@@ -526,15 +527,18 @@ fn hit_test_result(
     window_width: u32,
     result_count: usize,
 ) -> Option<usize> {
-    if position.x < 40.0 || position.x >= f64::from(window_width.saturating_sub(40)) {
+    if position.x < f64::from(layout::RESULT_LEFT)
+        || position.x >= f64::from(window_width) - f64::from(layout::RESULT_RIGHT_INSET)
+    {
         return None;
     }
-    let relative_y = position.y - 132.0;
+    let relative_y = position.y - f64::from(layout::RESULT_TOP);
     if relative_y < 0.0 {
         return None;
     }
-    let index = (relative_y / 52.0) as usize;
-    let within_row = relative_y % 52.0 < 48.0;
+    let index = (relative_y / f64::from(layout::RESULT_STRIDE)) as usize;
+    let within_row =
+        relative_y % f64::from(layout::RESULT_STRIDE) < f64::from(layout::RESULT_HEIGHT);
     (within_row && index < result_count).then_some(index)
 }
 

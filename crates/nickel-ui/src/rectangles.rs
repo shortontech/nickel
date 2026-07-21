@@ -2,6 +2,8 @@ use std::mem;
 
 use bytemuck::{Pod, Zeroable};
 
+use crate::layout;
+
 const MAX_VERTICES: usize = 12;
 
 #[repr(C)]
@@ -99,17 +101,27 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     ) {
         let mut vertices = Vec::with_capacity(MAX_VERTICES);
         if let Some(index) = hovered {
-            let top = 132.0 + index as f32 * 52.0;
+            let top = layout::RESULT_TOP + index as f32 * layout::RESULT_STRIDE;
             add_rectangle(
                 &mut vertices,
                 surface_size,
-                [40.0, top, surface_size.0 as f32 - 40.0, top + 48.0],
+                [
+                    layout::RESULT_LEFT,
+                    top,
+                    surface_size.0 as f32 - layout::RESULT_RIGHT_INSET,
+                    top + layout::RESULT_HEIGHT,
+                ],
                 [0.18, 0.42, 0.78, 1.0],
             );
             add_rectangle(
                 &mut vertices,
                 surface_size,
-                [42.0, top + 2.0, surface_size.0 as f32 - 42.0, top + 46.0],
+                [
+                    layout::RESULT_LEFT + 2.0,
+                    top + 2.0,
+                    surface_size.0 as f32 - layout::RESULT_RIGHT_INSET - 2.0,
+                    top + layout::RESULT_HEIGHT - 2.0,
+                ],
                 [0.055, 0.07, 0.105, 1.0],
             );
         }
