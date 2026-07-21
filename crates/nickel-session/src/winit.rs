@@ -4,7 +4,7 @@ use smithay::{
     backend::{
         allocator::Fourcc,
         renderer::{
-            Bind, Color32F, ExportMem, Frame, Offscreen, Renderer, TextureMapping,
+            Bind, Color32F, ExportMem, Frame, Offscreen, Renderer,
             damage::OutputDamageTracker,
             element::{
                 Kind,
@@ -133,7 +133,7 @@ pub fn init_winit(
                                 Kind::Unspecified,
                             );
                             let mut frame = renderer
-                                .render(&mut framebuffer, size, Transform::Normal)
+                                .render(&mut framebuffer, size, output.current_transform())
                                 .unwrap();
                             draw_render_elements::<GlesRenderer, _, _>(
                                 &mut frame,
@@ -157,7 +157,7 @@ pub fn init_winit(
                                 Kind::Unspecified,
                             );
                             let mut frame = renderer
-                                .render(&mut framebuffer, size, Transform::Normal)
+                                .render(&mut framebuffer, size, output.current_transform())
                                 .unwrap();
                             draw_render_elements(&mut frame, 1.0, &selected, &[damage]).unwrap();
                             let _ = frame.finish().unwrap();
@@ -190,7 +190,7 @@ pub fn init_winit(
                                 ));
                             }
                             let mut frame = renderer
-                                .render(&mut framebuffer, size, Transform::Normal)
+                                .render(&mut framebuffer, size, output.current_transform())
                                 .unwrap();
                             draw_render_elements(&mut frame, 1.0, &shell_elements, &[damage])
                                 .unwrap();
@@ -305,16 +305,7 @@ fn capture_preview(renderer: &mut GlesRenderer, window: &Window) -> Option<Previ
     let mapping = renderer
         .copy_framebuffer(&framebuffer, buffer_region, Fourcc::Abgr8888)
         .ok()?;
-    let mut rgba = renderer.map_texture(&mapping).ok()?.to_vec();
-    if !mapping.flipped() {
-        let stride = WIDTH as usize * 4;
-        for row in 0..HEIGHT as usize / 2 {
-            let opposite = HEIGHT as usize - 1 - row;
-            for column in 0..stride {
-                rgba.swap(row * stride + column, opposite * stride + column);
-            }
-        }
-    }
+    let rgba = renderer.map_texture(&mapping).ok()?.to_vec();
     Some(PreviewFrame {
         width: WIDTH as u16,
         height: HEIGHT as u16,
