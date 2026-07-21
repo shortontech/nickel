@@ -61,6 +61,7 @@ pub fn init_winit(
 
     let mut damage_tracker = OutputDamageTracker::from_output(&output);
     let mut last_preview_capture = Instant::now() - Duration::from_secs(1);
+    let mut last_preview_highlight = None;
 
     // SAFETY: startup is single-threaded and no child process is spawned until
     // after this function returns.
@@ -91,6 +92,12 @@ pub fn init_winit(
                 WinitEvent::Redraw => {
                     let size = backend.window_size();
                     let damage = Rectangle::from_size(size);
+                    if state.preview_highlight.is_some()
+                        || state.preview_highlight != last_preview_highlight
+                    {
+                        damage_tracker = OutputDamageTracker::from_output(&output);
+                    }
+                    last_preview_highlight = state.preview_highlight;
 
                     {
                         let (renderer, mut framebuffer) = backend.bind().unwrap();
