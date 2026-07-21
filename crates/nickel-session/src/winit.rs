@@ -9,6 +9,7 @@ use smithay::{
             element::{
                 Kind,
                 surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
+                utils::{ConstrainAlign, ConstrainScaleBehavior, constrain_render_elements},
             },
             gles::{GlesRenderer, GlesTexture},
             utils::draw_render_elements,
@@ -179,8 +180,6 @@ fn capture_preview(renderer: &mut GlesRenderer, window: &Window) -> Option<Previ
     if geometry.size.w <= 0 || geometry.size.h <= 0 {
         return None;
     }
-    let scale = (f64::from(WIDTH) / f64::from(geometry.size.w))
-        .min(f64::from(HEIGHT) / f64::from(geometry.size.h));
     let mut texture =
         Offscreen::<GlesTexture>::create_buffer(renderer, Fourcc::Abgr8888, (WIDTH, HEIGHT).into())
             .ok()?;
@@ -192,11 +191,22 @@ fn capture_preview(renderer: &mut GlesRenderer, window: &Window) -> Option<Previ
         renderer,
         window.toplevel()?.wl_surface(),
         (0, 0),
-        scale,
+        1.0,
         1.0,
         Kind::Unspecified,
     );
     let damage = Rectangle::from_size((WIDTH, HEIGHT).into());
+    let reference = Rectangle::from_size(geometry.size.to_physical(1));
+    let elements = constrain_render_elements(
+        elements,
+        (0, 0),
+        damage,
+        reference,
+        ConstrainScaleBehavior::Fit,
+        ConstrainAlign::TOP | ConstrainAlign::BOTTOM | ConstrainAlign::LEFT | ConstrainAlign::RIGHT,
+        1.0,
+    )
+    .collect::<Vec<_>>();
     let mut frame = renderer
         .render(&mut framebuffer, (WIDTH, HEIGHT).into(), Transform::Normal)
         .ok()?;
