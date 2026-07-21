@@ -1,8 +1,23 @@
+use crate::model::WindowId;
+
+#[derive(Clone, Copy)]
+pub enum WindowAction {
+    Close,
+}
+
 #[derive(Clone, Copy)]
 pub enum ShellCommand {
     Toggle,
     Show,
     Hide,
+    ShowContextMenu {
+        x: i32,
+    },
+    HideContextMenu,
+    WindowAction {
+        window: WindowId,
+        action: WindowAction,
+    },
 }
 
 #[cfg(target_os = "linux")]

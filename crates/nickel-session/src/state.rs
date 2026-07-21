@@ -54,6 +54,7 @@ pub struct NickelSession {
     pub launcher_window: Option<Window>,
     pub launcher_visible: bool,
     pub panel_window: Option<Window>,
+    pub context_menu_window: Option<Window>,
     maximized_restore: HashMap<ObjectId, Geometry>,
     pub last_titlebar_click: Option<(ObjectId, u32, Point<f64, Logical>)>,
     pub suppress_left_button_release: bool,
@@ -120,6 +121,7 @@ impl NickelSession {
             launcher_window: None,
             launcher_visible: false,
             panel_window: None,
+            context_menu_window: None,
             maximized_restore: HashMap::new(),
             last_titlebar_click: None,
             suppress_left_button_release: false,
@@ -148,19 +150,35 @@ impl NickelSession {
             .insert_source(
                 Generic::new(socket, Interest::READ, Mode::Level),
                 |_, socket, data| {
-                    let mut command = [0_u8; 64];
+                    let mut command = [0_u8; 128];
                     while let Ok((length, source)) = socket.as_ref().recv_from(&mut command) {
-                        match &command[..length] {
+                        let message = &command[..length];
+                        match message {
                             b"toggle-launcher" => data.state.toggle_launcher(),
                             b"hide-launcher" => data.state.set_launcher_visible(false),
                             b"show-launcher" => data.state.set_launcher_visible(true),
+                            b"hide-context-menu" => data.state.hide_context_menu(),
                             b"list-windows" => {
                                 if let Some(path) = source.as_pathname() {
                                     let snapshot = data.state.window_snapshot_payload();
                                     let _ = socket.as_ref().send_to(snapshot.as_bytes(), path);
                                 }
                             }
-                            _ => {}
+                            _ => {
+                                if let Ok(message) = std::str::from_utf8(message)
+                                    && let Some(x) = message
+                                        .strip_prefix("show-context-menu\t")
+                                        .and_then(|value| value.parse().ok())
+                                {
+                                    data.state.show_context_menu(x);
+                                } else if let Ok(message) = std::str::from_utf8(message)
+                                    && let Some(id) = message
+                                        .strip_prefix("close-window\t")
+                                        .and_then(|value| value.parse().ok())
+                                {
+                                    data.state.close_window(WindowId(id));
+                                }
+                            }
                         }
                     }
                     Ok(PostAction::Continue)
@@ -175,15 +193,19 @@ impl NickelSession {
     }
 
     fn window_snapshot_payload(&self) -> String {
-        let shell_ids = [self.launcher_window.as_ref(), self.panel_window.as_ref()]
-            .into_iter()
-            .flatten()
-            .filter_map(|window| {
-                self.surface_windows
-                    .get(&window.toplevel()?.wl_surface().id())
-            })
-            .copied()
-            .collect::<Vec<_>>();
+        let shell_ids = [
+            self.launcher_window.as_ref(),
+            self.panel_window.as_ref(),
+            self.context_menu_window.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(|window| {
+            self.surface_windows
+                .get(&window.toplevel()?.wl_surface().id())
+        })
+        .copied()
+        .collect::<Vec<_>>();
         self.windows
             .snapshot()
             .into_iter()
@@ -241,6 +263,66 @@ impl NickelSession {
         window.override_z_index(40);
         self.panel_window = Some(window);
         self.relayout_shell_surfaces();
+    }
+
+    pub fn register_context_menu(&mut self, window: Window) {
+        window.override_z_index(50);
+        self.space.unmap_elem(&window);
+        self.context_menu_window = Some(window);
+    }
+
+    pub fn show_context_menu(&mut self, x: i32) {
+        let (Some(window), Some(output)) =
+            (self.context_menu_window.clone(), self.output_geometry())
+        else {
+            return;
+        };
+        let width = 200;
+        let height = 52;
+        let x = (output.x + x).clamp(output.x, output.x + output.width - width);
+        let y = output.y + output.height - shell_layout::PANEL_HEIGHT - height - 4;
+        Self::configure_window(
+            &window,
+            Geometry {
+                x,
+                y,
+                width,
+                height,
+            },
+        );
+        self.space.map_element(window.clone(), (x, y), true);
+        self.seat.get_keyboard().unwrap().set_focus(
+            self,
+            Some(window.toplevel().unwrap().wl_surface().clone()),
+            SERIAL_COUNTER.next_serial(),
+        );
+        self.space.raise_element(&window, true);
+        self.raise_panel();
+    }
+
+    pub fn hide_context_menu(&mut self) {
+        if let Some(window) = self.context_menu_window.clone() {
+            self.space.unmap_elem(&window);
+        }
+    }
+
+    pub fn close_window(&mut self, id: WindowId) {
+        let surface_id = self
+            .surface_windows
+            .iter()
+            .find_map(|(surface, window)| (*window == id).then_some(surface.clone()));
+        let Some(surface_id) = surface_id else {
+            return;
+        };
+        if let Some(window) = self.space.elements().find(|window| {
+            window
+                .toplevel()
+                .is_some_and(|surface| surface.wl_surface().id() == surface_id)
+        }) && let Some(surface) = window.toplevel()
+        {
+            surface.send_close();
+        }
+        self.hide_context_menu();
     }
 
     pub fn relayout_shell_surfaces(&mut self) {
