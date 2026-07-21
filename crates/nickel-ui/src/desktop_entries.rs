@@ -90,11 +90,15 @@ fn resolve_icon(name: &str, theme: &str) -> Option<PathBuf> {
     if path.is_absolute() && path.is_file() {
         return Some(path.to_owned());
     }
-    freedesktop_icons::lookup(name)
-        .with_size(48)
-        .with_theme(theme)
-        .with_cache()
-        .find()
+    [theme, "breeze-dark", "breeze", "hicolor", "Adwaita"]
+        .into_iter()
+        .find_map(|candidate| {
+            freedesktop_icons::lookup(name)
+                .with_size(48)
+                .with_theme(candidate)
+                .with_cache()
+                .find()
+        })
 }
 
 fn icon_theme() -> String {

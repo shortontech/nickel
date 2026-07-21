@@ -132,6 +132,10 @@ impl NickelSession {
                             .surface_windows
                             .get(&window.toplevel().unwrap().wl_surface().id())
                             .copied()
+                            .filter(|_| {
+                                self.panel_window.as_ref() != Some(&window)
+                                    && self.launcher_window.as_ref() != Some(&window)
+                            })
                         {
                             self.windows.raise(id);
                         }

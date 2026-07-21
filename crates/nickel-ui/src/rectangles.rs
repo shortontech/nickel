@@ -4,7 +4,7 @@ use bytemuck::{Pod, Zeroable};
 
 use crate::layout;
 
-const MAX_VERTICES: usize = 24;
+const MAX_VERTICES: usize = 512;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -163,6 +163,22 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         pass.set_pipeline(&self.pipeline);
         pass.set_vertex_buffer(0, self.vertices.slice(..));
         pass.draw(0..self.vertex_count, 0..1);
+    }
+
+    pub fn update_raw(
+        &mut self,
+        queue: &wgpu::Queue,
+        surface_size: (u32, u32),
+        rectangles: &[([f32; 4], [f32; 4])],
+    ) {
+        let mut vertices = Vec::with_capacity(rectangles.len() * 6);
+        for (bounds, color) in rectangles.iter().take(MAX_VERTICES / 6) {
+            add_rectangle(&mut vertices, surface_size, *bounds, *color);
+        }
+        self.vertex_count = vertices.len() as u32;
+        if !vertices.is_empty() {
+            queue.write_buffer(&self.vertices, 0, bytemuck::cast_slice(&vertices));
+        }
     }
 }
 

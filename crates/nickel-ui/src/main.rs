@@ -70,14 +70,25 @@ struct Nickel {
     panel_window: Option<Arc<Window>>,
     panel_gpu: Option<panel::PanelGpu>,
     panel_hovered: bool,
+    panel_task_hovered: Option<usize>,
+    task_windows: Vec<TaskWindow>,
     launcher_visibility: LauncherVisibility,
     clock_deadline: Instant,
+    window_deadline: Instant,
+    window_feed: WindowFeed,
     launcher: Launcher,
     hovered_result: Option<usize>,
     pin_store: Option<storage::PinStore>,
     scroll_offset: usize,
     cursor_position: Option<PhysicalPosition<f64>>,
     scrollbar_drag_offset: Option<f64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TaskWindow {
+    id: u64,
+    app_id: String,
+    active: bool,
 }
 
 impl Default for Nickel {
@@ -111,8 +122,12 @@ impl Default for Nickel {
             panel_window: None,
             panel_gpu: None,
             panel_hovered: false,
+            panel_task_hovered: None,
+            task_windows: Vec::new(),
             launcher_visibility: LauncherVisibility::default(),
             clock_deadline: next_minute_deadline(Instant::now(), SystemTime::now()),
+            window_deadline: Instant::now(),
+            window_feed: WindowFeed::new(),
             launcher,
             hovered_result: None,
             pin_store,
@@ -146,6 +161,41 @@ impl Nickel {
         let visible = self.launcher_visibility.toggle();
         if !send_session_command(b"toggle-launcher") {
             self.set_launcher_visible(visible);
+        }
+    }
+
+    fn refresh_task_windows(&mut self) {
+        let Some(windows) = self.window_feed.snapshot() else {
+            return;
+        };
+        if windows == self.task_windows {
+            return;
+        }
+        let tasks = windows
+            .iter()
+            .map(|window| {
+                let resolved = self
+                    .launcher
+                    .application_for_app_id(&window.app_id)
+                    .and_then(|application| application.icon_path())
+                    .and_then(icons::load);
+                if resolved.is_none() {
+                    eprintln!("no panel icon resolved for app id {}", window.app_id);
+                }
+                let icon = resolved.unwrap_or_else(panel::fallback_icon);
+                panel::PanelTask {
+                    id: window.id,
+                    active: window.active,
+                    icon,
+                }
+            })
+            .collect();
+        self.task_windows = windows;
+        if let Some(gpu) = &mut self.panel_gpu {
+            gpu.set_tasks(tasks);
+        }
+        if let Some(window) = &self.panel_window {
+            window.request_redraw();
         }
     }
 
@@ -596,17 +646,19 @@ impl ApplicationHandler for Nickel {
                 }
                 WindowEvent::RedrawRequested => {
                     if let Some(gpu) = &mut self.panel_gpu {
-                        gpu.render(self.panel_hovered);
+                        gpu.render(self.panel_hovered, self.panel_task_hovered);
                     }
                 }
                 WindowEvent::CursorMoved { position, .. } => {
                     let hovered = panel::launcher_button_contains(position);
-                    if hovered == self.panel_hovered {
+                    let task_hovered = panel::task_at(position, self.task_windows.len());
+                    if hovered == self.panel_hovered && task_hovered == self.panel_task_hovered {
                         return;
                     }
                     self.panel_hovered = hovered;
+                    self.panel_task_hovered = task_hovered;
                     let window = self.panel_window.as_ref().expect("panel window exists");
-                    window.set_cursor(if hovered {
+                    window.set_cursor(if hovered || task_hovered.is_some() {
                         CursorIcon::Pointer
                     } else {
                         CursorIcon::Default
@@ -615,6 +667,7 @@ impl ApplicationHandler for Nickel {
                 }
                 WindowEvent::CursorLeft { .. } => {
                     self.panel_hovered = false;
+                    self.panel_task_hovered = None;
                     let window = self.panel_window.as_ref().expect("panel window exists");
                     window.set_cursor(CursorIcon::Default);
                     window.request_redraw();
@@ -836,6 +889,10 @@ impl ApplicationHandler for Nickel {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
+        if now >= self.window_deadline {
+            self.refresh_task_windows();
+            self.window_deadline = now + Duration::from_millis(250);
+        }
         if now >= self.clock_deadline {
             if self
                 .panel_gpu
@@ -847,7 +904,9 @@ impl ApplicationHandler for Nickel {
             }
             self.clock_deadline = next_minute_deadline(now, SystemTime::now());
         }
-        event_loop.set_control_flow(ControlFlow::WaitUntil(self.clock_deadline));
+        event_loop.set_control_flow(ControlFlow::WaitUntil(
+            self.clock_deadline.min(self.window_deadline),
+        ));
     }
 }
 
@@ -896,6 +955,68 @@ fn send_session_command(command: &[u8]) -> bool {
 #[cfg(not(unix))]
 fn send_session_command(_: &[u8]) -> bool {
     false
+}
+
+#[cfg(unix)]
+struct WindowFeed {
+    socket: Option<std::os::unix::net::UnixDatagram>,
+    path: PathBuf,
+}
+
+#[cfg(unix)]
+impl WindowFeed {
+    fn new() -> Self {
+        let path = env::temp_dir().join(format!("nickel-ui-{}-windows.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let socket = std::os::unix::net::UnixDatagram::bind(&path).ok();
+        if let Some(socket) = &socket {
+            let _ = socket.set_read_timeout(Some(Duration::from_millis(25)));
+        }
+        Self { socket, path }
+    }
+
+    fn snapshot(&self) -> Option<Vec<TaskWindow>> {
+        let socket = self.socket.as_ref()?;
+        socket
+            .send_to(b"list-windows", env::var_os(SESSION_CONTROL_ENV)?)
+            .ok()?;
+        let mut response = [0_u8; 16 * 1024];
+        let length = socket.recv(&mut response).ok()?;
+        let text = std::str::from_utf8(&response[..length]).ok()?;
+        Some(
+            text.lines()
+                .filter_map(|line| {
+                    let mut fields = line.splitn(3, '\t');
+                    Some(TaskWindow {
+                        id: fields.next()?.parse().ok()?,
+                        active: fields.next()? == "1",
+                        app_id: fields.next()?.to_owned(),
+                    })
+                })
+                .collect(),
+        )
+    }
+}
+
+#[cfg(unix)]
+impl Drop for WindowFeed {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+#[cfg(not(unix))]
+struct WindowFeed;
+
+#[cfg(not(unix))]
+impl WindowFeed {
+    fn new() -> Self {
+        Self
+    }
+
+    fn snapshot(&self) -> Option<Vec<TaskWindow>> {
+        None
+    }
 }
 
 fn next_minute_deadline(now: Instant, wall_clock: SystemTime) -> Instant {

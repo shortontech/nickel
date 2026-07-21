@@ -141,6 +141,16 @@ impl Launcher {
         self.result_at(self.selected)
     }
 
+    pub fn application_for_app_id(&self, app_id: &str) -> Option<&Application> {
+        let app_id = app_id.trim_end_matches(".desktop");
+        self.applications.iter().find(|application| {
+            application
+                .id()
+                .trim_end_matches(".desktop")
+                .eq_ignore_ascii_case(app_id)
+        })
+    }
+
     pub fn is_pinned(&self, application_id: &str) -> bool {
         self.pins.contains_key(application_id)
     }
@@ -226,6 +236,23 @@ impl Launcher {
 #[cfg(test)]
 mod tests {
     use super::{Application, Launcher};
+
+    #[test]
+    fn desktop_application_matches_wayland_app_id() {
+        let launcher = Launcher::new(vec![Application::new(
+            "org.kde.konsole.desktop".into(),
+            "Konsole".into(),
+            None,
+            None,
+            None,
+        )]);
+        assert_eq!(
+            launcher
+                .application_for_app_id("org.kde.konsole")
+                .map(Application::name),
+            Some("Konsole")
+        );
+    }
 
     #[test]
     fn fuzzy_query_finds_application() {

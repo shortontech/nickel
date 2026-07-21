@@ -69,12 +69,16 @@ impl WindowRegistry {
         eprintln!("nickel-session: unmapped window {}", id.0);
     }
 
-    #[cfg(test)]
-    fn snapshot(&self) -> Vec<&WindowInfo> {
+    pub fn snapshot(&self) -> Vec<&WindowInfo> {
         self.stacking_order
             .iter()
             .filter_map(|id| self.windows.get(id))
             .collect()
+    }
+
+    #[cfg(test)]
+    fn test_snapshot(&self) -> Vec<&WindowInfo> {
+        self.snapshot()
     }
 }
 
@@ -89,7 +93,7 @@ mod tests {
         registry.update_metadata(terminal, Some("Terminal".into()), Some("terminal".into()));
         let browser = registry.insert();
 
-        let windows = registry.snapshot();
+        let windows = registry.test_snapshot();
         assert_eq!(
             windows.iter().map(|window| window.id.0).collect::<Vec<_>>(),
             [1, 2]
@@ -100,7 +104,7 @@ mod tests {
 
         registry.raise(terminal);
         registry.remove(browser);
-        let windows = registry.snapshot();
+        let windows = registry.test_snapshot();
         assert_eq!(windows.len(), 1);
         assert_eq!(windows[0].id, terminal);
         assert!(windows[0].active);
