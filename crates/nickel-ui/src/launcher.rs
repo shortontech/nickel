@@ -5,7 +5,7 @@ use nucleo_matcher::{
     pattern::{AtomKind, CaseMatching, Normalization, Pattern},
 };
 
-const MAX_RESULTS: usize = 9;
+pub const MAX_RESULTS: usize = 9;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Application {

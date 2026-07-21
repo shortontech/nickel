@@ -21,7 +21,7 @@ mod rectangles;
 #[cfg(target_os = "linux")]
 mod desktop_entries;
 
-use launcher::Launcher;
+use launcher::{Launcher, MAX_RESULTS};
 
 const SECONDARY_DISPLAY_ENV: &str = "NICKEL_USE_SECONDARY_DISPLAY";
 
@@ -64,7 +64,7 @@ struct Gpu {
     atlas: TextAtlas,
     text_renderer: TextRenderer,
     search_buffer: Buffer,
-    results_buffer: Buffer,
+    result_buffers: Vec<Buffer>,
     icon_ids: HashMap<PathBuf, u16>,
     icon_images: Vec<Option<image::RgbaImage>>,
     rectangle_renderer: rectangles::RectangleRenderer,
@@ -108,11 +108,9 @@ impl Gpu {
         let rectangle_renderer = rectangles::RectangleRenderer::new(&device, config.format);
         let mut search_buffer = Buffer::new(&mut font_system, Metrics::new(30.0, 44.0));
         search_buffer.set_size(Some(config.width.saturating_sub(112) as f32), Some(56.0));
-        let mut results_buffer = Buffer::new(&mut font_system, Metrics::new(24.0, 52.0));
-        results_buffer.set_size(
-            Some(config.width.saturating_sub(112) as f32),
-            Some(config.height.saturating_sub(180) as f32),
-        );
+        let result_buffers = (0..MAX_RESULTS)
+            .map(|_| Buffer::new(&mut font_system, Metrics::new(24.0, 48.0)))
+            .collect();
 
         Ok(Self {
             surface,
@@ -125,7 +123,7 @@ impl Gpu {
             atlas,
             text_renderer,
             search_buffer,
-            results_buffer,
+            result_buffers,
             icon_ids: HashMap::new(),
             icon_images: Vec::new(),
             rectangle_renderer,
@@ -141,8 +139,6 @@ impl Gpu {
         self.surface.configure(&self.device, &self.config);
         let text_width = width.saturating_sub(112) as f32;
         self.search_buffer.set_size(Some(text_width), Some(56.0));
-        self.results_buffer
-            .set_size(Some(text_width), Some(height.saturating_sub(180) as f32));
     }
 
     fn render(&mut self, launcher: &Launcher, hovered_result: Option<usize>) {
@@ -160,32 +156,32 @@ impl Gpu {
         self.search_buffer
             .shape_until_scroll(&mut self.font_system, false);
 
-        let results_text = if launcher.result_count() == 0 {
-            "No applications found".to_owned()
-        } else {
-            (0..launcher.result_count())
-                .filter_map(|index| {
-                    let result = launcher.result_at(index)?;
-                    if index == launcher.selected_index() {
-                        Some(format!("›  {}", result.name()))
-                    } else {
-                        Some(format!("   {}", result.name()))
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
-        self.results_buffer.set_text(
-            &results_text,
-            &Attrs::new().family(Family::SansSerif),
-            Shaping::Advanced,
-            None,
-        );
-        self.results_buffer
-            .shape_until_scroll(&mut self.font_system, false);
+        let visible_count = launcher.result_count().max(1);
+        let mut row_glyphs = vec![Vec::new(); visible_count];
+        for (index, buffer) in self
+            .result_buffers
+            .iter_mut()
+            .take(visible_count)
+            .enumerate()
+        {
+            let row = layout::ResultRow::allocate(index, self.config.width);
+            let text = launcher
+                .result_at(index)
+                .map_or("No applications found", |result| result.name());
+            let text = if launcher.result_count() > 0 && index == launcher.selected_index() {
+                format!("›  {text}")
+            } else {
+                format!("   {text}")
+            };
+            buffer.set_size(Some(row.label.width), Some(row.label.height));
+            buffer.set_text(
+                &text,
+                &Attrs::new().family(Family::SansSerif),
+                Shaping::Advanced,
+                None,
+            );
+            buffer.shape_until_scroll(&mut self.font_system, false);
 
-        let mut custom_glyphs = Vec::new();
-        for index in 0..launcher.result_count() {
             let Some(path) = launcher
                 .result_at(index)
                 .and_then(|application| application.icon_path())
@@ -203,12 +199,12 @@ impl Gpu {
                 id
             };
             if self.icon_images[glyph_id as usize].is_some() {
-                custom_glyphs.push(CustomGlyph {
+                row_glyphs[index].push(CustomGlyph {
                     id: glyph_id,
-                    left: layout::ICON_LEFT - layout::RESULT_TEXT_LEFT,
-                    top: layout::icon_top_offset() + index as f32 * layout::RESULT_STRIDE,
-                    width: layout::ICON_SIZE,
-                    height: layout::ICON_SIZE,
+                    left: row.icon.x - row.label.x,
+                    top: row.icon.y - row.label.y,
+                    width: row.icon.width,
+                    height: row.icon.height,
                     color: None,
                     snap_to_physical_pixel: true,
                     metadata: 0,
@@ -229,6 +225,38 @@ impl Gpu {
             hovered_result,
         );
         let icon_images = &self.icon_images;
+        let mut text_areas = Vec::with_capacity(visible_count + 1);
+        text_areas.push(TextArea {
+            buffer: &self.search_buffer,
+            left: 56.0,
+            top: 48.0,
+            scale: 1.0,
+            bounds: TextBounds {
+                left: 56,
+                top: 48,
+                right: self.config.width.saturating_sub(56) as i32,
+                bottom: 108,
+            },
+            default_color: Color::rgb(238, 241, 248),
+            custom_glyphs: &[],
+        });
+        for (index, buffer) in self.result_buffers.iter().take(visible_count).enumerate() {
+            let row = layout::ResultRow::allocate(index, self.config.width);
+            text_areas.push(TextArea {
+                buffer,
+                left: row.label.x,
+                top: row.label.y,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: row.outer.x as i32,
+                    top: row.outer.y as i32,
+                    right: row.outer.right() as i32,
+                    bottom: row.outer.bottom() as i32,
+                },
+                default_color: Color::rgb(208, 216, 232),
+                custom_glyphs: &row_glyphs[index],
+            });
+        }
         self.text_renderer
             .prepare_with_custom(
                 &self.device,
@@ -236,36 +264,7 @@ impl Gpu {
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
-                [
-                    TextArea {
-                        buffer: &self.search_buffer,
-                        left: 56.0,
-                        top: 48.0,
-                        scale: 1.0,
-                        bounds: TextBounds {
-                            left: 56,
-                            top: 48,
-                            right: self.config.width.saturating_sub(56) as i32,
-                            bottom: 108,
-                        },
-                        default_color: Color::rgb(238, 241, 248),
-                        custom_glyphs: &[],
-                    },
-                    TextArea {
-                        buffer: &self.results_buffer,
-                        left: layout::RESULT_TEXT_LEFT,
-                        top: layout::RESULT_TEXT_TOP,
-                        scale: 1.0,
-                        bounds: TextBounds {
-                            left: 0,
-                            top: layout::RESULT_TOP as i32,
-                            right: self.config.width.saturating_sub(56) as i32,
-                            bottom: self.config.height.saturating_sub(32) as i32,
-                        },
-                        default_color: Color::rgb(208, 216, 232),
-                        custom_glyphs: &custom_glyphs,
-                    },
-                ],
+                text_areas,
                 &mut self.swash_cache,
                 &|request: RasterizeCustomGlyphRequest| {
                     let source = icon_images.get(request.id as usize)?.as_ref()?;
@@ -527,26 +526,12 @@ fn hit_test_result(
     window_width: u32,
     result_count: usize,
 ) -> Option<usize> {
-    if position.x < f64::from(layout::RESULT_LEFT)
-        || position.x >= f64::from(window_width) - f64::from(layout::RESULT_RIGHT_INSET)
-    {
-        return None;
-    }
-    let relative_y = position.y - f64::from(layout::RESULT_TOP);
-    if relative_y < 0.0 {
-        return None;
-    }
-    let index = (relative_y / f64::from(layout::RESULT_STRIDE)) as usize;
-    let within_row =
-        relative_y % f64::from(layout::RESULT_STRIDE) < f64::from(layout::RESULT_HEIGHT);
-    (within_row && index < result_count).then_some(index)
+    layout::hit_test_result(position.x, position.y, window_width, result_count)
 }
 
 #[cfg(test)]
 mod tests {
-    use winit::dpi::PhysicalPosition;
-
-    use super::{env_flag, hit_test_result};
+    use super::env_flag;
 
     #[test]
     fn missing_environment_flag_is_disabled() {
@@ -566,21 +551,5 @@ mod tests {
         }
         // SAFETY: This test uses a unique variable name and no other thread accesses it.
         unsafe { std::env::remove_var(name) };
-    }
-
-    #[test]
-    fn result_hit_testing_excludes_gaps_and_empty_rows() {
-        assert_eq!(
-            hit_test_result(PhysicalPosition::new(100.0, 140.0), 960, 3),
-            Some(0)
-        );
-        assert_eq!(
-            hit_test_result(PhysicalPosition::new(100.0, 181.0), 960, 3),
-            None
-        );
-        assert_eq!(
-            hit_test_result(PhysicalPosition::new(100.0, 300.0), 960, 3),
-            None
-        );
     }
 }
