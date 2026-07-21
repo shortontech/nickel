@@ -13,6 +13,7 @@ Represent multiple windows from the same application as one panel item while ret
 - Clicking a single-window group activates that window.
 - Hovering a group opens a preview surface above the panel. Member cards are arranged side by side and contain a live window thumbnail, application/window title, and a close button in the top-right corner.
 - The preview remains open while the pointer moves between the panel button and preview surface, then dismisses after both lose hover/focus.
+- Hovering a preview card temporarily redraws that window above a dimmed workspace while keeping the panel and preview surface visible. This peek must not change keyboard focus or persistent stacking order.
 - Clicking a preview activates that window. Clicking its close button closes only that window.
 - Right-clicking a preview opens a per-window menu with Close, Maximize/Restore, and Minimize actions.
 - Empty titles fall back to the application name, then `Untitled window`.

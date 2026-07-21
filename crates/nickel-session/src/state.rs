@@ -70,6 +70,7 @@ pub struct NickelSession {
     pub context_menu_window: Option<Window>,
     pub preview_frames: HashMap<WindowId, PreviewFrame>,
     pub preview_requests: HashSet<WindowId>,
+    pub preview_highlight: Option<WindowId>,
     pub minimized_windows: HashMap<WindowId, (Window, Point<i32, Logical>)>,
     maximized_restore: HashMap<ObjectId, Geometry>,
     pub last_titlebar_click: Option<(ObjectId, u32, Point<f64, Logical>)>,
@@ -147,6 +148,7 @@ impl NickelSession {
             context_menu_window: None,
             preview_frames: HashMap::new(),
             preview_requests: HashSet::new(),
+            preview_highlight: None,
             minimized_windows: HashMap::new(),
             maximized_restore: HashMap::new(),
             last_titlebar_click: None,
@@ -203,6 +205,14 @@ impl NickelSession {
                                         .and_then(parse_geometry_command)
                                 {
                                     data.state.show_context_menu(x, width, height, false);
+                                } else if let Ok(message) = std::str::from_utf8(message)
+                                    && let Some(id) = message
+                                        .strip_prefix("highlight-window\t")
+                                        .and_then(|value| value.parse().ok())
+                                {
+                                    data.state.preview_highlight = Some(WindowId(id));
+                                } else if message == b"clear-window-highlight" {
+                                    data.state.preview_highlight = None;
                                 } else if let Ok(message) = std::str::from_utf8(message)
                                     && let Some(id) = message
                                         .strip_prefix("get-preview\t")
@@ -386,6 +396,7 @@ impl NickelSession {
         }
         self.preview_requests.clear();
         self.preview_frames.clear();
+        self.preview_highlight = None;
         eprintln!("nickel-session: context menu hidden");
     }
 

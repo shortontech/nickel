@@ -8,6 +8,7 @@ use smithay::{
             damage::OutputDamageTracker,
             element::{
                 Kind,
+                solid::{SolidColorBuffer, SolidColorRenderElement},
                 surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
                 utils::{ConstrainAlign, ConstrainScaleBehavior, constrain_render_elements},
             },
@@ -110,6 +111,91 @@ pub fn init_winit(
                             [0.1, 0.1, 0.1, 1.0],
                         )
                         .unwrap();
+
+                        if let Some(highlight) = state.preview_highlight
+                            && let Some(window) = state.space.elements().find(|window| {
+                                window
+                                    .toplevel()
+                                    .and_then(|surface| {
+                                        state.surface_windows.get(&surface.wl_surface().id())
+                                    })
+                                    .copied()
+                                    == Some(highlight)
+                            })
+                        {
+                            let dim_buffer =
+                                SolidColorBuffer::new(size.to_logical(1), [0.0, 0.0, 0.0, 0.62]);
+                            let dim = SolidColorRenderElement::from_buffer(
+                                &dim_buffer,
+                                (0, 0),
+                                1.0,
+                                1.0,
+                                Kind::Unspecified,
+                            );
+                            let mut frame = renderer
+                                .render(&mut framebuffer, size, Transform::Normal)
+                                .unwrap();
+                            draw_render_elements::<GlesRenderer, _, _>(
+                                &mut frame,
+                                1.0,
+                                &[dim],
+                                &[damage],
+                            )
+                            .unwrap();
+                            let _ = frame.finish().unwrap();
+
+                            let location = state.space.element_location(window).unwrap_or_default();
+                            let selected = render_elements_from_surface_tree::<
+                                GlesRenderer,
+                                WaylandSurfaceRenderElement<GlesRenderer>,
+                            >(
+                                renderer,
+                                window.toplevel().unwrap().wl_surface(),
+                                location.to_physical(1),
+                                1.0,
+                                1.0,
+                                Kind::Unspecified,
+                            );
+                            let mut frame = renderer
+                                .render(&mut framebuffer, size, Transform::Normal)
+                                .unwrap();
+                            draw_render_elements(&mut frame, 1.0, &selected, &[damage]).unwrap();
+                            let _ = frame.finish().unwrap();
+
+                            let mut shell_elements = Vec::new();
+                            for shell in [
+                                state.launcher_window.as_ref(),
+                                state.panel_window.as_ref(),
+                                state.context_menu_window.as_ref(),
+                            ]
+                            .into_iter()
+                            .flatten()
+                            {
+                                let Some(location) = state.space.element_location(shell) else {
+                                    continue;
+                                };
+                                let Some(surface) = shell.toplevel() else {
+                                    continue;
+                                };
+                                shell_elements.extend(render_elements_from_surface_tree::<
+                                    GlesRenderer,
+                                    WaylandSurfaceRenderElement<GlesRenderer>,
+                                >(
+                                    renderer,
+                                    surface.wl_surface(),
+                                    location.to_physical(1),
+                                    1.0,
+                                    1.0,
+                                    Kind::Unspecified,
+                                ));
+                            }
+                            let mut frame = renderer
+                                .render(&mut framebuffer, size, Transform::Normal)
+                                .unwrap();
+                            draw_render_elements(&mut frame, 1.0, &shell_elements, &[damage])
+                                .unwrap();
+                            let _ = frame.finish().unwrap();
+                        }
                     }
                     backend.submit(Some(&[damage])).unwrap();
 
