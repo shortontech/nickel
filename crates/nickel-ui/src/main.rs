@@ -1326,7 +1326,7 @@ impl ApplicationHandler for Nickel {
             self.refresh_task_windows();
             self.refresh_tray_items();
             if let Some(group) = self.preview_group
-                && self.panel_task_hovered == Some(group)
+                && (self.context_preview_mode || self.panel_task_hovered == Some(group))
             {
                 self.show_window_group(group);
             }
