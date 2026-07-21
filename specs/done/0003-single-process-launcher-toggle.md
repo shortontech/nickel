@@ -16,7 +16,7 @@ Remove launcher startup latency by making the panel and launcher two windows own
 
 ## Boundaries
 
-No panel-to-launcher IPC or child process is introduced. Both windows share application state and an event loop. Sharing a single GPU device or atlas between surfaces is optional for this slice; eliminating repeated process and subsystem initialization is required.
+No panel-to-launcher IPC or child process is introduced. Both windows share application state and an event loop. Under `nickel-session`, a small session-control datagram asks the compositor to map or unmap the warm launcher surface because ordinary Wayland clients cannot control their own visibility. Sharing a single GPU device or atlas between surfaces is optional for this slice; eliminating repeated process and subsystem initialization is required.
 
 ## Verification
 
