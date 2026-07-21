@@ -315,6 +315,10 @@ pub fn task_at(position: winit::dpi::PhysicalPosition<f64>, task_count: usize) -
     (index < task_count).then_some(index)
 }
 
+pub fn task_menu_x(index: usize) -> i32 {
+    (TASKS_LEFT + index as f64 * TASK_WIDTH) as i32
+}
+
 pub fn fallback_icon() -> image::RgbaImage {
     image::RgbaImage::from_fn(32, 32, |x, y| {
         let border = x <= 2 || y <= 2 || x >= 29 || y >= 29;

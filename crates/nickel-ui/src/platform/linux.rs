@@ -3,7 +3,7 @@ use std::{env, path::PathBuf, time::Duration};
 use crate::{
     launcher::Launcher,
     model::{Application, ApplicationId, OpenWindow, WindowId},
-    platform::ShellCommand,
+    platform::{ShellCommand, WindowAction},
 };
 
 #[path = "../desktop_entries.rs"]
@@ -22,12 +22,17 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
         return false;
     };
     let command = match command {
-        ShellCommand::Toggle => b"toggle-launcher".as_slice(),
-        ShellCommand::Show => b"show-launcher".as_slice(),
-        ShellCommand::Hide => b"hide-launcher".as_slice(),
+        ShellCommand::Toggle => "toggle-launcher".to_owned(),
+        ShellCommand::Show => "show-launcher".to_owned(),
+        ShellCommand::Hide => "hide-launcher".to_owned(),
+        ShellCommand::ShowContextMenu { x } => format!("show-context-menu\t{x}"),
+        ShellCommand::HideContextMenu => "hide-context-menu".to_owned(),
+        ShellCommand::WindowAction { window, action } => match action {
+            WindowAction::Close => format!("close-window\t{}", window.0),
+        },
     };
     UnixDatagram::unbound()
-        .and_then(|socket| socket.send_to(command, path))
+        .and_then(|socket| socket.send_to(command.as_bytes(), path))
         .is_ok()
 }
 

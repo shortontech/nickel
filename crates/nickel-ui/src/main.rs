@@ -20,6 +20,7 @@ use winit::keyboard::{Key, NamedKey};
 use winit::monitor::MonitorHandle;
 use winit::window::{CursorIcon, Window, WindowAttributes, WindowId};
 
+mod context_menu;
 mod icons;
 mod launcher;
 mod layout;
@@ -30,8 +31,8 @@ mod rectangles;
 mod storage;
 
 use launcher::Launcher;
-use model::OpenWindow;
-use platform::{ShellCommand, WindowFeed};
+use model::{OpenWindow, WindowId as ShellWindowId};
+use platform::{ShellCommand, WindowAction, WindowFeed};
 
 const SECONDARY_DISPLAY_ENV: &str = "NICKEL_USE_SECONDARY_DISPLAY";
 
@@ -67,6 +68,10 @@ struct Nickel {
     panel_gpu: Option<panel::PanelGpu>,
     panel_hovered: bool,
     panel_task_hovered: Option<usize>,
+    context_menu_window: Option<Arc<Window>>,
+    context_menu_gpu: Option<context_menu::ContextMenuGpu>,
+    context_menu_hovered: bool,
+    context_menu_target: Option<ShellWindowId>,
     task_windows: Vec<OpenWindow>,
     launcher_visibility: LauncherVisibility,
     clock_deadline: Instant,
@@ -109,6 +114,10 @@ impl Default for Nickel {
             panel_gpu: None,
             panel_hovered: false,
             panel_task_hovered: None,
+            context_menu_window: None,
+            context_menu_gpu: None,
+            context_menu_hovered: false,
+            context_menu_target: None,
             task_windows: Vec::new(),
             launcher_visibility: LauncherVisibility::default(),
             clock_deadline: next_minute_deadline(Instant::now(), SystemTime::now()),
@@ -125,7 +134,35 @@ impl Default for Nickel {
 }
 
 impl Nickel {
+    fn hide_context_menu(&mut self) {
+        self.context_menu_target = None;
+        self.context_menu_hovered = false;
+        if !platform::send_shell_command(ShellCommand::HideContextMenu)
+            && let Some(window) = &self.context_menu_window
+        {
+            window.set_visible(false);
+        }
+    }
+
+    fn show_context_menu(&mut self, task_index: usize) {
+        let Some(window) = self.task_windows.get(task_index) else {
+            return;
+        };
+        self.context_menu_target = Some(window.id);
+        let x = panel::task_menu_x(task_index);
+        if !platform::send_shell_command(ShellCommand::ShowContextMenu { x })
+            && let Some(window) = &self.context_menu_window
+        {
+            window.set_visible(true);
+            window.focus_window();
+        }
+        if let Some(window) = &self.context_menu_window {
+            window.request_redraw();
+        }
+    }
+
     fn set_launcher_visible(&mut self, visible: bool) {
+        self.hide_context_menu();
         self.launcher_visibility.set(visible);
         if platform::send_shell_command(if visible {
             ShellCommand::Show
@@ -144,6 +181,7 @@ impl Nickel {
     }
 
     fn toggle_launcher(&mut self) {
+        self.hide_context_menu();
         let visible = self.launcher_visibility.toggle();
         if !platform::send_shell_command(ShellCommand::Toggle) {
             self.set_launcher_visible(visible);
@@ -178,6 +216,12 @@ impl Nickel {
             })
             .collect();
         self.task_windows = windows;
+        if self
+            .context_menu_target
+            .is_some_and(|target| !self.task_windows.iter().any(|window| window.id == target))
+        {
+            self.hide_context_menu();
+        }
         if let Some(gpu) = &mut self.panel_gpu {
             gpu.set_tasks(tasks);
         }
@@ -590,6 +634,10 @@ impl ApplicationHandler for Nickel {
             .with_title("Nickel Panel")
             .with_inner_size(LogicalSize::new(220, 56))
             .with_decorations(false);
+        let context_menu_attributes = WindowAttributes::default()
+            .with_title("Nickel Context Menu")
+            .with_inner_size(LogicalSize::new(context_menu::WIDTH, context_menu::HEIGHT))
+            .with_decorations(false);
 
         if let Some(monitor) = target {
             launcher_attributes =
@@ -619,6 +667,19 @@ impl ApplicationHandler for Nickel {
             event_loop.exit();
             return;
         };
+        let Ok(context_menu_window) = event_loop.create_window(context_menu_attributes) else {
+            eprintln!("failed to create Nickel context menu window");
+            event_loop.exit();
+            return;
+        };
+        let context_menu_window = Arc::new(context_menu_window);
+        let Ok(context_menu_gpu) = pollster::block_on(context_menu::ContextMenuGpu::new(
+            context_menu_window.clone(),
+        )) else {
+            eprintln!("failed to initialize Nickel context menu renderer");
+            event_loop.exit();
+            return;
+        };
 
         launcher_window.set_title("Nickel Launcher");
         panel_window.request_redraw();
@@ -626,6 +687,8 @@ impl ApplicationHandler for Nickel {
         self.gpu = Some(launcher_gpu);
         self.panel_window = Some(panel_window);
         self.panel_gpu = Some(panel_gpu);
+        self.context_menu_window = Some(context_menu_window);
+        self.context_menu_gpu = Some(context_menu_gpu);
     }
 
     fn window_event(
@@ -634,6 +697,56 @@ impl ApplicationHandler for Nickel {
         window_id: WindowId,
         event: WindowEvent,
     ) {
+        if self.context_menu_window.as_ref().map(|window| window.id()) == Some(window_id) {
+            match event {
+                WindowEvent::CloseRequested | WindowEvent::Focused(false) => {
+                    self.hide_context_menu()
+                }
+                WindowEvent::Resized(size) => {
+                    if let Some(gpu) = &mut self.context_menu_gpu {
+                        gpu.resize(size.width, size.height);
+                    }
+                }
+                WindowEvent::RedrawRequested => {
+                    if let Some(gpu) = &mut self.context_menu_gpu {
+                        gpu.render(self.context_menu_hovered);
+                    }
+                }
+                WindowEvent::CursorMoved { position, .. } => {
+                    let hovered = context_menu::item_contains(position);
+                    if hovered != self.context_menu_hovered {
+                        self.context_menu_hovered = hovered;
+                        self.context_menu_window
+                            .as_ref()
+                            .expect("context menu window exists")
+                            .request_redraw();
+                    }
+                }
+                WindowEvent::CursorLeft { .. } => {
+                    self.context_menu_hovered = false;
+                    self.context_menu_window
+                        .as_ref()
+                        .expect("context menu window exists")
+                        .request_redraw();
+                }
+                WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    button: MouseButton::Left,
+                    ..
+                } if self.context_menu_hovered => {
+                    if let Some(window) = self.context_menu_target {
+                        platform::send_shell_command(ShellCommand::WindowAction {
+                            window,
+                            action: WindowAction::Close,
+                        });
+                    }
+                    self.hide_context_menu();
+                }
+                _ => {}
+            }
+            return;
+        }
+
         if self.panel_window.as_ref().map(|window| window.id()) == Some(window_id) {
             match event {
                 WindowEvent::CloseRequested => event_loop.exit(),
@@ -679,6 +792,22 @@ impl ApplicationHandler for Nickel {
                     button: MouseButton::Left,
                     ..
                 } if self.panel_hovered => self.toggle_launcher(),
+                WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    button: MouseButton::Right,
+                    ..
+                } => {
+                    if let Some(index) = self.panel_task_hovered {
+                        self.show_context_menu(index);
+                    } else {
+                        self.hide_context_menu();
+                    }
+                }
+                WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    button: MouseButton::Left,
+                    ..
+                } => self.hide_context_menu(),
                 _ => {}
             }
             return;
