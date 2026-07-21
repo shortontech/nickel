@@ -224,14 +224,17 @@ impl WindowFeed {
             )
             .ok()?;
         let mut response = vec![0_u8; 256 * 144 * 4 + 12];
-        let length = socket.recv(&mut response).ok()?;
-        if length < 12 || u64::from_le_bytes(response[..8].try_into().ok()?) != window.0 {
-            return None;
+        for _ in 0..4 {
+            let length = socket.recv(&mut response).ok()?;
+            if length < 12 || u64::from_le_bytes(response[..8].try_into().ok()?) != window.0 {
+                continue;
+            }
+            let width = u16::from_le_bytes([response[8], response[9]]) as u32;
+            let height = u16::from_le_bytes([response[10], response[11]]) as u32;
+            let image = image::RgbaImage::from_raw(width, height, response[12..length].to_vec())?;
+            return Some(WindowPreview { window, image });
         }
-        let width = u16::from_le_bytes([response[8], response[9]]) as u32;
-        let height = u16::from_le_bytes([response[10], response[11]]) as u32;
-        let image = image::RgbaImage::from_raw(width, height, response[12..length].to_vec())?;
-        Some(WindowPreview { window, image })
+        None
     }
 }
 
