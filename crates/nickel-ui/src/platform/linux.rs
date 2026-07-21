@@ -9,7 +9,7 @@ use std::{
 use crate::{
     icons,
     launcher::Launcher,
-    model::{Application, ApplicationId, OpenWindow, TrayItem, WindowId},
+    model::{Application, ApplicationId, OpenWindow, TrayItem, WindowId, WindowPreview},
     platform::{ShellCommand, TraySource, WindowAction},
 };
 
@@ -163,13 +163,18 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
         ShellCommand::Toggle => "toggle-launcher".to_owned(),
         ShellCommand::Show => "show-launcher".to_owned(),
         ShellCommand::Hide => "hide-launcher".to_owned(),
-        ShellCommand::ShowContextMenu { x, height } => {
-            format!("show-context-menu\t{x}\t{height}")
+        ShellCommand::ShowContextMenu { x, width, height } => {
+            format!("show-context-menu\t{x}\t{width}\t{height}")
+        }
+        ShellCommand::ShowPreview { x, width, height } => {
+            format!("show-preview\t{x}\t{width}\t{height}")
         }
         ShellCommand::HideContextMenu => "hide-context-menu".to_owned(),
         ShellCommand::WindowAction { window, action } => match action {
             WindowAction::Activate => format!("activate-window\t{}", window.0),
             WindowAction::Close => format!("close-window\t{}", window.0),
+            WindowAction::Maximize => format!("maximize-window\t{}", window.0),
+            WindowAction::Minimize => format!("minimize-window\t{}", window.0),
         },
     };
     UnixDatagram::unbound()
@@ -206,6 +211,25 @@ impl WindowFeed {
                 .filter_map(|line| parse_window(line, launcher))
                 .collect(),
         )
+    }
+
+    pub fn preview(&self, window: WindowId) -> Option<WindowPreview> {
+        let socket = self.socket.as_ref()?;
+        socket
+            .send_to(
+                format!("get-preview\t{}", window.0).as_bytes(),
+                env::var_os(SESSION_CONTROL_ENV)?,
+            )
+            .ok()?;
+        let mut response = vec![0_u8; 256 * 144 * 4 + 12];
+        let length = socket.recv(&mut response).ok()?;
+        if length < 12 || u64::from_le_bytes(response[..8].try_into().ok()?) != window.0 {
+            return None;
+        }
+        let width = u16::from_le_bytes([response[8], response[9]]) as u32;
+        let height = u16::from_le_bytes([response[10], response[11]]) as u32;
+        let image = image::RgbaImage::from_raw(width, height, response[12..length].to_vec())?;
+        Some(WindowPreview { window, image })
     }
 }
 

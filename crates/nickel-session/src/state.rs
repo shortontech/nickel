@@ -1,5 +1,9 @@
 use std::{
-    collections::HashMap, ffi::OsString, os::unix::net::UnixDatagram, path::PathBuf, sync::Arc,
+    collections::{HashMap, HashSet},
+    ffi::OsString,
+    os::unix::net::UnixDatagram,
+    path::PathBuf,
+    sync::Arc,
 };
 
 use smithay::{
@@ -31,6 +35,15 @@ use crate::{
 
 use crate::CalloopData;
 
+fn parse_geometry_command(value: &str) -> Option<(i32, i32, i32)> {
+    let mut fields = value.split('\t');
+    Some((
+        fields.next()?.parse().ok()?,
+        fields.next()?.parse().ok()?,
+        fields.next()?.parse().ok()?,
+    ))
+}
+
 pub struct NickelSession {
     pub start_time: std::time::Instant,
     pub socket_name: OsString,
@@ -55,10 +68,20 @@ pub struct NickelSession {
     pub launcher_visible: bool,
     pub panel_window: Option<Window>,
     pub context_menu_window: Option<Window>,
+    pub preview_frames: HashMap<WindowId, PreviewFrame>,
+    pub preview_requests: HashSet<WindowId>,
+    pub minimized_windows: HashMap<WindowId, (Window, Point<i32, Logical>)>,
     maximized_restore: HashMap<ObjectId, Geometry>,
     pub last_titlebar_click: Option<(ObjectId, u32, Point<f64, Logical>)>,
     pub suppress_left_button_release: bool,
     control_socket_path: PathBuf,
+}
+
+#[derive(Clone)]
+pub struct PreviewFrame {
+    pub width: u16,
+    pub height: u16,
+    pub rgba: Vec<u8>,
 }
 
 impl NickelSession {
@@ -122,6 +145,9 @@ impl NickelSession {
             launcher_visible: false,
             panel_window: None,
             context_menu_window: None,
+            preview_frames: HashMap::new(),
+            preview_requests: HashSet::new(),
+            minimized_windows: HashMap::new(),
             maximized_restore: HashMap::new(),
             last_titlebar_click: None,
             suppress_left_button_release: false,
@@ -166,20 +192,52 @@ impl NickelSession {
                             }
                             _ => {
                                 if let Ok(message) = std::str::from_utf8(message)
-                                    && let Some((x, height)) = message
+                                    && let Some((x, width, height)) = message
                                         .strip_prefix("show-context-menu\t")
-                                        .and_then(|value| value.split_once('\t'))
-                                        .and_then(|(x, height)| {
-                                            Some((x.parse().ok()?, height.parse().ok()?))
-                                        })
+                                        .and_then(parse_geometry_command)
                                 {
-                                    data.state.show_context_menu(x, height);
+                                    data.state.show_context_menu(x, width, height, true);
+                                } else if let Ok(message) = std::str::from_utf8(message)
+                                    && let Some((x, width, height)) = message
+                                        .strip_prefix("show-preview\t")
+                                        .and_then(parse_geometry_command)
+                                {
+                                    data.state.show_context_menu(x, width, height, false);
+                                } else if let Ok(message) = std::str::from_utf8(message)
+                                    && let Some(id) = message
+                                        .strip_prefix("get-preview\t")
+                                        .and_then(|value| value.parse().ok())
+                                {
+                                    data.state.preview_requests.insert(WindowId(id));
+                                    if let (Some(path), Some(frame)) = (
+                                        source.as_pathname(),
+                                        data.state.preview_frames.get(&WindowId(id)),
+                                    ) {
+                                        let mut payload = Vec::with_capacity(12 + frame.rgba.len());
+                                        payload.extend_from_slice(&id.to_le_bytes());
+                                        payload.extend_from_slice(&frame.width.to_le_bytes());
+                                        payload.extend_from_slice(&frame.height.to_le_bytes());
+                                        payload.extend_from_slice(&frame.rgba);
+                                        let _ = socket.as_ref().send_to(&payload, path);
+                                    }
                                 } else if let Ok(message) = std::str::from_utf8(message)
                                     && let Some(id) = message
                                         .strip_prefix("activate-window\t")
                                         .and_then(|value| value.parse().ok())
                                 {
                                     data.state.activate_window(WindowId(id));
+                                } else if let Ok(message) = std::str::from_utf8(message)
+                                    && let Some(id) = message
+                                        .strip_prefix("maximize-window\t")
+                                        .and_then(|value| value.parse().ok())
+                                {
+                                    data.state.maximize_window(WindowId(id));
+                                } else if let Ok(message) = std::str::from_utf8(message)
+                                    && let Some(id) = message
+                                        .strip_prefix("minimize-window\t")
+                                        .and_then(|value| value.parse().ok())
+                                {
+                                    data.state.minimize_window(WindowId(id));
                                 } else if let Ok(message) = std::str::from_utf8(message)
                                     && let Some(id) = message
                                         .strip_prefix("close-window\t")
@@ -280,13 +338,19 @@ impl NickelSession {
         self.context_menu_window = Some(window);
     }
 
-    pub fn show_context_menu(&mut self, x: i32, requested_height: i32) {
+    pub fn show_context_menu(
+        &mut self,
+        x: i32,
+        requested_width: i32,
+        requested_height: i32,
+        focus: bool,
+    ) {
         let (Some(window), Some(output)) =
             (self.context_menu_window.clone(), self.output_geometry())
         else {
             return;
         };
-        let width = 320;
+        let width = requested_width.clamp(120, output.width.max(120));
         let maximum_height = (output.height - shell_layout::PANEL_HEIGHT).max(52);
         let height = requested_height.clamp(52, maximum_height);
         let x = (output.x + x).clamp(output.x, output.x + output.width - width);
@@ -301,11 +365,13 @@ impl NickelSession {
             },
         );
         self.space.map_element(window.clone(), (x, y), true);
-        self.seat.get_keyboard().unwrap().set_focus(
-            self,
-            Some(window.toplevel().unwrap().wl_surface().clone()),
-            SERIAL_COUNTER.next_serial(),
-        );
+        if focus {
+            self.seat.get_keyboard().unwrap().set_focus(
+                self,
+                Some(window.toplevel().unwrap().wl_surface().clone()),
+                SERIAL_COUNTER.next_serial(),
+            );
+        }
         self.space.elements().for_each(|window| {
             window.toplevel().unwrap().send_pending_configure();
         });
@@ -318,6 +384,8 @@ impl NickelSession {
         if let Some(window) = self.context_menu_window.clone() {
             self.space.unmap_elem(&window);
         }
+        self.preview_requests.clear();
+        self.preview_frames.clear();
         eprintln!("nickel-session: context menu hidden");
     }
 
@@ -329,6 +397,13 @@ impl NickelSession {
         let Some(surface_id) = surface_id else {
             return;
         };
+        if let Some((window, _)) = self.minimized_windows.remove(&id) {
+            if let Some(surface) = window.toplevel() {
+                surface.send_close();
+            }
+            self.hide_context_menu();
+            return;
+        }
         if let Some(window) = self.space.elements().find(|window| {
             window
                 .toplevel()
@@ -341,6 +416,9 @@ impl NickelSession {
     }
 
     pub fn activate_window(&mut self, id: WindowId) {
+        if let Some((window, location)) = self.minimized_windows.remove(&id) {
+            self.space.map_element(window, location, true);
+        }
         let Some(surface_id) = self
             .surface_windows
             .iter()
@@ -371,6 +449,43 @@ impl NickelSession {
             window.toplevel().unwrap().send_pending_configure();
         });
         self.raise_panel();
+    }
+
+    pub fn minimize_window(&mut self, id: WindowId) {
+        let Some(window) = self
+            .space
+            .elements()
+            .find(|window| {
+                window
+                    .toplevel()
+                    .and_then(|surface| self.surface_windows.get(&surface.wl_surface().id()))
+                    .copied()
+                    == Some(id)
+            })
+            .cloned()
+        else {
+            return;
+        };
+        let location = self.space.element_location(&window).unwrap_or_default();
+        self.space.unmap_elem(&window);
+        self.minimized_windows.insert(id, (window, location));
+        self.raise_panel();
+    }
+
+    pub fn maximize_window(&mut self, id: WindowId) {
+        self.activate_window(id);
+        let surface = self.space.elements().find_map(|window| {
+            let surface = window.toplevel()?;
+            (self
+                .surface_windows
+                .get(&surface.wl_surface().id())
+                .copied()
+                == Some(id))
+            .then(|| surface.clone())
+        });
+        if let Some(surface) = surface {
+            self.toggle_maximized_toplevel(&surface);
+        }
     }
 
     pub fn relayout_shell_surfaces(&mut self) {

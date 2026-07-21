@@ -48,6 +48,8 @@ enum LauncherVisibility {
 enum ContextAction {
     Activate(ShellWindowId),
     Close(ShellWindowId),
+    Maximize(ShellWindowId),
+    Minimize(ShellWindowId),
 }
 
 impl LauncherVisibility {
@@ -79,8 +81,12 @@ struct Nickel {
     context_menu_window: Option<Arc<Window>>,
     context_menu_gpu: Option<context_menu::ContextMenuGpu>,
     context_menu_hovered: Option<usize>,
+    context_close_hovered: Option<usize>,
     context_menu_target: Option<ShellWindowId>,
     context_menu_actions: Vec<ContextAction>,
+    context_preview_mode: bool,
+    preview_group: Option<usize>,
+    preview_hide_deadline: Option<Instant>,
     task_windows: Vec<OpenWindow>,
     window_groups: Vec<WindowGroup>,
     tray_items: Vec<TrayItem>,
@@ -130,8 +136,12 @@ impl Default for Nickel {
             context_menu_window: None,
             context_menu_gpu: None,
             context_menu_hovered: None,
+            context_close_hovered: None,
             context_menu_target: None,
             context_menu_actions: Vec::new(),
+            context_preview_mode: false,
+            preview_group: None,
+            preview_hide_deadline: None,
             task_windows: Vec::new(),
             window_groups: Vec::new(),
             tray_items: Vec::new(),
@@ -173,7 +183,11 @@ impl Nickel {
     fn hide_context_menu(&mut self) {
         self.context_menu_target = None;
         self.context_menu_hovered = None;
+        self.context_close_hovered = None;
         self.context_menu_actions.clear();
+        self.context_preview_mode = false;
+        self.preview_group = None;
+        self.preview_hide_deadline = None;
         if !platform::send_shell_command(ShellCommand::HideContextMenu)
             && let Some(window) = &self.context_menu_window
         {
@@ -191,6 +205,9 @@ impl Nickel {
         };
         let task = task.id;
         self.context_menu_target = Some(task);
+        self.context_preview_mode = false;
+        self.preview_group = None;
+        self.preview_hide_deadline = None;
         if !self.ensure_context_menu_gpu() {
             return;
         }
@@ -201,6 +218,7 @@ impl Nickel {
         let x = panel::task_menu_x(task_index);
         if !platform::send_shell_command(ShellCommand::ShowContextMenu {
             x,
+            width: context_menu::WIDTH as i32,
             height: context_menu::height_for(1) as i32,
         }) && let Some(window) = &self.context_menu_window
         {
@@ -216,34 +234,98 @@ impl Nickel {
         let Some(group) = self.window_groups.get(task_index) else {
             return;
         };
-        let actions: Vec<_> = group
-            .windows
+        let windows = group.windows.clone();
+        let application_name = group.application_name.clone();
+        let previews: Vec<_> = windows
             .iter()
-            .map(|window| ContextAction::Activate(window.id))
+            .filter_map(|window| self.window_feed.preview(window.id))
             .collect();
-        let labels: Vec<_> = group
-            .windows
+        self.preview_group = Some(task_index);
+        self.preview_hide_deadline = None;
+        if previews.is_empty() {
+            return;
+        }
+        let labels: Vec<_> = previews
             .iter()
-            .map(|window| {
+            .map(|preview| {
+                let window = windows
+                    .iter()
+                    .find(|window| window.id == preview.window)
+                    .expect("preview belongs to grouped window");
                 if window.title.is_empty() {
-                    group.application_name.clone()
+                    application_name.clone()
                 } else {
                     window.title.clone()
                 }
             })
             .collect();
-        self.context_menu_target = group.windows.last().map(|window| window.id);
+        let actions: Vec<_> = previews
+            .iter()
+            .map(|preview| ContextAction::Activate(preview.window))
+            .collect();
+        self.context_menu_target = previews.last().map(|preview| preview.window);
         if !self.ensure_context_menu_gpu() {
             return;
         }
         self.context_menu_actions = actions;
+        self.context_preview_mode = true;
         if let Some(gpu) = &mut self.context_menu_gpu {
-            gpu.set_labels(&labels);
+            gpu.set_previews(
+                &labels,
+                previews.into_iter().map(|preview| preview.image).collect(),
+            );
         }
         let x = panel::task_menu_x(task_index);
+        platform::send_shell_command(ShellCommand::ShowPreview {
+            x,
+            width: context_menu::preview_width(labels.len()) as i32,
+            height: context_menu::PREVIEW_HEIGHT as i32,
+        });
+        if let Some(window) = &self.context_menu_window {
+            window.request_redraw();
+        }
+    }
+
+    fn show_window_actions(&mut self, index: usize) {
+        let x = self
+            .preview_group
+            .map(panel::task_menu_x)
+            .unwrap_or_default()
+            + index as i32 * context_menu::PREVIEW_CARD_WIDTH as i32;
+        let Some(window) = self
+            .context_menu_actions
+            .get(index)
+            .map(|action| match action {
+                ContextAction::Activate(window)
+                | ContextAction::Close(window)
+                | ContextAction::Maximize(window)
+                | ContextAction::Minimize(window) => *window,
+            })
+        else {
+            return;
+        };
+        self.context_menu_target = Some(window);
+        self.context_preview_mode = false;
+        self.preview_group = None;
+        self.preview_hide_deadline = None;
+        self.context_menu_hovered = None;
+        self.context_close_hovered = None;
+        self.context_menu_actions = vec![
+            ContextAction::Close(window),
+            ContextAction::Maximize(window),
+            ContextAction::Minimize(window),
+        ];
+        if let Some(gpu) = &mut self.context_menu_gpu {
+            gpu.set_labels(&[
+                "Close window".into(),
+                "Maximize / Restore".into(),
+                "Minimize window".into(),
+            ]);
+        }
         platform::send_shell_command(ShellCommand::ShowContextMenu {
             x,
-            height: context_menu::height_for(labels.len()) as i32,
+            width: context_menu::WIDTH as i32,
+            height: context_menu::height_for(3) as i32,
         });
         if let Some(window) = &self.context_menu_window {
             window.request_redraw();
@@ -797,7 +879,9 @@ impl ApplicationHandler for Nickel {
         if self.context_menu_window.as_ref().map(|window| window.id()) == Some(window_id) {
             match event {
                 WindowEvent::CloseRequested => self.hide_context_menu(),
-                WindowEvent::Focused(false) if self.context_menu_target.is_some() => {
+                WindowEvent::Focused(false)
+                    if self.context_menu_target.is_some() && !self.context_preview_mode =>
+                {
                     self.hide_context_menu();
                 }
                 WindowEvent::Resized(size) => {
@@ -817,9 +901,26 @@ impl ApplicationHandler for Nickel {
                     }
                 }
                 WindowEvent::CursorMoved { position, .. } => {
-                    let hovered = context_menu::item_at(position, self.context_menu_actions.len());
-                    if hovered != self.context_menu_hovered {
+                    self.preview_hide_deadline = None;
+                    let hovered = if self.context_preview_mode {
+                        context_menu::preview_at(position, self.context_menu_actions.len())
+                    } else {
+                        context_menu::item_at(position, self.context_menu_actions.len())
+                    };
+                    let close_hovered = self
+                        .context_preview_mode
+                        .then(|| {
+                            context_menu::preview_close_at(
+                                position,
+                                self.context_menu_actions.len(),
+                            )
+                        })
+                        .flatten();
+                    if hovered != self.context_menu_hovered
+                        || close_hovered != self.context_close_hovered
+                    {
                         self.context_menu_hovered = hovered;
+                        self.context_close_hovered = close_hovered;
                         self.context_menu_window
                             .as_ref()
                             .expect("context menu window exists")
@@ -828,6 +929,11 @@ impl ApplicationHandler for Nickel {
                 }
                 WindowEvent::CursorLeft { .. } => {
                     self.context_menu_hovered = None;
+                    self.context_close_hovered = None;
+                    if self.context_preview_mode {
+                        self.preview_hide_deadline =
+                            Some(Instant::now() + Duration::from_millis(250));
+                    }
                     self.context_menu_window
                         .as_ref()
                         .expect("context menu window exists")
@@ -838,18 +944,36 @@ impl ApplicationHandler for Nickel {
                     button: MouseButton::Left,
                     ..
                 } if self.context_menu_hovered.is_some() => {
-                    if let Some(action) = self
-                        .context_menu_hovered
-                        .and_then(|index| self.context_menu_actions.get(index))
-                        .copied()
-                    {
+                    let index = self.context_menu_hovered.expect("hovered item exists");
+                    let action = if self.context_close_hovered == Some(index) {
+                        self.context_menu_actions
+                            .get(index)
+                            .map(|action| match action {
+                                ContextAction::Activate(window) => ContextAction::Close(*window),
+                                other => *other,
+                            })
+                    } else {
+                        self.context_menu_actions.get(index).copied()
+                    };
+                    if let Some(action) = action {
                         let (window, action) = match action {
                             ContextAction::Activate(window) => (window, WindowAction::Activate),
                             ContextAction::Close(window) => (window, WindowAction::Close),
+                            ContextAction::Maximize(window) => (window, WindowAction::Maximize),
+                            ContextAction::Minimize(window) => (window, WindowAction::Minimize),
                         };
                         platform::send_shell_command(ShellCommand::WindowAction { window, action });
                     }
                     self.hide_context_menu();
+                }
+                WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    button: MouseButton::Right,
+                    ..
+                } if self.context_preview_mode && self.context_menu_hovered.is_some() => {
+                    self.show_window_actions(
+                        self.context_menu_hovered.expect("preview is hovered"),
+                    );
                 }
                 _ => {}
             }
@@ -888,6 +1012,12 @@ impl ApplicationHandler for Nickel {
                     self.panel_hovered = hovered;
                     self.panel_task_hovered = task_hovered;
                     self.panel_tray_hovered = tray_hovered;
+                    if let Some(index) = task_hovered {
+                        self.show_window_group(index);
+                    } else if self.context_preview_mode {
+                        self.preview_hide_deadline =
+                            Some(Instant::now() + Duration::from_millis(250));
+                    }
                     let window = self.panel_window.as_ref().expect("panel window exists");
                     window.set_cursor(
                         if hovered || task_hovered.is_some() || tray_hovered.is_some() {
@@ -902,6 +1032,10 @@ impl ApplicationHandler for Nickel {
                     self.panel_hovered = false;
                     self.panel_task_hovered = None;
                     self.panel_tray_hovered = None;
+                    if self.context_preview_mode {
+                        self.preview_hide_deadline =
+                            Some(Instant::now() + Duration::from_millis(250));
+                    }
                     let window = self.panel_window.as_ref().expect("panel window exists");
                     window.set_cursor(CursorIcon::Default);
                     window.request_redraw();
@@ -1159,9 +1293,20 @@ impl ApplicationHandler for Nickel {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
+        if self
+            .preview_hide_deadline
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.hide_context_menu();
+        }
         if now >= self.window_deadline {
             self.refresh_task_windows();
             self.refresh_tray_items();
+            if let Some(group) = self.preview_group
+                && self.panel_task_hovered == Some(group)
+            {
+                self.show_window_group(group);
+            }
             self.window_deadline = now + Duration::from_millis(250);
         }
         if now >= self.clock_deadline {
@@ -1175,9 +1320,11 @@ impl ApplicationHandler for Nickel {
             }
             self.clock_deadline = next_minute_deadline(now, SystemTime::now());
         }
-        event_loop.set_control_flow(ControlFlow::WaitUntil(
-            self.clock_deadline.min(self.window_deadline),
-        ));
+        let mut deadline = self.clock_deadline.min(self.window_deadline);
+        if let Some(preview_deadline) = self.preview_hide_deadline {
+            deadline = deadline.min(preview_deadline);
+        }
+        event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
     }
 }
 
