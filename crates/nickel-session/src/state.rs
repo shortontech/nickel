@@ -13,7 +13,7 @@ use smithay::{
             protocol::wl_surface::WlSurface,
         },
     },
-    utils::{Logical, Point, Size},
+    utils::{Logical, Point, SERIAL_COUNTER, Size},
     wayland::{
         compositor::{CompositorClientState, CompositorState},
         output::OutputManagerState,
@@ -206,7 +206,16 @@ impl NickelSession {
         if visible {
             let geometry = self.launcher_geometry(&window);
             self.space
-                .map_element(window, (geometry.x, geometry.y), true);
+                .map_element(window.clone(), (geometry.x, geometry.y), true);
+            let surface = window.toplevel().unwrap().wl_surface().clone();
+            self.seat.get_keyboard().unwrap().set_focus(
+                self,
+                Some(surface),
+                SERIAL_COUNTER.next_serial(),
+            );
+            self.space.elements().for_each(|window| {
+                window.toplevel().unwrap().send_pending_configure();
+            });
             if let Some(panel) = self.panel_window.clone() {
                 self.space.raise_element(&panel, false);
             }
