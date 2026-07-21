@@ -66,8 +66,23 @@ fn application_from_entry(
         name,
         icon,
         icon_path,
-        entry.exec().map(str::to_owned),
+        entry.exec().and_then(parse_exec),
     ))
+}
+
+fn parse_exec(exec: &str) -> Option<Vec<String>> {
+    let arguments = shlex::split(exec)?;
+    let arguments: Vec<_> = arguments
+        .into_iter()
+        .filter(|argument| {
+            !matches!(
+                argument.as_str(),
+                "%f" | "%F" | "%u" | "%U" | "%i" | "%c" | "%k"
+            )
+        })
+        .map(|argument| argument.replace("%%", "%"))
+        .collect();
+    (!arguments.is_empty()).then_some(arguments)
 }
 
 fn resolve_icon(name: &str, theme: &str) -> Option<PathBuf> {
@@ -155,14 +170,24 @@ mod tests {
     #[test]
     fn extracts_application_and_icon_metadata() {
         let entry = parse(
-            "[Desktop Entry]\nType=Application\nName=Test App\nIcon=test-icon\nExec=test-app %U\n",
+            "[Desktop Entry]\nType=Application\nName=Test App\nIcon=test-icon\nExec=test-app --label \"two words\" %U\n",
         );
         let application =
             application_from_entry(&entry, &["en_US".into()], &["kde".into()], "hicolor")
                 .expect("visible application");
         assert_eq!(application.name(), "Test App");
         assert_eq!(application.icon(), Some("test-icon"));
-        assert_eq!(application.exec(), Some("test-app %U"));
+        assert_eq!(
+            application.exec(),
+            Some(
+                [
+                    "test-app".to_owned(),
+                    "--label".to_owned(),
+                    "two words".to_owned()
+                ]
+                .as_slice()
+            )
+        );
     }
 
     #[test]

@@ -677,16 +677,18 @@ impl ApplicationHandler for Nickel {
                     Key::Named(NamedKey::Escape) => self.launcher.clear(),
                     Key::Named(NamedKey::Enter) => {
                         if let Some(result) = self.launcher.selected_result() {
-                            println!(
-                                "selected application: {} (icon: {}, path: {}, exec: {})",
-                                result.name(),
-                                result.icon().unwrap_or("none"),
-                                result.icon_path().map_or_else(
-                                    || "unresolved".into(),
-                                    |path| path.display().to_string()
+                            match result.launch() {
+                                Ok(child) => println!(
+                                    "launched application: {} (pid {}, icon {})",
+                                    result.name(),
+                                    child.id(),
+                                    result.icon().unwrap_or("none")
                                 ),
-                                result.exec().unwrap_or("D-Bus activation")
-                            );
+                                Err(error) => eprintln!(
+                                    "failed to launch application {}: {error}",
+                                    result.name()
+                                ),
+                            }
                         }
                         changed = false;
                     }
