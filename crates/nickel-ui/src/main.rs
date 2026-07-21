@@ -25,6 +25,9 @@ mod layout;
 mod rectangles;
 mod storage;
 
+#[cfg(all(target_os = "linux", feature = "plasma-bootstrap"))]
+mod plasma_bootstrap;
+
 #[cfg(target_os = "linux")]
 mod desktop_entries;
 
@@ -704,6 +707,20 @@ impl ApplicationHandler for Nickel {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(all(target_os = "linux", feature = "plasma-bootstrap"))]
+    {
+        let windows = plasma_bootstrap::window_list()?;
+        println!("Plasma reported {} windows:", windows.len());
+        for window in windows {
+            println!(
+                "  {} [{}]{}",
+                window.title,
+                window.app_id,
+                if window.active { " (active)" } else { "" }
+            );
+        }
+    }
+
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Wait);
     event_loop.run_app(&mut Nickel::default())?;

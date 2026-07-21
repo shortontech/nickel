@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+default = []
+plasma-bootstrap = ["dep:wayland-client", "dep:wayland-protocols-plasma"]
+
 [dependencies]
 bytemuck.workspace = true
 glyphon.workspace = true
@@ -19,6 +23,8 @@ winit.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 freedesktop-desktop-entry.workspace = true
 freedesktop-icons.workspace = true
+wayland-client = { workspace = true, optional = true }
+wayland-protocols-plasma = { workspace = true, features = ["client"], optional = true }
 
 [dev-dependencies]
 tempfile = "3.25.0"

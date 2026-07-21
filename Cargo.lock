@@ -1191,6 +1191,8 @@ dependencies = [
  "redb",
  "resvg",
  "tempfile",
+ "wayland-client",
+ "wayland-protocols-plasma",
  "wgpu",
  "winit",
 ]
