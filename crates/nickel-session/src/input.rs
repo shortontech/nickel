@@ -64,6 +64,54 @@ impl NickelSession {
 
                 let button_state = event.state();
 
+                const BTN_LEFT: u32 = 0x110;
+                const DOUBLE_CLICK_MS: u32 = 500;
+                const DOUBLE_CLICK_DISTANCE: f64 = 6.0;
+                const TITLEBAR_HEIGHT: f64 = 40.0;
+
+                if button == BTN_LEFT && button_state == ButtonState::Pressed {
+                    let location = pointer.current_location();
+                    let titlebar_window = self
+                        .space
+                        .element_under(location)
+                        .map(|(window, _)| window.clone())
+                        .filter(|window| {
+                            self.panel_window.as_ref() != Some(window)
+                                && self.launcher_window.as_ref() != Some(window)
+                        })
+                        .filter(|window| {
+                            self.space.element_bbox(window).is_some_and(|bbox| {
+                                location.y >= f64::from(bbox.loc.y)
+                                    && location.y < f64::from(bbox.loc.y) + TITLEBAR_HEIGHT
+                            })
+                        });
+
+                    if let Some(window) = titlebar_window {
+                        let surface = window.toplevel().unwrap().clone();
+                        let id = surface.wl_surface().id();
+                        let is_double_click = self.last_titlebar_click.as_ref().is_some_and(
+                            |(previous_id, previous_time, previous_location)| {
+                                previous_id == &id
+                                    && event.time_msec().wrapping_sub(*previous_time)
+                                        <= DOUBLE_CLICK_MS
+                                    && (location.x - previous_location.x).abs()
+                                        <= DOUBLE_CLICK_DISTANCE
+                                    && (location.y - previous_location.y).abs()
+                                        <= DOUBLE_CLICK_DISTANCE
+                            },
+                        );
+
+                        if is_double_click {
+                            self.last_titlebar_click = None;
+                            self.toggle_maximized_toplevel(&surface);
+                        } else {
+                            self.last_titlebar_click = Some((id, event.time_msec(), location));
+                        }
+                    } else {
+                        self.last_titlebar_click = None;
+                    }
+                }
+
                 if ButtonState::Pressed == button_state && !pointer.is_grabbed() {
                     if let Some((window, _loc)) = self
                         .space

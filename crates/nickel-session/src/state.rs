@@ -55,6 +55,7 @@ pub struct NickelSession {
     pub launcher_visible: bool,
     pub panel_window: Option<Window>,
     maximized_restore: HashMap<ObjectId, Geometry>,
+    pub last_titlebar_click: Option<(ObjectId, u32, Point<f64, Logical>)>,
     control_socket_path: PathBuf,
 }
 
@@ -119,6 +120,7 @@ impl NickelSession {
             launcher_visible: false,
             panel_window: None,
             maximized_restore: HashMap::new(),
+            last_titlebar_click: None,
             control_socket_path,
         }
     }
@@ -272,6 +274,17 @@ impl NickelSession {
         }
         self.raise_panel();
         surface.send_pending_configure();
+    }
+
+    pub fn toggle_maximized_toplevel(&mut self, surface: &ToplevelSurface) {
+        if self
+            .maximized_restore
+            .contains_key(&surface.wl_surface().id())
+        {
+            self.unmaximize_toplevel(surface);
+        } else {
+            self.maximize_toplevel(surface);
+        }
     }
 
     pub fn forget_toplevel_geometry(&mut self, surface: &ToplevelSurface) {
