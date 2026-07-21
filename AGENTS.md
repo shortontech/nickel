@@ -1,0 +1,41 @@
+# Repository Guidelines
+
+## Project Structure & Module Organization
+
+Citrius is an all-Rust, cross-platform desktop shell targeting Windows, Linux, and macOS. Organize it as a Cargo workspace with small crates under `crates/`:
+
+- `crates/citrius-core/`: platform-neutral application state and domain logic.
+- `crates/citrius-search/`: indexing, fuzzy matching, and result ranking.
+- `crates/citrius-ui/`: `winit` event handling, `wgpu` rendering, and widgets.
+- `crates/citrius-platform/`: narrow Windows, Linux, and macOS adapters.
+- `assets/`: fonts, shaders, icons, and test fixtures with compatible licenses.
+- `tests/`: workspace-level integration and platform contract tests.
+- `specs/`: active design specifications; move completed specifications to `specs/done/`.
+
+Keep search, ranking, navigation, and task-switcher policy independent of native window APIs so they remain deterministic and portable.
+
+## Build, Test, and Development Commands
+
+Use standard Cargo commands from the workspace root:
+
+- `cargo run`: launch the development shell.
+- `cargo build --workspace`: compile every crate.
+- `cargo test --workspace`: run unit and integration tests.
+- `cargo fmt --all --check`: verify formatting.
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`: reject lint regressions.
+
+Add platform-specific commands here when packaging and test harnesses are introduced.
+
+## Coding Style & Naming Conventions
+
+Use stable Rust and standard `rustfmt` formatting. Name modules, functions, and files in `snake_case`; types and traits in `UpperCamelCase`; constants in `SCREAMING_SNAKE_CASE`. Prefer explicit platform boundaries using `cfg(target_os = "...")`. Keep unsafe code localized, documented with a `SAFETY:` justification, and covered by focused tests.
+
+Citrius application code and shipped tooling must remain Rust: do not introduce JavaScript, TypeScript, Lua, Go, C, or C++ application components.
+
+## Testing Guidelines
+
+Place unit tests beside their modules and cross-crate tests in `tests/`. Name behavior tests descriptively, for example `recent_window_ranks_above_unused_match`. Test core logic with synthetic windows, notifications, clocks, and controller events. Gate platform adapter tests by target OS and record manual coverage for focus, DPI, multiple monitors, and permissions.
+
+## Commit & Pull Request Guidelines
+
+No Git history exists yet. Use concise, imperative commit subjects such as `Add fuzzy ranking pipeline`. Keep commits scoped and include tests with behavioral changes. Commit new specifications when written; archive them when completed. Pull requests should explain user-visible behavior, list platforms tested, link relevant specifications or issues, and include screenshots or recordings for visual changes.
