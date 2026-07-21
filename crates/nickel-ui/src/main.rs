@@ -135,6 +135,25 @@ impl Default for Nickel {
 }
 
 impl Nickel {
+    fn ensure_context_menu_gpu(&mut self) -> bool {
+        if self.context_menu_gpu.is_some() {
+            return true;
+        }
+        let (Some(window), Some(launcher_gpu)) = (&self.context_menu_window, &self.gpu) else {
+            return false;
+        };
+        match context_menu::ContextMenuGpu::new(window.clone(), launcher_gpu.graphics.clone()) {
+            Ok(gpu) => {
+                self.context_menu_gpu = Some(gpu);
+                true
+            }
+            Err(error) => {
+                eprintln!("failed to initialize Nickel context menu renderer: {error}");
+                false
+            }
+        }
+    }
+
     fn hide_context_menu(&mut self) {
         self.context_menu_target = None;
         self.context_menu_hovered = false;
@@ -145,11 +164,27 @@ impl Nickel {
         }
     }
 
-    fn show_context_menu(&mut self, task_index: usize) {
-        let Some(window) = self.task_windows.get(task_index) else {
+    fn show_context_menu(&mut self, event_loop: &ActiveEventLoop, task_index: usize) {
+        let Some(task) = self.task_windows.get(task_index) else {
             return;
         };
-        self.context_menu_target = Some(window.id);
+        self.context_menu_target = Some(task.id);
+        if self.context_menu_window.is_none() {
+            let attributes = WindowAttributes::default()
+                .with_title("Nickel Context Menu")
+                .with_inner_size(LogicalSize::new(context_menu::WIDTH, context_menu::HEIGHT))
+                .with_decorations(false);
+            let Ok(window) = event_loop.create_window(attributes) else {
+                eprintln!("failed to create Nickel context menu window");
+                self.context_menu_target = None;
+                return;
+            };
+            self.context_menu_window = Some(Arc::new(window));
+            return;
+        }
+        if !self.ensure_context_menu_gpu() {
+            return;
+        }
         let x = panel::task_menu_x(task_index);
         if !platform::send_shell_command(ShellCommand::ShowContextMenu { x })
             && let Some(window) = &self.context_menu_window
@@ -620,11 +655,6 @@ impl ApplicationHandler for Nickel {
             .with_title("Nickel Panel")
             .with_inner_size(LogicalSize::new(220, 56))
             .with_decorations(false);
-        let context_menu_attributes = WindowAttributes::default()
-            .with_title("Nickel Context Menu")
-            .with_inner_size(LogicalSize::new(context_menu::WIDTH, context_menu::HEIGHT))
-            .with_decorations(false);
-
         if let Some(monitor) = target {
             launcher_attributes =
                 launcher_attributes.with_position(centered_position(&monitor, (960, 640)));
@@ -655,29 +685,14 @@ impl ApplicationHandler for Nickel {
             event_loop.exit();
             return;
         };
-        let Ok(context_menu_window) = event_loop.create_window(context_menu_attributes) else {
-            eprintln!("failed to create Nickel context menu window");
-            event_loop.exit();
-            return;
-        };
-        let context_menu_window = Arc::new(context_menu_window);
-        let Ok(mut context_menu_gpu) =
-            context_menu::ContextMenuGpu::new(context_menu_window.clone(), shared_graphics)
-        else {
-            eprintln!("failed to initialize Nickel context menu renderer");
-            event_loop.exit();
-            return;
-        };
-        context_menu_gpu.render(false);
-
         launcher_window.set_title("Nickel Launcher");
         panel_window.request_redraw();
         self.window = Some(launcher_window);
         self.gpu = Some(launcher_gpu);
         self.panel_window = Some(panel_window);
         self.panel_gpu = Some(panel_gpu);
-        self.context_menu_window = Some(context_menu_window);
-        self.context_menu_gpu = Some(context_menu_gpu);
+        self.context_menu_window = None;
+        self.context_menu_gpu = None;
     }
 
     fn window_event(
@@ -690,8 +705,25 @@ impl ApplicationHandler for Nickel {
             match event {
                 WindowEvent::CloseRequested => self.hide_context_menu(),
                 WindowEvent::Resized(size) => {
+                    if self.context_menu_gpu.is_none() {
+                        self.ensure_context_menu_gpu();
+                    }
                     if let Some(gpu) = &mut self.context_menu_gpu {
                         gpu.resize(size.width, size.height);
+                    }
+                    if let Some(target) = self.context_menu_target
+                        && let Some(index) = self
+                            .task_windows
+                            .iter()
+                            .position(|window| window.id == target)
+                    {
+                        platform::send_shell_command(ShellCommand::ShowContextMenu {
+                            x: panel::task_menu_x(index),
+                        });
+                        self.context_menu_window
+                            .as_ref()
+                            .expect("context menu window exists")
+                            .request_redraw();
                     }
                 }
                 WindowEvent::RedrawRequested => {
@@ -785,7 +817,7 @@ impl ApplicationHandler for Nickel {
                     ..
                 } => {
                     if let Some(index) = self.panel_task_hovered {
-                        self.show_context_menu(index);
+                        self.show_context_menu(event_loop, index);
                     } else {
                         self.hide_context_menu();
                     }
