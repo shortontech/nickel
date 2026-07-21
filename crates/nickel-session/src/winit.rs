@@ -210,7 +210,7 @@ fn capture_preview(renderer: &mut GlesRenderer, window: &Window) -> Option<Previ
         .copy_framebuffer(&framebuffer, buffer_region, Fourcc::Abgr8888)
         .ok()?;
     let mut rgba = renderer.map_texture(&mapping).ok()?.to_vec();
-    if mapping.flipped() {
+    if !mapping.flipped() {
         let stride = WIDTH as usize * 4;
         for row in 0..HEIGHT as usize / 2 {
             let opposite = HEIGHT as usize - 1 - row;
