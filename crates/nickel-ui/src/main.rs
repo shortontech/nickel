@@ -828,6 +828,9 @@ impl ApplicationHandler for Nickel {
 
         match event {
             WindowEvent::CloseRequested => self.set_launcher_visible(false),
+            WindowEvent::Focused(false) if self.launcher_visibility.is_visible() => {
+                self.set_launcher_visible(false);
+            }
             WindowEvent::Resized(size) => {
                 if let Some(gpu) = &mut self.gpu {
                     gpu.resize(size.width, size.height);
