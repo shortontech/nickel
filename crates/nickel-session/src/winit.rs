@@ -63,16 +63,18 @@ pub fn init_winit(
 
             match event {
                 WinitEvent::Resized { size, .. } => {
-                    output.change_current_state(
-                        Some(Mode {
-                            size,
-                            refresh: 60_000,
-                        }),
-                        None,
-                        None,
-                        None,
-                    );
+                    let mode = Mode {
+                        size,
+                        refresh: 60_000,
+                    };
+                    output.set_preferred(mode);
+                    output.change_current_state(Some(mode), None, None, None);
+                    damage_tracker = OutputDamageTracker::from_output(&output);
+                    state.space.refresh();
                     state.relayout_shell_surfaces();
+                    let _ = display.flush_clients();
+                    backend.window().request_redraw();
+                    eprintln!("nickel-session: output resized to {}x{}", size.w, size.h);
                 }
                 WinitEvent::Input(event) => state.process_input_event(event),
                 WinitEvent::Redraw => {
