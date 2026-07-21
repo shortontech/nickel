@@ -6,15 +6,14 @@ use glyphon::{
 };
 use winit::{dpi::PhysicalPosition, window::Window};
 
-use crate::rectangles::RectangleRenderer;
+use crate::{graphics::SharedGraphics, rectangles::RectangleRenderer};
 
 pub const WIDTH: u32 = 200;
 pub const HEIGHT: u32 = 52;
 
 pub struct ContextMenuGpu {
     surface: wgpu::Surface<'static>,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    graphics: Arc<SharedGraphics>,
     config: wgpu::SurfaceConfiguration,
     font_system: FontSystem,
     swash_cache: SwashCache,
@@ -26,37 +25,22 @@ pub struct ContextMenuGpu {
 }
 
 impl ContextMenuGpu {
-    pub async fn new(window: Arc<Window>) -> Result<Self, String> {
-        let instance = wgpu::Instance::default();
-        let surface = instance
-            .create_surface(window)
-            .map_err(|error| error.to_string())?;
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::LowPower,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-                ..Default::default()
-            })
-            .await
-            .map_err(|error| error.to_string())?;
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: Some("Nickel context menu device"),
-                ..Default::default()
-            })
-            .await
-            .map_err(|error| error.to_string())?;
+    pub fn new(window: Arc<Window>, graphics: Arc<SharedGraphics>) -> Result<Self, String> {
+        let surface = graphics.create_surface(window)?;
         let config = surface
-            .get_default_config(&adapter, WIDTH, HEIGHT)
+            .get_default_config(&graphics.adapter, WIDTH, HEIGHT)
             .ok_or_else(|| "context menu surface has no supported configuration".to_owned())?;
-        surface.configure(&device, &config);
+        surface.configure(&graphics.device, &config);
         let mut font_system = FontSystem::new();
-        let cache = Cache::new(&device);
-        let viewport = Viewport::new(&device, &cache);
-        let mut atlas = TextAtlas::new(&device, &queue, &cache, config.format);
-        let renderer =
-            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
+        let cache = Cache::new(&graphics.device);
+        let viewport = Viewport::new(&graphics.device, &cache);
+        let mut atlas = TextAtlas::new(&graphics.device, &graphics.queue, &cache, config.format);
+        let renderer = TextRenderer::new(
+            &mut atlas,
+            &graphics.device,
+            wgpu::MultisampleState::default(),
+            None,
+        );
         let mut label = Buffer::new(&mut font_system, Metrics::new(18.0, 36.0));
         label.set_size(Some(WIDTH as f32 - 24.0), Some(HEIGHT as f32));
         label.set_text(
@@ -66,11 +50,10 @@ impl ContextMenuGpu {
             None,
         );
         label.shape_until_scroll(&mut font_system, false);
-        let rectangles = RectangleRenderer::new(&device, config.format);
+        let rectangles = RectangleRenderer::new(&graphics.device, config.format);
         Ok(Self {
             surface,
-            device,
-            queue,
+            graphics,
             config,
             font_system,
             swash_cache: SwashCache::new(),
@@ -88,19 +71,19 @@ impl ContextMenuGpu {
         }
         self.config.width = width;
         self.config.height = height;
-        self.surface.configure(&self.device, &self.config);
+        self.surface.configure(&self.graphics.device, &self.config);
     }
 
     pub fn render(&mut self, hovered: bool) {
         self.viewport.update(
-            &self.queue,
+            &self.graphics.queue,
             Resolution {
                 width: self.config.width,
                 height: self.config.height,
             },
         );
         self.rectangles.update_raw(
-            &self.queue,
+            &self.graphics.queue,
             (self.config.width, self.config.height),
             if hovered {
                 &[([4.0, 4.0, 196.0, 48.0], [0.14, 0.18, 0.25, 1.0])]
@@ -110,8 +93,8 @@ impl ContextMenuGpu {
         );
         self.renderer
             .prepare(
-                &self.device,
-                &self.queue,
+                &self.graphics.device,
+                &self.graphics.queue,
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
@@ -136,13 +119,16 @@ impl ContextMenuGpu {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                self.surface.configure(&self.device, &self.config);
+                self.surface.configure(&self.graphics.device, &self.config);
                 return;
             }
             _ => return,
         };
         let view = frame.texture.create_view(&Default::default());
-        let mut encoder = self.device.create_command_encoder(&Default::default());
+        let mut encoder = self
+            .graphics
+            .device
+            .create_command_encoder(&Default::default());
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Nickel context menu pass"),
@@ -167,8 +153,8 @@ impl ContextMenuGpu {
                 .render(&self.atlas, &self.viewport, &mut pass)
                 .expect("context menu text rendering succeeds");
         }
-        self.queue.submit([encoder.finish()]);
-        self.queue.present(frame);
+        self.graphics.queue.submit([encoder.finish()]);
+        self.graphics.queue.present(frame);
     }
 }
 
