@@ -11,3 +11,6 @@ nucleo-matcher.workspace = true
 pollster.workspace = true
 wgpu.workspace = true
 winit.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+freedesktop-desktop-entry.workspace = true

@@ -14,15 +14,37 @@ use winit::window::{Window, WindowAttributes, WindowId};
 
 mod launcher;
 
+#[cfg(target_os = "linux")]
+mod desktop_entries;
+
 use launcher::Launcher;
 
 const SECONDARY_DISPLAY_ENV: &str = "CITRIUS_USE_SECONDARY_DISPLAY";
 
-#[derive(Default)]
 struct Citrius {
     window: Option<Arc<Window>>,
     gpu: Option<Gpu>,
     launcher: Launcher,
+}
+
+impl Default for Citrius {
+    fn default() -> Self {
+        #[cfg(target_os = "linux")]
+        let applications = desktop_entries::load_applications();
+        #[cfg(not(target_os = "linux"))]
+        let applications = Vec::new();
+
+        let launcher = if applications.is_empty() {
+            Launcher::default()
+        } else {
+            Launcher::new(applications)
+        };
+        Self {
+            window: None,
+            gpu: None,
+            launcher,
+        }
+    }
 }
 
 struct Gpu {
@@ -125,18 +147,16 @@ impl Gpu {
         self.search_buffer
             .shape_until_scroll(&mut self.font_system, false);
 
-        let results_text = if launcher.results().is_empty() {
+        let results_text = if launcher.result_count() == 0 {
             "No applications found".to_owned()
         } else {
-            launcher
-                .results()
-                .iter()
-                .enumerate()
-                .map(|(index, result)| {
+            (0..launcher.result_count())
+                .filter_map(|index| {
+                    let result = launcher.result_at(index)?;
                     if index == launcher.selected_index() {
-                        format!("›  {result}")
+                        Some(format!("›  {}", result.name()))
                     } else {
-                        format!("   {result}")
+                        Some(format!("   {}", result.name()))
                     }
                 })
                 .collect::<Vec<_>>()
@@ -331,7 +351,12 @@ impl ApplicationHandler for Citrius {
                     Key::Named(NamedKey::Escape) => self.launcher.clear(),
                     Key::Named(NamedKey::Enter) => {
                         if let Some(result) = self.launcher.selected_result() {
-                            println!("selected application: {result}");
+                            println!(
+                                "selected application: {} (icon: {}, exec: {})",
+                                result.name(),
+                                result.icon().unwrap_or("none"),
+                                result.exec().unwrap_or("D-Bus activation")
+                            );
                         }
                         changed = false;
                     }
