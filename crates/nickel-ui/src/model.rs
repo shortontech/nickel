@@ -1,0 +1,100 @@
+use std::{
+    io,
+    path::{Path, PathBuf},
+    process::{Child, Command},
+};
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ApplicationId(String);
+
+impl ApplicationId {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Application {
+    id: ApplicationId,
+    name: String,
+    icon: Option<String>,
+    icon_path: Option<PathBuf>,
+    launch_command: Option<Vec<String>>,
+}
+
+impl Application {
+    pub fn new(
+        id: String,
+        name: String,
+        icon: Option<String>,
+        icon_path: Option<PathBuf>,
+        launch_command: Option<Vec<String>>,
+    ) -> Self {
+        Self {
+            id: ApplicationId::new(id),
+            name,
+            icon,
+            icon_path,
+            launch_command,
+        }
+    }
+
+    pub fn id(&self) -> &str {
+        self.id.as_str()
+    }
+
+    pub fn application_id(&self) -> &ApplicationId {
+        &self.id
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn icon(&self) -> Option<&str> {
+        self.icon.as_deref()
+    }
+
+    pub fn icon_path(&self) -> Option<&Path> {
+        self.icon_path.as_deref()
+    }
+
+    #[cfg(test)]
+    pub fn launch_command(&self) -> Option<&[String]> {
+        self.launch_command.as_deref()
+    }
+
+    pub fn launch(&self) -> io::Result<Child> {
+        let (program, arguments) = self
+            .launch_command
+            .as_deref()
+            .and_then(|command| command.split_first())
+            .ok_or_else(|| io::Error::other("application has no launch command"))?;
+        Command::new(program).args(arguments).spawn()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct WindowId(pub u64);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpenWindow {
+    pub id: WindowId,
+    pub application_id: Option<ApplicationId>,
+    pub active: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ApplicationId;
+
+    #[test]
+    fn application_ids_are_opaque() {
+        let id = ApplicationId::new("org.example.App.desktop");
+        assert_eq!(id.as_str(), "org.example.App.desktop");
+    }
+}
