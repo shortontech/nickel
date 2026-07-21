@@ -221,6 +221,14 @@ Core logic should be tested with synthetic:
 
 Platform adapter tests should be gated by target operating system.
 
+On Linux, a deterministic StatusNotifierItem is available for live panel testing:
+
+```bash
+cargo run -p nickel-ui --bin nickel-test-tray
+```
+
+Its blue-and-yellow checkerboard icon logs an activation message when clicked and disappears when the process stops.
+
 Manual platform coverage should record:
 
 - Focus behavior

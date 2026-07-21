@@ -1,11 +1,24 @@
 use crate::{
     launcher::Launcher,
-    model::{Application, OpenWindow},
-    platform::ShellCommand,
+    model::{Application, OpenWindow, TrayItem},
+    platform::{ShellCommand, TraySource},
 };
 
 pub fn applications() -> Vec<Application> {
     Vec::new()
+}
+
+pub struct TrayFeed;
+impl TrayFeed {
+    pub fn new() -> Self {
+        Self
+    }
+}
+impl TraySource for TrayFeed {
+    fn snapshot(&self) -> Vec<TrayItem> {
+        Vec::new()
+    }
+    fn activate(&self, _: &str) {}
 }
 
 pub fn send_shell_command(_: ShellCommand) -> bool {
