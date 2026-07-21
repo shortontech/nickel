@@ -72,6 +72,7 @@ pub fn init_winit(
                         None,
                         None,
                     );
+                    state.relayout_shell_surfaces();
                 }
                 WinitEvent::Input(event) => state.process_input_event(event),
                 WinitEvent::Redraw => {

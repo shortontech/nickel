@@ -8,6 +8,7 @@ Give `nickel-session` explicit geometry policy for Nickel-owned shell surfaces i
 
 - The panel occupies the full logical output width and is 56 logical pixels high.
 - The panel is anchored to the bottom edge at `x = 0`.
+- Nickel-owned panel and launcher surfaces do not request client-side window decorations.
 - The usable application work area ends at the panel's top edge.
 - The launcher retains its requested size and is centered within the usable work area.
 - Showing an already-warm launcher recalculates its position before mapping it.

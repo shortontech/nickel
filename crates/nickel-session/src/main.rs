@@ -4,6 +4,7 @@ mod handlers;
 
 mod grabs;
 mod input;
+mod shell_layout;
 mod state;
 mod window_registry;
 mod winit;
