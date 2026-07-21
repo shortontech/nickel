@@ -1,4 +1,4 @@
-use std::env;
+use std::{env, sync::Arc};
 
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
@@ -11,7 +11,109 @@ const SECONDARY_DISPLAY_ENV: &str = "CITRIUS_USE_SECONDARY_DISPLAY";
 
 #[derive(Default)]
 struct Citrius {
-    window: Option<Window>,
+    window: Option<Arc<Window>>,
+    gpu: Option<Gpu>,
+}
+
+struct Gpu {
+    surface: wgpu::Surface<'static>,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    config: wgpu::SurfaceConfiguration,
+}
+
+impl Gpu {
+    async fn new(window: Arc<Window>) -> Result<Self, String> {
+        let instance = wgpu::Instance::default();
+        let surface = instance
+            .create_surface(window.clone())
+            .map_err(|error| format!("failed to create graphics surface: {error}"))?;
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::LowPower,
+                compatible_surface: Some(&surface),
+                force_fallback_adapter: false,
+                ..Default::default()
+            })
+            .await
+            .map_err(|error| format!("failed to find a graphics adapter: {error}"))?;
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("Citrius device"),
+                ..Default::default()
+            })
+            .await
+            .map_err(|error| format!("failed to create graphics device: {error}"))?;
+        let size = window.inner_size();
+        let config = surface
+            .get_default_config(&adapter, size.width.max(1), size.height.max(1))
+            .ok_or_else(|| "graphics surface has no supported configuration".to_owned())?;
+        surface.configure(&device, &config);
+
+        Ok(Self {
+            surface,
+            device,
+            queue,
+            config,
+        })
+    }
+
+    fn resize(&mut self, width: u32, height: u32) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        self.config.width = width;
+        self.config.height = height;
+        self.surface.configure(&self.device, &self.config);
+    }
+
+    fn render(&mut self) {
+        let frame = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(frame)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
+            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                self.surface.configure(&self.device, &self.config);
+                return;
+            }
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return,
+            wgpu::CurrentSurfaceTexture::Validation => {
+                eprintln!("skipped frame after surface validation error");
+                return;
+            }
+        };
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Citrius frame encoder"),
+            });
+
+        {
+            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Citrius background pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.035,
+                            g: 0.045,
+                            b: 0.065,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                ..Default::default()
+            });
+        }
+
+        self.queue.submit([encoder.finish()]);
+        self.queue.present(frame);
+    }
 }
 
 impl ApplicationHandler for Citrius {
@@ -35,7 +137,20 @@ impl ApplicationHandler for Citrius {
         }
 
         match event_loop.create_window(attributes) {
-            Ok(window) => self.window = Some(window),
+            Ok(window) => {
+                let window = Arc::new(window);
+                match pollster::block_on(Gpu::new(window.clone())) {
+                    Ok(gpu) => {
+                        window.request_redraw();
+                        self.window = Some(window);
+                        self.gpu = Some(gpu);
+                    }
+                    Err(error) => {
+                        eprintln!("{error}");
+                        event_loop.exit();
+                    }
+                }
+            }
             Err(error) => {
                 eprintln!("failed to create Citrius window: {error}");
                 event_loop.exit();
@@ -49,12 +164,23 @@ impl ApplicationHandler for Citrius {
         window_id: WindowId,
         event: WindowEvent,
     ) {
-        if self.window.as_ref().map(Window::id) != Some(window_id) {
+        if self.window.as_ref().map(|window| window.id()) != Some(window_id) {
             return;
         }
 
-        if event == WindowEvent::CloseRequested {
-            event_loop.exit();
+        match event {
+            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::Resized(size) => {
+                if let Some(gpu) = &mut self.gpu {
+                    gpu.resize(size.width, size.height);
+                }
+            }
+            WindowEvent::RedrawRequested => {
+                if let Some(gpu) = &mut self.gpu {
+                    gpu.render();
+                }
+            }
+            _ => {}
         }
     }
 }
