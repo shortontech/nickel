@@ -23,21 +23,17 @@ use winit::window::{CursorIcon, Window, WindowAttributes, WindowId};
 mod icons;
 mod launcher;
 mod layout;
+mod model;
 mod panel;
+mod platform;
 mod rectangles;
 mod storage;
 
-#[cfg(all(target_os = "linux", feature = "plasma-bootstrap"))]
-mod plasma_bootstrap;
-
-#[cfg(target_os = "linux")]
-mod desktop_entries;
-
 use launcher::Launcher;
+use model::OpenWindow;
+use platform::{ShellCommand, WindowFeed};
 
 const SECONDARY_DISPLAY_ENV: &str = "NICKEL_USE_SECONDARY_DISPLAY";
-#[cfg(unix)]
-const SESSION_CONTROL_ENV: &str = "NICKEL_SESSION_CONTROL";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum LauncherVisibility {
@@ -71,7 +67,7 @@ struct Nickel {
     panel_gpu: Option<panel::PanelGpu>,
     panel_hovered: bool,
     panel_task_hovered: Option<usize>,
-    task_windows: Vec<TaskWindow>,
+    task_windows: Vec<OpenWindow>,
     launcher_visibility: LauncherVisibility,
     clock_deadline: Instant,
     window_deadline: Instant,
@@ -84,19 +80,9 @@ struct Nickel {
     scrollbar_drag_offset: Option<f64>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct TaskWindow {
-    id: u64,
-    app_id: String,
-    active: bool,
-}
-
 impl Default for Nickel {
     fn default() -> Self {
-        #[cfg(target_os = "linux")]
-        let applications = desktop_entries::load_applications();
-        #[cfg(not(target_os = "linux"))]
-        let applications = Vec::new();
+        let applications = platform::applications();
 
         let mut launcher = if applications.is_empty() {
             Launcher::default()
@@ -141,10 +127,10 @@ impl Default for Nickel {
 impl Nickel {
     fn set_launcher_visible(&mut self, visible: bool) {
         self.launcher_visibility.set(visible);
-        if send_session_command(if visible {
-            b"show-launcher"
+        if platform::send_shell_command(if visible {
+            ShellCommand::Show
         } else {
-            b"hide-launcher"
+            ShellCommand::Hide
         }) {
             return;
         }
@@ -159,13 +145,13 @@ impl Nickel {
 
     fn toggle_launcher(&mut self) {
         let visible = self.launcher_visibility.toggle();
-        if !send_session_command(b"toggle-launcher") {
+        if !platform::send_shell_command(ShellCommand::Toggle) {
             self.set_launcher_visible(visible);
         }
     }
 
     fn refresh_task_windows(&mut self) {
-        let Some(windows) = self.window_feed.snapshot() else {
+        let Some(windows) = self.window_feed.snapshot(&self.launcher) else {
             return;
         };
         if windows == self.task_windows {
@@ -174,17 +160,18 @@ impl Nickel {
         let tasks = windows
             .iter()
             .map(|window| {
-                let resolved = self
-                    .launcher
-                    .application_for_app_id(&window.app_id)
+                let resolved = window
+                    .application_id
+                    .as_ref()
+                    .and_then(|id| self.launcher.application(id))
                     .and_then(|application| application.icon_path())
                     .and_then(icons::load);
                 if resolved.is_none() {
-                    eprintln!("no panel icon resolved for app id {}", window.app_id);
+                    eprintln!("no panel icon resolved for window {}", window.id.0);
                 }
                 let icon = resolved.unwrap_or_else(panel::fallback_icon);
                 panel::PanelTask {
-                    id: window.id,
+                    id: window.id.0,
                     active: window.active,
                     icon,
                 }
@@ -911,20 +898,6 @@ impl ApplicationHandler for Nickel {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    #[cfg(all(target_os = "linux", feature = "plasma-bootstrap"))]
-    {
-        let windows = plasma_bootstrap::window_list()?;
-        println!("Plasma reported {} windows:", windows.len());
-        for window in windows {
-            println!(
-                "  {} [{}]{}",
-                window.title,
-                window.app_id,
-                if window.active { " (active)" } else { "" }
-            );
-        }
-    }
-
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Wait);
     event_loop.run_app(&mut Nickel::default())?;
@@ -938,85 +911,6 @@ fn env_flag(name: &str) -> bool {
             "1" | "true" | "yes" | "on"
         )
     })
-}
-
-#[cfg(unix)]
-fn send_session_command(command: &[u8]) -> bool {
-    use std::os::unix::net::UnixDatagram;
-
-    let Some(path) = env::var_os(SESSION_CONTROL_ENV) else {
-        return false;
-    };
-    UnixDatagram::unbound()
-        .and_then(|socket| socket.send_to(command, path))
-        .is_ok()
-}
-
-#[cfg(not(unix))]
-fn send_session_command(_: &[u8]) -> bool {
-    false
-}
-
-#[cfg(unix)]
-struct WindowFeed {
-    socket: Option<std::os::unix::net::UnixDatagram>,
-    path: PathBuf,
-}
-
-#[cfg(unix)]
-impl WindowFeed {
-    fn new() -> Self {
-        let path = env::temp_dir().join(format!("nickel-ui-{}-windows.sock", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-        let socket = std::os::unix::net::UnixDatagram::bind(&path).ok();
-        if let Some(socket) = &socket {
-            let _ = socket.set_read_timeout(Some(Duration::from_millis(25)));
-        }
-        Self { socket, path }
-    }
-
-    fn snapshot(&self) -> Option<Vec<TaskWindow>> {
-        let socket = self.socket.as_ref()?;
-        socket
-            .send_to(b"list-windows", env::var_os(SESSION_CONTROL_ENV)?)
-            .ok()?;
-        let mut response = [0_u8; 16 * 1024];
-        let length = socket.recv(&mut response).ok()?;
-        let text = std::str::from_utf8(&response[..length]).ok()?;
-        Some(
-            text.lines()
-                .filter_map(|line| {
-                    let mut fields = line.splitn(3, '\t');
-                    Some(TaskWindow {
-                        id: fields.next()?.parse().ok()?,
-                        active: fields.next()? == "1",
-                        app_id: fields.next()?.to_owned(),
-                    })
-                })
-                .collect(),
-        )
-    }
-}
-
-#[cfg(unix)]
-impl Drop for WindowFeed {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
-
-#[cfg(not(unix))]
-struct WindowFeed;
-
-#[cfg(not(unix))]
-impl WindowFeed {
-    fn new() -> Self {
-        Self
-    }
-
-    fn snapshot(&self) -> Option<Vec<TaskWindow>> {
-        None
-    }
 }
 
 fn next_minute_deadline(now: Instant, wall_clock: SystemTime) -> Instant {

@@ -182,7 +182,7 @@ mod tests {
         assert_eq!(application.name(), "Test App");
         assert_eq!(application.icon(), Some("test-icon"));
         assert_eq!(
-            application.exec(),
+            application.launch_command(),
             Some(
                 [
                     "test-app".to_owned(),

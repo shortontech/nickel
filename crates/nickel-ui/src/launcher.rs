@@ -1,69 +1,12 @@
-use std::{
-    collections::HashMap,
-    io,
-    path::{Path, PathBuf},
-    process::{Child, Command},
-};
+use std::collections::HashMap;
 
 use nucleo_matcher::{
     Config, Matcher,
     pattern::{AtomKind, CaseMatching, Normalization, Pattern},
 };
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Application {
-    id: String,
-    name: String,
-    icon: Option<String>,
-    icon_path: Option<PathBuf>,
-    exec: Option<Vec<String>>,
-}
-
-impl Application {
-    pub fn new(
-        id: String,
-        name: String,
-        icon: Option<String>,
-        icon_path: Option<PathBuf>,
-        exec: Option<Vec<String>>,
-    ) -> Self {
-        Self {
-            id,
-            name,
-            icon,
-            icon_path,
-            exec,
-        }
-    }
-
-    pub fn id(&self) -> &str {
-        &self.id
-    }
-
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub fn icon(&self) -> Option<&str> {
-        self.icon.as_deref()
-    }
-
-    pub fn icon_path(&self) -> Option<&Path> {
-        self.icon_path.as_deref()
-    }
-
-    pub fn exec(&self) -> Option<&[String]> {
-        self.exec.as_deref()
-    }
-
-    pub fn launch(&self) -> io::Result<Child> {
-        let (program, arguments) = self
-            .exec()
-            .and_then(|command| command.split_first())
-            .ok_or_else(|| io::Error::other("application has no executable command"))?;
-        Command::new(program).args(arguments).spawn()
-    }
-}
+pub use crate::model::Application;
+use crate::model::ApplicationId;
 
 #[derive(Clone, Copy)]
 struct Candidate<'a> {
@@ -141,14 +84,14 @@ impl Launcher {
         self.result_at(self.selected)
     }
 
-    pub fn application_for_app_id(&self, app_id: &str) -> Option<&Application> {
-        let app_id = app_id.trim_end_matches(".desktop");
-        self.applications.iter().find(|application| {
-            application
-                .id()
-                .trim_end_matches(".desktop")
-                .eq_ignore_ascii_case(app_id)
-        })
+    pub fn application(&self, id: &ApplicationId) -> Option<&Application> {
+        self.applications
+            .iter()
+            .find(|application| application.application_id() == id)
+    }
+
+    pub fn applications(&self) -> impl Iterator<Item = &Application> {
+        self.applications.iter()
     }
 
     pub fn is_pinned(&self, application_id: &str) -> bool {
@@ -236,23 +179,6 @@ impl Launcher {
 #[cfg(test)]
 mod tests {
     use super::{Application, Launcher};
-
-    #[test]
-    fn desktop_application_matches_wayland_app_id() {
-        let launcher = Launcher::new(vec![Application::new(
-            "org.kde.konsole.desktop".into(),
-            "Konsole".into(),
-            None,
-            None,
-            None,
-        )]);
-        assert_eq!(
-            launcher
-                .application_for_app_id("org.kde.konsole")
-                .map(Application::name),
-            Some("Konsole")
-        );
-    }
 
     #[test]
     fn fuzzy_query_finds_application() {
