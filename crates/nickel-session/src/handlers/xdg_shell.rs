@@ -40,6 +40,9 @@ impl XdgShellHandler for NickelSession {
         self.surface_windows.insert(surface.wl_surface().id(), id);
         let window = Window::new_wayland_window(surface);
         self.space.map_element(window, (cascade, cascade), true);
+        if let Some(panel) = self.panel_window.clone() {
+            self.space.raise_element(&panel, false);
+        }
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
@@ -50,6 +53,13 @@ impl XdgShellHandler for NickelSession {
         {
             self.launcher_window = None;
             self.launcher_visible = false;
+        }
+        if self
+            .panel_window
+            .as_ref()
+            .is_some_and(|window| window.toplevel().unwrap().wl_surface() == surface.wl_surface())
+        {
+            self.panel_window = None;
         }
         if let Some(id) = self.surface_windows.remove(&surface.wl_surface().id()) {
             self.windows.remove(id);
@@ -232,6 +242,7 @@ impl NickelSession {
             (attributes.title.clone(), attributes.app_id.clone())
         });
         let is_launcher = title.as_deref() == Some("Nickel Launcher");
+        let is_panel = title.as_deref() == Some("Nickel Panel");
         if let Some(id) = self
             .surface_windows
             .get(&surface.wl_surface().id())
@@ -246,9 +257,17 @@ impl NickelSession {
                 .find(|window| window.toplevel().unwrap().wl_surface() == surface.wl_surface())
                 .cloned();
             if let Some(launcher) = launcher {
-                self.space.unmap_elem(&launcher);
-                self.launcher_window = Some(launcher);
-                self.launcher_visible = false;
+                self.register_launcher(launcher);
+            }
+        }
+        if is_panel && self.panel_window.is_none() {
+            let panel = self
+                .space
+                .elements()
+                .find(|window| window.toplevel().unwrap().wl_surface() == surface.wl_surface())
+                .cloned();
+            if let Some(panel) = panel {
+                self.register_panel(panel);
             }
         }
     }

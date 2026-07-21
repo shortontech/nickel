@@ -13,7 +13,7 @@ use smithay::{
             protocol::wl_surface::WlSurface,
         },
     },
-    utils::{Logical, Point},
+    utils::{Logical, Point, Size},
     wayland::{
         compositor::{CompositorClientState, CompositorState},
         output::OutputManagerState,
@@ -24,7 +24,10 @@ use smithay::{
     },
 };
 
-use crate::window_registry::{WindowId, WindowRegistry};
+use crate::{
+    shell_layout::{self, Geometry},
+    window_registry::{WindowId, WindowRegistry},
+};
 
 use crate::CalloopData;
 
@@ -50,6 +53,7 @@ pub struct NickelSession {
     pub surface_windows: HashMap<ObjectId, WindowId>,
     pub launcher_window: Option<Window>,
     pub launcher_visible: bool,
+    pub panel_window: Option<Window>,
     control_socket_path: PathBuf,
 }
 
@@ -112,6 +116,7 @@ impl NickelSession {
             surface_windows: HashMap::new(),
             launcher_window: None,
             launcher_visible: false,
+            panel_window: None,
             control_socket_path,
         }
     }
@@ -162,7 +167,12 @@ impl NickelSession {
             return;
         };
         if visible {
-            self.space.map_element(window, (64, 64), true);
+            let geometry = self.launcher_geometry(&window);
+            self.space
+                .map_element(window, (geometry.x, geometry.y), true);
+            if let Some(panel) = self.panel_window.clone() {
+                self.space.raise_element(&panel, false);
+            }
         } else {
             self.space.unmap_elem(&window);
         }
@@ -171,6 +181,75 @@ impl NickelSession {
             "nickel-session: launcher {}",
             if visible { "shown" } else { "hidden" }
         );
+    }
+
+    pub fn register_launcher(&mut self, window: Window) {
+        self.space.unmap_elem(&window);
+        self.launcher_window = Some(window);
+        self.launcher_visible = false;
+    }
+
+    pub fn register_panel(&mut self, window: Window) {
+        self.panel_window = Some(window);
+        self.relayout_shell_surfaces();
+    }
+
+    pub fn relayout_shell_surfaces(&mut self) {
+        let Some(output) = self.output_geometry() else {
+            return;
+        };
+        if let Some(panel) = self.panel_window.clone() {
+            let geometry = shell_layout::panel(output);
+            Self::configure_window(&panel, geometry);
+            self.space
+                .map_element(panel.clone(), (geometry.x, geometry.y), false);
+            self.space.raise_element(&panel, false);
+        }
+        if self.launcher_visible
+            && let Some(launcher) = self.launcher_window.clone()
+        {
+            let geometry = self.launcher_geometry(&launcher);
+            self.space
+                .map_element(launcher, (geometry.x, geometry.y), true);
+            if let Some(panel) = self.panel_window.clone() {
+                self.space.raise_element(&panel, false);
+            }
+        }
+    }
+
+    fn output_geometry(&self) -> Option<Geometry> {
+        let output = self.space.outputs().next()?;
+        let geometry = self.space.output_geometry(output)?;
+        Some(Geometry {
+            x: geometry.loc.x,
+            y: geometry.loc.y,
+            width: geometry.size.w,
+            height: geometry.size.h,
+        })
+    }
+
+    fn launcher_geometry(&self, launcher: &Window) -> Geometry {
+        let requested = launcher.geometry().size;
+        let width = if requested.w > 1 { requested.w } else { 960 };
+        let height = if requested.h > 1 { requested.h } else { 640 };
+        shell_layout::centered_in(
+            shell_layout::work_area(self.output_geometry().unwrap_or(Geometry {
+                x: 0,
+                y: 0,
+                width,
+                height: height + shell_layout::PANEL_HEIGHT,
+            })),
+            (width, height),
+        )
+    }
+
+    fn configure_window(window: &Window, geometry: Geometry) {
+        if let Some(toplevel) = window.toplevel() {
+            toplevel.with_pending_state(|state| {
+                state.size = Some(Size::from((geometry.width, geometry.height)));
+            });
+            toplevel.send_pending_configure();
+        }
     }
 
     fn init_wayland_listener(

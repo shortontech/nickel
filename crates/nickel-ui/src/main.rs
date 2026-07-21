@@ -529,18 +529,17 @@ impl ApplicationHandler for Nickel {
         let mut launcher_attributes = WindowAttributes::default()
             .with_title("Nickel Launcher Initializing")
             .with_inner_size(LogicalSize::new(960, 640))
-            .with_min_inner_size(LogicalSize::new(480, 320));
+            .with_min_inner_size(LogicalSize::new(480, 320))
+            .with_decorations(false);
         let mut panel_attributes = WindowAttributes::default()
             .with_title("Nickel Panel")
-            .with_inner_size(LogicalSize::new(220, 64))
-            .with_min_inner_size(LogicalSize::new(220, 64))
-            .with_max_inner_size(LogicalSize::new(220, 64))
-            .with_resizable(false);
+            .with_inner_size(LogicalSize::new(220, 56))
+            .with_decorations(false);
 
         if let Some(monitor) = target {
             launcher_attributes =
                 launcher_attributes.with_position(centered_position(&monitor, (960, 640)));
-            panel_attributes = panel_attributes.with_position(panel_position(&monitor, (220, 64)));
+            panel_attributes = panel_attributes.with_position(panel_position(&monitor, (220, 56)));
         }
 
         let Ok(launcher_window) = event_loop.create_window(launcher_attributes) else {
