@@ -170,6 +170,8 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
             format!("show-preview\t{x}\t{width}\t{height}")
         }
         ShellCommand::HideContextMenu => "hide-context-menu".to_owned(),
+        ShellCommand::HighlightWindow(window) => format!("highlight-window\t{}", window.0),
+        ShellCommand::ClearWindowHighlight => "clear-window-highlight".to_owned(),
         ShellCommand::WindowAction { window, action } => match action {
             WindowAction::Activate => format!("activate-window\t{}", window.0),
             WindowAction::Close => format!("close-window\t{}", window.0),

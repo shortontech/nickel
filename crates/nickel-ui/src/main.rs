@@ -920,6 +920,22 @@ impl ApplicationHandler for Nickel {
                             )
                         })
                         .flatten();
+                    if self.context_preview_mode && hovered != self.context_menu_hovered {
+                        if let Some(window) = hovered.and_then(|index| {
+                            self.context_menu_actions
+                                .get(index)
+                                .map(|action| match action {
+                                    ContextAction::Activate(window)
+                                    | ContextAction::Close(window)
+                                    | ContextAction::Maximize(window)
+                                    | ContextAction::Minimize(window) => *window,
+                                })
+                        }) {
+                            platform::send_shell_command(ShellCommand::HighlightWindow(window));
+                        } else {
+                            platform::send_shell_command(ShellCommand::ClearWindowHighlight);
+                        }
+                    }
                     if hovered != self.context_menu_hovered
                         || close_hovered != self.context_close_hovered
                     {
@@ -932,6 +948,9 @@ impl ApplicationHandler for Nickel {
                     }
                 }
                 WindowEvent::CursorLeft { .. } => {
+                    if self.context_preview_mode {
+                        platform::send_shell_command(ShellCommand::ClearWindowHighlight);
+                    }
                     self.context_menu_hovered = None;
                     self.context_close_hovered = None;
                     if self.context_preview_mode {

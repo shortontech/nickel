@@ -29,6 +29,8 @@ pub enum ShellCommand {
         height: i32,
     },
     HideContextMenu,
+    HighlightWindow(WindowId),
+    ClearWindowHighlight,
     WindowAction {
         window: WindowId,
         action: WindowAction,
