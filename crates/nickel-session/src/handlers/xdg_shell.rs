@@ -70,6 +70,7 @@ impl XdgShellHandler for NickelSession {
             self.context_menu_window = None;
         }
         if let Some(id) = self.surface_windows.remove(&surface.wl_surface().id()) {
+            self.minimized_windows.remove(&id);
             self.windows.remove(id);
         }
     }

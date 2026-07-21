@@ -1,6 +1,6 @@
 use crate::{
     launcher::Launcher,
-    model::{Application, OpenWindow, TrayItem},
+    model::{Application, OpenWindow, TrayItem, WindowId, WindowPreview},
     platform::{ShellCommand, TraySource},
 };
 
@@ -33,6 +33,10 @@ impl WindowFeed {
     }
 
     pub fn snapshot(&self, _: &Launcher) -> Option<Vec<OpenWindow>> {
+        None
+    }
+
+    pub fn preview(&self, _: WindowId) -> Option<WindowPreview> {
         None
     }
 }

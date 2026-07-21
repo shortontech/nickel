@@ -103,6 +103,12 @@ pub struct WindowGroup {
     pub windows: Vec<OpenWindow>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct WindowPreview {
+    pub window: WindowId,
+    pub image: image::RgbaImage,
+}
+
 impl WindowGroup {
     pub fn active(&self) -> bool {
         self.windows.iter().any(|window| window.active)
