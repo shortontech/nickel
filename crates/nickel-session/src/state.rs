@@ -149,11 +149,17 @@ impl NickelSession {
                 Generic::new(socket, Interest::READ, Mode::Level),
                 |_, socket, data| {
                     let mut command = [0_u8; 64];
-                    while let Ok(length) = socket.as_ref().recv(&mut command) {
+                    while let Ok((length, source)) = socket.as_ref().recv_from(&mut command) {
                         match &command[..length] {
                             b"toggle-launcher" => data.state.toggle_launcher(),
                             b"hide-launcher" => data.state.set_launcher_visible(false),
                             b"show-launcher" => data.state.set_launcher_visible(true),
+                            b"list-windows" => {
+                                if let Some(path) = source.as_pathname() {
+                                    let snapshot = data.state.window_snapshot_payload();
+                                    let _ = socket.as_ref().send_to(snapshot.as_bytes(), path);
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -166,6 +172,31 @@ impl NickelSession {
 
     pub fn toggle_launcher(&mut self) {
         self.set_launcher_visible(!self.launcher_visible);
+    }
+
+    fn window_snapshot_payload(&self) -> String {
+        let shell_ids = [self.launcher_window.as_ref(), self.panel_window.as_ref()]
+            .into_iter()
+            .flatten()
+            .filter_map(|window| {
+                self.surface_windows
+                    .get(&window.toplevel()?.wl_surface().id())
+            })
+            .copied()
+            .collect::<Vec<_>>();
+        self.windows
+            .snapshot()
+            .into_iter()
+            .filter(|window| !shell_ids.contains(&window.id))
+            .map(|window| {
+                format!(
+                    "{}\t{}\t{}\n",
+                    window.id.0,
+                    u8::from(window.active),
+                    window.app_id.replace(['\t', '\n', '\r'], "")
+                )
+            })
+            .collect()
     }
 
     pub fn set_launcher_visible(&mut self, visible: bool) {

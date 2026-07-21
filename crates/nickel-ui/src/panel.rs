@@ -1,10 +1,22 @@
 use std::sync::Arc;
 
 use glyphon::{
-    Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache,
-    TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, cosmic_text::Align,
+    Attrs, Buffer, Cache, Color, ContentType, CustomGlyph, Family, FontSystem, Metrics,
+    RasterizeCustomGlyphRequest, RasterizedCustomGlyph, Resolution, Shaping, SwashCache, TextArea,
+    TextAtlas, TextBounds, TextRenderer, Viewport, cosmic_text::Align,
 };
 use winit::window::Window;
+
+use crate::{icons, rectangles::RectangleRenderer};
+
+const TASKS_LEFT: f64 = 208.0;
+const TASK_WIDTH: f64 = 48.0;
+
+pub struct PanelTask {
+    pub id: u64,
+    pub active: bool,
+    pub icon: image::RgbaImage,
+}
 
 pub struct PanelGpu {
     surface: wgpu::Surface<'static>,
@@ -19,6 +31,9 @@ pub struct PanelGpu {
     label: Buffer,
     clock: Buffer,
     clock_text: String,
+    icon_buffer: Buffer,
+    tasks: Vec<PanelTask>,
+    rectangles: RectangleRenderer,
 }
 
 impl PanelGpu {
@@ -77,6 +92,9 @@ impl PanelGpu {
             Some(Align::Right),
         );
         clock.shape_until_scroll(&mut font_system, false);
+        let mut icon_buffer = Buffer::new(&mut font_system, Metrics::new(1.0, 1.0));
+        icon_buffer.set_size(Some(config.width as f32), Some(config.height as f32));
+        let rectangles = RectangleRenderer::new(&device, config.format);
 
         Ok(Self {
             surface,
@@ -91,6 +109,9 @@ impl PanelGpu {
             label,
             clock,
             clock_text,
+            icon_buffer,
+            tasks: Vec::new(),
+            rectangles,
         })
     }
 
@@ -104,6 +125,8 @@ impl PanelGpu {
         self.label.set_size(Some(width as f32), Some(height as f32));
         self.clock
             .set_size(Some(width.saturating_sub(24) as f32), Some(height as f32));
+        self.icon_buffer
+            .set_size(Some(width as f32), Some(height as f32));
     }
 
     pub fn update_clock(&mut self) -> bool {
@@ -122,7 +145,48 @@ impl PanelGpu {
         true
     }
 
-    pub fn render(&mut self, hovered: bool) {
+    pub fn set_tasks(&mut self, tasks: Vec<PanelTask>) {
+        self.tasks = tasks;
+    }
+
+    pub fn render(&mut self, launcher_hovered: bool, task_hovered: Option<usize>) {
+        let custom_glyphs = self
+            .tasks
+            .iter()
+            .enumerate()
+            .map(|(index, task)| CustomGlyph {
+                id: u16::try_from(task.id).unwrap_or(u16::MAX),
+                left: (TASKS_LEFT + index as f64 * TASK_WIDTH + 8.0) as f32,
+                top: 12.0,
+                width: 32.0,
+                height: 32.0,
+                color: None,
+                snap_to_physical_pixel: true,
+                metadata: 0,
+            })
+            .collect::<Vec<_>>();
+        let mut rectangles = Vec::new();
+        if let Some(index) = task_hovered {
+            let left = TASKS_LEFT as f32 + index as f32 * TASK_WIDTH as f32;
+            rectangles.push((
+                [left + 2.0, 4.0, left + 46.0, 52.0],
+                [0.12, 0.15, 0.21, 1.0],
+            ));
+        }
+        for (index, task) in self.tasks.iter().enumerate() {
+            if task.active {
+                let left = TASKS_LEFT as f32 + index as f32 * TASK_WIDTH as f32;
+                rectangles.push((
+                    [left + 12.0, 52.0, left + 36.0, 55.0],
+                    [0.3, 0.62, 1.0, 1.0],
+                ));
+            }
+        }
+        self.rectangles.update_raw(
+            &self.queue,
+            (self.config.width, self.config.height),
+            &rectangles,
+        );
         self.viewport.update(
             &self.queue,
             Resolution {
@@ -131,7 +195,7 @@ impl PanelGpu {
             },
         );
         self.renderer
-            .prepare(
+            .prepare_with_custom(
                 &self.device,
                 &self.queue,
                 &mut self.font_system,
@@ -149,7 +213,7 @@ impl PanelGpu {
                             right: 200,
                             bottom: self.config.height as i32,
                         },
-                        default_color: if hovered {
+                        default_color: if launcher_hovered {
                             Color::rgb(120, 180, 255)
                         } else {
                             Color::rgb(238, 241, 248)
@@ -170,8 +234,34 @@ impl PanelGpu {
                         default_color: Color::rgb(238, 241, 248),
                         custom_glyphs: &[],
                     },
+                    TextArea {
+                        buffer: &self.icon_buffer,
+                        left: 0.0,
+                        top: 0.0,
+                        scale: 1.0,
+                        bounds: TextBounds {
+                            left: TASKS_LEFT as i32,
+                            top: 0,
+                            right: self.config.width.saturating_sub(100) as i32,
+                            bottom: self.config.height as i32,
+                        },
+                        default_color: Color::rgb(238, 241, 248),
+                        custom_glyphs: &custom_glyphs,
+                    },
                 ],
                 &mut self.swash_cache,
+                &|request: RasterizeCustomGlyphRequest| {
+                    let source = &self
+                        .tasks
+                        .iter()
+                        .find(|task| u16::try_from(task.id).ok() == Some(request.id))?
+                        .icon;
+                    let image = icons::resized(source, request.width.into(), request.height.into());
+                    Some(RasterizedCustomGlyph {
+                        data: image.into_raw(),
+                        content_type: ContentType::Color,
+                    })
+                },
             )
             .expect("panel text preparation succeeds");
 
@@ -211,6 +301,7 @@ impl PanelGpu {
                 })],
                 ..Default::default()
             });
+            self.rectangles.render(&mut pass);
             self.renderer
                 .render(&self.atlas, &self.viewport, &mut pass)
                 .expect("panel text rendering succeeds");
@@ -218,6 +309,25 @@ impl PanelGpu {
         self.queue.submit([encoder.finish()]);
         self.queue.present(frame);
     }
+}
+
+pub fn task_at(position: winit::dpi::PhysicalPosition<f64>, task_count: usize) -> Option<usize> {
+    if position.y < 0.0 || position.y >= 56.0 || position.x < TASKS_LEFT {
+        return None;
+    }
+    let index = ((position.x - TASKS_LEFT) / TASK_WIDTH) as usize;
+    (index < task_count).then_some(index)
+}
+
+pub fn fallback_icon() -> image::RgbaImage {
+    image::RgbaImage::from_fn(32, 32, |x, y| {
+        let border = x <= 2 || y <= 2 || x >= 29 || y >= 29;
+        image::Rgba(if border {
+            [155, 169, 194, 255]
+        } else {
+            [70, 80, 100, 255]
+        })
+    })
 }
 
 pub fn launcher_button_contains(position: winit::dpi::PhysicalPosition<f64>) -> bool {
@@ -232,7 +342,7 @@ fn local_time_text() -> String {
 mod tests {
     use winit::dpi::PhysicalPosition;
 
-    use super::{launcher_button_contains, local_time_text};
+    use super::{launcher_button_contains, local_time_text, task_at};
 
     #[test]
     fn local_clock_uses_zero_padded_hour_and_minute() {
@@ -250,5 +360,13 @@ mod tests {
         assert!(!launcher_button_contains(PhysicalPosition::new(
             900.0, 28.0
         )));
+    }
+
+    #[test]
+    fn task_hit_testing_starts_after_launcher_button() {
+        assert_eq!(task_at(PhysicalPosition::new(208.0, 28.0), 2), Some(0));
+        assert_eq!(task_at(PhysicalPosition::new(255.0, 28.0), 2), Some(0));
+        assert_eq!(task_at(PhysicalPosition::new(256.0, 28.0), 2), Some(1));
+        assert_eq!(task_at(PhysicalPosition::new(304.0, 28.0), 2), None);
     }
 }
