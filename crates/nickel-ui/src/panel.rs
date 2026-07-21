@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use glyphon::{
     Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache,
-    TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
+    TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, cosmic_text::Align,
 };
 use winit::window::Window;
 
@@ -17,6 +17,8 @@ pub struct PanelGpu {
     atlas: TextAtlas,
     renderer: TextRenderer,
     label: Buffer,
+    clock: Buffer,
+    clock_text: String,
 }
 
 impl PanelGpu {
@@ -62,6 +64,19 @@ impl PanelGpu {
             None,
         );
         label.shape_until_scroll(&mut font_system, false);
+        let clock_text = local_time_text();
+        let mut clock = Buffer::new(&mut font_system, Metrics::new(20.0, 44.0));
+        clock.set_size(
+            Some(config.width.saturating_sub(24) as f32),
+            Some(config.height as f32),
+        );
+        clock.set_text(
+            &clock_text,
+            &Attrs::new().family(Family::SansSerif),
+            Shaping::Advanced,
+            Some(Align::Right),
+        );
+        clock.shape_until_scroll(&mut font_system, false);
 
         Ok(Self {
             surface,
@@ -74,6 +89,8 @@ impl PanelGpu {
             atlas,
             renderer,
             label,
+            clock,
+            clock_text,
         })
     }
 
@@ -85,6 +102,24 @@ impl PanelGpu {
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
         self.label.set_size(Some(width as f32), Some(height as f32));
+        self.clock
+            .set_size(Some(width.saturating_sub(24) as f32), Some(height as f32));
+    }
+
+    pub fn update_clock(&mut self) -> bool {
+        let text = local_time_text();
+        if text == self.clock_text {
+            return false;
+        }
+        self.clock_text = text;
+        self.clock.set_text(
+            &self.clock_text,
+            &Attrs::new().family(Family::SansSerif),
+            Shaping::Advanced,
+            Some(Align::Right),
+        );
+        self.clock.shape_until_scroll(&mut self.font_system, false);
+        true
     }
 
     pub fn render(&mut self, hovered: bool) {
@@ -102,20 +137,40 @@ impl PanelGpu {
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
-                [TextArea {
-                    buffer: &self.label,
-                    left: 48.0,
-                    top: 10.0,
-                    scale: 1.0,
-                    bounds: TextBounds {
-                        left: 0,
-                        top: 0,
-                        right: self.config.width as i32,
-                        bottom: self.config.height as i32,
+                [
+                    TextArea {
+                        buffer: &self.label,
+                        left: 48.0,
+                        top: 6.0,
+                        scale: 1.0,
+                        bounds: TextBounds {
+                            left: 0,
+                            top: 0,
+                            right: 200,
+                            bottom: self.config.height as i32,
+                        },
+                        default_color: if hovered {
+                            Color::rgb(120, 180, 255)
+                        } else {
+                            Color::rgb(238, 241, 248)
+                        },
+                        custom_glyphs: &[],
                     },
-                    default_color: Color::rgb(238, 241, 248),
-                    custom_glyphs: &[],
-                }],
+                    TextArea {
+                        buffer: &self.clock,
+                        left: 0.0,
+                        top: 6.0,
+                        scale: 1.0,
+                        bounds: TextBounds {
+                            left: 200,
+                            top: 0,
+                            right: self.config.width as i32,
+                            bottom: self.config.height as i32,
+                        },
+                        default_color: Color::rgb(238, 241, 248),
+                        custom_glyphs: &[],
+                    },
+                ],
                 &mut self.swash_cache,
             )
             .expect("panel text preparation succeeds");
@@ -144,20 +199,11 @@ impl PanelGpu {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(if hovered {
-                            wgpu::Color {
-                                r: 0.12,
-                                g: 0.28,
-                                b: 0.52,
-                                a: 1.0,
-                            }
-                        } else {
-                            wgpu::Color {
-                                r: 0.035,
-                                g: 0.045,
-                                b: 0.065,
-                                a: 1.0,
-                            }
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.035,
+                            g: 0.045,
+                            b: 0.065,
+                            a: 1.0,
                         }),
                         store: wgpu::StoreOp::Store,
                     },
@@ -171,5 +217,38 @@ impl PanelGpu {
         }
         self.queue.submit([encoder.finish()]);
         self.queue.present(frame);
+    }
+}
+
+pub fn launcher_button_contains(position: winit::dpi::PhysicalPosition<f64>) -> bool {
+    position.x >= 0.0 && position.x < 200.0 && position.y >= 0.0 && position.y < 56.0
+}
+
+fn local_time_text() -> String {
+    jiff::Zoned::now().strftime("%H:%M").to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use winit::dpi::PhysicalPosition;
+
+    use super::{launcher_button_contains, local_time_text};
+
+    #[test]
+    fn local_clock_uses_zero_padded_hour_and_minute() {
+        let text = local_time_text();
+        assert_eq!(text.len(), 5);
+        assert_eq!(text.as_bytes()[2], b':');
+        assert!(text.chars().enumerate().all(|(index, character)| {
+            index == 2 && character == ':' || index != 2 && character.is_ascii_digit()
+        }));
+    }
+
+    #[test]
+    fn launcher_button_does_not_include_clock_area() {
+        assert!(launcher_button_contains(PhysicalPosition::new(100.0, 28.0)));
+        assert!(!launcher_button_contains(PhysicalPosition::new(
+            900.0, 28.0
+        )));
     }
 }

@@ -4,6 +4,7 @@ use std::{
     path::PathBuf,
     sync::{Arc, mpsc},
     thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use glyphon::{
@@ -70,6 +71,7 @@ struct Nickel {
     panel_gpu: Option<panel::PanelGpu>,
     panel_hovered: bool,
     launcher_visibility: LauncherVisibility,
+    clock_deadline: Instant,
     launcher: Launcher,
     hovered_result: Option<usize>,
     pin_store: Option<storage::PinStore>,
@@ -110,6 +112,7 @@ impl Default for Nickel {
             panel_gpu: None,
             panel_hovered: false,
             launcher_visibility: LauncherVisibility::default(),
+            clock_deadline: next_minute_deadline(Instant::now(), SystemTime::now()),
             launcher,
             hovered_result: None,
             pin_store,
@@ -596,10 +599,18 @@ impl ApplicationHandler for Nickel {
                         gpu.render(self.panel_hovered);
                     }
                 }
-                WindowEvent::CursorMoved { .. } if !self.panel_hovered => {
-                    self.panel_hovered = true;
+                WindowEvent::CursorMoved { position, .. } => {
+                    let hovered = panel::launcher_button_contains(position);
+                    if hovered == self.panel_hovered {
+                        return;
+                    }
+                    self.panel_hovered = hovered;
                     let window = self.panel_window.as_ref().expect("panel window exists");
-                    window.set_cursor(CursorIcon::Pointer);
+                    window.set_cursor(if hovered {
+                        CursorIcon::Pointer
+                    } else {
+                        CursorIcon::Default
+                    });
                     window.request_redraw();
                 }
                 WindowEvent::CursorLeft { .. } => {
@@ -612,7 +623,7 @@ impl ApplicationHandler for Nickel {
                     state: ElementState::Pressed,
                     button: MouseButton::Left,
                     ..
-                } => self.toggle_launcher(),
+                } if self.panel_hovered => self.toggle_launcher(),
                 _ => {}
             }
             return;
@@ -822,6 +833,22 @@ impl ApplicationHandler for Nickel {
             _ => {}
         }
     }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let now = Instant::now();
+        if now >= self.clock_deadline {
+            if self
+                .panel_gpu
+                .as_mut()
+                .is_some_and(panel::PanelGpu::update_clock)
+                && let Some(window) = &self.panel_window
+            {
+                window.request_redraw();
+            }
+            self.clock_deadline = next_minute_deadline(now, SystemTime::now());
+        }
+        event_loop.set_control_flow(ControlFlow::WaitUntil(self.clock_deadline));
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -871,6 +898,14 @@ fn send_session_command(_: &[u8]) -> bool {
     false
 }
 
+fn next_minute_deadline(now: Instant, wall_clock: SystemTime) -> Instant {
+    const NANOS_PER_MINUTE: u128 = 60_000_000_000;
+    let elapsed = wall_clock.duration_since(UNIX_EPOCH).unwrap_or_default();
+    let into_minute = elapsed.as_nanos() % NANOS_PER_MINUTE;
+    let remaining = (NANOS_PER_MINUTE - into_minute) as u64;
+    now + Duration::from_nanos(remaining)
+}
+
 fn select_monitor(
     monitors: &[MonitorHandle],
     primary: Option<&MonitorHandle>,
@@ -913,7 +948,19 @@ fn hit_test_result(
 
 #[cfg(test)]
 mod tests {
-    use super::{LauncherVisibility, env_flag};
+    use std::time::{Duration, Instant, UNIX_EPOCH};
+
+    use super::{LauncherVisibility, env_flag, next_minute_deadline};
+
+    #[test]
+    fn clock_deadline_targets_the_next_minute_boundary() {
+        let now = Instant::now();
+        let wall_clock = UNIX_EPOCH + Duration::from_secs(125) + Duration::from_millis(250);
+        assert_eq!(
+            next_minute_deadline(now, wall_clock).duration_since(now),
+            Duration::from_millis(54_750)
+        );
+    }
 
     #[test]
     fn launcher_visibility_toggles_without_recreation() {
