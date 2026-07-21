@@ -1,8 +1,9 @@
-use std::{env, sync::Arc};
+use std::{collections::HashMap, env, path::PathBuf, sync::Arc};
 
 use glyphon::{
-    Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache,
-    TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
+    Attrs, Buffer, Cache, Color, ContentType, CustomGlyph, Family, FontSystem, Metrics,
+    RasterizeCustomGlyphRequest, RasterizedCustomGlyph, Resolution, Shaping, SwashCache, TextArea,
+    TextAtlas, TextBounds, TextRenderer, Viewport,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
@@ -12,6 +13,7 @@ use winit::keyboard::{Key, NamedKey};
 use winit::monitor::MonitorHandle;
 use winit::window::{Window, WindowAttributes, WindowId};
 
+mod icons;
 mod launcher;
 
 #[cfg(target_os = "linux")]
@@ -21,13 +23,13 @@ use launcher::Launcher;
 
 const SECONDARY_DISPLAY_ENV: &str = "NICKEL_USE_SECONDARY_DISPLAY";
 
-struct nickel {
+struct Nickel {
     window: Option<Arc<Window>>,
     gpu: Option<Gpu>,
     launcher: Launcher,
 }
 
-impl Default for nickel {
+impl Default for Nickel {
     fn default() -> Self {
         #[cfg(target_os = "linux")]
         let applications = desktop_entries::load_applications();
@@ -59,6 +61,8 @@ struct Gpu {
     text_renderer: TextRenderer,
     search_buffer: Buffer,
     results_buffer: Buffer,
+    icon_ids: HashMap<PathBuf, u16>,
+    icon_images: Vec<Option<image::RgbaImage>>,
 }
 
 impl Gpu {
@@ -116,6 +120,8 @@ impl Gpu {
             text_renderer,
             search_buffer,
             results_buffer,
+            icon_ids: HashMap::new(),
+            icon_images: Vec::new(),
         })
     }
 
@@ -171,6 +177,38 @@ impl Gpu {
         self.results_buffer
             .shape_until_scroll(&mut self.font_system, false);
 
+        let mut custom_glyphs = Vec::new();
+        for index in 0..launcher.result_count() {
+            let Some(path) = launcher
+                .result_at(index)
+                .and_then(|application| application.icon_path())
+            else {
+                continue;
+            };
+            let glyph_id = if let Some(id) = self.icon_ids.get(path) {
+                *id
+            } else {
+                let Ok(id) = u16::try_from(self.icon_images.len()) else {
+                    continue;
+                };
+                self.icon_ids.insert(path.to_owned(), id);
+                self.icon_images.push(icons::load(path));
+                id
+            };
+            if self.icon_images[glyph_id as usize].is_some() {
+                custom_glyphs.push(CustomGlyph {
+                    id: glyph_id,
+                    left: -52.0,
+                    top: 5.0 + index as f32 * 52.0,
+                    width: 36.0,
+                    height: 36.0,
+                    color: None,
+                    snap_to_physical_pixel: true,
+                    metadata: 0,
+                });
+            }
+        }
+
         self.viewport.update(
             &self.queue,
             Resolution {
@@ -178,8 +216,9 @@ impl Gpu {
                 height: self.config.height,
             },
         );
+        let icon_images = &self.icon_images;
         self.text_renderer
-            .prepare(
+            .prepare_with_custom(
                 &self.device,
                 &self.queue,
                 &mut self.font_system,
@@ -202,20 +241,28 @@ impl Gpu {
                     },
                     TextArea {
                         buffer: &self.results_buffer,
-                        left: 56.0,
+                        left: 108.0,
                         top: 136.0,
                         scale: 1.0,
                         bounds: TextBounds {
-                            left: 56,
+                            left: 0,
                             top: 136,
                             right: self.config.width.saturating_sub(56) as i32,
                             bottom: self.config.height.saturating_sub(32) as i32,
                         },
                         default_color: Color::rgb(208, 216, 232),
-                        custom_glyphs: &[],
+                        custom_glyphs: &custom_glyphs,
                     },
                 ],
                 &mut self.swash_cache,
+                &|request: RasterizeCustomGlyphRequest| {
+                    let source = icon_images.get(request.id as usize)?.as_ref()?;
+                    let image = icons::resized(source, request.width.into(), request.height.into());
+                    Some(RasterizedCustomGlyph {
+                        data: image.into_raw(),
+                        content_type: ContentType::Color,
+                    })
+                },
             )
             .expect("text preparation should succeed");
 
@@ -271,7 +318,7 @@ impl Gpu {
     }
 }
 
-impl ApplicationHandler for nickel {
+impl ApplicationHandler for Nickel {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
@@ -283,7 +330,7 @@ impl ApplicationHandler for nickel {
         let target = select_monitor(&monitors, primary.as_ref(), use_secondary);
 
         let mut attributes = WindowAttributes::default()
-            .with_title("nickel")
+            .with_title("Nickel")
             .with_inner_size(LogicalSize::new(960, 640))
             .with_min_inner_size(LogicalSize::new(480, 320));
 
@@ -352,9 +399,13 @@ impl ApplicationHandler for nickel {
                     Key::Named(NamedKey::Enter) => {
                         if let Some(result) = self.launcher.selected_result() {
                             println!(
-                                "selected application: {} (icon: {}, exec: {})",
+                                "selected application: {} (icon: {}, path: {}, exec: {})",
                                 result.name(),
                                 result.icon().unwrap_or("none"),
+                                result.icon_path().map_or_else(
+                                    || "unresolved".into(),
+                                    |path| path.display().to_string()
+                                ),
                                 result.exec().unwrap_or("D-Bus activation")
                             );
                         }
@@ -378,7 +429,7 @@ impl ApplicationHandler for nickel {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Wait);
-    event_loop.run_app(&mut nickel::default())?;
+    event_loop.run_app(&mut Nickel::default())?;
     Ok(())
 }
 

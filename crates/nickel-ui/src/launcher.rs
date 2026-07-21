@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use nucleo_matcher::{
     Config, Matcher,
     pattern::{AtomKind, CaseMatching, Normalization, Pattern},
@@ -10,15 +12,23 @@ pub struct Application {
     id: String,
     name: String,
     icon: Option<String>,
+    icon_path: Option<PathBuf>,
     exec: Option<String>,
 }
 
 impl Application {
-    pub fn new(id: String, name: String, icon: Option<String>, exec: Option<String>) -> Self {
+    pub fn new(
+        id: String,
+        name: String,
+        icon: Option<String>,
+        icon_path: Option<PathBuf>,
+        exec: Option<String>,
+    ) -> Self {
         Self {
             id,
             name,
             icon,
+            icon_path,
             exec,
         }
     }
@@ -33,6 +43,10 @@ impl Application {
 
     pub fn icon(&self) -> Option<&str> {
         self.icon.as_deref()
+    }
+
+    pub fn icon_path(&self) -> Option<&Path> {
+        self.icon_path.as_deref()
     }
 
     pub fn exec(&self) -> Option<&str> {
@@ -74,7 +88,7 @@ impl Default for Launcher {
                 "Discover",
             ]
             .into_iter()
-            .map(|name| Application::new(name.to_lowercase(), name.into(), None, None))
+            .map(|name| Application::new(name.to_lowercase(), name.into(), None, None, None))
             .collect(),
         )
     }

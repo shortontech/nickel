@@ -1,4 +1,8 @@
-use std::collections::HashSet;
+use std::{
+    collections::HashSet,
+    env, fs,
+    path::{Path, PathBuf},
+};
 
 use freedesktop_desktop_entry::{
     DesktopEntry, Iter, current_desktop, default_paths, get_languages_from_env,
@@ -11,6 +15,7 @@ pub fn load_applications() -> Vec<Application> {
     let desktops = current_desktop().unwrap_or_default();
     let mut seen = HashSet::new();
     let mut applications = Vec::new();
+    let icon_theme = icon_theme();
 
     for entry in Iter::new(default_paths()).entries(Some(&locales)) {
         // Higher-priority XDG directories appear first. Hidden entries must also
@@ -18,7 +23,8 @@ pub fn load_applications() -> Vec<Application> {
         if !seen.insert(entry.id().to_owned()) {
             continue;
         }
-        if let Some(application) = application_from_entry(&entry, &locales, &desktops) {
+        if let Some(application) = application_from_entry(&entry, &locales, &desktops, &icon_theme)
+        {
             applications.push(application);
         }
     }
@@ -36,6 +42,7 @@ fn application_from_entry(
     entry: &DesktopEntry,
     locales: &[String],
     desktops: &[String],
+    icon_theme: &str,
 ) -> Option<Application> {
     if entry.type_() != Some("Application")
         || entry.hidden()
@@ -50,12 +57,64 @@ fn application_from_entry(
         return None;
     }
 
+    let icon = entry.icon().map(str::to_owned);
+    let icon_path = icon
+        .as_deref()
+        .and_then(|name| resolve_icon(name, icon_theme));
     Some(Application::new(
         entry.id().to_owned(),
         name,
-        entry.icon().map(str::to_owned),
+        icon,
+        icon_path,
         entry.exec().map(str::to_owned),
     ))
+}
+
+fn resolve_icon(name: &str, theme: &str) -> Option<PathBuf> {
+    let path = Path::new(name);
+    if path.is_absolute() && path.is_file() {
+        return Some(path.to_owned());
+    }
+    freedesktop_icons::lookup(name)
+        .with_size(48)
+        .with_theme(theme)
+        .with_cache()
+        .find()
+}
+
+fn icon_theme() -> String {
+    if let Ok(theme) = env::var("NICKEL_ICON_THEME")
+        && !theme.trim().is_empty()
+    {
+        return theme;
+    }
+
+    let config_home = env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")));
+    config_home
+        .and_then(|directory| fs::read_to_string(directory.join("kdeglobals")).ok())
+        .and_then(|contents| value_in_section(&contents, "Icons", "Theme"))
+        .unwrap_or_else(|| "hicolor".to_owned())
+}
+
+fn value_in_section(contents: &str, section: &str, key: &str) -> Option<String> {
+    let mut in_section = false;
+    for line in contents.lines().map(str::trim) {
+        if line.starts_with('[') && line.ends_with(']') {
+            in_section = &line[1..line.len() - 1] == section;
+        } else if in_section
+            && let Some(value) = line
+                .strip_prefix(key)
+                .and_then(|line| line.strip_prefix('='))
+        {
+            let value = value.trim();
+            if !value.is_empty() {
+                return Some(value.to_owned());
+            }
+        }
+    }
+    None
 }
 
 fn visible_on_desktop(entry: &DesktopEntry, desktops: &[String]) -> bool {
@@ -82,7 +141,7 @@ mod tests {
 
     use freedesktop_desktop_entry::DesktopEntry;
 
-    use super::application_from_entry;
+    use super::{application_from_entry, value_in_section};
 
     fn parse(contents: &str) -> DesktopEntry {
         DesktopEntry::from_str(
@@ -98,8 +157,9 @@ mod tests {
         let entry = parse(
             "[Desktop Entry]\nType=Application\nName=Test App\nIcon=test-icon\nExec=test-app %U\n",
         );
-        let application = application_from_entry(&entry, &["en_US".into()], &["kde".into()])
-            .expect("visible application");
+        let application =
+            application_from_entry(&entry, &["en_US".into()], &["kde".into()], "hicolor")
+                .expect("visible application");
         assert_eq!(application.name(), "Test App");
         assert_eq!(application.icon(), Some("test-icon"));
         assert_eq!(application.exec(), Some("test-app %U"));
@@ -109,11 +169,20 @@ mod tests {
     fn filters_hidden_and_desktop_specific_entries() {
         let hidden =
             parse("[Desktop Entry]\nType=Application\nName=Hidden\nExec=hidden\nNoDisplay=true\n");
-        assert!(application_from_entry(&hidden, &[], &["kde".into()]).is_none());
+        assert!(application_from_entry(&hidden, &[], &["kde".into()], "hicolor").is_none());
 
         let gnome_only = parse(
             "[Desktop Entry]\nType=Application\nName=GNOME Tool\nExec=tool\nOnlyShowIn=GNOME;\n",
         );
-        assert!(application_from_entry(&gnome_only, &[], &["kde".into()]).is_none());
+        assert!(application_from_entry(&gnome_only, &[], &["kde".into()], "hicolor").is_none());
+    }
+
+    #[test]
+    fn reads_kde_icon_theme_without_a_configuration_dependency() {
+        let config = "[General]\nColorScheme=BreezeDark\n\n[Icons]\nTheme=breeze-dark\n";
+        assert_eq!(
+            value_in_section(config, "Icons", "Theme").as_deref(),
+            Some("breeze-dark")
+        );
     }
 }
