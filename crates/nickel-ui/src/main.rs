@@ -702,6 +702,9 @@ impl ApplicationHandler for Nickel {
         if self.context_menu_window.as_ref().map(|window| window.id()) == Some(window_id) {
             match event {
                 WindowEvent::CloseRequested => self.hide_context_menu(),
+                WindowEvent::Focused(false) if self.context_menu_target.is_some() => {
+                    self.hide_context_menu();
+                }
                 WindowEvent::Resized(size) => {
                     if self.context_menu_gpu.is_none() {
                         self.ensure_context_menu_gpu();
