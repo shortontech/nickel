@@ -8,7 +8,7 @@ use smithay::{
     reexports::{
         calloop::{EventLoop, Interest, LoopSignal, Mode, PostAction, generic::Generic},
         wayland_server::{
-            Display, DisplayHandle,
+            Display, DisplayHandle, Resource,
             backend::{ClientData, ClientId, DisconnectReason, ObjectId},
             protocol::wl_surface::WlSurface,
         },
@@ -18,7 +18,7 @@ use smithay::{
         compositor::{CompositorClientState, CompositorState},
         output::OutputManagerState,
         selection::data_device::DataDeviceState,
-        shell::xdg::XdgShellState,
+        shell::xdg::{ToplevelSurface, XdgShellState},
         shm::ShmState,
         socket::ListeningSocketSource,
     },
@@ -54,6 +54,7 @@ pub struct NickelSession {
     pub launcher_window: Option<Window>,
     pub launcher_visible: bool,
     pub panel_window: Option<Window>,
+    maximized_restore: HashMap<ObjectId, Geometry>,
     control_socket_path: PathBuf,
 }
 
@@ -117,6 +118,7 @@ impl NickelSession {
             launcher_window: None,
             launcher_visible: false,
             panel_window: None,
+            maximized_restore: HashMap::new(),
             control_socket_path,
         }
     }
@@ -217,6 +219,99 @@ impl NickelSession {
             if let Some(panel) = self.panel_window.clone() {
                 self.space.raise_element(&panel, false);
             }
+        }
+        self.relayout_maximized_windows();
+    }
+
+    pub fn maximize_toplevel(&mut self, surface: &ToplevelSurface) {
+        let Some(window) = self.window_for_surface(surface.wl_surface()) else {
+            surface.send_configure();
+            return;
+        };
+        let Some(output) = self.output_geometry() else {
+            surface.send_configure();
+            return;
+        };
+        let location = self.space.element_location(&window).unwrap_or_default();
+        let size = window.geometry().size;
+        self.maximized_restore
+            .entry(surface.wl_surface().id())
+            .or_insert(Geometry {
+                x: location.x,
+                y: location.y,
+                width: size.w.max(1),
+                height: size.h.max(1),
+            });
+
+        let geometry = shell_layout::work_area(output);
+        surface.with_pending_state(|state| {
+            state
+                .states
+                .set(smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Maximized);
+            state.size = Some(Size::from((geometry.width, geometry.height)));
+        });
+        self.space
+            .map_element(window, (geometry.x, geometry.y), true);
+        self.raise_panel();
+        surface.send_pending_configure();
+    }
+
+    pub fn unmaximize_toplevel(&mut self, surface: &ToplevelSurface) {
+        let restore = self.maximized_restore.remove(&surface.wl_surface().id());
+        surface.with_pending_state(|state| {
+            state
+                .states
+                .unset(smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Maximized);
+            state.size = restore.map(|geometry| Size::from((geometry.width, geometry.height)));
+        });
+        if let Some(geometry) = restore
+            && let Some(window) = self.window_for_surface(surface.wl_surface())
+        {
+            self.space
+                .map_element(window, (geometry.x, geometry.y), true);
+        }
+        self.raise_panel();
+        surface.send_pending_configure();
+    }
+
+    pub fn forget_toplevel_geometry(&mut self, surface: &ToplevelSurface) {
+        self.maximized_restore.remove(&surface.wl_surface().id());
+    }
+
+    fn relayout_maximized_windows(&mut self) {
+        let Some(output) = self.output_geometry() else {
+            return;
+        };
+        let geometry = shell_layout::work_area(output);
+        let maximized: Vec<_> = self
+            .space
+            .elements()
+            .filter_map(|window| {
+                let surface = window.toplevel()?.wl_surface();
+                self.maximized_restore
+                    .contains_key(&surface.id())
+                    .then_some((window.clone(), window.toplevel()?.clone()))
+            })
+            .collect();
+        for (window, surface) in maximized {
+            Self::configure_window(&window, geometry);
+            self.space
+                .map_element(window, (geometry.x, geometry.y), true);
+            surface.send_pending_configure();
+        }
+        self.raise_panel();
+    }
+
+    fn window_for_surface(&self, surface: &WlSurface) -> Option<Window> {
+        self.space
+            .elements()
+            .find(|window| window.toplevel().unwrap().wl_surface() == surface)
+            .cloned()
+    }
+
+    fn raise_panel(&mut self) {
+        if let Some(panel) = self.panel_window.clone() {
+            self.space.raise_element(&panel, false);
         }
     }
 

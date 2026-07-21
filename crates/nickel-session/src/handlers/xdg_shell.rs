@@ -46,6 +46,7 @@ impl XdgShellHandler for NickelSession {
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
+        self.forget_toplevel_geometry(&surface);
         if self
             .launcher_window
             .as_ref()
@@ -72,6 +73,14 @@ impl XdgShellHandler for NickelSession {
 
     fn title_changed(&mut self, surface: ToplevelSurface) {
         self.update_window_metadata(&surface);
+    }
+
+    fn maximize_request(&mut self, surface: ToplevelSurface) {
+        self.maximize_toplevel(&surface);
+    }
+
+    fn unmaximize_request(&mut self, surface: ToplevelSurface) {
+        self.unmaximize_toplevel(&surface);
     }
 
     fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {
