@@ -236,6 +236,18 @@ mod tests {
         assert!(launcher.is_pinned("discover"));
     }
 
+    #[test]
+    fn clear_resets_query_and_selection() {
+        let mut launcher = Launcher::default();
+        launcher.insert("term");
+        launcher.select_next();
+
+        launcher.clear();
+
+        assert_eq!(launcher.query(), "");
+        assert_eq!(launcher.selected_index(), 0);
+    }
+
     #[cfg(unix)]
     #[test]
     fn launch_spawns_the_parsed_command_without_a_shell() {
