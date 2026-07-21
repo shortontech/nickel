@@ -190,6 +190,9 @@ impl NickelSession {
     }
 
     pub fn register_panel(&mut self, window: Window) {
+        // Smithay's ordinary xdg windows use z-index 30. Keep the Nickel panel
+        // in its top shell layer so later application maps cannot cover it.
+        window.override_z_index(40);
         self.panel_window = Some(window);
         self.relayout_shell_surfaces();
     }
