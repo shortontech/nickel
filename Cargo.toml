@@ -1,6 +1,6 @@
 [workspace]
-members = ["crates/citrius-ui"]
-default-members = ["crates/citrius-ui"]
+members = ["crates/nickel-ui"]
+default-members = ["crates/nickel-ui"]
 resolver = "3"
 
 [workspace.package]

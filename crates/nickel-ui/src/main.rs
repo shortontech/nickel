@@ -19,15 +19,15 @@ mod desktop_entries;
 
 use launcher::Launcher;
 
-const SECONDARY_DISPLAY_ENV: &str = "CITRIUS_USE_SECONDARY_DISPLAY";
+const SECONDARY_DISPLAY_ENV: &str = "NICKEL_USE_SECONDARY_DISPLAY";
 
-struct Citrius {
+struct nickel {
     window: Option<Arc<Window>>,
     gpu: Option<Gpu>,
     launcher: Launcher,
 }
 
-impl Default for Citrius {
+impl Default for nickel {
     fn default() -> Self {
         #[cfg(target_os = "linux")]
         let applications = desktop_entries::load_applications();
@@ -78,7 +78,7 @@ impl Gpu {
             .map_err(|error| format!("failed to find a graphics adapter: {error}"))?;
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
-                label: Some("Citrius device"),
+                label: Some("nickel device"),
                 ..Default::default()
             })
             .await
@@ -238,12 +238,12 @@ impl Gpu {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Citrius frame encoder"),
+                label: Some("nickel frame encoder"),
             });
 
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Citrius background pass"),
+                label: Some("nickel background pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
@@ -271,7 +271,7 @@ impl Gpu {
     }
 }
 
-impl ApplicationHandler for Citrius {
+impl ApplicationHandler for nickel {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
@@ -283,7 +283,7 @@ impl ApplicationHandler for Citrius {
         let target = select_monitor(&monitors, primary.as_ref(), use_secondary);
 
         let mut attributes = WindowAttributes::default()
-            .with_title("Citrius")
+            .with_title("nickel")
             .with_inner_size(LogicalSize::new(960, 640))
             .with_min_inner_size(LogicalSize::new(480, 320));
 
@@ -307,7 +307,7 @@ impl ApplicationHandler for Citrius {
                 }
             }
             Err(error) => {
-                eprintln!("failed to create Citrius window: {error}");
+                eprintln!("failed to create nickel window: {error}");
                 event_loop.exit();
             }
         }
@@ -378,7 +378,7 @@ impl ApplicationHandler for Citrius {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Wait);
-    event_loop.run_app(&mut Citrius::default())?;
+    event_loop.run_app(&mut nickel::default())?;
     Ok(())
 }
 
@@ -421,7 +421,7 @@ mod tests {
 
     #[test]
     fn missing_environment_flag_is_disabled() {
-        let name = "CITRIUS_TEST_MISSING_FLAG";
+        let name = "NICKEL_TEST_MISSING_FLAG";
         // SAFETY: This test uses a unique variable name and no other thread accesses it.
         unsafe { std::env::remove_var(name) };
         assert!(!env_flag(name));
@@ -429,7 +429,7 @@ mod tests {
 
     #[test]
     fn common_true_values_enable_environment_flag() {
-        let name = "CITRIUS_TEST_TRUE_FLAG";
+        let name = "NICKEL_TEST_TRUE_FLAG";
         for value in ["1", "true", "TRUE", "yes", "on"] {
             // SAFETY: This test uses a unique variable name and no other thread accesses it.
             unsafe { std::env::set_var(name, value) };
