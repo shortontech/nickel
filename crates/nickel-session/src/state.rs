@@ -267,7 +267,6 @@ impl NickelSession {
 
     pub fn register_context_menu(&mut self, window: Window) {
         window.override_z_index(50);
-        self.space.unmap_elem(&window);
         self.context_menu_window = Some(window);
     }
 
