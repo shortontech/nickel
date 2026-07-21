@@ -4,7 +4,7 @@ use bytemuck::{Pod, Zeroable};
 
 use crate::layout;
 
-const MAX_VERTICES: usize = 12;
+const MAX_VERTICES: usize = 24;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -93,14 +93,15 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         }
     }
 
-    pub fn update_hover(
+    pub fn update(
         &mut self,
         queue: &wgpu::Queue,
         surface_size: (u32, u32),
-        hovered: Option<usize>,
+        hovered_row: Option<usize>,
+        scrollbar: Option<layout::Scrollbar>,
     ) {
         let mut vertices = Vec::with_capacity(MAX_VERTICES);
-        if let Some(index) = hovered {
+        if let Some(index) = hovered_row {
             let row = layout::ResultRow::allocate(index, surface_size.0);
             add_rectangle(
                 &mut vertices,
@@ -123,6 +124,30 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
                     row.outer.bottom() - 2.0,
                 ],
                 [0.055, 0.07, 0.105, 1.0],
+            );
+        }
+        if let Some(scrollbar) = scrollbar {
+            add_rectangle(
+                &mut vertices,
+                surface_size,
+                [
+                    scrollbar.track.x,
+                    scrollbar.track.y,
+                    scrollbar.track.right(),
+                    scrollbar.track.bottom(),
+                ],
+                [0.09, 0.11, 0.15, 1.0],
+            );
+            add_rectangle(
+                &mut vertices,
+                surface_size,
+                [
+                    scrollbar.thumb.x,
+                    scrollbar.thumb.y,
+                    scrollbar.thumb.right(),
+                    scrollbar.thumb.bottom(),
+                ],
+                [0.38, 0.43, 0.52, 1.0],
             );
         }
         self.vertex_count = vertices.len() as u32;

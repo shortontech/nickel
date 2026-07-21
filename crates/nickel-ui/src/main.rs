@@ -7,7 +7,7 @@ use glyphon::{
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
-use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::monitor::MonitorHandle;
@@ -22,7 +22,7 @@ mod storage;
 #[cfg(target_os = "linux")]
 mod desktop_entries;
 
-use launcher::{Launcher, MAX_RESULTS};
+use launcher::Launcher;
 
 const SECONDARY_DISPLAY_ENV: &str = "NICKEL_USE_SECONDARY_DISPLAY";
 
@@ -32,6 +32,9 @@ struct Nickel {
     launcher: Launcher,
     hovered_result: Option<usize>,
     pin_store: Option<storage::PinStore>,
+    scroll_offset: usize,
+    cursor_position: Option<PhysicalPosition<f64>>,
+    scrollbar_drag_offset: Option<f64>,
 }
 
 impl Default for Nickel {
@@ -65,7 +68,53 @@ impl Default for Nickel {
             launcher,
             hovered_result: None,
             pin_store,
+            scroll_offset: 0,
+            cursor_position: None,
+            scrollbar_drag_offset: None,
         }
+    }
+}
+
+impl Nickel {
+    fn viewport_metrics(&self) -> (u32, u32, usize) {
+        let size = self.window.as_ref().expect("window exists").inner_size();
+        (
+            size.width,
+            size.height,
+            layout::visible_capacity(size.height),
+        )
+    }
+
+    fn set_scroll_offset(&mut self, offset: usize) {
+        let (_, _, capacity) = self.viewport_metrics();
+        self.scroll_offset = offset.min(layout::max_scroll_offset(
+            self.launcher.result_count(),
+            capacity,
+        ));
+    }
+
+    fn scroll_by(&mut self, rows: i32) {
+        let offset = if rows.is_negative() {
+            self.scroll_offset
+                .saturating_sub(rows.unsigned_abs() as usize)
+        } else {
+            self.scroll_offset.saturating_add(rows as usize)
+        };
+        self.set_scroll_offset(offset);
+    }
+
+    fn ensure_selection_visible(&mut self) {
+        let (_, _, capacity) = self.viewport_metrics();
+        if capacity == 0 {
+            return;
+        }
+        let selected = self.launcher.selected_index();
+        if selected < self.scroll_offset {
+            self.scroll_offset = selected;
+        } else if selected >= self.scroll_offset + capacity {
+            self.scroll_offset = selected + 1 - capacity;
+        }
+        self.set_scroll_offset(self.scroll_offset);
     }
 }
 
@@ -124,7 +173,7 @@ impl Gpu {
         let rectangle_renderer = rectangles::RectangleRenderer::new(&device, config.format);
         let mut search_buffer = Buffer::new(&mut font_system, Metrics::new(30.0, 44.0));
         search_buffer.set_size(Some(config.width.saturating_sub(112) as f32), Some(56.0));
-        let result_buffers = (0..MAX_RESULTS)
+        let result_buffers = (0..9)
             .map(|_| Buffer::new(&mut font_system, Metrics::new(24.0, 48.0)))
             .collect();
 
@@ -157,7 +206,7 @@ impl Gpu {
         self.search_buffer.set_size(Some(text_width), Some(56.0));
     }
 
-    fn render(&mut self, launcher: &Launcher, hovered_result: Option<usize>) {
+    fn render(&mut self, launcher: &Launcher, hovered_result: Option<usize>, scroll_offset: usize) {
         let search_text = if launcher.query().is_empty() {
             "Search applications…".to_owned()
         } else {
@@ -172,7 +221,16 @@ impl Gpu {
         self.search_buffer
             .shape_until_scroll(&mut self.font_system, false);
 
-        let visible_count = launcher.result_count().max(1);
+        let capacity = layout::visible_capacity(self.config.height);
+        let visible_count = launcher
+            .result_count()
+            .saturating_sub(scroll_offset)
+            .min(capacity)
+            .max(1);
+        while self.result_buffers.len() < visible_count {
+            self.result_buffers
+                .push(Buffer::new(&mut self.font_system, Metrics::new(24.0, 48.0)));
+        }
         let mut row_glyphs = vec![Vec::new(); visible_count];
         for (index, buffer) in self
             .result_buffers
@@ -180,13 +238,14 @@ impl Gpu {
             .take(visible_count)
             .enumerate()
         {
+            let result_index = scroll_offset + index;
             let row = layout::ResultRow::allocate(index, self.config.width);
             let text = launcher
-                .result_at(index)
+                .result_at(result_index)
                 .map_or("No applications found", |result| result.name());
-            let selected = launcher.result_count() > 0 && index == launcher.selected_index();
+            let selected = launcher.result_count() > 0 && result_index == launcher.selected_index();
             let pinned = launcher
-                .result_at(index)
+                .result_at(result_index)
                 .is_some_and(|application| launcher.is_pinned(application.id()));
             let marker = match (selected, pinned) {
                 (true, true) => "› ★",
@@ -205,7 +264,7 @@ impl Gpu {
             buffer.shape_until_scroll(&mut self.font_system, false);
 
             let Some(path) = launcher
-                .result_at(index)
+                .result_at(result_index)
                 .and_then(|application| application.icon_path())
             else {
                 continue;
@@ -241,10 +300,19 @@ impl Gpu {
                 height: self.config.height,
             },
         );
-        self.rectangle_renderer.update_hover(
+        let scrollbar = layout::scrollbar(
+            self.config.width,
+            self.config.height,
+            launcher.result_count(),
+            capacity,
+            scroll_offset,
+        );
+        let hovered_row = hovered_result.and_then(|index| index.checked_sub(scroll_offset));
+        self.rectangle_renderer.update(
             &self.queue,
             (self.config.width, self.config.height),
-            hovered_result,
+            hovered_row.filter(|index| *index < visible_count),
+            scrollbar,
         );
         let icon_images = &self.icon_images;
         let mut text_areas = Vec::with_capacity(visible_count + 1);
@@ -410,6 +478,7 @@ impl ApplicationHandler for Nickel {
                 if let Some(gpu) = &mut self.gpu {
                     gpu.resize(size.width, size.height);
                 }
+                self.set_scroll_offset(self.scroll_offset);
                 self.window
                     .as_ref()
                     .expect("window exists")
@@ -417,19 +486,43 @@ impl ApplicationHandler for Nickel {
             }
             WindowEvent::RedrawRequested => {
                 if let Some(gpu) = &mut self.gpu {
-                    gpu.render(&self.launcher, self.hovered_result);
+                    gpu.render(&self.launcher, self.hovered_result, self.scroll_offset);
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                let hovered = hit_test_result(
-                    position,
-                    self.window
-                        .as_ref()
-                        .expect("window exists")
-                        .inner_size()
-                        .width,
-                    self.launcher.result_count(),
-                );
+                self.cursor_position = Some(position);
+                if let Some(grab_offset) = self.scrollbar_drag_offset {
+                    let (width, height, capacity) = self.viewport_metrics();
+                    if let Some(scrollbar) = layout::scrollbar(
+                        width,
+                        height,
+                        self.launcher.result_count(),
+                        capacity,
+                        self.scroll_offset,
+                    ) {
+                        let offset = layout::offset_from_thumb_y(
+                            position.y - grab_offset,
+                            scrollbar,
+                            self.launcher.result_count(),
+                            capacity,
+                        );
+                        self.set_scroll_offset(offset);
+                        self.hovered_result = None;
+                        self.window
+                            .as_ref()
+                            .expect("window exists")
+                            .request_redraw();
+                    }
+                    return;
+                }
+                let (width, _, capacity) = self.viewport_metrics();
+                let local_count = self
+                    .launcher
+                    .result_count()
+                    .saturating_sub(self.scroll_offset)
+                    .min(capacity);
+                let hovered = hit_test_result(position, width, local_count)
+                    .map(|index| index + self.scroll_offset);
                 if hovered != self.hovered_result {
                     self.hovered_result = hovered;
                     let window = self.window.as_ref().expect("window exists");
@@ -442,16 +535,60 @@ impl ApplicationHandler for Nickel {
                 }
             }
             WindowEvent::CursorLeft { .. } => {
+                self.cursor_position = None;
                 self.hovered_result = None;
                 let window = self.window.as_ref().expect("window exists");
                 window.set_cursor(CursorIcon::Default);
                 window.request_redraw();
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let rows = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => -y.round() as i32,
+                    MouseScrollDelta::PixelDelta(position) => (-position.y / 52.0).round() as i32,
+                };
+                if rows != 0 {
+                    self.scroll_by(rows);
+                    self.hovered_result = None;
+                    self.window
+                        .as_ref()
+                        .expect("window exists")
+                        .request_redraw();
+                }
             }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
             } => {
+                let (width, height, capacity) = self.viewport_metrics();
+                if let (Some(position), Some(scrollbar)) = (
+                    self.cursor_position,
+                    layout::scrollbar(
+                        width,
+                        height,
+                        self.launcher.result_count(),
+                        capacity,
+                        self.scroll_offset,
+                    ),
+                ) {
+                    if layout::rect_contains(scrollbar.thumb, position.x, position.y) {
+                        self.scrollbar_drag_offset =
+                            Some(position.y - f64::from(scrollbar.thumb.y));
+                        return;
+                    }
+                    if layout::rect_contains(scrollbar.track, position.x, position.y) {
+                        if position.y < f64::from(scrollbar.thumb.y) {
+                            self.scroll_by(-(capacity as i32));
+                        } else {
+                            self.scroll_by(capacity as i32);
+                        }
+                        self.window
+                            .as_ref()
+                            .expect("window exists")
+                            .request_redraw();
+                        return;
+                    }
+                }
                 if let Some(index) = self.hovered_result {
                     self.launcher.select(index);
                     if let Some(result) = self.launcher.selected_result() {
@@ -463,6 +600,11 @@ impl ApplicationHandler for Nickel {
                         .request_redraw();
                 }
             }
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Left,
+                ..
+            } => self.scrollbar_drag_offset = None,
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Right,
@@ -478,6 +620,7 @@ impl ApplicationHandler for Nickel {
                     match store.toggle(&application_id).and_then(|_| store.pins()) {
                         Ok(pins) => {
                             self.launcher.set_pins(pins);
+                            self.scroll_offset = 0;
                             self.hovered_result = None;
                             self.window
                                 .as_ref()
@@ -517,6 +660,7 @@ impl ApplicationHandler for Nickel {
                     _ => changed = false,
                 }
                 if changed {
+                    self.ensure_selection_visible();
                     self.window
                         .as_ref()
                         .expect("window exists")

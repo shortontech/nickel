@@ -8,8 +8,6 @@ use nucleo_matcher::{
     pattern::{AtomKind, CaseMatching, Normalization, Pattern},
 };
 
-pub const MAX_RESULTS: usize = 9;
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Application {
     id: String,
@@ -187,7 +185,6 @@ impl Launcher {
                     .get(self.applications[*index].id())
                     .map_or((1, *index as u64), |order| (0, *order))
             });
-            results.truncate(MAX_RESULTS);
             self.results = results;
             self.selected = 0;
             return;
@@ -210,7 +207,6 @@ impl Launcher {
         self.results = pattern
             .match_list(candidates, &mut matcher)
             .into_iter()
-            .take(MAX_RESULTS)
             .map(|(candidate, _score)| candidate.index)
             .collect();
         self.selected = 0;

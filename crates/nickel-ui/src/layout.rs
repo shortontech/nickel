@@ -3,9 +3,13 @@ const LIST_RIGHT_INSET: f32 = 40.0;
 const LIST_TOP: f32 = 132.0;
 const ROW_HEIGHT: f32 = 48.0;
 const ROW_GAP: f32 = 4.0;
+const LIST_BOTTOM_INSET: f32 = 32.0;
 const ROW_PADDING: f32 = 16.0;
 const COLUMN_GAP: f32 = 16.0;
 const ICON_SIZE: f32 = 36.0;
+const SCROLLBAR_RIGHT_INSET: f32 = 18.0;
+const SCROLLBAR_WIDTH: f32 = 6.0;
+const MIN_THUMB_HEIGHT: f32 = 32.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rect {
@@ -64,6 +68,72 @@ impl ResultRow {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Scrollbar {
+    pub track: Rect,
+    pub thumb: Rect,
+}
+
+pub fn visible_capacity(available_height: u32) -> usize {
+    let height = (available_height as f32 - LIST_TOP - LIST_BOTTOM_INSET).max(0.0);
+    ((height + ROW_GAP) / (ROW_HEIGHT + ROW_GAP)).floor() as usize
+}
+
+pub fn max_scroll_offset(total: usize, capacity: usize) -> usize {
+    total.saturating_sub(capacity)
+}
+
+pub fn scrollbar(
+    available_width: u32,
+    available_height: u32,
+    total: usize,
+    capacity: usize,
+    offset: usize,
+) -> Option<Scrollbar> {
+    if capacity == 0 || total <= capacity {
+        return None;
+    }
+    let track = Rect {
+        x: available_width as f32 - SCROLLBAR_RIGHT_INSET - SCROLLBAR_WIDTH,
+        y: LIST_TOP,
+        width: SCROLLBAR_WIDTH,
+        height: (available_height as f32 - LIST_TOP - LIST_BOTTOM_INSET).max(0.0),
+    };
+    let thumb_height = (track.height * capacity as f32 / total as f32)
+        .max(MIN_THUMB_HEIGHT)
+        .min(track.height);
+    let travel = track.height - thumb_height;
+    let max_offset = max_scroll_offset(total, capacity);
+    let thumb_y = track.y + travel * offset.min(max_offset) as f32 / max_offset as f32;
+    Some(Scrollbar {
+        track,
+        thumb: Rect {
+            x: track.x,
+            y: thumb_y,
+            width: track.width,
+            height: thumb_height,
+        },
+    })
+}
+
+pub fn offset_from_thumb_y(
+    thumb_y: f64,
+    scrollbar: Scrollbar,
+    total: usize,
+    capacity: usize,
+) -> usize {
+    let travel = scrollbar.track.height - scrollbar.thumb.height;
+    if travel <= 0.0 {
+        return 0;
+    }
+    let fraction = ((thumb_y as f32 - scrollbar.track.y) / travel).clamp(0.0, 1.0);
+    (fraction * max_scroll_offset(total, capacity) as f32).round() as usize
+}
+
+pub fn rect_contains(rect: Rect, x: f64, y: f64) -> bool {
+    rect.contains(x, y)
+}
+
 pub fn hit_test_result(x: f64, y: f64, available_width: u32, count: usize) -> Option<usize> {
     (0..count).find(|index| {
         ResultRow::allocate(*index, available_width)
@@ -92,5 +162,17 @@ mod tests {
         assert_eq!(hit_test_result(100.0, 140.0, 960, 3), Some(0));
         assert_eq!(hit_test_result(100.0, 181.0, 960, 3), None);
         assert_eq!(hit_test_result(100.0, 300.0, 960, 3), None);
+    }
+
+    #[test]
+    fn scrollbar_thumb_tracks_visible_fraction_and_offset() {
+        let top = super::scrollbar(960, 640, 100, 9, 0).expect("overflow scrollbar");
+        let bottom = super::scrollbar(960, 640, 100, 9, 91).expect("overflow scrollbar");
+        assert_eq!(top.thumb.y, top.track.y);
+        assert_eq!(bottom.thumb.bottom(), bottom.track.bottom());
+        assert_eq!(
+            super::offset_from_thumb_y(bottom.thumb.y.into(), bottom, 100, 9),
+            91
+        );
     }
 }
