@@ -139,14 +139,16 @@ impl NickelSession {
                         {
                             self.windows.raise(id);
                         }
-                        keyboard.set_focus(
-                            self,
-                            Some(window.toplevel().unwrap().wl_surface().clone()),
-                            serial,
-                        );
-                        self.space.elements().for_each(|window| {
-                            window.toplevel().unwrap().send_pending_configure();
-                        });
+                        if self.panel_window.as_ref() != Some(&window) {
+                            keyboard.set_focus(
+                                self,
+                                Some(window.toplevel().unwrap().wl_surface().clone()),
+                                serial,
+                            );
+                            self.space.elements().for_each(|window| {
+                                window.toplevel().unwrap().send_pending_configure();
+                            });
+                        }
                     } else {
                         self.space.elements().for_each(|window| {
                             window.set_activated(false);
