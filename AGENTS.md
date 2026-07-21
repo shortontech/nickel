@@ -38,4 +38,4 @@ Place unit tests beside their modules and cross-crate tests in `tests/`. Name be
 
 ## Commit & Pull Request Guidelines
 
-No Git history exists yet. Use concise, imperative commit subjects such as `Add fuzzy ranking pipeline`. Keep commits scoped and include tests with behavioral changes. Commit new specifications when written; archive them when completed. Pull requests should explain user-visible behavior, list platforms tested, link relevant specifications or issues, and include screenshots or recordings for visual changes.
+Use concise, imperative commit subjects such as `Add fuzzy ranking pipeline`. Keep commits scoped and include tests with behavioral changes. Commit new specifications when written; archive them when completed. Pull requests should explain user-visible behavior, list platforms tested, link relevant specifications or issues, and include screenshots or recordings for visual changes.
