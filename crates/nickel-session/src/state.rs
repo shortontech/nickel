@@ -1,4 +1,4 @@
-use std::{ffi::OsString, sync::Arc};
+use std::{collections::HashMap, ffi::OsString, sync::Arc};
 
 use smithay::{
     desktop::{PopupManager, Space, Window, WindowSurfaceType},
@@ -7,7 +7,7 @@ use smithay::{
         calloop::{EventLoop, Interest, LoopSignal, Mode, PostAction, generic::Generic},
         wayland_server::{
             Display, DisplayHandle,
-            backend::{ClientData, ClientId, DisconnectReason},
+            backend::{ClientData, ClientId, DisconnectReason, ObjectId},
             protocol::wl_surface::WlSurface,
         },
     },
@@ -22,7 +22,7 @@ use smithay::{
     },
 };
 
-use crate::window_registry::WindowRegistry;
+use crate::window_registry::{WindowId, WindowRegistry};
 
 use crate::CalloopData;
 
@@ -45,6 +45,7 @@ pub struct NickelSession {
 
     pub seat: Seat<Self>,
     pub windows: WindowRegistry,
+    pub surface_windows: HashMap<ObjectId, WindowId>,
 }
 
 impl NickelSession {
@@ -101,6 +102,7 @@ impl NickelSession {
             popups,
             seat,
             windows: WindowRegistry::default(),
+            surface_windows: HashMap::new(),
         }
     }
 

@@ -11,7 +11,7 @@ use smithay::{
     utils::SERIAL_COUNTER,
 };
 
-use crate::{state::NickelSession, window_registry::WindowId};
+use crate::state::NickelSession;
 
 impl NickelSession {
     pub fn process_input_event<I: InputBackend>(&mut self, event: InputEvent<I>) {
@@ -71,9 +71,13 @@ impl NickelSession {
                         .map(|(w, l)| (w.clone(), l))
                     {
                         self.space.raise_element(&window, true);
-                        self.windows.raise(WindowId(
-                            window.toplevel().unwrap().wl_surface().id().protocol_id(),
-                        ));
+                        if let Some(id) = self
+                            .surface_windows
+                            .get(&window.toplevel().unwrap().wl_surface().id())
+                            .copied()
+                        {
+                            self.windows.raise(id);
+                        }
                         keyboard.set_focus(
                             self,
                             Some(window.toplevel().unwrap().wl_surface().clone()),

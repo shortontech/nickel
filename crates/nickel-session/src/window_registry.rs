@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct WindowId(pub u32);
+pub struct WindowId(pub u64);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WindowInfo {
@@ -15,6 +15,7 @@ pub struct WindowInfo {
 pub struct WindowRegistry {
     windows: BTreeMap<WindowId, WindowInfo>,
     stacking_order: Vec<WindowId>,
+    next_id: u64,
 }
 
 impl WindowRegistry {
@@ -22,15 +23,21 @@ impl WindowRegistry {
         self.windows.len()
     }
 
-    pub fn insert(&mut self, id: WindowId) {
-        self.windows.entry(id).or_insert_with(|| WindowInfo {
+    pub fn insert(&mut self) -> WindowId {
+        self.next_id += 1;
+        let id = WindowId(self.next_id);
+        self.windows.insert(
             id,
-            title: String::new(),
-            app_id: String::new(),
-            active: false,
-        });
+            WindowInfo {
+                id,
+                title: String::new(),
+                app_id: String::new(),
+                active: false,
+            },
+        );
         self.raise(id);
         eprintln!("nickel-session: mapped window {}", id.0);
+        id
     }
 
     pub fn update_metadata(&mut self, id: WindowId, title: Option<String>, app_id: Option<String>) {
@@ -73,33 +80,29 @@ impl WindowRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::{WindowId, WindowRegistry};
+    use super::WindowRegistry;
 
     #[test]
     fn lifecycle_tracks_metadata_focus_and_stacking() {
         let mut registry = WindowRegistry::default();
-        registry.insert(WindowId(7));
-        registry.update_metadata(
-            WindowId(7),
-            Some("Terminal".into()),
-            Some("terminal".into()),
-        );
-        registry.insert(WindowId(8));
+        let terminal = registry.insert();
+        registry.update_metadata(terminal, Some("Terminal".into()), Some("terminal".into()));
+        let browser = registry.insert();
 
         let windows = registry.snapshot();
         assert_eq!(
             windows.iter().map(|window| window.id.0).collect::<Vec<_>>(),
-            [7, 8]
+            [1, 2]
         );
         assert!(!windows[0].active);
         assert!(windows[1].active);
         assert_eq!(windows[0].title, "Terminal");
 
-        registry.raise(WindowId(7));
-        registry.remove(WindowId(8));
+        registry.raise(terminal);
+        registry.remove(browser);
         let windows = registry.snapshot();
         assert_eq!(windows.len(), 1);
-        assert_eq!(windows[0].id, WindowId(7));
+        assert_eq!(windows[0].id, terminal);
         assert!(windows[0].active);
         assert_eq!(registry.len(), 1);
     }
