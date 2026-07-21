@@ -88,10 +88,11 @@ impl PanelGpu {
         let mut icon_buffer = Buffer::new(&mut font_system, Metrics::new(1.0, 1.0));
         icon_buffer.set_size(Some(config.width as f32), Some(config.height as f32));
         let rectangles = RectangleRenderer::new(&device, config.format);
-        let panel_icon =
+        let panel_icon = tinted_panel_icon(
             image::load_from_memory(include_bytes!("../../../assets/icons/nickel-panel.png"))
                 .map_err(|error| format!("failed to decode Nickel panel icon: {error}"))?
-                .into_rgba8();
+                .into_rgba8(),
+        );
 
         Ok(Self {
             surface,
@@ -325,6 +326,13 @@ pub fn fallback_icon() -> image::RgbaImage {
     })
 }
 
+fn tinted_panel_icon(mut icon: image::RgbaImage) -> image::RgbaImage {
+    for pixel in icon.pixels_mut() {
+        pixel.0[..3].copy_from_slice(&[238, 241, 248]);
+    }
+    icon
+}
+
 pub fn launcher_button_contains(position: winit::dpi::PhysicalPosition<f64>) -> bool {
     position.x >= 0.0
         && position.x < LAUNCHER_BUTTON_WIDTH
@@ -340,7 +348,7 @@ fn local_time_text() -> String {
 mod tests {
     use winit::dpi::PhysicalPosition;
 
-    use super::{launcher_button_contains, local_time_text, task_at};
+    use super::{launcher_button_contains, local_time_text, task_at, tinted_panel_icon};
 
     #[test]
     fn local_clock_uses_zero_padded_hour_and_minute() {
@@ -367,5 +375,14 @@ mod tests {
         assert_eq!(task_at(PhysicalPosition::new(111.0, 28.0), 2), Some(0));
         assert_eq!(task_at(PhysicalPosition::new(112.0, 28.0), 2), Some(1));
         assert_eq!(task_at(PhysicalPosition::new(160.0, 28.0), 2), None);
+    }
+
+    #[test]
+    fn panel_icon_tint_preserves_alpha_mask() {
+        let source = image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 0, 0, 127]));
+        assert_eq!(
+            tinted_panel_icon(source).get_pixel(0, 0).0,
+            [238, 241, 248, 127]
+        );
     }
 }
