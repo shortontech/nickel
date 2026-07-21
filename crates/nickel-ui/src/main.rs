@@ -244,7 +244,7 @@ impl Nickel {
             .collect();
         self.preview_group = Some(task_index);
         self.preview_hide_deadline = None;
-        if previews.is_empty() {
+        if previews.len() != windows.len() {
             return;
         }
         let labels: Vec<_> = previews
