@@ -186,6 +186,21 @@ impl Nickel {
         }
     }
 
+    fn launch_result(&self, index: usize) {
+        let Some(result) = self.launcher.result_at(index) else {
+            return;
+        };
+        match result.launch() {
+            Ok(child) => println!(
+                "launched application: {} (pid {}, icon {})",
+                result.name(),
+                child.id(),
+                result.icon().unwrap_or("none")
+            ),
+            Err(error) => eprintln!("failed to launch application {}: {error}", result.name()),
+        }
+    }
+
     fn viewport_metrics(&self) -> (u32, u32, usize) {
         let size = self.window.as_ref().expect("window exists").inner_size();
         (
@@ -792,9 +807,7 @@ impl ApplicationHandler for Nickel {
                 }
                 if let Some(index) = self.hovered_result {
                     self.launcher.select(index);
-                    if let Some(result) = self.launcher.selected_result() {
-                        println!("clicked application: {}", result.name());
-                    }
+                    self.launch_result(index);
                     self.window
                         .as_ref()
                         .expect("window exists")
@@ -843,20 +856,7 @@ impl ApplicationHandler for Nickel {
                     }
                     Key::Named(NamedKey::Escape) => self.launcher.clear(),
                     Key::Named(NamedKey::Enter) => {
-                        if let Some(result) = self.launcher.selected_result() {
-                            match result.launch() {
-                                Ok(child) => println!(
-                                    "launched application: {} (pid {}, icon {})",
-                                    result.name(),
-                                    child.id(),
-                                    result.icon().unwrap_or("none")
-                                ),
-                                Err(error) => eprintln!(
-                                    "failed to launch application {}: {error}",
-                                    result.name()
-                                ),
-                            }
-                        }
+                        self.launch_result(self.launcher.selected_index());
                         changed = false;
                     }
                     Key::Character(text) => self.launcher.insert(&text),
