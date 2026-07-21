@@ -187,6 +187,12 @@ impl Nickel {
     fn set_launcher_visible(&mut self, visible: bool) {
         self.hide_context_menu();
         self.launcher_visibility.set(visible);
+        if !visible {
+            self.launcher.clear();
+            self.hovered_result = None;
+            self.scroll_offset = 0;
+            self.scrollbar_drag_offset = None;
+        }
         if platform::send_shell_command(if visible {
             ShellCommand::Show
         } else {
