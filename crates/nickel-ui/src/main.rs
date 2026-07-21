@@ -231,6 +231,8 @@ impl Nickel {
     }
 
     fn show_window_group(&mut self, task_index: usize) {
+        let preview_was_visible =
+            self.context_preview_mode && self.preview_group == Some(task_index);
         let Some(group) = self.window_groups.get(task_index) else {
             return;
         };
@@ -276,11 +278,13 @@ impl Nickel {
             );
         }
         let x = panel::task_menu_x(task_index);
-        platform::send_shell_command(ShellCommand::ShowPreview {
-            x,
-            width: context_menu::preview_width(labels.len()) as i32,
-            height: context_menu::PREVIEW_HEIGHT as i32,
-        });
+        if !preview_was_visible {
+            platform::send_shell_command(ShellCommand::ShowPreview {
+                x,
+                width: context_menu::preview_width(labels.len()) as i32,
+                height: context_menu::PREVIEW_HEIGHT as i32,
+            });
+        }
         if let Some(window) = &self.context_menu_window {
             window.request_redraw();
         }
