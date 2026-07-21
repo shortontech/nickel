@@ -32,7 +32,7 @@ mod rectangles;
 mod storage;
 
 use launcher::Launcher;
-use model::{OpenWindow, TrayItem, WindowId as ShellWindowId};
+use model::{OpenWindow, TrayItem, WindowGroup, WindowId as ShellWindowId};
 use platform::{ShellCommand, TrayFeed, TraySource, WindowAction, WindowFeed};
 
 const SECONDARY_DISPLAY_ENV: &str = "NICKEL_USE_SECONDARY_DISPLAY";
@@ -42,6 +42,12 @@ enum LauncherVisibility {
     #[default]
     Hidden,
     Visible,
+}
+
+#[derive(Clone, Copy)]
+enum ContextAction {
+    Activate(ShellWindowId),
+    Close(ShellWindowId),
 }
 
 impl LauncherVisibility {
@@ -72,9 +78,11 @@ struct Nickel {
     panel_tray_hovered: Option<usize>,
     context_menu_window: Option<Arc<Window>>,
     context_menu_gpu: Option<context_menu::ContextMenuGpu>,
-    context_menu_hovered: bool,
+    context_menu_hovered: Option<usize>,
     context_menu_target: Option<ShellWindowId>,
+    context_menu_actions: Vec<ContextAction>,
     task_windows: Vec<OpenWindow>,
+    window_groups: Vec<WindowGroup>,
     tray_items: Vec<TrayItem>,
     launcher_visibility: LauncherVisibility,
     clock_deadline: Instant,
@@ -121,9 +129,11 @@ impl Default for Nickel {
             panel_tray_hovered: None,
             context_menu_window: None,
             context_menu_gpu: None,
-            context_menu_hovered: false,
+            context_menu_hovered: None,
             context_menu_target: None,
+            context_menu_actions: Vec::new(),
             task_windows: Vec::new(),
+            window_groups: Vec::new(),
             tray_items: Vec::new(),
             launcher_visibility: LauncherVisibility::default(),
             clock_deadline: next_minute_deadline(Instant::now(), SystemTime::now()),
@@ -162,7 +172,8 @@ impl Nickel {
 
     fn hide_context_menu(&mut self) {
         self.context_menu_target = None;
-        self.context_menu_hovered = false;
+        self.context_menu_hovered = None;
+        self.context_menu_actions.clear();
         if !platform::send_shell_command(ShellCommand::HideContextMenu)
             && let Some(window) = &self.context_menu_window
         {
@@ -171,20 +182,69 @@ impl Nickel {
     }
 
     fn show_context_menu(&mut self, task_index: usize) {
-        let Some(task) = self.task_windows.get(task_index) else {
+        let Some(task) = self
+            .window_groups
+            .get(task_index)
+            .and_then(|group| group.windows.last())
+        else {
             return;
         };
-        self.context_menu_target = Some(task.id);
+        let task = task.id;
+        self.context_menu_target = Some(task);
         if !self.ensure_context_menu_gpu() {
             return;
         }
+        self.context_menu_actions = vec![ContextAction::Close(task)];
+        if let Some(gpu) = &mut self.context_menu_gpu {
+            gpu.set_labels(&["Close window".into()]);
+        }
         let x = panel::task_menu_x(task_index);
-        if !platform::send_shell_command(ShellCommand::ShowContextMenu { x })
-            && let Some(window) = &self.context_menu_window
+        if !platform::send_shell_command(ShellCommand::ShowContextMenu {
+            x,
+            height: context_menu::height_for(1) as i32,
+        }) && let Some(window) = &self.context_menu_window
         {
             window.set_visible(true);
             window.focus_window();
         }
+        if let Some(window) = &self.context_menu_window {
+            window.request_redraw();
+        }
+    }
+
+    fn show_window_group(&mut self, task_index: usize) {
+        let Some(group) = self.window_groups.get(task_index) else {
+            return;
+        };
+        let actions: Vec<_> = group
+            .windows
+            .iter()
+            .map(|window| ContextAction::Activate(window.id))
+            .collect();
+        let labels: Vec<_> = group
+            .windows
+            .iter()
+            .map(|window| {
+                if window.title.is_empty() {
+                    group.application_name.clone()
+                } else {
+                    window.title.clone()
+                }
+            })
+            .collect();
+        self.context_menu_target = group.windows.last().map(|window| window.id);
+        if !self.ensure_context_menu_gpu() {
+            return;
+        }
+        self.context_menu_actions = actions;
+        if let Some(gpu) = &mut self.context_menu_gpu {
+            gpu.set_labels(&labels);
+        }
+        let x = panel::task_menu_x(task_index);
+        platform::send_shell_command(ShellCommand::ShowContextMenu {
+            x,
+            height: context_menu::height_for(labels.len()) as i32,
+        });
         if let Some(window) = &self.context_menu_window {
             window.request_redraw();
         }
@@ -230,27 +290,29 @@ impl Nickel {
         if windows == self.task_windows {
             return;
         }
-        let tasks = windows
+        let groups = self.launcher.group_windows(&windows);
+        let tasks = groups
             .iter()
-            .map(|window| {
-                let resolved = window
+            .map(|group| {
+                let resolved = group
                     .application_id
                     .as_ref()
                     .and_then(|id| self.launcher.application(id))
                     .and_then(|application| application.icon_path())
                     .and_then(icons::load);
                 if resolved.is_none() {
-                    eprintln!("no panel icon resolved for window {}", window.id.0);
+                    eprintln!("no panel icon resolved for {}", group.application_name);
                 }
                 let icon = resolved.unwrap_or_else(panel::fallback_icon);
                 panel::PanelTask {
-                    id: window.id.0,
-                    active: window.active,
+                    id: group.windows.last().map_or(0, |window| window.id.0),
+                    active: group.active(),
                     icon,
                 }
             })
             .collect();
         self.task_windows = windows;
+        self.window_groups = groups;
         if self
             .context_menu_target
             .is_some_and(|target| !self.task_windows.iter().any(|window| window.id == target))
@@ -755,7 +817,7 @@ impl ApplicationHandler for Nickel {
                     }
                 }
                 WindowEvent::CursorMoved { position, .. } => {
-                    let hovered = context_menu::item_contains(position);
+                    let hovered = context_menu::item_at(position, self.context_menu_actions.len());
                     if hovered != self.context_menu_hovered {
                         self.context_menu_hovered = hovered;
                         self.context_menu_window
@@ -765,7 +827,7 @@ impl ApplicationHandler for Nickel {
                     }
                 }
                 WindowEvent::CursorLeft { .. } => {
-                    self.context_menu_hovered = false;
+                    self.context_menu_hovered = None;
                     self.context_menu_window
                         .as_ref()
                         .expect("context menu window exists")
@@ -775,12 +837,17 @@ impl ApplicationHandler for Nickel {
                     state: ElementState::Pressed,
                     button: MouseButton::Left,
                     ..
-                } if self.context_menu_hovered => {
-                    if let Some(window) = self.context_menu_target {
-                        platform::send_shell_command(ShellCommand::WindowAction {
-                            window,
-                            action: WindowAction::Close,
-                        });
+                } if self.context_menu_hovered.is_some() => {
+                    if let Some(action) = self
+                        .context_menu_hovered
+                        .and_then(|index| self.context_menu_actions.get(index))
+                        .copied()
+                    {
+                        let (window, action) = match action {
+                            ContextAction::Activate(window) => (window, WindowAction::Activate),
+                            ContextAction::Close(window) => (window, WindowAction::Close),
+                        };
+                        platform::send_shell_command(ShellCommand::WindowAction { window, action });
                     }
                     self.hide_context_menu();
                 }
@@ -808,7 +875,7 @@ impl ApplicationHandler for Nickel {
                 }
                 WindowEvent::CursorMoved { position, .. } => {
                     let hovered = panel::launcher_button_contains(position);
-                    let task_hovered = panel::task_at(position, self.task_windows.len());
+                    let task_hovered = panel::task_at(position, self.window_groups.len());
                     let tray_hovered = self.panel_window.as_ref().and_then(|window| {
                         panel::tray_at(position, window.inner_size().width, self.tray_items.len())
                     });
@@ -869,7 +936,29 @@ impl ApplicationHandler for Nickel {
                     state: ElementState::Pressed,
                     button: MouseButton::Left,
                     ..
-                } => self.hide_context_menu(),
+                } => {
+                    if let Some(index) = self.panel_task_hovered {
+                        if self
+                            .window_groups
+                            .get(index)
+                            .is_some_and(|group| group.windows.len() > 1)
+                        {
+                            self.show_window_group(index);
+                            return;
+                        }
+                        if let Some(window) = self
+                            .window_groups
+                            .get(index)
+                            .and_then(|group| group.windows.last())
+                        {
+                            platform::send_shell_command(ShellCommand::WindowAction {
+                                window: window.id,
+                                action: WindowAction::Activate,
+                            });
+                        }
+                    }
+                    self.hide_context_menu();
+                }
                 _ => {}
             }
             return;

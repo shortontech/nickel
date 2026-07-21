@@ -93,6 +93,20 @@ pub struct OpenWindow {
     pub id: WindowId,
     pub application_id: Option<ApplicationId>,
     pub active: bool,
+    pub title: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WindowGroup {
+    pub application_id: Option<ApplicationId>,
+    pub application_name: String,
+    pub windows: Vec<OpenWindow>,
+}
+
+impl WindowGroup {
+    pub fn active(&self) -> bool {
+        self.windows.iter().any(|window| window.active)
+    }
 }
 
 #[cfg(test)]
