@@ -254,7 +254,7 @@ impl Gpu {
                     TextArea {
                         buffer: &self.results_buffer,
                         left: layout::RESULT_TEXT_LEFT,
-                        top: layout::RESULT_TOP,
+                        top: layout::RESULT_TEXT_TOP,
                         scale: 1.0,
                         bounds: TextBounds {
                             left: 0,
