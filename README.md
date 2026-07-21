@@ -347,4 +347,5 @@ Pull requests should explain user-visible behavior, list tested platforms, refer
 
 ## License
 
-License information will be added before the first public release.
+Nickel is dual-licensed under the [MIT License](LICENSE-MIT) or the
+[Apache License, Version 2.0](LICENSE-APACHE), at your option.
