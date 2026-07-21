@@ -158,6 +158,12 @@ impl Launcher {
         }
     }
 
+    pub fn select(&mut self, index: usize) {
+        if index < self.results.len() {
+            self.selected = index;
+        }
+    }
+
     fn refresh(&mut self) {
         let pattern = Pattern::new(
             &self.query,

@@ -1175,6 +1175,7 @@ dependencies = [
 name = "nickel-ui"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "freedesktop-desktop-entry",
  "freedesktop-icons",
  "glyphon",

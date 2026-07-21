@@ -7,14 +7,15 @@ use glyphon::{
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
-use winit::event::{ElementState, WindowEvent};
+use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::monitor::MonitorHandle;
-use winit::window::{Window, WindowAttributes, WindowId};
+use winit::window::{CursorIcon, Window, WindowAttributes, WindowId};
 
 mod icons;
 mod launcher;
+mod rectangles;
 
 #[cfg(target_os = "linux")]
 mod desktop_entries;
@@ -27,6 +28,7 @@ struct Nickel {
     window: Option<Arc<Window>>,
     gpu: Option<Gpu>,
     launcher: Launcher,
+    hovered_result: Option<usize>,
 }
 
 impl Default for Nickel {
@@ -45,6 +47,7 @@ impl Default for Nickel {
             window: None,
             gpu: None,
             launcher,
+            hovered_result: None,
         }
     }
 }
@@ -63,6 +66,7 @@ struct Gpu {
     results_buffer: Buffer,
     icon_ids: HashMap<PathBuf, u16>,
     icon_images: Vec<Option<image::RgbaImage>>,
+    rectangle_renderer: rectangles::RectangleRenderer,
 }
 
 impl Gpu {
@@ -100,6 +104,7 @@ impl Gpu {
         let mut atlas = TextAtlas::new(&device, &queue, &cache, config.format);
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
+        let rectangle_renderer = rectangles::RectangleRenderer::new(&device, config.format);
         let mut search_buffer = Buffer::new(&mut font_system, Metrics::new(30.0, 44.0));
         search_buffer.set_size(Some(config.width.saturating_sub(112) as f32), Some(56.0));
         let mut results_buffer = Buffer::new(&mut font_system, Metrics::new(24.0, 52.0));
@@ -122,6 +127,7 @@ impl Gpu {
             results_buffer,
             icon_ids: HashMap::new(),
             icon_images: Vec::new(),
+            rectangle_renderer,
         })
     }
 
@@ -138,7 +144,7 @@ impl Gpu {
             .set_size(Some(text_width), Some(height.saturating_sub(180) as f32));
     }
 
-    fn render(&mut self, launcher: &Launcher) {
+    fn render(&mut self, launcher: &Launcher, hovered_result: Option<usize>) {
         let search_text = if launcher.query().is_empty() {
             "Search applications…".to_owned()
         } else {
@@ -215,6 +221,11 @@ impl Gpu {
                 width: self.config.width,
                 height: self.config.height,
             },
+        );
+        self.rectangle_renderer.update_hover(
+            &self.queue,
+            (self.config.width, self.config.height),
+            hovered_result,
         );
         let icon_images = &self.icon_images;
         self.text_renderer
@@ -307,6 +318,7 @@ impl Gpu {
                 })],
                 ..Default::default()
             });
+            self.rectangle_renderer.render(&mut pass);
             self.text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)
                 .expect("text rendering should succeed");
@@ -383,7 +395,50 @@ impl ApplicationHandler for Nickel {
             }
             WindowEvent::RedrawRequested => {
                 if let Some(gpu) = &mut self.gpu {
-                    gpu.render(&self.launcher);
+                    gpu.render(&self.launcher, self.hovered_result);
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                let hovered = hit_test_result(
+                    position,
+                    self.window
+                        .as_ref()
+                        .expect("window exists")
+                        .inner_size()
+                        .width,
+                    self.launcher.result_count(),
+                );
+                if hovered != self.hovered_result {
+                    self.hovered_result = hovered;
+                    let window = self.window.as_ref().expect("window exists");
+                    window.set_cursor(if hovered.is_some() {
+                        CursorIcon::Pointer
+                    } else {
+                        CursorIcon::Default
+                    });
+                    window.request_redraw();
+                }
+            }
+            WindowEvent::CursorLeft { .. } => {
+                self.hovered_result = None;
+                let window = self.window.as_ref().expect("window exists");
+                window.set_cursor(CursorIcon::Default);
+                window.request_redraw();
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => {
+                if let Some(index) = self.hovered_result {
+                    self.launcher.select(index);
+                    if let Some(result) = self.launcher.selected_result() {
+                        println!("clicked application: {}", result.name());
+                    }
+                    self.window
+                        .as_ref()
+                        .expect("window exists")
+                        .request_redraw();
                 }
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
@@ -466,9 +521,28 @@ fn centered_position(monitor: &MonitorHandle, window_size: (u32, u32)) -> Physic
     PhysicalPosition::new(x, y)
 }
 
+fn hit_test_result(
+    position: PhysicalPosition<f64>,
+    window_width: u32,
+    result_count: usize,
+) -> Option<usize> {
+    if position.x < 40.0 || position.x >= f64::from(window_width.saturating_sub(40)) {
+        return None;
+    }
+    let relative_y = position.y - 132.0;
+    if relative_y < 0.0 {
+        return None;
+    }
+    let index = (relative_y / 52.0) as usize;
+    let within_row = relative_y % 52.0 < 48.0;
+    (within_row && index < result_count).then_some(index)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::env_flag;
+    use winit::dpi::PhysicalPosition;
+
+    use super::{env_flag, hit_test_result};
 
     #[test]
     fn missing_environment_flag_is_disabled() {
@@ -488,5 +562,21 @@ mod tests {
         }
         // SAFETY: This test uses a unique variable name and no other thread accesses it.
         unsafe { std::env::remove_var(name) };
+    }
+
+    #[test]
+    fn result_hit_testing_excludes_gaps_and_empty_rows() {
+        assert_eq!(
+            hit_test_result(PhysicalPosition::new(100.0, 140.0), 960, 3),
+            Some(0)
+        );
+        assert_eq!(
+            hit_test_result(PhysicalPosition::new(100.0, 181.0), 960, 3),
+            None
+        );
+        assert_eq!(
+            hit_test_result(PhysicalPosition::new(100.0, 300.0), 960, 3),
+            None
+        );
     }
 }

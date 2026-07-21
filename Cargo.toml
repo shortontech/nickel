@@ -9,6 +9,7 @@ license = "MIT OR Apache-2.0"
 rust-version = "1.94"
 
 [workspace.dependencies]
+bytemuck = { version = "1.25.0", features = ["derive"] }
 freedesktop-desktop-entry = { version = "0.8.1", default-features = false }
 freedesktop-icons = "0.4.0"
 glyphon = "0.12.0"
