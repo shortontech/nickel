@@ -631,11 +631,17 @@ struct Gpu {
     text_renderer: TextRenderer,
     search_buffer: Buffer,
     result_buffers: Vec<Buffer>,
-    icon_ids: HashMap<PathBuf, u16>,
+    icon_ids: HashMap<LauncherIconSource, u16>,
     icon_images: Vec<Option<image::RgbaImage>>,
-    icon_requests: mpsc::Sender<(u16, PathBuf)>,
+    icon_requests: mpsc::Sender<(u16, LauncherIconSource)>,
     icon_results: mpsc::Receiver<(u16, Option<image::RgbaImage>)>,
     rectangle_renderer: rectangles::RectangleRenderer,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+enum LauncherIconSource {
+    File(PathBuf),
+    Platform(String),
 }
 
 impl Gpu {
@@ -665,14 +671,20 @@ impl Gpu {
         let result_buffers = (0..9)
             .map(|_| Buffer::new(&mut font_system, Metrics::new(24.0, 48.0)))
             .collect();
-        let (icon_requests, worker_requests) = mpsc::channel::<(u16, PathBuf)>();
+        let (icon_requests, worker_requests) = mpsc::channel::<(u16, LauncherIconSource)>();
         let (worker_results, icon_results) = mpsc::channel();
         let redraw_window = window.clone();
         thread::Builder::new()
             .name("nickel-icon-loader".into())
             .spawn(move || {
-                while let Ok((id, path)) = worker_requests.recv() {
-                    if worker_results.send((id, icons::load(&path))).is_err() {
+                while let Ok((id, source)) = worker_requests.recv() {
+                    let image = match source {
+                        LauncherIconSource::File(path) => icons::load(&path),
+                        LauncherIconSource::Platform(reference) => {
+                            platform::application_icon(&reference)
+                        }
+                    };
+                    if worker_results.send((id, image)).is_err() {
                         break;
                     }
                     redraw_window.request_redraw();
@@ -772,22 +784,28 @@ impl Gpu {
             );
             buffer.shape_until_scroll(&mut self.font_system, false);
 
-            let Some(path) = launcher
-                .result_at(result_index)
-                .and_then(|application| application.icon_path())
-            else {
+            let Some(source) = launcher.result_at(result_index).and_then(|application| {
+                application
+                    .icon_path()
+                    .map(|path| LauncherIconSource::File(path.to_owned()))
+                    .or_else(|| {
+                        application
+                            .icon()
+                            .map(|reference| LauncherIconSource::Platform(reference.to_owned()))
+                    })
+            }) else {
                 continue;
             };
-            let glyph_id = if let Some(id) = self.icon_ids.get(path) {
+            let glyph_id = if let Some(id) = self.icon_ids.get(&source) {
                 *id
             } else {
                 let Ok(id) = u16::try_from(self.icon_images.len()) else {
                     continue;
                 };
-                self.icon_ids.insert(path.to_owned(), id);
+                self.icon_ids.insert(source.clone(), id);
                 self.icon_images.push(None);
-                if self.icon_requests.send((id, path.to_owned())).is_err() {
-                    eprintln!("icon loader stopped before loading {}", path.display());
+                if self.icon_requests.send((id, source)).is_err() {
+                    eprintln!("launcher icon loader stopped");
                 }
                 id
             };

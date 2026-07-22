@@ -45,8 +45,15 @@ use crate::{
     platform::{GlobalShortcut, ShellCommand, TraySource, WindowAction},
 };
 
+#[path = "windows_start_menu.rs"]
+mod start_menu;
+
 pub fn applications() -> Vec<Application> {
-    Vec::new()
+    start_menu::load_applications()
+}
+
+pub fn application_icon(reference: &str) -> Option<image::RgbaImage> {
+    executable_icon(PathBuf::from(reference).as_path())
 }
 
 pub fn launcher_hotkey_receiver() -> Receiver<GlobalShortcut> {
@@ -134,6 +141,9 @@ unsafe extern "system" fn windows_key_hook(code: i32, wparam: WPARAM, lparam: LP
         if windows_key && key_down {
             WINDOWS_KEY_HELD.store(true, Ordering::Relaxed);
             WINDOWS_KEY_CHORDED.store(false, Ordering::Relaxed);
+            // Nickel owns the Windows key completely. Forwarding only the press while consuming
+            // the release leaves Windows' modifier state stuck and prevents launcher typing.
+            return LRESULT(1);
         } else if WINDOWS_KEY_HELD.load(Ordering::Relaxed) && key_down {
             WINDOWS_KEY_CHORDED.store(true, Ordering::Relaxed);
         } else if windows_key && key_up {
@@ -142,8 +152,8 @@ unsafe extern "system" fn windows_key_hook(code: i32, wparam: WPARAM, lparam: LP
                 if let Some(sender) = WINDOWS_KEY_SENDER.get() {
                     let _ = sender.send(GlobalShortcut::ToggleLauncher);
                 }
-                return LRESULT(1);
             }
+            return LRESULT(1);
         }
     }
     // SAFETY: Unhandled events must continue through the hook chain.

@@ -251,6 +251,10 @@ pub fn launcher_hotkey_receiver() -> mpsc::Receiver<GlobalShortcut> {
     receiver
 }
 
+pub fn application_icon(_: &str) -> Option<image::RgbaImage> {
+    None
+}
+
 impl Drop for WindowFeed {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
