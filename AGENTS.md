@@ -26,6 +26,10 @@ Use standard Cargo commands from the workspace root:
 
 Add platform-specific commands here when packaging and test harnesses are introduced.
 
+On Windows development hosts, prefer installed Unix-style tools such as `rg`, `cat`, and `ps`
+for routine searching, reading, and process inspection. Use PowerShell-specific commands only when
+the task genuinely requires Windows APIs or no suitable Unix-style tool is available.
+
 ## Coding Style & Naming Conventions
 
 Use stable Rust and standard `rustfmt` formatting. Name modules, functions, and files in `snake_case`; types and traits in `UpperCamelCase`; constants in `SCREAMING_SNAKE_CASE`. Prefer explicit platform boundaries using `cfg(target_os = "...")`. Keep unsafe code localized, documented with a `SAFETY:` justification, and covered by focused tests.

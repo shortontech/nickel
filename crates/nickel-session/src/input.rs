@@ -1,7 +1,7 @@
 use smithay::{
     backend::input::{
         AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, InputBackend, InputEvent,
-        KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent,
+        KeyState, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent,
     },
     input::{
         keyboard::FilterResult,
@@ -17,6 +17,14 @@ impl NickelSession {
     pub fn process_input_event<I: InputBackend>(&mut self, event: InputEvent<I>) {
         match event {
             InputEvent::Keyboard { event, .. } => {
+                const KEY_LEFTMETA: u32 = 125;
+                const KEY_RIGHTMETA: u32 = 126;
+                if matches!(event.key_code().raw(), KEY_LEFTMETA | KEY_RIGHTMETA) {
+                    if event.state() == KeyState::Released {
+                        self.toggle_launcher();
+                    }
+                    return;
+                }
                 let serial = SERIAL_COUNTER.next_serial();
                 let time = Event::time_msec(&event);
 

@@ -10,7 +10,7 @@ use crate::{
     icons,
     launcher::Launcher,
     model::{Application, ApplicationId, OpenWindow, TrayItem, WindowId, WindowPreview},
-    platform::{ShellCommand, TraySource, WindowAction},
+    platform::{GlobalShortcut, ShellCommand, TraySource, WindowAction},
 };
 
 #[path = "../desktop_entries.rs"]
@@ -236,6 +236,19 @@ impl WindowFeed {
         }
         None
     }
+
+    pub fn supports_previews(&self) -> bool {
+        self.socket.is_some()
+    }
+
+    pub fn icon(&self, _: WindowId) -> Option<image::RgbaImage> {
+        None
+    }
+}
+
+pub fn launcher_hotkey_receiver() -> mpsc::Receiver<GlobalShortcut> {
+    let (_sender, receiver) = mpsc::channel();
+    receiver
 }
 
 impl Drop for WindowFeed {

@@ -18,7 +18,7 @@ const TRAY_WIDTH: f64 = 40.0;
 const CLOCK_WIDTH: f64 = 100.0;
 
 pub struct PanelTask {
-    pub id: u64,
+    pub glyph_id: u16,
     pub active: bool,
     pub icon: image::RgbaImage,
 }
@@ -158,7 +158,7 @@ impl PanelGpu {
                 .iter()
                 .enumerate()
                 .map(|(index, task)| CustomGlyph {
-                    id: u16::try_from(task.id).unwrap_or(u16::MAX),
+                    id: task.glyph_id,
                     left: (TASKS_LEFT + index as f64 * TASK_WIDTH + 8.0) as f32,
                     top: 12.0,
                     width: 32.0,
@@ -262,7 +262,7 @@ impl PanelGpu {
                         &self
                             .tasks
                             .iter()
-                            .find(|task| u16::try_from(task.id).ok() == Some(request.id))?
+                            .find(|task| task.glyph_id == request.id)?
                             .icon
                     };
                     let image = icons::resized(source, request.width.into(), request.height.into());
