@@ -1,7 +1,10 @@
+#[cfg(target_os = "linux")]
 use std::{thread, time::Duration};
 
+#[cfg(target_os = "linux")]
 struct TestTray;
 
+#[cfg(target_os = "linux")]
 #[zbus::interface(name = "org.kde.StatusNotifierItem")]
 impl TestTray {
     fn activate(&self, _x: i32, _y: i32) {
@@ -53,6 +56,7 @@ impl TestTray {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let connection = zbus::blocking::Connection::session()?;
     connection.request_name("org.nickel.TestTray")?;
@@ -71,3 +75,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         thread::sleep(Duration::from_secs(60));
     }
 }
+
+#[cfg(not(target_os = "linux"))]
+fn main() {}
