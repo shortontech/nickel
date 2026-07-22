@@ -48,19 +48,23 @@ pub enum ShellCommand {
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
-pub use linux::{TrayFeed, WindowFeed, applications, launcher_hotkey_receiver, send_shell_command};
+pub use linux::{
+    TrayFeed, WindowFeed, application_icon, applications, launcher_hotkey_receiver,
+    send_shell_command,
+};
 
 #[cfg(target_os = "windows")]
 mod windows;
 #[cfg(target_os = "windows")]
 pub use windows::{
-    TrayFeed, WindowFeed, applications, configure_desktop_window, configure_panel_window,
-    launcher_hotkey_receiver, release_panel_window, send_shell_command,
+    TrayFeed, WindowFeed, application_icon, applications, configure_desktop_window,
+    configure_panel_window, launcher_hotkey_receiver, release_panel_window, send_shell_command,
 };
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 mod unsupported;
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 pub use unsupported::{
-    TrayFeed, WindowFeed, applications, launcher_hotkey_receiver, send_shell_command,
+    TrayFeed, WindowFeed, application_icon, applications, launcher_hotkey_receiver,
+    send_shell_command,
 };

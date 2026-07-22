@@ -13,6 +13,10 @@ pub fn launcher_hotkey_receiver() -> std::sync::mpsc::Receiver<GlobalShortcut> {
     receiver
 }
 
+pub fn application_icon(_: &str) -> Option<image::RgbaImage> {
+    None
+}
+
 pub struct TrayFeed;
 impl TrayFeed {
     pub fn new() -> Self {
