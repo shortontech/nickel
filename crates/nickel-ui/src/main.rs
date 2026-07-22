@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env,
     path::PathBuf,
     sync::{Arc, mpsc},
@@ -13,14 +13,15 @@ use glyphon::{
     TextAtlas, TextBounds, TextRenderer, Viewport,
 };
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalSize, PhysicalPosition};
+use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::monitor::MonitorHandle;
-use winit::window::{CursorIcon, Window, WindowAttributes, WindowId};
+use winit::window::{CursorIcon, Window, WindowAttributes, WindowId, WindowLevel};
 
 mod context_menu;
+mod desktop;
 mod graphics;
 mod icons;
 mod launcher;
@@ -33,9 +34,10 @@ mod storage;
 
 use launcher::Launcher;
 use model::{OpenWindow, TrayItem, WindowGroup, WindowId as ShellWindowId};
-use platform::{ShellCommand, TrayFeed, TraySource, WindowAction, WindowFeed};
+use platform::{GlobalShortcut, ShellCommand, TrayFeed, TraySource, WindowAction, WindowFeed};
 
 const SECONDARY_DISPLAY_ENV: &str = "NICKEL_USE_SECONDARY_DISPLAY";
+const PANEL_HEIGHT: f64 = 56.0;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum LauncherVisibility {
@@ -71,6 +73,8 @@ impl LauncherVisibility {
 }
 
 struct Nickel {
+    desktop_window: Option<Arc<Window>>,
+    desktop_gpu: Option<desktop::DesktopGpu>,
     window: Option<Arc<Window>>,
     gpu: Option<Gpu>,
     panel_window: Option<Arc<Window>>,
@@ -89,8 +93,13 @@ struct Nickel {
     preview_hide_deadline: Option<Instant>,
     task_windows: Vec<OpenWindow>,
     window_groups: Vec<WindowGroup>,
+    panel_glyph_ids: HashMap<String, u16>,
+    next_panel_glyph_id: u16,
+    unresolved_panel_icons: HashSet<String>,
     tray_items: Vec<TrayItem>,
     launcher_visibility: LauncherVisibility,
+    launcher_hotkey_rx: mpsc::Receiver<GlobalShortcut>,
+    task_switcher_active: bool,
     clock_deadline: Instant,
     window_deadline: Instant,
     window_feed: WindowFeed,
@@ -126,6 +135,8 @@ impl Default for Nickel {
             }
         };
         Self {
+            desktop_window: None,
+            desktop_gpu: None,
             window: None,
             gpu: None,
             panel_window: None,
@@ -144,8 +155,13 @@ impl Default for Nickel {
             preview_hide_deadline: None,
             task_windows: Vec::new(),
             window_groups: Vec::new(),
+            panel_glyph_ids: HashMap::new(),
+            next_panel_glyph_id: 1,
+            unresolved_panel_icons: HashSet::new(),
             tray_items: Vec::new(),
             launcher_visibility: LauncherVisibility::default(),
+            launcher_hotkey_rx: platform::launcher_hotkey_receiver(),
+            task_switcher_active: false,
             clock_deadline: next_minute_deadline(Instant::now(), SystemTime::now()),
             window_deadline: Instant::now(),
             window_feed: WindowFeed::new(),
@@ -369,6 +385,102 @@ impl Nickel {
         }
     }
 
+    fn advance_task_switcher(&mut self, forward: bool) {
+        if !self.task_switcher_active {
+            self.refresh_task_windows();
+            if self.task_windows.len() < 2 {
+                return;
+            }
+            self.context_menu_actions = self
+                .task_windows
+                .iter()
+                .map(|window| ContextAction::Activate(window.id))
+                .collect();
+            let labels: Vec<_> = self
+                .task_windows
+                .iter()
+                .map(|window| {
+                    if window.title.is_empty() {
+                        "Untitled window".to_owned()
+                    } else {
+                        window.title.clone()
+                    }
+                })
+                .collect();
+            let active = self
+                .task_windows
+                .iter()
+                .position(|window| window.active)
+                .unwrap_or(0);
+            self.context_menu_hovered = Some(active);
+            self.context_menu_target = self.task_windows.get(active).map(|window| window.id);
+            self.context_preview_mode = false;
+            self.preview_group = None;
+            self.preview_hide_deadline = None;
+            if !self.ensure_context_menu_gpu() {
+                return;
+            }
+            if let Some(gpu) = &mut self.context_menu_gpu {
+                gpu.set_labels(&labels);
+            }
+            let height = context_menu::height_for(labels.len());
+            if let Some(window) = &self.context_menu_window {
+                let _ = window.request_inner_size(PhysicalSize::new(context_menu::WIDTH, height));
+                if let Some(monitor) = window.current_monitor().or_else(|| {
+                    self.panel_window
+                        .as_ref()
+                        .and_then(|panel| panel.current_monitor())
+                }) {
+                    window.set_outer_position(centered_position(
+                        &monitor,
+                        (context_menu::WIDTH, height),
+                    ));
+                }
+                window.set_visible(true);
+                window.focus_window();
+            }
+            self.task_switcher_active = true;
+        }
+        let count = self.context_menu_actions.len();
+        if count == 0 {
+            return;
+        }
+        let current = self.context_menu_hovered.unwrap_or(0);
+        let selected = if forward {
+            (current + 1) % count
+        } else {
+            (current + count - 1) % count
+        };
+        self.context_menu_hovered = Some(selected);
+        self.context_menu_target = self.task_windows.get(selected).map(|window| window.id);
+        if let Some(window) = &self.context_menu_window {
+            window.request_redraw();
+        }
+    }
+
+    fn commit_task_switcher(&mut self) {
+        if !self.task_switcher_active {
+            return;
+        }
+        let target = self.context_menu_hovered.and_then(|index| {
+            self.context_menu_actions.get(index).and_then(|action| {
+                if let ContextAction::Activate(window) = action {
+                    Some(*window)
+                } else {
+                    None
+                }
+            })
+        });
+        self.task_switcher_active = false;
+        self.hide_context_menu();
+        if let Some(window) = target {
+            platform::send_shell_command(ShellCommand::WindowAction {
+                window,
+                action: WindowAction::Activate,
+            });
+        }
+    }
+
     fn refresh_task_windows(&mut self) {
         let Some(windows) = self.window_feed.snapshot(&self.launcher) else {
             return;
@@ -376,27 +488,44 @@ impl Nickel {
         if windows == self.task_windows {
             return;
         }
-        let groups = self.launcher.group_windows(&windows);
-        let tasks = groups
-            .iter()
-            .map(|group| {
-                let resolved = group
-                    .application_id
-                    .as_ref()
-                    .and_then(|id| self.launcher.application(id))
-                    .and_then(|application| application.icon_path())
-                    .and_then(icons::load);
-                if resolved.is_none() {
-                    eprintln!("no panel icon resolved for {}", group.application_name);
-                }
-                let icon = resolved.unwrap_or_else(panel::fallback_icon);
-                panel::PanelTask {
-                    id: group.windows.last().map_or(0, |window| window.id.0),
-                    active: group.active(),
-                    icon,
-                }
-            })
-            .collect();
+        let groups =
+            stable_window_group_order(&self.window_groups, self.launcher.group_windows(&windows));
+        let mut tasks = Vec::with_capacity(groups.len());
+        for group in &groups {
+            let key = window_group_key(group);
+            let glyph_id = if let Some(id) = self.panel_glyph_ids.get(&key) {
+                *id
+            } else {
+                let id = self.next_panel_glyph_id;
+                self.next_panel_glyph_id += 1;
+                self.panel_glyph_ids.insert(key, id);
+                id
+            };
+            let resolved = group
+                .application_id
+                .as_ref()
+                .and_then(|id| self.launcher.application(id))
+                .and_then(|application| application.icon_path())
+                .and_then(icons::load)
+                .or_else(|| {
+                    group
+                        .windows
+                        .last()
+                        .and_then(|window| self.window_feed.icon(window.id))
+                });
+            if resolved.is_none()
+                && self
+                    .unresolved_panel_icons
+                    .insert(group.application_name.clone())
+            {
+                eprintln!("no panel icon resolved for {}", group.application_name);
+            }
+            tasks.push(panel::PanelTask {
+                glyph_id,
+                active: group.active(),
+                icon: resolved.unwrap_or_else(panel::fallback_icon),
+            });
+        }
         self.task_windows = windows;
         self.window_groups = groups;
         if self
@@ -814,25 +943,62 @@ impl ApplicationHandler for Nickel {
         let primary = event_loop.primary_monitor();
         let target = select_monitor(&monitors, primary.as_ref(), use_secondary);
 
+        let mut desktop_attributes = WindowAttributes::default()
+            .with_title("Nickel Desktop")
+            .with_inner_size(PhysicalSize::new(1280, 720))
+            .with_decorations(false)
+            .with_resizable(false)
+            .with_window_level(WindowLevel::AlwaysOnBottom);
         let mut launcher_attributes = WindowAttributes::default()
             .with_title("Nickel Launcher Initializing")
             .with_inner_size(LogicalSize::new(960, 640))
             .with_min_inner_size(LogicalSize::new(480, 320))
+            .with_visible(false)
             .with_decorations(false);
         let mut panel_attributes = WindowAttributes::default()
             .with_title("Nickel Panel")
-            .with_inner_size(LogicalSize::new(220, 56))
+            .with_inner_size(LogicalSize::new(960.0, PANEL_HEIGHT))
             .with_decorations(false);
         let context_menu_attributes = WindowAttributes::default()
             .with_title("Nickel Context Menu")
             .with_inner_size(LogicalSize::new(context_menu::WIDTH, context_menu::HEIGHT))
-            .with_decorations(false);
-        if let Some(monitor) = target {
+            .with_visible(false)
+            .with_decorations(false)
+            .with_window_level(WindowLevel::AlwaysOnTop);
+        if let Some(monitor) = target.as_ref() {
+            desktop_attributes = desktop_attributes
+                .with_inner_size(monitor.size())
+                .with_position(monitor.position());
             launcher_attributes =
-                launcher_attributes.with_position(centered_position(&monitor, (960, 640)));
-            panel_attributes = panel_attributes.with_position(panel_position(&monitor, (220, 56)));
+                launcher_attributes.with_position(centered_position(monitor, (960, 640)));
+            let (panel_size, panel_position) =
+                panel_layout(monitor.position(), monitor.size(), monitor.scale_factor());
+            panel_attributes = panel_attributes
+                .with_inner_size(panel_size)
+                .with_position(panel_position);
         }
 
+        let desktop_window = if cfg!(target_os = "windows") {
+            let Ok(window) = event_loop.create_window(desktop_attributes) else {
+                eprintln!("failed to create Nickel desktop window");
+                event_loop.exit();
+                return;
+            };
+            let window = Arc::new(window);
+            #[cfg(target_os = "windows")]
+            {
+                use winit::platform::windows::WindowExtWindows;
+                window.set_skip_taskbar(true);
+                if !platform::configure_desktop_window(&window) {
+                    eprintln!(
+                        "failed to place Nickel desktop at the bottom of the Windows Z-order"
+                    );
+                }
+            }
+            Some(window)
+        } else {
+            None
+        };
         let Ok(launcher_window) = event_loop.create_window(launcher_attributes) else {
             eprintln!("failed to create Nickel launcher window");
             event_loop.exit();
@@ -845,12 +1011,21 @@ impl ApplicationHandler for Nickel {
             return;
         };
         let panel_window = Arc::new(panel_window);
+        #[cfg(target_os = "windows")]
+        if !platform::configure_panel_window(&panel_window) {
+            eprintln!("failed to reserve the Windows work area for Nickel's panel");
+        }
         let Ok(context_menu_window) = event_loop.create_window(context_menu_attributes) else {
             eprintln!("failed to create Nickel context menu window");
             event_loop.exit();
             return;
         };
         let context_menu_window = Arc::new(context_menu_window);
+        #[cfg(target_os = "windows")]
+        {
+            use winit::platform::windows::WindowExtWindows;
+            context_menu_window.set_skip_taskbar(true);
+        }
         platform::send_shell_command(ShellCommand::HideContextMenu);
         let Ok(launcher_gpu) = pollster::block_on(Gpu::new(launcher_window.clone())) else {
             eprintln!("failed to initialize Nickel launcher renderer");
@@ -858,6 +1033,16 @@ impl ApplicationHandler for Nickel {
             return;
         };
         let shared_graphics = launcher_gpu.graphics.clone();
+        let desktop_gpu =
+            desktop_window.as_ref().and_then(|window| {
+                match desktop::DesktopGpu::new(window.clone(), shared_graphics.clone()) {
+                    Ok(gpu) => Some(gpu),
+                    Err(error) => {
+                        eprintln!("failed to initialize Nickel desktop renderer: {error}");
+                        None
+                    }
+                }
+            });
         let Ok(panel_gpu) = panel::PanelGpu::new(panel_window.clone(), shared_graphics.clone())
         else {
             eprintln!("failed to initialize Nickel panel renderer");
@@ -865,7 +1050,12 @@ impl ApplicationHandler for Nickel {
             return;
         };
         launcher_window.set_title("Nickel Launcher");
+        if let Some(window) = &desktop_window {
+            window.request_redraw();
+        }
         panel_window.request_redraw();
+        self.desktop_window = desktop_window;
+        self.desktop_gpu = desktop_gpu;
         self.window = Some(launcher_window);
         self.gpu = Some(launcher_gpu);
         self.panel_window = Some(panel_window);
@@ -880,11 +1070,30 @@ impl ApplicationHandler for Nickel {
         window_id: WindowId,
         event: WindowEvent,
     ) {
+        if self.desktop_window.as_ref().map(|window| window.id()) == Some(window_id) {
+            match event {
+                WindowEvent::Resized(size) => {
+                    if let Some(gpu) = &mut self.desktop_gpu {
+                        gpu.resize(size.width, size.height);
+                    }
+                }
+                WindowEvent::RedrawRequested => {
+                    if let Some(gpu) = &mut self.desktop_gpu {
+                        gpu.render();
+                    }
+                }
+                WindowEvent::CloseRequested => {}
+                _ => {}
+            }
+            return;
+        }
         if self.context_menu_window.as_ref().map(|window| window.id()) == Some(window_id) {
             match event {
                 WindowEvent::CloseRequested => self.hide_context_menu(),
                 WindowEvent::Focused(false)
-                    if self.context_menu_target.is_some() && !self.context_preview_mode =>
+                    if self.context_menu_target.is_some()
+                        && !self.context_preview_mode
+                        && !self.task_switcher_active =>
                 {
                     self.hide_context_menu();
                 }
@@ -1035,7 +1244,9 @@ impl ApplicationHandler for Nickel {
                     self.panel_hovered = hovered;
                     self.panel_task_hovered = task_hovered;
                     self.panel_tray_hovered = tray_hovered;
-                    if let Some(index) = task_hovered {
+                    if let Some(index) =
+                        task_hovered.filter(|_| self.window_feed.supports_previews())
+                    {
                         self.show_window_group(index);
                     } else if self.context_preview_mode {
                         self.preview_hide_deadline =
@@ -1095,10 +1306,11 @@ impl ApplicationHandler for Nickel {
                     ..
                 } => {
                     if let Some(index) = self.panel_task_hovered {
-                        if self
-                            .window_groups
-                            .get(index)
-                            .is_some_and(|group| group.windows.len() > 1)
+                        if self.window_feed.supports_previews()
+                            && self
+                                .window_groups
+                                .get(index)
+                                .is_some_and(|group| group.windows.len() > 1)
                         {
                             self.show_window_group(index);
                             return;
@@ -1106,7 +1318,7 @@ impl ApplicationHandler for Nickel {
                         if let Some(window) = self
                             .window_groups
                             .get(index)
-                            .and_then(|group| group.windows.last())
+                            .and_then(group_activation_target)
                         {
                             platform::send_shell_command(ShellCommand::WindowAction {
                                 window: window.id,
@@ -1314,8 +1526,23 @@ impl ApplicationHandler for Nickel {
         }
     }
 
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        #[cfg(target_os = "windows")]
+        if let Some(window) = &self.panel_window {
+            platform::release_panel_window(window);
+        }
+    }
+
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
+        while let Ok(shortcut) = self.launcher_hotkey_rx.try_recv() {
+            match shortcut {
+                GlobalShortcut::ToggleLauncher => self.toggle_launcher(),
+                GlobalShortcut::SwitchNext => self.advance_task_switcher(true),
+                GlobalShortcut::SwitchPrevious => self.advance_task_switcher(false),
+                GlobalShortcut::CommitSwitch => self.commit_task_switcher(),
+            }
+        }
         if self
             .preview_hide_deadline
             .is_some_and(|deadline| now >= deadline)
@@ -1347,6 +1574,8 @@ impl ApplicationHandler for Nickel {
         if let Some(preview_deadline) = self.preview_hide_deadline {
             deadline = deadline.min(preview_deadline);
         }
+        #[cfg(target_os = "windows")]
+        let deadline = deadline.min(now + Duration::from_millis(25));
         event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
     }
 }
@@ -1399,12 +1628,66 @@ fn centered_position(monitor: &MonitorHandle, window_size: (u32, u32)) -> Physic
     PhysicalPosition::new(x, y)
 }
 
-fn panel_position(monitor: &MonitorHandle, panel_size: (u32, u32)) -> PhysicalPosition<i32> {
-    let origin = monitor.position();
-    let size = monitor.size();
-    let x = origin.x + (size.width.saturating_sub(panel_size.0) / 2) as i32;
-    let y = origin.y + size.height.saturating_sub(panel_size.1) as i32;
-    PhysicalPosition::new(x, y)
+fn panel_layout(
+    origin: PhysicalPosition<i32>,
+    monitor_size: PhysicalSize<u32>,
+    scale_factor: f64,
+) -> (LogicalSize<f64>, PhysicalPosition<i32>) {
+    let logical_width = f64::from(monitor_size.width) / scale_factor;
+    let physical_height = (PANEL_HEIGHT * scale_factor).round() as u32;
+    let y = origin.y + monitor_size.height.saturating_sub(physical_height) as i32;
+    (
+        LogicalSize::new(logical_width, PANEL_HEIGHT),
+        PhysicalPosition::new(origin.x, y),
+    )
+}
+
+fn stable_window_group_order(
+    previous: &[WindowGroup],
+    mut current: Vec<WindowGroup>,
+) -> Vec<WindowGroup> {
+    let mut ordered = Vec::with_capacity(current.len());
+    for old in previous {
+        if let Some(index) = current.iter().position(|new| same_window_group(old, new)) {
+            ordered.push(current.remove(index));
+        }
+    }
+    ordered.extend(current);
+    ordered
+}
+
+fn same_window_group(left: &WindowGroup, right: &WindowGroup) -> bool {
+    match (&left.application_id, &right.application_id) {
+        (Some(left), Some(right)) => left == right,
+        (None, None) => {
+            left.windows.first().map(|window| window.id)
+                == right.windows.first().map(|window| window.id)
+        }
+        _ => false,
+    }
+}
+
+fn window_group_key(group: &WindowGroup) -> String {
+    group.application_id.as_ref().map_or_else(
+        || {
+            format!(
+                "window:{}",
+                group.windows.first().map_or(0, |window| window.id.0)
+            )
+        },
+        |application| format!("application:{}", application.as_str()),
+    )
+}
+
+fn group_activation_target(group: &WindowGroup) -> Option<&OpenWindow> {
+    let active = group.windows.iter().position(|window| window.active);
+    match active {
+        Some(index) if group.windows.len() > 1 => {
+            group.windows.get((index + 1) % group.windows.len())
+        }
+        Some(index) => group.windows.get(index),
+        None => group.windows.first(),
+    }
 }
 
 fn hit_test_result(
@@ -1419,7 +1702,80 @@ fn hit_test_result(
 mod tests {
     use std::time::{Duration, Instant, UNIX_EPOCH};
 
-    use super::{LauncherVisibility, env_flag, next_minute_deadline};
+    use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
+
+    use crate::model::{ApplicationId, OpenWindow, WindowGroup, WindowId as ShellWindowId};
+
+    use super::{
+        LauncherVisibility, env_flag, group_activation_target, next_minute_deadline, panel_layout,
+        stable_window_group_order,
+    };
+
+    fn window_group(application: &str, window: u64, active: bool) -> WindowGroup {
+        WindowGroup {
+            application_id: Some(ApplicationId::new(application)),
+            application_name: application.into(),
+            windows: vec![OpenWindow {
+                id: ShellWindowId(window),
+                application_id: Some(ApplicationId::new(application)),
+                active,
+                title: application.into(),
+            }],
+        }
+    }
+
+    #[test]
+    fn window_groups_keep_panel_slots_when_z_order_changes() {
+        let previous = vec![
+            window_group("powershell", 1, true),
+            window_group("chrome", 2, false),
+        ];
+        let refreshed = vec![
+            window_group("chrome", 2, true),
+            window_group("powershell", 1, false),
+        ];
+        let ordered = stable_window_group_order(&previous, refreshed);
+        assert_eq!(
+            ordered
+                .iter()
+                .map(|group| group.application_name.as_str())
+                .collect::<Vec<_>>(),
+            ["powershell", "chrome"]
+        );
+        assert!(!ordered[0].active());
+        assert!(ordered[1].active());
+    }
+
+    #[test]
+    fn grouped_task_activates_front_window_then_cycles_when_active() {
+        let mut group = window_group("chrome", 10, false);
+        group.windows.push(OpenWindow {
+            id: ShellWindowId(11),
+            application_id: Some(ApplicationId::new("chrome")),
+            active: false,
+            title: "other chrome".into(),
+        });
+        assert_eq!(
+            group_activation_target(&group).map(|window| window.id),
+            Some(ShellWindowId(10))
+        );
+        group.windows[0].active = true;
+        assert_eq!(
+            group_activation_target(&group).map(|window| window.id),
+            Some(ShellWindowId(11))
+        );
+    }
+
+    #[test]
+    fn panel_spans_monitor_and_anchors_to_bottom_at_display_scale() {
+        let (size, position) = panel_layout(
+            PhysicalPosition::new(1920, 0),
+            PhysicalSize::new(2560, 1440),
+            1.25,
+        );
+        assert_eq!(size, LogicalSize::new(2048.0, 56.0));
+        assert_eq!(position, PhysicalPosition::new(1920, 1370));
+    }
 
     #[test]
     fn clock_deadline_targets_the_next_minute_boundary() {

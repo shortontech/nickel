@@ -1,11 +1,16 @@
 use crate::{
     launcher::Launcher,
     model::{Application, OpenWindow, TrayItem, WindowId, WindowPreview},
-    platform::{ShellCommand, TraySource},
+    platform::{GlobalShortcut, ShellCommand, TraySource},
 };
 
 pub fn applications() -> Vec<Application> {
     Vec::new()
+}
+
+pub fn launcher_hotkey_receiver() -> std::sync::mpsc::Receiver<GlobalShortcut> {
+    let (_sender, receiver) = std::sync::mpsc::channel();
+    receiver
 }
 
 pub struct TrayFeed;
@@ -37,6 +42,14 @@ impl WindowFeed {
     }
 
     pub fn preview(&self, _: WindowId) -> Option<WindowPreview> {
+        None
+    }
+
+    pub fn supports_previews(&self) -> bool {
+        false
+    }
+
+    pub fn icon(&self, _: WindowId) -> Option<image::RgbaImage> {
         None
     }
 }
