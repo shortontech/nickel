@@ -1,5 +1,10 @@
 [workspace]
-members = ["crates/nickel-session", "crates/nickel-settings", "crates/nickel-ui"]
+members = [
+    "crates/nickel-core",
+    "crates/nickel-session",
+    "crates/nickel-settings",
+    "crates/nickel-ui",
+]
 default-members = ["crates/nickel-ui"]
 resolver = "3"
 

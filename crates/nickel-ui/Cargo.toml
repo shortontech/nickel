@@ -11,6 +11,7 @@ bytemuck.workspace = true
 glyphon.workspace = true
 image.workspace = true
 jiff.workspace = true
+nickel-core = { path = "../nickel-core" }
 nucleo-matcher.workspace = true
 pollster.workspace = true
 redb.workspace = true
