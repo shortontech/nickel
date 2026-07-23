@@ -186,7 +186,7 @@ impl ContextMenuGpu {
                     .map(|(index, _)| TextArea {
                         buffer: &self.close_label,
                         left: (index as f32 + 1.0) * PREVIEW_CARD_WIDTH as f32 - 30.0,
-                        top: 6.0,
+                        top: 3.0,
                         scale: 1.0,
                         bounds: TextBounds {
                             left: 0,

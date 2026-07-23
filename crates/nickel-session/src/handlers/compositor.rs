@@ -29,6 +29,9 @@ impl CompositorHandler for NickelSession {
 
     fn commit(&mut self, surface: &WlSurface) {
         on_commit_buffer_handler::<Self>(surface);
+        if let Some(sender) = &self.buffer_commit_tx {
+            let _ = sender.send(surface.clone());
+        }
         if !is_sync_subsurface(surface) {
             let mut root = surface.clone();
             while let Some(parent) = get_parent(&root) {
