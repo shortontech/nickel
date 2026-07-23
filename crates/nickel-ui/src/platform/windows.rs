@@ -1,49 +1,129 @@
 use std::{
+    env,
     ffi::c_void,
     os::windows::ffi::OsStringExt,
     path::PathBuf,
-    sync::mpsc::{self, Receiver, Sender},
+    sync::{
+        Mutex,
+        mpsc::{self, Receiver, Sender},
+    },
     thread,
 };
 
 use windows::{
     Win32::{
-        Foundation::{CloseHandle, HWND, LPARAM, LRESULT, RECT, WPARAM},
+        Foundation::{CloseHandle, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
         Graphics::Gdi::{
             BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection,
             DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, HGDIOBJ, ReleaseDC, SelectObject,
         },
         Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES,
         System::Threading::{
-            OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
-            QueryFullProcessImageNameW,
+            AttachThreadInput, GetCurrentThreadId, OpenProcess, PROCESS_NAME_WIN32,
+            PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
         },
-        UI::Shell::{
-            ABE_BOTTOM, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, APPBARDATA, SHAppBarMessage,
-            SHFILEINFOW, SHGFI_ICON, SHGetFileInfoW,
+        System::{
+            Com::{
+                CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+                CoTaskMemFree, CoUninitialize,
+            },
+            DataExchange::COPYDATASTRUCT,
         },
-        UI::WindowsAndMessaging::{
-            CallNextHookEx, DI_NORMAL, DestroyIcon, DrawIconEx, EnumWindows, GA_ROOT, GA_ROOTOWNER,
-            GCLP_HICON, GCLP_HICONSM, GWL_EXSTYLE, GetAncestor, GetClassLongPtrW, GetClassNameW,
-            GetForegroundWindow, GetLastActivePopup, GetMessageW, GetWindowLongPtrW, GetWindowRect,
-            GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, HICON, HWND_BOTTOM,
-            HWND_TOPMOST, IsWindow, IsWindowVisible, IsZoomed, KBDLLHOOKSTRUCT, MSG, PostMessageW,
-            SPI_GETWORKAREA, SPI_SETWORKAREA, SPIF_SENDCHANGE, SW_MAXIMIZE, SW_MINIMIZE,
-            SW_RESTORE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-            SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, SetWindowsHookExW, ShowWindow,
-            SystemParametersInfoW, WH_KEYBOARD_LL, WM_CLOSE, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN,
-            WM_SYSKEYUP, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+        UI::{
+            Input::KeyboardAndMouse::SetFocus,
+            Shell::{
+                ABE_BOTTOM, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, APPBARDATA,
+                DWPOS_CENTER, DWPOS_FILL, DWPOS_FIT, DWPOS_SPAN, DWPOS_STRETCH, DWPOS_TILE,
+                DesktopWallpaper, IDesktopWallpaper, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD,
+                NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NOTIFYICON_VERSION_4, NOTIFYICONDATAW,
+                SHAppBarMessage, SHFILEINFOW, SHGFI_ICON, SHGetFileInfoW, ShellExecuteW,
+            },
+            WindowsAndMessaging::{
+                BringWindowToTop, CallNextHookEx, CallWindowProcW, DI_NORMAL, DestroyIcon,
+                DrawIconEx, EnumWindows, GA_ROOT, GA_ROOTOWNER, GCLP_HICON, GCLP_HICONSM,
+                GWL_EXSTYLE, GWLP_WNDPROC, GetAncestor, GetClassLongPtrW, GetClassNameW,
+                GetCursorPos, GetForegroundWindow, GetLastActivePopup, GetMessageW,
+                GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
+                GetWindowThreadProcessId, HICON, HWND_BOTTOM, HWND_BROADCAST, HWND_TOPMOST,
+                IsWindow, IsWindowVisible, IsZoomed, KBDLLHOOKSTRUCT, MSG, PostMessageW,
+                RegisterWindowMessageW, SPI_GETWORKAREA, SPI_SETWORKAREA, SPIF_SENDCHANGE, SW_HIDE,
+                SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL, SWP_FRAMECHANGED,
+                SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SendNotifyMessageW, SetForegroundWindow,
+                SetWindowLongPtrW, SetWindowPos, SetWindowsHookExW, ShowWindow,
+                SystemParametersInfoW, WH_KEYBOARD_LL, WM_CLOSE, WM_COPYDATA, WM_KEYDOWN, WM_KEYUP,
+                WM_LBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WS_EX_APPWINDOW, WS_EX_NOACTIVATE,
+                WS_EX_TOOLWINDOW,
+            },
         },
     },
-    core::{BOOL, PCWSTR, PWSTR},
+    core::{BOOL, PCWSTR, PWSTR, w},
 };
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use crate::{
+    desktop::{Wallpaper, WallpaperPosition},
     launcher::Launcher,
     model::{Application, ApplicationId, OpenWindow, TrayItem, WindowId, WindowPreview},
     platform::{GlobalShortcut, ShellCommand, TraySource, WindowAction},
 };
+
+pub fn wallpaper() -> Wallpaper {
+    // SAFETY: COM is initialized for this call on Nickel's UI thread and all returned task
+    // allocator strings are freed before the apartment is released.
+    unsafe {
+        let initialized = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
+        let result = query_wallpaper();
+        if initialized {
+            CoUninitialize();
+        }
+        result.unwrap_or_default()
+    }
+}
+
+unsafe fn query_wallpaper() -> windows::core::Result<Wallpaper> {
+    let desktop: IDesktopWallpaper =
+        unsafe { CoCreateInstance(&DesktopWallpaper, None, CLSCTX_ALL)? };
+    let color = unsafe { desktop.GetBackgroundColor()? }.0;
+    let position = unsafe { desktop.GetPosition()? };
+    let monitor = unsafe { desktop.GetMonitorDevicePathAt(0)? };
+    let path = unsafe { desktop.GetWallpaper(monitor)? };
+    let path_string = unsafe { path.to_string() }.unwrap_or_default();
+    unsafe {
+        CoTaskMemFree(Some(monitor.0.cast()));
+        CoTaskMemFree(Some(path.0.cast()));
+    }
+    let image = image::open(&path_string)
+        .or_else(|_| image::open(transcoded_wallpaper_path()))
+        .ok()
+        .map(|image| image.to_rgba8());
+    Ok(Wallpaper {
+        image,
+        color: [
+            (color & 0xff) as u8,
+            ((color >> 8) & 0xff) as u8,
+            ((color >> 16) & 0xff) as u8,
+        ],
+        position: match position {
+            value if value == DWPOS_CENTER => WallpaperPosition::Center,
+            value if value == DWPOS_TILE => WallpaperPosition::Tile,
+            value if value == DWPOS_STRETCH => WallpaperPosition::Stretch,
+            value if value == DWPOS_FIT => WallpaperPosition::Fit,
+            value if value == DWPOS_SPAN => WallpaperPosition::Span,
+            value if value == DWPOS_FILL => WallpaperPosition::Fill,
+            _ => WallpaperPosition::Fill,
+        },
+    })
+}
+
+fn transcoded_wallpaper_path() -> PathBuf {
+    env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_default()
+        .join("Microsoft")
+        .join("Windows")
+        .join("Themes")
+        .join("TranscodedWallpaper")
+}
 
 #[path = "windows_start_menu.rs"]
 mod start_menu;
@@ -87,9 +167,39 @@ static ALT_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::
 static SHIFT_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static SWITCH_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static TAB_SUPPRESSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static RUN_SUPPRESSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static LAUNCHER_VISIBLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static WINDOWS_TOGGLE_SENT_ON_DOWN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 static PANEL_APPBAR_REGISTERED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static ORIGINAL_WORK_AREA: std::sync::Mutex<Option<RECT>> = std::sync::Mutex::new(None);
+static TRAY_ITEMS: Mutex<Vec<NativeTrayIcon>> = Mutex::new(Vec::new());
+static PANEL_WINDOW_PROC: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+static PREVIOUS_FOREGROUND_WINDOW: std::sync::atomic::AtomicIsize =
+    std::sync::atomic::AtomicIsize::new(0);
+static LAUNCHER_FOREGROUND_WINDOW: std::sync::atomic::AtomicIsize =
+    std::sync::atomic::AtomicIsize::new(0);
+static LAUNCHER_WINDOW_HANDLE: std::sync::atomic::AtomicIsize =
+    std::sync::atomic::AtomicIsize::new(0);
+static RESTORE_LAUNCHER_FOCUS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[derive(Clone)]
+struct NativeTrayIcon {
+    owner: isize,
+    id: u32,
+    callback_message: u32,
+    version: u32,
+    item: TrayItem,
+}
+
+#[repr(C)]
+struct TrayNotifyData {
+    signature: u32,
+    message: u32,
+    icon: NOTIFYICONDATAW,
+}
 
 unsafe extern "system" fn windows_key_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     use std::sync::atomic::Ordering;
@@ -103,6 +213,7 @@ unsafe extern "system" fn windows_key_hook(code: i32, wparam: WPARAM, lparam: LP
     const VK_LSHIFT: u32 = 0xa0;
     const VK_RSHIFT: u32 = 0xa1;
     const VK_TAB: u32 = 0x09;
+    const VK_R: u32 = 0x52;
 
     if code >= 0 {
         // SAFETY: WH_KEYBOARD_LL supplies a KBDLLHOOKSTRUCT pointer in LPARAM.
@@ -138,19 +249,57 @@ unsafe extern "system" fn windows_key_hook(code: i32, wparam: WPARAM, lparam: LP
         {
             return LRESULT(1);
         }
-        if windows_key && key_down {
-            WINDOWS_KEY_HELD.store(true, Ordering::Relaxed);
+        if event.vkCode == VK_R
+            && (WINDOWS_KEY_HELD.load(Ordering::Relaxed) || RUN_SUPPRESSED.load(Ordering::Relaxed))
+        {
+            if key_down && !RUN_SUPPRESSED.swap(true, Ordering::Relaxed) {
+                WINDOWS_KEY_CHORDED.store(true, Ordering::Relaxed);
+                // Win+R is a one-shot chord. Stop treating subsequent keyboard input as
+                // Windows-modified immediately; the physical Windows-key release is still
+                // consumed below and WINDOWS_KEY_CHORDED prevents it from toggling the launcher.
+                WINDOWS_KEY_HELD.store(false, Ordering::Relaxed);
+                if let Some(sender) = WINDOWS_KEY_SENDER.get() {
+                    let _ = sender.send(GlobalShortcut::ShowRun);
+                }
+            } else if key_up {
+                RUN_SUPPRESSED.store(false, Ordering::Relaxed);
+            }
+            return LRESULT(1);
+        } else if windows_key && key_down {
+            // Model the key as a button. Auto-repeat or duplicate keydown messages are not
+            // additional presses and must not reset the chord state.
+            if WINDOWS_KEY_HELD.swap(true, Ordering::Relaxed) {
+                return LRESULT(1);
+            }
             WINDOWS_KEY_CHORDED.store(false, Ordering::Relaxed);
+            if LAUNCHER_VISIBLE.load(Ordering::Relaxed)
+                && !WINDOWS_TOGGLE_SENT_ON_DOWN.swap(true, Ordering::Relaxed)
+            {
+                LAUNCHER_VISIBLE.store(false, Ordering::Relaxed);
+                WINDOWS_KEY_CHORDED.store(true, Ordering::Relaxed);
+                if let Some(sender) = WINDOWS_KEY_SENDER.get() {
+                    let _ = sender.send(GlobalShortcut::HideLauncher);
+                }
+            }
             // Nickel owns the Windows key completely. Forwarding only the press while consuming
             // the release leaves Windows' modifier state stuck and prevents launcher typing.
             return LRESULT(1);
         } else if WINDOWS_KEY_HELD.load(Ordering::Relaxed) && key_down {
             WINDOWS_KEY_CHORDED.store(true, Ordering::Relaxed);
         } else if windows_key && key_up {
-            WINDOWS_KEY_HELD.store(false, Ordering::Relaxed);
-            if !WINDOWS_KEY_CHORDED.swap(false, Ordering::Relaxed) {
+            // A release without a matching down edge is stale or duplicated.
+            if !WINDOWS_KEY_HELD.swap(false, Ordering::Relaxed) {
+                return LRESULT(1);
+            }
+            if WINDOWS_TOGGLE_SENT_ON_DOWN.swap(false, Ordering::Relaxed) {
+                WINDOWS_KEY_CHORDED.store(false, Ordering::Relaxed);
+                return LRESULT(1);
+            }
+            let chorded = WINDOWS_KEY_CHORDED.swap(false, Ordering::Relaxed);
+            if !chorded {
                 if let Some(sender) = WINDOWS_KEY_SENDER.get() {
-                    let _ = sender.send(GlobalShortcut::ToggleLauncher);
+                    LAUNCHER_VISIBLE.store(true, Ordering::Relaxed);
+                    let _ = sender.send(GlobalShortcut::ShowLauncher);
                 }
             }
             return LRESULT(1);
@@ -158,6 +307,22 @@ unsafe extern "system" fn windows_key_hook(code: i32, wparam: WPARAM, lparam: LP
     }
     // SAFETY: Unhandled events must continue through the hook chain.
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
+}
+
+pub fn execute_run_command(command: &str) -> bool {
+    let command: Vec<u16> = command.encode_utf16().chain([0]).collect();
+    // SAFETY: The UTF-16 command buffer remains alive through this synchronous call.
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            w!("open"),
+            PCWSTR(command.as_ptr()),
+            None,
+            None,
+            SW_SHOWNORMAL,
+        )
+    };
+    result.0 as isize > 32
 }
 
 pub fn configure_desktop_window(window: &winit::window::Window) -> bool {
@@ -190,6 +355,23 @@ pub fn configure_desktop_window(window: &winit::window::Window) -> bool {
     }
 }
 
+pub fn configure_launcher_window(window: &winit::window::Window) -> bool {
+    use std::sync::atomic::Ordering;
+
+    let Some(hwnd) = window_hwnd(window) else {
+        return false;
+    };
+    LAUNCHER_WINDOW_HANDLE.store(hwnd.0 as isize, Ordering::Relaxed);
+    true
+}
+
+pub fn launcher_has_foreground_focus() -> bool {
+    use std::sync::atomic::Ordering;
+
+    let launcher = LAUNCHER_WINDOW_HANDLE.load(Ordering::Relaxed);
+    launcher != 0 && unsafe { GetForegroundWindow().0 as isize == launcher }
+}
+
 pub fn configure_panel_window(window: &winit::window::Window) -> bool {
     let Some(hwnd) = window_hwnd(window) else {
         return false;
@@ -216,6 +398,7 @@ pub fn configure_panel_window(window: &winit::window::Window) -> bool {
         )
         .is_ok()
     };
+    install_tray_host(hwnd);
     let mut appbar = APPBARDATA {
         cbSize: size_of::<APPBARDATA>() as u32,
         hWnd: hwnd,
@@ -251,6 +434,142 @@ pub fn configure_panel_window(window: &winit::window::Window) -> bool {
         .is_ok()
     };
     positioned && topmost
+}
+
+fn install_tray_host(hwnd: HWND) {
+    use std::sync::atomic::Ordering;
+
+    if PANEL_WINDOW_PROC.load(Ordering::Relaxed) != 0 {
+        return;
+    }
+    // SAFETY: hwnd is Nickel's live winit panel. We retain and call its original window procedure
+    // for every message except the tray protocol message handled synchronously below.
+    let previous = unsafe {
+        SetWindowLongPtrW(
+            hwnd,
+            GWLP_WNDPROC,
+            tray_window_proc as *const () as usize as isize,
+        )
+    };
+    if previous == 0 {
+        eprintln!("failed to subclass Nickel's Windows tray host");
+        return;
+    }
+    PANEL_WINDOW_PROC.store(previous, Ordering::Relaxed);
+    // Applications cache failed Shell_NotifyIcon registrations. Explorer announces taskbar
+    // recreation with this registered message, prompting well-behaved clients to add them again.
+    // SAFETY: This is an asynchronous broadcast with scalar parameters only.
+    unsafe {
+        let message = RegisterWindowMessageW(w!("TaskbarCreated"));
+        let _ = SendNotifyMessageW(HWND_BROADCAST, message, WPARAM(0), LPARAM(0));
+    }
+}
+
+unsafe extern "system" fn tray_window_proc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    use std::sync::atomic::Ordering;
+
+    if message == WM_COPYDATA {
+        // SAFETY: WM_COPYDATA guarantees the COPYDATASTRUCT and its buffer remain valid for this
+        // synchronous call. Bounds and protocol signature are validated before interpretation.
+        let copy = unsafe { &*(lparam.0 as *const COPYDATASTRUCT) };
+        if copy.dwData == 1
+            && copy.cbData as usize >= size_of::<TrayNotifyData>()
+            && !copy.lpData.is_null()
+        {
+            let data = unsafe { &*(copy.lpData as *const TrayNotifyData) };
+            if data.signature == 0x3475_3423 && update_tray_icon(data.message, &data.icon) {
+                return LRESULT(1);
+            }
+        }
+    }
+    let previous = PANEL_WINDOW_PROC.load(Ordering::Relaxed);
+    if previous == 0 {
+        return LRESULT(0);
+    }
+    // SAFETY: previous is the live winit WNDPROC returned by SetWindowLongPtrW.
+    let procedure = unsafe { std::mem::transmute(previous) };
+    unsafe { CallWindowProcW(procedure, hwnd, message, wparam, lparam) }
+}
+
+fn update_tray_icon(message: u32, icon: &NOTIFYICONDATAW) -> bool {
+    let owner = icon.hWnd.0 as isize;
+    let id = icon.uID;
+    let Ok(mut items) = TRAY_ITEMS.lock() else {
+        return false;
+    };
+    let existing = items
+        .iter()
+        .position(|item| item.owner == owner && item.id == id);
+    match message {
+        value if value == NIM_ADD.0 => {
+            let Some(image) = render_icon(icon.hIcon) else {
+                return false;
+            };
+            let title = wide_text(&icon.szTip);
+            let registration = NativeTrayIcon {
+                owner,
+                id,
+                callback_message: icon.uCallbackMessage,
+                version: 0,
+                item: TrayItem {
+                    id: format!("windows:{owner}:{id}"),
+                    title,
+                    icon: image,
+                },
+            };
+            if let Some(index) = existing {
+                items[index] = registration;
+            } else {
+                items.push(registration);
+            }
+            true
+        }
+        value if value == NIM_MODIFY.0 => {
+            let Some(index) = existing else {
+                return false;
+            };
+            if icon.uFlags.0 & NIF_MESSAGE.0 != 0 {
+                items[index].callback_message = icon.uCallbackMessage;
+            }
+            if icon.uFlags.0 & NIF_TIP.0 != 0 {
+                items[index].item.title = wide_text(&icon.szTip);
+            }
+            if icon.uFlags.0 & NIF_ICON.0 != 0
+                && let Some(image) = render_icon(icon.hIcon)
+            {
+                items[index].item.icon = image;
+            }
+            true
+        }
+        value if value == NIM_DELETE.0 => {
+            if let Some(index) = existing {
+                items.remove(index);
+            }
+            true
+        }
+        value if value == NIM_SETVERSION.0 => {
+            let Some(index) = existing else {
+                return false;
+            };
+            // SAFETY: NIM_SETVERSION defines the active union member as uVersion.
+            items[index].version = unsafe { icon.Anonymous.uVersion };
+            true
+        }
+        _ => false,
+    }
+}
+
+fn wide_text(buffer: &[u16]) -> String {
+    let length = buffer
+        .iter()
+        .position(|unit| *unit == 0)
+        .unwrap_or(buffer.len());
+    String::from_utf16_lossy(&buffer[..length])
 }
 
 fn reserve_work_area_without_explorer(panel: RECT) -> bool {
@@ -334,14 +653,91 @@ impl TrayFeed {
 }
 impl TraySource for TrayFeed {
     fn snapshot(&self) -> Vec<TrayItem> {
-        Vec::new()
+        let mut icons = TRAY_ITEMS.lock().expect("Windows tray icon lock poisoned");
+        icons.retain(|icon| unsafe { IsWindow(Some(HWND(icon.owner as *mut c_void))).as_bool() });
+        icons.iter().map(|icon| icon.item.clone()).collect()
     }
-    fn activate(&self, _: &str) {}
+    fn activate(&self, id: &str) {
+        let icon = TRAY_ITEMS
+            .lock()
+            .expect("Windows tray icon lock poisoned")
+            .iter()
+            .find(|icon| icon.item.id == id)
+            .cloned();
+        let Some(icon) = icon else {
+            return;
+        };
+        let (wparam, lparam) = if icon.version == NOTIFYICON_VERSION_4 {
+            let mut cursor = POINT::default();
+            unsafe {
+                let _ = GetCursorPos(&mut cursor);
+            }
+            (
+                WPARAM(((cursor.y as u16 as usize) << 16) | cursor.x as u16 as usize),
+                LPARAM(((icon.id as u16 as isize) << 16) | WM_LBUTTONUP as isize),
+            )
+        } else {
+            (WPARAM(icon.id as usize), LPARAM(WM_LBUTTONUP as isize))
+        };
+        unsafe {
+            let _ = PostMessageW(
+                Some(HWND(icon.owner as *mut c_void)),
+                icon.callback_message,
+                wparam,
+                lparam,
+            );
+        }
+    }
 }
 
 pub fn send_shell_command(command: ShellCommand) -> bool {
-    let ShellCommand::WindowAction { window, action } = command else {
-        return false;
+    use std::sync::atomic::Ordering;
+
+    let (window, action) = match command {
+        ShellCommand::Show => {
+            let foreground = unsafe { GetForegroundWindow() };
+            PREVIOUS_FOREGROUND_WINDOW.store(foreground.0 as isize, Ordering::Relaxed);
+            let launcher = LAUNCHER_WINDOW_HANDLE.load(Ordering::Relaxed);
+            if launcher == 0 {
+                return false;
+            }
+            let hwnd = HWND(launcher as *mut c_void);
+            // SAFETY: The handle belongs to Nickel's live launcher window.
+            unsafe {
+                let foreground_thread = GetWindowThreadProcessId(foreground, None);
+                let current_thread = GetCurrentThreadId();
+                let attached = foreground_thread != 0
+                    && foreground_thread != current_thread
+                    && AttachThreadInput(current_thread, foreground_thread, true).as_bool();
+                let _ = ShowWindow(hwnd, SW_SHOW);
+                let _ = BringWindowToTop(hwnd);
+                let _ = SetForegroundWindow(hwnd);
+                let _ = SetFocus(Some(hwnd));
+                if attached {
+                    let _ = AttachThreadInput(current_thread, foreground_thread, false);
+                }
+            }
+            return true;
+        }
+        ShellCommand::Hide => {
+            let foreground = unsafe { GetForegroundWindow() };
+            let launcher = LAUNCHER_FOREGROUND_WINDOW.load(Ordering::Relaxed);
+            RESTORE_LAUNCHER_FOCUS.store(
+                launcher != 0 && foreground.0 as isize == launcher,
+                Ordering::Relaxed,
+            );
+            let hwnd = LAUNCHER_WINDOW_HANDLE.load(Ordering::Relaxed);
+            if hwnd == 0 {
+                return false;
+            }
+            // SAFETY: The handle belongs to Nickel's live launcher window.
+            unsafe {
+                let _ = ShowWindow(HWND(hwnd as *mut c_void), SW_HIDE);
+            }
+            return true;
+        }
+        ShellCommand::WindowAction { window, action } => (window, action),
+        _ => return false,
     };
     let hwnd = hwnd(window);
     // SAFETY: The handle comes from EnumWindows and is revalidated immediately before use.
@@ -372,6 +768,32 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
                 let _ = ShowWindow(hwnd, SW_MINIMIZE);
                 true
             }
+        }
+    }
+}
+
+pub fn launcher_visibility_applied(visible: bool) {
+    use std::sync::atomic::Ordering;
+
+    LAUNCHER_VISIBLE.store(visible, Ordering::Relaxed);
+    if visible {
+        let foreground = unsafe { GetForegroundWindow() };
+        LAUNCHER_FOREGROUND_WINDOW.store(foreground.0 as isize, Ordering::Relaxed);
+        return;
+    }
+    LAUNCHER_FOREGROUND_WINDOW.store(0, Ordering::Relaxed);
+    if !RESTORE_LAUNCHER_FOCUS.swap(false, Ordering::Relaxed) {
+        return;
+    }
+    let previous = PREVIOUS_FOREGROUND_WINDOW.swap(0, Ordering::Relaxed);
+    if previous == 0 {
+        return;
+    }
+    let hwnd = HWND(previous as *mut c_void);
+    // SAFETY: The handle was captured from GetForegroundWindow and is revalidated before use.
+    unsafe {
+        if IsWindow(Some(hwnd)).as_bool() {
+            let _ = SetForegroundWindow(hwnd);
         }
     }
 }

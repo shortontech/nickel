@@ -12,6 +12,8 @@ use glyphon::{
     RasterizeCustomGlyphRequest, RasterizedCustomGlyph, Resolution, Shaping, SwashCache, TextArea,
     TextAtlas, TextBounds, TextRenderer, Viewport,
 };
+use nickel_core::launcher::LauncherVisibility;
+use nickel_core::run::RunPrompt;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -30,6 +32,7 @@ mod model;
 mod panel;
 mod platform;
 mod rectangles;
+mod run_dialog;
 mod storage;
 
 use launcher::Launcher;
@@ -39,37 +42,12 @@ use platform::{GlobalShortcut, ShellCommand, TrayFeed, TraySource, WindowAction,
 const SECONDARY_DISPLAY_ENV: &str = "NICKEL_USE_SECONDARY_DISPLAY";
 const PANEL_HEIGHT: f64 = 56.0;
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-enum LauncherVisibility {
-    #[default]
-    Hidden,
-    Visible,
-}
-
 #[derive(Clone, Copy)]
 enum ContextAction {
     Activate(ShellWindowId),
     Close(ShellWindowId),
     Maximize(ShellWindowId),
     Minimize(ShellWindowId),
-}
-
-impl LauncherVisibility {
-    fn is_visible(self) -> bool {
-        self == Self::Visible
-    }
-
-    fn toggle(&mut self) -> bool {
-        *self = match *self {
-            Self::Hidden => Self::Visible,
-            Self::Visible => Self::Hidden,
-        };
-        self.is_visible()
-    }
-
-    fn set(&mut self, visible: bool) {
-        *self = if visible { Self::Visible } else { Self::Hidden };
-    }
 }
 
 struct Nickel {
@@ -89,6 +67,10 @@ struct Nickel {
     context_menu_target: Option<ShellWindowId>,
     context_menu_actions: Vec<ContextAction>,
     context_preview_mode: bool,
+    run_window: Option<Arc<Window>>,
+    run_gpu: Option<run_dialog::RunDialogGpu>,
+    run_prompt: RunPrompt,
+    run_hovered: Option<run_dialog::Action>,
     preview_group: Option<usize>,
     preview_hide_deadline: Option<Instant>,
     task_windows: Vec<OpenWindow>,
@@ -98,6 +80,7 @@ struct Nickel {
     unresolved_panel_icons: HashSet<String>,
     tray_items: Vec<TrayItem>,
     launcher_visibility: LauncherVisibility,
+    launcher_focus_loss_deadline: Option<Instant>,
     launcher_hotkey_rx: mpsc::Receiver<GlobalShortcut>,
     task_switcher_active: bool,
     clock_deadline: Instant,
@@ -151,6 +134,10 @@ impl Default for Nickel {
             context_menu_target: None,
             context_menu_actions: Vec::new(),
             context_preview_mode: false,
+            run_window: None,
+            run_gpu: None,
+            run_prompt: RunPrompt::default(),
+            run_hovered: None,
             preview_group: None,
             preview_hide_deadline: None,
             task_windows: Vec::new(),
@@ -160,6 +147,7 @@ impl Default for Nickel {
             unresolved_panel_icons: HashSet::new(),
             tray_items: Vec::new(),
             launcher_visibility: LauncherVisibility::default(),
+            launcher_focus_loss_deadline: None,
             launcher_hotkey_rx: platform::launcher_hotkey_receiver(),
             task_switcher_active: false,
             clock_deadline: next_minute_deadline(Instant::now(), SystemTime::now()),
@@ -177,6 +165,33 @@ impl Default for Nickel {
 }
 
 impl Nickel {
+    fn show_run(&mut self) {
+        self.set_launcher_visible(false);
+        self.run_prompt.clear();
+        self.run_hovered = None;
+        if let Some(window) = &self.run_window {
+            window.set_visible(true);
+            window.focus_window();
+            window.request_redraw();
+        }
+    }
+
+    fn hide_run(&mut self) {
+        self.run_hovered = None;
+        if let Some(window) = &self.run_window {
+            window.set_visible(false);
+        }
+    }
+
+    fn submit_run(&mut self) {
+        let Some(command) = self.run_prompt.submission() else {
+            return;
+        };
+        if platform::execute_run_command(command) {
+            self.hide_run();
+        }
+    }
+
     fn ensure_context_menu_gpu(&mut self) -> bool {
         if self.context_menu_gpu.is_some() {
             return true;
@@ -361,34 +376,36 @@ impl Nickel {
     fn set_launcher_visible(&mut self, visible: bool) {
         self.hide_context_menu();
         self.launcher_visibility.set(visible);
-        if !visible {
+        if visible {
+            #[cfg(target_os = "windows")]
+            {
+                self.launcher_focus_loss_deadline =
+                    Some(Instant::now() + Duration::from_millis(150));
+            }
+        } else {
+            self.launcher_focus_loss_deadline = None;
             self.launcher.clear();
             self.hovered_result = None;
             self.scroll_offset = 0;
             self.scrollbar_drag_offset = None;
         }
-        if platform::send_shell_command(if visible {
+        let handled = platform::send_shell_command(if visible {
             ShellCommand::Show
         } else {
             ShellCommand::Hide
-        }) {
-            return;
-        }
-        if let Some(window) = &self.window {
+        });
+        if !handled && let Some(window) = &self.window {
             window.set_visible(visible);
             if visible {
                 window.focus_window();
                 window.request_redraw();
             }
         }
+        platform::launcher_visibility_applied(visible);
     }
 
     fn toggle_launcher(&mut self) {
-        self.hide_context_menu();
-        let visible = self.launcher_visibility.toggle();
-        if !platform::send_shell_command(ShellCommand::Toggle) {
-            self.set_launcher_visible(visible);
-        }
+        self.set_launcher_visible(!self.launcher_visibility.is_visible());
     }
 
     fn advance_task_switcher(&mut self, forward: bool) {
@@ -981,16 +998,28 @@ impl ApplicationHandler for Nickel {
             .with_inner_size(LogicalSize::new(960, 640))
             .with_min_inner_size(LogicalSize::new(480, 320))
             .with_visible(false)
-            .with_decorations(false);
+            .with_decorations(false)
+            .with_window_level(WindowLevel::AlwaysOnTop);
         let mut panel_attributes = WindowAttributes::default()
             .with_title("Nickel Panel")
             .with_inner_size(LogicalSize::new(960.0, PANEL_HEIGHT))
             .with_decorations(false);
+        #[cfg(target_os = "windows")]
+        {
+            use winit::platform::windows::WindowAttributesExtWindows;
+            panel_attributes = panel_attributes.with_class_name("Shell_TrayWnd");
+        }
         let context_menu_attributes = WindowAttributes::default()
             .with_title("Nickel Context Menu")
             .with_inner_size(LogicalSize::new(context_menu::WIDTH, context_menu::HEIGHT))
             .with_visible(false)
             .with_decorations(false)
+            .with_window_level(WindowLevel::AlwaysOnTop);
+        let mut run_attributes = WindowAttributes::default()
+            .with_title("Run")
+            .with_inner_size(LogicalSize::new(run_dialog::WIDTH, run_dialog::HEIGHT))
+            .with_visible(false)
+            .with_resizable(false)
             .with_window_level(WindowLevel::AlwaysOnTop);
         if let Some(monitor) = target.as_ref() {
             desktop_attributes = desktop_attributes
@@ -998,6 +1027,10 @@ impl ApplicationHandler for Nickel {
                 .with_position(monitor.position());
             launcher_attributes =
                 launcher_attributes.with_position(centered_position(monitor, (960, 640)));
+            run_attributes = run_attributes.with_position(centered_position(
+                monitor,
+                (run_dialog::WIDTH, run_dialog::HEIGHT),
+            ));
             let (panel_size, panel_position) =
                 panel_layout(monitor.position(), monitor.size(), monitor.scale_factor());
             panel_attributes = panel_attributes
@@ -1032,6 +1065,10 @@ impl ApplicationHandler for Nickel {
             return;
         };
         let launcher_window = Arc::new(launcher_window);
+        #[cfg(target_os = "windows")]
+        if !platform::configure_launcher_window(&launcher_window) {
+            eprintln!("failed to register Nickel's launcher window handle");
+        }
         let Ok(panel_window) = event_loop.create_window(panel_attributes) else {
             eprintln!("failed to create Nickel panel window");
             event_loop.exit();
@@ -1048,10 +1085,17 @@ impl ApplicationHandler for Nickel {
             return;
         };
         let context_menu_window = Arc::new(context_menu_window);
+        let Ok(run_window) = event_loop.create_window(run_attributes) else {
+            eprintln!("failed to create Nickel Run window");
+            event_loop.exit();
+            return;
+        };
+        let run_window = Arc::new(run_window);
         #[cfg(target_os = "windows")]
         {
             use winit::platform::windows::WindowExtWindows;
             context_menu_window.set_skip_taskbar(true);
+            run_window.set_skip_taskbar(true);
         }
         platform::send_shell_command(ShellCommand::HideContextMenu);
         let Ok(launcher_gpu) = pollster::block_on(Gpu::new(launcher_window.clone())) else {
@@ -1062,7 +1106,11 @@ impl ApplicationHandler for Nickel {
         let shared_graphics = launcher_gpu.graphics.clone();
         let desktop_gpu =
             desktop_window.as_ref().and_then(|window| {
-                match desktop::DesktopGpu::new(window.clone(), shared_graphics.clone()) {
+                match desktop::DesktopGpu::new(
+                    window.clone(),
+                    shared_graphics.clone(),
+                    platform::wallpaper(),
+                ) {
                     Ok(gpu) => Some(gpu),
                     Err(error) => {
                         eprintln!("failed to initialize Nickel desktop renderer: {error}");
@@ -1073,6 +1121,13 @@ impl ApplicationHandler for Nickel {
         let Ok(panel_gpu) = panel::PanelGpu::new(panel_window.clone(), shared_graphics.clone())
         else {
             eprintln!("failed to initialize Nickel panel renderer");
+            event_loop.exit();
+            return;
+        };
+        let Ok(run_gpu) =
+            run_dialog::RunDialogGpu::new(run_window.clone(), shared_graphics.clone())
+        else {
+            eprintln!("failed to initialize Nickel Run renderer");
             event_loop.exit();
             return;
         };
@@ -1089,6 +1144,8 @@ impl ApplicationHandler for Nickel {
         self.panel_gpu = Some(panel_gpu);
         self.context_menu_window = Some(context_menu_window);
         self.context_menu_gpu = None;
+        self.run_window = Some(run_window);
+        self.run_gpu = Some(run_gpu);
     }
 
     fn window_event(
@@ -1241,6 +1298,73 @@ impl ApplicationHandler for Nickel {
             }
             return;
         }
+        if self.run_window.as_ref().map(|window| window.id()) == Some(window_id) {
+            match event {
+                WindowEvent::CloseRequested | WindowEvent::Focused(false) => self.hide_run(),
+                WindowEvent::Resized(size) => {
+                    if let Some(gpu) = &mut self.run_gpu {
+                        gpu.resize(size.width, size.height);
+                    }
+                }
+                WindowEvent::RedrawRequested => {
+                    if let Some(gpu) = &mut self.run_gpu {
+                        gpu.render(self.run_prompt.command(), self.run_hovered);
+                    }
+                }
+                WindowEvent::CursorMoved { position, .. } => {
+                    let hovered = run_dialog::action_at(position);
+                    if hovered != self.run_hovered {
+                        self.run_hovered = hovered;
+                        self.run_window
+                            .as_ref()
+                            .expect("run window exists")
+                            .request_redraw();
+                    }
+                }
+                WindowEvent::CursorLeft { .. } => {
+                    self.run_hovered = None;
+                    self.run_window
+                        .as_ref()
+                        .expect("run window exists")
+                        .request_redraw();
+                }
+                WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    button: MouseButton::Left,
+                    ..
+                } => match self.run_hovered {
+                    Some(run_dialog::Action::Run) => self.submit_run(),
+                    Some(run_dialog::Action::Cancel) => self.hide_run(),
+                    Some(run_dialog::Action::Browse) | None => {}
+                },
+                WindowEvent::KeyboardInput { event, .. }
+                    if event.state == ElementState::Pressed =>
+                {
+                    let mut changed = true;
+                    match event.logical_key {
+                        Key::Named(NamedKey::Backspace) => self.run_prompt.backspace(),
+                        Key::Named(NamedKey::Escape) => {
+                            self.hide_run();
+                            changed = false;
+                        }
+                        Key::Named(NamedKey::Enter) => {
+                            self.submit_run();
+                            changed = false;
+                        }
+                        Key::Character(text) => self.run_prompt.insert(&text),
+                        _ => changed = false,
+                    }
+                    if changed {
+                        self.run_window
+                            .as_ref()
+                            .expect("run window exists")
+                            .request_redraw();
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
 
         if self.panel_window.as_ref().map(|window| window.id()) == Some(window_id) {
             match event {
@@ -1374,8 +1498,15 @@ impl ApplicationHandler for Nickel {
 
         match event {
             WindowEvent::CloseRequested => self.set_launcher_visible(false),
+            WindowEvent::Focused(true) => {
+                #[cfg(not(target_os = "windows"))]
+                {
+                    self.launcher_focus_loss_deadline = None;
+                }
+            }
             WindowEvent::Focused(false) if self.launcher_visibility.is_visible() => {
-                self.set_launcher_visible(false);
+                self.launcher_focus_loss_deadline =
+                    Some(Instant::now() + Duration::from_millis(100));
             }
             WindowEvent::Resized(size) => {
                 if let Some(gpu) = &mut self.gpu {
@@ -1572,10 +1703,29 @@ impl ApplicationHandler for Nickel {
         let now = Instant::now();
         while let Ok(shortcut) = self.launcher_hotkey_rx.try_recv() {
             match shortcut {
-                GlobalShortcut::ToggleLauncher => self.toggle_launcher(),
+                GlobalShortcut::ShowLauncher => self.set_launcher_visible(true),
+                GlobalShortcut::HideLauncher => self.set_launcher_visible(false),
+                GlobalShortcut::ShowRun => self.show_run(),
                 GlobalShortcut::SwitchNext => self.advance_task_switcher(true),
                 GlobalShortcut::SwitchPrevious => self.advance_task_switcher(false),
                 GlobalShortcut::CommitSwitch => self.commit_task_switcher(),
+            }
+        }
+        if self
+            .launcher_focus_loss_deadline
+            .is_some_and(|deadline| now >= deadline)
+        {
+            if platform::launcher_has_foreground_focus() {
+                #[cfg(target_os = "windows")]
+                {
+                    self.launcher_focus_loss_deadline = Some(now + Duration::from_millis(100));
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    self.launcher_focus_loss_deadline = None;
+                }
+            } else {
+                self.set_launcher_visible(false);
             }
         }
         if self
@@ -1608,6 +1758,9 @@ impl ApplicationHandler for Nickel {
         let mut deadline = self.clock_deadline.min(self.window_deadline);
         if let Some(preview_deadline) = self.preview_hide_deadline {
             deadline = deadline.min(preview_deadline);
+        }
+        if let Some(focus_deadline) = self.launcher_focus_loss_deadline {
+            deadline = deadline.min(focus_deadline);
         }
         #[cfg(target_os = "windows")]
         let deadline = deadline.min(now + Duration::from_millis(25));
