@@ -16,7 +16,9 @@ pub enum WindowAction {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub enum GlobalShortcut {
-    ToggleLauncher,
+    ShowLauncher,
+    HideLauncher,
+    ShowRun,
     SwitchNext,
     SwitchPrevious,
     CommitSwitch,
@@ -24,7 +26,6 @@ pub enum GlobalShortcut {
 
 #[derive(Clone, Copy)]
 pub enum ShellCommand {
-    Toggle,
     Show,
     Hide,
     ShowContextMenu {
@@ -50,8 +51,9 @@ pub enum ShellCommand {
 mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::{
-    TrayFeed, WindowFeed, application_icon, applications, launcher_hotkey_receiver,
-    send_shell_command,
+    TrayFeed, WindowFeed, application_icon, applications, execute_run_command,
+    launcher_has_foreground_focus, launcher_hotkey_receiver, launcher_visibility_applied,
+    send_shell_command, wallpaper,
 };
 
 #[cfg(target_os = "windows")]
@@ -59,13 +61,16 @@ mod windows;
 #[cfg(target_os = "windows")]
 pub use windows::{
     TrayFeed, WindowFeed, application_icon, applications, configure_desktop_window,
-    configure_panel_window, launcher_hotkey_receiver, release_panel_window, send_shell_command,
+    configure_launcher_window, configure_panel_window, execute_run_command,
+    launcher_has_foreground_focus, launcher_hotkey_receiver, launcher_visibility_applied,
+    release_panel_window, send_shell_command, wallpaper,
 };
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 mod unsupported;
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 pub use unsupported::{
-    TrayFeed, WindowFeed, application_icon, applications, launcher_hotkey_receiver,
-    send_shell_command,
+    TrayFeed, WindowFeed, application_icon, applications, execute_run_command,
+    launcher_has_foreground_focus, launcher_hotkey_receiver, launcher_visibility_applied,
+    send_shell_command, wallpaper,
 };

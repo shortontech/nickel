@@ -6,6 +6,7 @@ use std::{
     sync::Arc,
 };
 
+use nickel_core::launcher::LauncherVisibility;
 use smithay::{
     desktop::{PopupManager, Space, Window, WindowSurfaceType},
     input::{Seat, SeatState},
@@ -113,7 +114,7 @@ pub struct NickelSession {
     pub windows: WindowRegistry,
     pub surface_windows: HashMap<ObjectId, WindowId>,
     pub launcher_window: Option<Window>,
-    pub launcher_visible: bool,
+    pub launcher_visibility: LauncherVisibility,
     pub panel_window: Option<Window>,
     pub context_menu_window: Option<Window>,
     pub primary_output_name: Option<String>,
@@ -199,7 +200,7 @@ impl NickelSession {
             windows: WindowRegistry::default(),
             surface_windows: HashMap::new(),
             launcher_window: None,
-            launcher_visible: false,
+            launcher_visibility: LauncherVisibility::default(),
             panel_window: None,
             context_menu_window: None,
             primary_output_name: None,
@@ -355,7 +356,8 @@ impl NickelSession {
     }
 
     pub fn toggle_launcher(&mut self) {
-        self.set_launcher_visible(!self.launcher_visible);
+        let visible = self.launcher_visibility.toggle();
+        self.apply_launcher_visibility(visible);
     }
 
     fn window_snapshot_payload(&self) -> String {
@@ -501,6 +503,11 @@ impl NickelSession {
     }
 
     pub fn set_launcher_visible(&mut self, visible: bool) {
+        self.launcher_visibility.set(visible);
+        self.apply_launcher_visibility(visible);
+    }
+
+    fn apply_launcher_visibility(&mut self, visible: bool) {
         let Some(window) = self.launcher_window.clone() else {
             return;
         };
@@ -523,7 +530,6 @@ impl NickelSession {
         } else {
             self.space.unmap_elem(&window);
         }
-        self.launcher_visible = visible;
         eprintln!(
             "nickel-session: launcher {}",
             if visible { "shown" } else { "hidden" }
@@ -533,7 +539,7 @@ impl NickelSession {
     pub fn register_launcher(&mut self, window: Window) {
         self.space.unmap_elem(&window);
         self.launcher_window = Some(window);
-        self.launcher_visible = false;
+        self.launcher_visibility.set(false);
     }
 
     pub fn register_panel(&mut self, window: Window) {
@@ -741,7 +747,7 @@ impl NickelSession {
                 .map_element(panel.clone(), (geometry.x, geometry.y), false);
             self.space.raise_element(&panel, false);
         }
-        if self.launcher_visible
+        if self.launcher_visibility.is_visible()
             && let Some(launcher) = self.launcher_window.clone()
         {
             let geometry = self.launcher_geometry(&launcher);

@@ -90,7 +90,7 @@ impl XdgShellHandler for NickelSession {
             .is_some_and(|window| window.toplevel().unwrap().wl_surface() == surface.wl_surface())
         {
             self.launcher_window = None;
-            self.launcher_visible = false;
+            self.launcher_visibility.set(false);
         }
         if self
             .panel_window

@@ -7,6 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 bitflags.workspace = true
+nickel-core = { path = "../nickel-core" }
 smithay.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

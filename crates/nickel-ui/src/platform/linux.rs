@@ -7,11 +7,16 @@ use std::{
 };
 
 use crate::{
+    desktop::Wallpaper,
     icons,
     launcher::Launcher,
     model::{Application, ApplicationId, OpenWindow, TrayItem, WindowId, WindowPreview},
     platform::{GlobalShortcut, ShellCommand, TraySource, WindowAction},
 };
+
+pub fn wallpaper() -> Wallpaper {
+    Wallpaper::default()
+}
 
 #[path = "../desktop_entries.rs"]
 mod desktop_entries;
@@ -160,7 +165,6 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
         return false;
     };
     let command = match command {
-        ShellCommand::Toggle => "toggle-launcher".to_owned(),
         ShellCommand::Show => "show-launcher".to_owned(),
         ShellCommand::Hide => "hide-launcher".to_owned(),
         ShellCommand::ShowContextMenu { x, width, height } => {
@@ -249,6 +253,20 @@ impl WindowFeed {
 pub fn launcher_hotkey_receiver() -> mpsc::Receiver<GlobalShortcut> {
     let (_sender, receiver) = mpsc::channel();
     receiver
+}
+
+pub fn execute_run_command(command: &str) -> bool {
+    std::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .spawn()
+        .is_ok()
+}
+
+pub fn launcher_visibility_applied(_: bool) {}
+
+pub fn launcher_has_foreground_focus() -> bool {
+    false
 }
 
 pub fn application_icon(_: &str) -> Option<image::RgbaImage> {

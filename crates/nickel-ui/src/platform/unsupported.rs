@@ -1,8 +1,13 @@
 use crate::{
+    desktop::Wallpaper,
     launcher::Launcher,
     model::{Application, OpenWindow, TrayItem, WindowId, WindowPreview},
     platform::{GlobalShortcut, ShellCommand, TraySource},
 };
+
+pub fn wallpaper() -> Wallpaper {
+    Wallpaper::default()
+}
 
 pub fn applications() -> Vec<Application> {
     Vec::new()
@@ -11,6 +16,16 @@ pub fn applications() -> Vec<Application> {
 pub fn launcher_hotkey_receiver() -> std::sync::mpsc::Receiver<GlobalShortcut> {
     let (_sender, receiver) = std::sync::mpsc::channel();
     receiver
+}
+
+pub fn execute_run_command(_: &str) -> bool {
+    false
+}
+
+pub fn launcher_visibility_applied(_: bool) {}
+
+pub fn launcher_has_foreground_focus() -> bool {
+    false
 }
 
 pub fn application_icon(_: &str) -> Option<image::RgbaImage> {
