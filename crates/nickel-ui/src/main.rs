@@ -83,6 +83,7 @@ struct Nickel {
     launcher_focus_loss_deadline: Option<Instant>,
     launcher_hotkey_rx: mpsc::Receiver<GlobalShortcut>,
     task_switcher_active: bool,
+    task_switcher_windows: Vec<OpenWindow>,
     clock_deadline: Instant,
     window_deadline: Instant,
     window_feed: WindowFeed,
@@ -150,6 +151,7 @@ impl Default for Nickel {
             launcher_focus_loss_deadline: None,
             launcher_hotkey_rx: platform::launcher_hotkey_receiver(),
             task_switcher_active: false,
+            task_switcher_windows: Vec::new(),
             clock_deadline: next_minute_deadline(Instant::now(), SystemTime::now()),
             window_deadline: Instant::now(),
             window_feed: WindowFeed::new(),
@@ -280,7 +282,7 @@ impl Nickel {
             self.context_menu_hovered = None;
             self.context_close_hovered = None;
             self.context_menu_actions.clear();
-            self.context_preview_mode = false;
+            self.context_preview_mode = true;
             platform::send_shell_command(ShellCommand::HideContextMenu);
             return;
         }
@@ -320,6 +322,7 @@ impl Nickel {
                 x,
                 width: context_menu::preview_width(labels.len()) as i32,
                 height: context_menu::PREVIEW_HEIGHT as i32,
+                windows: windows.iter().map(|window| window.id).collect(),
             });
         }
         if let Some(window) = &self.context_menu_window {
@@ -408,19 +411,36 @@ impl Nickel {
         self.set_launcher_visible(!self.launcher_visibility.is_visible());
     }
 
-    fn advance_task_switcher(&mut self, forward: bool) {
+    fn advance_task_switcher(&mut self, forward: bool, same_group: bool) {
         if !self.task_switcher_active {
             self.refresh_task_windows();
-            if self.task_windows.len() < 2 {
+            self.task_switcher_windows = if same_group {
+                let active_application = self
+                    .task_windows
+                    .iter()
+                    .find(|window| window.active)
+                    .and_then(|window| window.application_id.clone());
+                self.task_windows
+                    .iter()
+                    .filter(|window| {
+                        active_application.is_some() && window.application_id == active_application
+                    })
+                    .cloned()
+                    .collect()
+            } else {
+                self.task_windows.clone()
+            };
+            if self.task_switcher_windows.len() < 2 {
+                self.task_switcher_windows.clear();
                 return;
             }
             self.context_menu_actions = self
-                .task_windows
+                .task_switcher_windows
                 .iter()
                 .map(|window| ContextAction::Activate(window.id))
                 .collect();
             let labels: Vec<_> = self
-                .task_windows
+                .task_switcher_windows
                 .iter()
                 .map(|window| {
                     if window.title.is_empty() {
@@ -431,12 +451,15 @@ impl Nickel {
                 })
                 .collect();
             let active = self
-                .task_windows
+                .task_switcher_windows
                 .iter()
                 .position(|window| window.active)
                 .unwrap_or(0);
             self.context_menu_hovered = Some(active);
-            self.context_menu_target = self.task_windows.get(active).map(|window| window.id);
+            self.context_menu_target = self
+                .task_switcher_windows
+                .get(active)
+                .map(|window| window.id);
             self.context_preview_mode = false;
             self.preview_group = None;
             self.preview_hide_deadline = None;
@@ -444,25 +467,44 @@ impl Nickel {
                 return;
             }
             if let Some(gpu) = &mut self.context_menu_gpu {
-                gpu.set_labels(&labels);
+                gpu.set_previews(
+                    &labels,
+                    labels.iter().map(|_| image::RgbaImage::new(1, 1)).collect(),
+                );
             }
-            let height = context_menu::height_for(labels.len());
+            let width = context_menu::preview_width(labels.len());
+            let height = context_menu::PREVIEW_HEIGHT;
+            self.task_switcher_active = true;
             if let Some(window) = &self.context_menu_window {
-                let _ = window.request_inner_size(PhysicalSize::new(context_menu::WIDTH, height));
-                if let Some(monitor) = window.current_monitor().or_else(|| {
+                let monitor = window.current_monitor().or_else(|| {
                     self.panel_window
                         .as_ref()
                         .and_then(|panel| panel.current_monitor())
+                });
+                let x = monitor
+                    .as_ref()
+                    .map(|monitor| centered_position(monitor, (width, height)).x)
+                    .unwrap_or_default();
+                if !platform::send_shell_command(ShellCommand::ShowPreview {
+                    x,
+                    width: width as i32,
+                    height: height as i32,
+                    windows: self
+                        .task_switcher_windows
+                        .iter()
+                        .map(|window| window.id)
+                        .collect(),
                 }) {
-                    window.set_outer_position(centered_position(
-                        &monitor,
-                        (context_menu::WIDTH, height),
-                    ));
+                    let _ = window.request_inner_size(PhysicalSize::new(width, height));
+                    if let Some(monitor) = monitor {
+                        window.set_outer_position(centered_position(&monitor, (width, height)));
+                    }
+                    window.set_visible(true);
+                    #[cfg(not(target_os = "windows"))]
+                    window.focus_window();
                 }
-                window.set_visible(true);
-                window.focus_window();
+                window.request_redraw();
             }
-            self.task_switcher_active = true;
         }
         let count = self.context_menu_actions.len();
         if count == 0 {
@@ -475,7 +517,10 @@ impl Nickel {
             (current + count - 1) % count
         };
         self.context_menu_hovered = Some(selected);
-        self.context_menu_target = self.task_windows.get(selected).map(|window| window.id);
+        self.context_menu_target = self
+            .task_switcher_windows
+            .get(selected)
+            .map(|window| window.id);
         if let Some(window) = &self.context_menu_window {
             window.request_redraw();
         }
@@ -495,6 +540,7 @@ impl Nickel {
             })
         });
         self.task_switcher_active = false;
+        self.task_switcher_windows.clear();
         self.hide_context_menu();
         if let Some(window) = target {
             platform::send_shell_command(ShellCommand::WindowAction {
@@ -1003,7 +1049,8 @@ impl ApplicationHandler for Nickel {
         let mut panel_attributes = WindowAttributes::default()
             .with_title("Nickel Panel")
             .with_inner_size(LogicalSize::new(960.0, PANEL_HEIGHT))
-            .with_decorations(false);
+            .with_decorations(false)
+            .with_transparent(true);
         #[cfg(target_os = "windows")]
         {
             use winit::platform::windows::WindowAttributesExtWindows;
@@ -1096,6 +1143,9 @@ impl ApplicationHandler for Nickel {
             use winit::platform::windows::WindowExtWindows;
             context_menu_window.set_skip_taskbar(true);
             run_window.set_skip_taskbar(true);
+            if !platform::configure_context_menu_window(&context_menu_window) {
+                eprintln!("failed to register Nickel's Windows preview window");
+            }
         }
         platform::send_shell_command(ShellCommand::HideContextMenu);
         let Ok(launcher_gpu) = pollster::block_on(Gpu::new(launcher_window.clone())) else {
@@ -1174,7 +1224,9 @@ impl ApplicationHandler for Nickel {
         if self.context_menu_window.as_ref().map(|window| window.id()) == Some(window_id) {
             match event {
                 WindowEvent::CloseRequested => self.hide_context_menu(),
-                WindowEvent::Focused(false) if self.context_preview_mode => {
+                WindowEvent::Focused(false)
+                    if self.context_preview_mode && !self.task_switcher_active =>
+                {
                     self.hide_context_menu();
                 }
                 WindowEvent::Focused(false)
@@ -1701,13 +1753,23 @@ impl ApplicationHandler for Nickel {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
+        if self
+            .desktop_gpu
+            .as_ref()
+            .is_some_and(desktop::DesktopGpu::is_animated)
+            && let Some(window) = &self.desktop_window
+        {
+            window.request_redraw();
+        }
         while let Ok(shortcut) = self.launcher_hotkey_rx.try_recv() {
             match shortcut {
                 GlobalShortcut::ShowLauncher => self.set_launcher_visible(true),
                 GlobalShortcut::HideLauncher => self.set_launcher_visible(false),
                 GlobalShortcut::ShowRun => self.show_run(),
-                GlobalShortcut::SwitchNext => self.advance_task_switcher(true),
-                GlobalShortcut::SwitchPrevious => self.advance_task_switcher(false),
+                GlobalShortcut::SwitchNext => self.advance_task_switcher(true, false),
+                GlobalShortcut::SwitchPrevious => self.advance_task_switcher(false, false),
+                GlobalShortcut::SwitchGroupNext => self.advance_task_switcher(true, true),
+                GlobalShortcut::SwitchGroupPrevious => self.advance_task_switcher(false, true),
                 GlobalShortcut::CommitSwitch => self.commit_task_switcher(),
             }
         }
@@ -1738,7 +1800,7 @@ impl ApplicationHandler for Nickel {
             self.refresh_task_windows();
             self.refresh_tray_items();
             if let Some(group) = self.preview_group
-                && (self.context_preview_mode || self.panel_task_hovered == Some(group))
+                && (self.panel_task_hovered == Some(group) || self.context_menu_hovered.is_some())
             {
                 self.show_window_group(group);
             }

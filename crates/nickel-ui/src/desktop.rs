@@ -1,9 +1,19 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use image::{Rgba, RgbaImage, imageops::FilterType};
+use wgpu::util::DeviceExt;
 use winit::window::Window;
 
 use crate::graphics::SharedGraphics;
+
+const ANIMATED_WALLPAPER_ENV: &str = "NICKEL_ANIMATED_WALLPAPER";
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct WallpaperUniform {
+    seconds: f32,
+    animated: u32,
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum WallpaperPosition {
@@ -41,6 +51,9 @@ pub struct DesktopGpu {
     texture: wgpu::Texture,
     bind_group: wgpu::BindGroup,
     pipeline: wgpu::RenderPipeline,
+    time_buffer: wgpu::Buffer,
+    started: Instant,
+    animated: bool,
 }
 
 impl DesktopGpu {
@@ -73,6 +86,16 @@ impl DesktopGpu {
                             count: None,
                         },
                         wgpu::BindGroupLayoutEntry {
+                            binding: 2,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
                             binding: 1,
                             visibility: wgpu::ShaderStages::FRAGMENT,
                             ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
@@ -101,28 +124,38 @@ struct VertexOutput {
 
 @vertex
 fn vs_main(@builtin(vertex_index) index: u32) -> VertexOutput {
-    let positions = array<vec2<f32>, 3>(
-        vec2<f32>(-1.0, -3.0),
-        vec2<f32>(-1.0, 1.0),
-        vec2<f32>(3.0, 1.0),
-    );
-    let uvs = array<vec2<f32>, 3>(
-        vec2<f32>(0.0, 2.0),
-        vec2<f32>(0.0, 0.0),
-        vec2<f32>(2.0, 0.0),
+    let positions = array<vec2<f32>, 6>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>( 1.0, -1.0),
+        vec2<f32>(-1.0,  1.0),
+        vec2<f32>(-1.0,  1.0),
+        vec2<f32>( 1.0, -1.0),
+        vec2<f32>( 1.0,  1.0),
     );
     var output: VertexOutput;
     output.position = vec4<f32>(positions[index], 0.0, 1.0);
-    output.uv = uvs[index];
+    let uv = positions[index] * 0.5 + vec2<f32>(0.5);
+    output.uv = vec2<f32>(uv.x, 1.0 - uv.y);
     return output;
 }
 
 @group(0) @binding(0) var wallpaper: texture_2d<f32>;
 @group(0) @binding(1) var wallpaper_sampler: sampler;
+struct HueTime {
+    seconds: f32,
+    animated: u32,
+};
+@group(0) @binding(2) var<uniform> hue_time: HueTime;
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    return textureSample(wallpaper, wallpaper_sampler, input.uv);
+    if hue_time.animated == 0u {
+        return textureSample(wallpaper, wallpaper_sampler, input.uv);
+    }
+    let phase = hue_time.seconds * 1.4 + input.uv.x * 3.0 + input.uv.y * 1.7;
+    let color = 0.52 + 0.48 * cos(phase + vec3<f32>(0.0, 2.094, 4.189));
+    let triangle_tint = select(0.82, 1.0, input.uv.x + input.uv.y > 1.0);
+    return vec4<f32>(color * triangle_tint, 1.0);
 }
 "#
                     .into(),
@@ -155,7 +188,25 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
                 multiview_mask: None,
                 cache: None,
             });
-        let (texture, bind_group) = upload_wallpaper(&graphics, &bind_group_layout, &composed);
+        let animated = std::env::var_os(ANIMATED_WALLPAPER_ENV).is_some_and(|value| {
+            !matches!(
+                value.to_string_lossy().to_ascii_lowercase().as_str(),
+                "" | "0" | "false" | "no" | "off"
+            )
+        });
+        let uniform = WallpaperUniform {
+            seconds: 0.0,
+            animated: u32::from(animated),
+        };
+        let time_buffer = graphics
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Nickel desktop hue time"),
+                contents: bytemuck::bytes_of(&uniform),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+        let (texture, bind_group) =
+            upload_wallpaper(&graphics, &bind_group_layout, &composed, &time_buffer);
         Ok(Self {
             surface,
             graphics,
@@ -164,7 +215,14 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             texture,
             bind_group,
             pipeline,
+            time_buffer,
+            started: Instant::now(),
+            animated,
         })
+    }
+
+    pub fn is_animated(&self) -> bool {
+        self.animated
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -176,10 +234,18 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         self.surface.configure(&self.graphics.device, &self.config);
         let composed = compose_wallpaper(&self.wallpaper, width, height);
         let layout = self.pipeline.get_bind_group_layout(0);
-        (self.texture, self.bind_group) = upload_wallpaper(&self.graphics, &layout, &composed);
+        (self.texture, self.bind_group) =
+            upload_wallpaper(&self.graphics, &layout, &composed, &self.time_buffer);
     }
 
     pub fn render(&mut self) {
+        let uniform = WallpaperUniform {
+            seconds: self.started.elapsed().as_secs_f32(),
+            animated: u32::from(self.animated),
+        };
+        self.graphics
+            .queue
+            .write_buffer(&self.time_buffer, 0, bytemuck::bytes_of(&uniform));
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
@@ -210,7 +276,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.bind_group, &[]);
-            pass.draw(0..3, 0..1);
+            pass.draw(0..6, 0..1);
         }
         self.graphics.queue.submit([encoder.finish()]);
         self.graphics.queue.present(frame);
@@ -221,6 +287,7 @@ fn upload_wallpaper(
     graphics: &SharedGraphics,
     layout: &wgpu::BindGroupLayout,
     image: &RgbaImage,
+    time_buffer: &wgpu::Buffer,
 ) -> (wgpu::Texture, wgpu::BindGroup) {
     let size = wgpu::Extent3d {
         width: image.width(),
@@ -272,6 +339,10 @@ fn upload_wallpaper(
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: time_buffer.as_entire_binding(),
                 },
             ],
         });

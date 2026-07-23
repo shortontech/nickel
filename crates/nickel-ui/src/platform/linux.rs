@@ -170,7 +170,9 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
         ShellCommand::ShowContextMenu { x, width, height } => {
             format!("show-context-menu\t{x}\t{width}\t{height}")
         }
-        ShellCommand::ShowPreview { x, width, height } => {
+        ShellCommand::ShowPreview {
+            x, width, height, ..
+        } => {
             format!("show-preview\t{x}\t{width}\t{height}")
         }
         ShellCommand::HideContextMenu => "hide-context-menu".to_owned(),

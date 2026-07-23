@@ -21,10 +21,12 @@ pub enum GlobalShortcut {
     ShowRun,
     SwitchNext,
     SwitchPrevious,
+    SwitchGroupNext,
+    SwitchGroupPrevious,
     CommitSwitch,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub enum ShellCommand {
     Show,
     Hide,
@@ -37,6 +39,7 @@ pub enum ShellCommand {
         x: i32,
         width: i32,
         height: i32,
+        windows: Vec<WindowId>,
     },
     HideContextMenu,
     HighlightWindow(WindowId),
@@ -60,10 +63,10 @@ pub use linux::{
 mod windows;
 #[cfg(target_os = "windows")]
 pub use windows::{
-    TrayFeed, WindowFeed, application_icon, applications, configure_desktop_window,
-    configure_launcher_window, configure_panel_window, execute_run_command,
-    launcher_has_foreground_focus, launcher_hotkey_receiver, launcher_visibility_applied,
-    release_panel_window, send_shell_command, wallpaper,
+    TrayFeed, WindowFeed, application_icon, applications, configure_context_menu_window,
+    configure_desktop_window, configure_launcher_window, configure_panel_window,
+    execute_run_command, launcher_has_foreground_focus, launcher_hotkey_receiver,
+    launcher_visibility_applied, release_panel_window, send_shell_command, wallpaper,
 };
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]

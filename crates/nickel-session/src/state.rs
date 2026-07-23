@@ -6,7 +6,7 @@ use std::{
     sync::Arc,
 };
 
-use nickel_core::launcher::LauncherVisibility;
+use nickel_core::{hotkeys::HotkeyController, launcher::LauncherVisibility};
 use smithay::{
     desktop::{PopupManager, Space, Window, WindowSurfaceType},
     input::{Seat, SeatState},
@@ -120,7 +120,7 @@ pub struct NickelSession {
     pub primary_output_name: Option<String>,
     pub preview_frames: HashMap<WindowId, PreviewFrame>,
     pub preview_requests: HashSet<WindowId>,
-    pub super_chorded: bool,
+    pub hotkeys: HotkeyController,
     pub alt_tab_order: Vec<WindowId>,
     pub alt_tab_index: usize,
     pub preview_highlight: Option<WindowId>,
@@ -206,7 +206,7 @@ impl NickelSession {
             primary_output_name: None,
             preview_frames: HashMap::new(),
             preview_requests: HashSet::new(),
-            super_chorded: false,
+            hotkeys: HotkeyController::default(),
             alt_tab_order: Vec::new(),
             alt_tab_index: 0,
             preview_highlight: None,
@@ -357,6 +357,7 @@ impl NickelSession {
 
     pub fn toggle_launcher(&mut self) {
         let visible = self.launcher_visibility.toggle();
+        self.hotkeys.launcher_visibility_applied(visible);
         self.apply_launcher_visibility(visible);
     }
 
@@ -504,6 +505,7 @@ impl NickelSession {
 
     pub fn set_launcher_visible(&mut self, visible: bool) {
         self.launcher_visibility.set(visible);
+        self.hotkeys.launcher_visibility_applied(visible);
         self.apply_launcher_visibility(visible);
     }
 
@@ -667,7 +669,7 @@ impl NickelSession {
         self.raise_panel();
     }
 
-    pub fn cycle_windows(&mut self) {
+    pub fn cycle_windows(&mut self, forward: bool) {
         if self.alt_tab_order.is_empty() {
             let shell_ids = [
                 self.launcher_window.as_ref(),
@@ -690,9 +692,19 @@ impl NickelSession {
                 .map(|window| window.id)
                 .filter(|id| !shell_ids.contains(id))
                 .collect();
-            self.alt_tab_index = usize::from(self.alt_tab_order.len() > 1);
+            self.alt_tab_index = if forward {
+                usize::from(self.alt_tab_order.len() > 1)
+            } else {
+                self.alt_tab_order.len().saturating_sub(1)
+            };
         } else if !self.alt_tab_order.is_empty() {
-            self.alt_tab_index = (self.alt_tab_index + 1) % self.alt_tab_order.len();
+            self.alt_tab_index = if forward {
+                (self.alt_tab_index + 1) % self.alt_tab_order.len()
+            } else {
+                self.alt_tab_index
+                    .checked_sub(1)
+                    .unwrap_or(self.alt_tab_order.len() - 1)
+            };
         }
         if let Some(id) = self.alt_tab_order.get(self.alt_tab_index).copied() {
             self.activate_window(id);

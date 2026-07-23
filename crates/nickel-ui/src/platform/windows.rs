@@ -12,15 +12,20 @@ use std::{
 
 use windows::{
     Win32::{
-        Foundation::{CloseHandle, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
+        Foundation::{COLORREF, CloseHandle, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
+        Graphics::Dwm::{
+            DWM_THUMBNAIL_PROPERTIES, DWM_TNP_OPACITY, DWM_TNP_RECTDESTINATION,
+            DWM_TNP_SOURCECLIENTAREAONLY, DWM_TNP_VISIBLE, DwmRegisterThumbnail,
+            DwmUnregisterThumbnail, DwmUpdateThumbnailProperties,
+        },
         Graphics::Gdi::{
             BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection,
             DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, HGDIOBJ, ReleaseDC, SelectObject,
         },
         Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES,
         System::Threading::{
-            AttachThreadInput, GetCurrentThreadId, OpenProcess, PROCESS_NAME_WIN32,
-            PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+            AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId, OpenProcess,
+            PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
         },
         System::{
             Com::{
@@ -30,7 +35,7 @@ use windows::{
             DataExchange::COPYDATASTRUCT,
         },
         UI::{
-            Input::KeyboardAndMouse::SetFocus,
+            Input::KeyboardAndMouse::{GetAsyncKeyState, SetFocus},
             Shell::{
                 ABE_BOTTOM, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, APPBARDATA,
                 DWPOS_CENTER, DWPOS_FILL, DWPOS_FIT, DWPOS_SPAN, DWPOS_STRETCH, DWPOS_TILE,
@@ -44,21 +49,29 @@ use windows::{
                 GWL_EXSTYLE, GWLP_WNDPROC, GetAncestor, GetClassLongPtrW, GetClassNameW,
                 GetCursorPos, GetForegroundWindow, GetLastActivePopup, GetMessageW,
                 GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
-                GetWindowThreadProcessId, HICON, HWND_BOTTOM, HWND_BROADCAST, HWND_TOPMOST,
-                IsWindow, IsWindowVisible, IsZoomed, KBDLLHOOKSTRUCT, MSG, PostMessageW,
-                RegisterWindowMessageW, SPI_GETWORKAREA, SPI_SETWORKAREA, SPIF_SENDCHANGE, SW_HIDE,
-                SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL, SWP_FRAMECHANGED,
-                SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SendNotifyMessageW, SetForegroundWindow,
-                SetWindowLongPtrW, SetWindowPos, SetWindowsHookExW, ShowWindow,
-                SystemParametersInfoW, WH_KEYBOARD_LL, WM_CLOSE, WM_COPYDATA, WM_KEYDOWN, WM_KEYUP,
-                WM_LBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WS_EX_APPWINDOW, WS_EX_NOACTIVATE,
-                WS_EX_TOOLWINDOW,
+                GetWindowThreadProcessId, HICON, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTLEFT,
+                HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_BOTTOM, HWND_BROADCAST, HWND_TOPMOST,
+                IsIconic, IsWindow, IsWindowVisible, IsZoomed, KBDLLHOOKSTRUCT, LWA_ALPHA, MSG,
+                MSLLHOOKSTRUCT, PostMessageW, RegisterWindowMessageW, SPI_GETWORKAREA,
+                SPI_SETWORKAREA, SPIF_SENDCHANGE, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE,
+                SW_SHOW, SW_SHOWNOACTIVATE, SW_SHOWNORMAL, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED,
+                SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendNotifyMessageW,
+                SetForegroundWindow, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos,
+                SetWindowsHookExW, ShowWindow, SystemParametersInfoW, WH_KEYBOARD_LL, WH_MOUSE_LL,
+                WM_CLOSE, WM_COPYDATA, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
+                WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+                WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+                WindowFromPoint,
             },
         },
     },
     core::{BOOL, PCWSTR, PWSTR, w},
 };
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+use nickel_core::hotkeys::{
+    Hotkey, HotkeyAction, HotkeyController, HotkeyOutcome, HotkeySnapshot, KeyEdge,
+};
 
 use crate::{
     desktop::{Wallpaper, WallpaperPosition},
@@ -76,7 +89,27 @@ pub fn wallpaper() -> Wallpaper {
         if initialized {
             CoUninitialize();
         }
-        result.unwrap_or_default()
+        result.unwrap_or_else(|error| {
+            eprintln!("Nickel wallpaper COM query failed: {error}");
+            fallback_wallpaper()
+        })
+    }
+}
+
+fn fallback_wallpaper() -> Wallpaper {
+    let cache_path = transcoded_wallpaper_path();
+    let image = load_wallpaper_image(&cache_path);
+    if let Some(image) = &image {
+        eprintln!(
+            "Nickel wallpaper fallback: {} ({}x{})",
+            cache_path.display(),
+            image.width(),
+            image.height()
+        );
+    }
+    Wallpaper {
+        image,
+        ..Wallpaper::default()
     }
 }
 
@@ -92,10 +125,26 @@ unsafe fn query_wallpaper() -> windows::core::Result<Wallpaper> {
         CoTaskMemFree(Some(monitor.0.cast()));
         CoTaskMemFree(Some(path.0.cast()));
     }
-    let image = image::open(&path_string)
-        .or_else(|_| image::open(transcoded_wallpaper_path()))
-        .ok()
-        .map(|image| image.to_rgba8());
+    let cache_path = transcoded_wallpaper_path();
+    let (image, source) = match load_wallpaper_image(PathBuf::from(&path_string)) {
+        Some(image) => (Some(image), path_string.clone()),
+        None => match load_wallpaper_image(&cache_path) {
+            Some(image) => (Some(image), cache_path.to_string_lossy().into_owned()),
+            None => (None, "<none>".to_owned()),
+        },
+    };
+    if let Some(image) = &image {
+        eprintln!(
+            "Nickel wallpaper: {source} ({}x{})",
+            image.width(),
+            image.height()
+        );
+    } else {
+        eprintln!(
+            "Nickel wallpaper: no image; configured={path_string:?}, cache={}",
+            cache_path.display()
+        );
+    }
     Ok(Wallpaper {
         image,
         color: [
@@ -123,6 +172,16 @@ fn transcoded_wallpaper_path() -> PathBuf {
         .join("Windows")
         .join("Themes")
         .join("TranscodedWallpaper")
+}
+
+fn load_wallpaper_image(path: impl AsRef<std::path::Path>) -> Option<image::RgbaImage> {
+    image::ImageReader::open(path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?
+        .decode()
+        .ok()
+        .map(|image| image.to_rgba8())
 }
 
 #[path = "windows_start_menu.rs"]
@@ -153,6 +212,11 @@ fn run_windows_key_hook(sender: Sender<GlobalShortcut>) {
         eprintln!("failed to register the Windows-key launcher hook");
         return;
     };
+    let mouse_hook = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(windows_mouse_hook), None, 0) };
+    let Ok(_mouse_hook) = mouse_hook else {
+        eprintln!("failed to register Nickel's Windows mouse chord hook");
+        return;
+    };
     WINDOWS_KEY_SENDER.set(sender).ok();
     let mut message = MSG::default();
     // SAFETY: message is valid writable storage for each synchronous call.
@@ -160,17 +224,8 @@ fn run_windows_key_hook(sender: Sender<GlobalShortcut>) {
 }
 
 static WINDOWS_KEY_SENDER: std::sync::OnceLock<Sender<GlobalShortcut>> = std::sync::OnceLock::new();
-static WINDOWS_KEY_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static WINDOWS_KEY_CHORDED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-static ALT_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static SHIFT_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static SWITCH_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static TAB_SUPPRESSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static RUN_SUPPRESSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static LAUNCHER_VISIBLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static WINDOWS_TOGGLE_SENT_ON_DOWN: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static HOTKEY_CONTROLLER: std::sync::OnceLock<Mutex<HotkeyController>> = std::sync::OnceLock::new();
+static INPUT_TRACE_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static PANEL_APPBAR_REGISTERED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static ORIGINAL_WORK_AREA: std::sync::Mutex<Option<RECT>> = std::sync::Mutex::new(None);
@@ -182,8 +237,21 @@ static LAUNCHER_FOREGROUND_WINDOW: std::sync::atomic::AtomicIsize =
     std::sync::atomic::AtomicIsize::new(0);
 static LAUNCHER_WINDOW_HANDLE: std::sync::atomic::AtomicIsize =
     std::sync::atomic::AtomicIsize::new(0);
+static CONTEXT_MENU_WINDOW_HANDLE: std::sync::atomic::AtomicIsize =
+    std::sync::atomic::AtomicIsize::new(0);
+static DWM_THUMBNAILS: Mutex<Vec<isize>> = Mutex::new(Vec::new());
 static RESTORE_LAUNCHER_FOCUS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+static WINDOW_DRAG: Mutex<Option<WindowDrag>> = Mutex::new(None);
+
+#[derive(Clone, Copy)]
+struct WindowDrag {
+    window: isize,
+    start: POINT,
+    rectangle: RECT,
+    resize_edge: Option<u32>,
+    last_update: u32,
+}
 
 #[derive(Clone)]
 struct NativeTrayIcon {
@@ -202,8 +270,6 @@ struct TrayNotifyData {
 }
 
 unsafe extern "system" fn windows_key_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    use std::sync::atomic::Ordering;
-
     const VK_LWIN: u32 = 0x5b;
     const VK_RWIN: u32 = 0x5c;
     const VK_MENU: u32 = 0x12;
@@ -213,100 +279,334 @@ unsafe extern "system" fn windows_key_hook(code: i32, wparam: WPARAM, lparam: LP
     const VK_LSHIFT: u32 = 0xa0;
     const VK_RSHIFT: u32 = 0xa1;
     const VK_TAB: u32 = 0x09;
+    const VK_OEM_3: u32 = 0xc0;
     const VK_R: u32 = 0x52;
 
-    if code >= 0 {
-        // SAFETY: WH_KEYBOARD_LL supplies a KBDLLHOOKSTRUCT pointer in LPARAM.
-        let event = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
-        let message = wparam.0 as u32;
-        let key_down = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
-        let key_up = message == WM_KEYUP || message == WM_SYSKEYUP;
-        let windows_key = event.vkCode == VK_LWIN || event.vkCode == VK_RWIN;
-        if matches!(event.vkCode, VK_MENU | VK_LMENU | VK_RMENU) {
-            ALT_HELD.store(key_down, Ordering::Relaxed);
-            if key_up && SWITCH_ACTIVE.swap(false, Ordering::Relaxed) {
-                if let Some(sender) = WINDOWS_KEY_SENDER.get() {
-                    let _ = sender.send(GlobalShortcut::CommitSwitch);
+    if code < 0 {
+        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+    }
+    // SAFETY: WH_KEYBOARD_LL supplies a KBDLLHOOKSTRUCT pointer in LPARAM.
+    let event = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
+    let message = wparam.0 as u32;
+    let edge = if message == WM_KEYDOWN || message == WM_SYSKEYDOWN {
+        KeyEdge::Pressed
+    } else if message == WM_KEYUP || message == WM_SYSKEYUP {
+        KeyEdge::Released
+    } else {
+        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+    };
+    let key = match event.vkCode {
+        VK_LWIN | VK_RWIN => Hotkey::Super,
+        VK_MENU | VK_LMENU | VK_RMENU => Hotkey::Alt,
+        VK_SHIFT | VK_LSHIFT | VK_RSHIFT => Hotkey::Shift,
+        VK_TAB => Hotkey::Tab,
+        VK_OEM_3 => Hotkey::Grave,
+        VK_R => Hotkey::Run,
+        _ => Hotkey::Other,
+    };
+    if matches!(key, Hotkey::Tab | Hotkey::Grave)
+        && edge == KeyEdge::Pressed
+        && unsafe { GetAsyncKeyState(VK_MENU as i32) < 0 }
+        && let Ok(mut controller) = hotkey_controller().lock()
+        && !controller.snapshot().alt_held
+    {
+        controller.handle(Hotkey::Alt, KeyEdge::Pressed);
+    }
+    let (outcome, snapshot) = hotkey_controller()
+        .lock()
+        .map(|mut controller| {
+            let outcome = controller.handle(key, edge);
+            (outcome, controller.snapshot())
+        })
+        .unwrap_or_default();
+    if !matches!(key, Hotkey::Run | Hotkey::Other) {
+        trace_input("key", Some(key), Some(edge), outcome, snapshot);
+    }
+    send_hotkey_action(outcome.action);
+    if outcome.suppress {
+        LRESULT(1)
+    } else {
+        unsafe { CallNextHookEx(None, code, wparam, lparam) }
+    }
+}
+
+fn hotkey_controller() -> &'static Mutex<HotkeyController> {
+    HOTKEY_CONTROLLER.get_or_init(|| Mutex::new(HotkeyController::default()))
+}
+
+fn input_trace_enabled() -> bool {
+    *INPUT_TRACE_ENABLED.get_or_init(|| {
+        env::var_os("NICKEL_INPUT_TRACE").is_some_and(|value| {
+            !matches!(
+                value.to_string_lossy().to_ascii_lowercase().as_str(),
+                "" | "0" | "false" | "no" | "off"
+            )
+        })
+    })
+}
+
+fn physical_key_states() -> (bool, bool, bool, bool, bool) {
+    const VK_LWIN: i32 = 0x5b;
+    const VK_RWIN: i32 = 0x5c;
+    const VK_MENU: i32 = 0x12;
+    const VK_SHIFT: i32 = 0x10;
+    const VK_TAB: i32 = 0x09;
+    const VK_OEM_3: i32 = 0xc0;
+    unsafe {
+        (
+            GetAsyncKeyState(VK_LWIN) < 0 || GetAsyncKeyState(VK_RWIN) < 0,
+            GetAsyncKeyState(VK_MENU) < 0,
+            GetAsyncKeyState(VK_SHIFT) < 0,
+            GetAsyncKeyState(VK_TAB) < 0,
+            GetAsyncKeyState(VK_OEM_3) < 0,
+        )
+    }
+}
+
+fn trace_input(
+    source: &str,
+    key: Option<Hotkey>,
+    edge: Option<KeyEdge>,
+    outcome: HotkeyOutcome,
+    state: HotkeySnapshot,
+) {
+    if !input_trace_enabled() {
+        return;
+    }
+    let foreground = unsafe { GetForegroundWindow() };
+    let (physical_super, physical_alt, physical_shift, physical_tab, physical_grave) =
+        physical_key_states();
+    eprintln!(
+        "input source={source} event={key:?} edge={edge:?} foreground={:?} \
+         physical[super={physical_super} alt={physical_alt} shift={physical_shift} tab={physical_tab} grave={physical_grave}] \
+         controller[super={} chord={} alt={} shift={} tab={} grave={} run={} switch={} launcher={}] \
+         suppress={} action={:?}",
+        foreground.0,
+        state.super_held,
+        state.super_chorded,
+        state.alt_held,
+        state.shift_held,
+        state.tab_held,
+        state.grave_held,
+        state.run_held,
+        state.switch_active,
+        state.launcher_visible,
+        outcome.suppress,
+        outcome.action
+    );
+}
+
+fn send_hotkey_action(action: Option<HotkeyAction>) {
+    let shortcut = match action {
+        Some(HotkeyAction::ShowLauncher) => GlobalShortcut::ShowLauncher,
+        Some(HotkeyAction::HideLauncher) => GlobalShortcut::HideLauncher,
+        Some(HotkeyAction::ShowRun) => GlobalShortcut::ShowRun,
+        Some(HotkeyAction::SwitchNext) => GlobalShortcut::SwitchNext,
+        Some(HotkeyAction::SwitchPrevious) => GlobalShortcut::SwitchPrevious,
+        Some(HotkeyAction::SwitchGroupNext) => GlobalShortcut::SwitchGroupNext,
+        Some(HotkeyAction::SwitchGroupPrevious) => GlobalShortcut::SwitchGroupPrevious,
+        Some(HotkeyAction::CommitSwitch) => GlobalShortcut::CommitSwitch,
+        None => return,
+    };
+    if let Some(sender) = WINDOWS_KEY_SENDER.get() {
+        let _ = sender.send(shortcut);
+    }
+}
+
+unsafe extern "system" fn windows_mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if code < 0 {
+        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+    }
+    let message = wparam.0 as u32;
+    // SAFETY: WH_MOUSE_LL supplies an MSLLHOOKSTRUCT pointer in LPARAM.
+    let event = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
+    if let Ok(mut drag) = WINDOW_DRAG.lock()
+        && let Some(operation) = *drag
+    {
+        let release = matches!(message, WM_LBUTTONUP | WM_RBUTTONUP);
+        if message == WM_MOUSEMOVE || release {
+            if release || event.time.wrapping_sub(operation.last_update) >= 33 {
+                update_window_drag(operation, event.pt);
+                if !release {
+                    drag.as_mut().expect("drag operation exists").last_update = event.time;
                 }
             }
-        } else if matches!(event.vkCode, VK_SHIFT | VK_LSHIFT | VK_RSHIFT) {
-            SHIFT_HELD.store(key_down, Ordering::Relaxed);
-        } else if event.vkCode == VK_TAB && ALT_HELD.load(Ordering::Relaxed) {
-            if key_down {
-                SWITCH_ACTIVE.store(true, Ordering::Relaxed);
-                TAB_SUPPRESSED.store(true, Ordering::Relaxed);
-                if let Some(sender) = WINDOWS_KEY_SENDER.get() {
-                    let shortcut = if SHIFT_HELD.load(Ordering::Relaxed) {
-                        GlobalShortcut::SwitchPrevious
-                    } else {
-                        GlobalShortcut::SwitchNext
-                    };
-                    let _ = sender.send(shortcut);
-                }
-            }
-            return LRESULT(1);
-        } else if event.vkCode == VK_TAB && key_up && TAB_SUPPRESSED.swap(false, Ordering::Relaxed)
-        {
-            return LRESULT(1);
-        }
-        if event.vkCode == VK_R
-            && (WINDOWS_KEY_HELD.load(Ordering::Relaxed) || RUN_SUPPRESSED.load(Ordering::Relaxed))
-        {
-            if key_down && !RUN_SUPPRESSED.swap(true, Ordering::Relaxed) {
-                WINDOWS_KEY_CHORDED.store(true, Ordering::Relaxed);
-                // Win+R is a one-shot chord. Stop treating subsequent keyboard input as
-                // Windows-modified immediately; the physical Windows-key release is still
-                // consumed below and WINDOWS_KEY_CHORDED prevents it from toggling the launcher.
-                WINDOWS_KEY_HELD.store(false, Ordering::Relaxed);
-                if let Some(sender) = WINDOWS_KEY_SENDER.get() {
-                    let _ = sender.send(GlobalShortcut::ShowRun);
-                }
-            } else if key_up {
-                RUN_SUPPRESSED.store(false, Ordering::Relaxed);
-            }
-            return LRESULT(1);
-        } else if windows_key && key_down {
-            // Model the key as a button. Auto-repeat or duplicate keydown messages are not
-            // additional presses and must not reset the chord state.
-            if WINDOWS_KEY_HELD.swap(true, Ordering::Relaxed) {
+            if release {
+                *drag = None;
+                let snapshot = hotkey_controller()
+                    .lock()
+                    .map(|controller| controller.snapshot())
+                    .unwrap_or_default();
+                trace_input(
+                    "mouse-release",
+                    None,
+                    Some(KeyEdge::Released),
+                    HotkeyOutcome::default(),
+                    snapshot,
+                );
                 return LRESULT(1);
             }
-            WINDOWS_KEY_CHORDED.store(false, Ordering::Relaxed);
-            if LAUNCHER_VISIBLE.load(Ordering::Relaxed)
-                && !WINDOWS_TOGGLE_SENT_ON_DOWN.swap(true, Ordering::Relaxed)
-            {
-                LAUNCHER_VISIBLE.store(false, Ordering::Relaxed);
-                WINDOWS_KEY_CHORDED.store(true, Ordering::Relaxed);
-                if let Some(sender) = WINDOWS_KEY_SENDER.get() {
-                    let _ = sender.send(GlobalShortcut::HideLauncher);
-                }
-            }
-            // Nickel owns the Windows key completely. Forwarding only the press while consuming
-            // the release leaves Windows' modifier state stuck and prevents launcher typing.
-            return LRESULT(1);
-        } else if WINDOWS_KEY_HELD.load(Ordering::Relaxed) && key_down {
-            WINDOWS_KEY_CHORDED.store(true, Ordering::Relaxed);
-        } else if windows_key && key_up {
-            // A release without a matching down edge is stale or duplicated.
-            if !WINDOWS_KEY_HELD.swap(false, Ordering::Relaxed) {
-                return LRESULT(1);
-            }
-            if WINDOWS_TOGGLE_SENT_ON_DOWN.swap(false, Ordering::Relaxed) {
-                WINDOWS_KEY_CHORDED.store(false, Ordering::Relaxed);
-                return LRESULT(1);
-            }
-            let chorded = WINDOWS_KEY_CHORDED.swap(false, Ordering::Relaxed);
-            if !chorded {
-                if let Some(sender) = WINDOWS_KEY_SENDER.get() {
-                    LAUNCHER_VISIBLE.store(true, Ordering::Relaxed);
-                    let _ = sender.send(GlobalShortcut::ShowLauncher);
-                }
-            }
-            return LRESULT(1);
+            // Observe pointer motion without consuming it. Suppressing WM_MOUSEMOVE freezes the
+            // real cursor while the window chases coordinates reported by the hook.
+            return unsafe { CallNextHookEx(None, code, wparam, lparam) };
         }
     }
-    // SAFETY: Unhandled events must continue through the hook chain.
-    unsafe { CallNextHookEx(None, code, wparam, lparam) }
+    if !matches!(message, WM_LBUTTONDOWN | WM_RBUTTONDOWN) {
+        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+    }
+    let chord_started = hotkey_controller()
+        .lock()
+        .is_ok_and(|mut controller| controller.begin_pointer_chord());
+    if !chord_started {
+        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+    }
+    let snapshot = hotkey_controller()
+        .lock()
+        .map(|controller| controller.snapshot())
+        .unwrap_or_default();
+    trace_input(
+        if message == WM_LBUTTONDOWN {
+            "mouse-move"
+        } else {
+            "mouse-resize"
+        },
+        None,
+        Some(KeyEdge::Pressed),
+        HotkeyOutcome {
+            suppress: true,
+            action: None,
+        },
+        snapshot,
+    );
+
+    let target = unsafe { GetAncestor(WindowFromPoint(event.pt), GA_ROOT) };
+    if target.0.is_null() {
+        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+    }
+    let mut process_id = 0;
+    unsafe {
+        GetWindowThreadProcessId(target, Some(&mut process_id));
+    }
+    if process_id == unsafe { GetCurrentProcessId() } {
+        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+    }
+
+    let mut rectangle = RECT::default();
+    if unsafe { GetWindowRect(target, &mut rectangle) }.is_err() {
+        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+    }
+    if let Ok(mut drag) = WINDOW_DRAG.lock() {
+        *drag = Some(WindowDrag {
+            window: target.0 as isize,
+            start: event.pt,
+            rectangle,
+            resize_edge: (message == WM_RBUTTONDOWN).then(|| resize_hit_test(target, event.pt)),
+            last_update: event.time,
+        });
+    }
+    unsafe {
+        let _ = SetForegroundWindow(target);
+    }
+    LRESULT(1)
+}
+
+fn update_window_drag(operation: WindowDrag, pointer: POINT) {
+    let delta_x = pointer.x - operation.start.x;
+    let delta_y = pointer.y - operation.start.y;
+    let mut rectangle = operation.rectangle;
+    if let Some(edge) = operation.resize_edge {
+        if matches!(edge, HTLEFT | HTTOPLEFT | HTBOTTOMLEFT) {
+            rectangle.left += delta_x;
+        }
+        if matches!(edge, HTRIGHT | HTTOPRIGHT | HTBOTTOMRIGHT) {
+            rectangle.right += delta_x;
+        }
+        if matches!(edge, HTTOP | HTTOPLEFT | HTTOPRIGHT) {
+            rectangle.top += delta_y;
+        }
+        if matches!(edge, HTBOTTOM | HTBOTTOMLEFT | HTBOTTOMRIGHT) {
+            rectangle.bottom += delta_y;
+        }
+        if rectangle.right - rectangle.left < 120 {
+            if matches!(edge, HTLEFT | HTTOPLEFT | HTBOTTOMLEFT) {
+                rectangle.left = rectangle.right - 120;
+            } else {
+                rectangle.right = rectangle.left + 120;
+            }
+        }
+        if rectangle.bottom - rectangle.top < 80 {
+            if matches!(edge, HTTOP | HTTOPLEFT | HTTOPRIGHT) {
+                rectangle.top = rectangle.bottom - 80;
+            } else {
+                rectangle.bottom = rectangle.top + 80;
+            }
+        }
+    } else {
+        let width = rectangle.right - rectangle.left;
+        let height = rectangle.bottom - rectangle.top;
+        rectangle.left += delta_x;
+        rectangle.top += delta_y;
+        rectangle.right = rectangle.left + width;
+        rectangle.bottom = rectangle.top + height;
+    }
+    let window = HWND(operation.window as *mut c_void);
+    unsafe {
+        let _ = SetWindowPos(
+            window,
+            None,
+            rectangle.left,
+            rectangle.top,
+            rectangle.right - rectangle.left,
+            rectangle.bottom - rectangle.top,
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
+        );
+    }
+}
+
+fn resize_hit_test(window: HWND, pointer: POINT) -> u32 {
+    let mut rectangle = RECT::default();
+    if unsafe { GetWindowRect(window, &mut rectangle) }.is_err() {
+        return HTBOTTOMRIGHT;
+    }
+    let width = (rectangle.right - rectangle.left).max(1);
+    let height = (rectangle.bottom - rectangle.top).max(1);
+    let local_x = pointer.x - rectangle.left;
+    let local_y = pointer.y - rectangle.top;
+    let horizontal = if local_x < width / 3 {
+        -1
+    } else if local_x > width * 2 / 3 {
+        1
+    } else {
+        0
+    };
+    let vertical = if local_y < height / 3 {
+        -1
+    } else if local_y > height * 2 / 3 {
+        1
+    } else {
+        0
+    };
+    match (horizontal, vertical) {
+        (-1, -1) => HTTOPLEFT,
+        (0, -1) => HTTOP,
+        (1, -1) => HTTOPRIGHT,
+        (-1, 0) => HTLEFT,
+        (1, 0) => HTRIGHT,
+        (-1, 1) => HTBOTTOMLEFT,
+        (0, 1) => HTBOTTOM,
+        (1, 1) => HTBOTTOMRIGHT,
+        (0, 0) => [
+            (local_x, HTLEFT),
+            (width - local_x, HTRIGHT),
+            (local_y, HTTOP),
+            (height - local_y, HTBOTTOM),
+        ]
+        .into_iter()
+        .min_by_key(|(distance, _)| *distance)
+        .map(|(_, edge)| edge)
+        .unwrap_or(HTBOTTOMRIGHT),
+        _ => HTBOTTOMRIGHT,
+    }
 }
 
 pub fn execute_run_command(command: &str) -> bool {
@@ -365,6 +665,16 @@ pub fn configure_launcher_window(window: &winit::window::Window) -> bool {
     true
 }
 
+pub fn configure_context_menu_window(window: &winit::window::Window) -> bool {
+    use std::sync::atomic::Ordering;
+
+    let Some(hwnd) = window_hwnd(window) else {
+        return false;
+    };
+    CONTEXT_MENU_WINDOW_HANDLE.store(hwnd.0 as isize, Ordering::Relaxed);
+    true
+}
+
 pub fn launcher_has_foreground_focus() -> bool {
     use std::sync::atomic::Ordering;
 
@@ -386,7 +696,12 @@ pub fn configure_panel_window(window: &winit::window::Window) -> bool {
     // keeps it out of native task switching; TOPMOST keeps it above ordinary application windows.
     let topmost = unsafe {
         let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
-        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, (style | WS_EX_TOOLWINDOW.0) as isize);
+        SetWindowLongPtrW(
+            hwnd,
+            GWL_EXSTYLE,
+            (style | WS_EX_TOOLWINDOW.0 | WS_EX_LAYERED.0) as isize,
+        );
+        let opacity_set = SetLayeredWindowAttributes(hwnd, COLORREF(0), 204, LWA_ALPHA).is_ok();
         SetWindowPos(
             hwnd,
             Some(HWND_TOPMOST),
@@ -397,6 +712,7 @@ pub fn configure_panel_window(window: &winit::window::Window) -> bool {
             SWP_NOACTIVATE | SWP_FRAMECHANGED,
         )
         .is_ok()
+            && opacity_set
     };
     install_tray_host(hwnd);
     let mut appbar = APPBARDATA {
@@ -736,6 +1052,32 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
             }
             return true;
         }
+        ShellCommand::ShowContextMenu { x, width, height } => {
+            clear_dwm_thumbnails();
+            return show_context_window(x, width, height);
+        }
+        ShellCommand::ShowPreview {
+            x,
+            width,
+            height,
+            windows,
+        } => {
+            if !show_context_window(x, width, height) {
+                return false;
+            }
+            return show_dwm_previews(&windows);
+        }
+        ShellCommand::HideContextMenu => {
+            clear_dwm_thumbnails();
+            let context = CONTEXT_MENU_WINDOW_HANDLE.load(Ordering::Relaxed);
+            if context == 0 {
+                return false;
+            }
+            unsafe {
+                let _ = ShowWindow(HWND(context as *mut c_void), SW_HIDE);
+            }
+            return true;
+        }
         ShellCommand::WindowAction { window, action } => (window, action),
         _ => return false,
     };
@@ -750,7 +1092,34 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
         match action {
             WindowAction::Activate => {
                 let _ = ShowWindow(hwnd, SW_RESTORE);
-                SetForegroundWindow(hwnd).as_bool()
+                let foreground = GetForegroundWindow();
+                let current_thread = GetCurrentThreadId();
+                let foreground_thread = GetWindowThreadProcessId(foreground, None);
+                let target_thread = GetWindowThreadProcessId(hwnd, None);
+                let attached_foreground = foreground_thread != 0
+                    && foreground_thread != current_thread
+                    && AttachThreadInput(current_thread, foreground_thread, true).as_bool();
+                let attached_target = target_thread != 0
+                    && target_thread != current_thread
+                    && target_thread != foreground_thread
+                    && AttachThreadInput(current_thread, target_thread, true).as_bool();
+                let _ = BringWindowToTop(hwnd);
+                let activated = SetForegroundWindow(hwnd).as_bool();
+                if attached_target {
+                    let _ = AttachThreadInput(current_thread, target_thread, false);
+                }
+                if attached_foreground {
+                    let _ = AttachThreadInput(current_thread, foreground_thread, false);
+                }
+                if input_trace_enabled() {
+                    eprintln!(
+                        "input source=activate target={:?} previous={:?} current={:?} result={activated}",
+                        hwnd.0,
+                        foreground.0,
+                        GetForegroundWindow().0
+                    );
+                }
+                activated
             }
             WindowAction::Close => PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)).is_ok(),
             WindowAction::Maximize => {
@@ -766,8 +1135,108 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
             }
             WindowAction::Minimize => {
                 let _ = ShowWindow(hwnd, SW_MINIMIZE);
+                park_iconic_window(hwnd);
                 true
             }
+        }
+    }
+}
+
+fn show_context_window(x: i32, width: i32, height: i32) -> bool {
+    use std::sync::atomic::Ordering;
+
+    let context = CONTEXT_MENU_WINDOW_HANDLE.load(Ordering::Relaxed);
+    if context == 0 {
+        return false;
+    }
+    let hwnd = HWND(context as *mut c_void);
+    let mut work_area = RECT::default();
+    unsafe {
+        if SystemParametersInfoW(
+            SPI_GETWORKAREA,
+            0,
+            Some((&mut work_area as *mut RECT).cast()),
+            Default::default(),
+        )
+        .is_err()
+        {
+            return false;
+        }
+        let max_x = (work_area.right - width).max(work_area.left);
+        let left = x.clamp(work_area.left, max_x);
+        let top = (work_area.bottom - height).max(work_area.top);
+        if SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            left,
+            top,
+            width,
+            height,
+            SWP_NOACTIVATE,
+        )
+        .is_err()
+        {
+            return false;
+        }
+        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    }
+    true
+}
+
+fn show_dwm_previews(windows: &[WindowId]) -> bool {
+    use std::sync::atomic::Ordering;
+
+    clear_dwm_thumbnails();
+    let destination = CONTEXT_MENU_WINDOW_HANDLE.load(Ordering::Relaxed);
+    if destination == 0 {
+        return false;
+    }
+    let destination = HWND(destination as *mut c_void);
+    let mut registered = Vec::new();
+    for (index, window) in windows.iter().enumerate() {
+        let source = hwnd(*window);
+        let Ok(thumbnail) = (unsafe { DwmRegisterThumbnail(destination, source) }) else {
+            continue;
+        };
+        let left = 10 + index as i32 * crate::context_menu::PREVIEW_CARD_WIDTH as i32;
+        let properties = DWM_THUMBNAIL_PROPERTIES {
+            dwFlags: DWM_TNP_RECTDESTINATION
+                | DWM_TNP_OPACITY
+                | DWM_TNP_VISIBLE
+                | DWM_TNP_SOURCECLIENTAREAONLY,
+            rcDestination: RECT {
+                left,
+                top: 44,
+                right: left + 240,
+                bottom: 179,
+            },
+            opacity: 255,
+            fVisible: BOOL(1),
+            fSourceClientAreaOnly: BOOL(1),
+            ..Default::default()
+        };
+        if unsafe { DwmUpdateThumbnailProperties(thumbnail, &properties) }.is_ok() {
+            registered.push(thumbnail);
+        } else {
+            unsafe {
+                let _ = DwmUnregisterThumbnail(thumbnail);
+            }
+        }
+    }
+    let success = registered.len() == windows.len();
+    if let Ok(mut thumbnails) = DWM_THUMBNAILS.lock() {
+        *thumbnails = registered;
+    }
+    success
+}
+
+fn clear_dwm_thumbnails() {
+    let Ok(mut thumbnails) = DWM_THUMBNAILS.lock() else {
+        return;
+    };
+    for thumbnail in thumbnails.drain(..) {
+        unsafe {
+            let _ = DwmUnregisterThumbnail(thumbnail);
         }
     }
 }
@@ -775,7 +1244,9 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
 pub fn launcher_visibility_applied(visible: bool) {
     use std::sync::atomic::Ordering;
 
-    LAUNCHER_VISIBLE.store(visible, Ordering::Relaxed);
+    if let Ok(mut controller) = hotkey_controller().lock() {
+        controller.launcher_visibility_applied(visible);
+    }
     if visible {
         let foreground = unsafe { GetForegroundWindow() };
         LAUNCHER_FOREGROUND_WINDOW.store(foreground.0 as isize, Ordering::Relaxed);
@@ -816,12 +1287,15 @@ impl WindowFeed {
         Some(windows)
     }
 
-    pub fn preview(&self, _: WindowId) -> Option<WindowPreview> {
-        None
+    pub fn preview(&self, window: WindowId) -> Option<WindowPreview> {
+        unsafe { IsWindow(Some(hwnd(window))).as_bool() }.then(|| WindowPreview {
+            window,
+            image: image::RgbaImage::new(1, 1),
+        })
     }
 
     pub fn supports_previews(&self) -> bool {
-        false
+        true
     }
 
     pub fn icon(&self, window: WindowId) -> Option<image::RgbaImage> {
@@ -843,6 +1317,9 @@ unsafe extern "system" fn collect_window(hwnd: HWND, state: LPARAM) -> BOOL {
     unsafe { GetWindowThreadProcessId(hwnd, Some(&mut process_id)) };
     if process_id == std::process::id() {
         return BOOL(1);
+    }
+    if unsafe { IsIconic(hwnd).as_bool() } {
+        park_iconic_window(hwnd);
     }
     let Some(title) = window_title(hwnd) else {
         return BOOL(1);
@@ -883,6 +1360,23 @@ unsafe extern "system" fn collect_window(hwnd: HWND, state: LPARAM) -> BOOL {
         title,
     });
     BOOL(1)
+}
+
+fn park_iconic_window(hwnd: HWND) {
+    // Explorer normally conceals the legacy iconic HWND representation. In an Explorer-free
+    // session, Windows places that tiny minimized titlebar on the desktop. Moving only the
+    // iconic representation off-screen preserves WINDOWPLACEMENT.rcNormalPosition for restore.
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            -32_000,
+            -32_000,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
+        );
+    }
 }
 
 fn is_taskbar_window(hwnd: HWND, class: &str) -> bool {
