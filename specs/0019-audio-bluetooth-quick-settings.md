@@ -8,13 +8,14 @@ Provide taskbar controls for sound and Bluetooth that remain functional when Nic
 
 - Add platform-neutral audio and Bluetooth models to `nickel-core`, including output devices, volume, mute state, adapter power, discovery state, paired devices, connection state, and pending authorization.
 - Add narrow platform adapters. Linux uses PipeWire/WirePlumber for audio and BlueZ over D-Bus for Bluetooth; Windows and macOS implementations follow their native APIs.
+- Treat the shared quick-settings surface as the product UI rather than copying a Linux desktop. Use the same layout, navigation, icon states, and command semantics on Windows and Linux.
 - Add sound and Bluetooth status buttons beside the clock. Icons must communicate muted, unavailable, powered off, and connected states without opening the menu.
 - Open a compact quick-settings surface from either button. It supports output selection, volume and mute, Bluetooth power, discovery, connect/disconnect, and navigation to the full settings application.
 - Keep blocking enumeration and device operations off the UI/compositor thread. Adapters publish cached snapshots and accept bounded commands through channels.
 - Preserve ordinary StatusNotifier tray items. Quick settings are shell-owned controls, not synthetic tray applications.
 - When no backend is available, render a disabled state with a concise explanation rather than hiding controls or invoking another desktop’s utilities.
 
-The first implementation targets Linux. Pairing prompts, microphone controls, per-application volume, codecs, advanced device profiles, and cross-platform adapters are follow-up slices.
+The first live backend targets Linux, but the shared model and UI must compile on Windows from the first slice. Windows adapters expose an unavailable state until Core Audio and WinRT Bluetooth implementations can be exercised on a Windows host. Pairing prompts, microphone controls, per-application volume, codecs, and advanced device profiles are follow-up slices.
 
 ## Security and Session Services
 
@@ -26,6 +27,7 @@ The first implementation targets Linux. Pairing prompts, microphone controls, pe
 ## Verification
 
 - Unit-test snapshot reduction, icon states, device ordering, and command routing with synthetic adapters.
+- Cross-compile or build-check the shared UI and unavailable adapters for Windows without introducing Linux types into shared modules.
 - Verify the panel remains responsive while Linux services are absent or slow.
 - In a Nickel-only login session, change volume, mute, select an output, reconnect an existing Bluetooth device, and confirm sound continues after Plasma exits.
 - Run workspace tests and Clippy with warnings denied.
