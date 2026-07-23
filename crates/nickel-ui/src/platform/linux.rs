@@ -238,7 +238,7 @@ impl WindowFeed {
     }
 
     pub fn supports_previews(&self) -> bool {
-        self.socket.is_some()
+        false
     }
 
     pub fn icon(&self, _: WindowId) -> Option<image::RgbaImage> {

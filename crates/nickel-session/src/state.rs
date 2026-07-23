@@ -44,6 +44,54 @@ fn parse_geometry_command(value: &str) -> Option<(i32, i32, i32)> {
     ))
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct OutputPlacement {
+    name: String,
+    x: i32,
+    y: i32,
+}
+
+fn parse_output_layout(message: &str) -> Result<(String, Vec<OutputPlacement>), &'static str> {
+    let mut lines = message.lines();
+    if lines.next() != Some("apply-outputs") {
+        return Err("invalid output command");
+    }
+    let primary = lines
+        .next()
+        .and_then(|line| line.strip_prefix("primary\t"))
+        .filter(|name| !name.is_empty())
+        .ok_or("missing primary output")?
+        .to_owned();
+    let mut placements = Vec::new();
+    for line in lines.filter(|line| !line.is_empty()) {
+        let mut fields = line.split('\t');
+        let name = fields
+            .next()
+            .filter(|name| !name.is_empty())
+            .ok_or("missing output name")?;
+        let x = fields
+            .next()
+            .and_then(|value| value.parse().ok())
+            .ok_or("invalid output x")?;
+        let y = fields
+            .next()
+            .and_then(|value| value.parse().ok())
+            .ok_or("invalid output y")?;
+        if fields.next().is_some() {
+            return Err("too many output fields");
+        }
+        placements.push(OutputPlacement {
+            name: name.to_owned(),
+            x,
+            y,
+        });
+    }
+    if placements.is_empty() {
+        return Err("output layout is empty");
+    }
+    Ok((primary, placements))
+}
+
 pub struct NickelSession {
     pub start_time: std::time::Instant,
     pub socket_name: OsString,
@@ -68,15 +116,20 @@ pub struct NickelSession {
     pub launcher_visible: bool,
     pub panel_window: Option<Window>,
     pub context_menu_window: Option<Window>,
+    pub primary_output_name: Option<String>,
     pub preview_frames: HashMap<WindowId, PreviewFrame>,
     pub preview_requests: HashSet<WindowId>,
-    pub pressed_modifier_keys: HashSet<u32>,
     pub super_chorded: bool,
+    pub alt_tab_order: Vec<WindowId>,
+    pub alt_tab_index: usize,
     pub preview_highlight: Option<WindowId>,
     pub minimized_windows: HashMap<WindowId, (Window, Point<i32, Logical>)>,
     maximized_restore: HashMap<ObjectId, Geometry>,
+    fullscreen_restore: HashMap<ObjectId, Geometry>,
     pub last_titlebar_click: Option<(ObjectId, u32, Point<f64, Logical>)>,
     pub suppress_left_button_release: bool,
+    pub buffer_commit_tx: Option<smithay::reexports::calloop::channel::Sender<WlSurface>>,
+    pub identify_outputs_until: Option<std::time::Instant>,
     control_socket_path: PathBuf,
 }
 
@@ -149,15 +202,20 @@ impl NickelSession {
             launcher_visible: false,
             panel_window: None,
             context_menu_window: None,
+            primary_output_name: None,
             preview_frames: HashMap::new(),
             preview_requests: HashSet::new(),
-            pressed_modifier_keys: HashSet::new(),
             super_chorded: false,
+            alt_tab_order: Vec::new(),
+            alt_tab_index: 0,
             preview_highlight: None,
             minimized_windows: HashMap::new(),
             maximized_restore: HashMap::new(),
+            fullscreen_restore: HashMap::new(),
             last_titlebar_click: None,
             suppress_left_button_release: false,
+            buffer_commit_tx: None,
+            identify_outputs_until: None,
             control_socket_path,
         }
     }
@@ -183,7 +241,7 @@ impl NickelSession {
             .insert_source(
                 Generic::new(socket, Interest::READ, Mode::Level),
                 |_, socket, data| {
-                    let mut command = [0_u8; 128];
+                    let mut command = [0_u8; 4096];
                     while let Ok((length, source)) = socket.as_ref().recv_from(&mut command) {
                         let message = &command[..length];
                         match message {
@@ -197,8 +255,34 @@ impl NickelSession {
                                     let _ = socket.as_ref().send_to(snapshot.as_bytes(), path);
                                 }
                             }
+                            b"list-outputs" => {
+                                if let Some(path) = source.as_pathname() {
+                                    let snapshot = data.state.output_snapshot_payload();
+                                    let _ = socket.as_ref().send_to(snapshot.as_bytes(), path);
+                                }
+                            }
+                            b"identify-outputs" => {
+                                data.state.identify_outputs_until = Some(
+                                    std::time::Instant::now() + std::time::Duration::from_secs(3),
+                                );
+                                #[cfg(feature = "backend-udev")]
+                                data.render_all_outputs();
+                                if let Some(path) = source.as_pathname() {
+                                    let _ = socket.as_ref().send_to(b"ok", path);
+                                }
+                            }
                             _ => {
                                 if let Ok(message) = std::str::from_utf8(message)
+                                    && message.starts_with("apply-outputs\n")
+                                {
+                                    let response = match data.state.apply_output_layout(message) {
+                                        Ok(()) => "ok".to_owned(),
+                                        Err(error) => format!("error\t{error}"),
+                                    };
+                                    if let Some(path) = source.as_pathname() {
+                                        let _ = socket.as_ref().send_to(response.as_bytes(), path);
+                                    }
+                                } else if let Ok(message) = std::str::from_utf8(message)
                                     && let Some((x, width, height)) = message
                                         .strip_prefix("show-context-menu\t")
                                         .and_then(parse_geometry_command)
@@ -304,6 +388,118 @@ impl NickelSession {
             .collect()
     }
 
+    fn output_snapshot_payload(&self) -> String {
+        self.space
+            .outputs()
+            .filter_map(|output| {
+                let geometry = self.space.output_geometry(output)?;
+                let physical = output.physical_properties();
+                Some(format!(
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                    output.name(),
+                    physical.model.replace(['\t', '\n', '\r'], " "),
+                    geometry.loc.x,
+                    geometry.loc.y,
+                    geometry.size.w,
+                    geometry.size.h,
+                    physical.size.w,
+                    physical.size.h,
+                    u8::from(self.primary_output_name.as_deref() == Some(output.name().as_str()))
+                ))
+            })
+            .collect()
+    }
+
+    fn apply_output_layout(&mut self, message: &str) -> Result<(), &'static str> {
+        let (primary, mut placements) = parse_output_layout(message)?;
+        let connected: HashMap<_, _> = self
+            .space
+            .outputs()
+            .filter_map(|output| {
+                self.space
+                    .output_geometry(output)
+                    .map(|geometry| (output.name(), (output.clone(), geometry.size)))
+            })
+            .collect();
+        if placements.len() != connected.len() {
+            return Err("layout must include every connected output");
+        }
+        let mut names = HashSet::new();
+        if placements.iter().any(|placement| {
+            !connected.contains_key(&placement.name) || !names.insert(&placement.name)
+        }) {
+            return Err("layout contains an unknown or duplicate output");
+        }
+        if !names.contains(&primary) {
+            return Err("primary output is not connected");
+        }
+        let minimum_x = placements
+            .iter()
+            .map(|placement| placement.x)
+            .min()
+            .unwrap_or(0);
+        let minimum_y = placements
+            .iter()
+            .map(|placement| placement.y)
+            .min()
+            .unwrap_or(0);
+        for placement in &mut placements {
+            placement.x -= minimum_x;
+            placement.y -= minimum_y;
+        }
+        for (index, left) in placements.iter().enumerate() {
+            let left_size = connected[&left.name].1;
+            for right in placements.iter().skip(index + 1) {
+                let right_size = connected[&right.name].1;
+                let overlaps = left.x < right.x + right_size.w
+                    && left.x + left_size.w > right.x
+                    && left.y < right.y + right_size.h
+                    && left.y + left_size.h > right.y;
+                if overlaps {
+                    return Err("outputs may touch but cannot overlap");
+                }
+            }
+        }
+
+        for placement in &placements {
+            let (output, _) = &connected[&placement.name];
+            let location = (placement.x, placement.y).into();
+            output.change_current_state(None, None, None, Some(location));
+            self.space.map_output(output, location);
+        }
+        self.primary_output_name = Some(primary);
+        self.rescue_stranded_windows();
+        self.relayout_shell_surfaces();
+        Ok(())
+    }
+
+    fn rescue_stranded_windows(&mut self) {
+        let outputs: Vec<_> = self
+            .space
+            .outputs()
+            .filter_map(|output| self.space.output_geometry(output))
+            .collect();
+        let Some(fallback) = self
+            .output_geometry()
+            .map(|geometry| (geometry.x, geometry.y))
+        else {
+            return;
+        };
+        let stranded: Vec<_> = self
+            .space
+            .elements()
+            .filter(|window| {
+                self.space
+                    .element_bbox(window)
+                    .is_some_and(|bounds| !outputs.iter().any(|output| output.overlaps(bounds)))
+            })
+            .cloned()
+            .collect();
+        for window in stranded {
+            self.space.map_element(window, fallback, false);
+        }
+    }
+
     pub fn set_launcher_visible(&mut self, visible: bool) {
         let Some(window) = self.launcher_window.clone() else {
             return;
@@ -399,8 +595,6 @@ impl NickelSession {
         if let Some(window) = self.context_menu_window.clone() {
             self.space.unmap_elem(&window);
         }
-        self.preview_requests.clear();
-        self.preview_frames.clear();
         self.preview_highlight = None;
         eprintln!("nickel-session: context menu hidden");
     }
@@ -465,6 +659,38 @@ impl NickelSession {
             window.toplevel().unwrap().send_pending_configure();
         });
         self.raise_panel();
+    }
+
+    pub fn cycle_windows(&mut self) {
+        if self.alt_tab_order.is_empty() {
+            let shell_ids = [
+                self.launcher_window.as_ref(),
+                self.panel_window.as_ref(),
+                self.context_menu_window.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            .filter_map(|window| {
+                self.surface_windows
+                    .get(&window.toplevel()?.wl_surface().id())
+            })
+            .copied()
+            .collect::<HashSet<_>>();
+            self.alt_tab_order = self
+                .windows
+                .snapshot()
+                .into_iter()
+                .rev()
+                .map(|window| window.id)
+                .filter(|id| !shell_ids.contains(id))
+                .collect();
+            self.alt_tab_index = usize::from(self.alt_tab_order.len() > 1);
+        } else if !self.alt_tab_order.is_empty() {
+            self.alt_tab_index = (self.alt_tab_index + 1) % self.alt_tab_order.len();
+        }
+        if let Some(id) = self.alt_tab_order.get(self.alt_tab_index).copied() {
+            self.activate_window(id);
+        }
     }
 
     pub fn minimize_window(&mut self, id: WindowId) {
@@ -579,6 +805,54 @@ impl NickelSession {
         surface.send_pending_configure();
     }
 
+    pub fn fullscreen_toplevel(&mut self, surface: &ToplevelSurface) {
+        let Some(window) = self.window_for_surface(surface.wl_surface()) else {
+            surface.send_configure();
+            return;
+        };
+        let Some(output) = self.output_geometry_for_window(&window) else {
+            surface.send_configure();
+            return;
+        };
+        let location = self.space.element_location(&window).unwrap_or_default();
+        let size = window.geometry().size;
+        self.fullscreen_restore
+            .entry(surface.wl_surface().id())
+            .or_insert(Geometry {
+                x: location.x,
+                y: location.y,
+                width: size.w.max(1),
+                height: size.h.max(1),
+            });
+        surface.with_pending_state(|state| {
+            state
+                .states
+                .set(smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Fullscreen);
+            state.size = Some(Size::from((output.width, output.height)));
+        });
+        window.override_z_index(45);
+        self.space.map_element(window, (output.x, output.y), true);
+        surface.send_pending_configure();
+    }
+
+    pub fn unfullscreen_toplevel(&mut self, surface: &ToplevelSurface) {
+        let Some(restore) = self.fullscreen_restore.remove(&surface.wl_surface().id()) else {
+            return;
+        };
+        surface.with_pending_state(|state| {
+            state
+                .states
+                .unset(smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Fullscreen);
+            state.size = Some(Size::from((restore.width, restore.height)));
+        });
+        if let Some(window) = self.window_for_surface(surface.wl_surface()) {
+            window.override_z_index(30);
+            self.space.map_element(window, (restore.x, restore.y), true);
+        }
+        self.raise_panel();
+        surface.send_pending_configure();
+    }
+
     pub fn toggle_maximized_toplevel(&mut self, surface: &ToplevelSurface) {
         if self
             .maximized_restore
@@ -592,6 +866,7 @@ impl NickelSession {
 
     pub fn forget_toplevel_geometry(&mut self, surface: &ToplevelSurface) {
         self.maximized_restore.remove(&surface.wl_surface().id());
+        self.fullscreen_restore.remove(&surface.wl_surface().id());
     }
 
     fn relayout_maximized_windows(&mut self) {
@@ -632,7 +907,11 @@ impl NickelSession {
     }
 
     fn output_geometry(&self) -> Option<Geometry> {
-        let output = self.space.outputs().next()?;
+        let output = self
+            .primary_output_name
+            .as_ref()
+            .and_then(|name| self.space.outputs().find(|output| output.name() == *name))
+            .or_else(|| self.space.outputs().next())?;
         let geometry = self.space.output_geometry(output)?;
         Some(Geometry {
             x: geometry.loc.x,
@@ -773,4 +1052,38 @@ pub struct ClientState {
 impl ClientData for ClientState {
     fn initialized(&self, _client_id: ClientId) {}
     fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{OutputPlacement, parse_output_layout};
+
+    #[test]
+    fn output_layout_command_parses_atomically() {
+        let (primary, outputs) =
+            parse_output_layout("apply-outputs\nprimary\tDP-3\nDVI-I-1\t0\t0\nDP-3\t1920\t120\n")
+                .unwrap();
+
+        assert_eq!(primary, "DP-3");
+        assert_eq!(
+            outputs,
+            vec![
+                OutputPlacement {
+                    name: "DVI-I-1".into(),
+                    x: 0,
+                    y: 0,
+                },
+                OutputPlacement {
+                    name: "DP-3".into(),
+                    x: 1920,
+                    y: 120,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn output_layout_command_rejects_missing_primary() {
+        assert!(parse_output_layout("apply-outputs\nDVI-I-1\t0\t0\n").is_err());
+    }
 }

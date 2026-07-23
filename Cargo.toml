@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/nickel-session", "crates/nickel-ui"]
+members = ["crates/nickel-session", "crates/nickel-settings", "crates/nickel-ui"]
 default-members = ["crates/nickel-ui"]
 resolver = "3"
 
@@ -24,6 +24,7 @@ smithay = { version = "0.7.0", default-features = false, features = ["wayland_fr
 thiserror = "2.0.17"
 tracing = "0.1.44"
 shlex = "1.3.0"
+softbuffer = "0.4.8"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 wgpu = "30.0.0"
 winit = "0.30.12"

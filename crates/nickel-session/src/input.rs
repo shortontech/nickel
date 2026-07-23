@@ -1,11 +1,11 @@
 use smithay::{
     backend::input::{
         AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, InputBackend, InputEvent,
-        KeyState, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
-        TouchEvent,
+        KeyState, KeyboardKeyEvent, MouseButton, PointerAxisEvent, PointerButtonEvent,
+        PointerMotionEvent, TouchEvent,
     },
     input::{
-        keyboard::FilterResult,
+        keyboard::{FilterResult, Keysym, keysyms},
         pointer::{AxisFrame, ButtonEvent, Focus, GrabStartData, MotionEvent},
         touch::{DownEvent, MotionEvent as TouchMotion, UpEvent},
     },
@@ -22,66 +22,63 @@ impl NickelSession {
     pub fn process_input_event<I: InputBackend>(&mut self, event: InputEvent<I>) -> Option<i32> {
         match event {
             InputEvent::Keyboard { event, .. } => {
-                // libinput's Smithay backend exposes XKB keycodes (evdev + 8).
-                const KEY_LEFTCTRL: u32 = 37;
-                const KEY_LEFTALT: u32 = 64;
-                const KEY_RIGHTCTRL: u32 = 105;
-                const KEY_RIGHTALT: u32 = 108;
-                const KEY_LEFTMETA: u32 = 133;
-                const KEY_RIGHTMETA: u32 = 134;
-                let key_code = event.key_code().raw();
-                if matches!(
-                    key_code,
-                    KEY_LEFTCTRL
-                        | KEY_LEFTALT
-                        | KEY_RIGHTCTRL
-                        | KEY_RIGHTALT
-                        | KEY_LEFTMETA
-                        | KEY_RIGHTMETA
-                ) {
-                    match event.state() {
-                        KeyState::Pressed => {
-                            self.pressed_modifier_keys.insert(key_code);
-                        }
-                        KeyState::Released => {
-                            self.pressed_modifier_keys.remove(&key_code);
-                        }
-                    }
-                }
-                let control = self
-                    .pressed_modifier_keys
-                    .iter()
-                    .any(|key| matches!(*key, KEY_LEFTCTRL | KEY_RIGHTCTRL));
-                let alt = self
-                    .pressed_modifier_keys
-                    .iter()
-                    .any(|key| matches!(*key, KEY_LEFTALT | KEY_RIGHTALT));
-                if control
-                    && alt
-                    && let Some(vt) = vt_from_key_code(key_code)
-                {
-                    return (event.state() == KeyState::Pressed).then_some(vt);
-                }
-                if matches!(key_code, KEY_LEFTMETA | KEY_RIGHTMETA) {
-                    if event.state() == KeyState::Released {
-                        if !self.super_chorded {
-                            self.toggle_launcher();
-                        }
-                        self.super_chorded = false;
-                    }
-                    return None;
-                }
                 let serial = SERIAL_COUNTER.next_serial();
                 let time = Event::time_msec(&event);
-
-                self.seat.get_keyboard().unwrap().input::<(), _>(
-                    self,
-                    event.key_code(),
-                    event.state(),
-                    serial,
-                    time,
-                    |_, _, _| FilterResult::Forward,
-                );
+                let state = event.state();
+                let keyboard = self.seat.get_keyboard().unwrap();
+                return keyboard
+                    .input::<Option<i32>, _>(
+                        self,
+                        event.key_code(),
+                        state,
+                        serial,
+                        time,
+                        move |session, modifiers, handle| {
+                            let sym = handle.modified_sym();
+                            let is_super = matches!(
+                                sym,
+                                value if value == Keysym::new(keysyms::KEY_Super_L)
+                                    || value == Keysym::new(keysyms::KEY_Super_R)
+                            );
+                            let is_alt = matches!(
+                                sym,
+                                value if value == Keysym::new(keysyms::KEY_Alt_L)
+                                    || value == Keysym::new(keysyms::KEY_Alt_R)
+                            );
+                            if is_alt && state == KeyState::Released {
+                                session.alt_tab_order.clear();
+                                session.alt_tab_index = 0;
+                            }
+                            if modifiers.ctrl
+                                && modifiers.alt
+                                && let Some(vt) = vt_from_keysym(sym)
+                            {
+                                return FilterResult::Intercept(
+                                    (state == KeyState::Pressed).then_some(vt),
+                                );
+                            }
+                            if is_super {
+                                if state == KeyState::Released {
+                                    if !session.super_chorded {
+                                        session.toggle_launcher();
+                                    }
+                                    session.super_chorded = false;
+                                }
+                                return FilterResult::Intercept(None);
+                            }
+                            if sym == Keysym::new(keysyms::KEY_Tab) && modifiers.alt {
+                                if state == KeyState::Pressed {
+                                    session.cycle_windows();
+                                }
+                                return FilterResult::Intercept(None);
+                            }
+                            if modifiers.logo && state == KeyState::Pressed {
+                                session.super_chorded = true;
+                            }
+                            FilterResult::Forward
+                        },
+                    )
+                    .flatten();
             }
             InputEvent::PointerMotion { event, .. } => {
                 let current = self.seat.get_pointer().unwrap().current_location();
@@ -151,18 +148,17 @@ impl NickelSession {
 
                 let button_state = event.state();
 
-                const BTN_LEFT: u32 = 0x110;
-                const BTN_RIGHT: u32 = 0x111;
                 const DOUBLE_CLICK_MS: u32 = 500;
                 const DOUBLE_CLICK_DISTANCE: f64 = 6.0;
                 const TITLEBAR_HEIGHT: f64 = 40.0;
                 let mut suppress_pointer_event = false;
-                let super_pressed = self
-                    .pressed_modifier_keys
-                    .iter()
-                    .any(|key| matches!(*key, 133 | 134));
+                let mouse_button = event.button();
+                let super_pressed = keyboard.modifier_state().logo;
 
-                if button == BTN_LEFT && button_state == ButtonState::Pressed && !super_pressed {
+                if mouse_button == Some(MouseButton::Left)
+                    && button_state == ButtonState::Pressed
+                    && !super_pressed
+                {
                     let location = pointer.current_location();
                     let titlebar_window = self
                         .space
@@ -205,7 +201,7 @@ impl NickelSession {
                     } else {
                         self.last_titlebar_click = None;
                     }
-                } else if button == BTN_LEFT
+                } else if mouse_button == Some(MouseButton::Left)
                     && button_state == ButtonState::Released
                     && self.suppress_left_button_release
                 {
@@ -250,7 +246,7 @@ impl NickelSession {
                     }
                 };
 
-                if button == BTN_LEFT
+                if mouse_button == Some(MouseButton::Left)
                     && button_state == ButtonState::Pressed
                     && super_pressed
                     && !pointer.is_grabbed()
@@ -284,7 +280,7 @@ impl NickelSession {
                     );
                 }
 
-                if button == BTN_RIGHT
+                if mouse_button == Some(MouseButton::Right)
                     && button_state == ButtonState::Pressed
                     && super_pressed
                     && !pointer.is_grabbed()
@@ -460,11 +456,20 @@ fn resize_edges_at(
     }
 }
 
-fn vt_from_key_code(key_code: u32) -> Option<i32> {
-    match key_code {
-        67..=76 => Some((key_code - 66) as i32),
-        95 => Some(11),
-        96 => Some(12),
+fn vt_from_keysym(sym: Keysym) -> Option<i32> {
+    match sym.raw() {
+        keysyms::KEY_F1 => Some(1),
+        keysyms::KEY_F2 => Some(2),
+        keysyms::KEY_F3 => Some(3),
+        keysyms::KEY_F4 => Some(4),
+        keysyms::KEY_F5 => Some(5),
+        keysyms::KEY_F6 => Some(6),
+        keysyms::KEY_F7 => Some(7),
+        keysyms::KEY_F8 => Some(8),
+        keysyms::KEY_F9 => Some(9),
+        keysyms::KEY_F10 => Some(10),
+        keysyms::KEY_F11 => Some(11),
+        keysyms::KEY_F12 => Some(12),
         _ => None,
     }
 }
@@ -473,7 +478,9 @@ fn vt_from_key_code(key_code: u32) -> Option<i32> {
 mod tests {
     use smithay::utils::{Point, Rectangle};
 
-    use super::{ResizeEdge, resize_edges_at, vt_from_key_code};
+    use smithay::input::keyboard::{Keysym, keysyms};
+
+    use super::{ResizeEdge, resize_edges_at, vt_from_keysym};
 
     #[test]
     fn resize_edges_follow_pointer_region() {
@@ -495,10 +502,10 @@ mod tests {
 
     #[test]
     fn xkb_function_keys_map_to_linux_virtual_terminals() {
-        assert_eq!(vt_from_key_code(67), Some(1));
-        assert_eq!(vt_from_key_code(76), Some(10));
-        assert_eq!(vt_from_key_code(95), Some(11));
-        assert_eq!(vt_from_key_code(96), Some(12));
-        assert_eq!(vt_from_key_code(1), None);
+        assert_eq!(vt_from_keysym(Keysym::new(keysyms::KEY_F1)), Some(1));
+        assert_eq!(vt_from_keysym(Keysym::new(keysyms::KEY_F10)), Some(10));
+        assert_eq!(vt_from_keysym(Keysym::new(keysyms::KEY_F11)), Some(11));
+        assert_eq!(vt_from_keysym(Keysym::new(keysyms::KEY_F12)), Some(12));
+        assert_eq!(vt_from_keysym(Keysym::new(keysyms::KEY_Escape)), None);
     }
 }

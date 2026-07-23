@@ -261,6 +261,12 @@ impl Nickel {
         self.preview_group = Some(task_index);
         self.preview_hide_deadline = None;
         if previews.len() != windows.len() {
+            self.context_menu_target = None;
+            self.context_menu_hovered = None;
+            self.context_close_hovered = None;
+            self.context_menu_actions.clear();
+            self.context_preview_mode = false;
+            platform::send_shell_command(ShellCommand::HideContextMenu);
             return;
         }
         let labels: Vec<_> = previews
@@ -1111,6 +1117,9 @@ impl ApplicationHandler for Nickel {
         if self.context_menu_window.as_ref().map(|window| window.id()) == Some(window_id) {
             match event {
                 WindowEvent::CloseRequested => self.hide_context_menu(),
+                WindowEvent::Focused(false) if self.context_preview_mode => {
+                    self.hide_context_menu();
+                }
                 WindowEvent::Focused(false)
                     if self.context_menu_target.is_some()
                         && !self.context_preview_mode
@@ -1295,6 +1304,9 @@ impl ApplicationHandler for Nickel {
                     window.set_cursor(CursorIcon::Default);
                     window.request_redraw();
                 }
+                WindowEvent::Focused(false) if self.context_preview_mode => {
+                    self.hide_context_menu();
+                }
                 WindowEvent::MouseInput {
                     state: ElementState::Pressed,
                     button: MouseButton::Left,
@@ -1334,7 +1346,9 @@ impl ApplicationHandler for Nickel {
                                 .is_some_and(|group| group.windows.len() > 1)
                         {
                             self.show_window_group(index);
-                            return;
+                            if self.context_preview_mode {
+                                return;
+                            }
                         }
                         if let Some(window) = self
                             .window_groups
