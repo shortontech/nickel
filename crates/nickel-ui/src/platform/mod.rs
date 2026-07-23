@@ -14,6 +14,7 @@ pub enum WindowAction {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub enum GlobalShortcut {
     ToggleLauncher,
     SwitchNext,

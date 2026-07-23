@@ -205,6 +205,37 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
+### Linux compositor backends
+
+The default `nickel-session` build uses the nested winit backend and can run
+inside an existing desktop:
+
+```bash
+cargo run -p nickel-session -- --backend winit --command target/debug/nickel-ui
+```
+
+The direct backend requires the standard DRM, GBM, libinput, udev, and libseat
+development packages. On Ubuntu these are `libdrm-dev`, `libgbm-dev`,
+`libinput-dev`, `libudev-dev`, `libseat-dev`, and `libegl1-mesa-dev`.
+
+Build the direct backend without linking the nested window-system backend:
+
+```bash
+cargo build -p nickel-ui
+cargo build -p nickel-session --no-default-features --features backend-udev
+```
+
+Run it from a text VT owned by the logged-in user:
+
+```bash
+RUST_LOG=info target/debug/nickel-session \
+  --backend udev --command target/debug/nickel-ui
+```
+
+`NICKEL_DRM_DEVICE=/dev/dri/cardN` overrides automatic primary-GPU selection.
+Do not launch the direct backend from inside another compositor that already
+owns the same DRM device.
+
 ## Testing
 
 Unit tests live beside their modules. Cross-crate and platform-contract tests live under `tests/`.

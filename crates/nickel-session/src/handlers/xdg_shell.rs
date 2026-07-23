@@ -27,6 +27,7 @@ use smithay::{
 use crate::{
     NickelSession,
     grabs::{MoveSurfaceGrab, ResizeSurfaceGrab},
+    shell_layout,
 };
 
 impl XdgShellHandler for NickelSession {
@@ -35,11 +36,47 @@ impl XdgShellHandler for NickelSession {
     }
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
+        let surface_id = surface.wl_surface().id();
+        let is_shell_client = [
+            self.launcher_window.as_ref(),
+            self.panel_window.as_ref(),
+            self.context_menu_window.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|window| {
+            window
+                .toplevel()
+                .unwrap()
+                .wl_surface()
+                .id()
+                .same_client_as(&surface_id)
+        });
         let cascade = i32::try_from(self.windows.len() % 8).unwrap_or(0) * 32;
         let id = self.windows.insert();
         self.surface_windows.insert(surface.wl_surface().id(), id);
+        let geometry = self
+            .output_geometry_for_shell()
+            .map(shell_layout::work_area)
+            .map(|area| shell_layout::initial_window(area, cascade));
+        if let Some(geometry) = geometry {
+            surface.with_pending_state(|state| {
+                state.size = Some((geometry.width, geometry.height).into());
+            });
+        }
+        let wl_surface = surface.wl_surface().clone();
         let window = Window::new_wayland_window(surface);
-        self.space.map_element(window, (cascade, cascade), true);
+        let location = geometry
+            .map(|geometry| (geometry.x, geometry.y))
+            .unwrap_or((cascade, cascade));
+        self.space.map_element(window, location, true);
+        if !is_shell_client && self.launcher_window.is_some() {
+            self.seat.get_keyboard().unwrap().set_focus(
+                self,
+                Some(wl_surface),
+                smithay::utils::SERIAL_COUNTER.next_serial(),
+            );
+        }
         if let Some(panel) = self.panel_window.clone() {
             self.space.raise_element(&panel, false);
         }

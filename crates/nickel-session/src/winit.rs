@@ -88,7 +88,9 @@ pub fn init_winit(
                     backend.window().request_redraw();
                     eprintln!("nickel-session: output resized to {}x{}", size.w, size.h);
                 }
-                WinitEvent::Input(event) => state.process_input_event(event),
+                WinitEvent::Input(event) => {
+                    let _ = state.process_input_event(event);
+                }
                 WinitEvent::Redraw => {
                     let size = backend.window_size();
                     let damage = Rectangle::from_size(size);

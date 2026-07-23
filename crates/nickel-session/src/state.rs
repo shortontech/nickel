@@ -70,6 +70,8 @@ pub struct NickelSession {
     pub context_menu_window: Option<Window>,
     pub preview_frames: HashMap<WindowId, PreviewFrame>,
     pub preview_requests: HashSet<WindowId>,
+    pub pressed_modifier_keys: HashSet<u32>,
+    pub super_chorded: bool,
     pub preview_highlight: Option<WindowId>,
     pub minimized_windows: HashMap<WindowId, (Window, Point<i32, Logical>)>,
     maximized_restore: HashMap<ObjectId, Geometry>,
@@ -110,6 +112,7 @@ impl NickelSession {
         // Notify clients that we have a pointer (mouse)
         // Here we assume that there is always pointer plugged in
         seat.add_pointer();
+        seat.add_touch();
 
         // A space represents a two-dimensional plane. Windows and Outputs can be mapped onto it.
         //
@@ -148,6 +151,8 @@ impl NickelSession {
             context_menu_window: None,
             preview_frames: HashMap::new(),
             preview_requests: HashSet::new(),
+            pressed_modifier_keys: HashSet::new(),
+            super_chorded: false,
             preview_highlight: None,
             minimized_windows: HashMap::new(),
             maximized_restore: HashMap::new(),
@@ -528,7 +533,7 @@ impl NickelSession {
             surface.send_configure();
             return;
         };
-        let Some(output) = self.output_geometry() else {
+        let Some(output) = self.output_geometry_for_window(&window) else {
             surface.send_configure();
             return;
         };
@@ -543,7 +548,7 @@ impl NickelSession {
                 height: size.h.max(1),
             });
 
-        let geometry = shell_layout::work_area(output);
+        let geometry = self.work_area_for_output(output);
         surface.with_pending_state(|state| {
             state
                 .states
@@ -590,10 +595,6 @@ impl NickelSession {
     }
 
     fn relayout_maximized_windows(&mut self) {
-        let Some(output) = self.output_geometry() else {
-            return;
-        };
-        let geometry = shell_layout::work_area(output);
         let maximized: Vec<_> = self
             .space
             .elements()
@@ -605,6 +606,10 @@ impl NickelSession {
             })
             .collect();
         for (window, surface) in maximized {
+            let Some(output) = self.output_geometry_for_window(&window) else {
+                continue;
+            };
+            let geometry = self.work_area_for_output(output);
             Self::configure_window(&window, geometry);
             self.space
                 .map_element(window, (geometry.x, geometry.y), true);
@@ -635,6 +640,40 @@ impl NickelSession {
             width: geometry.size.w,
             height: geometry.size.h,
         })
+    }
+
+    fn output_geometry_for_window(&self, window: &Window) -> Option<Geometry> {
+        let bounds = self.space.element_bbox(window)?;
+        let window_geometry = Geometry {
+            x: bounds.loc.x,
+            y: bounds.loc.y,
+            width: bounds.size.w,
+            height: bounds.size.h,
+        };
+        let outputs: Vec<_> = self
+            .space
+            .outputs()
+            .filter_map(|output| self.space.output_geometry(output))
+            .map(|geometry| Geometry {
+                x: geometry.loc.x,
+                y: geometry.loc.y,
+                width: geometry.size.w,
+                height: geometry.size.h,
+            })
+            .collect();
+        shell_layout::output_for_window(window_geometry, &outputs)
+    }
+
+    fn work_area_for_output(&self, output: Geometry) -> Geometry {
+        if self.output_geometry() == Some(output) {
+            shell_layout::work_area(output)
+        } else {
+            output
+        }
+    }
+
+    pub(crate) fn output_geometry_for_shell(&self) -> Option<Geometry> {
+        self.output_geometry()
     }
 
     fn launcher_geometry(&self, launcher: &Window) -> Geometry {

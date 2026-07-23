@@ -563,17 +563,20 @@ impl Nickel {
         }
     }
 
-    fn launch_result(&self, index: usize) {
+    fn launch_result(&mut self, index: usize) {
         let Some(result) = self.launcher.result_at(index) else {
             return;
         };
         match result.launch() {
-            Ok(child) => println!(
-                "launched application: {} (pid {}, icon {})",
-                result.name(),
-                child.id(),
-                result.icon().unwrap_or("none")
-            ),
+            Ok(child) => {
+                println!(
+                    "launched application: {} (pid {}, icon {})",
+                    result.name(),
+                    child.id(),
+                    result.icon().unwrap_or("none")
+                );
+                self.set_launcher_visible(false);
+            }
             Err(error) => eprintln!("failed to launch application {}: {error}", result.name()),
         }
     }
