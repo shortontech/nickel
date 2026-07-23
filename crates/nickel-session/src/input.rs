@@ -1,3 +1,4 @@
+use nickel_core::hotkeys::{Hotkey, HotkeyAction, KeyEdge};
 use smithay::{
     backend::input::{
         AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, InputBackend, InputEvent,
@@ -35,20 +36,6 @@ impl NickelSession {
                         time,
                         move |session, modifiers, handle| {
                             let sym = handle.modified_sym();
-                            let is_super = matches!(
-                                sym,
-                                value if value == Keysym::new(keysyms::KEY_Super_L)
-                                    || value == Keysym::new(keysyms::KEY_Super_R)
-                            );
-                            let is_alt = matches!(
-                                sym,
-                                value if value == Keysym::new(keysyms::KEY_Alt_L)
-                                    || value == Keysym::new(keysyms::KEY_Alt_R)
-                            );
-                            if is_alt && state == KeyState::Released {
-                                session.alt_tab_order.clear();
-                                session.alt_tab_index = 0;
-                            }
                             if modifiers.ctrl
                                 && modifiers.alt
                                 && let Some(vt) = vt_from_keysym(sym)
@@ -57,23 +44,34 @@ impl NickelSession {
                                     (state == KeyState::Pressed).then_some(vt),
                                 );
                             }
-                            if is_super {
-                                if state == KeyState::Released {
-                                    if !session.super_chorded {
-                                        session.toggle_launcher();
-                                    }
-                                    session.super_chorded = false;
+                            let key = hotkey_from_keysym(sym);
+                            let edge = if state == KeyState::Pressed {
+                                KeyEdge::Pressed
+                            } else {
+                                KeyEdge::Released
+                            };
+                            let outcome = session.hotkeys.handle(key, edge);
+                            match outcome.action {
+                                Some(HotkeyAction::ShowLauncher) => {
+                                    session.set_launcher_visible(true)
                                 }
-                                return FilterResult::Intercept(None);
-                            }
-                            if sym == Keysym::new(keysyms::KEY_Tab) && modifiers.alt {
-                                if state == KeyState::Pressed {
-                                    session.cycle_windows();
+                                Some(HotkeyAction::HideLauncher) => {
+                                    session.set_launcher_visible(false)
                                 }
-                                return FilterResult::Intercept(None);
+                                Some(HotkeyAction::SwitchNext) => session.cycle_windows(true),
+                                Some(HotkeyAction::SwitchPrevious) => session.cycle_windows(false),
+                                Some(HotkeyAction::SwitchGroupNext) => session.cycle_windows(true),
+                                Some(HotkeyAction::SwitchGroupPrevious) => {
+                                    session.cycle_windows(false)
+                                }
+                                Some(HotkeyAction::CommitSwitch) => {
+                                    session.alt_tab_order.clear();
+                                    session.alt_tab_index = 0;
+                                }
+                                Some(HotkeyAction::ShowRun) | None => {}
                             }
-                            if modifiers.logo && state == KeyState::Pressed {
-                                session.super_chorded = true;
+                            if outcome.suppress {
+                                return FilterResult::Intercept(None);
                             }
                             FilterResult::Forward
                         },
@@ -260,7 +258,7 @@ impl NickelSession {
                                 && self.context_menu_window.as_ref() != Some(window)
                         })
                 {
-                    self.super_chorded = true;
+                    self.hotkeys.begin_pointer_chord();
                     let location = pointer.current_location();
                     let initial_window_location = self.space.element_location(&window).unwrap();
                     let start_data = GrabStartData {
@@ -294,7 +292,7 @@ impl NickelSession {
                                 && self.context_menu_window.as_ref() != Some(window)
                         })
                 {
-                    self.super_chorded = true;
+                    self.hotkeys.begin_pointer_chord();
                     let location = pointer.current_location();
                     let initial_window_location = self.space.element_location(&window).unwrap();
                     let initial_rect =
@@ -453,6 +451,37 @@ fn resize_edges_at(
             .unwrap_or(ResizeEdge::BOTTOM_RIGHT)
     } else {
         horizontal | vertical
+    }
+}
+
+fn hotkey_from_keysym(sym: Keysym) -> Hotkey {
+    match sym {
+        value
+            if value == Keysym::new(keysyms::KEY_Super_L)
+                || value == Keysym::new(keysyms::KEY_Super_R) =>
+        {
+            Hotkey::Super
+        }
+        value
+            if value == Keysym::new(keysyms::KEY_Alt_L)
+                || value == Keysym::new(keysyms::KEY_Alt_R) =>
+        {
+            Hotkey::Alt
+        }
+        value
+            if value == Keysym::new(keysyms::KEY_Shift_L)
+                || value == Keysym::new(keysyms::KEY_Shift_R) =>
+        {
+            Hotkey::Shift
+        }
+        value if value == Keysym::new(keysyms::KEY_Tab) => Hotkey::Tab,
+        value
+            if value == Keysym::new(keysyms::KEY_grave)
+                || value == Keysym::new(keysyms::KEY_asciitilde) =>
+        {
+            Hotkey::Grave
+        }
+        _ => Hotkey::Other,
     }
 }
 

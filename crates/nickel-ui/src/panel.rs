@@ -49,9 +49,21 @@ impl PanelGpu {
     pub fn new(window: Arc<Window>, graphics: Arc<SharedGraphics>) -> Result<Self, String> {
         let surface = graphics.create_surface(window.clone())?;
         let size = window.inner_size();
-        let config = surface
+        let mut config = surface
             .get_default_config(&graphics.adapter, size.width.max(1), size.height.max(1))
             .ok_or_else(|| "panel surface has no supported configuration".to_owned())?;
+        let capabilities = surface.get_capabilities(&graphics.adapter);
+        if capabilities
+            .alpha_modes
+            .contains(&wgpu::CompositeAlphaMode::PreMultiplied)
+        {
+            config.alpha_mode = wgpu::CompositeAlphaMode::PreMultiplied;
+        } else if capabilities
+            .alpha_modes
+            .contains(&wgpu::CompositeAlphaMode::PostMultiplied)
+        {
+            config.alpha_mode = wgpu::CompositeAlphaMode::PostMultiplied;
+        }
         surface.configure(&graphics.device, &config);
 
         let mut font_system = FontSystem::new();
