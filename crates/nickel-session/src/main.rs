@@ -2,11 +2,13 @@
 
 mod handlers;
 
+mod backend;
 mod grabs;
 mod input;
 mod shell_layout;
 mod state;
 mod window_registry;
+#[cfg(feature = "backend-winit")]
 mod winit;
 
 use smithay::reexports::{
@@ -18,6 +20,10 @@ pub use state::NickelSession;
 pub struct CalloopData {
     state: NickelSession,
     display_handle: DisplayHandle,
+    #[cfg(feature = "backend-udev")]
+    event_loop_handle: smithay::reexports::calloop::LoopHandle<'static, CalloopData>,
+    #[cfg(feature = "backend-udev")]
+    native: Option<backend::udev::UdevData>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -27,7 +33,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing_subscriber::fmt().init();
     }
 
-    let mut event_loop: EventLoop<CalloopData> = EventLoop::try_new()?;
+    let arguments = backend::SessionArguments::parse(std::env::args_os().skip(1))?;
+    let mut event_loop: EventLoop<'static, CalloopData> = EventLoop::try_new()?;
 
     let display: Display<NickelSession> = Display::new()?;
     let display_handle = display.handle();
@@ -36,25 +43,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut data = CalloopData {
         state,
         display_handle,
+        #[cfg(feature = "backend-udev")]
+        event_loop_handle: event_loop.handle(),
+        #[cfg(feature = "backend-udev")]
+        native: None,
     };
 
-    crate::winit::init_winit(&mut event_loop, &mut data)?;
+    match arguments.backend {
+        backend::BackendKind::Winit => {
+            #[cfg(feature = "backend-winit")]
+            backend::winit::init_winit(&mut event_loop, &mut data)?;
+            #[cfg(not(feature = "backend-winit"))]
+            unreachable!("backend availability was validated while parsing arguments");
+        }
+        backend::BackendKind::Udev => {
+            #[cfg(feature = "backend-udev")]
+            backend::udev::init_udev(&mut event_loop, &mut data)?;
+            #[cfg(not(feature = "backend-udev"))]
+            unreachable!("backend availability was validated while parsing arguments");
+        }
+    }
 
     println!(
         "nickel-session listening on {}",
         data.state.socket_name.to_string_lossy()
     );
 
-    let mut args = std::env::args().skip(1);
-    let flag = args.next();
-    let command = args.next();
-
-    match (flag.as_deref(), command) {
-        (Some("-c") | Some("--command"), Some(command)) => {
-            std::process::Command::new(command).args(args).spawn()?;
-        }
-        (None, None) => {}
-        _ => return Err("usage: nickel-session [--command PROGRAM [ARG ...]]".into()),
+    if let Some((program, arguments)) = arguments.command {
+        std::process::Command::new(program)
+            .args(arguments)
+            .spawn()?;
     }
 
     event_loop.run(None, &mut data, move |_| {

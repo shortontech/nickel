@@ -28,6 +28,16 @@ pub fn work_area(output: Geometry) -> Geometry {
     }
 }
 
+pub fn output_for_window(window: Geometry, outputs: &[Geometry]) -> Option<Geometry> {
+    outputs.iter().copied().max_by_key(|output| {
+        let left = window.x.max(output.x);
+        let top = window.y.max(output.y);
+        let right = (window.x + window.width).min(output.x + output.width);
+        let bottom = (window.y + window.height).min(output.y + output.height);
+        i64::from((right - left).max(0)) * i64::from((bottom - top).max(0))
+    })
+}
+
 pub fn centered_in(area: Geometry, requested: (i32, i32)) -> Geometry {
     let width = requested.0.max(1).min(area.width.max(1));
     let height = requested.1.max(1).min(area.height.max(1));
@@ -39,9 +49,22 @@ pub fn centered_in(area: Geometry, requested: (i32, i32)) -> Geometry {
     }
 }
 
+pub fn initial_window(area: Geometry, cascade: i32) -> Geometry {
+    let target_width = (area.width * 3 / 4).clamp(640, 1200);
+    let target_height = (area.height * 3 / 4).clamp(480, 800);
+    let mut geometry = centered_in(area, (target_width, target_height));
+    let maximum_x = area.x + (area.width - geometry.width).max(0);
+    let maximum_y = area.y + (area.height - geometry.height).max(0);
+    geometry.x = (geometry.x + cascade).clamp(area.x, maximum_x);
+    geometry.y = (geometry.y + cascade).clamp(area.y, maximum_y);
+    geometry
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Geometry, PANEL_HEIGHT, centered_in, panel, work_area};
+    use super::{
+        Geometry, PANEL_HEIGHT, centered_in, initial_window, output_for_window, panel, work_area,
+    };
 
     #[test]
     fn panel_occupies_bottom_edge_and_work_area_stops_above_it() {
@@ -94,5 +117,45 @@ mod tests {
         };
         assert_eq!(panel(output).height, 20);
         assert_eq!(work_area(output).height, 0);
+    }
+
+    #[test]
+    fn initial_windows_are_usefully_sized_and_remain_inside_work_area() {
+        let area = Geometry {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1024,
+        };
+        let window = initial_window(area, 224);
+        assert_eq!((window.width, window.height), (1200, 768));
+        assert!(window.x >= area.x);
+        assert!(window.y >= area.y);
+        assert!(window.x + window.width <= area.x + area.width);
+        assert!(window.y + window.height <= area.y + area.height);
+    }
+
+    #[test]
+    fn window_uses_output_with_largest_overlap() {
+        let left = Geometry {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
+        let right = Geometry {
+            x: 1920,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
+        let window = Geometry {
+            x: 1800,
+            y: 100,
+            width: 800,
+            height: 600,
+        };
+
+        assert_eq!(output_for_window(window, &[left, right]), Some(right));
     }
 }
