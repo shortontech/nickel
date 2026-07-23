@@ -1758,6 +1758,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "nickel-core"
+version = "0.1.0"
+
+[[package]]
 name = "nickel-session"
 version = "0.1.0"
 dependencies = [
@@ -1786,6 +1790,7 @@ dependencies = [
  "glyphon",
  "image",
  "jiff",
+ "nickel-core",
  "nucleo-matcher",
  "pollster",
  "redb",
