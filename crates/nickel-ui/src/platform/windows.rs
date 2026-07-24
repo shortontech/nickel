@@ -243,6 +243,8 @@ static DWM_THUMBNAILS: Mutex<Vec<isize>> = Mutex::new(Vec::new());
 static RESTORE_LAUNCHER_FOCUS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static WINDOW_DRAG: Mutex<Option<WindowDrag>> = Mutex::new(None);
+const PANEL_APPBAR_CALLBACK: u32 = 0x8000 + 17;
+const ABN_FULLSCREENAPP_CODE: usize = 2;
 
 #[derive(Clone, Copy)]
 struct WindowDrag {
@@ -718,7 +720,7 @@ pub fn configure_panel_window(window: &winit::window::Window) -> bool {
     let mut appbar = APPBARDATA {
         cbSize: size_of::<APPBARDATA>() as u32,
         hWnd: hwnd,
-        uCallbackMessage: 0x8000 + 17,
+        uCallbackMessage: PANEL_APPBAR_CALLBACK,
         uEdge: ABE_BOTTOM,
         rc: rectangle,
         lParam: LPARAM(0),
@@ -789,6 +791,29 @@ unsafe extern "system" fn tray_window_proc(
 ) -> LRESULT {
     use std::sync::atomic::Ordering;
 
+    if message == PANEL_APPBAR_CALLBACK && wparam.0 == ABN_FULLSCREENAPP_CODE {
+        // AppBars are notified when a fullscreen application enters or leaves the foreground.
+        // Drop Nickel behind it while it is active, then restore the panel's topmost band. The
+        // AppBar reservation remains intact, so ordinary maximized windows still avoid the panel.
+        let insert_after = if lparam.0 != 0 {
+            HWND_BOTTOM
+        } else {
+            HWND_TOPMOST
+        };
+        // SAFETY: hwnd is Nickel's live panel HWND and this changes only its Z-order.
+        let _ = unsafe {
+            SetWindowPos(
+                hwnd,
+                Some(insert_after),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
+            )
+        };
+        return LRESULT(0);
+    }
     if message == WM_COPYDATA {
         // SAFETY: WM_COPYDATA guarantees the COPYDATASTRUCT and its buffer remain valid for this
         // synchronous call. Bounds and protocol signature are validated before interpretation.
