@@ -1503,7 +1503,11 @@ impl ApplicationHandler for Nickel {
                     button: MouseButton::Right,
                     ..
                 } => {
-                    if let Some(index) = self.panel_task_hovered {
+                    if let Some(index) = self.panel_tray_hovered {
+                        if let Some(item) = self.tray_items.get(index) {
+                            self.tray_feed.context_menu(&item.id);
+                        }
+                    } else if let Some(index) = self.panel_task_hovered {
                         self.show_context_menu(index);
                     } else {
                         self.hide_context_menu();

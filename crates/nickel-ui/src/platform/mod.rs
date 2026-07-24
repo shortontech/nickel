@@ -3,6 +3,7 @@ use crate::model::{TrayItem, WindowId};
 pub trait TraySource {
     fn snapshot(&self) -> Vec<TrayItem>;
     fn activate(&self, id: &str);
+    fn context_menu(&self, id: &str);
 }
 
 #[derive(Clone, Copy)]

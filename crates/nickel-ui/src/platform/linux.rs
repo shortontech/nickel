@@ -25,7 +25,7 @@ const SESSION_CONTROL_ENV: &str = "NICKEL_SESSION_CONTROL";
 
 pub struct TrayFeed {
     items: Arc<Mutex<Vec<TrayItem>>>,
-    actions: mpsc::Sender<String>,
+    actions: mpsc::Sender<(String, bool)>,
 }
 
 impl TrayFeed {
@@ -49,11 +49,15 @@ impl TraySource for TrayFeed {
     }
 
     fn activate(&self, id: &str) {
-        let _ = self.actions.send(id.to_owned());
+        let _ = self.actions.send((id.to_owned(), false));
+    }
+
+    fn context_menu(&self, id: &str) {
+        let _ = self.actions.send((id.to_owned(), true));
     }
 }
 
-fn tray_worker(items: Arc<Mutex<Vec<TrayItem>>>, actions: mpsc::Receiver<String>) {
+fn tray_worker(items: Arc<Mutex<Vec<TrayItem>>>, actions: mpsc::Receiver<(String, bool)>) {
     let Ok(connection) = zbus::blocking::Connection::session() else {
         return;
     };
@@ -73,8 +77,8 @@ fn tray_worker(items: Arc<Mutex<Vec<TrayItem>>>, actions: mpsc::Receiver<String>
         if let Ok(mut current) = items.lock() {
             *current = snapshot;
         }
-        while let Ok(id) = actions.try_recv() {
-            activate_tray_item(&connection, &id);
+        while let Ok((id, context_menu)) = actions.try_recv() {
+            activate_tray_item(&connection, &id, context_menu);
         }
         thread::sleep(Duration::from_millis(250));
     }
@@ -133,12 +137,17 @@ fn read_tray_item(connection: &zbus::blocking::Connection, id: String) -> Option
     Some(TrayItem { id, title, icon })
 }
 
-fn activate_tray_item(connection: &zbus::blocking::Connection, id: &str) {
+fn activate_tray_item(connection: &zbus::blocking::Connection, id: &str, context_menu: bool) {
     let (service, path) = item_address(id);
     if let Ok(proxy) =
         zbus::blocking::Proxy::new(connection, service, path, "org.kde.StatusNotifierItem")
     {
-        let _ = proxy.call_method("Activate", &(0_i32, 0_i32));
+        let method = if context_menu {
+            "ContextMenu"
+        } else {
+            "Activate"
+        };
+        let _ = proxy.call_method(method, &(0_i32, 0_i32));
     }
 }
 
