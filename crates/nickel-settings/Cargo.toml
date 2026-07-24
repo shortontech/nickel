@@ -8,3 +8,9 @@ rust-version.workspace = true
 [dependencies]
 softbuffer.workspace = true
 winit.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Devices_Display",
+    "Win32_Foundation",
+] }
