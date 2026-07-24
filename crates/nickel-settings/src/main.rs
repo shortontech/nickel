@@ -1,5 +1,8 @@
 use std::{num::NonZeroU32, sync::Arc};
 
+#[cfg(target_os = "windows")]
+use std::collections::HashMap;
+
 use softbuffer::{Context, Surface};
 use winit::{
     application::ApplicationHandler,
@@ -58,6 +61,91 @@ fn parse_output(line: &str) -> Option<OutputSnapshot> {
         physical_height: fields.next()?.parse().ok()?,
         primary: fields.next()? == "1",
     })
+}
+
+#[cfg(target_os = "windows")]
+fn windows_display_names() -> HashMap<String, String> {
+    use std::mem::size_of;
+    use windows::Win32::{
+        Devices::Display::{
+            DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
+            DISPLAYCONFIG_DEVICE_INFO_HEADER, DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO,
+            DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME,
+            DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, QDC_ONLY_ACTIVE_PATHS,
+            QueryDisplayConfig,
+        },
+        Foundation::ERROR_SUCCESS,
+    };
+
+    let mut path_count = 0;
+    let mut mode_count = 0;
+    // SAFETY: The count pointers are valid writable storage.
+    if unsafe {
+        GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut path_count, &mut mode_count)
+    } != ERROR_SUCCESS
+    {
+        return HashMap::new();
+    }
+    let mut paths = vec![DISPLAYCONFIG_PATH_INFO::default(); path_count as usize];
+    let mut modes = vec![DISPLAYCONFIG_MODE_INFO::default(); mode_count as usize];
+    // SAFETY: Both vectors have the capacities reported immediately above and the counts remain
+    // writable so Windows can report how many entries it populated.
+    if unsafe {
+        QueryDisplayConfig(
+            QDC_ONLY_ACTIVE_PATHS,
+            &mut path_count,
+            paths.as_mut_ptr(),
+            &mut mode_count,
+            modes.as_mut_ptr(),
+            None,
+        )
+    } != ERROR_SUCCESS
+    {
+        return HashMap::new();
+    }
+    paths.truncate(path_count as usize);
+    let mut names = HashMap::new();
+    for path in paths {
+        let mut source = DISPLAYCONFIG_SOURCE_DEVICE_NAME {
+            header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+                size: size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32,
+                adapterId: path.sourceInfo.adapterId,
+                id: path.sourceInfo.id,
+            },
+            ..Default::default()
+        };
+        let mut target = DISPLAYCONFIG_TARGET_DEVICE_NAME {
+            header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                r#type: DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
+                size: size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as u32,
+                adapterId: path.targetInfo.adapterId,
+                id: path.targetInfo.id,
+            },
+            ..Default::default()
+        };
+        // SAFETY: Each request packet has the documented type, size, adapter, and source/target ID.
+        if unsafe { DisplayConfigGetDeviceInfo(&raw mut source.header) } != 0
+            || unsafe { DisplayConfigGetDeviceInfo(&raw mut target.header) } != 0
+        {
+            continue;
+        }
+        let source_name = wide_text(&source.viewGdiDeviceName);
+        let friendly_name = wide_text(&target.monitorFriendlyDeviceName);
+        if !source_name.is_empty() && !friendly_name.is_empty() {
+            names.insert(source_name, friendly_name);
+        }
+    }
+    names
+}
+
+#[cfg(target_os = "windows")]
+fn wide_text(buffer: &[u16]) -> String {
+    let length = buffer
+        .iter()
+        .position(|unit| *unit == 0)
+        .unwrap_or(buffer.len());
+    String::from_utf16_lossy(&buffer[..length])
 }
 
 #[cfg(target_os = "linux")]
@@ -347,6 +435,90 @@ impl SettingsApp {
         self.status = "LIVE OUTPUTS LOADED".into();
     }
 
+    #[cfg(target_os = "windows")]
+    fn load_windows_outputs(&mut self, event_loop: &ActiveEventLoop) {
+        let monitors: Vec<_> = event_loop.available_monitors().collect();
+        if monitors.is_empty() {
+            self.status = "NO WINDOWS DISPLAYS FOUND".into();
+            return;
+        }
+        let primary = event_loop.primary_monitor();
+        let minimum_x = monitors
+            .iter()
+            .map(|monitor| monitor.position().x)
+            .min()
+            .unwrap_or(0);
+        let minimum_y = monitors
+            .iter()
+            .map(|monitor| monitor.position().y)
+            .min()
+            .unwrap_or(0);
+        let maximum_x = monitors
+            .iter()
+            .map(|monitor| monitor.position().x + monitor.size().width as i32)
+            .max()
+            .unwrap_or(1);
+        let maximum_y = monitors
+            .iter()
+            .map(|monitor| monitor.position().y + monitor.size().height as i32)
+            .max()
+            .unwrap_or(1);
+        let desktop_width = (maximum_x - minimum_x).max(1);
+        let desktop_height = (maximum_y - minimum_y).max(1);
+        self.pixels_per_logical = (380.0 / f64::from(desktop_width))
+            .min(210.0 / f64::from(desktop_height))
+            .max(0.04);
+        let rendered_width = (f64::from(desktop_width) * self.pixels_per_logical).round() as i32;
+        let rendered_height = (f64::from(desktop_height) * self.pixels_per_logical).round() as i32;
+        let origin_x = DISPLAY_PLANE.x + (DISPLAY_PLANE.w - rendered_width) / 2;
+        let origin_y = DISPLAY_PLANE.y + (DISPLAY_PLANE.h - rendered_height) / 2;
+        let friendly_names = windows_display_names();
+        self.displays = monitors
+            .into_iter()
+            .enumerate()
+            .map(|(index, monitor)| {
+                let position = monitor.position();
+                let size = monitor.size();
+                let raw_name = monitor
+                    .name()
+                    .unwrap_or_else(|| format!("Display {}", index + 1));
+                let connector = raw_name
+                    .strip_prefix(r"\\.\")
+                    .unwrap_or(&raw_name)
+                    .to_owned();
+                let name = friendly_names
+                    .get(&raw_name)
+                    .cloned()
+                    .unwrap_or_else(|| connector.clone());
+                DisplayCard {
+                    connector: connector.clone(),
+                    name: name.clone(),
+                    detail: format!("{}  {} X {}", connector, size.width, size.height),
+                    logical_width: size.width as i32,
+                    logical_height: size.height as i32,
+                    rect: Rect {
+                        x: origin_x
+                            + (f64::from(position.x - minimum_x) * self.pixels_per_logical).round()
+                                as i32,
+                        y: origin_y
+                            + (f64::from(position.y - minimum_y) * self.pixels_per_logical).round()
+                                as i32,
+                        w: (f64::from(size.width) * self.pixels_per_logical).round() as i32,
+                        h: (f64::from(size.height) * self.pixels_per_logical).round() as i32,
+                    },
+                    primary: primary.as_ref() == Some(&monitor),
+                }
+            })
+            .collect();
+        self.selected = self
+            .displays
+            .iter()
+            .position(|display| display.primary)
+            .unwrap_or(0);
+        self.applied = true;
+        self.status = "WINDOWS DISPLAYS LOADED".into();
+    }
+
     fn apply_layout(&mut self) {
         let primary = self
             .displays
@@ -528,6 +700,8 @@ impl ApplicationHandler for SettingsApp {
         if self.window.is_some() {
             return;
         }
+        #[cfg(target_os = "windows")]
+        self.load_windows_outputs(event_loop);
         let attributes = WindowAttributes::default()
             .with_title("Nickel Settings")
             .with_inner_size(LogicalSize::new(850.0, 580.0))
