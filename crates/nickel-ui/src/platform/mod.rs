@@ -67,7 +67,8 @@ pub use windows::{
     TrayFeed, WindowFeed, application_icon, applications, configure_context_menu_window,
     configure_desktop_window, configure_launcher_window, configure_panel_window,
     execute_run_command, launcher_has_foreground_focus, launcher_hotkey_receiver,
-    launcher_visibility_applied, release_panel_window, send_shell_command, wallpaper,
+    launcher_visibility_applied, paste_text_if_requested, release_panel_window, send_shell_command,
+    wallpaper,
 };
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]

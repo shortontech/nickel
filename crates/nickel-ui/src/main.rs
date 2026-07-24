@@ -1,3 +1,17 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
+macro_rules! eprintln {
+    ($($argument:tt)*) => {
+        tracing::warn!($($argument)*)
+    };
+}
+
+macro_rules! println {
+    ($($argument:tt)*) => {
+        tracing::info!($($argument)*)
+    };
+}
+
 use std::{
     collections::{HashMap, HashSet},
     env,
@@ -12,13 +26,14 @@ use glyphon::{
     RasterizeCustomGlyphRequest, RasterizedCustomGlyph, Resolution, Shaping, SwashCache, TextArea,
     TextAtlas, TextBounds, TextRenderer, Viewport,
 };
+use nickel_components::TextEditor;
 use nickel_core::launcher::LauncherVisibility;
 use nickel_core::run::RunPrompt;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::monitor::MonitorHandle;
 use winit::window::{CursorIcon, Window, WindowAttributes, WindowId, WindowLevel};
 
@@ -70,6 +85,8 @@ struct Nickel {
     run_window: Option<Arc<Window>>,
     run_gpu: Option<run_dialog::RunDialogGpu>,
     run_prompt: RunPrompt,
+    run_editor: TextEditor,
+    run_modifiers: ModifiersState,
     run_hovered: Option<run_dialog::Action>,
     preview_group: Option<usize>,
     preview_hide_deadline: Option<Instant>,
@@ -105,11 +122,16 @@ impl Default for Nickel {
         } else {
             Launcher::new(applications)
         };
+        let mut run_prompt = RunPrompt::default();
         let pin_store = match storage::PinStore::open_default() {
             Ok(store) => {
                 match store.pins() {
                     Ok(pins) => launcher.set_pins(pins),
                     Err(error) => eprintln!("failed to read pins: {error}"),
+                }
+                match store.run_history() {
+                    Ok(history) => run_prompt.set_history(history),
+                    Err(error) => eprintln!("failed to read Run history: {error}"),
                 }
                 Some(store)
             }
@@ -137,7 +159,9 @@ impl Default for Nickel {
             context_preview_mode: false,
             run_window: None,
             run_gpu: None,
-            run_prompt: RunPrompt::default(),
+            run_prompt,
+            run_editor: TextEditor::default(),
+            run_modifiers: ModifiersState::empty(),
             run_hovered: None,
             preview_group: None,
             preview_hide_deadline: None,
@@ -170,6 +194,7 @@ impl Nickel {
     fn show_run(&mut self) {
         self.set_launcher_visible(false);
         self.run_prompt.clear();
+        self.run_editor.clear();
         self.run_hovered = None;
         if let Some(window) = &self.run_window {
             window.set_visible(true);
@@ -186,10 +211,20 @@ impl Nickel {
     }
 
     fn submit_run(&mut self) {
-        let Some(command) = self.run_prompt.submission() else {
+        let Some(command) = self
+            .run_prompt
+            .submission(self.run_editor.text())
+            .map(str::to_owned)
+        else {
             return;
         };
-        if platform::execute_run_command(command) {
+        if platform::execute_run_command(&command) {
+            self.run_prompt.record(&command);
+            if let Some(store) = &self.pin_store
+                && let Err(error) = store.record_run(self.run_prompt.history())
+            {
+                eprintln!("failed to store Run history: {error}");
+            }
             self.hide_run();
         }
     }
@@ -1360,11 +1395,22 @@ impl ApplicationHandler for Nickel {
                 }
                 WindowEvent::RedrawRequested => {
                     if let Some(gpu) = &mut self.run_gpu {
-                        gpu.render(self.run_prompt.command(), self.run_hovered);
+                        gpu.render(
+                            self.run_editor.text(),
+                            self.run_editor.cursor(),
+                            self.run_prompt.history(),
+                            self.run_prompt.history_open(),
+                            self.run_prompt.history_selection(),
+                            self.run_hovered,
+                        );
                     }
                 }
                 WindowEvent::CursorMoved { position, .. } => {
-                    let hovered = run_dialog::action_at(position);
+                    let hovered = run_dialog::action_at(
+                        position,
+                        self.run_prompt.history_open(),
+                        self.run_prompt.history().len(),
+                    );
                     if hovered != self.run_hovered {
                         self.run_hovered = hovered;
                         self.run_window
@@ -1387,14 +1433,47 @@ impl ApplicationHandler for Nickel {
                 } => match self.run_hovered {
                     Some(run_dialog::Action::Run) => self.submit_run(),
                     Some(run_dialog::Action::Cancel) => self.hide_run(),
+                    Some(run_dialog::Action::HistoryToggle) => {
+                        self.run_prompt.toggle_history();
+                        self.run_window
+                            .as_ref()
+                            .expect("run window exists")
+                            .request_redraw();
+                    }
+                    Some(run_dialog::Action::HistoryItem(index)) => {
+                        self.run_prompt.choose_history(index);
+                        if let Some(command) = self.run_prompt.selected_history_command() {
+                            self.run_editor.set_text(command);
+                        }
+                        self.run_window
+                            .as_ref()
+                            .expect("run window exists")
+                            .request_redraw();
+                    }
                     Some(run_dialog::Action::Browse) | None => {}
                 },
+                WindowEvent::ModifiersChanged(modifiers) => {
+                    self.run_modifiers = modifiers.state();
+                }
                 WindowEvent::KeyboardInput { event, .. }
                     if event.state == ElementState::Pressed =>
                 {
                     let mut changed = true;
                     match event.logical_key {
-                        Key::Named(NamedKey::Backspace) => self.run_prompt.backspace(),
+                        Key::Named(NamedKey::Backspace) => self.run_editor.backspace(),
+                        Key::Named(NamedKey::Delete) => self.run_editor.delete(),
+                        Key::Named(NamedKey::ArrowLeft) => {
+                            self.run_editor.move_left(self.run_modifiers.shift_key())
+                        }
+                        Key::Named(NamedKey::ArrowRight) => {
+                            self.run_editor.move_right(self.run_modifiers.shift_key())
+                        }
+                        Key::Named(NamedKey::Home) => {
+                            self.run_editor.move_home(self.run_modifiers.shift_key())
+                        }
+                        Key::Named(NamedKey::End) => {
+                            self.run_editor.move_end(self.run_modifiers.shift_key())
+                        }
                         Key::Named(NamedKey::Escape) => {
                             self.hide_run();
                             changed = false;
@@ -1403,7 +1482,30 @@ impl ApplicationHandler for Nickel {
                             self.submit_run();
                             changed = false;
                         }
-                        Key::Character(text) => self.run_prompt.insert(&text),
+                        Key::Named(NamedKey::ArrowDown) => {
+                            self.run_prompt.select_history_next();
+                            if let Some(command) = self.run_prompt.selected_history_command() {
+                                self.run_editor.set_text(command);
+                            }
+                        }
+                        Key::Named(NamedKey::ArrowUp) => {
+                            self.run_prompt.select_history_previous();
+                            if let Some(command) = self.run_prompt.selected_history_command() {
+                                self.run_editor.set_text(command);
+                            }
+                        }
+                        Key::Named(NamedKey::Space) => self.run_editor.insert(" "),
+                        Key::Character(text) => {
+                            if self.run_modifiers.control_key() && text.eq_ignore_ascii_case("a") {
+                                self.run_editor.select_all();
+                            } else if let Some(pasted) = platform::paste_text_if_requested(&text) {
+                                self.run_editor.insert(&pasted);
+                            } else if self.run_modifiers.control_key() {
+                                changed = false;
+                            } else {
+                                self.run_editor.insert(&text);
+                            }
+                        }
                         _ => changed = false,
                     }
                     if changed {
@@ -1835,6 +1937,7 @@ impl ApplicationHandler for Nickel {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let _log_path = nickel_logging::init("nickel-ui").ok();
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Wait);
     event_loop.run_app(&mut Nickel::default())?;

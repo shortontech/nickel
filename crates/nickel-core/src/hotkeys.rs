@@ -81,17 +81,13 @@ impl HotkeyController {
                     self.super_held = true;
                     self.super_chorded = false;
                 }
-                HotkeyOutcome {
-                    suppress: true,
-                    ..Default::default()
-                }
+                // Observe the shell modifier without taking it away from Windows or applications.
+                // This lets another shell present its own Start surface alongside Nickel.
+                HotkeyOutcome::default()
             }
             (Hotkey::Super, KeyEdge::Released) => {
                 if !self.super_held {
-                    return HotkeyOutcome {
-                        suppress: true,
-                        ..Default::default()
-                    };
+                    return HotkeyOutcome::default();
                 }
                 self.super_held = false;
                 let action = if self.super_chorded {
@@ -104,7 +100,7 @@ impl HotkeyController {
                 self.super_chorded = false;
                 HotkeyOutcome {
                     action,
-                    suppress: true,
+                    suppress: false,
                 }
             }
             (Hotkey::Run, KeyEdge::Pressed) if self.super_held => {
@@ -118,6 +114,11 @@ impl HotkeyController {
             }
             (Hotkey::Run, KeyEdge::Released) if self.run_held => {
                 self.run_held = false;
+                // Super+R transfers focus to the Run window, and Windows may omit the later Super
+                // release from the low-level hook during that transition. End the completed chord
+                // here so a missed release cannot make subsequent R presses look like shortcuts.
+                self.super_held = false;
+                self.super_chorded = false;
                 HotkeyOutcome {
                     suppress: true,
                     ..Default::default()
@@ -236,11 +237,10 @@ mod tests {
     #[test]
     fn super_release_toggles_launcher_once() {
         let mut controller = HotkeyController::default();
-        controller.handle(Hotkey::Super, KeyEdge::Pressed);
-        assert_eq!(
-            controller.handle(Hotkey::Super, KeyEdge::Released).action,
-            Some(HotkeyAction::ShowLauncher)
-        );
+        assert!(!controller.handle(Hotkey::Super, KeyEdge::Pressed).suppress);
+        let released = controller.handle(Hotkey::Super, KeyEdge::Released);
+        assert!(!released.suppress);
+        assert_eq!(released.action, Some(HotkeyAction::ShowLauncher));
         controller.launcher_visibility_applied(true);
         controller.handle(Hotkey::Super, KeyEdge::Pressed);
         assert_eq!(
@@ -258,6 +258,19 @@ mod tests {
             controller.handle(Hotkey::Super, KeyEdge::Released).action,
             None
         );
+    }
+
+    #[test]
+    fn run_release_ends_super_chord_even_without_super_release() {
+        let mut controller = HotkeyController::default();
+        controller.handle(Hotkey::Super, KeyEdge::Pressed);
+        assert_eq!(
+            controller.handle(Hotkey::Run, KeyEdge::Pressed).action,
+            Some(HotkeyAction::ShowRun)
+        );
+        controller.handle(Hotkey::Run, KeyEdge::Released);
+        assert!(!controller.snapshot().super_held);
+        assert!(!controller.handle(Hotkey::Run, KeyEdge::Pressed).suppress);
     }
 
     #[test]

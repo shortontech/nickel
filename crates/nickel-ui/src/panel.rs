@@ -76,8 +76,8 @@ impl PanelGpu {
             wgpu::MultisampleState::default(),
             None,
         );
-        let clock_text = local_time_text();
-        let mut clock = Buffer::new(&mut font_system, Metrics::new(20.0, 44.0));
+        let clock_text = local_clock_text();
+        let mut clock = Buffer::new(&mut font_system, Metrics::new(14.0, 22.0));
         clock.set_size(
             Some(config.width.saturating_sub(24) as f32),
             Some(config.height as f32),
@@ -131,7 +131,7 @@ impl PanelGpu {
     }
 
     pub fn update_clock(&mut self) -> bool {
-        let text = local_time_text();
+        let text = local_clock_text();
         if text == self.clock_text {
             return false;
         }
@@ -388,24 +388,92 @@ pub fn launcher_button_contains(position: winit::dpi::PhysicalPosition<f64>) -> 
         && position.y < 56.0
 }
 
+fn local_clock_text() -> String {
+    format!("{}\n{}", local_time_text(), local_short_date_text())
+}
+
+#[cfg(target_os = "windows")]
+fn local_time_text() -> String {
+    use windows::{
+        Win32::Globalization::{GetTimeFormatEx, TIME_NOSECONDS},
+        core::PCWSTR,
+    };
+
+    let mut time = [0_u16; 128];
+    let written = unsafe {
+        GetTimeFormatEx(
+            PCWSTR::null(),
+            TIME_NOSECONDS,
+            None,
+            PCWSTR::null(),
+            Some(&mut time),
+        )
+    };
+    if written > 1 {
+        String::from_utf16_lossy(&time[..written as usize - 1])
+    } else {
+        jiff::Zoned::now().strftime("%H:%M").to_string()
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
 fn local_time_text() -> String {
     jiff::Zoned::now().strftime("%H:%M").to_string()
+}
+
+#[cfg(target_os = "windows")]
+fn local_short_date_text() -> String {
+    use windows::{
+        Win32::Globalization::{DATE_SHORTDATE, GetDateFormatEx},
+        core::PCWSTR,
+    };
+
+    let mut date = [0_u16; 128];
+    let written = unsafe {
+        GetDateFormatEx(
+            PCWSTR::null(),
+            DATE_SHORTDATE,
+            None,
+            PCWSTR::null(),
+            Some(&mut date),
+            PCWSTR::null(),
+        )
+    };
+    if written > 1 {
+        String::from_utf16_lossy(&date[..written as usize - 1])
+    } else {
+        jiff::Zoned::now().strftime("%Y-%m-%d").to_string()
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn local_short_date_text() -> String {
+    jiff::Zoned::now().strftime("%Y-%m-%d").to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use winit::dpi::PhysicalPosition;
 
-    use super::{launcher_button_contains, local_time_text, task_at, tinted_panel_icon, tray_at};
+    use super::{
+        launcher_button_contains, local_clock_text, local_short_date_text, local_time_text,
+        task_at, tinted_panel_icon, tray_at,
+    };
 
     #[test]
-    fn local_clock_uses_zero_padded_hour_and_minute() {
+    fn local_clock_has_a_nonempty_single_line_time() {
         let text = local_time_text();
-        assert_eq!(text.len(), 5);
-        assert_eq!(text.as_bytes()[2], b':');
-        assert!(text.chars().enumerate().all(|(index, character)| {
-            index == 2 && character == ':' || index != 2 && character.is_ascii_digit()
-        }));
+        assert!(!text.is_empty());
+        assert!(!text.contains(['\r', '\n']));
+    }
+
+    #[test]
+    fn local_clock_includes_the_platform_short_date() {
+        let date = local_short_date_text();
+        let clock = local_clock_text();
+        assert!(!date.is_empty());
+        assert_eq!(clock.lines().count(), 2);
+        assert!(clock.ends_with(&date));
     }
 
     #[test]

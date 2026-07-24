@@ -9,17 +9,33 @@ use winit::{dpi::PhysicalPosition, window::Window};
 use crate::{graphics::SharedGraphics, rectangles::RectangleRenderer};
 
 pub const WIDTH: u32 = 520;
-pub const HEIGHT: u32 = 240;
+pub const HEIGHT: u32 = 360;
+const HISTORY_ROWS: usize = 4;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Action {
     Run,
     Cancel,
     Browse,
+    HistoryToggle,
+    HistoryItem(usize),
 }
 
-pub fn action_at(position: PhysicalPosition<f64>) -> Option<Action> {
-    if !(174.0..=218.0).contains(&position.y) {
+pub fn action_at(
+    position: PhysicalPosition<f64>,
+    history_open: bool,
+    history_len: usize,
+) -> Option<Action> {
+    if (116.0..=158.0).contains(&position.y) && (450.0..=492.0).contains(&position.x) {
+        return Some(Action::HistoryToggle);
+    }
+    if history_open && (158.0..278.0).contains(&position.y) {
+        let index = ((position.y - 158.0) / 30.0) as usize;
+        if index < history_len.min(HISTORY_ROWS) && (28.0..=492.0).contains(&position.x) {
+            return Some(Action::HistoryItem(index));
+        }
+    }
+    if !(294.0..=338.0).contains(&position.y) {
         return None;
     }
     match position.x {
@@ -42,7 +58,9 @@ pub struct RunDialogGpu {
     heading: Buffer,
     prompt: Buffer,
     input: Buffer,
+    history_toggle: Buffer,
     buttons: Vec<Buffer>,
+    history_labels: Vec<Buffer>,
     rectangles: RectangleRenderer,
 }
 
@@ -73,6 +91,7 @@ impl RunDialogGpu {
             456.0,
         );
         let input = text_buffer(&mut font_system, "", 18.0, 30.0, 430.0);
+        let history_toggle = text_buffer(&mut font_system, "v", 16.0, 24.0, 20.0);
         let buttons = ["OK", "Cancel", "Browse…"]
             .into_iter()
             .map(|label| text_buffer(&mut font_system, label, 16.0, 24.0, 90.0))
@@ -89,7 +108,9 @@ impl RunDialogGpu {
             heading,
             prompt,
             input,
+            history_toggle,
             buttons,
+            history_labels: Vec::new(),
             rectangles: RectangleRenderer::new(&graphics.device, format),
         })
     }
@@ -103,14 +124,29 @@ impl RunDialogGpu {
         self.surface.configure(&self.graphics.device, &self.config);
     }
 
-    pub fn render(&mut self, command: &str, hovered: Option<Action>) {
+    pub fn render(
+        &mut self,
+        command: &str,
+        cursor: usize,
+        history: &[String],
+        history_open: bool,
+        history_selection: Option<usize>,
+        hovered: Option<Action>,
+    ) {
+        let mut displayed = command.to_owned();
+        displayed.insert_str(cursor, "▏");
         self.input.set_text(
-            &format!("{command}▏"),
+            &displayed,
             &Attrs::new().family(Family::SansSerif),
             Shaping::Advanced,
             None,
         );
         self.input.shape_until_scroll(&mut self.font_system, false);
+        self.history_labels = history
+            .iter()
+            .take(HISTORY_ROWS)
+            .map(|command| text_buffer(&mut self.font_system, command, 16.0, 24.0, 420.0))
+            .collect();
         self.viewport.update(
             &self.graphics.queue,
             Resolution {
@@ -121,14 +157,34 @@ impl RunDialogGpu {
         let mut rectangles = vec![
             ([28.0, 116.0, 492.0, 158.0], [0.03, 0.04, 0.06, 1.0]),
             ([28.0, 116.0, 492.0, 118.0], [0.28, 0.48, 0.82, 1.0]),
+            ([450.0, 118.0, 492.0, 158.0], [0.12, 0.15, 0.21, 1.0]),
         ];
+        if history_open {
+            for index in 0..self.history_labels.len() {
+                rectangles.push((
+                    [
+                        28.0,
+                        158.0 + index as f32 * 30.0,
+                        492.0,
+                        188.0 + index as f32 * 30.0,
+                    ],
+                    if hovered == Some(Action::HistoryItem(index))
+                        || history_selection == Some(index)
+                    {
+                        [0.2, 0.28, 0.4, 1.0]
+                    } else {
+                        [0.09, 0.11, 0.16, 1.0]
+                    },
+                ));
+            }
+        }
         for (index, action) in [Action::Run, Action::Cancel, Action::Browse]
             .into_iter()
             .enumerate()
         {
             let left = 192.0 + index as f32 * 108.0;
             rectangles.push((
-                [left, 174.0, left + 100.0, 218.0],
+                [left, 294.0, left + 100.0, 338.0],
                 if hovered == Some(action) {
                     [0.2, 0.28, 0.4, 1.0]
                 } else {
@@ -163,12 +219,30 @@ impl RunDialogGpu {
                 self.config.width,
                 self.config.height,
             ),
+            area(
+                &self.history_toggle,
+                466.0,
+                124.0,
+                self.config.width,
+                self.config.height,
+            ),
         ];
+        if history_open {
+            for (index, label) in self.history_labels.iter().enumerate() {
+                areas.push(area(
+                    label,
+                    42.0,
+                    161.0 + index as f32 * 30.0,
+                    self.config.width,
+                    self.config.height,
+                ));
+            }
+        }
         for (index, button) in self.buttons.iter().enumerate() {
             areas.push(area(
                 button,
                 210.0 + index as f32 * 108.0,
-                184.0,
+                304.0,
                 self.config.width,
                 self.config.height,
             ));
@@ -270,16 +344,28 @@ mod tests {
     #[test]
     fn buttons_have_independent_hit_targets() {
         assert_eq!(
-            action_at(PhysicalPosition::new(240.0, 190.0)),
+            action_at(PhysicalPosition::new(240.0, 310.0), false, 0),
             Some(Action::Run)
         );
         assert_eq!(
-            action_at(PhysicalPosition::new(350.0, 190.0)),
+            action_at(PhysicalPosition::new(350.0, 310.0), false, 0),
             Some(Action::Cancel)
         );
         assert_eq!(
-            action_at(PhysicalPosition::new(460.0, 190.0)),
+            action_at(PhysicalPosition::new(460.0, 310.0), false, 0),
             Some(Action::Browse)
+        );
+    }
+
+    #[test]
+    fn history_toggle_and_rows_have_hit_targets() {
+        assert_eq!(
+            action_at(PhysicalPosition::new(470.0, 130.0), false, 2),
+            Some(Action::HistoryToggle)
+        );
+        assert_eq!(
+            action_at(PhysicalPosition::new(100.0, 200.0), true, 2),
+            Some(Action::HistoryItem(1))
         );
     }
 }

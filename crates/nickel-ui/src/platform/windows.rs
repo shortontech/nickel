@@ -33,16 +33,20 @@ use windows::{
                 CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
                 CoTaskMemFree, CoUninitialize,
             },
-            DataExchange::COPYDATASTRUCT,
+            DataExchange::{COPYDATASTRUCT, CloseClipboard, GetClipboardData, OpenClipboard},
+            Memory::{GlobalLock, GlobalSize, GlobalUnlock},
         },
         UI::{
-            Input::KeyboardAndMouse::{GetAsyncKeyState, SetFocus},
+            Input::KeyboardAndMouse::{
+                GetAsyncKeyState, MOD_NOREPEAT, MOD_WIN, RegisterHotKey, SetFocus,
+            },
             Shell::{
                 ABE_BOTTOM, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, APPBARDATA,
                 DWPOS_CENTER, DWPOS_FILL, DWPOS_FIT, DWPOS_SPAN, DWPOS_STRETCH, DWPOS_TILE,
-                DesktopWallpaper, IDesktopWallpaper, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD,
-                NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NOTIFYICON_VERSION_4, SHAppBarMessage,
-                SHFILEINFOW, SHGFI_ICON, SHGetFileInfoW, ShellExecuteW,
+                DesktopWallpaper, IDesktopWallpaper, NIF_GUID, NIF_ICON, NIF_MESSAGE, NIF_STATE,
+                NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NIN_SELECT, NIS_HIDDEN,
+                NOTIFYICON_VERSION_4, SHAppBarMessage, SHFILEINFOW, SHGFI_ICON, SHGetFileInfoW,
+                ShellExecuteW,
             },
             WindowsAndMessaging::{
                 BringWindowToTop, CallNextHookEx, CallWindowProcW, CreateWindowExW, DI_NORMAL,
@@ -60,10 +64,11 @@ use windows::{
                 SWP_NOZORDER, SendNotifyMessageW, SetForegroundWindow, SetLayeredWindowAttributes,
                 SetWindowLongPtrW, SetWindowPos, SetWindowsHookExW, ShowWindow,
                 SystemParametersInfoW, WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_EX_STYLE, WINDOW_STYLE,
-                WM_CLOSE, WM_COPYDATA, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
-                WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW,
-                WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_APPWINDOW, WS_EX_LAYERED,
-                WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WindowFromPoint,
+                WM_CLOSE, WM_CONTEXTMENU, WM_COPYDATA, WM_HOTKEY, WM_KEYDOWN, WM_KEYUP,
+                WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP,
+                WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
+                WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+                WindowFromPoint,
             },
         },
     },
@@ -207,6 +212,38 @@ pub fn launcher_hotkey_receiver() -> Receiver<GlobalShortcut> {
 }
 
 fn run_windows_key_hook(sender: Sender<GlobalShortcut>) {
+    const VK_LWIN: u32 = 0x5b;
+    const VK_RWIN: u32 = 0x5c;
+    const VK_R: u32 = 0x52;
+    const LEFT_WIN_HOTKEY: i32 = 0x4e01;
+    const RIGHT_WIN_HOTKEY: i32 = 0x4e02;
+    const RUN_HOTKEY: i32 = 0x4e03;
+
+    WINDOWS_KEY_SENDER.set(sender).ok();
+    let modifiers = MOD_WIN | MOD_NOREPEAT;
+    let left_registered =
+        unsafe { RegisterHotKey(None, LEFT_WIN_HOTKEY, modifiers, VK_LWIN) }.is_ok();
+    let right_registered =
+        unsafe { RegisterHotKey(None, RIGHT_WIN_HOTKEY, modifiers, VK_RWIN) }.is_ok();
+    let run_registered = unsafe { RegisterHotKey(None, RUN_HOTKEY, modifiers, VK_R) }.is_ok();
+    let registration_bits = u8::from(left_registered) | (u8::from(right_registered) << 1);
+    RUN_HOTKEY_REGISTERED.store(run_registered, std::sync::atomic::Ordering::Release);
+    if registration_bits == 0 {
+        tracing::warn!(
+            "bare Windows-key hotkey registration unavailable; using passive hook observation"
+        );
+    } else {
+        tracing::info!(
+            left_registered,
+            right_registered,
+            run_registered,
+            "registered bare Windows key through RegisterHotKey"
+        );
+    }
+    if !run_registered {
+        tracing::warn!("Win+R registration unavailable; using low-level hook fallback");
+    }
+
     // SAFETY: The callback remains valid for the process lifetime and this thread owns the
     // message loop required by a low-level keyboard hook.
     let hook = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(windows_key_hook), None, 0) };
@@ -219,14 +256,28 @@ fn run_windows_key_hook(sender: Sender<GlobalShortcut>) {
         eprintln!("failed to register Nickel's Windows mouse chord hook");
         return;
     };
-    WINDOWS_KEY_SENDER.set(sender).ok();
     let mut message = MSG::default();
     // SAFETY: message is valid writable storage for each synchronous call.
-    while unsafe { GetMessageW(&mut message, None, 0, 0).as_bool() } {}
+    while unsafe { GetMessageW(&mut message, None, 0, 0).as_bool() } {
+        if message.message == WM_HOTKEY {
+            match message.wParam.0 as i32 {
+                LEFT_WIN_HOTKEY | RIGHT_WIN_HOTKEY => register_bare_windows_key_press(),
+                RUN_HOTKEY => {
+                    tracing::debug!("Win+R hotkey received");
+                    if let Some(sender) = WINDOWS_KEY_SENDER.get() {
+                        let _ = sender.send(GlobalShortcut::ShowRun);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 static WINDOWS_KEY_SENDER: std::sync::OnceLock<Sender<GlobalShortcut>> = std::sync::OnceLock::new();
 static HOTKEY_CONTROLLER: std::sync::OnceLock<Mutex<HotkeyController>> = std::sync::OnceLock::new();
+static RUN_HOTKEY_REGISTERED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 static INPUT_TRACE_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static PANEL_APPBAR_REGISTERED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -264,8 +315,10 @@ struct WindowDrag {
 struct NativeTrayIcon {
     owner: isize,
     id: u32,
+    guid: Option<windows::core::GUID>,
     callback_message: u32,
     version: u32,
+    hidden: bool,
     item: TrayItem,
 }
 
@@ -330,6 +383,16 @@ unsafe extern "system" fn windows_key_hook(code: i32, wparam: WPARAM, lparam: LP
         VK_R => Hotkey::Run,
         _ => Hotkey::Other,
     };
+    if key == Hotkey::Run && RUN_HOTKEY_REGISTERED.load(std::sync::atomic::Ordering::Acquire) {
+        if edge == KeyEdge::Pressed
+            && let Ok(mut controller) = hotkey_controller().lock()
+        {
+            // RegisterHotKey owns Win+R dispatch. The hook only records that another key joined
+            // the Windows-key press, preventing the later release from toggling the launcher.
+            controller.handle(Hotkey::Other, KeyEdge::Pressed);
+        }
+        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+    }
     if matches!(key, Hotkey::Tab | Hotkey::Grave)
         && edge == KeyEdge::Pressed
         && unsafe { GetAsyncKeyState(VK_MENU as i32) < 0 }
@@ -354,6 +417,13 @@ unsafe extern "system" fn windows_key_hook(code: i32, wparam: WPARAM, lparam: LP
     } else {
         unsafe { CallNextHookEx(None, code, wparam, lparam) }
     }
+}
+
+fn register_bare_windows_key_press() {
+    if let Ok(mut controller) = hotkey_controller().lock() {
+        controller.handle(Hotkey::Super, KeyEdge::Pressed);
+    }
+    tracing::debug!("bare Windows hotkey press registered; awaiting release");
 }
 
 fn hotkey_controller() -> &'static Mutex<HotkeyController> {
@@ -480,9 +550,24 @@ unsafe extern "system" fn windows_mouse_hook(code: i32, wparam: WPARAM, lparam: 
     if !matches!(message, WM_LBUTTONDOWN | WM_RBUTTONDOWN) {
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
     }
-    let chord_started = hotkey_controller()
+    let (super_held, chord_started) = hotkey_controller()
         .lock()
-        .is_ok_and(|mut controller| controller.begin_pointer_chord());
+        .map(|mut controller| {
+            let super_held = controller.snapshot().super_held;
+            let chord_started = controller.begin_pointer_chord();
+            (super_held, chord_started)
+        })
+        .unwrap_or_default();
+    tracing::debug!(
+        super_held,
+        chord_started,
+        button = if message == WM_LBUTTONDOWN {
+            "left"
+        } else {
+            "right"
+        },
+        "Windows-key mouse gesture candidate"
+    );
     if !chord_started {
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
     }
@@ -636,6 +721,21 @@ fn resize_hit_test(window: HWND, pointer: POINT) -> u32 {
 }
 
 pub fn execute_run_command(command: &str) -> bool {
+    if command
+        .get(.."ms-settings:".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("ms-settings:"))
+    {
+        let uri = command.to_owned();
+        // Windows can take an unbounded amount of time to activate the packaged Settings app.
+        // Waiting here blocks winit's only event thread, which also makes the keyboard and mouse
+        // hooks appear wedged. Treat a well-formed Settings URI as submitted and wait off-thread.
+        thread::spawn(move || match launch_uri(&uri) {
+            Ok(true) => {}
+            Ok(false) => eprintln!("Windows declined to launch Settings URI: {uri}"),
+            Err(error) => eprintln!("failed to launch Settings URI {uri}: {error}"),
+        });
+        return true;
+    }
     let command: Vec<u16> = command.encode_utf16().chain([0]).collect();
     // SAFETY: The UTF-16 command buffer remains alive through this synchronous call.
     let result = unsafe {
@@ -649,6 +749,72 @@ pub fn execute_run_command(command: &str) -> bool {
         )
     };
     result.0 as isize > 32
+}
+
+pub fn paste_text_if_requested(character: &str) -> Option<String> {
+    const VK_CONTROL: i32 = 0x11;
+    if !character.eq_ignore_ascii_case("v") || unsafe { GetAsyncKeyState(VK_CONTROL) >= 0 } {
+        return None;
+    }
+
+    // Returning Some even when the clipboard cannot be read consumes Ctrl+V instead of inserting
+    // a literal "v" into the Run command.
+    Some(read_clipboard_text().unwrap_or_default())
+}
+
+fn read_clipboard_text() -> Option<String> {
+    use windows::Win32::Foundation::HGLOBAL;
+
+    unsafe { OpenClipboard(None).ok()? };
+    let result = (|| {
+        // CF_UNICODETEXT is the standard UTF-16 clipboard format.
+        let handle = unsafe { GetClipboardData(13).ok()? };
+        let global = HGLOBAL(handle.0);
+        let byte_len = unsafe { GlobalSize(global) };
+        if byte_len < 2 {
+            return None;
+        }
+        let pointer = unsafe { GlobalLock(global) }.cast::<u16>();
+        if pointer.is_null() {
+            return None;
+        }
+        let units = unsafe { std::slice::from_raw_parts(pointer, byte_len / 2) };
+        let text_len = units
+            .iter()
+            .position(|unit| *unit == 0)
+            .unwrap_or(units.len());
+        let text = String::from_utf16_lossy(&units[..text_len]);
+        let _ = unsafe { GlobalUnlock(global) };
+        Some(text.replace(['\r', '\n'], " "))
+    })();
+    let _ = unsafe { CloseClipboard() };
+    result
+}
+
+fn launch_uri(uri: &str) -> windows::core::Result<bool> {
+    use windows::{
+        Win32::System::Com::CLSCTX_LOCAL_SERVER,
+        Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize},
+        Win32::UI::Shell::{AO_NONE, ApplicationActivationManager, IApplicationActivationManager},
+    };
+
+    unsafe { RoInitialize(RO_INIT_MULTITHREADED)? };
+    let result = (|| {
+        let manager: IApplicationActivationManager =
+            unsafe { CoCreateInstance(&ApplicationActivationManager, None, CLSCTX_LOCAL_SERVER)? };
+        let arguments: Vec<u16> = uri.encode_utf16().chain([0]).collect();
+        let process_id = unsafe {
+            manager.ActivateApplication(
+                w!("windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel"),
+                PCWSTR(arguments.as_ptr()),
+                AO_NONE,
+            )?
+        };
+        eprintln!("activated Settings URI {uri} as process {process_id}");
+        Ok(process_id != 0)
+    })();
+    unsafe { RoUninitialize() };
+    result
 }
 
 pub fn configure_desktop_window(window: &winit::window::Window) -> bool {
@@ -914,12 +1080,26 @@ unsafe extern "system" fn tray_window_proc(
 fn update_tray_icon(message: u32, icon: &TrayNotifyIconData) -> bool {
     let owner = icon.window as isize;
     let id = icon.id;
+    let guid = tray_guid(icon);
+    if input_trace_enabled() {
+        eprintln!(
+            "tray receive operation={} owner={owner:#x} id={id} guid={guid:?} flags={:#x} \
+             callback={:#x} icon={:#x} state={:#x} state_mask={:#x} version={}",
+            tray_operation_name(message),
+            icon.flags,
+            icon.callback_message,
+            icon.icon,
+            icon.state,
+            icon.state_mask,
+            icon.version
+        );
+    }
     let Ok(mut items) = TRAY_ITEMS.lock() else {
         return false;
     };
     let existing = items
         .iter()
-        .position(|item| item.owner == owner && item.id == id);
+        .position(|item| tray_icon_matches(item, owner, id, guid));
     match message {
         value if value == NIM_ADD.0 => {
             let Some(image) = render_icon(HICON(icon.icon as usize as *mut c_void)) else {
@@ -929,10 +1109,15 @@ fn update_tray_icon(message: u32, icon: &TrayNotifyIconData) -> bool {
             let registration = NativeTrayIcon {
                 owner,
                 id,
+                guid,
                 callback_message: icon.callback_message,
                 version: 0,
+                hidden: tray_icon_hidden(icon),
                 item: TrayItem {
-                    id: format!("windows:{owner}:{id}"),
+                    id: guid.map_or_else(
+                        || format!("windows:{owner}:{id}"),
+                        |guid| format!("windows-guid:{guid:?}"),
+                    ),
                     title,
                     icon: image,
                 },
@@ -954,6 +1139,9 @@ fn update_tray_icon(message: u32, icon: &TrayNotifyIconData) -> bool {
             if icon.flags & NIF_TIP.0 != 0 {
                 items[index].item.title = wide_text(&icon.tip);
             }
+            if icon.flags & NIF_STATE.0 != 0 {
+                items[index].hidden = tray_icon_hidden(icon);
+            }
             if icon.flags & NIF_ICON.0 != 0
                 && let Some(image) = render_icon(HICON(icon.icon as usize as *mut c_void))
             {
@@ -974,6 +1162,40 @@ fn update_tray_icon(message: u32, icon: &TrayNotifyIconData) -> bool {
             items[index].version = icon.version;
             true
         }
+        _ => false,
+    }
+}
+
+fn tray_operation_name(message: u32) -> &'static str {
+    match message {
+        value if value == NIM_ADD.0 => "add",
+        value if value == NIM_MODIFY.0 => "modify",
+        value if value == NIM_DELETE.0 => "delete",
+        value if value == NIM_SETVERSION.0 => "set-version",
+        _ => "unknown",
+    }
+}
+
+fn tray_guid(icon: &TrayNotifyIconData) -> Option<windows::core::GUID> {
+    (icon.flags & NIF_GUID.0 != 0 && icon.guid != windows::core::GUID::from_u128(0))
+        .then_some(icon.guid)
+}
+
+fn tray_icon_hidden(icon: &TrayNotifyIconData) -> bool {
+    icon.flags & NIF_STATE.0 != 0
+        && icon.state_mask as u32 & NIS_HIDDEN.0 != 0
+        && icon.state as u32 & NIS_HIDDEN.0 != 0
+}
+
+fn tray_icon_matches(
+    item: &NativeTrayIcon,
+    owner: isize,
+    id: u32,
+    guid: Option<windows::core::GUID>,
+) -> bool {
+    match (item.guid, guid) {
+        (Some(existing), Some(incoming)) => existing == incoming,
+        (None, None) => item.owner == owner && item.id == id,
         _ => false,
     }
 }
@@ -1069,18 +1291,22 @@ impl TraySource for TrayFeed {
     fn snapshot(&self) -> Vec<TrayItem> {
         let mut icons = TRAY_ITEMS.lock().expect("Windows tray icon lock poisoned");
         icons.retain(|icon| unsafe { IsWindow(Some(HWND(icon.owner as *mut c_void))).as_bool() });
-        icons.iter().map(|icon| icon.item.clone()).collect()
+        icons
+            .iter()
+            .filter(|icon| !icon.hidden)
+            .map(|icon| icon.item.clone())
+            .collect()
     }
     fn activate(&self, id: &str) {
-        self.send_mouse_up(id, WM_LBUTTONUP);
+        self.send_callback(id, WM_LBUTTONDOWN, WM_LBUTTONUP);
     }
     fn context_menu(&self, id: &str) {
-        self.send_mouse_up(id, WM_RBUTTONUP);
+        self.send_callback(id, WM_RBUTTONDOWN, WM_RBUTTONUP);
     }
 }
 
 impl TrayFeed {
-    fn send_mouse_up(&self, id: &str, mouse_message: u32) {
+    fn send_callback(&self, id: &str, legacy_down: u32, legacy_up: u32) {
         let icon = TRAY_ITEMS
             .lock()
             .expect("Windows tray icon lock poisoned")
@@ -1090,24 +1316,51 @@ impl TrayFeed {
         let Some(icon) = icon else {
             return;
         };
-        let (wparam, lparam) = if icon.version == NOTIFYICON_VERSION_4 {
+        if legacy_up == WM_RBUTTONUP {
+            unsafe {
+                let _ = SetForegroundWindow(HWND(icon.owner as *mut c_void));
+            }
+        }
+        if icon.version == NOTIFYICON_VERSION_4 {
             let mut cursor = POINT::default();
             unsafe {
                 let _ = GetCursorPos(&mut cursor);
             }
-            (
-                WPARAM(((cursor.y as u16 as usize) << 16) | cursor.x as u16 as usize),
-                LPARAM(((icon.id as u16 as isize) << 16) | mouse_message as isize),
-            )
+            let message = if legacy_up == WM_RBUTTONUP {
+                WM_CONTEXTMENU
+            } else {
+                NIN_SELECT
+            };
+            let wparam = WPARAM(((cursor.y as u16 as usize) << 16) | cursor.x as u16 as usize);
+            let lparam = LPARAM(((icon.id as u16 as isize) << 16) | message as isize);
+            post_tray_callback(&icon, wparam, lparam, message);
         } else {
-            (WPARAM(icon.id as usize), LPARAM(mouse_message as isize))
-        };
-        unsafe {
-            let _ = PostMessageW(
-                Some(HWND(icon.owner as *mut c_void)),
+            let wparam = WPARAM(icon.id as usize);
+            post_tray_callback(&icon, wparam, LPARAM(legacy_down as isize), legacy_down);
+            post_tray_callback(&icon, wparam, LPARAM(legacy_up as isize), legacy_up);
+        }
+    }
+}
+
+fn post_tray_callback(icon: &NativeTrayIcon, wparam: WPARAM, lparam: LPARAM, event: u32) {
+    unsafe {
+        let result = PostMessageW(
+            Some(HWND(icon.owner as *mut c_void)),
+            icon.callback_message,
+            wparam,
+            lparam,
+        );
+        if input_trace_enabled() {
+            eprintln!(
+                "tray send owner={:#x} id={} guid={:?} version={} callback={:#x} \
+                 event={event:#x} wparam={:#x} lparam={:#x} result={result:?}",
+                icon.owner,
+                icon.id,
+                icon.guid,
+                icon.version,
                 icon.callback_message,
-                wparam,
-                lparam,
+                wparam.0,
+                lparam.0,
             );
         }
     }

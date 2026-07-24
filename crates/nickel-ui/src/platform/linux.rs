@@ -18,6 +18,10 @@ pub fn wallpaper() -> Wallpaper {
     Wallpaper::default()
 }
 
+pub fn paste_text_if_requested(_: &str) -> Option<String> {
+    None
+}
+
 #[path = "../desktop_entries.rs"]
 mod desktop_entries;
 

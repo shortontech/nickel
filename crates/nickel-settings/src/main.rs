@@ -1,30 +1,41 @@
-use std::{num::NonZeroU32, sync::Arc};
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 #[cfg(target_os = "windows")]
 use std::collections::HashMap;
 
-use softbuffer::{Context, Surface};
+use nickel_components::{
+    Button as UiButton, Column, ComponentGpu, Container, Insets, LinearGradient, PaintCommand,
+    Point as UiPoint, Rect as UiRect, Row, Text, TextAlign, UiTree,
+};
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalSize, PhysicalPosition},
     event::{ElementState, MouseButton, WindowEvent},
-    event_loop::{ActiveEventLoop, EventLoop},
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     window::{Window, WindowAttributes, WindowId},
 };
 
-const BACKGROUND: u32 = 0x001b1d21;
-const PANEL: u32 = 0x0025282e;
-const CARD: u32 = 0x00323842;
-const CARD_SELECTED: u32 = 0x003c5878;
-const PRIMARY: u32 = 0x002d8fdd;
-const BORDER: u32 = 0x006d7685;
+const WINDOW_BACKGROUND: u32 = 0x0017191e;
+const PANEL: u32 = 0x001d2026;
+const SIDEBAR_TOP: u32 = 0x00323a48;
+const SIDEBAR_BOTTOM: u32 = 0x0013161c;
+const CARD: u32 = 0x00252a33;
+const CARD_SELECTED: u32 = 0x0033445a;
+const PRIMARY: u32 = 0x004b8bd8;
+const BORDER: u32 = 0x00363c47;
 const TEXT: u32 = 0x00f2f4f8;
-const MUTED: u32 = 0x00aab1bd;
-const SUCCESS: u32 = 0x0047b881;
+const MUTED: u32 = 0x009ca5b3;
+const SUCCESS: u32 = 0x0052c98b;
+const SIDEBAR_WIDTH: i32 = 190;
 const DISPLAY_PLANE: Rect = Rect {
-    x: 40,
-    y: 120,
-    w: 770,
+    x: 210,
+    y: 96,
+    w: 600,
     h: 340,
 };
 
@@ -198,10 +209,29 @@ struct DisplayCard {
     primary: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SettingsPage {
+    Display,
+    Network,
+}
+
+struct NetworkAdapter {
+    name: String,
+    description: String,
+    connected: bool,
+    speed: u64,
+}
+
+struct WifiNetwork {
+    profile: String,
+    signal: u32,
+    connected: bool,
+    interface: u128,
+}
+
 struct SettingsApp {
     window: Option<Arc<Window>>,
-    context: Option<Context<Arc<Window>>>,
-    surface: Option<Surface<Arc<Window>, Arc<Window>>>,
+    gpu: Option<ComponentGpu>,
     displays: Vec<DisplayCard>,
     selected: usize,
     cursor: (i32, i32),
@@ -209,14 +239,21 @@ struct SettingsApp {
     applied: bool,
     pixels_per_logical: f64,
     status: String,
+    page: SettingsPage,
+    network_adapters: Vec<NetworkAdapter>,
+    wifi_networks: Vec<WifiNetwork>,
+    wifi_status: String,
+    pending_wifi_profile: Option<String>,
+    next_wifi_refresh: Option<Instant>,
+    wifi_refreshes_left: u8,
+    ui: UiTree,
 }
 
 impl Default for SettingsApp {
     fn default() -> Self {
         Self {
             window: None,
-            context: None,
-            surface: None,
+            gpu: None,
             displays: vec![
                 DisplayCard {
                     connector: "DVI-I-1".into(),
@@ -253,11 +290,50 @@ impl Default for SettingsApp {
             applied: false,
             pixels_per_logical: 0.14,
             status: "CHANGES NOT APPLIED".into(),
+            page: SettingsPage::Display,
+            network_adapters: Vec::new(),
+            wifi_networks: Vec::new(),
+            wifi_status: String::new(),
+            pending_wifi_profile: None,
+            next_wifi_refresh: None,
+            wifi_refreshes_left: 0,
+            ui: UiTree::default(),
         }
     }
 }
 
 impl SettingsApp {
+    #[cfg(any())]
+    fn display_nav() -> Rect {
+        Rect {
+            x: 12,
+            y: 118,
+            w: 146,
+            h: 46,
+        }
+    }
+
+    #[cfg(any())]
+    fn network_nav() -> Rect {
+        Rect {
+            x: 12,
+            y: 172,
+            w: 146,
+            h: 46,
+        }
+    }
+
+    #[cfg(any())]
+    fn wifi_row(index: usize) -> Rect {
+        Rect {
+            x: 190,
+            y: 150 + index as i32 * 52,
+            w: 620,
+            h: 44,
+        }
+    }
+
+    #[cfg(any())]
     fn primary_button() -> Rect {
         Rect {
             x: 540,
@@ -267,6 +343,7 @@ impl SettingsApp {
         }
     }
 
+    #[cfg(any())]
     fn identify_button() -> Rect {
         Rect {
             x: 390,
@@ -276,6 +353,7 @@ impl SettingsApp {
         }
     }
 
+    #[cfg(any())]
     fn apply_button() -> Rect {
         Rect {
             x: 700,
@@ -291,21 +369,254 @@ impl SettingsApp {
         }
     }
 
+    fn build_ui(&self, width: f32, height: f32) -> UiTree {
+        let (title, subtitle) = match self.page {
+            SettingsPage::Display => (
+                "DISPLAY SETTINGS",
+                "DRAG DISPLAYS TO MATCH THEIR PHYSICAL POSITION",
+            ),
+            SettingsPage::Network => ("NETWORK SETTINGS", "WINDOWS NETWORK ADAPTERS"),
+        };
+        let header_content = Container::new()
+            .grow(1.0)
+            .height(72.0)
+            .background(PANEL)
+            .padding(Insets {
+                top: 11.0,
+                right: 40.0,
+                bottom: 8.0,
+                left: 20.0,
+            })
+            .child(
+                Column::new()
+                    .gap(4.0)
+                    .child(Text::new(title).scale(3.0).color(TEXT))
+                    .child(Text::new(subtitle).scale(1.0).color(MUTED)),
+            );
+        let header = Row::new()
+            .height(72.0)
+            .child(
+                Container::new()
+                    .width(SIDEBAR_WIDTH as f32)
+                    .height(72.0)
+                    .background(SIDEBAR_TOP),
+            )
+            .child(header_content);
+        let mut display_button = UiButton::new("nav:display", "DISPLAY")
+            .width((SIDEBAR_WIDTH - 24) as f32)
+            .height(46.0);
+        if self.page == SettingsPage::Display {
+            display_button = display_button
+                .background(CARD_SELECTED)
+                .border(PRIMARY, 2.0);
+        }
+        let mut network_button = UiButton::new("nav:network", "NETWORK")
+            .width((SIDEBAR_WIDTH - 24) as f32)
+            .height(46.0);
+        if self.page == SettingsPage::Network {
+            network_button = network_button
+                .background(CARD_SELECTED)
+                .border(PRIMARY, 2.0);
+        }
+        let sidebar = Column::new()
+            .width(SIDEBAR_WIDTH as f32)
+            .background(LinearGradient::vertical(SIDEBAR_TOP, SIDEBAR_BOTTOM))
+            .padding(Insets {
+                top: 20.0,
+                right: 12.0,
+                bottom: 12.0,
+                left: 12.0,
+            })
+            .gap(8.0)
+            .child(display_button)
+            .child(network_button);
+
+        let content = match self.page {
+            SettingsPage::Display => self.display_components(),
+            SettingsPage::Network => self.network_components(),
+        };
+        let root = Column::new()
+            .height(height)
+            .background(WINDOW_BACKGROUND)
+            .child(header)
+            .child(Row::new().grow(1.0).child(sidebar).child(content));
+        UiTree::layout(root, UiRect::new(0.0, 0.0, width, height))
+    }
+
+    fn display_components(&self) -> Column {
+        let selected = &self.displays[self.selected];
+        Column::new()
+            .grow(1.0)
+            .padding(Insets {
+                top: 24.0,
+                right: 40.0,
+                bottom: 20.0,
+                left: 20.0,
+            })
+            .gap(12.0)
+            .child(
+                Container::new()
+                    .height(340.0)
+                    .background(0x001b1e24)
+                    .border(BORDER, 2.0),
+            )
+            .child(
+                Row::new()
+                    .height(42.0)
+                    .gap(15.0)
+                    .child(Text::new(&selected.name).color(TEXT).width(183.0))
+                    .child(
+                        UiButton::new("display:identify", "IDENTIFY")
+                            .width(135.0)
+                            .background(CARD),
+                    )
+                    .child(
+                        UiButton::new("display:primary", "MAKE PRIMARY")
+                            .width(145.0)
+                            .background(CARD),
+                    )
+                    .child(
+                        UiButton::new("display:apply", "APPLY")
+                            .width(105.0)
+                            .background(PRIMARY),
+                    ),
+            )
+            .child(
+                Text::new(&self.status)
+                    .color(if self.applied { SUCCESS } else { MUTED })
+                    .height(18.0),
+            )
+    }
+
+    fn network_components(&self) -> Column {
+        let wifi_cards = self
+            .wifi_networks
+            .iter()
+            .take(4)
+            .enumerate()
+            .map(|(index, network)| {
+                let detail = if network.connected {
+                    format!("CONNECTED  {}%", network.signal)
+                } else if network.signal == 0 {
+                    "SAVED  NOT IN RANGE".to_owned()
+                } else {
+                    format!("{}%  CLICK TO CONNECT", network.signal)
+                };
+                Container::new()
+                    .height(44.0)
+                    .background(CARD)
+                    .border(BORDER, 1.0)
+                    .padding(Insets {
+                        top: 12.0,
+                        right: 14.0,
+                        bottom: 8.0,
+                        left: 14.0,
+                    })
+                    .action(format!("wifi:{index}"))
+                    .child(
+                        Row::new()
+                            .child(Text::new(&network.profile).color(TEXT).width(316.0))
+                            .child(Text::new(detail).scale(1.0).color(if network.connected {
+                                SUCCESS
+                            } else {
+                                MUTED
+                            })),
+                    )
+            });
+        let adapter_cards = self.network_adapters.iter().take(2).map(|adapter| {
+            let status = if adapter.connected {
+                format!("CONNECTED  {} MBPS", adapter.speed / 1_000_000)
+            } else {
+                "DISCONNECTED".to_owned()
+            };
+            Container::new()
+                .height(72.0)
+                .background(CARD)
+                .border(BORDER, 1.0)
+                .padding(Insets {
+                    top: 11.0,
+                    right: 14.0,
+                    bottom: 8.0,
+                    left: 14.0,
+                })
+                .child(
+                    Column::new()
+                        .gap(7.0)
+                        .child(Text::new(&adapter.name).color(TEXT))
+                        .child(
+                            Row::new()
+                                .child(Text::new(status).color(if adapter.connected {
+                                    SUCCESS
+                                } else {
+                                    MUTED
+                                }))
+                                .child(Text::new(&adapter.description).scale(1.0).color(MUTED)),
+                        ),
+                )
+        });
+        Column::new()
+            .grow(1.0)
+            .padding(Insets {
+                top: 20.0,
+                right: 40.0,
+                bottom: 20.0,
+                left: 20.0,
+            })
+            .gap(8.0)
+            .child(
+                Row::new()
+                    .height(26.0)
+                    .child(Text::new("SAVED WI-FI").color(TEXT).width(308.0))
+                    .child(Text::new(&self.wifi_status).scale(1.0).color(MUTED)),
+            )
+            .child(
+                Column::new()
+                    .height((self.wifi_networks.len().min(4) as f32 * 52.0).max(44.0))
+                    .gap(8.0)
+                    .children(wifi_cards),
+            )
+            .child(Text::new("ADAPTERS").color(TEXT).height(18.0))
+            .child(Column::new().gap(12.0).children(adapter_cards))
+    }
+
     fn pointer_pressed(&mut self) {
         let (x, y) = self.cursor;
-        if Self::identify_button().contains(x, y) {
-            match session_request("identify-outputs") {
-                Ok(response) if response == "ok" => self.status = "IDENTIFYING DISPLAYS".into(),
-                _ => self.status = "IDENTIFY FAILED".into(),
+        let action = self
+            .ui
+            .action_at(UiPoint {
+                x: x as f32,
+                y: y as f32,
+            })
+            .map(str::to_owned);
+        if let Some(action) = action {
+            match action.as_str() {
+                "nav:display" => self.page = SettingsPage::Display,
+                "nav:network" => self.page = SettingsPage::Network,
+                "display:identify" => match session_request("identify-outputs") {
+                    Ok(response) if response == "ok" => self.status = "IDENTIFYING DISPLAYS".into(),
+                    _ => self.status = "IDENTIFY FAILED".into(),
+                },
+                "display:primary" => {
+                    for (index, display) in self.displays.iter_mut().enumerate() {
+                        display.primary = index == self.selected;
+                    }
+                    self.applied = false;
+                    self.status = "CHANGES NOT APPLIED".into();
+                }
+                "display:apply" => self.apply_layout(),
+                _ if action.starts_with("wifi:") => {
+                    if let Ok(index) = action["wifi:".len()..].parse() {
+                        self.connect_windows_wifi(index);
+                    }
+                }
+                _ => {}
             }
-        } else if Self::primary_button().contains(x, y) {
-            for (index, display) in self.displays.iter_mut().enumerate() {
-                display.primary = index == self.selected;
-            }
-            self.applied = false;
-            self.status = "CHANGES NOT APPLIED".into();
-        } else if Self::apply_button().contains(x, y) {
-            self.apply_layout();
+            self.request_redraw();
+            return;
+        }
+        if self.page != SettingsPage::Display {
+            self.request_redraw();
+            return;
         } else if let Some(index) = self
             .displays
             .iter()
@@ -322,6 +633,9 @@ impl SettingsApp {
 
     fn pointer_moved(&mut self, position: PhysicalPosition<f64>) {
         self.cursor = (position.x.round() as i32, position.y.round() as i32);
+        if self.page != SettingsPage::Display {
+            return;
+        }
         if let Some((offset_x, offset_y)) = self.drag_offset {
             let mut rect = self.displays[self.selected].rect;
             rect.x = self.cursor.0 - offset_x;
@@ -341,6 +655,9 @@ impl SettingsApp {
     }
 
     fn finish_drag(&mut self) {
+        if self.page != SettingsPage::Display {
+            return;
+        }
         if self.drag_offset.take().is_none() {
             return;
         }
@@ -519,6 +836,253 @@ impl SettingsApp {
         self.status = "WINDOWS DISPLAYS LOADED".into();
     }
 
+    #[cfg(target_os = "windows")]
+    fn load_windows_network(&mut self) {
+        use std::mem::size_of;
+        use windows::Win32::{
+            Foundation::{ERROR_BUFFER_OVERFLOW, NO_ERROR},
+            NetworkManagement::{
+                IpHelper::{
+                    GAA_FLAG_INCLUDE_PREFIX, GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH,
+                },
+                Ndis::IfOperStatusUp,
+            },
+            Networking::WinSock::AF_UNSPEC,
+        };
+
+        let mut byte_count = 0;
+        let first = unsafe {
+            GetAdaptersAddresses(
+                AF_UNSPEC.0 as u32,
+                GAA_FLAG_INCLUDE_PREFIX,
+                None,
+                None,
+                &mut byte_count,
+            )
+        };
+        if first != ERROR_BUFFER_OVERFLOW.0 || byte_count == 0 {
+            return;
+        }
+        let words = (byte_count as usize).div_ceil(size_of::<usize>());
+        let mut storage = vec![0_usize; words];
+        let first_adapter = storage.as_mut_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>();
+        let result = unsafe {
+            GetAdaptersAddresses(
+                AF_UNSPEC.0 as u32,
+                GAA_FLAG_INCLUDE_PREFIX,
+                None,
+                Some(first_adapter),
+                &mut byte_count,
+            )
+        };
+        if result != NO_ERROR.0 {
+            return;
+        }
+
+        let mut adapters = Vec::new();
+        let mut current = first_adapter;
+        while let Some(adapter) = unsafe { current.as_ref() } {
+            let name = unsafe { adapter.FriendlyName.to_string() }.unwrap_or_default();
+            let description = unsafe { adapter.Description.to_string() }.unwrap_or_default();
+            if !name.is_empty() && adapter.IfType != 24 {
+                adapters.push(NetworkAdapter {
+                    name,
+                    description,
+                    connected: adapter.OperStatus == IfOperStatusUp,
+                    speed: adapter.ReceiveLinkSpeed.max(adapter.TransmitLinkSpeed),
+                });
+            }
+            current = adapter.Next;
+        }
+        adapters.sort_by_key(|adapter| (!adapter.connected, adapter.name.to_ascii_lowercase()));
+        self.network_adapters = adapters;
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn load_windows_network(&mut self) {}
+
+    #[cfg(target_os = "windows")]
+    fn load_windows_wifi(&mut self) {
+        use std::{collections::HashMap, slice};
+        use windows::Win32::{
+            Foundation::{HANDLE, NO_ERROR},
+            NetworkManagement::WiFi::{
+                WLAN_AVAILABLE_NETWORK_CONNECTED, WLAN_AVAILABLE_NETWORK_LIST,
+                WLAN_INTERFACE_INFO_LIST, WLAN_PROFILE_INFO_LIST, WlanCloseHandle,
+                WlanEnumInterfaces, WlanFreeMemory, WlanGetAvailableNetworkList,
+                WlanGetProfileList, WlanOpenHandle,
+            },
+        };
+
+        let mut negotiated = 0;
+        let mut handle = HANDLE::default();
+        if unsafe { WlanOpenHandle(2, None, &mut negotiated, &mut handle) } != NO_ERROR.0 {
+            self.wifi_status = "WINDOWS WI-FI SERVICE UNAVAILABLE".into();
+            return;
+        }
+        let mut interface_list = std::ptr::null_mut::<WLAN_INTERFACE_INFO_LIST>();
+        if unsafe { WlanEnumInterfaces(handle, None, &mut interface_list) } != NO_ERROR.0
+            || interface_list.is_null()
+        {
+            unsafe {
+                WlanCloseHandle(handle, None);
+            }
+            self.wifi_status = "NO WI-FI INTERFACE FOUND".into();
+            return;
+        }
+
+        let interfaces = unsafe {
+            slice::from_raw_parts(
+                (*interface_list).InterfaceInfo.as_ptr(),
+                (*interface_list).dwNumberOfItems as usize,
+            )
+        };
+        let mut networks_by_profile = HashMap::<String, WifiNetwork>::new();
+        for interface in interfaces {
+            let interface_id = interface.InterfaceGuid.to_u128();
+            let mut available_profiles = HashMap::<String, (u32, bool)>::new();
+            let mut available = std::ptr::null_mut::<WLAN_AVAILABLE_NETWORK_LIST>();
+            if unsafe {
+                WlanGetAvailableNetworkList(
+                    handle,
+                    &raw const interface.InterfaceGuid,
+                    0,
+                    None,
+                    &mut available,
+                )
+            } == NO_ERROR.0
+                && !available.is_null()
+            {
+                let entries = unsafe {
+                    slice::from_raw_parts(
+                        (*available).Network.as_ptr(),
+                        (*available).dwNumberOfItems as usize,
+                    )
+                };
+                for network in entries {
+                    let profile = wide_text(&network.strProfileName);
+                    if !profile.is_empty() {
+                        available_profiles.insert(
+                            profile.to_ascii_lowercase(),
+                            (
+                                network.wlanSignalQuality,
+                                network.dwFlags & WLAN_AVAILABLE_NETWORK_CONNECTED != 0,
+                            ),
+                        );
+                    }
+                }
+                unsafe { WlanFreeMemory(available.cast()) };
+            }
+
+            let mut profile_list = std::ptr::null_mut::<WLAN_PROFILE_INFO_LIST>();
+            if unsafe {
+                WlanGetProfileList(
+                    handle,
+                    &raw const interface.InterfaceGuid,
+                    None,
+                    &mut profile_list,
+                )
+            } != NO_ERROR.0
+                || profile_list.is_null()
+            {
+                continue;
+            }
+            let profiles = unsafe {
+                slice::from_raw_parts(
+                    (*profile_list).ProfileInfo.as_ptr(),
+                    (*profile_list).dwNumberOfItems as usize,
+                )
+            };
+            for saved in profiles {
+                let profile = wide_text(&saved.strProfileName);
+                if profile.is_empty() {
+                    continue;
+                }
+                let key = profile.to_ascii_lowercase();
+                let (signal, connected) =
+                    available_profiles.get(&key).copied().unwrap_or((0, false));
+                networks_by_profile.entry(key).or_insert(WifiNetwork {
+                    profile,
+                    signal,
+                    connected,
+                    interface: interface_id,
+                });
+            }
+            unsafe { WlanFreeMemory(profile_list.cast()) };
+        }
+        unsafe {
+            WlanFreeMemory(interface_list.cast());
+            WlanCloseHandle(handle, None);
+        }
+        let mut networks: Vec<_> = networks_by_profile.into_values().collect();
+        networks.sort_by_key(|network| {
+            (
+                !network.connected,
+                network.signal == 0,
+                std::cmp::Reverse(network.signal),
+                network.profile.to_ascii_lowercase(),
+            )
+        });
+        self.wifi_status = if networks.is_empty() {
+            "NO SAVED WI-FI PROFILES".into()
+        } else {
+            format!("{} SAVED WI-FI PROFILES", networks.len())
+        };
+        self.wifi_networks = networks;
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn load_windows_wifi(&mut self) {}
+
+    #[cfg(target_os = "windows")]
+    fn connect_windows_wifi(&mut self, index: usize) {
+        use windows::{
+            Win32::{
+                Foundation::{HANDLE, NO_ERROR},
+                NetworkManagement::WiFi::{
+                    WLAN_CONNECTION_PARAMETERS, WlanCloseHandle, WlanConnect, WlanOpenHandle,
+                    dot11_BSS_type_any, wlan_connection_mode_profile,
+                },
+            },
+            core::{GUID, PCWSTR},
+        };
+
+        let Some(network) = self.wifi_networks.get(index) else {
+            return;
+        };
+        let profile = network.profile.clone();
+        let interface = GUID::from_u128(network.interface);
+        let profile_wide: Vec<u16> = profile.encode_utf16().chain([0]).collect();
+        let mut negotiated = 0;
+        let mut handle = HANDLE::default();
+        if unsafe { WlanOpenHandle(2, None, &mut negotiated, &mut handle) } != NO_ERROR.0 {
+            self.wifi_status = "WINDOWS WI-FI SERVICE UNAVAILABLE".into();
+            return;
+        }
+        let parameters = WLAN_CONNECTION_PARAMETERS {
+            wlanConnectionMode: wlan_connection_mode_profile,
+            strProfile: PCWSTR(profile_wide.as_ptr()),
+            dot11BssType: dot11_BSS_type_any,
+            ..Default::default()
+        };
+        let result =
+            unsafe { WlanConnect(handle, &raw const interface, &raw const parameters, None) };
+        unsafe {
+            WlanCloseHandle(handle, None);
+        }
+        self.wifi_status = if result == NO_ERROR.0 {
+            self.pending_wifi_profile = Some(profile.clone());
+            self.next_wifi_refresh = Some(Instant::now() + Duration::from_millis(400));
+            self.wifi_refreshes_left = 15;
+            format!("CONNECTING TO {profile}")
+        } else {
+            format!("CONNECTION FAILED ({result})")
+        };
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn connect_windows_wifi(&mut self, _index: usize) {}
+
     fn apply_layout(&mut self) {
         let primary = self
             .displays
@@ -552,6 +1116,79 @@ impl SettingsApp {
 
     fn render(&mut self) {
         let Some(window) = &self.window else { return };
+        let size = window.inner_size();
+        self.ui = self.build_ui(size.width as f32, size.height as f32);
+        let mut commands = self.ui.commands().to_vec();
+        if self.page == SettingsPage::Display {
+            for (index, display) in self.displays.iter().enumerate() {
+                let rect = UiRect::new(
+                    display.rect.x as f32,
+                    display.rect.y as f32,
+                    display.rect.w as f32,
+                    display.rect.h as f32,
+                );
+                commands.push(PaintCommand::Fill {
+                    rect,
+                    color: if index == self.selected {
+                        CARD_SELECTED
+                    } else {
+                        CARD
+                    },
+                });
+                commands.push(PaintCommand::Stroke {
+                    rect,
+                    color: if display.primary { PRIMARY } else { BORDER },
+                    width: if display.primary { 4.0 } else { 2.0 },
+                });
+                commands.push(PaintCommand::Text {
+                    bounds: UiRect::new(
+                        (display.rect.x + 18) as f32,
+                        (display.rect.y + 20) as f32,
+                        (display.rect.w - 36) as f32,
+                        32.0,
+                    ),
+                    text: display.name.clone(),
+                    scale: 3.0,
+                    color: TEXT,
+                    align: TextAlign::Start,
+                });
+                commands.push(PaintCommand::Text {
+                    bounds: UiRect::new(
+                        (display.rect.x + 18) as f32,
+                        (display.rect.y + 58) as f32,
+                        (display.rect.w - 36) as f32,
+                        24.0,
+                    ),
+                    text: display.detail.clone(),
+                    scale: 2.0,
+                    color: MUTED,
+                    align: TextAlign::Start,
+                });
+                if display.primary {
+                    commands.push(PaintCommand::Text {
+                        bounds: UiRect::new(
+                            (display.rect.x + 18) as f32,
+                            (display.rect.y + display.rect.h - 30) as f32,
+                            (display.rect.w - 36) as f32,
+                            24.0,
+                        ),
+                        text: "PRIMARY".into(),
+                        scale: 2.0,
+                        color: PRIMARY,
+                        align: TextAlign::Start,
+                    });
+                }
+            }
+        }
+        if let Some(gpu) = &mut self.gpu {
+            gpu.render(&commands).expect("render settings components");
+        }
+    }
+
+    #[cfg(any())]
+    #[allow(dead_code)]
+    fn render_legacy(&mut self) {
+        let Some(window) = &self.window else { return };
         let Some(surface) = &mut self.surface else {
             return;
         };
@@ -582,26 +1219,74 @@ impl SettingsApp {
             },
             PANEL,
         );
+        fill_rect(
+            &mut buffer,
+            width,
+            height,
+            Rect {
+                x: 0,
+                y: 96,
+                w: SIDEBAR_WIDTH,
+                h: size.height as i32 - 96,
+            },
+            PANEL,
+        );
         draw_text(
             &mut buffer,
             width,
             height,
-            38,
+            190,
             29,
             4,
-            "DISPLAY SETTINGS",
+            match self.page {
+                SettingsPage::Display => "DISPLAY SETTINGS",
+                SettingsPage::Network => "NETWORK SETTINGS",
+            },
             TEXT,
         );
         draw_text(
             &mut buffer,
             width,
             height,
-            40,
+            192,
             68,
             2,
-            "DRAG DISPLAYS TO MATCH THEIR PHYSICAL POSITION",
+            match self.page {
+                SettingsPage::Display => "DRAG DISPLAYS TO MATCH THEIR PHYSICAL POSITION",
+                SettingsPage::Network => "WINDOWS NETWORK ADAPTERS",
+            },
             MUTED,
         );
+
+        button(
+            &mut buffer,
+            width,
+            height,
+            Self::display_nav(),
+            "DISPLAY",
+            self.page == SettingsPage::Display,
+        );
+        button(
+            &mut buffer,
+            width,
+            height,
+            Self::network_nav(),
+            "NETWORK",
+            self.page == SettingsPage::Network,
+        );
+
+        if self.page == SettingsPage::Network {
+            Self::render_network(
+                &self.wifi_networks,
+                &self.wifi_status,
+                &self.network_adapters,
+                &mut buffer,
+                width,
+                height,
+            );
+            buffer.present().expect("present settings framebuffer");
+            return;
+        }
 
         fill_rect(&mut buffer, width, height, DISPLAY_PLANE, 0x00202429);
         stroke_rect(&mut buffer, width, height, DISPLAY_PLANE, BORDER, 2);
@@ -656,7 +1341,16 @@ impl SettingsApp {
         }
 
         let selected = &self.displays[self.selected];
-        draw_text(&mut buffer, width, height, 42, 486, 2, &selected.name, TEXT);
+        draw_text(
+            &mut buffer,
+            width,
+            height,
+            192,
+            486,
+            2,
+            &selected.name,
+            TEXT,
+        );
         button(
             &mut buffer,
             width,
@@ -685,13 +1379,134 @@ impl SettingsApp {
             &mut buffer,
             width,
             height,
-            42,
+            192,
             535,
             2,
             &self.status,
             if self.applied { SUCCESS } else { MUTED },
         );
         buffer.present().expect("present settings framebuffer");
+    }
+
+    #[cfg(any())]
+    fn render_network(
+        wifi_networks: &[WifiNetwork],
+        wifi_status: &str,
+        adapters: &[NetworkAdapter],
+        buffer: &mut [u32],
+        width: usize,
+        height: usize,
+    ) {
+        draw_text(buffer, width, height, 192, 116, 2, "SAVED WI-FI", TEXT);
+        draw_text(buffer, width, height, 500, 118, 1, wifi_status, MUTED);
+        for (index, network) in wifi_networks.iter().take(4).enumerate() {
+            let rect = Self::wifi_row(index);
+            fill_rect(buffer, width, height, rect, CARD);
+            stroke_rect(
+                buffer,
+                width,
+                height,
+                rect,
+                if network.connected { SUCCESS } else { BORDER },
+                2,
+            );
+            draw_text(
+                buffer,
+                width,
+                height,
+                rect.x + 14,
+                rect.y + 13,
+                2,
+                &network.profile,
+                TEXT,
+            );
+            let detail = if network.connected {
+                format!("CONNECTED  {}%", network.signal)
+            } else {
+                format!("{}%  CLICK TO CONNECT", network.signal)
+            };
+            draw_text(
+                buffer,
+                width,
+                height,
+                rect.x + 330,
+                rect.y + 15,
+                1,
+                &detail,
+                if network.connected { SUCCESS } else { MUTED },
+            );
+        }
+
+        let adapter_top = 378;
+        draw_text(
+            buffer,
+            width,
+            height,
+            192,
+            adapter_top - 24,
+            2,
+            "ADAPTERS",
+            TEXT,
+        );
+        if adapters.is_empty() {
+            draw_text(
+                buffer,
+                width,
+                height,
+                200,
+                adapter_top,
+                2,
+                "NO NETWORK ADAPTERS FOUND",
+                MUTED,
+            );
+            return;
+        }
+        for (index, adapter) in adapters.iter().take(2).enumerate() {
+            let top = adapter_top + index as i32 * 86;
+            let rect = Rect {
+                x: 190,
+                y: top,
+                w: 620,
+                h: 72,
+            };
+            fill_rect(buffer, width, height, rect, CARD);
+            stroke_rect(
+                buffer,
+                width,
+                height,
+                rect,
+                if adapter.connected { SUCCESS } else { BORDER },
+                2,
+            );
+            draw_text(buffer, width, height, 206, top + 12, 2, &adapter.name, TEXT);
+            let status = if adapter.connected {
+                format!("CONNECTED  {} MBPS", adapter.speed / 1_000_000)
+            } else {
+                "DISCONNECTED".to_owned()
+            };
+            draw_text(
+                buffer,
+                width,
+                height,
+                206,
+                top + 38,
+                2,
+                &status,
+                if adapter.connected { SUCCESS } else { MUTED },
+            );
+            if !adapter.description.eq_ignore_ascii_case(&adapter.name) {
+                draw_text(
+                    buffer,
+                    width,
+                    height,
+                    470,
+                    top + 38,
+                    1,
+                    &adapter.description,
+                    MUTED,
+                );
+            }
+        }
     }
 }
 
@@ -701,7 +1516,11 @@ impl ApplicationHandler for SettingsApp {
             return;
         }
         #[cfg(target_os = "windows")]
-        self.load_windows_outputs(event_loop);
+        {
+            self.load_windows_outputs(event_loop);
+            self.load_windows_network();
+            self.load_windows_wifi();
+        }
         let attributes = WindowAttributes::default()
             .with_title("Nickel Settings")
             .with_inner_size(LogicalSize::new(850.0, 580.0))
@@ -711,11 +1530,11 @@ impl ApplicationHandler for SettingsApp {
                 .create_window(attributes)
                 .expect("create settings window"),
         );
-        let context = Context::new(window.clone()).expect("create settings context");
-        let surface = Surface::new(&context, window.clone()).expect("create settings surface");
+        let size = window.inner_size();
+        let gpu = ComponentGpu::new(window.clone(), size.width, size.height)
+            .expect("create settings component renderer");
         self.window = Some(window);
-        self.context = Some(context);
-        self.surface = Some(surface);
+        self.gpu = Some(gpu);
         self.request_redraw();
     }
 
@@ -734,9 +1553,50 @@ impl ApplicationHandler for SettingsApp {
                 ..
             } => self.finish_drag(),
             WindowEvent::RedrawRequested => self.render(),
-            WindowEvent::Resized(_) => self.request_redraw(),
+            WindowEvent::Resized(size) => {
+                if let Some(gpu) = &mut self.gpu {
+                    gpu.resize(size.width, size.height);
+                }
+                self.request_redraw();
+            }
             _ => {}
         }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(refresh_at) = self.next_wifi_refresh else {
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return;
+        };
+        if Instant::now() < refresh_at {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(refresh_at));
+            return;
+        }
+
+        self.load_windows_wifi();
+        let connected = self.pending_wifi_profile.as_ref().is_some_and(|profile| {
+            self.wifi_networks
+                .iter()
+                .any(|network| network.connected && network.profile.eq_ignore_ascii_case(profile))
+        });
+        if connected {
+            let profile = self.pending_wifi_profile.take().unwrap_or_default();
+            self.wifi_status = format!("CONNECTED TO {profile}");
+            self.next_wifi_refresh = None;
+            self.wifi_refreshes_left = 0;
+        } else if self.wifi_refreshes_left > 1 {
+            self.wifi_refreshes_left -= 1;
+            self.next_wifi_refresh = Some(Instant::now() + Duration::from_millis(400));
+            if let Some(profile) = &self.pending_wifi_profile {
+                self.wifi_status = format!("CONNECTING TO {profile}");
+            }
+        } else {
+            let profile = self.pending_wifi_profile.take().unwrap_or_default();
+            self.wifi_status = format!("CONNECTION TO {profile} TIMED OUT");
+            self.next_wifi_refresh = None;
+            self.wifi_refreshes_left = 0;
+        }
+        self.request_redraw();
     }
 }
 
@@ -872,6 +1732,7 @@ fn constrain_center(mut monitor: Rect, plane: Rect) -> Rect {
     monitor
 }
 
+#[cfg(any())]
 fn button(buffer: &mut [u32], width: usize, height: usize, rect: Rect, label: &str, accent: bool) {
     fill_rect(
         buffer,
@@ -901,6 +1762,7 @@ fn button(buffer: &mut [u32], width: usize, height: usize, rect: Rect, label: &s
     );
 }
 
+#[cfg(any())]
 fn fill_rect(buffer: &mut [u32], width: usize, height: usize, rect: Rect, color: u32) {
     let left = rect.x.max(0) as usize;
     let top = rect.y.max(0) as usize;
@@ -911,6 +1773,7 @@ fn fill_rect(buffer: &mut [u32], width: usize, height: usize, rect: Rect, color:
     }
 }
 
+#[cfg(any())]
 fn stroke_rect(
     buffer: &mut [u32],
     width: usize,
@@ -970,6 +1833,7 @@ fn stroke_rect(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(any())]
 fn draw_text(
     buffer: &mut [u32],
     width: usize,
@@ -1005,6 +1869,7 @@ fn draw_text(
     }
 }
 
+#[cfg(any())]
 fn glyph(character: char) -> [u8; 7] {
     match character {
         'A' => [14, 17, 17, 31, 17, 17, 17],
@@ -1051,6 +1916,7 @@ fn glyph(character: char) -> [u8; 7] {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let _log_path = nickel_logging::init("nickel-settings").ok();
     let event_loop = EventLoop::new()?;
     let mut app = SettingsApp::default();
     app.load_outputs();

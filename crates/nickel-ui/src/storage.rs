@@ -4,6 +4,7 @@ use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
 const METADATA: TableDefinition<&str, u64> = TableDefinition::new("metadata");
 const PINS: TableDefinition<&str, u64> = TableDefinition::new("pins");
+const RUN_HISTORY: TableDefinition<u64, &str> = TableDefinition::new("run_history");
 const SCHEMA_VERSION: u64 = 1;
 
 pub struct PinStore {
@@ -70,6 +71,33 @@ impl PinStore {
         Ok(pinned)
     }
 
+    pub fn run_history(&self) -> Result<Vec<String>, String> {
+        let transaction = self.database.begin_read().map_err(display_error)?;
+        let table = transaction.open_table(RUN_HISTORY).map_err(display_error)?;
+        table
+            .iter()
+            .map_err(display_error)?
+            .map(|entry| {
+                let (_, command) = entry.map_err(display_error)?;
+                Ok(command.value().to_owned())
+            })
+            .collect()
+    }
+
+    pub fn record_run(&self, history: &[String]) -> Result<(), String> {
+        let transaction = self.database.begin_write().map_err(display_error)?;
+        {
+            let mut table = transaction.open_table(RUN_HISTORY).map_err(display_error)?;
+            table.retain(|_, _| false).map_err(display_error)?;
+            for (index, command) in history.iter().take(20).enumerate() {
+                table
+                    .insert(index as u64, command.as_str())
+                    .map_err(display_error)?;
+            }
+        }
+        transaction.commit().map_err(display_error)
+    }
+
     fn initialize(&self) -> Result<(), String> {
         let transaction = self.database.begin_write().map_err(display_error)?;
         {
@@ -78,6 +106,7 @@ impl PinStore {
                 .insert("schema_version", SCHEMA_VERSION)
                 .map_err(display_error)?;
             transaction.open_table(PINS).map_err(display_error)?;
+            transaction.open_table(RUN_HISTORY).map_err(display_error)?;
         }
         transaction.commit().map_err(display_error)
     }
@@ -140,6 +169,23 @@ mod tests {
         assert_eq!(
             reopened.pins().expect("read remaining pins"),
             vec![("org.example.First".into(), 2)]
+        );
+    }
+
+    #[test]
+    fn run_history_survives_reopen_in_recent_order() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("state.redb");
+        {
+            let store = PinStore::open(path.clone()).expect("open store");
+            store
+                .record_run(&["second".into(), "first".into()])
+                .expect("store history");
+        }
+        let reopened = PinStore::open(path).expect("reopen store");
+        assert_eq!(
+            reopened.run_history().expect("read history"),
+            ["second", "first"]
         );
     }
 }
