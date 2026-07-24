@@ -43,6 +43,7 @@ impl TraySource for TrayFeed {
         Vec::new()
     }
     fn activate(&self, _: &str) {}
+    fn context_menu(&self, _: &str) {}
 }
 
 pub fn send_shell_command(_: ShellCommand) -> bool {

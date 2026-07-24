@@ -23,6 +23,7 @@ use windows::{
             DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, HGDIOBJ, ReleaseDC, SelectObject,
         },
         Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES,
+        System::LibraryLoader::GetModuleHandleW,
         System::Threading::{
             AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId, OpenProcess,
             PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
@@ -40,28 +41,29 @@ use windows::{
                 ABE_BOTTOM, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, APPBARDATA,
                 DWPOS_CENTER, DWPOS_FILL, DWPOS_FIT, DWPOS_SPAN, DWPOS_STRETCH, DWPOS_TILE,
                 DesktopWallpaper, IDesktopWallpaper, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD,
-                NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NOTIFYICON_VERSION_4, NOTIFYICONDATAW,
-                SHAppBarMessage, SHFILEINFOW, SHGFI_ICON, SHGetFileInfoW, ShellExecuteW,
+                NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NOTIFYICON_VERSION_4, SHAppBarMessage,
+                SHFILEINFOW, SHGFI_ICON, SHGetFileInfoW, ShellExecuteW,
             },
             WindowsAndMessaging::{
-                BringWindowToTop, CallNextHookEx, CallWindowProcW, DI_NORMAL, DestroyIcon,
-                DrawIconEx, EnumWindows, GA_ROOT, GA_ROOTOWNER, GCLP_HICON, GCLP_HICONSM,
-                GWL_EXSTYLE, GWLP_WNDPROC, GetAncestor, GetClassLongPtrW, GetClassNameW,
-                GetCursorPos, GetForegroundWindow, GetLastActivePopup, GetMessageW,
+                BringWindowToTop, CallNextHookEx, CallWindowProcW, CreateWindowExW, DI_NORMAL,
+                DefWindowProcW, DestroyIcon, DrawIconEx, EnumWindows, GA_ROOT, GA_ROOTOWNER,
+                GCLP_HICON, GCLP_HICONSM, GWL_EXSTYLE, GWLP_WNDPROC, GetAncestor, GetClassLongPtrW,
+                GetClassNameW, GetCursorPos, GetForegroundWindow, GetLastActivePopup, GetMessageW,
                 GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
                 GetWindowThreadProcessId, HICON, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTLEFT,
                 HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_BOTTOM, HWND_BROADCAST, HWND_TOPMOST,
                 IsIconic, IsWindow, IsWindowVisible, IsZoomed, KBDLLHOOKSTRUCT, LWA_ALPHA, MSG,
-                MSLLHOOKSTRUCT, PostMessageW, RegisterWindowMessageW, SPI_GETWORKAREA,
-                SPI_SETWORKAREA, SPIF_SENDCHANGE, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE,
-                SW_SHOW, SW_SHOWNOACTIVATE, SW_SHOWNORMAL, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED,
-                SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendNotifyMessageW,
-                SetForegroundWindow, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos,
-                SetWindowsHookExW, ShowWindow, SystemParametersInfoW, WH_KEYBOARD_LL, WH_MOUSE_LL,
+                MSLLHOOKSTRUCT, PostMessageW, RegisterClassW, RegisterWindowMessageW,
+                SPI_GETWORKAREA, SPI_SETWORKAREA, SPIF_SENDCHANGE, SW_HIDE, SW_MAXIMIZE,
+                SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, SW_SHOWNORMAL,
+                SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+                SWP_NOZORDER, SendNotifyMessageW, SetForegroundWindow, SetLayeredWindowAttributes,
+                SetWindowLongPtrW, SetWindowPos, SetWindowsHookExW, ShowWindow,
+                SystemParametersInfoW, WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_EX_STYLE, WINDOW_STYLE,
                 WM_CLOSE, WM_COPYDATA, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
-                WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
-                WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-                WindowFromPoint,
+                WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW,
+                WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_APPWINDOW, WS_EX_LAYERED,
+                WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WindowFromPoint,
             },
         },
     },
@@ -231,6 +233,9 @@ static PANEL_APPBAR_REGISTERED: std::sync::atomic::AtomicBool =
 static ORIGINAL_WORK_AREA: std::sync::Mutex<Option<RECT>> = std::sync::Mutex::new(None);
 static TRAY_ITEMS: Mutex<Vec<NativeTrayIcon>> = Mutex::new(Vec::new());
 static PANEL_WINDOW_PROC: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+static PANEL_WINDOW_HANDLE: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+static TRAY_NOTIFY_WINDOW_HANDLE: std::sync::atomic::AtomicIsize =
+    std::sync::atomic::AtomicIsize::new(0);
 static PREVIOUS_FOREGROUND_WINDOW: std::sync::atomic::AtomicIsize =
     std::sync::atomic::AtomicIsize::new(0);
 static LAUNCHER_FOREGROUND_WINDOW: std::sync::atomic::AtomicIsize =
@@ -266,9 +271,28 @@ struct NativeTrayIcon {
 
 #[repr(C)]
 struct TrayNotifyData {
-    signature: u32,
+    signature: i32,
     message: u32,
-    icon: NOTIFYICONDATAW,
+    icon: TrayNotifyIconData,
+}
+
+#[repr(C)]
+struct TrayNotifyIconData {
+    cb_size: i32,
+    window: u32,
+    id: u32,
+    flags: u32,
+    callback_message: u32,
+    icon: u32,
+    tip: [u16; 128],
+    state: i32,
+    state_mask: i32,
+    info: [u16; 256],
+    version: u32,
+    info_title: [u16; 64],
+    info_flags: u32,
+    guid: windows::core::GUID,
+    balloon_icon: u32,
 }
 
 unsafe extern "system" fn windows_key_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -773,13 +797,59 @@ fn install_tray_host(hwnd: HWND) {
         eprintln!("failed to subclass Nickel's Windows tray host");
         return;
     }
+    PANEL_WINDOW_HANDLE.store(hwnd.0 as isize, Ordering::Relaxed);
     PANEL_WINDOW_PROC.store(previous, Ordering::Relaxed);
+    install_tray_notify_window(hwnd);
     // Applications cache failed Shell_NotifyIcon registrations. Explorer announces taskbar
     // recreation with this registered message, prompting well-behaved clients to add them again.
     // SAFETY: This is an asynchronous broadcast with scalar parameters only.
     unsafe {
         let message = RegisterWindowMessageW(w!("TaskbarCreated"));
         let _ = SendNotifyMessageW(HWND_BROADCAST, message, WPARAM(0), LPARAM(0));
+    }
+}
+
+fn install_tray_notify_window(parent: HWND) {
+    use std::sync::atomic::Ordering;
+
+    if TRAY_NOTIFY_WINDOW_HANDLE.load(Ordering::Relaxed) != 0 {
+        return;
+    }
+    // SAFETY: The class procedure is static for the process lifetime. The child is an invisible
+    // protocol endpoint owned by Nickel's live panel window.
+    unsafe {
+        let Ok(module) = GetModuleHandleW(None) else {
+            eprintln!("failed to resolve Nickel's module for the notification-area host");
+            return;
+        };
+        let class = WNDCLASSW {
+            hInstance: windows::Win32::Foundation::HINSTANCE(module.0),
+            lpszClassName: w!("TrayNotifyWnd"),
+            lpfnWndProc: Some(tray_window_proc),
+            ..Default::default()
+        };
+        if RegisterClassW(&raw const class) == 0 {
+            eprintln!("failed to register Nickel's TrayNotifyWnd class");
+            return;
+        }
+        let Ok(window) = CreateWindowExW(
+            WINDOW_EX_STYLE::default(),
+            class.lpszClassName,
+            w!(""),
+            WINDOW_STYLE(WS_CHILD.0 | WS_CLIPCHILDREN.0 | WS_CLIPSIBLINGS.0),
+            0,
+            0,
+            1,
+            1,
+            Some(parent),
+            None,
+            Some(class.hInstance),
+            None,
+        ) else {
+            eprintln!("failed to create Nickel's TrayNotifyWnd child window");
+            return;
+        };
+        TRAY_NOTIFY_WINDOW_HANDLE.store(window.0 as isize, Ordering::Relaxed);
     }
 }
 
@@ -823,23 +893,27 @@ unsafe extern "system" fn tray_window_proc(
             && !copy.lpData.is_null()
         {
             let data = unsafe { &*(copy.lpData as *const TrayNotifyData) };
-            if data.signature == 0x3475_3423 && update_tray_icon(data.message, &data.icon) {
+            if data.signature == 0x3475_3423_u32 as i32
+                && update_tray_icon(data.message, &data.icon)
+            {
                 return LRESULT(1);
             }
         }
     }
     let previous = PANEL_WINDOW_PROC.load(Ordering::Relaxed);
-    if previous == 0 {
-        return LRESULT(0);
+    let panel = PANEL_WINDOW_HANDLE.load(Ordering::Relaxed);
+    if previous != 0 && hwnd.0 as isize == panel {
+        // SAFETY: previous is the live winit WNDPROC returned by SetWindowLongPtrW.
+        let procedure = unsafe { std::mem::transmute(previous) };
+        return unsafe { CallWindowProcW(procedure, hwnd, message, wparam, lparam) };
     }
-    // SAFETY: previous is the live winit WNDPROC returned by SetWindowLongPtrW.
-    let procedure = unsafe { std::mem::transmute(previous) };
-    unsafe { CallWindowProcW(procedure, hwnd, message, wparam, lparam) }
+    // SAFETY: Messages for the private TrayNotifyWnd child use the system default procedure.
+    unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
 }
 
-fn update_tray_icon(message: u32, icon: &NOTIFYICONDATAW) -> bool {
-    let owner = icon.hWnd.0 as isize;
-    let id = icon.uID;
+fn update_tray_icon(message: u32, icon: &TrayNotifyIconData) -> bool {
+    let owner = icon.window as isize;
+    let id = icon.id;
     let Ok(mut items) = TRAY_ITEMS.lock() else {
         return false;
     };
@@ -848,14 +922,14 @@ fn update_tray_icon(message: u32, icon: &NOTIFYICONDATAW) -> bool {
         .position(|item| item.owner == owner && item.id == id);
     match message {
         value if value == NIM_ADD.0 => {
-            let Some(image) = render_icon(icon.hIcon) else {
+            let Some(image) = render_icon(HICON(icon.icon as usize as *mut c_void)) else {
                 return false;
             };
-            let title = wide_text(&icon.szTip);
+            let title = wide_text(&icon.tip);
             let registration = NativeTrayIcon {
                 owner,
                 id,
-                callback_message: icon.uCallbackMessage,
+                callback_message: icon.callback_message,
                 version: 0,
                 item: TrayItem {
                     id: format!("windows:{owner}:{id}"),
@@ -874,14 +948,14 @@ fn update_tray_icon(message: u32, icon: &NOTIFYICONDATAW) -> bool {
             let Some(index) = existing else {
                 return false;
             };
-            if icon.uFlags.0 & NIF_MESSAGE.0 != 0 {
-                items[index].callback_message = icon.uCallbackMessage;
+            if icon.flags & NIF_MESSAGE.0 != 0 {
+                items[index].callback_message = icon.callback_message;
             }
-            if icon.uFlags.0 & NIF_TIP.0 != 0 {
-                items[index].item.title = wide_text(&icon.szTip);
+            if icon.flags & NIF_TIP.0 != 0 {
+                items[index].item.title = wide_text(&icon.tip);
             }
-            if icon.uFlags.0 & NIF_ICON.0 != 0
-                && let Some(image) = render_icon(icon.hIcon)
+            if icon.flags & NIF_ICON.0 != 0
+                && let Some(image) = render_icon(HICON(icon.icon as usize as *mut c_void))
             {
                 items[index].item.icon = image;
             }
@@ -897,8 +971,7 @@ fn update_tray_icon(message: u32, icon: &NOTIFYICONDATAW) -> bool {
             let Some(index) = existing else {
                 return false;
             };
-            // SAFETY: NIM_SETVERSION defines the active union member as uVersion.
-            items[index].version = unsafe { icon.Anonymous.uVersion };
+            items[index].version = icon.version;
             true
         }
         _ => false,
@@ -999,6 +1072,15 @@ impl TraySource for TrayFeed {
         icons.iter().map(|icon| icon.item.clone()).collect()
     }
     fn activate(&self, id: &str) {
+        self.send_mouse_up(id, WM_LBUTTONUP);
+    }
+    fn context_menu(&self, id: &str) {
+        self.send_mouse_up(id, WM_RBUTTONUP);
+    }
+}
+
+impl TrayFeed {
+    fn send_mouse_up(&self, id: &str, mouse_message: u32) {
         let icon = TRAY_ITEMS
             .lock()
             .expect("Windows tray icon lock poisoned")
@@ -1015,10 +1097,10 @@ impl TraySource for TrayFeed {
             }
             (
                 WPARAM(((cursor.y as u16 as usize) << 16) | cursor.x as u16 as usize),
-                LPARAM(((icon.id as u16 as isize) << 16) | WM_LBUTTONUP as isize),
+                LPARAM(((icon.id as u16 as isize) << 16) | mouse_message as isize),
             )
         } else {
-            (WPARAM(icon.id as usize), LPARAM(WM_LBUTTONUP as isize))
+            (WPARAM(icon.id as usize), LPARAM(mouse_message as isize))
         };
         unsafe {
             let _ = PostMessageW(
