@@ -26,12 +26,12 @@ use glyphon::{
     RasterizeCustomGlyphRequest, RasterizedCustomGlyph, Resolution, Shaping, SwashCache, TextArea,
     TextAtlas, TextBounds, TextRenderer, Viewport,
 };
-use nickel_components::TextEditor;
+use nickel_components::{TextEditor, TextField};
 use nickel_core::launcher::LauncherVisibility;
 use nickel_core::run::RunPrompt;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
-use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::monitor::MonitorHandle;
@@ -106,6 +106,7 @@ struct Nickel {
     window_feed: WindowFeed,
     tray_feed: TrayFeed,
     launcher: Launcher,
+    launcher_editor: TextEditor,
     hovered_result: Option<usize>,
     pin_store: Option<storage::PinStore>,
     scroll_offset: usize,
@@ -181,6 +182,7 @@ impl Default for Nickel {
             window_feed: WindowFeed::new(),
             tray_feed: TrayFeed::new(),
             launcher,
+            launcher_editor: TextEditor::default(),
             hovered_result: None,
             pin_store,
             scroll_offset: 0,
@@ -423,6 +425,7 @@ impl Nickel {
         } else {
             self.launcher_focus_loss_deadline = None;
             self.launcher.clear();
+            self.launcher_editor.clear();
             self.hovered_result = None;
             self.scroll_offset = 0;
             self.scrollbar_drag_offset = None;
@@ -829,19 +832,21 @@ impl Gpu {
         self.search_buffer.set_size(Some(text_width), Some(56.0));
     }
 
-    fn render(&mut self, launcher: &Launcher, hovered_result: Option<usize>, scroll_offset: usize) {
+    fn render(
+        &mut self,
+        launcher: &Launcher,
+        editor: &TextEditor,
+        hovered_result: Option<usize>,
+        scroll_offset: usize,
+    ) {
         while let Ok((id, image)) = self.icon_results.try_recv() {
             if let Some(slot) = self.icon_images.get_mut(id as usize) {
                 *slot = image;
             }
         }
-        let search_text = if launcher.query().is_empty() {
-            "Search applications…".to_owned()
-        } else {
-            format!("{}▏", launcher.query())
-        };
+        let search_field = TextField::placeholder(editor, "Search applications…").scale(3.0);
         self.search_buffer.set_text(
-            &search_text,
+            search_field.display_text(),
             &Attrs::new().family(Family::SansSerif),
             Shaping::Advanced,
             None,
@@ -1147,6 +1152,9 @@ impl ApplicationHandler for Nickel {
             return;
         };
         let launcher_window = Arc::new(launcher_window);
+        launcher_window.set_ime_allowed(true);
+        launcher_window
+            .set_ime_cursor_area(PhysicalPosition::new(56, 96), PhysicalSize::new(2, 32));
         #[cfg(target_os = "windows")]
         if !platform::configure_launcher_window(&launcher_window) {
             eprintln!("failed to register Nickel's launcher window handle");
@@ -1173,6 +1181,8 @@ impl ApplicationHandler for Nickel {
             return;
         };
         let run_window = Arc::new(run_window);
+        run_window.set_ime_allowed(true);
+        run_window.set_ime_cursor_area(PhysicalPosition::new(42, 148), PhysicalSize::new(2, 28));
         #[cfg(target_os = "windows")]
         {
             use winit::platform::windows::WindowExtWindows;
@@ -1394,10 +1404,10 @@ impl ApplicationHandler for Nickel {
                     }
                 }
                 WindowEvent::RedrawRequested => {
+                    let displayed_command = self.run_editor.display_text_with_caret("▏");
                     if let Some(gpu) = &mut self.run_gpu {
                         gpu.render(
-                            self.run_editor.text(),
-                            self.run_editor.cursor(),
+                            &displayed_command,
                             self.run_prompt.history(),
                             self.run_prompt.history_open(),
                             self.run_prompt.history_selection(),
@@ -1455,6 +1465,29 @@ impl ApplicationHandler for Nickel {
                 WindowEvent::ModifiersChanged(modifiers) => {
                     self.run_modifiers = modifiers.state();
                 }
+                WindowEvent::Ime(Ime::Preedit(text, cursor)) => {
+                    self.run_editor
+                        .set_preedit(text, cursor.map(|(start, end)| start..end));
+                    self.run_window
+                        .as_ref()
+                        .expect("run window exists")
+                        .request_redraw();
+                }
+                WindowEvent::Ime(Ime::Commit(text)) => {
+                    self.run_editor.commit_preedit(&text);
+                    self.run_window
+                        .as_ref()
+                        .expect("run window exists")
+                        .request_redraw();
+                }
+                WindowEvent::Ime(Ime::Disabled) => {
+                    self.run_editor.cancel_preedit();
+                    self.run_window
+                        .as_ref()
+                        .expect("run window exists")
+                        .request_redraw();
+                }
+                WindowEvent::Ime(Ime::Enabled) => {}
                 WindowEvent::KeyboardInput { event, .. }
                     if event.state == ElementState::Pressed =>
                 {
@@ -1475,8 +1508,12 @@ impl ApplicationHandler for Nickel {
                             self.run_editor.move_end(self.run_modifiers.shift_key())
                         }
                         Key::Named(NamedKey::Escape) => {
-                            self.hide_run();
-                            changed = false;
+                            if self.run_editor.preedit().is_empty() {
+                                self.hide_run();
+                                changed = false;
+                            } else {
+                                self.run_editor.cancel_preedit();
+                            }
                         }
                         Key::Named(NamedKey::Enter) => {
                             self.submit_run();
@@ -1678,7 +1715,12 @@ impl ApplicationHandler for Nickel {
             }
             WindowEvent::RedrawRequested => {
                 if let Some(gpu) = &mut self.gpu {
-                    gpu.render(&self.launcher, self.hovered_result, self.scroll_offset);
+                    gpu.render(
+                        &self.launcher,
+                        &self.launcher_editor,
+                        self.hovered_result,
+                        self.scroll_offset,
+                    );
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -1821,22 +1863,68 @@ impl ApplicationHandler for Nickel {
                     }
                 }
             }
+            WindowEvent::Ime(Ime::Preedit(text, cursor)) => {
+                self.launcher_editor
+                    .set_preedit(text, cursor.map(|(start, end)| start..end));
+                self.window
+                    .as_ref()
+                    .expect("window exists")
+                    .request_redraw();
+            }
+            WindowEvent::Ime(Ime::Commit(text)) => {
+                self.launcher_editor.commit_preedit(&text);
+                self.launcher.set_query(self.launcher_editor.text());
+                self.scroll_offset = 0;
+                self.ensure_selection_visible();
+                self.window
+                    .as_ref()
+                    .expect("window exists")
+                    .request_redraw();
+            }
+            WindowEvent::Ime(Ime::Disabled) => {
+                self.launcher_editor.cancel_preedit();
+                self.window
+                    .as_ref()
+                    .expect("window exists")
+                    .request_redraw();
+            }
+            WindowEvent::Ime(Ime::Enabled) => {}
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 let mut changed = true;
+                let mut query_changed = false;
                 match event.logical_key {
                     Key::Named(NamedKey::ArrowDown) => self.launcher.select_next(),
                     Key::Named(NamedKey::ArrowUp) => self.launcher.select_previous(),
-                    Key::Named(NamedKey::Backspace) => self.launcher.backspace(),
-                    Key::Named(NamedKey::Escape) if self.launcher.query().is_empty() => {
+                    Key::Named(NamedKey::Backspace) => {
+                        self.launcher_editor.backspace();
+                        query_changed = true;
+                    }
+                    Key::Named(NamedKey::Escape)
+                        if self.launcher_editor.text().is_empty()
+                            && self.launcher_editor.preedit().is_empty() =>
+                    {
                         self.set_launcher_visible(false);
                     }
-                    Key::Named(NamedKey::Escape) => self.launcher.clear(),
+                    Key::Named(NamedKey::Escape) if !self.launcher_editor.preedit().is_empty() => {
+                        self.launcher_editor.cancel_preedit();
+                    }
+                    Key::Named(NamedKey::Escape) => {
+                        self.launcher_editor.clear();
+                        query_changed = true;
+                    }
                     Key::Named(NamedKey::Enter) => {
                         self.launch_result(self.launcher.selected_index());
                         changed = false;
                     }
-                    Key::Character(text) => self.launcher.insert(&text),
+                    Key::Character(text) if self.launcher_editor.preedit().is_empty() => {
+                        self.launcher_editor.insert(&text);
+                        query_changed = true;
+                    }
                     _ => changed = false,
+                }
+                if query_changed {
+                    self.launcher.set_query(self.launcher_editor.text());
+                    self.scroll_offset = 0;
                 }
                 if changed {
                     self.ensure_selection_visible();

@@ -1,4 +1,4 @@
-use crate::{Axis, Insets, Point, Rect};
+use crate::{Axis, Insets, Point, Rect, TextEditor};
 
 pub type Color = u32;
 
@@ -374,6 +374,53 @@ impl Header {
     pub fn color(mut self, color: Color) -> Self {
         self.0 = self.0.color(color);
         self
+    }
+}
+
+pub struct TextField {
+    text: Text,
+    displayed: String,
+}
+
+impl TextField {
+    pub fn new(editor: &TextEditor) -> Self {
+        let displayed = editor.display_text_with_caret("▏");
+        Self {
+            text: Text::new(&displayed),
+            displayed,
+        }
+    }
+
+    pub fn placeholder(editor: &TextEditor, placeholder: impl Into<String>) -> Self {
+        if editor.text().is_empty() && editor.preedit().is_empty() {
+            let displayed = placeholder.into();
+            Self {
+                text: Text::new(&displayed),
+                displayed,
+            }
+        } else {
+            Self::new(editor)
+        }
+    }
+
+    pub fn display_text(&self) -> &str {
+        &self.displayed
+    }
+
+    pub fn scale(mut self, scale: f32) -> Self {
+        self.text = self.text.scale(scale);
+        self
+    }
+
+    pub fn color(mut self, color: Color) -> Self {
+        self.text = self.text.color(color);
+        self
+    }
+}
+
+impl Component for TextField {
+    fn into_element(self) -> Element {
+        self.text.into_element()
     }
 }
 

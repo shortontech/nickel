@@ -10,5 +10,5 @@ pub use layout::{Axis, Constraints, FlexItem, Insets, Point, Rect, Size, layout_
 pub use text_editor::TextEditor;
 pub use ui::{
     Background, Button, ButtonLabel, Color, Column, Component, Container, GradientAxis, Grid,
-    Header, LinearGradient, PaintCommand, Row, Text, TextAlign, UiTree,
+    Header, LinearGradient, PaintCommand, Row, Text, TextAlign, TextField, UiTree,
 };

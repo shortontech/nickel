@@ -420,10 +420,9 @@ unsafe extern "system" fn windows_key_hook(code: i32, wparam: WPARAM, lparam: LP
 }
 
 fn register_bare_windows_key_press() {
-    if let Ok(mut controller) = hotkey_controller().lock() {
-        controller.handle(Hotkey::Super, KeyEdge::Pressed);
-    }
-    tracing::debug!("bare Windows hotkey press registered; awaiting release");
+    // RegisterHotKey owns bare-Windows dispatch and suppression, but it can post repeated or
+    // delayed messages. Physical down/up state comes exclusively from the keyboard hook.
+    tracing::debug!("bare Windows hotkey received");
 }
 
 fn hotkey_controller() -> &'static Mutex<HotkeyController> {

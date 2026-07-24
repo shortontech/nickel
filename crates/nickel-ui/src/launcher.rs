@@ -138,6 +138,13 @@ impl Launcher {
         self.refresh();
     }
 
+    pub fn set_query(&mut self, query: &str) {
+        self.query.clear();
+        self.query
+            .extend(query.chars().filter(|character| !character.is_control()));
+        self.refresh();
+    }
+
     pub fn backspace(&mut self) {
         self.query.pop();
         self.refresh();

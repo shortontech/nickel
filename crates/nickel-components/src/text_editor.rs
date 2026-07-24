@@ -6,6 +6,8 @@ pub struct TextEditor {
     text: String,
     cursor: usize,
     anchor: usize,
+    preedit: String,
+    preedit_cursor: Option<Range<usize>>,
 }
 
 impl TextEditor {
@@ -16,6 +18,8 @@ impl TextEditor {
             text,
             cursor,
             anchor: cursor,
+            preedit: String::new(),
+            preedit_cursor: None,
         }
     }
 
@@ -40,12 +44,55 @@ impl TextEditor {
         self.text = text.into();
         self.cursor = self.text.len();
         self.anchor = self.cursor;
+        self.cancel_preedit();
     }
 
     pub fn clear(&mut self) {
         self.text.clear();
         self.cursor = 0;
         self.anchor = 0;
+        self.cancel_preedit();
+    }
+
+    pub fn preedit(&self) -> &str {
+        &self.preedit
+    }
+
+    pub fn set_preedit(&mut self, text: impl Into<String>, cursor: Option<Range<usize>>) {
+        self.preedit = text.into();
+        self.preedit_cursor = cursor.map(|range| {
+            clamp_boundary(&self.preedit, range.start)..clamp_boundary(&self.preedit, range.end)
+        });
+    }
+
+    pub fn commit_preedit(&mut self, text: &str) {
+        self.cancel_preedit();
+        self.insert(text);
+    }
+
+    pub fn cancel_preedit(&mut self) {
+        self.preedit.clear();
+        self.preedit_cursor = None;
+    }
+
+    pub fn display_text_with_caret(&self, caret: &str) -> String {
+        let replacement = self.selection().unwrap_or(self.cursor..self.cursor);
+        let mut displayed =
+            String::with_capacity(self.text.len() + self.preedit.len() + caret.len());
+        displayed.push_str(&self.text[..replacement.start]);
+        if self.preedit.is_empty() {
+            displayed.push_str(caret);
+        } else {
+            let preedit_caret = self
+                .preedit_cursor
+                .as_ref()
+                .map_or(self.preedit.len(), |cursor| cursor.end);
+            displayed.push_str(&self.preedit[..preedit_caret]);
+            displayed.push_str(caret);
+            displayed.push_str(&self.preedit[preedit_caret..]);
+        }
+        displayed.push_str(&self.text[replacement.end..]);
+        displayed
     }
 
     pub fn insert(&mut self, text: &str) {
@@ -137,6 +184,14 @@ fn previous_boundary(text: &str, cursor: usize) -> usize {
         .unwrap_or(0)
 }
 
+fn clamp_boundary(text: &str, index: usize) -> usize {
+    let mut index = index.min(text.len());
+    while !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
 fn next_boundary(text: &str, cursor: usize) -> usize {
     text[cursor..]
         .grapheme_indices(true)
@@ -199,5 +254,26 @@ mod tests {
         assert_eq!(editor.text(), "👨‍👩‍👧");
         editor.delete();
         assert_eq!(editor.text(), "");
+    }
+
+    #[test]
+    fn preedit_is_presented_without_committing_and_then_commits_once() {
+        let mut editor = TextEditor::new("run ");
+        editor.set_preedit("にほ", Some(6..6));
+        assert_eq!(editor.text(), "run ");
+        assert_eq!(editor.display_text_with_caret("|"), "run にほ|");
+        editor.commit_preedit("日本");
+        assert_eq!(editor.text(), "run 日本");
+        assert_eq!(editor.preedit(), "");
+    }
+
+    #[test]
+    fn preedit_visually_replaces_selection() {
+        let mut editor = TextEditor::new("old");
+        editor.select_all();
+        editor.set_preedit("新", None);
+        assert_eq!(editor.display_text_with_caret("|"), "新|");
+        editor.cancel_preedit();
+        assert_eq!(editor.text(), "old");
     }
 }
