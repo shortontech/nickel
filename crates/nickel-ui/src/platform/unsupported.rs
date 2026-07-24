@@ -9,6 +9,10 @@ pub fn wallpaper() -> Wallpaper {
     Wallpaper::default()
 }
 
+pub fn paste_text_if_requested(_: &str) -> Option<String> {
+    None
+}
+
 pub fn applications() -> Vec<Application> {
     Vec::new()
 }
