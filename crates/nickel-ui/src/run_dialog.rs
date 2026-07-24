@@ -126,17 +126,14 @@ impl RunDialogGpu {
 
     pub fn render(
         &mut self,
-        command: &str,
-        cursor: usize,
+        displayed_command: &str,
         history: &[String],
         history_open: bool,
         history_selection: Option<usize>,
         hovered: Option<Action>,
     ) {
-        let mut displayed = command.to_owned();
-        displayed.insert_str(cursor, "▏");
         self.input.set_text(
-            &displayed,
+            displayed_command,
             &Attrs::new().family(Family::SansSerif),
             Shaping::Advanced,
             None,
