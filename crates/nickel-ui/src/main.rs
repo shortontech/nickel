@@ -38,6 +38,7 @@ use winit::monitor::MonitorHandle;
 use winit::window::{CursorIcon, Window, WindowAttributes, WindowId, WindowLevel};
 
 mod context_menu;
+mod control_center;
 mod desktop;
 mod graphics;
 mod icons;
@@ -75,6 +76,10 @@ struct Nickel {
     panel_hovered: bool,
     panel_task_hovered: Option<usize>,
     panel_tray_hovered: Option<usize>,
+    panel_control_hovered: bool,
+    control_center_window: Option<Arc<Window>>,
+    control_center_gpu: Option<control_center::ControlCenterGpu>,
+    control_center_visible: bool,
     context_menu_window: Option<Arc<Window>>,
     context_menu_gpu: Option<context_menu::ContextMenuGpu>,
     context_menu_hovered: Option<usize>,
@@ -103,6 +108,7 @@ struct Nickel {
     task_switcher_windows: Vec<OpenWindow>,
     clock_deadline: Instant,
     window_deadline: Instant,
+    fullscreen_deadline: Instant,
     window_feed: WindowFeed,
     tray_feed: TrayFeed,
     launcher: Launcher,
@@ -151,6 +157,10 @@ impl Default for Nickel {
             panel_hovered: false,
             panel_task_hovered: None,
             panel_tray_hovered: None,
+            panel_control_hovered: false,
+            control_center_window: None,
+            control_center_gpu: None,
+            control_center_visible: false,
             context_menu_window: None,
             context_menu_gpu: None,
             context_menu_hovered: None,
@@ -179,6 +189,7 @@ impl Default for Nickel {
             task_switcher_windows: Vec::new(),
             clock_deadline: next_minute_deadline(Instant::now(), SystemTime::now()),
             window_deadline: Instant::now(),
+            fullscreen_deadline: Instant::now(),
             window_feed: WindowFeed::new(),
             tray_feed: TrayFeed::new(),
             launcher,
@@ -193,6 +204,28 @@ impl Default for Nickel {
 }
 
 impl Nickel {
+    fn set_control_center_visible(&mut self, visible: bool) {
+        self.control_center_visible = visible;
+        if visible {
+            self.set_launcher_visible(false);
+            self.hide_run();
+            if let Some(gpu) = &mut self.control_center_gpu {
+                gpu.refresh();
+            }
+        }
+        if let Some(window) = &self.control_center_window {
+            window.set_visible(visible);
+            if visible {
+                window.focus_window();
+                window.request_redraw();
+            }
+        }
+    }
+
+    fn toggle_control_center(&mut self) {
+        self.set_control_center_visible(!self.control_center_visible);
+    }
+
     fn show_run(&mut self) {
         self.set_launcher_visible(false);
         self.run_prompt.clear();
@@ -1102,6 +1135,16 @@ impl ApplicationHandler for Nickel {
             .with_visible(false)
             .with_decorations(false)
             .with_window_level(WindowLevel::AlwaysOnTop);
+        let mut control_center_attributes = WindowAttributes::default()
+            .with_title("Nickel Control Center")
+            .with_inner_size(LogicalSize::new(
+                control_center::WIDTH,
+                control_center::HEIGHT,
+            ))
+            .with_visible(false)
+            .with_decorations(false)
+            .with_resizable(false)
+            .with_window_level(WindowLevel::AlwaysOnTop);
         let mut run_attributes = WindowAttributes::default()
             .with_title("Run")
             .with_inner_size(LogicalSize::new(run_dialog::WIDTH, run_dialog::HEIGHT))
@@ -1118,6 +1161,18 @@ impl ApplicationHandler for Nickel {
                 monitor,
                 (run_dialog::WIDTH, run_dialog::HEIGHT),
             ));
+            let monitor_position = monitor.position();
+            let monitor_size = monitor.size();
+            control_center_attributes =
+                control_center_attributes.with_position(PhysicalPosition::new(
+                    monitor_position.x + monitor_size.width as i32
+                        - control_center::WIDTH as i32
+                        - 12,
+                    monitor_position.y + monitor_size.height as i32
+                        - control_center::HEIGHT as i32
+                        - PANEL_HEIGHT as i32
+                        - 12,
+                ));
             let (panel_size, panel_position) =
                 panel_layout(monitor.position(), monitor.size(), monitor.scale_factor());
             panel_attributes = panel_attributes
@@ -1183,11 +1238,18 @@ impl ApplicationHandler for Nickel {
         let run_window = Arc::new(run_window);
         run_window.set_ime_allowed(true);
         run_window.set_ime_cursor_area(PhysicalPosition::new(42, 148), PhysicalSize::new(2, 28));
+        let Ok(control_center_window) = event_loop.create_window(control_center_attributes) else {
+            eprintln!("failed to create Nickel Control Center window");
+            event_loop.exit();
+            return;
+        };
+        let control_center_window = Arc::new(control_center_window);
         #[cfg(target_os = "windows")]
         {
             use winit::platform::windows::WindowExtWindows;
             context_menu_window.set_skip_taskbar(true);
             run_window.set_skip_taskbar(true);
+            control_center_window.set_skip_taskbar(true);
             if !platform::configure_context_menu_window(&context_menu_window) {
                 eprintln!("failed to register Nickel's Windows preview window");
             }
@@ -1226,6 +1288,14 @@ impl ApplicationHandler for Nickel {
             event_loop.exit();
             return;
         };
+        let control_center_gpu =
+            match control_center::ControlCenterGpu::new(control_center_window.clone()) {
+                Ok(gpu) => Some(gpu),
+                Err(error) => {
+                    eprintln!("failed to initialize Nickel Control Center renderer: {error}");
+                    None
+                }
+            };
         launcher_window.set_title("Nickel Launcher");
         if let Some(window) = &desktop_window {
             window.request_redraw();
@@ -1241,6 +1311,8 @@ impl ApplicationHandler for Nickel {
         self.context_menu_gpu = None;
         self.run_window = Some(run_window);
         self.run_gpu = Some(run_gpu);
+        self.control_center_window = Some(control_center_window);
+        self.control_center_gpu = control_center_gpu;
     }
 
     fn window_event(
@@ -1249,6 +1321,35 @@ impl ApplicationHandler for Nickel {
         window_id: WindowId,
         event: WindowEvent,
     ) {
+        if self
+            .control_center_window
+            .as_ref()
+            .map(|window| window.id())
+            == Some(window_id)
+        {
+            match event {
+                WindowEvent::CloseRequested | WindowEvent::Focused(false) => {
+                    self.set_control_center_visible(false);
+                }
+                WindowEvent::Resized(size) => {
+                    if let Some(gpu) = &mut self.control_center_gpu {
+                        gpu.resize(size.width, size.height);
+                    }
+                    self.control_center_window
+                        .as_ref()
+                        .expect("control center window exists")
+                        .request_redraw();
+                }
+                WindowEvent::RedrawRequested => {
+                    if let Some(gpu) = &mut self.control_center_gpu {
+                        gpu.render();
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+
         if self.desktop_window.as_ref().map(|window| window.id()) == Some(window_id) {
             match event {
                 WindowEvent::Resized(size) => {
@@ -1580,15 +1681,20 @@ impl ApplicationHandler for Nickel {
                     let tray_hovered = self.panel_window.as_ref().and_then(|window| {
                         panel::tray_at(position, window.inner_size().width, self.tray_items.len())
                     });
+                    let control_hovered = self.panel_window.as_ref().is_some_and(|window| {
+                        panel::control_center_contains(position, window.inner_size().width)
+                    });
                     if hovered == self.panel_hovered
                         && task_hovered == self.panel_task_hovered
                         && tray_hovered == self.panel_tray_hovered
+                        && control_hovered == self.panel_control_hovered
                     {
                         return;
                     }
                     self.panel_hovered = hovered;
                     self.panel_task_hovered = task_hovered;
                     self.panel_tray_hovered = tray_hovered;
+                    self.panel_control_hovered = control_hovered;
                     if let Some(index) =
                         task_hovered.filter(|_| self.window_feed.supports_previews())
                     {
@@ -1599,7 +1705,11 @@ impl ApplicationHandler for Nickel {
                     }
                     let window = self.panel_window.as_ref().expect("panel window exists");
                     window.set_cursor(
-                        if hovered || task_hovered.is_some() || tray_hovered.is_some() {
+                        if hovered
+                            || task_hovered.is_some()
+                            || tray_hovered.is_some()
+                            || control_hovered
+                        {
                             CursorIcon::Pointer
                         } else {
                             CursorIcon::Default
@@ -1611,6 +1721,7 @@ impl ApplicationHandler for Nickel {
                     self.panel_hovered = false;
                     self.panel_task_hovered = None;
                     self.panel_tray_hovered = None;
+                    self.panel_control_hovered = false;
                     if self.context_preview_mode {
                         self.preview_hide_deadline =
                             Some(Instant::now() + Duration::from_millis(250));
@@ -1627,6 +1738,11 @@ impl ApplicationHandler for Nickel {
                     button: MouseButton::Left,
                     ..
                 } if self.panel_hovered => self.toggle_launcher(),
+                WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    button: MouseButton::Left,
+                    ..
+                } if self.panel_control_hovered => self.toggle_control_center(),
                 WindowEvent::MouseInput {
                     state: ElementState::Pressed,
                     button: MouseButton::Left,
@@ -2000,6 +2116,10 @@ impl ApplicationHandler for Nickel {
             }
             self.window_deadline = now + Duration::from_millis(250);
         }
+        if now >= self.fullscreen_deadline {
+            platform::update_panel_fullscreen_state();
+            self.fullscreen_deadline = now + Duration::from_secs(1);
+        }
         if now >= self.clock_deadline {
             if self
                 .panel_gpu
@@ -2011,7 +2131,10 @@ impl ApplicationHandler for Nickel {
             }
             self.clock_deadline = next_minute_deadline(now, SystemTime::now());
         }
-        let mut deadline = self.clock_deadline.min(self.window_deadline);
+        let mut deadline = self
+            .clock_deadline
+            .min(self.window_deadline)
+            .min(self.fullscreen_deadline);
         if let Some(preview_deadline) = self.preview_hide_deadline {
             deadline = deadline.min(preview_deadline);
         }

@@ -363,6 +363,16 @@ pub fn tray_at(
     })
 }
 
+pub fn control_center_contains(
+    position: winit::dpi::PhysicalPosition<f64>,
+    panel_width: u32,
+) -> bool {
+    position.x >= f64::from(panel_width) - CLOCK_WIDTH
+        && position.x < f64::from(panel_width)
+        && position.y >= 0.0
+        && position.y < 56.0
+}
+
 pub fn fallback_icon() -> image::RgbaImage {
     image::RgbaImage::from_fn(32, 32, |x, y| {
         let border = x <= 2 || y <= 2 || x >= 29 || y >= 29;
@@ -456,8 +466,8 @@ mod tests {
     use winit::dpi::PhysicalPosition;
 
     use super::{
-        launcher_button_contains, local_clock_text, local_short_date_text, local_time_text,
-        task_at, tinted_panel_icon, tray_at,
+        control_center_contains, launcher_button_contains, local_clock_text, local_short_date_text,
+        local_time_text, task_at, tinted_panel_icon, tray_at,
     };
 
     #[test]
@@ -465,6 +475,18 @@ mod tests {
         let text = local_time_text();
         assert!(!text.is_empty());
         assert!(!text.contains(['\r', '\n']));
+    }
+
+    #[test]
+    fn clock_area_opens_control_center() {
+        assert!(control_center_contains(
+            PhysicalPosition::new(1230.0, 28.0),
+            1280
+        ));
+        assert!(!control_center_contains(
+            PhysicalPosition::new(1179.0, 28.0),
+            1280
+        ));
     }
 
     #[test]

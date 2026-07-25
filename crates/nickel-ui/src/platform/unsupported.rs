@@ -13,6 +13,12 @@ pub fn paste_text_if_requested(_: &str) -> Option<String> {
     None
 }
 
+pub fn network_status() -> super::NetworkStatus {
+    super::NetworkStatus::default()
+}
+
+pub fn update_panel_fullscreen_state() {}
+
 pub fn applications() -> Vec<Application> {
     Vec::new()
 }

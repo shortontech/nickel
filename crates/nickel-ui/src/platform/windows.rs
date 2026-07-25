@@ -20,7 +20,8 @@ use windows::{
         },
         Graphics::Gdi::{
             BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection,
-            DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, HGDIOBJ, ReleaseDC, SelectObject,
+            DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetMonitorInfoW, HGDIOBJ,
+            MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, ReleaseDC, SelectObject,
         },
         Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES,
         System::LibraryLoader::GetModuleHandleW,
@@ -202,6 +203,80 @@ pub fn application_icon(reference: &str) -> Option<image::RgbaImage> {
     executable_icon(PathBuf::from(reference).as_path())
 }
 
+pub fn network_status() -> super::NetworkStatus {
+    use windows::Win32::{
+        Foundation::{HANDLE, NO_ERROR},
+        NetworkManagement::WiFi::{
+            WLAN_CONNECTION_ATTRIBUTES, WLAN_INTERFACE_INFO_LIST, WlanCloseHandle,
+            WlanEnumInterfaces, WlanFreeMemory, WlanOpenHandle, WlanQueryInterface,
+            wlan_interface_state_connected, wlan_intf_opcode_current_connection,
+        },
+    };
+
+    let mut negotiated = 0;
+    let mut handle = HANDLE::default();
+    if unsafe { WlanOpenHandle(2, None, &mut negotiated, &mut handle) } != NO_ERROR.0 {
+        return super::NetworkStatus::default();
+    }
+    let mut interfaces = std::ptr::null_mut::<WLAN_INTERFACE_INFO_LIST>();
+    if unsafe { WlanEnumInterfaces(handle, None, &mut interfaces) } != NO_ERROR.0
+        || interfaces.is_null()
+    {
+        unsafe {
+            WlanCloseHandle(handle, None);
+        }
+        return super::NetworkStatus::default();
+    }
+
+    let mut status = super::NetworkStatus {
+        available: true,
+        ..Default::default()
+    };
+    let entries = unsafe {
+        std::slice::from_raw_parts(
+            (*interfaces).InterfaceInfo.as_ptr(),
+            (*interfaces).dwNumberOfItems as usize,
+        )
+    };
+    for interface in entries {
+        let mut bytes = 0;
+        let mut data = std::ptr::null_mut::<c_void>();
+        if unsafe {
+            WlanQueryInterface(
+                handle,
+                &raw const interface.InterfaceGuid,
+                wlan_intf_opcode_current_connection,
+                None,
+                &mut bytes,
+                &mut data,
+                None,
+            )
+        } != NO_ERROR.0
+            || data.is_null()
+            || bytes < std::mem::size_of::<WLAN_CONNECTION_ATTRIBUTES>() as u32
+        {
+            continue;
+        }
+        let connection = unsafe { &*data.cast::<WLAN_CONNECTION_ATTRIBUTES>() };
+        if connection.isState == wlan_interface_state_connected {
+            let ssid = &connection.wlanAssociationAttributes.dot11Ssid;
+            let length = (ssid.uSSIDLength as usize).min(ssid.ucSSID.len());
+            status.connected = true;
+            status.name = String::from_utf8_lossy(&ssid.ucSSID[..length]).into_owned();
+            status.signal_percent = connection.wlanAssociationAttributes.wlanSignalQuality;
+        }
+        unsafe { WlanFreeMemory(data) };
+        if status.connected {
+            break;
+        }
+    }
+    unsafe {
+        WlanFreeMemory(interfaces.cast());
+        WlanCloseHandle(handle, None);
+    }
+    status
+}
+
 pub fn launcher_hotkey_receiver() -> Receiver<GlobalShortcut> {
     let (sender, receiver) = mpsc::channel();
     thread::Builder::new()
@@ -280,6 +355,8 @@ static RUN_HOTKEY_REGISTERED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static INPUT_TRACE_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static PANEL_APPBAR_REGISTERED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static PANEL_FULLSCREEN_ACTIVE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static ORIGINAL_WORK_AREA: std::sync::Mutex<Option<RECT>> = std::sync::Mutex::new(None);
 static TRAY_ITEMS: Mutex<Vec<NativeTrayIcon>> = Mutex::new(Vec::new());
@@ -943,6 +1020,97 @@ pub fn configure_panel_window(window: &winit::window::Window) -> bool {
     positioned && topmost
 }
 
+pub fn update_panel_fullscreen_state() {
+    use std::sync::atomic::Ordering;
+
+    let panel = HWND(PANEL_WINDOW_HANDLE.load(Ordering::Relaxed) as *mut c_void);
+    if panel.0.is_null() {
+        return;
+    }
+    let foreground = unsafe { GetForegroundWindow() };
+    let fullscreen = foreground.0 != panel.0
+        && foreground.0 != std::ptr::null_mut()
+        && unsafe { IsWindowVisible(foreground).as_bool() }
+        && !unsafe { IsIconic(foreground).as_bool() }
+        // Standard maximized windows can report monitor-sized outer bounds because GetWindowRect
+        // includes their invisible resize frame. Borderless fullscreen windows do not carry the
+        // maximized state, so this separates the two without relying on Explorer's work area.
+        && !unsafe { IsZoomed(foreground).as_bool() }
+        && is_foreign_process_window(foreground)
+        && window_covers_monitor(foreground);
+    let previous = PANEL_FULLSCREEN_ACTIVE.swap(fullscreen, Ordering::Relaxed);
+    let positioned = apply_panel_fullscreen_state(panel, fullscreen);
+    if let Err(error) = positioned {
+        tracing::warn!(
+            fullscreen,
+            panel = panel.0 as usize,
+            %error,
+            "failed to update panel borderless-fullscreen Z-order"
+        );
+    } else if previous != fullscreen {
+        tracing::debug!(
+            fullscreen,
+            panel = panel.0 as usize,
+            "updated panel borderless-fullscreen state"
+        );
+    }
+}
+
+fn apply_panel_fullscreen_state(panel: HWND, fullscreen: bool) -> windows::core::Result<()> {
+    if fullscreen {
+        unsafe {
+            let _ = ShowWindow(panel, SW_HIDE);
+        }
+        return Ok(());
+    }
+    unsafe {
+        let _ = ShowWindow(panel, SW_SHOWNOACTIVATE);
+        SetWindowPos(
+            panel,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
+        )
+    }
+}
+
+fn is_foreign_process_window(window: HWND) -> bool {
+    let mut process_id = 0;
+    unsafe {
+        GetWindowThreadProcessId(window, Some(&mut process_id));
+    }
+    process_id != 0 && process_id != unsafe { GetCurrentProcessId() }
+}
+
+fn window_covers_monitor(window: HWND) -> bool {
+    let mut window_rect = RECT::default();
+    if unsafe { GetWindowRect(window, &mut window_rect) }.is_err() {
+        return false;
+    }
+    let monitor = unsafe { MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST) };
+    if monitor.is_invalid() {
+        return false;
+    }
+    let mut monitor_info = MONITORINFO {
+        cbSize: size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if !unsafe { GetMonitorInfoW(monitor, &mut monitor_info) }.as_bool() {
+        return false;
+    }
+    rectangle_covers(window_rect, monitor_info.rcMonitor, 2)
+}
+
+fn rectangle_covers(window: RECT, monitor: RECT, tolerance: i32) -> bool {
+    window.left <= monitor.left + tolerance
+        && window.top <= monitor.top + tolerance
+        && window.right >= monitor.right - tolerance
+        && window.bottom >= monitor.bottom - tolerance
+}
+
 fn install_tray_host(hwnd: HWND) {
     use std::sync::atomic::Ordering;
 
@@ -1030,23 +1198,15 @@ unsafe extern "system" fn tray_window_proc(
         // AppBars are notified when a fullscreen application enters or leaves the foreground.
         // Drop Nickel behind it while it is active, then restore the panel's topmost band. The
         // AppBar reservation remains intact, so ordinary maximized windows still avoid the panel.
-        let insert_after = if lparam.0 != 0 {
-            HWND_BOTTOM
-        } else {
-            HWND_TOPMOST
-        };
+        let fullscreen = lparam.0 != 0;
+        PANEL_FULLSCREEN_ACTIVE.store(fullscreen, Ordering::Relaxed);
+        tracing::debug!(
+            fullscreen,
+            panel = hwnd.0 as usize,
+            "received AppBar fullscreen notification"
+        );
         // SAFETY: hwnd is Nickel's live panel HWND and this changes only its Z-order.
-        let _ = unsafe {
-            SetWindowPos(
-                hwnd,
-                Some(insert_after),
-                0,
-                0,
-                0,
-                0,
-                SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
-            )
-        };
+        let _ = apply_panel_fullscreen_state(hwnd, fullscreen);
         return LRESULT(0);
     }
     if message == WM_COPYDATA {
@@ -1949,7 +2109,9 @@ fn hwnd(window: WindowId) -> HWND {
 
 #[cfg(test)]
 mod tests {
-    use super::{executable_icon, is_shell_infrastructure};
+    use windows::Win32::Foundation::RECT;
+
+    use super::{executable_icon, is_shell_infrastructure, rectangle_covers};
 
     #[test]
     fn shell_executable_icon_has_visible_pixels() {
@@ -1964,5 +2126,46 @@ mod tests {
         assert!(is_shell_infrastructure("WorkerW"));
         assert!(!is_shell_infrastructure("winit"));
         assert!(!is_shell_infrastructure("CabinetWClass"));
+    }
+
+    #[test]
+    fn borderless_window_covering_monitor_is_fullscreen() {
+        let monitor = RECT {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+
+        assert!(rectangle_covers(monitor, monitor, 2));
+        assert!(rectangle_covers(
+            RECT {
+                left: -1,
+                top: -1,
+                right: 1921,
+                bottom: 1081,
+            },
+            monitor,
+            2,
+        ));
+    }
+
+    #[test]
+    fn maximized_window_respecting_panel_is_not_fullscreen() {
+        assert!(!rectangle_covers(
+            RECT {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1024,
+            },
+            RECT {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1080,
+            },
+            2,
+        ));
     }
 }
