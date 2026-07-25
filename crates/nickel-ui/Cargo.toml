@@ -32,6 +32,7 @@ zbus.workspace = true
 windows-core = "0.62.2"
 windows = { workspace = true, features = [
     "Foundation",
+    "Media_Control",
     "System",
     "Win32_Foundation",
     "Win32_Globalization",

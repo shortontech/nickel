@@ -50,6 +50,7 @@ mod platform;
 mod rectangles;
 mod run_dialog;
 mod storage;
+mod volume_osd;
 
 use launcher::Launcher;
 use model::{OpenWindow, TrayItem, WindowGroup, WindowId as ShellWindowId};
@@ -80,6 +81,10 @@ struct Nickel {
     control_center_window: Option<Arc<Window>>,
     control_center_gpu: Option<control_center::ControlCenterGpu>,
     control_center_visible: bool,
+    volume_osd_window: Option<Arc<Window>>,
+    volume_osd_gpu: Option<volume_osd::VolumeOsdGpu>,
+    volume_osd_deadline: Option<Instant>,
+    volume_osd_state: (u8, bool),
     context_menu_window: Option<Arc<Window>>,
     context_menu_gpu: Option<context_menu::ContextMenuGpu>,
     context_menu_hovered: Option<usize>,
@@ -161,6 +166,10 @@ impl Default for Nickel {
             control_center_window: None,
             control_center_gpu: None,
             control_center_visible: false,
+            volume_osd_window: None,
+            volume_osd_gpu: None,
+            volume_osd_deadline: None,
+            volume_osd_state: (0, false),
             context_menu_window: None,
             context_menu_gpu: None,
             context_menu_hovered: None,
@@ -251,6 +260,28 @@ impl Nickel {
 
     fn toggle_control_center(&mut self) {
         self.set_control_center_visible(!self.control_center_visible);
+    }
+
+    fn show_volume_osd(&mut self, volume_percent: u8, muted: bool) {
+        self.volume_osd_state = (volume_percent, muted);
+        if self.volume_osd_gpu.is_none() {
+            self.volume_osd_gpu = self
+                .volume_osd_window
+                .as_ref()
+                .zip(self.gpu.as_ref())
+                .and_then(|(window, gpu)| {
+                    volume_osd::VolumeOsdGpu::new(window.clone(), gpu.graphics.clone())
+                        .map_err(|error| {
+                            eprintln!("failed to initialize Nickel volume indicator: {error}");
+                        })
+                        .ok()
+                });
+        }
+        if let Some(window) = &self.volume_osd_window {
+            window.set_visible(true);
+            window.request_redraw();
+        }
+        self.volume_osd_deadline = Some(Instant::now() + Duration::from_millis(1_200));
     }
 
     fn show_run(&mut self) {
@@ -1179,6 +1210,13 @@ impl ApplicationHandler for Nickel {
             .with_visible(false)
             .with_resizable(false)
             .with_window_level(WindowLevel::AlwaysOnTop);
+        let mut volume_osd_attributes = WindowAttributes::default()
+            .with_title("Nickel Volume")
+            .with_inner_size(LogicalSize::new(volume_osd::WIDTH, volume_osd::HEIGHT))
+            .with_visible(false)
+            .with_decorations(false)
+            .with_resizable(false)
+            .with_window_level(WindowLevel::AlwaysOnTop);
         if let Some(monitor) = target.as_ref() {
             desktop_attributes = desktop_attributes
                 .with_inner_size(monitor.size())
@@ -1191,6 +1229,14 @@ impl ApplicationHandler for Nickel {
             ));
             let monitor_position = monitor.position();
             let monitor_size = monitor.size();
+            volume_osd_attributes = volume_osd_attributes.with_position(PhysicalPosition::new(
+                monitor_position.x
+                    + (monitor_size.width.saturating_sub(volume_osd::WIDTH) / 2) as i32,
+                monitor_position.y + monitor_size.height as i32
+                    - volume_osd::HEIGHT as i32
+                    - PANEL_HEIGHT as i32
+                    - 52,
+            ));
             control_center_attributes =
                 control_center_attributes.with_position(PhysicalPosition::new(
                     monitor_position.x + monitor_size.width as i32
@@ -1272,14 +1318,24 @@ impl ApplicationHandler for Nickel {
             return;
         };
         let control_center_window = Arc::new(control_center_window);
+        let Ok(volume_osd_window) = event_loop.create_window(volume_osd_attributes) else {
+            eprintln!("failed to create Nickel volume indicator window");
+            event_loop.exit();
+            return;
+        };
+        let volume_osd_window = Arc::new(volume_osd_window);
         #[cfg(target_os = "windows")]
         {
             use winit::platform::windows::WindowExtWindows;
             context_menu_window.set_skip_taskbar(true);
             run_window.set_skip_taskbar(true);
             control_center_window.set_skip_taskbar(true);
+            volume_osd_window.set_skip_taskbar(true);
             if !platform::configure_context_menu_window(&context_menu_window) {
                 eprintln!("failed to register Nickel's Windows preview window");
+            }
+            if !platform::configure_volume_osd_window(&volume_osd_window) {
+                eprintln!("failed to configure Nickel's Windows volume indicator");
             }
         }
         platform::send_shell_command(ShellCommand::HideContextMenu);
@@ -1334,6 +1390,7 @@ impl ApplicationHandler for Nickel {
         self.run_gpu = Some(run_gpu);
         self.control_center_window = Some(control_center_window);
         self.control_center_gpu = control_center_gpu;
+        self.volume_osd_window = Some(volume_osd_window);
     }
 
     fn window_event(
@@ -1342,6 +1399,24 @@ impl ApplicationHandler for Nickel {
         window_id: WindowId,
         event: WindowEvent,
     ) {
+        if self.volume_osd_window.as_ref().map(|window| window.id()) == Some(window_id) {
+            match event {
+                WindowEvent::RedrawRequested => {
+                    if let Some(gpu) = &mut self.volume_osd_gpu {
+                        gpu.render(self.volume_osd_state.0, self.volume_osd_state.1);
+                    }
+                }
+                WindowEvent::CloseRequested => {
+                    if let Some(window) = &self.volume_osd_window {
+                        window.set_visible(false);
+                    }
+                    self.volume_osd_deadline = None;
+                    self.volume_osd_gpu = None;
+                }
+                _ => {}
+            }
+            return;
+        }
         if self
             .control_center_window
             .as_ref()
@@ -2150,7 +2225,21 @@ impl ApplicationHandler for Nickel {
                 GlobalShortcut::SwitchGroupNext => self.advance_task_switcher(true, true),
                 GlobalShortcut::SwitchGroupPrevious => self.advance_task_switcher(false, true),
                 GlobalShortcut::CommitSwitch => self.commit_task_switcher(),
+                GlobalShortcut::AudioChanged {
+                    volume_percent,
+                    muted,
+                } => self.show_volume_osd(volume_percent, muted),
             }
+        }
+        if self
+            .volume_osd_deadline
+            .is_some_and(|deadline| now >= deadline)
+        {
+            if let Some(window) = &self.volume_osd_window {
+                window.set_visible(false);
+            }
+            self.volume_osd_deadline = None;
+            self.volume_osd_gpu = None;
         }
         if self
             .launcher_focus_loss_deadline
