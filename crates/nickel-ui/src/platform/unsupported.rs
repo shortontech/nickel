@@ -25,6 +25,12 @@ pub fn set_audio_volume(_volume_percent: u8) -> bool {
     false
 }
 
+pub fn capture_pointer(_window: &winit::window::Window) -> bool {
+    false
+}
+
+pub fn release_pointer() {}
+
 pub fn select_audio_device(_id: &str) -> bool {
     false
 }

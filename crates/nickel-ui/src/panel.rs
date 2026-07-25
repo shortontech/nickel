@@ -52,6 +52,7 @@ impl PanelGpu {
         let mut config = surface
             .get_default_config(&graphics.adapter, size.width.max(1), size.height.max(1))
             .ok_or_else(|| "panel surface has no supported configuration".to_owned())?;
+        config.desired_maximum_frame_latency = 1;
         let capabilities = surface.get_capabilities(&graphics.adapter);
         if capabilities
             .alpha_modes

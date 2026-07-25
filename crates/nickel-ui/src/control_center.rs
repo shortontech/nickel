@@ -6,7 +6,7 @@ use nickel_components::{
 };
 use winit::window::Window;
 
-use crate::platform;
+use crate::{graphics::SharedGraphics, platform};
 
 pub const WIDTH: u32 = 380;
 pub const HEIGHT: u32 = 470;
@@ -27,18 +27,28 @@ pub struct ControlCenterGpu {
     ui: UiTree,
     cursor: Point,
     audio_dropdown_open: bool,
+    volume_dragging: bool,
 }
 
 impl ControlCenterGpu {
-    pub fn new(window: Arc<Window>) -> Result<Self, String> {
+    pub fn new(window: Arc<Window>, graphics: Arc<SharedGraphics>) -> Result<Self, String> {
+        let surface = graphics.create_surface(window)?;
         Ok(Self {
-            gpu: ComponentGpu::new(window, WIDTH, HEIGHT)?,
+            gpu: ComponentGpu::with_shared_graphics(
+                surface,
+                &graphics.adapter,
+                &graphics.device,
+                &graphics.queue,
+                WIDTH,
+                HEIGHT,
+            )?,
             size: (WIDTH, HEIGHT),
             network: platform::network_status(),
             audio: platform::audio_status(),
             ui: UiTree::default(),
             cursor: Point { x: 0.0, y: 0.0 },
             audio_dropdown_open: false,
+            volume_dragging: false,
         })
     }
 
@@ -67,6 +77,11 @@ impl ControlCenterGpu {
 
     pub fn cursor_moved(&mut self, x: f32, y: f32) {
         self.cursor = Point { x, y };
+        if self.volume_dragging
+            && let Some(fraction) = self.ui.horizontal_fraction_for_action("audio-volume", x)
+        {
+            self.set_volume_fraction(fraction);
+        }
     }
 
     pub fn pointer_pressed(&mut self) -> bool {
@@ -79,10 +94,8 @@ impl ControlCenterGpu {
             return true;
         };
         if action == "audio-volume" {
-            let volume = (fraction * 100.0).round() as u8;
-            if platform::set_audio_volume(volume) {
-                self.audio.volume_percent = volume;
-            }
+            self.volume_dragging = true;
+            self.set_volume_fraction(fraction);
             return true;
         }
         if action == "audio-device" {
@@ -102,6 +115,21 @@ impl ControlCenterGpu {
             return true;
         }
         false
+    }
+
+    pub fn pointer_released(&mut self) -> bool {
+        std::mem::take(&mut self.volume_dragging)
+    }
+
+    pub fn is_volume_dragging(&self) -> bool {
+        self.volume_dragging
+    }
+
+    fn set_volume_fraction(&mut self, fraction: f32) {
+        let volume = (fraction.clamp(0.0, 1.0) * 100.0).round() as u8;
+        if volume != self.audio.volume_percent && platform::set_audio_volume(volume) {
+            self.audio.volume_percent = volume;
+        }
     }
 }
 

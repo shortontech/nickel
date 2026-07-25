@@ -34,9 +34,10 @@ pub struct ContextMenuGpu {
 impl ContextMenuGpu {
     pub fn new(window: Arc<Window>, graphics: Arc<SharedGraphics>) -> Result<Self, String> {
         let surface = graphics.create_surface(window)?;
-        let config = surface
+        let mut config = surface
             .get_default_config(&graphics.adapter, WIDTH, HEIGHT)
             .ok_or_else(|| "context menu surface has no supported configuration".to_owned())?;
+        config.desired_maximum_frame_latency = 1;
         surface.configure(&graphics.device, &config);
         let mut font_system = FontSystem::new();
         let cache = Cache::new(&graphics.device);
