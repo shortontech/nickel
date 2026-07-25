@@ -1345,6 +1345,27 @@ impl ApplicationHandler for Nickel {
                         gpu.render();
                     }
                 }
+                WindowEvent::CursorMoved { position, .. } => {
+                    if let Some(gpu) = &mut self.control_center_gpu {
+                        gpu.cursor_moved(position.x as f32, position.y as f32);
+                    }
+                }
+                WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    button: MouseButton::Left,
+                    ..
+                } => {
+                    if self
+                        .control_center_gpu
+                        .as_mut()
+                        .is_some_and(control_center::ControlCenterGpu::pointer_pressed)
+                    {
+                        self.control_center_window
+                            .as_ref()
+                            .expect("control center window exists")
+                            .request_redraw();
+                    }
+                }
                 _ => {}
             }
             return;

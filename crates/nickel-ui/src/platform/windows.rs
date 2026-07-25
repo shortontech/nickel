@@ -277,6 +277,173 @@ pub fn network_status() -> super::NetworkStatus {
     status
 }
 
+pub fn audio_status() -> super::AudioStatus {
+    use windows::Win32::{
+        Devices::FunctionDiscovery::PKEY_Device_FriendlyName,
+        Media::Audio::{
+            DEVICE_STATE_ACTIVE, Endpoints::IAudioEndpointVolume, IMMDevice, IMMDeviceEnumerator,
+            MMDeviceEnumerator, eMultimedia, eRender,
+        },
+        System::Com::{CLSCTX_ALL, STGM_READ, StructuredStorage::PropVariantToString},
+    };
+
+    unsafe {
+        let initialized = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
+        let result = (|| -> windows::core::Result<super::AudioStatus> {
+            let enumerator: IMMDeviceEnumerator =
+                CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+            let default_device = enumerator.GetDefaultAudioEndpoint(eRender, eMultimedia)?;
+            let default_id = take_com_string(default_device.GetId()?);
+            let endpoint: IAudioEndpointVolume = default_device.Activate(CLSCTX_ALL, None)?;
+            let volume_percent = (endpoint.GetMasterVolumeLevelScalar()? * 100.0)
+                .round()
+                .clamp(0.0, 100.0) as u8;
+            let muted = endpoint.GetMute()?.as_bool();
+            let collection = enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE)?;
+            let mut devices = Vec::new();
+            for index in 0..collection.GetCount()? {
+                let device: IMMDevice = collection.Item(index)?;
+                let id = take_com_string(device.GetId()?);
+                let store = device.OpenPropertyStore(STGM_READ)?;
+                let value = store.GetValue(&PKEY_Device_FriendlyName)?;
+                let mut name_buffer = [0_u16; 512];
+                let name = if PropVariantToString(&raw const value, &mut name_buffer).is_ok() {
+                    String::from_utf16_lossy(
+                        &name_buffer[..name_buffer
+                            .iter()
+                            .position(|unit| *unit == 0)
+                            .unwrap_or(name_buffer.len())],
+                    )
+                } else {
+                    id.clone()
+                };
+                devices.push(super::AudioDeviceStatus {
+                    is_default: id == default_id,
+                    id,
+                    name,
+                });
+            }
+            devices.sort_by(|left, right| {
+                right
+                    .is_default
+                    .cmp(&left.is_default)
+                    .then_with(|| left.name.cmp(&right.name))
+            });
+            Ok(super::AudioStatus {
+                available: true,
+                devices,
+                volume_percent,
+                muted,
+            })
+        })();
+        if initialized {
+            CoUninitialize();
+        }
+        result.unwrap_or_default()
+    }
+}
+
+pub fn set_audio_volume(volume_percent: u8) -> bool {
+    use windows::Win32::{
+        Media::Audio::{
+            Endpoints::IAudioEndpointVolume, IMMDeviceEnumerator, MMDeviceEnumerator, eMultimedia,
+            eRender,
+        },
+        System::Com::CLSCTX_ALL,
+    };
+
+    unsafe {
+        let initialized = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
+        let result = (|| -> windows::core::Result<()> {
+            let enumerator: IMMDeviceEnumerator =
+                CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+            let device = enumerator.GetDefaultAudioEndpoint(eRender, eMultimedia)?;
+            let endpoint: IAudioEndpointVolume = device.Activate(CLSCTX_ALL, None)?;
+            endpoint.SetMasterVolumeLevelScalar(
+                f32::from(volume_percent.min(100)) / 100.0,
+                std::ptr::null(),
+            )
+        })();
+        if initialized {
+            CoUninitialize();
+        }
+        result.is_ok()
+    }
+}
+
+pub fn select_audio_device(id: &str) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows::Win32::{
+        Media::Audio::{eCommunications, eConsole, eMultimedia},
+        System::Com::CLSCTX_ALL,
+    };
+
+    let wide: Vec<_> = std::ffi::OsStr::new(id)
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    unsafe {
+        let initialized = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
+        let result = (|| -> windows::core::Result<()> {
+            let policy: IPolicyConfig = CoCreateInstance(&POLICY_CONFIG_CLIENT, None, CLSCTX_ALL)?;
+            for role in [eConsole, eMultimedia, eCommunications] {
+                (windows::core::Interface::vtable(&policy).SetDefaultEndpoint)(
+                    windows::core::Interface::as_raw(&policy),
+                    windows::core::PCWSTR(wide.as_ptr()),
+                    role,
+                )
+                .ok()?;
+            }
+            Ok(())
+        })();
+        if initialized {
+            CoUninitialize();
+        }
+        result.is_ok()
+    }
+}
+
+unsafe fn take_com_string(value: windows::core::PWSTR) -> String {
+    let text = unsafe { value.to_string() }.unwrap_or_default();
+    unsafe {
+        CoTaskMemFree(Some(value.as_ptr().cast()));
+    }
+    text
+}
+
+const POLICY_CONFIG_CLIENT: windows::core::GUID =
+    windows::core::GUID::from_u128(0x870af99c_171d_4f9e_af0d_e63df40c2bc9);
+
+windows::core::imp::define_interface!(
+    IPolicyConfig,
+    IPolicyConfig_Vtbl,
+    0x568b9108_44bf_40b4_9006_86afe5b5a620
+);
+windows::core::imp::interface_hierarchy!(IPolicyConfig, windows::core::IUnknown);
+
+#[repr(C)]
+#[allow(non_snake_case)]
+pub struct IPolicyConfig_Vtbl {
+    base__: windows::core::IUnknown_Vtbl,
+    GetMixFormat: usize,
+    GetDeviceFormat: usize,
+    ResetDeviceFormat: usize,
+    SetDeviceFormat: usize,
+    GetProcessingPeriod: usize,
+    SetProcessingPeriod: usize,
+    GetShareMode: usize,
+    SetShareMode: usize,
+    GetPropertyValue: usize,
+    SetPropertyValue: usize,
+    SetDefaultEndpoint: unsafe extern "system" fn(
+        *mut c_void,
+        windows::core::PCWSTR,
+        windows::Win32::Media::Audio::ERole,
+    ) -> windows::core::HRESULT,
+    SetEndpointVisibility: usize,
+}
+
 pub fn launcher_hotkey_receiver() -> Receiver<GlobalShortcut> {
     let (sender, receiver) = mpsc::channel();
     thread::Builder::new()

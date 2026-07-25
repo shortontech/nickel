@@ -17,6 +17,18 @@ pub fn network_status() -> super::NetworkStatus {
     super::NetworkStatus::default()
 }
 
+pub fn audio_status() -> super::AudioStatus {
+    super::AudioStatus::default()
+}
+
+pub fn set_audio_volume(_volume_percent: u8) -> bool {
+    false
+}
+
+pub fn select_audio_device(_id: &str) -> bool {
+    false
+}
+
 pub fn update_panel_fullscreen_state() {}
 
 pub fn applications() -> Vec<Application> {
