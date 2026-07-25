@@ -17,9 +17,8 @@ struct Vertex {
 }
 
 pub struct ComponentGpu {
-    _instance: wgpu::Instance,
+    _instance: Option<wgpu::Instance>,
     surface: wgpu::Surface<'static>,
-    adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
@@ -56,14 +55,47 @@ impl ComponentGpu {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("Nickel component device"),
+                memory_hints: wgpu::MemoryHints::MemoryUsage,
                 ..Default::default()
             })
             .await
             .map_err(|error| format!("failed to create component device: {error}"))?;
-        let config = surface
+        Self::from_graphics(
+            Some(instance),
+            surface,
+            &adapter,
+            &device,
+            &queue,
+            width,
+            height,
+        )
+    }
+
+    pub fn with_shared_graphics(
+        surface: wgpu::Surface<'static>,
+        adapter: &wgpu::Adapter,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, String> {
+        Self::from_graphics(None, surface, adapter, device, queue, width, height)
+    }
+
+    fn from_graphics(
+        instance: Option<wgpu::Instance>,
+        surface: wgpu::Surface<'static>,
+        adapter: &wgpu::Adapter,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, String> {
+        let mut config = surface
             .get_default_config(&adapter, width.max(1), height.max(1))
             .ok_or_else(|| "component surface has no supported configuration".to_owned())?;
-        surface.configure(&device, &config);
+        config.desired_maximum_frame_latency = 1;
+        surface.configure(device, &config);
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Nickel component rectangle shader"),
@@ -134,9 +166,8 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         Ok(Self {
             _instance: instance,
             surface,
-            adapter,
-            device,
-            queue,
+            device: device.clone(),
+            queue: queue.clone(),
             config,
             rectangle_pipeline,
             rectangle_vertices,
@@ -323,10 +354,6 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         }
         self.rectangle_capacity = required.next_power_of_two();
         self.rectangle_vertices = rectangle_buffer(&self.device, self.rectangle_capacity);
-    }
-
-    pub fn adapter(&self) -> &wgpu::Adapter {
-        &self.adapter
     }
 }
 

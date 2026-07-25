@@ -39,7 +39,8 @@ use windows::{
         },
         UI::{
             Input::KeyboardAndMouse::{
-                GetAsyncKeyState, MOD_NOREPEAT, MOD_WIN, RegisterHotKey, SetFocus,
+                GetAsyncKeyState, GetCapture, MOD_NOREPEAT, MOD_WIN, RegisterHotKey,
+                ReleaseCapture, SetCapture, SetFocus,
             },
             Shell::{
                 ABE_BOTTOM, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, APPBARDATA,
@@ -369,6 +370,22 @@ pub fn set_audio_volume(volume_percent: u8) -> bool {
         }
         result.is_ok()
     }
+}
+
+pub fn capture_pointer(window: &winit::window::Window) -> bool {
+    let Some(hwnd) = window_hwnd(window) else {
+        return false;
+    };
+    // SAFETY: `hwnd` belongs to the live winit window supplied by the caller.
+    unsafe {
+        let _ = SetCapture(hwnd);
+        GetCapture() == hwnd
+    }
+}
+
+pub fn release_pointer() {
+    // SAFETY: releasing capture is valid even if this thread owns no capture.
+    let _ = unsafe { ReleaseCapture() };
 }
 
 pub fn select_audio_device(id: &str) -> bool {

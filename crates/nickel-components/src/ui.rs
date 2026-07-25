@@ -747,6 +747,14 @@ impl UiTree {
                 (hit.action.as_str(), fraction)
             })
     }
+
+    pub fn horizontal_fraction_for_action(&self, action: &str, x: f32) -> Option<f32> {
+        self.hits
+            .iter()
+            .rev()
+            .find(|hit| hit.action == action)
+            .map(|hit| ((x - hit.rect.origin.x) / hit.rect.size.width.max(1.0)).clamp(0.0, 1.0))
+    }
 }
 
 fn layout_element(
@@ -1068,6 +1076,10 @@ mod tests {
             .expect("slider hit");
         assert_eq!(action, "volume");
         assert!((fraction - 0.75).abs() < 0.001);
+        assert_eq!(
+            tree.horizontal_fraction_for_action("volume", 250.0),
+            Some(1.0)
+        );
     }
 
     #[test]

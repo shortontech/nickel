@@ -205,6 +205,30 @@ impl Default for Nickel {
 
 impl Nickel {
     fn set_control_center_visible(&mut self, visible: bool) {
+        if visible && self.control_center_gpu.is_none() {
+            let renderer = self
+                .control_center_window
+                .as_ref()
+                .zip(self.gpu.as_ref())
+                .and_then(|(window, gpu)| {
+                    control_center::ControlCenterGpu::new(window.clone(), gpu.graphics.clone())
+                        .map_err(|error| {
+                            eprintln!(
+                                "failed to initialize Nickel Control Center renderer: {error}"
+                            );
+                        })
+                        .ok()
+                });
+            self.control_center_gpu = renderer;
+        }
+        if !visible
+            && self
+                .control_center_gpu
+                .as_mut()
+                .is_some_and(control_center::ControlCenterGpu::pointer_released)
+        {
+            platform::release_pointer();
+        }
         self.control_center_visible = visible;
         if visible {
             self.set_launcher_visible(false);
@@ -219,6 +243,9 @@ impl Nickel {
                 window.focus_window();
                 window.request_redraw();
             }
+        }
+        if !visible {
+            self.control_center_gpu = None;
         }
     }
 
@@ -791,9 +818,10 @@ impl Gpu {
     async fn new(window: Arc<Window>) -> Result<Self, String> {
         let (graphics, surface) = graphics::SharedGraphics::new(window.clone()).await?;
         let size = window.inner_size();
-        let config = surface
+        let mut config = surface
             .get_default_config(&graphics.adapter, size.width.max(1), size.height.max(1))
             .ok_or_else(|| "graphics surface has no supported configuration".to_owned())?;
+        config.desired_maximum_frame_latency = 1;
         surface.configure(&graphics.device, &config);
 
         let mut font_system = FontSystem::new();
@@ -1288,14 +1316,7 @@ impl ApplicationHandler for Nickel {
             event_loop.exit();
             return;
         };
-        let control_center_gpu =
-            match control_center::ControlCenterGpu::new(control_center_window.clone()) {
-                Ok(gpu) => Some(gpu),
-                Err(error) => {
-                    eprintln!("failed to initialize Nickel Control Center renderer: {error}");
-                    None
-                }
-            };
+        let control_center_gpu = None;
         launcher_window.set_title("Nickel Launcher");
         if let Some(window) = &desktop_window {
             window.request_redraw();
@@ -1348,6 +1369,12 @@ impl ApplicationHandler for Nickel {
                 WindowEvent::CursorMoved { position, .. } => {
                     if let Some(gpu) = &mut self.control_center_gpu {
                         gpu.cursor_moved(position.x as f32, position.y as f32);
+                        if gpu.is_volume_dragging() {
+                            self.control_center_window
+                                .as_ref()
+                                .expect("control center window exists")
+                                .request_redraw();
+                        }
                     }
                 }
                 WindowEvent::MouseInput {
@@ -1360,10 +1387,31 @@ impl ApplicationHandler for Nickel {
                         .as_mut()
                         .is_some_and(control_center::ControlCenterGpu::pointer_pressed)
                     {
-                        self.control_center_window
+                        let window = self
+                            .control_center_window
                             .as_ref()
-                            .expect("control center window exists")
-                            .request_redraw();
+                            .expect("control center window exists");
+                        if self
+                            .control_center_gpu
+                            .as_ref()
+                            .is_some_and(control_center::ControlCenterGpu::is_volume_dragging)
+                        {
+                            platform::capture_pointer(window);
+                        }
+                        window.request_redraw();
+                    }
+                }
+                WindowEvent::MouseInput {
+                    state: ElementState::Released,
+                    button: MouseButton::Left,
+                    ..
+                } => {
+                    if self
+                        .control_center_gpu
+                        .as_mut()
+                        .is_some_and(control_center::ControlCenterGpu::pointer_released)
+                    {
+                        platform::release_pointer();
                     }
                 }
                 _ => {}
