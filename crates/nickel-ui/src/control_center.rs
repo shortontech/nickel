@@ -1,27 +1,32 @@
 use std::sync::Arc;
 
 use nickel_components::{
-    Column, ComponentGpu, Container, Header, Insets, LinearGradient, Rect, Row, Text, UiTree,
+    Column, ComponentGpu, Container, Dropdown, Header, Insets, LinearGradient, Point, Rect, Row,
+    Slider, Text, UiTree,
 };
 use winit::window::Window;
 
 use crate::platform;
 
 pub const WIDTH: u32 = 380;
-pub const HEIGHT: u32 = 344;
+pub const HEIGHT: u32 = 470;
 
-const BACKGROUND_TOP: u32 = 0x202b43ff;
-const BACKGROUND_BOTTOM: u32 = 0x111827ff;
-const CARD: u32 = 0x2b3852ff;
-const CARD_BORDER: u32 = 0x42516cff;
-const PRIMARY: u32 = 0xf4f7ffff;
-const SECONDARY: u32 = 0xaebbd1ff;
-const ACCENT: u32 = 0x65b8ffff;
+const BACKGROUND_TOP: u32 = 0x202b43;
+const BACKGROUND_BOTTOM: u32 = 0x111827;
+const CARD: u32 = 0x2b3852;
+const CARD_BORDER: u32 = 0x42516c;
+const PRIMARY: u32 = 0xf4f7ff;
+const SECONDARY: u32 = 0xaebbd1;
+const ACCENT: u32 = 0x65b8ff;
 
 pub struct ControlCenterGpu {
     gpu: ComponentGpu,
     size: (u32, u32),
     network: platform::NetworkStatus,
+    audio: platform::AudioStatus,
+    ui: UiTree,
+    cursor: Point,
+    audio_dropdown_open: bool,
 }
 
 impl ControlCenterGpu {
@@ -30,11 +35,16 @@ impl ControlCenterGpu {
             gpu: ComponentGpu::new(window, WIDTH, HEIGHT)?,
             size: (WIDTH, HEIGHT),
             network: platform::network_status(),
+            audio: platform::audio_status(),
+            ui: UiTree::default(),
+            cursor: Point { x: 0.0, y: 0.0 },
+            audio_dropdown_open: false,
         })
     }
 
     pub fn refresh(&mut self) {
         self.network = platform::network_status();
+        self.audio = platform::audio_status();
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -43,14 +53,65 @@ impl ControlCenterGpu {
     }
 
     pub fn render(&mut self) {
-        let ui = build_ui(&self.network, self.size.0 as f32, self.size.1 as f32);
-        if let Err(error) = self.gpu.render(ui.commands()) {
+        self.ui = build_ui(
+            &self.network,
+            &self.audio,
+            self.audio_dropdown_open,
+            self.size.0 as f32,
+            self.size.1 as f32,
+        );
+        if let Err(error) = self.gpu.render(self.ui.commands()) {
             eprintln!("failed to render Control Center: {error}");
         }
     }
+
+    pub fn cursor_moved(&mut self, x: f32, y: f32) {
+        self.cursor = Point { x, y };
+    }
+
+    pub fn pointer_pressed(&mut self) -> bool {
+        let Some((action, fraction)) = self
+            .ui
+            .action_at_with_horizontal_fraction(self.cursor)
+            .map(|(action, fraction)| (action.to_owned(), fraction))
+        else {
+            self.audio_dropdown_open = false;
+            return true;
+        };
+        if action == "audio-volume" {
+            let volume = (fraction * 100.0).round() as u8;
+            if platform::set_audio_volume(volume) {
+                self.audio.volume_percent = volume;
+            }
+            return true;
+        }
+        if action == "audio-device" {
+            self.audio_dropdown_open = !self.audio_dropdown_open;
+            return true;
+        }
+        if let Some(index) = action
+            .strip_prefix("audio-device:option:")
+            .and_then(|index| index.parse::<usize>().ok())
+        {
+            if let Some(device) = self.audio.devices.get(index)
+                && platform::select_audio_device(&device.id)
+            {
+                self.audio = platform::audio_status();
+            }
+            self.audio_dropdown_open = false;
+            return true;
+        }
+        false
+    }
 }
 
-fn build_ui(network: &platform::NetworkStatus, width: f32, height: f32) -> UiTree {
+fn build_ui(
+    network: &platform::NetworkStatus,
+    audio: &platform::AudioStatus,
+    audio_dropdown_open: bool,
+    width: f32,
+    height: f32,
+) -> UiTree {
     let (network_name, network_detail) = if network.connected {
         (
             if network.name.is_empty() {
@@ -65,6 +126,17 @@ fn build_ui(network: &platform::NetworkStatus, width: f32, height: f32) -> UiTre
     } else {
         ("Wi-Fi".to_owned(), "UNAVAILABLE".to_owned())
     };
+    let selected_audio = audio
+        .devices
+        .iter()
+        .find(|device| device.is_default)
+        .map(|device| device.name.clone())
+        .unwrap_or_else(|| "No audio output".into());
+    let audio_devices: Vec<_> = audio
+        .devices
+        .iter()
+        .map(|device| device.name.clone())
+        .collect();
 
     let root = Column::new()
         .background(LinearGradient::vertical(BACKGROUND_TOP, BACKGROUND_BOTTOM))
@@ -85,28 +157,45 @@ fn build_ui(network: &platform::NetworkStatus, width: f32, height: f32) -> UiTre
                 ),
         )
         .child(
-            Row::new()
-                .gap(12.0)
-                .height(88.0)
-                .child(status_card("Audio", "COMING NEXT", 164.0))
-                .child(status_card("Bluetooth", "COMING NEXT", 164.0)),
-        )
-        .child(
             Container::new()
                 .background(CARD)
                 .border(CARD_BORDER, 1.0)
                 .padding(Insets::all(14.0))
-                .height(62.0)
+                .height(if audio_dropdown_open {
+                    116.0 + audio_devices.len() as f32 * 36.0
+                } else {
+                    116.0
+                })
                 .child(
                     Column::new()
-                        .gap(5.0)
-                        .child(Text::new("Notifications").scale(2.0).color(PRIMARY))
+                        .gap(8.0)
                         .child(
-                            Text::new("NO NEW NOTIFICATIONS")
-                                .scale(1.3)
-                                .color(SECONDARY),
+                            Row::new()
+                                .height(22.0)
+                                .child(Text::new("Audio").scale(2.0).color(PRIMARY))
+                                .child(
+                                    Text::new(format!("{}%", audio.volume_percent))
+                                        .scale(1.5)
+                                        .color(SECONDARY),
+                                ),
+                        )
+                        .child(
+                            Slider::new("audio-volume", f32::from(audio.volume_percent) / 100.0)
+                                .colors(0x354158, ACCENT, PRIMARY),
+                        )
+                        .child(
+                            Dropdown::new("audio-device", selected_audio, audio_devices)
+                                .expanded(audio_dropdown_open)
+                                .colors(0x27344c, 0x34445f, PRIMARY),
                         ),
                 ),
+        )
+        .child(
+            Row::new()
+                .gap(12.0)
+                .height(68.0)
+                .child(status_card("Bluetooth", "COMING NEXT", 164.0))
+                .child(status_card("Notifications", "NONE", 164.0)),
         );
     UiTree::layout(root, Rect::new(0.0, 0.0, width, height))
 }
@@ -138,6 +227,8 @@ mod tests {
                 name: "SukiAlan".into(),
                 signal_percent: 82,
             },
+            &platform::AudioStatus::default(),
+            false,
             WIDTH as f32,
             HEIGHT as f32,
         );

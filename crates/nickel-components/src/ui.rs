@@ -100,8 +100,27 @@ pub struct Style {
 #[derive(Clone, Debug, PartialEq)]
 enum Kind {
     Flex(Axis),
-    Grid { columns: usize },
-    Text { value: String, scale: f32 },
+    Grid {
+        columns: usize,
+    },
+    Text {
+        value: String,
+        scale: f32,
+    },
+    Slider {
+        value: f32,
+        track: Color,
+        fill: Color,
+        thumb: Color,
+    },
+    Dropdown {
+        selected: String,
+        options: Vec<String>,
+        expanded: bool,
+        background: Color,
+        option_background: Color,
+        foreground: Color,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -568,6 +587,124 @@ impl Component for ButtonLabel {
     }
 }
 
+pub struct Slider(Element);
+
+impl Slider {
+    pub fn new(action: impl Into<String>, value: f32) -> Self {
+        let mut element = Element {
+            kind: Kind::Slider {
+                value: value.clamp(0.0, 1.0),
+                track: 0x354158,
+                fill: 0x68b8ff,
+                thumb: 0xf4f7ff,
+            },
+            style: Style::default(),
+            action: Some(action.into()),
+            children: Vec::new(),
+        };
+        element.style.height = Some(24.0);
+        Self(element)
+    }
+
+    pub fn colors(mut self, track: Color, fill: Color, thumb: Color) -> Self {
+        if let Kind::Slider {
+            track: slider_track,
+            fill: slider_fill,
+            thumb: slider_thumb,
+            ..
+        } = &mut self.0.kind
+        {
+            *slider_track = track;
+            *slider_fill = fill;
+            *slider_thumb = thumb;
+        }
+        self
+    }
+
+    pub fn width(mut self, width: f32) -> Self {
+        self.0 = self.0.width(width);
+        self
+    }
+}
+
+impl Component for Slider {
+    fn into_element(self) -> Element {
+        self.0
+    }
+}
+
+pub struct Dropdown(Element);
+
+impl Dropdown {
+    pub fn new(
+        action: impl Into<String>,
+        selected: impl Into<String>,
+        options: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        let options: Vec<_> = options.into_iter().map(Into::into).collect();
+        let mut element = Element {
+            kind: Kind::Dropdown {
+                selected: selected.into(),
+                options,
+                expanded: false,
+                background: 0x27344c,
+                option_background: 0x34445f,
+                foreground: 0xf4f7ff,
+            },
+            style: Style::default(),
+            action: Some(action.into()),
+            children: Vec::new(),
+        };
+        element.style.height = Some(42.0);
+        Self(element)
+    }
+
+    pub fn expanded(mut self, expanded: bool) -> Self {
+        if let Kind::Dropdown {
+            expanded: is_expanded,
+            options,
+            ..
+        } = &mut self.0.kind
+        {
+            *is_expanded = expanded;
+            self.0.style.height = Some(
+                42.0 + if expanded {
+                    options.len() as f32 * 36.0
+                } else {
+                    0.0
+                },
+            );
+        }
+        self
+    }
+
+    pub fn colors(
+        mut self,
+        background: Color,
+        option_background: Color,
+        foreground: Color,
+    ) -> Self {
+        if let Kind::Dropdown {
+            background: dropdown_background,
+            option_background: dropdown_option_background,
+            foreground: dropdown_foreground,
+            ..
+        } = &mut self.0.kind
+        {
+            *dropdown_background = background;
+            *dropdown_option_background = option_background;
+            *dropdown_foreground = foreground;
+        }
+        self
+    }
+}
+
+impl Component for Dropdown {
+    fn into_element(self) -> Element {
+        self.0
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct HitRegion {
     rect: Rect,
@@ -597,6 +734,18 @@ impl UiTree {
             .rev()
             .find(|hit| contains(hit.rect, point))
             .map(|hit| hit.action.as_str())
+    }
+
+    pub fn action_at_with_horizontal_fraction(&self, point: Point) -> Option<(&str, f32)> {
+        self.hits
+            .iter()
+            .rev()
+            .find(|hit| contains(hit.rect, point))
+            .map(|hit| {
+                let fraction =
+                    ((point.x - hit.rect.origin.x) / hit.rect.size.width.max(1.0)).clamp(0.0, 1.0);
+                (hit.action.as_str(), fraction)
+            })
     }
 }
 
@@ -646,6 +795,111 @@ fn layout_element(
             color: foreground.unwrap_or(0x00ff_ffff),
             align: element.style.text_align,
         }),
+        Kind::Slider {
+            value,
+            track,
+            fill,
+            thumb,
+        } => {
+            let track_rect = Rect::new(
+                rect.origin.x,
+                rect.origin.y + rect.size.height / 2.0 - 3.0,
+                rect.size.width,
+                6.0,
+            );
+            let fill_width = track_rect.size.width * value.clamp(0.0, 1.0);
+            tree.commands.push(PaintCommand::Fill {
+                rect: track_rect,
+                color: *track,
+            });
+            tree.commands.push(PaintCommand::Fill {
+                rect: Rect::new(
+                    track_rect.origin.x,
+                    track_rect.origin.y,
+                    fill_width,
+                    track_rect.size.height,
+                ),
+                color: *fill,
+            });
+            tree.commands.push(PaintCommand::Fill {
+                rect: Rect::new(
+                    track_rect.origin.x + fill_width - 7.0,
+                    rect.origin.y + rect.size.height / 2.0 - 7.0,
+                    14.0,
+                    14.0,
+                ),
+                color: *thumb,
+            });
+        }
+        Kind::Dropdown {
+            selected,
+            options,
+            expanded,
+            background,
+            option_background,
+            foreground,
+        } => {
+            let header = Rect::new(rect.origin.x, rect.origin.y, rect.size.width, 42.0);
+            tree.commands.push(PaintCommand::Fill {
+                rect: header,
+                color: *background,
+            });
+            tree.commands.push(PaintCommand::Text {
+                bounds: header.inset(Insets {
+                    top: 10.0,
+                    right: 36.0,
+                    bottom: 8.0,
+                    left: 12.0,
+                }),
+                text: selected.clone(),
+                scale: 2.0,
+                color: *foreground,
+                align: TextAlign::Start,
+            });
+            tree.commands.push(PaintCommand::Text {
+                bounds: Rect::new(
+                    header.origin.x + header.size.width - 32.0,
+                    header.origin.y + 10.0,
+                    20.0,
+                    22.0,
+                ),
+                text: if *expanded { "▲" } else { "▼" }.into(),
+                scale: 1.0,
+                color: *foreground,
+                align: TextAlign::Center,
+            });
+            if *expanded {
+                let action = element.action.as_deref().unwrap_or("dropdown");
+                for (index, option) in options.iter().enumerate() {
+                    let option_rect = Rect::new(
+                        rect.origin.x,
+                        rect.origin.y + 42.0 + index as f32 * 36.0,
+                        rect.size.width,
+                        36.0,
+                    );
+                    tree.commands.push(PaintCommand::Fill {
+                        rect: option_rect,
+                        color: *option_background,
+                    });
+                    tree.commands.push(PaintCommand::Text {
+                        bounds: option_rect.inset(Insets {
+                            top: 7.0,
+                            right: 12.0,
+                            bottom: 7.0,
+                            left: 12.0,
+                        }),
+                        text: option.clone(),
+                        scale: 2.0,
+                        color: *foreground,
+                        align: TextAlign::Start,
+                    });
+                    tree.hits.push(HitRegion {
+                        rect: option_rect,
+                        action: format!("{action}:option:{index}"),
+                    });
+                }
+            }
+        }
         Kind::Flex(axis) => {
             let content = rect.inset(element.style.padding);
             let child_bounds = flex_bounds(content, *axis, element.style.gap, &element.children);
@@ -736,8 +990,18 @@ fn flex_bounds(content: Rect, axis: Axis, gap: f32, children: &[Element]) -> Vec
 fn child_main_size(child: &Element, axis: Axis) -> Option<f32> {
     match axis {
         Axis::Horizontal => child.style.width,
-        Axis::Vertical => child.style.height.or(match child.kind {
-            Kind::Text { scale, .. } => Some(text_line_height(scale)),
+        Axis::Vertical => child.style.height.or(match &child.kind {
+            Kind::Text { scale, .. } => Some(text_line_height(*scale)),
+            Kind::Slider { .. } => Some(24.0),
+            Kind::Dropdown {
+                options, expanded, ..
+            } => Some(
+                42.0 + if *expanded {
+                    options.len() as f32 * 36.0
+                } else {
+                    0.0
+                },
+            ),
             _ => None,
         }),
     }
@@ -791,5 +1055,30 @@ mod tests {
             Rect::new(0.0, 0.0, 200.0, 100.0),
         );
         assert_eq!(tree.hits.len(), 3);
+    }
+
+    #[test]
+    fn slider_reports_horizontal_fraction() {
+        let tree = UiTree::layout(
+            Slider::new("volume", 0.5).width(200.0),
+            Rect::new(0.0, 0.0, 200.0, 24.0),
+        );
+        let (action, fraction) = tree
+            .action_at_with_horizontal_fraction(Point { x: 150.0, y: 12.0 })
+            .expect("slider hit");
+        assert_eq!(action, "volume");
+        assert!((fraction - 0.75).abs() < 0.001);
+    }
+
+    #[test]
+    fn expanded_dropdown_exposes_option_actions() {
+        let tree = UiTree::layout(
+            Dropdown::new("audio", "Speakers", ["Speakers", "Headphones"]).expanded(true),
+            Rect::new(0.0, 0.0, 240.0, 114.0),
+        );
+        assert_eq!(
+            tree.action_at(Point { x: 20.0, y: 96.0 }),
+            Some("audio:option:1")
+        );
     }
 }

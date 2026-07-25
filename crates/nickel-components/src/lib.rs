@@ -9,6 +9,6 @@ pub use gpu::ComponentGpu;
 pub use layout::{Axis, Constraints, FlexItem, Insets, Point, Rect, Size, layout_flex};
 pub use text_editor::TextEditor;
 pub use ui::{
-    Background, Button, ButtonLabel, Color, Column, Component, Container, GradientAxis, Grid,
-    Header, LinearGradient, PaintCommand, Row, Text, TextAlign, TextField, UiTree,
+    Background, Button, ButtonLabel, Color, Column, Component, Container, Dropdown, GradientAxis,
+    Grid, Header, LinearGradient, PaintCommand, Row, Slider, Text, TextAlign, TextField, UiTree,
 };
