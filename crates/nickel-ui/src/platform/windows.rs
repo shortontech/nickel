@@ -15,8 +15,9 @@ use windows::{
         Foundation::{COLORREF, CloseHandle, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
         Graphics::Dwm::{
             DWM_THUMBNAIL_PROPERTIES, DWM_TNP_OPACITY, DWM_TNP_RECTDESTINATION,
-            DWM_TNP_SOURCECLIENTAREAONLY, DWM_TNP_VISIBLE, DwmRegisterThumbnail,
-            DwmUnregisterThumbnail, DwmUpdateThumbnailProperties,
+            DWM_TNP_SOURCECLIENTAREAONLY, DWM_TNP_VISIBLE, DWM_WINDOW_CORNER_PREFERENCE,
+            DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmRegisterThumbnail,
+            DwmSetWindowAttribute, DwmUnregisterThumbnail, DwmUpdateThumbnailProperties,
         },
         Graphics::Gdi::{
             BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection,
@@ -59,9 +60,9 @@ use windows::{
                 GetWindowThreadProcessId, HICON, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTLEFT,
                 HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_BOTTOM, HWND_BROADCAST, HWND_TOPMOST,
                 IsIconic, IsWindow, IsWindowVisible, IsZoomed, KBDLLHOOKSTRUCT, LWA_ALPHA, MSG,
-                MSLLHOOKSTRUCT, PostMessageW, RegisterClassW, RegisterWindowMessageW,
-                SPI_GETWORKAREA, SPI_SETWORKAREA, SPIF_SENDCHANGE, SW_HIDE, SW_MAXIMIZE,
-                SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, SW_SHOWNORMAL,
+                MSLLHOOKSTRUCT, PostMessageW, RegisterClassW, RegisterShellHookWindow,
+                RegisterWindowMessageW, SPI_GETWORKAREA, SPI_SETWORKAREA, SPIF_SENDCHANGE, SW_HIDE,
+                SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, SW_SHOWNORMAL,
                 SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
                 SWP_NOZORDER, SendNotifyMessageW, SetForegroundWindow, SetLayeredWindowAttributes,
                 SetWindowLongPtrW, SetWindowPos, SetWindowsHookExW, ShowWindow,
@@ -546,6 +547,7 @@ static ORIGINAL_WORK_AREA: std::sync::Mutex<Option<RECT>> = std::sync::Mutex::ne
 static TRAY_ITEMS: Mutex<Vec<NativeTrayIcon>> = Mutex::new(Vec::new());
 static PANEL_WINDOW_PROC: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 static PANEL_WINDOW_HANDLE: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+static SHELL_HOOK_MESSAGE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 static TRAY_NOTIFY_WINDOW_HANDLE: std::sync::atomic::AtomicIsize =
     std::sync::atomic::AtomicIsize::new(0);
 static PREVIOUS_FOREGROUND_WINDOW: std::sync::atomic::AtomicIsize =
@@ -1127,6 +1129,40 @@ pub fn configure_context_menu_window(window: &winit::window::Window) -> bool {
     true
 }
 
+pub fn configure_volume_osd_window(window: &winit::window::Window) -> bool {
+    let Some(hwnd) = window_hwnd(window) else {
+        return false;
+    };
+    // SAFETY: style and DWM attributes apply only to Nickel's live indicator window.
+    unsafe {
+        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+        SetWindowLongPtrW(
+            hwnd,
+            GWL_EXSTYLE,
+            (style | WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0) as isize,
+        );
+        let preference: DWM_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND;
+        let rounded = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            (&raw const preference).cast(),
+            size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
+        )
+        .is_ok();
+        SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        )
+        .is_ok()
+            && rounded
+    }
+}
+
 pub fn launcher_has_foreground_focus() -> bool {
     use std::sync::atomic::Ordering;
 
@@ -1316,6 +1352,16 @@ fn install_tray_host(hwnd: HWND) {
     }
     PANEL_WINDOW_HANDLE.store(hwnd.0 as isize, Ordering::Relaxed);
     PANEL_WINDOW_PROC.store(previous, Ordering::Relaxed);
+    // SAFETY: hwnd is Nickel's live top-level panel window. Shell-hook notifications are delivered
+    // to its subclass procedure on the creating UI thread.
+    unsafe {
+        let shell_hook_message = RegisterWindowMessageW(w!("SHELLHOOK"));
+        if shell_hook_message != 0 && RegisterShellHookWindow(hwnd).as_bool() {
+            SHELL_HOOK_MESSAGE.store(shell_hook_message, Ordering::Relaxed);
+        } else {
+            tracing::warn!("failed to register Nickel for Windows shell-hook messages");
+        }
+    }
     install_tray_notify_window(hwnd);
     // Applications cache failed Shell_NotifyIcon registrations. Explorer announces taskbar
     // recreation with this registered message, prompting well-behaved clients to add them again.
@@ -1393,6 +1439,12 @@ unsafe extern "system" fn tray_window_proc(
         let _ = apply_panel_fullscreen_state(hwnd, fullscreen);
         return LRESULT(0);
     }
+    if message == SHELL_HOOK_MESSAGE.load(Ordering::Relaxed) && wparam.0 == 12 {
+        let command = ((lparam.0 as u32) >> 16) & 0x0fff;
+        if handle_shell_app_command(command) {
+            return LRESULT(0);
+        }
+    }
     if message == WM_COPYDATA {
         // SAFETY: WM_COPYDATA guarantees the COPYDATASTRUCT and its buffer remain valid for this
         // synchronous call. Bounds and protocol signature are validated before interpretation.
@@ -1418,6 +1470,111 @@ unsafe extern "system" fn tray_window_proc(
     }
     // SAFETY: Messages for the private TrayNotifyWnd child use the system default procedure.
     unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+}
+
+fn handle_shell_app_command(command: u32) -> bool {
+    const VOLUME_MUTE: u32 = 8;
+    const VOLUME_DOWN: u32 = 9;
+    const VOLUME_UP: u32 = 10;
+    const MEDIA_NEXT: u32 = 11;
+    const MEDIA_PREVIOUS: u32 = 12;
+    const MEDIA_STOP: u32 = 13;
+    const MEDIA_PLAY_PAUSE: u32 = 14;
+    const MEDIA_PLAY: u32 = 46;
+    const MEDIA_PAUSE: u32 = 47;
+    const MEDIA_FAST_FORWARD: u32 = 49;
+    const MEDIA_REWIND: u32 = 50;
+
+    match command {
+        VOLUME_MUTE | VOLUME_DOWN | VOLUME_UP => {
+            match apply_endpoint_app_command(command) {
+                Ok((volume_percent, muted)) => {
+                    if let Some(sender) = WINDOWS_KEY_SENDER.get() {
+                        let _ = sender.send(GlobalShortcut::AudioChanged {
+                            volume_percent,
+                            muted,
+                        });
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(command, %error, "failed to apply shell audio command");
+                }
+            }
+            true
+        }
+        MEDIA_NEXT | MEDIA_PREVIOUS | MEDIA_STOP | MEDIA_PLAY_PAUSE | MEDIA_PLAY | MEDIA_PAUSE
+        | MEDIA_FAST_FORWARD | MEDIA_REWIND => {
+            dispatch_media_app_command(command);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn apply_endpoint_app_command(command: u32) -> windows::core::Result<(u8, bool)> {
+    use windows::Win32::{
+        Media::Audio::{
+            Endpoints::IAudioEndpointVolume, IMMDeviceEnumerator, MMDeviceEnumerator, eMultimedia,
+            eRender,
+        },
+        System::Com::CLSCTX_ALL,
+    };
+
+    // SAFETY: COM initialization is balanced on this thread when this call initialized it.
+    unsafe {
+        let initialized = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
+        let result = (|| {
+            let enumerator: IMMDeviceEnumerator =
+                CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+            let device = enumerator.GetDefaultAudioEndpoint(eRender, eMultimedia)?;
+            let endpoint: IAudioEndpointVolume = device.Activate(CLSCTX_ALL, None)?;
+            match command {
+                8 => endpoint.SetMute(!endpoint.GetMute()?.as_bool(), std::ptr::null()),
+                9 => endpoint.VolumeStepDown(std::ptr::null()),
+                10 => endpoint.VolumeStepUp(std::ptr::null()),
+                _ => Ok(()),
+            }?;
+            Ok((
+                (endpoint.GetMasterVolumeLevelScalar()? * 100.0)
+                    .round()
+                    .clamp(0.0, 100.0) as u8,
+                endpoint.GetMute()?.as_bool(),
+            ))
+        })();
+        if initialized {
+            CoUninitialize();
+        }
+        result
+    }
+}
+
+fn dispatch_media_app_command(command: u32) {
+    thread::spawn(move || {
+        use std::future::IntoFuture;
+        use windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager;
+
+        let result = (|| -> windows::core::Result<bool> {
+            let manager = pollster::block_on(
+                GlobalSystemMediaTransportControlsSessionManager::RequestAsync()?.into_future(),
+            )?;
+            let session = manager.GetCurrentSession()?;
+            let operation = match command {
+                11 => session.TrySkipNextAsync()?,
+                12 => session.TrySkipPreviousAsync()?,
+                13 => session.TryStopAsync()?,
+                14 => session.TryTogglePlayPauseAsync()?,
+                46 => session.TryPlayAsync()?,
+                47 => session.TryPauseAsync()?,
+                49 => session.TryFastForwardAsync()?,
+                50 => session.TryRewindAsync()?,
+                _ => return Ok(false),
+            };
+            pollster::block_on(operation.into_future())
+        })();
+        if let Err(error) = result {
+            tracing::debug!(command, %error, "media command had no controllable Windows session");
+        }
+    });
 }
 
 fn update_tray_icon(message: u32, icon: &TrayNotifyIconData) -> bool {
@@ -1794,7 +1951,12 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
     unsafe {
         match action {
             WindowAction::Activate => {
-                let _ = ShowWindow(hwnd, SW_RESTORE);
+                if should_restore_on_activation(
+                    IsIconic(hwnd).as_bool(),
+                    window_covers_monitor(hwnd),
+                ) {
+                    let _ = ShowWindow(hwnd, SW_RESTORE);
+                }
                 let foreground = GetForegroundWindow();
                 let current_thread = GetCurrentThreadId();
                 let foreground_thread = GetWindowThreadProcessId(foreground, None);
@@ -1843,6 +2005,10 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
             }
         }
     }
+}
+
+fn should_restore_on_activation(iconic: bool, covers_monitor: bool) -> bool {
+    iconic && !covers_monitor
 }
 
 fn show_context_window(x: i32, width: i32, height: i32) -> bool {
@@ -2295,7 +2461,9 @@ fn hwnd(window: WindowId) -> HWND {
 mod tests {
     use windows::Win32::Foundation::RECT;
 
-    use super::{executable_icon, is_shell_infrastructure, rectangle_covers};
+    use super::{
+        executable_icon, is_shell_infrastructure, rectangle_covers, should_restore_on_activation,
+    };
 
     #[test]
     fn shell_executable_icon_has_visible_pixels() {
@@ -2351,5 +2519,13 @@ mod tests {
             },
             2,
         ));
+    }
+
+    #[test]
+    fn activation_restores_only_minimized_non_fullscreen_windows() {
+        assert!(should_restore_on_activation(true, false));
+        assert!(!should_restore_on_activation(false, false));
+        assert!(!should_restore_on_activation(false, true));
+        assert!(!should_restore_on_activation(true, true));
     }
 }

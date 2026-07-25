@@ -31,6 +31,10 @@ pub fn capture_pointer(_window: &winit::window::Window) -> bool {
 
 pub fn release_pointer() {}
 
+pub fn configure_volume_osd_window(_window: &winit::window::Window) -> bool {
+    true
+}
+
 pub fn select_audio_device(_id: &str) -> bool {
     false
 }

@@ -48,6 +48,7 @@ pub enum GlobalShortcut {
     SwitchGroupNext,
     SwitchGroupPrevious,
     CommitSwitch,
+    AudioChanged { volume_percent: u8, muted: bool },
 }
 
 #[derive(Clone)]
@@ -79,9 +80,10 @@ mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::{
     TrayFeed, WindowFeed, application_icon, applications, audio_status, capture_pointer,
-    execute_run_command, launcher_has_foreground_focus, launcher_hotkey_receiver,
-    launcher_visibility_applied, network_status, release_pointer, select_audio_device,
-    send_shell_command, set_audio_volume, update_panel_fullscreen_state, wallpaper,
+    configure_volume_osd_window, execute_run_command, launcher_has_foreground_focus,
+    launcher_hotkey_receiver, launcher_visibility_applied, network_status, release_pointer,
+    select_audio_device, send_shell_command, set_audio_volume, update_panel_fullscreen_state,
+    wallpaper,
 };
 
 #[cfg(target_os = "windows")]
@@ -90,10 +92,11 @@ mod windows;
 pub use windows::{
     TrayFeed, WindowFeed, application_icon, applications, audio_status, capture_pointer,
     configure_context_menu_window, configure_desktop_window, configure_launcher_window,
-    configure_panel_window, execute_run_command, launcher_has_foreground_focus,
-    launcher_hotkey_receiver, launcher_visibility_applied, network_status, paste_text_if_requested,
-    release_panel_window, release_pointer, select_audio_device, send_shell_command,
-    set_audio_volume, update_panel_fullscreen_state, wallpaper,
+    configure_panel_window, configure_volume_osd_window, execute_run_command,
+    launcher_has_foreground_focus, launcher_hotkey_receiver, launcher_visibility_applied,
+    network_status, paste_text_if_requested, release_panel_window, release_pointer,
+    select_audio_device, send_shell_command, set_audio_volume, update_panel_fullscreen_state,
+    wallpaper,
 };
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
@@ -101,7 +104,8 @@ mod unsupported;
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 pub use unsupported::{
     TrayFeed, WindowFeed, application_icon, applications, audio_status, capture_pointer,
-    execute_run_command, launcher_has_foreground_focus, launcher_hotkey_receiver,
-    launcher_visibility_applied, network_status, release_pointer, select_audio_device,
-    send_shell_command, set_audio_volume, update_panel_fullscreen_state, wallpaper,
+    configure_volume_osd_window, execute_run_command, launcher_has_foreground_focus,
+    launcher_hotkey_receiver, launcher_visibility_applied, network_status, release_pointer,
+    select_audio_device, send_shell_command, set_audio_volume, update_panel_fullscreen_state,
+    wallpaper,
 };
