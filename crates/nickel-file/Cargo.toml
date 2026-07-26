@@ -1,24 +1,22 @@
 [package]
-name = "nickel-settings"
+name = "nickel-file"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+image.workspace = true
 nickel-components = { path = "../nickel-components" }
-nickel-core = { path = "../nickel-core" }
 nickel-logging = { path = "../nickel-logging" }
+nickel-platform = { path = "../nickel-platform" }
 tracing.workspace = true
 winit.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { workspace = true, features = [
-    "Win32_Devices_Display",
     "Win32_Foundation",
-    "Win32_Graphics_Gdi",
-    "Win32_NetworkManagement_IpHelper",
-    "Win32_NetworkManagement_Ndis",
-    "Win32_NetworkManagement_WiFi",
-    "Win32_Networking_WinSock",
+    "Win32_System_Com",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
 ] }

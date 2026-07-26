@@ -10,8 +10,9 @@ use std::collections::HashMap;
 
 use nickel_components::{
     Button as UiButton, Column, ComponentGpu, Container, Insets, LinearGradient, PaintCommand,
-    Point as UiPoint, Rect as UiRect, Row, Text, TextAlign, UiTree,
+    Point as UiPoint, RadioButton, Rect as UiRect, Row, Slider, Text, TextAlign, UiTree,
 };
+use nickel_core::shell_settings::ShellSettings;
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalSize, PhysicalPosition},
@@ -212,6 +213,7 @@ struct DisplayCard {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SettingsPage {
     Display,
+    Bar,
     Network,
 }
 
@@ -240,6 +242,8 @@ struct SettingsApp {
     pixels_per_logical: f64,
     status: String,
     page: SettingsPage,
+    shell_settings: ShellSettings,
+    desktop_slider_dragging: bool,
     network_adapters: Vec<NetworkAdapter>,
     wifi_networks: Vec<WifiNetwork>,
     wifi_status: String,
@@ -291,6 +295,8 @@ impl Default for SettingsApp {
             pixels_per_logical: 0.14,
             status: "CHANGES NOT APPLIED".into(),
             page: SettingsPage::Display,
+            shell_settings: ShellSettings::load_default(),
+            desktop_slider_dragging: false,
             network_adapters: Vec::new(),
             wifi_networks: Vec::new(),
             wifi_status: String::new(),
@@ -375,6 +381,7 @@ impl SettingsApp {
                 "DISPLAY SETTINGS",
                 "DRAG DISPLAYS TO MATCH THEIR PHYSICAL POSITION",
             ),
+            SettingsPage::Bar => ("NICKEL BAR", "DISPLAYS, WINDOWS, AND DESKTOPS"),
             SettingsPage::Network => ("NETWORK SETTINGS", "WINDOWS NETWORK ADAPTERS"),
         };
         let header_content = Container::new()
@@ -410,6 +417,12 @@ impl SettingsApp {
                 .background(CARD_SELECTED)
                 .border(PRIMARY, 2.0);
         }
+        let mut bar_button = UiButton::new("nav:bar", "NICKEL BAR")
+            .width((SIDEBAR_WIDTH - 24) as f32)
+            .height(46.0);
+        if self.page == SettingsPage::Bar {
+            bar_button = bar_button.background(CARD_SELECTED).border(PRIMARY, 2.0);
+        }
         let mut network_button = UiButton::new("nav:network", "NETWORK")
             .width((SIDEBAR_WIDTH - 24) as f32)
             .height(46.0);
@@ -429,10 +442,12 @@ impl SettingsApp {
             })
             .gap(8.0)
             .child(display_button)
+            .child(bar_button)
             .child(network_button);
 
         let content = match self.page {
             SettingsPage::Display => self.display_components(),
+            SettingsPage::Bar => self.bar_components(),
             SettingsPage::Network => self.network_components(),
         };
         let root = Column::new()
@@ -579,19 +594,145 @@ impl SettingsApp {
             .child(Column::new().gap(12.0).children(adapter_cards))
     }
 
+    fn bar_components(&self) -> Column {
+        let display_count = self.displays.len().max(1);
+        let desktop_choices = (0..self.shell_settings.desktop_count).map(|index| {
+            Container::new()
+                .width(64.0)
+                .height(46.0)
+                .background(CARD)
+                .border(if index == 0 { PRIMARY } else { BORDER }, 2.0)
+                .padding(Insets {
+                    top: 9.0,
+                    right: 4.0,
+                    bottom: 4.0,
+                    left: 4.0,
+                })
+                .child(
+                    Text::new(format!("{}", index + 1))
+                        .align(TextAlign::Center)
+                        .scale(1.0)
+                        .color(if index == 0 { TEXT } else { MUTED }),
+                )
+        });
+        Column::new()
+            .grow(1.0)
+            .padding(Insets {
+                top: 24.0,
+                right: 40.0,
+                bottom: 20.0,
+                left: 20.0,
+            })
+            .gap(14.0)
+            .child(Text::new("SHOW NICKEL BAR ON").color(TEXT).height(20.0))
+            .child(
+                Row::new()
+                    .height(38.0)
+                    .gap(28.0)
+                    .child(
+                        RadioButton::new(
+                            "bar:displays:primary",
+                            "PRIMARY DISPLAY",
+                            !self.shell_settings.bar_on_all_displays,
+                        )
+                        .width(210.0),
+                    )
+                    .child(
+                        RadioButton::new(
+                            "bar:displays:all",
+                            format!("ALL DISPLAYS ({display_count})"),
+                            self.shell_settings.bar_on_all_displays,
+                        )
+                        .width(210.0),
+                    ),
+            )
+            .child(
+                Text::new("WINDOWS SHOWN ON EACH BAR")
+                    .color(TEXT)
+                    .height(20.0),
+            )
+            .child(
+                Row::new()
+                    .height(38.0)
+                    .gap(28.0)
+                    .child(
+                        RadioButton::new(
+                            "bar:windows:display",
+                            "THIS DISPLAY",
+                            !self.shell_settings.all_windows_on_every_bar,
+                        )
+                        .width(210.0),
+                    )
+                    .child(
+                        RadioButton::new(
+                            "bar:windows:all",
+                            "ALL WINDOWS",
+                            self.shell_settings.all_windows_on_every_bar,
+                        )
+                        .width(210.0),
+                    ),
+            )
+            .child(Text::new("DESKTOPS").color(TEXT).height(20.0))
+            .child(
+                Text::new(format!(
+                    "{} DESKTOP{}",
+                    self.shell_settings.desktop_count,
+                    if self.shell_settings.desktop_count == 1 {
+                        ""
+                    } else {
+                        "S"
+                    }
+                ))
+                .scale(1.0)
+                .color(MUTED)
+                .height(18.0),
+            )
+            .child(
+                Slider::new(
+                    "bar:desktop-count",
+                    f32::from(self.shell_settings.desktop_count.saturating_sub(1)) / 7.0,
+                )
+                .width(520.0),
+            )
+            .child(Row::new().height(46.0).gap(8.0).children(desktop_choices))
+    }
+
     fn pointer_pressed(&mut self) {
         let (x, y) = self.cursor;
-        let action = self
-            .ui
-            .action_at(UiPoint {
-                x: x as f32,
-                y: y as f32,
-            })
-            .map(str::to_owned);
+        let point = UiPoint {
+            x: x as f32,
+            y: y as f32,
+        };
+        if let Some(("bar:desktop-count", fraction)) =
+            self.ui.action_at_with_horizontal_fraction(point)
+        {
+            self.desktop_slider_dragging = true;
+            self.set_desktop_count_from_fraction(fraction);
+            self.request_redraw();
+            return;
+        }
+        let action = self.ui.action_at(point).map(str::to_owned);
         if let Some(action) = action {
             match action.as_str() {
                 "nav:display" => self.page = SettingsPage::Display,
+                "nav:bar" => self.page = SettingsPage::Bar,
                 "nav:network" => self.page = SettingsPage::Network,
+                "bar:displays:primary" => {
+                    self.shell_settings.bar_on_all_displays = false;
+                    let _ = self.shell_settings.save_default();
+                }
+                "bar:displays:all" => {
+                    self.shell_settings.bar_on_all_displays = true;
+                    let _ = self.shell_settings.save_default();
+                }
+                "bar:windows:display" => {
+                    self.shell_settings.all_windows_on_every_bar = false;
+                    let _ = self.shell_settings.save_default();
+                }
+                "bar:windows:all" => {
+                    self.shell_settings.all_windows_on_every_bar = true;
+                    let _ = self.shell_settings.save_default();
+                }
                 "display:identify" => match session_request("identify-outputs") {
                     Ok(response) if response == "ok" => self.status = "IDENTIFYING DISPLAYS".into(),
                     _ => self.status = "IDENTIFY FAILED".into(),
@@ -633,6 +774,16 @@ impl SettingsApp {
 
     fn pointer_moved(&mut self, position: PhysicalPosition<f64>) {
         self.cursor = (position.x.round() as i32, position.y.round() as i32);
+        if self.desktop_slider_dragging {
+            if let Some(fraction) = self
+                .ui
+                .horizontal_fraction_for_action("bar:desktop-count", position.x as f32)
+            {
+                self.set_desktop_count_from_fraction(fraction);
+                self.request_redraw();
+            }
+            return;
+        }
         if self.page != SettingsPage::Display {
             return;
         }
@@ -655,6 +806,7 @@ impl SettingsApp {
     }
 
     fn finish_drag(&mut self) {
+        self.desktop_slider_dragging = false;
         if self.page != SettingsPage::Display {
             return;
         }
@@ -676,6 +828,19 @@ impl SettingsApp {
             .unwrap_or(selected);
         self.displays[self.selected].rect = snapped;
         self.request_redraw();
+    }
+
+    fn set_desktop_count_from_fraction(&mut self, fraction: f32) {
+        let count = 1 + (fraction.clamp(0.0, 1.0) * 7.0).round() as u8;
+        if count == self.shell_settings.desktop_count {
+            return;
+        }
+        self.shell_settings.desktop_count = count;
+        self.shell_settings.active_desktop = self
+            .shell_settings
+            .active_desktop
+            .min(count.saturating_sub(1));
+        let _ = self.shell_settings.save_default();
     }
 
     fn load_outputs(&mut self) {
@@ -1090,11 +1255,30 @@ impl SettingsApp {
             .find(|display| display.primary)
             .map(|display| display.connector.as_str())
             .unwrap_or(self.displays[self.selected].connector.as_str());
-        let mut command = format!("apply-outputs\nprimary\t{primary}\n");
         let placements = logical_placements(&self.displays);
+
+        #[cfg(target_os = "windows")]
+        {
+            match apply_windows_layout(&self.displays, &placements, primary) {
+                Ok(()) => {
+                    self.applied = true;
+                    self.status = "LIVE LAYOUT APPLIED".into();
+                }
+                Err(error) => {
+                    self.applied = false;
+                    self.status = format!("APPLY FAILED ({error})");
+                }
+            }
+            return;
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        let mut command = format!("apply-outputs\nprimary\t{primary}\n");
+        #[cfg(not(target_os = "windows"))]
         for (display, (x, y)) in self.displays.iter().zip(placements) {
             command.push_str(&format!("{}\t{x}\t{y}\n", display.connector));
         }
+        #[cfg(not(target_os = "windows"))]
         match session_request(&command) {
             Ok(response) if response == "ok" => {
                 self.applied = true;
@@ -1718,6 +1902,68 @@ fn logical_placements(displays: &[DisplayCard]) -> Vec<(i32, i32)> {
         *y -= minimum_y;
     }
     placements
+}
+
+#[cfg(target_os = "windows")]
+fn apply_windows_layout(
+    displays: &[DisplayCard],
+    placements: &[(i32, i32)],
+    primary: &str,
+) -> Result<(), i32> {
+    use std::mem::size_of;
+    use windows::{
+        Win32::Graphics::Gdi::{
+            CDS_NORESET, CDS_SET_PRIMARY, CDS_TYPE, CDS_UPDATEREGISTRY, ChangeDisplaySettingsExW,
+            DEVMODEW, DISP_CHANGE_SUCCESSFUL, DM_POSITION, ENUM_CURRENT_SETTINGS,
+            EnumDisplaySettingsW,
+        },
+        core::PCWSTR,
+    };
+
+    let (primary_x, primary_y) = displays
+        .iter()
+        .zip(placements)
+        .find(|(display, _)| display.connector == primary)
+        .map(|(_, placement)| *placement)
+        .unwrap_or((0, 0));
+
+    for (display, &(x, y)) in displays.iter().zip(placements) {
+        let device_name = format!(r"\\.\{}", display.connector);
+        let device_wide: Vec<u16> = device_name.encode_utf16().chain([0]).collect();
+        let device = PCWSTR(device_wide.as_ptr());
+        let mut mode = DEVMODEW {
+            dmSize: size_of::<DEVMODEW>() as u16,
+            ..Default::default()
+        };
+        // SAFETY: `device` and `mode` remain valid for the duration of each Win32 call.
+        if !unsafe { EnumDisplaySettingsW(device, ENUM_CURRENT_SETTINGS, &raw mut mode) }.as_bool()
+        {
+            return Err(-1);
+        }
+        mode.dmFields |= DM_POSITION;
+        mode.Anonymous1.Anonymous2.dmPosition.x = x - primary_x;
+        mode.Anonymous1.Anonymous2.dmPosition.y = y - primary_y;
+        let mut flags = CDS_UPDATEREGISTRY | CDS_NORESET;
+        if display.connector == primary {
+            flags |= CDS_SET_PRIMARY;
+        }
+        // SAFETY: The device name and initialized DEVMODEW are valid for this synchronous call.
+        let result =
+            unsafe { ChangeDisplaySettingsExW(device, Some(&raw const mode), None, flags, None) };
+        if result != DISP_CHANGE_SUCCESSFUL {
+            return Err(result.0);
+        }
+    }
+
+    // Commit all staged changes together to avoid transient intermediate layouts.
+    // SAFETY: A null device and mode apply the previously staged changes.
+    let result =
+        unsafe { ChangeDisplaySettingsExW(PCWSTR::null(), None, None, CDS_TYPE::default(), None) };
+    if result == DISP_CHANGE_SUCCESSFUL {
+        Ok(())
+    } else {
+        Err(result.0)
+    }
 }
 
 fn constrain_center(mut monitor: Rect, plane: Rect) -> Rect {

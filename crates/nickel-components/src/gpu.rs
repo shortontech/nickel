@@ -1,9 +1,10 @@
-use std::{mem, sync::Arc};
+use std::{collections::HashMap, mem, sync::Arc};
 
 use bytemuck::{Pod, Zeroable};
 use glyphon::{
-    Attrs, Buffer, Cache, Color as TextColor, Family, FontSystem, Metrics, Resolution, Shaping,
-    SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, cosmic_text::Align,
+    Attrs, Buffer, Cache, Color as TextColor, ContentType, CustomGlyph, Family, FontSystem,
+    Metrics, RasterizeCustomGlyphRequest, RasterizedCustomGlyph, Resolution, Shaping, SwashCache,
+    TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, cosmic_text::Align,
 };
 use winit::window::Window;
 
@@ -31,6 +32,7 @@ pub struct ComponentGpu {
     atlas: TextAtlas,
     text_renderer: TextRenderer,
     text_buffers: Vec<Buffer>,
+    image_buffer: Buffer,
 }
 
 impl ComponentGpu {
@@ -157,12 +159,14 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         let rectangle_capacity = 256;
         let rectangle_vertices = rectangle_buffer(&device, rectangle_capacity);
 
-        let font_system = FontSystem::new();
+        let mut font_system = FontSystem::new();
         let cache = Cache::new(&device);
         let viewport = Viewport::new(&device, &cache);
         let mut atlas = TextAtlas::new(&device, &queue, &cache, config.format);
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
+        let mut image_buffer = Buffer::new(&mut font_system, Metrics::new(1.0, 1.0));
+        image_buffer.set_size(Some(width.max(1) as f32), Some(height.max(1) as f32));
         Ok(Self {
             _instance: instance,
             surface,
@@ -178,6 +182,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             atlas,
             text_renderer,
             text_buffers: Vec::new(),
+            image_buffer,
         })
     }
 
@@ -195,6 +200,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         self.text_buffers.clear();
         let mut text_bounds = Vec::new();
         let mut text_colors = Vec::new();
+        let mut image_commands = Vec::new();
         for command in commands {
             match command {
                 PaintCommand::Fill { rect, color } => {
@@ -258,6 +264,9 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
                     text_bounds.push(*bounds);
                     text_colors.push(text_color(*color));
                 }
+                PaintCommand::Image { bounds, id, image } => {
+                    image_commands.push((*bounds, *id, image.clone()));
+                }
             }
         }
         self.ensure_rectangle_capacity(vertices.len());
@@ -272,7 +281,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
                 height: self.config.height,
             },
         );
-        let areas = self
+        let mut areas = self
             .text_buffers
             .iter()
             .zip(text_bounds)
@@ -292,8 +301,43 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
                 custom_glyphs: &[],
             })
             .collect::<Vec<_>>();
+        let image_glyphs = image_commands
+            .iter()
+            .map(|(bounds, id, _)| {
+                vec![CustomGlyph {
+                    id: *id,
+                    left: 0.0,
+                    top: 0.0,
+                    width: bounds.size.width.round().max(1.0),
+                    height: bounds.size.height.round().max(1.0),
+                    color: None,
+                    snap_to_physical_pixel: true,
+                    metadata: 0,
+                }]
+            })
+            .collect::<Vec<_>>();
+        for ((bounds, _, _), glyphs) in image_commands.iter().zip(&image_glyphs) {
+            areas.push(TextArea {
+                buffer: &self.image_buffer,
+                left: bounds.origin.x,
+                top: bounds.origin.y,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: bounds.origin.x.floor() as i32,
+                    top: bounds.origin.y.floor() as i32,
+                    right: (bounds.origin.x + bounds.size.width).ceil() as i32,
+                    bottom: (bounds.origin.y + bounds.size.height).ceil() as i32,
+                },
+                default_color: TextColor::rgba(255, 255, 255, 255),
+                custom_glyphs: glyphs,
+            });
+        }
+        let images = image_commands
+            .iter()
+            .map(|(_, id, image)| (*id, image))
+            .collect::<HashMap<_, _>>();
         self.text_renderer
-            .prepare(
+            .prepare_with_custom(
                 &self.device,
                 &self.queue,
                 &mut self.font_system,
@@ -301,6 +345,14 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
                 &self.viewport,
                 areas,
                 &mut self.swash_cache,
+                &|request: RasterizeCustomGlyphRequest| {
+                    let source = images.get(&request.id)?;
+                    let image = resize_rgba(source, request.width.into(), request.height.into());
+                    Some(RasterizedCustomGlyph {
+                        data: image.into_raw(),
+                        content_type: ContentType::Color,
+                    })
+                },
             )
             .map_err(|error| format!("failed to prepare component text: {error}"))?;
 
@@ -355,6 +407,29 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         self.rectangle_capacity = required.next_power_of_two();
         self.rectangle_vertices = rectangle_buffer(&self.device, self.rectangle_capacity);
     }
+}
+
+fn resize_rgba(source: &image::RgbaImage, width: u32, height: u32) -> image::RgbaImage {
+    let width = width.max(1);
+    let height = height.max(1);
+    let scale = (width as f32 / source.width().max(1) as f32)
+        .min(height as f32 / source.height().max(1) as f32);
+    let fitted_width = (source.width() as f32 * scale).round().max(1.0) as u32;
+    let fitted_height = (source.height() as f32 * scale).round().max(1.0) as u32;
+    let fitted = image::imageops::resize(
+        source,
+        fitted_width,
+        fitted_height,
+        image::imageops::FilterType::Lanczos3,
+    );
+    let mut output = image::RgbaImage::new(width, height);
+    image::imageops::overlay(
+        &mut output,
+        &fitted,
+        i64::from((width - fitted_width) / 2),
+        i64::from((height - fitted_height) / 2),
+    );
+    output
 }
 
 fn rectangle_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {

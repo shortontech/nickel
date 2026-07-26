@@ -14,6 +14,7 @@ jiff.workspace = true
 nickel-components = { path = "../nickel-components" }
 nickel-core = { path = "../nickel-core" }
 nickel-logging = { path = "../nickel-logging" }
+nickel-platform = { path = "../nickel-platform" }
 nucleo-matcher.workspace = true
 pollster.workspace = true
 redb.workspace = true

@@ -1,3 +1,7 @@
+use std::sync::Arc;
+
+use image::RgbaImage;
+
 use crate::{Axis, Insets, Point, Rect, TextEditor};
 
 pub type Color = u32;
@@ -81,6 +85,11 @@ pub enum PaintCommand {
         color: Color,
         align: TextAlign,
     },
+    Image {
+        bounds: Rect,
+        id: u16,
+        image: Arc<RgbaImage>,
+    },
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -106,6 +115,10 @@ enum Kind {
     Text {
         value: String,
         scale: f32,
+    },
+    Image {
+        id: u16,
+        image: Arc<RgbaImage>,
     },
     Slider {
         value: f32,
@@ -325,6 +338,11 @@ impl Grid {
         self.0 = self.0.grow(grow);
         self
     }
+
+    pub fn height(mut self, height: f32) -> Self {
+        self.0 = self.0.height(height);
+        self
+    }
 }
 
 impl Default for Grid {
@@ -378,6 +396,35 @@ impl Text {
 }
 
 impl Component for Text {
+    fn into_element(self) -> Element {
+        self.0
+    }
+}
+
+pub struct Image(Element);
+
+impl Image {
+    pub fn new(id: u16, image: Arc<RgbaImage>) -> Self {
+        Self(Element {
+            kind: Kind::Image { id, image },
+            style: Style::default(),
+            action: None,
+            children: Vec::new(),
+        })
+    }
+
+    pub fn width(mut self, width: f32) -> Self {
+        self.0 = self.0.width(width);
+        self
+    }
+
+    pub fn height(mut self, height: f32) -> Self {
+        self.0 = self.0.height(height);
+        self
+    }
+}
+
+impl Component for Image {
     fn into_element(self) -> Element {
         self.0
     }
@@ -582,6 +629,38 @@ impl ButtonLabel {
 }
 
 impl Component for ButtonLabel {
+    fn into_element(self) -> Element {
+        self.0.into_element()
+    }
+}
+
+pub struct RadioButton(Container);
+
+impl RadioButton {
+    pub fn new(action: impl Into<String>, label: impl Into<String>, selected: bool) -> Self {
+        let indicator = if selected { "●" } else { "○" };
+        Self(
+            Container::new().height(34.0).action(action).child(
+                Row::new()
+                    .gap(10.0)
+                    .child(
+                        Text::new(indicator)
+                            .width(22.0)
+                            .scale(1.35)
+                            .color(if selected { 0x68b8ff } else { 0x8792a8 }),
+                    )
+                    .child(Text::new(label).scale(1.15).color(0xf4f7ff)),
+            ),
+        )
+    }
+
+    pub fn width(mut self, width: f32) -> Self {
+        self.0 = self.0.width(width);
+        self
+    }
+}
+
+impl Component for RadioButton {
     fn into_element(self) -> Element {
         self.0.into_element()
     }
@@ -802,6 +881,11 @@ fn layout_element(
             scale: *scale,
             color: foreground.unwrap_or(0x00ff_ffff),
             align: element.style.text_align,
+        }),
+        Kind::Image { id, image } => tree.commands.push(PaintCommand::Image {
+            bounds: rect,
+            id: *id,
+            image: image.clone(),
         }),
         Kind::Slider {
             value,
