@@ -1848,6 +1848,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "nickel-i18n-lint"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "nickel-logging"
 version = "0.1.0"
 dependencies = [
@@ -1906,6 +1914,7 @@ dependencies = [
  "jiff",
  "nickel-components",
  "nickel-core",
+ "nickel-i18n",
  "nickel-logging",
  "nickel-platform",
  "nucleo-matcher",
