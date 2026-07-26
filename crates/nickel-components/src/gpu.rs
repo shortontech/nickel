@@ -197,6 +197,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
     pub fn render(&mut self, commands: &[PaintCommand]) -> Result<(), String> {
         let mut vertices = Vec::new();
+        let mut overlay_vertices = Vec::new();
         self.text_buffers.clear();
         let mut text_bounds = Vec::new();
         let mut text_colors = Vec::new();
@@ -224,6 +225,23 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
                 PaintCommand::Stroke { rect, color, width } => {
                     add_stroke(
                         &mut vertices,
+                        (self.config.width, self.config.height),
+                        *rect,
+                        *width,
+                        color_rgba(*color),
+                    );
+                }
+                PaintCommand::OverlayFill { rect, color } => {
+                    add_rectangle(
+                        &mut overlay_vertices,
+                        (self.config.width, self.config.height),
+                        *rect,
+                        color_rgba(*color),
+                    );
+                }
+                PaintCommand::OverlayStroke { rect, color, width } => {
+                    add_stroke(
+                        &mut overlay_vertices,
                         (self.config.width, self.config.height),
                         *rect,
                         *width,
@@ -269,6 +287,8 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
                 }
             }
         }
+        let overlay_start = vertices.len();
+        vertices.extend_from_slice(&overlay_vertices);
         self.ensure_rectangle_capacity(vertices.len());
         if !vertices.is_empty() {
             self.queue
@@ -281,7 +301,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
                 height: self.config.height,
             },
         );
-        let mut areas = self
+        let text_areas = self
             .text_buffers
             .iter()
             .zip(text_bounds)
@@ -316,6 +336,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
                 }]
             })
             .collect::<Vec<_>>();
+        let mut areas = Vec::new();
         for ((bounds, _, _), glyphs) in image_commands.iter().zip(&image_glyphs) {
             areas.push(TextArea {
                 buffer: &self.image_buffer,
@@ -332,6 +353,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
                 custom_glyphs: glyphs,
             });
         }
+        areas.extend(text_areas);
         let images = image_commands
             .iter()
             .map(|(_, id, image)| (*id, image))
@@ -393,6 +415,11 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             self.text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)
                 .map_err(|error| format!("failed to render component text: {error}"))?;
+            if overlay_start < vertices.len() {
+                pass.set_pipeline(&self.rectangle_pipeline);
+                pass.set_vertex_buffer(0, self.rectangle_vertices.slice(..));
+                pass.draw(overlay_start as u32..vertices.len() as u32, 0..1);
+            }
         }
         self.queue.submit([encoder.finish()]);
         self.queue.present(frame);

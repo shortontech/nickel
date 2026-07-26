@@ -5,7 +5,7 @@ use glyphon::{
     RasterizeCustomGlyphRequest, RasterizedCustomGlyph, Resolution, Shaping, SwashCache, TextArea,
     TextAtlas, TextBounds, TextRenderer, Viewport, cosmic_text::Align,
 };
-use nickel_core::theme::ThemePalette;
+use nickel_core::theme::{Appearance, ThemePalette};
 use winit::window::Window;
 
 use crate::{graphics::SharedGraphics, icons, rectangles::RectangleRenderer};
@@ -102,12 +102,13 @@ impl PanelGpu {
         let mut icon_buffer = Buffer::new(&mut font_system, Metrics::new(1.0, 1.0));
         icon_buffer.set_size(Some(config.width as f32), Some(config.height as f32));
         let rectangles = RectangleRenderer::new(&graphics.device, config.format);
+        let theme = ThemePalette::from_appearance(nickel_platform::appearance());
         let panel_icon = tinted_panel_icon(
             image::load_from_memory(include_bytes!("../../../assets/icons/nickel-panel.png"))
                 .map_err(|error| format!("failed to decode Nickel panel icon: {error}"))?
                 .into_rgba8(),
+            theme.text,
         );
-        let theme = ThemePalette::from_appearance(nickel_platform::appearance());
 
         Ok(Self {
             surface,
@@ -171,6 +172,16 @@ impl PanelGpu {
     pub fn set_desktops(&mut self, count: u8, active: u8) {
         self.desktop_count = count.clamp(1, 8);
         self.active_desktop = active.min(self.desktop_count - 1);
+    }
+
+    pub fn set_appearance(&mut self, appearance: Appearance) {
+        self.theme = ThemePalette::from_appearance(appearance);
+        self.panel_icon = tinted_panel_icon(
+            image::load_from_memory(include_bytes!("../../../assets/icons/nickel-panel.png"))
+                .expect("embedded Nickel panel icon remains valid")
+                .into_rgba8(),
+            self.theme.text,
+        );
     }
 
     pub fn render(
@@ -301,7 +312,7 @@ impl PanelGpu {
                             right: self.config.width as i32,
                             bottom: self.config.height as i32,
                         },
-                        default_color: Color::rgb(238, 241, 248),
+                        default_color: text_color(self.theme.text),
                         custom_glyphs: &[],
                     },
                     TextArea {
@@ -315,7 +326,7 @@ impl PanelGpu {
                             right: self.config.width.saturating_sub(100) as i32,
                             bottom: self.config.height as i32,
                         },
-                        default_color: Color::rgb(238, 241, 248),
+                        default_color: text_color(self.theme.text),
                         custom_glyphs: &custom_glyphs,
                     },
                 ],
@@ -477,9 +488,22 @@ fn wgpu_color(rgb: u32) -> wgpu::Color {
     }
 }
 
-fn tinted_panel_icon(mut icon: image::RgbaImage) -> image::RgbaImage {
+fn text_color(rgb: u32) -> Color {
+    Color::rgb(
+        ((rgb >> 16) & 0xff) as u8,
+        ((rgb >> 8) & 0xff) as u8,
+        (rgb & 0xff) as u8,
+    )
+}
+
+fn tinted_panel_icon(mut icon: image::RgbaImage, color: u32) -> image::RgbaImage {
+    let tint = [
+        ((color >> 16) & 0xff) as u8,
+        ((color >> 8) & 0xff) as u8,
+        (color & 0xff) as u8,
+    ];
     for pixel in icon.pixels_mut() {
-        pixel.0[..3].copy_from_slice(&[238, 241, 248]);
+        pixel.0[..3].copy_from_slice(&tint);
     }
     icon
 }
@@ -612,8 +636,8 @@ mod tests {
     fn panel_icon_tint_preserves_alpha_mask() {
         let source = image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 0, 0, 127]));
         assert_eq!(
-            tinted_panel_icon(source).get_pixel(0, 0).0,
-            [238, 241, 248, 127]
+            tinted_panel_icon(source, 0x123456).get_pixel(0, 0).0,
+            [0x12, 0x34, 0x56, 127]
         );
     }
 

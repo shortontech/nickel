@@ -38,7 +38,12 @@ impl ThemePalette {
         let dark = appearance.mode == ThemeMode::Dark;
         Self {
             background: Oklch::new(if dark { 0.115 } else { 0.965 }, 0.018, seed.h).to_rgb(),
-            panel: Oklch::new(if dark { 0.155 } else { 0.925 }, 0.024, seed.h).to_rgb(),
+            panel: Oklch::new(
+                if dark { 0.220 } else { 0.820 },
+                if dark { 0.055 } else { 0.090 },
+                seed.h,
+            )
+            .to_rgb(),
             surface: Oklch::new(if dark { 0.205 } else { 0.875 }, 0.027, seed.h).to_rgb(),
             surface_hover: Oklch::new(if dark { 0.275 } else { 0.815 }, 0.040, seed.h).to_rgb(),
             text: Oklch::new(if dark { 0.955 } else { 0.185 }, 0.008, seed.h).to_rgb(),
@@ -115,6 +120,19 @@ impl Oklch {
         });
         (u32::from(channels[0]) << 16) | (u32::from(channels[1]) << 8) | u32::from(channels[2])
     }
+}
+
+pub fn accent_hue(rgb: [u8; 3]) -> u16 {
+    Oklch::from_srgb(rgb).h.round().rem_euclid(360.0) as u16
+}
+
+pub fn accent_from_hue(hue: u16) -> [u8; 3] {
+    let rgb = Oklch::new(0.62, 0.17, f32::from(hue.min(359))).to_rgb();
+    [
+        ((rgb >> 16) & 0xff) as u8,
+        ((rgb >> 8) & 0xff) as u8,
+        (rgb & 0xff) as u8,
+    ]
 }
 
 #[cfg(test)]

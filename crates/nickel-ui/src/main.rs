@@ -50,6 +50,7 @@ mod panel;
 mod platform;
 mod rectangles;
 mod run_dialog;
+mod screenshot;
 mod storage;
 mod volume_osd;
 
@@ -75,6 +76,8 @@ struct Nickel {
     panel_primary: Vec<bool>,
     shell_settings: ShellSettings,
     settings_deadline: Instant,
+    display_deadline: Instant,
+    display_topology: Vec<(String, i32, i32, u32, u32, u64)>,
     panel_hovered: bool,
     panel_task_hovered: Option<usize>,
     panel_tray_hovered: Option<usize>,
@@ -87,6 +90,8 @@ struct Nickel {
     volume_osd_gpu: Option<volume_osd::VolumeOsdGpu>,
     volume_osd_deadline: Option<Instant>,
     volume_osd_state: (u8, bool),
+    screenshot_tool: Option<screenshot::ScreenshotTool>,
+    screenshot_capture_deadline: Option<Instant>,
     context_menu_window: Option<Arc<Window>>,
     context_menu_gpu: Option<context_menu::ContextMenuGpu>,
     context_menu_hovered: Option<usize>,
@@ -163,6 +168,8 @@ impl Default for Nickel {
             panel_primary: Vec::new(),
             shell_settings: ShellSettings::load_default(),
             settings_deadline: Instant::now(),
+            display_deadline: Instant::now(),
+            display_topology: Vec::new(),
             panel_hovered: false,
             panel_task_hovered: None,
             panel_tray_hovered: None,
@@ -175,6 +182,8 @@ impl Default for Nickel {
             volume_osd_gpu: None,
             volume_osd_deadline: None,
             volume_osd_state: (0, false),
+            screenshot_tool: None,
+            screenshot_capture_deadline: None,
             context_menu_window: None,
             context_menu_gpu: None,
             context_menu_hovered: None,
@@ -777,10 +786,19 @@ impl Nickel {
             settings.bar_on_all_displays != self.shell_settings.bar_on_all_displays;
         let desktops_changed = settings.desktop_count != self.shell_settings.desktop_count
             || settings.active_desktop != self.shell_settings.active_desktop;
+        let appearance_changed = settings.theme != self.shell_settings.theme
+            || settings.accent_hue != self.shell_settings.accent_hue;
         self.shell_settings = settings;
         if desktops_changed {
             for (window, gpu) in &mut self.panel_surfaces {
                 gpu.set_desktops(settings.desktop_count, settings.active_desktop);
+                window.request_redraw();
+            }
+        }
+        if appearance_changed {
+            let appearance = settings.resolve_appearance(nickel_platform::appearance());
+            for (window, gpu) in &mut self.panel_surfaces {
+                gpu.set_appearance(appearance);
                 window.request_redraw();
             }
         }
@@ -806,6 +824,55 @@ impl Nickel {
                 window.set_visible(false);
             }
         }
+    }
+
+    fn reconcile_display_topology(&mut self, event_loop: &ActiveEventLoop) {
+        let monitors = sorted_monitors(event_loop);
+        let topology = display_topology(&monitors);
+        if topology == self.display_topology {
+            return;
+        }
+        if monitors.len() != self.desktop_surfaces.len()
+            || monitors.len() != self.panel_surfaces.len()
+        {
+            eprintln!(
+                "display count changed from {} to {}; surface recreation required",
+                self.desktop_surfaces.len(),
+                monitors.len()
+            );
+            self.display_topology = topology;
+            return;
+        }
+
+        let primary = event_loop.primary_monitor();
+        self.panel_primary.clear();
+        for ((desktop_window, _), monitor) in self.desktop_surfaces.iter().zip(&monitors) {
+            desktop_window.set_outer_position(monitor.position());
+            let _ = desktop_window.request_inner_size(monitor.size());
+            #[cfg(target_os = "windows")]
+            if !platform::configure_desktop_window(desktop_window) {
+                eprintln!("failed to reposition a Nickel desktop surface");
+            }
+        }
+        for ((panel_window, _), monitor) in self.panel_surfaces.iter().zip(&monitors) {
+            let is_primary = primary.as_ref() == Some(monitor);
+            self.panel_primary.push(is_primary);
+            #[cfg(target_os = "windows")]
+            platform::release_panel_window(panel_window);
+            let (size, position) =
+                panel_layout(monitor.position(), monitor.size(), monitor.scale_factor());
+            panel_window.set_outer_position(position);
+            let _ = panel_window.request_inner_size(size);
+            let should_show = self.shell_settings.bar_on_all_displays || is_primary;
+            panel_window.set_visible(should_show);
+            #[cfg(target_os = "windows")]
+            if should_show && !platform::configure_panel_window(panel_window) {
+                eprintln!("failed to reposition a Nickel panel AppBar");
+            }
+            panel_window.request_redraw();
+        }
+        self.display_topology = topology;
+        tracing::info!("reconciled Nickel surfaces with changed display topology");
     }
 
     fn launch_result(&mut self, index: usize) {
@@ -1219,7 +1286,7 @@ impl ApplicationHandler for Nickel {
             return;
         }
 
-        let monitors: Vec<_> = event_loop.available_monitors().collect();
+        let monitors = sorted_monitors(event_loop);
         let primary = event_loop.primary_monitor();
         let target = primary.clone().or_else(|| monitors.first().cloned());
 
@@ -1275,6 +1342,14 @@ impl ApplicationHandler for Nickel {
             .with_decorations(false)
             .with_resizable(false)
             .with_window_level(WindowLevel::AlwaysOnTop);
+        let mut screenshot_attributes = WindowAttributes::default()
+            .with_title("Nickel Screenshot")
+            .with_inner_size(PhysicalSize::new(1200, 760))
+            .with_min_inner_size(PhysicalSize::new(720, 480))
+            .with_visible(false)
+            .with_decorations(true)
+            .with_resizable(true)
+            .with_window_level(WindowLevel::Normal);
         if let Some(monitor) = target.as_ref() {
             launcher_attributes =
                 launcher_attributes.with_position(centered_position(monitor, (960, 640)));
@@ -1302,6 +1377,12 @@ impl ApplicationHandler for Nickel {
                         - PANEL_HEIGHT as i32
                         - 12,
                 ));
+            let monitor_position = monitor.position();
+            let monitor_size = monitor.size();
+            screenshot_attributes = screenshot_attributes.with_position(PhysicalPosition::new(
+                monitor_position.x + (monitor_size.width.saturating_sub(1200) / 2) as i32,
+                monitor_position.y + (monitor_size.height.saturating_sub(760) / 2) as i32,
+            ));
         }
 
         let mut desktop_windows = Vec::new();
@@ -1397,6 +1478,12 @@ impl ApplicationHandler for Nickel {
             return;
         };
         let volume_osd_window = Arc::new(volume_osd_window);
+        let Ok(screenshot_window) = event_loop.create_window(screenshot_attributes) else {
+            eprintln!("failed to create Nickel screenshot surface");
+            event_loop.exit();
+            return;
+        };
+        let screenshot_window = Arc::new(screenshot_window);
         #[cfg(target_os = "windows")]
         {
             use winit::platform::windows::WindowExtWindows;
@@ -1404,6 +1491,7 @@ impl ApplicationHandler for Nickel {
             run_window.set_skip_taskbar(true);
             control_center_window.set_skip_taskbar(true);
             volume_osd_window.set_skip_taskbar(true);
+            screenshot_window.set_skip_taskbar(true);
             if !platform::configure_context_menu_window(&context_menu_window) {
                 eprintln!("failed to register Nickel's Windows preview window");
             }
@@ -1441,6 +1529,10 @@ impl ApplicationHandler for Nickel {
                 self.shell_settings.desktop_count,
                 self.shell_settings.active_desktop,
             );
+            gpu.set_appearance(
+                self.shell_settings
+                    .resolve_appearance(nickel_platform::appearance()),
+            );
             panel_surfaces.push((window, gpu));
         }
         let Ok(run_gpu) =
@@ -1451,6 +1543,12 @@ impl ApplicationHandler for Nickel {
             return;
         };
         let control_center_gpu = None;
+        let screenshot_tool = screenshot::ScreenshotTool::new(
+            screenshot_window,
+            self.shell_settings
+                .resolve_appearance(nickel_platform::appearance()),
+        )
+        .ok();
         launcher_window.set_title("Nickel Launcher");
         for (window, _) in &desktop_surfaces {
             window.request_redraw();
@@ -1463,6 +1561,7 @@ impl ApplicationHandler for Nickel {
         self.gpu = Some(launcher_gpu);
         self.panel_surfaces = panel_surfaces;
         self.panel_primary = panel_primary;
+        self.display_topology = display_topology(&monitors);
         self.context_menu_window = Some(context_menu_window);
         self.context_menu_gpu = None;
         self.run_window = Some(run_window);
@@ -1470,6 +1569,7 @@ impl ApplicationHandler for Nickel {
         self.control_center_window = Some(control_center_window);
         self.control_center_gpu = control_center_gpu;
         self.volume_osd_window = Some(volume_osd_window);
+        self.screenshot_tool = screenshot_tool;
     }
 
     fn window_event(
@@ -1478,6 +1578,45 @@ impl ApplicationHandler for Nickel {
         window_id: WindowId,
         event: WindowEvent,
     ) {
+        if self.screenshot_tool.as_ref().map(|tool| tool.window.id()) == Some(window_id) {
+            let tool = self
+                .screenshot_tool
+                .as_mut()
+                .expect("screenshot tool exists");
+            match event {
+                WindowEvent::CloseRequested => tool.hide(),
+                WindowEvent::RedrawRequested => tool.render(),
+                WindowEvent::Resized(size) => tool.resize(size.width, size.height),
+                WindowEvent::CursorMoved { position, .. } => tool.cursor_moved(position),
+                WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    button: MouseButton::Left,
+                    ..
+                } => {
+                    if tool.pointer_pressed() {
+                        tool.hide();
+                    } else {
+                        platform::capture_pointer(&tool.window);
+                    }
+                }
+                WindowEvent::MouseInput {
+                    state: ElementState::Released,
+                    button: MouseButton::Left,
+                    ..
+                } => {
+                    tool.pointer_released();
+                    platform::release_pointer();
+                }
+                WindowEvent::KeyboardInput { event, .. }
+                    if event.state == ElementState::Pressed
+                        && event.logical_key == Key::Named(NamedKey::Escape) =>
+                {
+                    tool.hide();
+                }
+                _ => {}
+            }
+            return;
+        }
         if self.volume_osd_window.as_ref().map(|window| window.id()) == Some(window_id) {
             match event {
                 WindowEvent::RedrawRequested => {
@@ -2342,10 +2481,41 @@ impl ApplicationHandler for Nickel {
                 GlobalShortcut::SwitchGroupNext => self.advance_task_switcher(true, true),
                 GlobalShortcut::SwitchGroupPrevious => self.advance_task_switcher(false, true),
                 GlobalShortcut::CommitSwitch => self.commit_task_switcher(),
+                GlobalShortcut::CaptureActiveWindow => {
+                    if let Err(error) = platform::capture_active_window() {
+                        tracing::warn!(%error, "failed to copy active window screenshot");
+                    }
+                }
+                GlobalShortcut::CaptureActiveWindowToFile => {
+                    if let Err(error) = platform::capture_active_window_to_file() {
+                        tracing::warn!(%error, "failed to capture active window to a temporary file");
+                    }
+                }
+                GlobalShortcut::ShowScreenshotTool => {
+                    if let Some(tool) = &mut self.screenshot_tool {
+                        tool.hide();
+                    }
+                    self.screenshot_capture_deadline =
+                        Some(Instant::now() + Duration::from_millis(75));
+                }
                 GlobalShortcut::AudioChanged {
                     volume_percent,
                     muted,
                 } => self.show_volume_osd(volume_percent, muted),
+            }
+        }
+        if self
+            .screenshot_capture_deadline
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.screenshot_capture_deadline = None;
+            match platform::capture_desktop() {
+                Ok(capture) => {
+                    if let Some(tool) = &mut self.screenshot_tool {
+                        tool.show(capture.image);
+                    }
+                }
+                Err(error) => tracing::warn!(%error, "failed to capture desktop"),
             }
         }
         if self
@@ -2399,6 +2569,10 @@ impl ApplicationHandler for Nickel {
             self.refresh_shell_settings();
             self.settings_deadline = now + Duration::from_millis(500);
         }
+        if now >= self.display_deadline {
+            self.reconcile_display_topology(event_loop);
+            self.display_deadline = now + Duration::from_secs(1);
+        }
         if now >= self.clock_deadline {
             for (window, gpu) in &mut self.panel_surfaces {
                 if gpu.update_clock() {
@@ -2411,12 +2585,16 @@ impl ApplicationHandler for Nickel {
             .clock_deadline
             .min(self.window_deadline)
             .min(self.fullscreen_deadline)
-            .min(self.settings_deadline);
+            .min(self.settings_deadline)
+            .min(self.display_deadline);
         if let Some(preview_deadline) = self.preview_hide_deadline {
             deadline = deadline.min(preview_deadline);
         }
         if let Some(focus_deadline) = self.launcher_focus_loss_deadline {
             deadline = deadline.min(focus_deadline);
+        }
+        if let Some(capture_deadline) = self.screenshot_capture_deadline {
+            deadline = deadline.min(capture_deadline);
         }
         #[cfg(target_os = "windows")]
         let deadline = deadline.min(now + Duration::from_millis(25));
@@ -2455,6 +2633,36 @@ fn centered_position(monitor: &MonitorHandle, window_size: (u32, u32)) -> Physic
     let x = origin.x + (size.width.saturating_sub(window_size.0) / 2) as i32;
     let y = origin.y + (size.height.saturating_sub(window_size.1) / 2) as i32;
     PhysicalPosition::new(x, y)
+}
+
+fn sorted_monitors(event_loop: &ActiveEventLoop) -> Vec<MonitorHandle> {
+    let mut monitors: Vec<_> = event_loop.available_monitors().collect();
+    monitors.sort_by_key(|monitor| {
+        (
+            monitor.name().unwrap_or_default(),
+            monitor.position().x,
+            monitor.position().y,
+        )
+    });
+    monitors
+}
+
+fn display_topology(monitors: &[MonitorHandle]) -> Vec<(String, i32, i32, u32, u32, u64)> {
+    monitors
+        .iter()
+        .map(|monitor| {
+            let position = monitor.position();
+            let size = monitor.size();
+            (
+                monitor.name().unwrap_or_default(),
+                position.x,
+                position.y,
+                size.width,
+                size.height,
+                monitor.scale_factor().to_bits(),
+            )
+        })
+        .collect()
 }
 
 fn panel_layout(

@@ -6,7 +6,7 @@ use std::{
 };
 
 use image::RgbaImage;
-use nickel_core::theme::{Appearance, ThemeMode};
+use nickel_core::theme::{Appearance, ThemeMode, ThemePalette};
 use windows::{
     Win32::{
         Graphics::Gdi::{
@@ -24,6 +24,10 @@ use windows::{
         },
     },
     core::{GUID, Interface, PCWSTR},
+};
+use winit::{
+    platform::windows::{Color, WindowExtWindows},
+    window::{Theme, Window},
 };
 
 pub fn show_hidden_files() -> bool {
@@ -70,6 +74,25 @@ pub fn appearance() -> Appearance {
         },
         accent,
     }
+}
+
+pub fn apply_window_appearance(window: &Window, appearance: Appearance) {
+    let palette = ThemePalette::from_appearance(appearance);
+    window.set_theme(Some(match appearance.mode {
+        ThemeMode::Light => Theme::Light,
+        ThemeMode::Dark => Theme::Dark,
+    }));
+    window.set_title_background_color(Some(color(palette.panel)));
+    window.set_title_text_color(color(palette.text));
+    window.set_border_color(Some(color(palette.accent)));
+}
+
+fn color(rgb: u32) -> Color {
+    Color::from_rgb(
+        ((rgb >> 16) & 0xff) as u8,
+        ((rgb >> 8) & 0xff) as u8,
+        (rgb & 0xff) as u8,
+    )
 }
 
 fn registry_dword(subkey: &str, value_name: &str) -> Option<u32> {

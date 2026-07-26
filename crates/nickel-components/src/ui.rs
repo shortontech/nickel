@@ -78,6 +78,15 @@ pub enum PaintCommand {
         color: Color,
         width: f32,
     },
+    OverlayFill {
+        rect: Rect,
+        color: Color,
+    },
+    OverlayStroke {
+        rect: Rect,
+        color: Color,
+        width: f32,
+    },
     Text {
         bounds: Rect,
         text: String,
@@ -597,6 +606,13 @@ impl Button {
         self.0 = self.0.height(height);
         self
     }
+
+    pub fn color(mut self, color: Color) -> Self {
+        if let Some(label) = self.0.0.children.first_mut() {
+            label.style.foreground = Some(color);
+        }
+        self
+    }
 }
 
 impl Component for Button {
@@ -656,6 +672,18 @@ impl RadioButton {
 
     pub fn width(mut self, width: f32) -> Self {
         self.0 = self.0.width(width);
+        self
+    }
+
+    pub fn colors(mut self, indicator: Color, label: Color) -> Self {
+        if let Some(row) = self.0.0.children.first_mut() {
+            if let Some(indicator_text) = row.children.first_mut() {
+                indicator_text.style.foreground = Some(indicator);
+            }
+            if let Some(label_text) = row.children.get_mut(1) {
+                label_text.style.foreground = Some(label);
+            }
+        }
         self
     }
 }

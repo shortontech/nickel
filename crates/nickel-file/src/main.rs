@@ -11,6 +11,7 @@ use nickel_components::{
     Button, Column, ComponentGpu, Container, Grid, Image, Insets, LinearGradient, Point, Rect, Row,
     Text, TextAlign, UiTree,
 };
+use nickel_core::shell_settings::ShellSettings;
 use nickel_file::{DirectoryBrowser, FileEntry};
 use winit::{
     application::ApplicationHandler,
@@ -291,6 +292,9 @@ impl FileApp {
         let Some(window) = &self.window else {
             return;
         };
+        let appearance =
+            ShellSettings::load_default().resolve_appearance(nickel_platform::appearance());
+        nickel_platform::apply_window_appearance(window, appearance);
         let size = window.inner_size();
         self.ui = self.build_ui(size.width as f32, size.height as f32);
         if let Some(gpu) = &mut self.gpu

@@ -12,7 +12,10 @@ use nickel_components::{
     Button as UiButton, Column, ComponentGpu, Container, Insets, LinearGradient, PaintCommand,
     Point as UiPoint, RadioButton, Rect as UiRect, Row, Slider, Text, TextAlign, UiTree,
 };
-use nickel_core::shell_settings::ShellSettings;
+use nickel_core::{
+    shell_settings::{ShellSettings, ThemePreference},
+    theme::{ThemeMode, ThemePalette},
+};
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalSize, PhysicalPosition},
@@ -21,17 +24,6 @@ use winit::{
     window::{Window, WindowAttributes, WindowId},
 };
 
-const WINDOW_BACKGROUND: u32 = 0x0017191e;
-const PANEL: u32 = 0x001d2026;
-const SIDEBAR_TOP: u32 = 0x00323a48;
-const SIDEBAR_BOTTOM: u32 = 0x0013161c;
-const CARD: u32 = 0x00252a33;
-const CARD_SELECTED: u32 = 0x0033445a;
-const PRIMARY: u32 = 0x004b8bd8;
-const BORDER: u32 = 0x00363c47;
-const TEXT: u32 = 0x00f2f4f8;
-const MUTED: u32 = 0x009ca5b3;
-const SUCCESS: u32 = 0x0052c98b;
 const SIDEBAR_WIDTH: i32 = 190;
 const DISPLAY_PLANE: Rect = Rect {
     x: 210,
@@ -214,6 +206,7 @@ struct DisplayCard {
 enum SettingsPage {
     Display,
     Bar,
+    Appearance,
     Network,
 }
 
@@ -244,6 +237,7 @@ struct SettingsApp {
     page: SettingsPage,
     shell_settings: ShellSettings,
     desktop_slider_dragging: bool,
+    appearance_slider_dragging: bool,
     network_adapters: Vec<NetworkAdapter>,
     wifi_networks: Vec<WifiNetwork>,
     wifi_status: String,
@@ -297,6 +291,7 @@ impl Default for SettingsApp {
             page: SettingsPage::Display,
             shell_settings: ShellSettings::load_default(),
             desktop_slider_dragging: false,
+            appearance_slider_dragging: false,
             network_adapters: Vec::new(),
             wifi_networks: Vec::new(),
             wifi_status: String::new(),
@@ -375,19 +370,28 @@ impl SettingsApp {
         }
     }
 
+    fn palette(&self) -> ThemePalette {
+        ThemePalette::from_appearance(
+            self.shell_settings
+                .resolve_appearance(nickel_platform::appearance()),
+        )
+    }
+
     fn build_ui(&self, width: f32, height: f32) -> UiTree {
+        let palette = self.palette();
         let (title, subtitle) = match self.page {
             SettingsPage::Display => (
                 "DISPLAY SETTINGS",
                 "DRAG DISPLAYS TO MATCH THEIR PHYSICAL POSITION",
             ),
             SettingsPage::Bar => ("NICKEL BAR", "DISPLAYS, WINDOWS, AND DESKTOPS"),
+            SettingsPage::Appearance => ("APPEARANCE", "LIGHT, DARK, AND ONE STARTING HUE"),
             SettingsPage::Network => ("NETWORK SETTINGS", "WINDOWS NETWORK ADAPTERS"),
         };
         let header_content = Container::new()
             .grow(1.0)
             .height(72.0)
-            .background(PANEL)
+            .background(palette.panel)
             .padding(Insets {
                 top: 11.0,
                 right: 40.0,
@@ -397,8 +401,8 @@ impl SettingsApp {
             .child(
                 Column::new()
                     .gap(4.0)
-                    .child(Text::new(title).scale(3.0).color(TEXT))
-                    .child(Text::new(subtitle).scale(1.0).color(MUTED)),
+                    .child(Text::new(title).scale(3.0).color(palette.text))
+                    .child(Text::new(subtitle).scale(1.0).color(palette.muted)),
             );
         let header = Row::new()
             .height(72.0)
@@ -406,34 +410,48 @@ impl SettingsApp {
                 Container::new()
                     .width(SIDEBAR_WIDTH as f32)
                     .height(72.0)
-                    .background(SIDEBAR_TOP),
+                    .background(palette.panel),
             )
             .child(header_content);
         let mut display_button = UiButton::new("nav:display", "DISPLAY")
             .width((SIDEBAR_WIDTH - 24) as f32)
-            .height(46.0);
+            .height(46.0)
+            .color(palette.text);
         if self.page == SettingsPage::Display {
             display_button = display_button
-                .background(CARD_SELECTED)
-                .border(PRIMARY, 2.0);
+                .background(palette.accent_soft)
+                .border(palette.accent, 2.0);
         }
         let mut bar_button = UiButton::new("nav:bar", "NICKEL BAR")
             .width((SIDEBAR_WIDTH - 24) as f32)
-            .height(46.0);
+            .height(46.0)
+            .color(palette.text);
         if self.page == SettingsPage::Bar {
-            bar_button = bar_button.background(CARD_SELECTED).border(PRIMARY, 2.0);
+            bar_button = bar_button
+                .background(palette.accent_soft)
+                .border(palette.accent, 2.0);
+        }
+        let mut appearance_button = UiButton::new("nav:appearance", "APPEARANCE")
+            .width((SIDEBAR_WIDTH - 24) as f32)
+            .height(46.0)
+            .color(palette.text);
+        if self.page == SettingsPage::Appearance {
+            appearance_button = appearance_button
+                .background(palette.accent_soft)
+                .border(palette.accent, 2.0);
         }
         let mut network_button = UiButton::new("nav:network", "NETWORK")
             .width((SIDEBAR_WIDTH - 24) as f32)
-            .height(46.0);
+            .height(46.0)
+            .color(palette.text);
         if self.page == SettingsPage::Network {
             network_button = network_button
-                .background(CARD_SELECTED)
-                .border(PRIMARY, 2.0);
+                .background(palette.accent_soft)
+                .border(palette.accent, 2.0);
         }
         let sidebar = Column::new()
             .width(SIDEBAR_WIDTH as f32)
-            .background(LinearGradient::vertical(SIDEBAR_TOP, SIDEBAR_BOTTOM))
+            .background(LinearGradient::vertical(palette.panel, palette.background))
             .padding(Insets {
                 top: 20.0,
                 right: 12.0,
@@ -443,22 +461,25 @@ impl SettingsApp {
             .gap(8.0)
             .child(display_button)
             .child(bar_button)
+            .child(appearance_button)
             .child(network_button);
 
         let content = match self.page {
             SettingsPage::Display => self.display_components(),
             SettingsPage::Bar => self.bar_components(),
+            SettingsPage::Appearance => self.appearance_components(),
             SettingsPage::Network => self.network_components(),
         };
         let root = Column::new()
             .height(height)
-            .background(WINDOW_BACKGROUND)
+            .background(palette.background)
             .child(header)
             .child(Row::new().grow(1.0).child(sidebar).child(content));
         UiTree::layout(root, UiRect::new(0.0, 0.0, width, height))
     }
 
     fn display_components(&self) -> Column {
+        let palette = self.palette();
         let selected = &self.displays[self.selected];
         Column::new()
             .grow(1.0)
@@ -472,38 +493,46 @@ impl SettingsApp {
             .child(
                 Container::new()
                     .height(340.0)
-                    .background(0x001b1e24)
-                    .border(BORDER, 2.0),
+                    .background(palette.surface)
+                    .border(palette.muted, 2.0),
             )
             .child(
                 Row::new()
                     .height(42.0)
                     .gap(15.0)
-                    .child(Text::new(&selected.name).color(TEXT).width(183.0))
+                    .child(Text::new(&selected.name).color(palette.text).width(183.0))
                     .child(
                         UiButton::new("display:identify", "IDENTIFY")
                             .width(135.0)
-                            .background(CARD),
+                            .color(palette.text)
+                            .background(palette.surface),
                     )
                     .child(
                         UiButton::new("display:primary", "MAKE PRIMARY")
                             .width(145.0)
-                            .background(CARD),
+                            .color(palette.text)
+                            .background(palette.surface),
                     )
                     .child(
                         UiButton::new("display:apply", "APPLY")
                             .width(105.0)
-                            .background(PRIMARY),
+                            .color(palette.text)
+                            .background(palette.accent),
                     ),
             )
             .child(
                 Text::new(&self.status)
-                    .color(if self.applied { SUCCESS } else { MUTED })
+                    .color(if self.applied {
+                        palette.complement
+                    } else {
+                        palette.muted
+                    })
                     .height(18.0),
             )
     }
 
     fn network_components(&self) -> Column {
+        let palette = self.palette();
         let wifi_cards = self
             .wifi_networks
             .iter()
@@ -519,8 +548,8 @@ impl SettingsApp {
                 };
                 Container::new()
                     .height(44.0)
-                    .background(CARD)
-                    .border(BORDER, 1.0)
+                    .background(palette.surface)
+                    .border(palette.muted, 1.0)
                     .padding(Insets {
                         top: 12.0,
                         right: 14.0,
@@ -530,11 +559,11 @@ impl SettingsApp {
                     .action(format!("wifi:{index}"))
                     .child(
                         Row::new()
-                            .child(Text::new(&network.profile).color(TEXT).width(316.0))
+                            .child(Text::new(&network.profile).color(palette.text).width(316.0))
                             .child(Text::new(detail).scale(1.0).color(if network.connected {
-                                SUCCESS
+                                palette.complement
                             } else {
-                                MUTED
+                                palette.muted
                             })),
                     )
             });
@@ -546,8 +575,8 @@ impl SettingsApp {
             };
             Container::new()
                 .height(72.0)
-                .background(CARD)
-                .border(BORDER, 1.0)
+                .background(palette.surface)
+                .border(palette.muted, 1.0)
                 .padding(Insets {
                     top: 11.0,
                     right: 14.0,
@@ -557,15 +586,19 @@ impl SettingsApp {
                 .child(
                     Column::new()
                         .gap(7.0)
-                        .child(Text::new(&adapter.name).color(TEXT))
+                        .child(Text::new(&adapter.name).color(palette.text))
                         .child(
                             Row::new()
                                 .child(Text::new(status).color(if adapter.connected {
-                                    SUCCESS
+                                    palette.complement
                                 } else {
-                                    MUTED
+                                    palette.muted
                                 }))
-                                .child(Text::new(&adapter.description).scale(1.0).color(MUTED)),
+                                .child(
+                                    Text::new(&adapter.description)
+                                        .scale(1.0)
+                                        .color(palette.muted),
+                                ),
                         ),
                 )
         });
@@ -581,8 +614,8 @@ impl SettingsApp {
             .child(
                 Row::new()
                     .height(26.0)
-                    .child(Text::new("SAVED WI-FI").color(TEXT).width(308.0))
-                    .child(Text::new(&self.wifi_status).scale(1.0).color(MUTED)),
+                    .child(Text::new("SAVED WI-FI").color(palette.text).width(308.0))
+                    .child(Text::new(&self.wifi_status).scale(1.0).color(palette.muted)),
             )
             .child(
                 Column::new()
@@ -590,18 +623,26 @@ impl SettingsApp {
                     .gap(8.0)
                     .children(wifi_cards),
             )
-            .child(Text::new("ADAPTERS").color(TEXT).height(18.0))
+            .child(Text::new("ADAPTERS").color(palette.text).height(18.0))
             .child(Column::new().gap(12.0).children(adapter_cards))
     }
 
     fn bar_components(&self) -> Column {
+        let palette = self.palette();
         let display_count = self.displays.len().max(1);
         let desktop_choices = (0..self.shell_settings.desktop_count).map(|index| {
             Container::new()
                 .width(64.0)
                 .height(46.0)
-                .background(CARD)
-                .border(if index == 0 { PRIMARY } else { BORDER }, 2.0)
+                .background(palette.surface)
+                .border(
+                    if index == 0 {
+                        palette.accent
+                    } else {
+                        palette.muted
+                    },
+                    2.0,
+                )
                 .padding(Insets {
                     top: 9.0,
                     right: 4.0,
@@ -612,7 +653,11 @@ impl SettingsApp {
                     Text::new(format!("{}", index + 1))
                         .align(TextAlign::Center)
                         .scale(1.0)
-                        .color(if index == 0 { TEXT } else { MUTED }),
+                        .color(if index == 0 {
+                            palette.text
+                        } else {
+                            palette.muted
+                        }),
                 )
         });
         Column::new()
@@ -624,7 +669,11 @@ impl SettingsApp {
                 left: 20.0,
             })
             .gap(14.0)
-            .child(Text::new("SHOW NICKEL BAR ON").color(TEXT).height(20.0))
+            .child(
+                Text::new("SHOW NICKEL BAR ON")
+                    .color(palette.text)
+                    .height(20.0),
+            )
             .child(
                 Row::new()
                     .height(38.0)
@@ -635,6 +684,14 @@ impl SettingsApp {
                             "PRIMARY DISPLAY",
                             !self.shell_settings.bar_on_all_displays,
                         )
+                        .colors(
+                            if !self.shell_settings.bar_on_all_displays {
+                                palette.accent
+                            } else {
+                                palette.muted
+                            },
+                            palette.text,
+                        )
                         .width(210.0),
                     )
                     .child(
@@ -643,12 +700,20 @@ impl SettingsApp {
                             format!("ALL DISPLAYS ({display_count})"),
                             self.shell_settings.bar_on_all_displays,
                         )
+                        .colors(
+                            if self.shell_settings.bar_on_all_displays {
+                                palette.accent
+                            } else {
+                                palette.muted
+                            },
+                            palette.text,
+                        )
                         .width(210.0),
                     ),
             )
             .child(
                 Text::new("WINDOWS SHOWN ON EACH BAR")
-                    .color(TEXT)
+                    .color(palette.text)
                     .height(20.0),
             )
             .child(
@@ -661,6 +726,14 @@ impl SettingsApp {
                             "THIS DISPLAY",
                             !self.shell_settings.all_windows_on_every_bar,
                         )
+                        .colors(
+                            if !self.shell_settings.all_windows_on_every_bar {
+                                palette.accent
+                            } else {
+                                palette.muted
+                            },
+                            palette.text,
+                        )
                         .width(210.0),
                     )
                     .child(
@@ -669,10 +742,18 @@ impl SettingsApp {
                             "ALL WINDOWS",
                             self.shell_settings.all_windows_on_every_bar,
                         )
+                        .colors(
+                            if self.shell_settings.all_windows_on_every_bar {
+                                palette.accent
+                            } else {
+                                palette.muted
+                            },
+                            palette.text,
+                        )
                         .width(210.0),
                     ),
             )
-            .child(Text::new("DESKTOPS").color(TEXT).height(20.0))
+            .child(Text::new("DESKTOPS").color(palette.text).height(20.0))
             .child(
                 Text::new(format!(
                     "{} DESKTOP{}",
@@ -684,7 +765,7 @@ impl SettingsApp {
                     }
                 ))
                 .scale(1.0)
-                .color(MUTED)
+                .color(palette.muted)
                 .height(18.0),
             )
             .child(
@@ -695,6 +776,106 @@ impl SettingsApp {
                 .width(520.0),
             )
             .child(Row::new().height(46.0).gap(8.0).children(desktop_choices))
+    }
+
+    fn appearance_components(&self) -> Column {
+        let system = nickel_platform::appearance();
+        let appearance = self.shell_settings.resolve_appearance(system);
+        let palette = ThemePalette::from_appearance(appearance);
+        let hue = self.shell_settings.displayed_hue(system);
+        let swatches = [
+            ("BACKGROUND", palette.background),
+            ("PANEL", palette.panel),
+            ("SURFACE", palette.surface),
+            ("HOVER", palette.surface_hover),
+            ("ACCENT", palette.accent),
+            ("COMPLEMENT", palette.complement),
+        ]
+        .into_iter()
+        .map(|(label, color)| {
+            Container::new()
+                .width(88.0)
+                .height(76.0)
+                .background(color)
+                .border(palette.muted, 1.0)
+                .padding(Insets {
+                    top: 46.0,
+                    right: 4.0,
+                    bottom: 4.0,
+                    left: 4.0,
+                })
+                .child(
+                    Text::new(label)
+                        .align(TextAlign::Center)
+                        .scale(0.72)
+                        .color(palette.text),
+                )
+        });
+        Column::new()
+            .grow(1.0)
+            .padding(Insets {
+                top: 24.0,
+                right: 40.0,
+                bottom: 20.0,
+                left: 20.0,
+            })
+            .gap(14.0)
+            .child(Text::new("MODE").color(palette.text).height(20.0))
+            .child(
+                Row::new()
+                    .height(38.0)
+                    .gap(28.0)
+                    .child(
+                        RadioButton::new(
+                            "appearance:light",
+                            "LIGHT",
+                            appearance.mode == ThemeMode::Light,
+                        )
+                        .colors(
+                            if appearance.mode == ThemeMode::Light {
+                                palette.accent
+                            } else {
+                                palette.muted
+                            },
+                            palette.text,
+                        )
+                        .width(180.0),
+                    )
+                    .child(
+                        RadioButton::new(
+                            "appearance:dark",
+                            "DARK",
+                            appearance.mode == ThemeMode::Dark,
+                        )
+                        .colors(
+                            if appearance.mode == ThemeMode::Dark {
+                                palette.accent
+                            } else {
+                                palette.muted
+                            },
+                            palette.text,
+                        )
+                        .width(180.0),
+                    ),
+            )
+            .child(Text::new("STARTING HUE").color(palette.text).height(20.0))
+            .child(
+                Text::new(format!("{hue}°  ALL OTHER COLORS ARE DERIVED"))
+                    .scale(1.0)
+                    .color(palette.muted)
+                    .height(18.0),
+            )
+            .child(
+                Slider::new("appearance:hue", f32::from(hue) / 359.0)
+                    .colors(palette.surface, palette.accent, palette.text)
+                    .width(520.0),
+            )
+            .child(
+                Text::new("DERIVED PALETTE")
+                    .color(palette.text)
+                    .height(20.0),
+            )
+            .child(Row::new().height(76.0).gap(8.0).children(swatches))
     }
 
     fn pointer_pressed(&mut self) {
@@ -711,12 +892,29 @@ impl SettingsApp {
             self.request_redraw();
             return;
         }
+        if let Some(("appearance:hue", fraction)) =
+            self.ui.action_at_with_horizontal_fraction(point)
+        {
+            self.appearance_slider_dragging = true;
+            self.set_appearance_hue_from_fraction(fraction);
+            self.request_redraw();
+            return;
+        }
         let action = self.ui.action_at(point).map(str::to_owned);
         if let Some(action) = action {
             match action.as_str() {
                 "nav:display" => self.page = SettingsPage::Display,
                 "nav:bar" => self.page = SettingsPage::Bar,
+                "nav:appearance" => self.page = SettingsPage::Appearance,
                 "nav:network" => self.page = SettingsPage::Network,
+                "appearance:light" => {
+                    self.shell_settings.theme = ThemePreference::Light;
+                    let _ = self.shell_settings.save_default();
+                }
+                "appearance:dark" => {
+                    self.shell_settings.theme = ThemePreference::Dark;
+                    let _ = self.shell_settings.save_default();
+                }
                 "bar:displays:primary" => {
                     self.shell_settings.bar_on_all_displays = false;
                     let _ = self.shell_settings.save_default();
@@ -784,6 +982,16 @@ impl SettingsApp {
             }
             return;
         }
+        if self.appearance_slider_dragging {
+            if let Some(fraction) = self
+                .ui
+                .horizontal_fraction_for_action("appearance:hue", position.x as f32)
+            {
+                self.set_appearance_hue_from_fraction(fraction);
+                self.request_redraw();
+            }
+            return;
+        }
         if self.page != SettingsPage::Display {
             return;
         }
@@ -807,6 +1015,7 @@ impl SettingsApp {
 
     fn finish_drag(&mut self) {
         self.desktop_slider_dragging = false;
+        self.appearance_slider_dragging = false;
         if self.page != SettingsPage::Display {
             return;
         }
@@ -840,6 +1049,15 @@ impl SettingsApp {
             .shell_settings
             .active_desktop
             .min(count.saturating_sub(1));
+        let _ = self.shell_settings.save_default();
+    }
+
+    fn set_appearance_hue_from_fraction(&mut self, fraction: f32) {
+        let hue = (fraction.clamp(0.0, 1.0) * 359.0).round() as u16;
+        if self.shell_settings.accent_hue == Some(hue) {
+            return;
+        }
+        self.shell_settings.accent_hue = Some(hue);
         let _ = self.shell_settings.save_default();
     }
 
@@ -1300,6 +1518,11 @@ impl SettingsApp {
 
     fn render(&mut self) {
         let Some(window) = &self.window else { return };
+        let appearance = self
+            .shell_settings
+            .resolve_appearance(nickel_platform::appearance());
+        nickel_platform::apply_window_appearance(window, appearance);
+        let palette = ThemePalette::from_appearance(appearance);
         let size = window.inner_size();
         self.ui = self.build_ui(size.width as f32, size.height as f32);
         let mut commands = self.ui.commands().to_vec();
@@ -1314,14 +1537,18 @@ impl SettingsApp {
                 commands.push(PaintCommand::Fill {
                     rect,
                     color: if index == self.selected {
-                        CARD_SELECTED
+                        palette.accent_soft
                     } else {
-                        CARD
+                        palette.surface
                     },
                 });
                 commands.push(PaintCommand::Stroke {
                     rect,
-                    color: if display.primary { PRIMARY } else { BORDER },
+                    color: if display.primary {
+                        palette.accent
+                    } else {
+                        palette.muted
+                    },
                     width: if display.primary { 4.0 } else { 2.0 },
                 });
                 commands.push(PaintCommand::Text {
@@ -1333,7 +1560,7 @@ impl SettingsApp {
                     ),
                     text: display.name.clone(),
                     scale: 3.0,
-                    color: TEXT,
+                    color: palette.text,
                     align: TextAlign::Start,
                 });
                 commands.push(PaintCommand::Text {
@@ -1345,7 +1572,7 @@ impl SettingsApp {
                     ),
                     text: display.detail.clone(),
                     scale: 2.0,
-                    color: MUTED,
+                    color: palette.muted,
                     align: TextAlign::Start,
                 });
                 if display.primary {
@@ -1358,7 +1585,7 @@ impl SettingsApp {
                         ),
                         text: "PRIMARY".into(),
                         scale: 2.0,
-                        color: PRIMARY,
+                        color: palette.accent,
                         align: TextAlign::Start,
                     });
                 }

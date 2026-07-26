@@ -8,11 +8,14 @@ use std::{
         mpsc::{self, Receiver, Sender},
     },
     thread,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use windows::{
     Win32::{
-        Foundation::{COLORREF, CloseHandle, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
+        Foundation::{
+            COLORREF, CloseHandle, GlobalFree, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+        },
         Graphics::Dwm::{
             DWM_THUMBNAIL_PROPERTIES, DWM_TNP_OPACITY, DWM_TNP_RECTDESTINATION,
             DWM_TNP_SOURCECLIENTAREAONLY, DWM_TNP_VISIBLE, DWM_WINDOW_CORNER_PREFERENCE,
@@ -20,9 +23,10 @@ use windows::{
             DwmSetWindowAttribute, DwmUnregisterThumbnail, DwmUpdateThumbnailProperties,
         },
         Graphics::Gdi::{
-            BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection,
-            DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetMonitorInfoW, HGDIOBJ,
-            MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, ReleaseDC, SelectObject,
+            BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleBitmap,
+            CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC,
+            GetMonitorInfoW, HGDIOBJ, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+            ReleaseDC, SRCCOPY, SelectObject,
         },
         Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES,
         System::LibraryLoader::GetModuleHandleW,
@@ -35,8 +39,11 @@ use windows::{
                 CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
                 CoTaskMemFree, CoUninitialize,
             },
-            DataExchange::{COPYDATASTRUCT, CloseClipboard, GetClipboardData, OpenClipboard},
-            Memory::{GlobalLock, GlobalSize, GlobalUnlock},
+            DataExchange::{
+                COPYDATASTRUCT, CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard,
+                SetClipboardData,
+            },
+            Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock},
         },
         UI::{
             Input::KeyboardAndMouse::{
@@ -87,7 +94,7 @@ use crate::{
     desktop::{Wallpaper, WallpaperPosition},
     launcher::Launcher,
     model::{Application, ApplicationId, OpenWindow, TrayItem, WindowId, WindowPreview},
-    platform::{GlobalShortcut, ShellCommand, TraySource, WindowAction},
+    platform::{DesktopCapture, GlobalShortcut, ShellCommand, TraySource, WindowAction},
 };
 
 pub fn wallpaper() -> Wallpaper {
@@ -104,6 +111,339 @@ pub fn wallpaper() -> Wallpaper {
             fallback_wallpaper()
         })
     }
+}
+
+pub fn capture_active_window() -> Result<(), String> {
+    const CF_BITMAP: u32 = 2;
+    let window = unsafe { GetForegroundWindow() };
+    if window.0.is_null() {
+        return Err("Windows reported no foreground window".into());
+    }
+    let mut bounds = RECT::default();
+    unsafe { GetWindowRect(window, &raw mut bounds) }
+        .map_err(|error| format!("could not read active-window bounds: {error}"))?;
+    let width = bounds.right - bounds.left;
+    let height = bounds.bottom - bounds.top;
+    if width <= 0 || height <= 0 {
+        return Err("active window has empty bounds".into());
+    }
+
+    // SAFETY: The screen and memory device contexts are released on every path. Once
+    // SetClipboardData succeeds, Windows owns the bitmap and Nickel must not delete it.
+    unsafe {
+        let screen = GetDC(None);
+        if screen.0.is_null() {
+            return Err("could not acquire the screen device context".into());
+        }
+        let memory = CreateCompatibleDC(Some(screen));
+        if memory.0.is_null() {
+            ReleaseDC(None, screen);
+            return Err("could not create the screenshot device context".into());
+        }
+        let bitmap = CreateCompatibleBitmap(screen, width, height);
+        if bitmap.0.is_null() {
+            let _ = DeleteDC(memory);
+            ReleaseDC(None, screen);
+            return Err("could not allocate the screenshot bitmap".into());
+        }
+        let previous = SelectObject(memory, HGDIOBJ(bitmap.0));
+        let copied = BitBlt(
+            memory,
+            0,
+            0,
+            width,
+            height,
+            Some(screen),
+            bounds.left,
+            bounds.top,
+            SRCCOPY,
+        );
+        SelectObject(memory, previous);
+        let _ = DeleteDC(memory);
+        ReleaseDC(None, screen);
+        if let Err(error) = copied {
+            let _ = DeleteObject(HGDIOBJ(bitmap.0));
+            return Err(format!("could not copy active-window pixels: {error}"));
+        }
+
+        if let Err(error) = OpenClipboard(None) {
+            let _ = DeleteObject(HGDIOBJ(bitmap.0));
+            return Err(format!("could not open the clipboard: {error}"));
+        }
+        let clipboard_result = EmptyClipboard()
+            .and_then(|()| SetClipboardData(CF_BITMAP, Some(HANDLE(bitmap.0))).map(|_| ()));
+        let _ = CloseClipboard();
+        if let Err(error) = clipboard_result {
+            let _ = DeleteObject(HGDIOBJ(bitmap.0));
+            return Err(format!(
+                "could not place screenshot on the clipboard: {error}"
+            ));
+        }
+    }
+    tracing::info!(width, height, "captured active window to clipboard");
+    Ok(())
+}
+
+pub fn capture_desktop() -> Result<DesktopCapture, String> {
+    let foreground = unsafe { GetForegroundWindow() };
+    let monitor = unsafe { MonitorFromWindow(foreground, MONITOR_DEFAULTTONEAREST) };
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if !unsafe { GetMonitorInfoW(monitor, &raw mut info) }.as_bool() {
+        return Err("could not read monitor bounds".into());
+    }
+    Ok(DesktopCapture {
+        image: capture_rect_rgba(info.rcMonitor)?,
+    })
+}
+
+pub fn copy_image_to_clipboard(image: &image::RgbaImage) -> Result<(), String> {
+    const CF_BITMAP: u32 = 2;
+    let info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: image.width() as i32,
+            biHeight: -(image.height() as i32),
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    unsafe {
+        let mut pixels = std::ptr::null_mut::<c_void>();
+        let bitmap = CreateDIBSection(
+            None,
+            &raw const info,
+            DIB_RGB_COLORS,
+            &raw mut pixels,
+            None,
+            0,
+        )
+        .map_err(|error| format!("could not allocate clipboard image: {error}"))?;
+        let bgra = std::slice::from_raw_parts_mut(pixels.cast::<u8>(), image.as_raw().len());
+        for (source, target) in image.as_raw().chunks_exact(4).zip(bgra.chunks_exact_mut(4)) {
+            target.copy_from_slice(&[source[2], source[1], source[0], 255]);
+        }
+        if let Err(error) = OpenClipboard(None) {
+            let _ = DeleteObject(HGDIOBJ(bitmap.0));
+            return Err(format!("could not open clipboard: {error}"));
+        }
+        let result = EmptyClipboard()
+            .and_then(|()| SetClipboardData(CF_BITMAP, Some(HANDLE(bitmap.0))).map(|_| ()));
+        let _ = CloseClipboard();
+        if let Err(error) = result {
+            let _ = DeleteObject(HGDIOBJ(bitmap.0));
+            return Err(format!("could not copy image: {error}"));
+        }
+    }
+    Ok(())
+}
+
+pub fn copy_temp_image_path(image: &image::RgbaImage) -> Result<PathBuf, String> {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let path = env::temp_dir().join(format!("nickel-crop-{stamp}.png"));
+    image
+        .save(&path)
+        .map_err(|error| format!("could not save temporary screenshot: {error}"))?;
+    set_clipboard_text(&path.to_string_lossy())?;
+    Ok(path)
+}
+
+fn capture_rect_rgba(bounds: RECT) -> Result<image::RgbaImage, String> {
+    let width = bounds.right - bounds.left;
+    let height = bounds.bottom - bounds.top;
+    if width <= 0 || height <= 0 {
+        return Err("capture rectangle is empty".into());
+    }
+    let info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: width,
+            biHeight: -height,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    unsafe {
+        let screen = GetDC(None);
+        let memory = CreateCompatibleDC(Some(screen));
+        let mut pixels = std::ptr::null_mut::<c_void>();
+        let bitmap = CreateDIBSection(
+            Some(screen),
+            &raw const info,
+            DIB_RGB_COLORS,
+            &raw mut pixels,
+            None,
+            0,
+        )
+        .map_err(|error| format!("could not allocate capture: {error}"))?;
+        let previous = SelectObject(memory, HGDIOBJ(bitmap.0));
+        let copied = BitBlt(
+            memory,
+            0,
+            0,
+            width,
+            height,
+            Some(screen),
+            bounds.left,
+            bounds.top,
+            SRCCOPY,
+        );
+        let mut rgba = vec![0; width as usize * height as usize * 4];
+        if copied.is_ok() {
+            let bgra = std::slice::from_raw_parts(pixels.cast::<u8>(), rgba.len());
+            for (source, target) in bgra.chunks_exact(4).zip(rgba.chunks_exact_mut(4)) {
+                target.copy_from_slice(&[source[2], source[1], source[0], 255]);
+            }
+        }
+        SelectObject(memory, previous);
+        let _ = DeleteObject(HGDIOBJ(bitmap.0));
+        let _ = DeleteDC(memory);
+        ReleaseDC(None, screen);
+        copied.map_err(|error| format!("could not capture desktop: {error}"))?;
+        image::RgbaImage::from_raw(width as u32, height as u32, rgba)
+            .ok_or_else(|| "could not construct desktop capture".into())
+    }
+}
+
+pub fn capture_active_window_to_file() -> Result<(), String> {
+    let path = save_active_window_to_temp()?;
+    set_clipboard_text(&path.to_string_lossy())?;
+    tracing::info!(path = %path.display(), "copied temporary screenshot path");
+    Ok(())
+}
+
+fn save_active_window_to_temp() -> Result<PathBuf, String> {
+    let window = unsafe { GetForegroundWindow() };
+    if window.0.is_null() {
+        return Err("Windows reported no foreground window".into());
+    }
+    let mut bounds = RECT::default();
+    unsafe { GetWindowRect(window, &raw mut bounds) }
+        .map_err(|error| format!("could not read active-window bounds: {error}"))?;
+    let width = bounds.right - bounds.left;
+    let height = bounds.bottom - bounds.top;
+    if width <= 0 || height <= 0 {
+        return Err("active window has empty bounds".into());
+    }
+
+    let mut pixels = std::ptr::null_mut::<c_void>();
+    let info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: width,
+            biHeight: -height,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let rgba = unsafe {
+        let screen = GetDC(None);
+        if screen.0.is_null() {
+            return Err("could not acquire the screen device context".into());
+        }
+        let memory = CreateCompatibleDC(Some(screen));
+        if memory.0.is_null() {
+            ReleaseDC(None, screen);
+            return Err("could not create the screenshot device context".into());
+        }
+        let bitmap = match CreateDIBSection(
+            Some(screen),
+            &raw const info,
+            DIB_RGB_COLORS,
+            &raw mut pixels,
+            None,
+            0,
+        ) {
+            Ok(bitmap) => bitmap,
+            Err(error) => {
+                let _ = DeleteDC(memory);
+                ReleaseDC(None, screen);
+                return Err(format!("could not allocate screenshot pixels: {error}"));
+            }
+        };
+        let previous = SelectObject(memory, HGDIOBJ(bitmap.0));
+        let copied = BitBlt(
+            memory,
+            0,
+            0,
+            width,
+            height,
+            Some(screen),
+            bounds.left,
+            bounds.top,
+            SRCCOPY,
+        );
+        let mut rgba = vec![0_u8; width as usize * height as usize * 4];
+        if copied.is_ok() && !pixels.is_null() {
+            let bgra = std::slice::from_raw_parts(pixels.cast::<u8>(), rgba.len());
+            for (source, target) in bgra.chunks_exact(4).zip(rgba.chunks_exact_mut(4)) {
+                target.copy_from_slice(&[source[2], source[1], source[0], 255]);
+            }
+        }
+        SelectObject(memory, previous);
+        let _ = DeleteObject(HGDIOBJ(bitmap.0));
+        let _ = DeleteDC(memory);
+        ReleaseDC(None, screen);
+        copied.map_err(|error| format!("could not copy active-window pixels: {error}"))?;
+        rgba
+    };
+
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let path = env::temp_dir().join(format!("nickel-window-{stamp}.png"));
+    let image = image::RgbaImage::from_raw(width as u32, height as u32, rgba)
+        .ok_or_else(|| "could not construct the screenshot image".to_string())?;
+    image
+        .save(&path)
+        .map_err(|error| format!("could not save temporary screenshot: {error}"))?;
+    tracing::info!(path = %path.display(), width, height, "captured active window to a temporary file");
+    Ok(path)
+}
+
+fn set_clipboard_text(text: &str) -> Result<(), String> {
+    const CF_UNICODETEXT: u32 = 13;
+    let wide: Vec<u16> = text.encode_utf16().chain([0]).collect();
+    unsafe {
+        let memory = GlobalAlloc(GMEM_MOVEABLE, wide.len() * std::mem::size_of::<u16>())
+            .map_err(|error| format!("could not allocate clipboard text: {error}"))?;
+        let destination = GlobalLock(memory).cast::<u16>();
+        if destination.is_null() {
+            let _ = GlobalFree(Some(memory));
+            return Err("could not lock clipboard text memory".into());
+        }
+        std::ptr::copy_nonoverlapping(wide.as_ptr(), destination, wide.len());
+        let _ = GlobalUnlock(memory);
+        if let Err(error) = OpenClipboard(None) {
+            let _ = GlobalFree(Some(memory));
+            return Err(format!("could not open the clipboard: {error}"));
+        }
+        let result = EmptyClipboard()
+            .and_then(|()| SetClipboardData(CF_UNICODETEXT, Some(HANDLE(memory.0))).map(|_| ()));
+        let _ = CloseClipboard();
+        if let Err(error) = result {
+            let _ = GlobalFree(Some(memory));
+            return Err(format!(
+                "could not put the screenshot path on the clipboard: {error}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn fallback_wallpaper() -> Wallpaper {
@@ -621,6 +961,7 @@ unsafe extern "system" fn windows_key_hook(code: i32, wparam: WPARAM, lparam: LP
     const VK_TAB: u32 = 0x09;
     const VK_OEM_3: u32 = 0xc0;
     const VK_R: u32 = 0x52;
+    const VK_SNAPSHOT: u32 = 0x2c;
 
     if code < 0 {
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
@@ -642,6 +983,7 @@ unsafe extern "system" fn windows_key_hook(code: i32, wparam: WPARAM, lparam: LP
         VK_TAB => Hotkey::Tab,
         VK_OEM_3 => Hotkey::Grave,
         VK_R => Hotkey::Run,
+        VK_SNAPSHOT => Hotkey::PrintScreen,
         _ => Hotkey::Other,
     };
     if key == Hotkey::Run && RUN_HOTKEY_REGISTERED.load(std::sync::atomic::Ordering::Acquire) {
@@ -654,7 +996,7 @@ unsafe extern "system" fn windows_key_hook(code: i32, wparam: WPARAM, lparam: LP
         }
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
     }
-    if matches!(key, Hotkey::Tab | Hotkey::Grave)
+    if matches!(key, Hotkey::Tab | Hotkey::Grave | Hotkey::PrintScreen)
         && edge == KeyEdge::Pressed
         && unsafe { GetAsyncKeyState(VK_MENU as i32) < 0 }
         && let Ok(mut controller) = hotkey_controller().lock()
@@ -762,6 +1104,9 @@ fn send_hotkey_action(action: Option<HotkeyAction>) {
         Some(HotkeyAction::SwitchGroupNext) => GlobalShortcut::SwitchGroupNext,
         Some(HotkeyAction::SwitchGroupPrevious) => GlobalShortcut::SwitchGroupPrevious,
         Some(HotkeyAction::CommitSwitch) => GlobalShortcut::CommitSwitch,
+        Some(HotkeyAction::CaptureActiveWindow) => GlobalShortcut::CaptureActiveWindow,
+        Some(HotkeyAction::CaptureActiveWindowToFile) => GlobalShortcut::CaptureActiveWindowToFile,
+        Some(HotkeyAction::ShowScreenshotTool) => GlobalShortcut::ShowScreenshotTool,
         None => return,
     };
     if let Some(sender) = WINDOWS_KEY_SENDER.get() {
@@ -781,7 +1126,15 @@ unsafe extern "system" fn windows_mouse_hook(code: i32, wparam: WPARAM, lparam: 
     {
         let release = matches!(message, WM_LBUTTONUP | WM_RBUTTONUP);
         if message == WM_MOUSEMOVE || release {
-            if release || event.time.wrapping_sub(operation.last_update) >= 33 {
+            // Moving is inexpensive and should track the compositor closely. Resizing can make
+            // applications such as Windows Terminal reflow and redraw their entire contents, so
+            // retain a modest cap there without making ordinary dragging feel like 30 FPS.
+            let minimum_interval = if operation.resize_edge.is_some() {
+                16
+            } else {
+                8
+            };
+            if release || event.time.wrapping_sub(operation.last_update) >= minimum_interval {
                 update_window_drag(operation, event.pt);
                 if !release {
                     drag.as_mut().expect("drag operation exists").last_update = event.time;
@@ -810,9 +1163,20 @@ unsafe extern "system" fn windows_mouse_hook(code: i32, wparam: WPARAM, lparam: 
     if !matches!(message, WM_LBUTTONDOWN | WM_RBUTTONDOWN) {
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
     }
+    const VK_LWIN: i32 = 0x5b;
+    const VK_RWIN: i32 = 0x5c;
+    let physical_super = unsafe { GetAsyncKeyState(VK_LWIN) < 0 || GetAsyncKeyState(VK_RWIN) < 0 };
     let (super_held, chord_started) = hotkey_controller()
         .lock()
         .map(|mut controller| {
+            // Mouse and keyboard low-level hooks are delivered independently. A mouse-down can
+            // win the startup/event-order race before Nickel observes Super-down, so reconcile
+            // from Windows' physical state at the gesture boundary.
+            if physical_super && !controller.snapshot().super_held {
+                controller.handle(Hotkey::Super, KeyEdge::Pressed);
+            } else {
+                controller.reconcile_super(physical_super);
+            }
             let super_held = controller.snapshot().super_held;
             let chord_started = controller.begin_pointer_chord();
             (super_held, chord_started)
@@ -820,6 +1184,7 @@ unsafe extern "system" fn windows_mouse_hook(code: i32, wparam: WPARAM, lparam: 
         .unwrap_or_default();
     tracing::debug!(
         super_held,
+        physical_super,
         chord_started,
         button = if message == WM_LBUTTONDOWN {
             "left"

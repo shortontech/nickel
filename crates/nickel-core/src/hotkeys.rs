@@ -6,6 +6,7 @@ pub enum Hotkey {
     Tab,
     Grave,
     Run,
+    PrintScreen,
     Other,
 }
 
@@ -25,6 +26,9 @@ pub enum HotkeyAction {
     SwitchGroupNext,
     SwitchGroupPrevious,
     CommitSwitch,
+    CaptureActiveWindow,
+    CaptureActiveWindowToFile,
+    ShowScreenshotTool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -42,6 +46,7 @@ pub struct HotkeySnapshot {
     pub tab_held: bool,
     pub grave_held: bool,
     pub run_held: bool,
+    pub print_screen_held: bool,
     pub switch_active: bool,
     pub launcher_visible: bool,
 }
@@ -55,6 +60,7 @@ pub struct HotkeyController {
     tab_held: bool,
     grave_held: bool,
     run_held: bool,
+    print_screen_held: bool,
     switch_active: bool,
     launcher_visible: bool,
 }
@@ -69,6 +75,7 @@ impl HotkeyController {
             tab_held: self.tab_held,
             grave_held: self.grave_held,
             run_held: self.run_held,
+            print_screen_held: self.print_screen_held,
             switch_active: self.switch_active,
             launcher_visible: self.launcher_visible,
         }
@@ -132,6 +139,7 @@ impl HotkeyController {
                 self.alt_held = false;
                 self.tab_held = false;
                 self.grave_held = false;
+                self.print_screen_held = false;
                 let action = self.switch_active.then_some(HotkeyAction::CommitSwitch);
                 self.switch_active = false;
                 HotkeyOutcome {
@@ -187,6 +195,25 @@ impl HotkeyController {
                     ..Default::default()
                 }
             }
+            (Hotkey::PrintScreen, KeyEdge::Pressed) => {
+                let action = (!self.print_screen_held).then_some(if self.alt_held {
+                    HotkeyAction::CaptureActiveWindow
+                } else {
+                    HotkeyAction::ShowScreenshotTool
+                });
+                self.print_screen_held = true;
+                HotkeyOutcome {
+                    action,
+                    suppress: true,
+                }
+            }
+            (Hotkey::PrintScreen, KeyEdge::Released) if self.print_screen_held => {
+                self.print_screen_held = false;
+                HotkeyOutcome {
+                    suppress: true,
+                    ..Default::default()
+                }
+            }
             _ => {
                 if self.super_held && edge == KeyEdge::Pressed {
                     self.super_chorded = true;
@@ -220,6 +247,7 @@ impl HotkeyController {
         self.alt_held = false;
         self.tab_held = false;
         self.grave_held = false;
+        self.print_screen_held = false;
         let action = self.switch_active.then_some(HotkeyAction::CommitSwitch);
         self.switch_active = false;
         action
@@ -300,6 +328,53 @@ mod tests {
         assert_eq!(
             controller.handle(Hotkey::Alt, KeyEdge::Released).action,
             Some(HotkeyAction::CommitSwitch)
+        );
+    }
+
+    #[test]
+    fn alt_print_screen_captures_once_per_press() {
+        let mut controller = HotkeyController::default();
+        controller.handle(Hotkey::Alt, KeyEdge::Pressed);
+        assert_eq!(
+            controller
+                .handle(Hotkey::PrintScreen, KeyEdge::Pressed)
+                .action,
+            Some(HotkeyAction::CaptureActiveWindow)
+        );
+        assert_eq!(
+            controller
+                .handle(Hotkey::PrintScreen, KeyEdge::Pressed)
+                .action,
+            None
+        );
+        assert!(
+            controller
+                .handle(Hotkey::PrintScreen, KeyEdge::Released)
+                .suppress
+        );
+    }
+
+    #[test]
+    fn alt_shift_print_screen_captures_to_file() {
+        let mut controller = HotkeyController::default();
+        controller.handle(Hotkey::Alt, KeyEdge::Pressed);
+        controller.handle(Hotkey::Shift, KeyEdge::Pressed);
+        assert_eq!(
+            controller
+                .handle(Hotkey::PrintScreen, KeyEdge::Pressed)
+                .action,
+            Some(HotkeyAction::CaptureActiveWindow)
+        );
+    }
+
+    #[test]
+    fn print_screen_opens_crop_tool() {
+        let mut controller = HotkeyController::default();
+        assert_eq!(
+            controller
+                .handle(Hotkey::PrintScreen, KeyEdge::Pressed)
+                .action,
+            Some(HotkeyAction::ShowScreenshotTool)
         );
     }
 
