@@ -24,12 +24,13 @@ use std::{
 use glyphon::{
     Attrs, Buffer, Cache, Color, ContentType, CustomGlyph, Family, FontSystem, Metrics,
     RasterizeCustomGlyphRequest, RasterizedCustomGlyph, Resolution, Shaping, SwashCache, TextArea,
-    TextAtlas, TextBounds, TextRenderer, Viewport,
+    TextAtlas, TextBounds, TextRenderer, Viewport, cosmic_text::Align,
 };
 use nickel_components::{TextEditor, TextField};
 use nickel_core::launcher::LauncherVisibility;
 use nickel_core::run::RunPrompt;
 use nickel_core::shell_settings::ShellSettings;
+use nickel_core::theme::{Appearance, ThemePalette};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
@@ -798,6 +799,12 @@ impl Nickel {
         }
         if appearance_changed {
             let appearance = settings.resolve_appearance(nickel_platform::appearance());
+            if let Some(gpu) = &mut self.gpu {
+                gpu.set_appearance(appearance);
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
             for (window, gpu) in &mut self.panel_surfaces {
                 gpu.set_appearance(appearance);
                 window.request_redraw();
@@ -899,7 +906,7 @@ impl Nickel {
         (
             size.width,
             size.height,
-            layout::visible_capacity(size.height),
+            layout::visible_capacity(size.width, size.height),
         )
     }
 
@@ -946,12 +953,14 @@ struct Gpu {
     atlas: TextAtlas,
     text_renderer: TextRenderer,
     search_buffer: Buffer,
+    chrome_buffers: Vec<Buffer>,
     result_buffers: Vec<Buffer>,
     icon_ids: HashMap<LauncherIconSource, u16>,
     icon_images: Vec<Option<image::RgbaImage>>,
     icon_requests: mpsc::Sender<(u16, LauncherIconSource)>,
     icon_results: mpsc::Receiver<(u16, Option<image::RgbaImage>)>,
     rectangle_renderer: rectangles::RectangleRenderer,
+    palette: ThemePalette,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -983,10 +992,20 @@ impl Gpu {
         );
         let rectangle_renderer =
             rectangles::RectangleRenderer::new(&graphics.device, config.format);
-        let mut search_buffer = Buffer::new(&mut font_system, Metrics::new(30.0, 44.0));
-        search_buffer.set_size(Some(config.width.saturating_sub(112) as f32), Some(56.0));
-        let result_buffers = (0..9)
-            .map(|_| Buffer::new(&mut font_system, Metrics::new(24.0, 48.0)))
+        let mut search_buffer = Buffer::new(&mut font_system, Metrics::new(20.0, 30.0));
+        search_buffer.set_size(
+            Some(
+                config
+                    .width
+                    .saturating_sub(layout::CONTENT_LEFT as u32 + 56) as f32,
+            ),
+            Some(40.0),
+        );
+        let chrome_buffers = (0..8)
+            .map(|_| Buffer::new(&mut font_system, Metrics::new(17.0, 30.0)))
+            .collect();
+        let result_buffers = (0..12)
+            .map(|_| Buffer::new(&mut font_system, Metrics::new(17.0, 24.0)))
             .collect();
         let (icon_requests, worker_requests) = mpsc::channel::<(u16, LauncherIconSource)>();
         let (worker_results, icon_results) = mpsc::channel();
@@ -1031,13 +1050,19 @@ impl Gpu {
             atlas,
             text_renderer,
             search_buffer,
+            chrome_buffers,
             result_buffers,
             icon_ids: HashMap::new(),
             icon_images: Vec::new(),
             icon_requests,
             icon_results,
             rectangle_renderer,
+            palette: ThemePalette::from_appearance(Appearance::default()),
         })
+    }
+
+    fn set_appearance(&mut self, appearance: Appearance) {
+        self.palette = ThemePalette::from_appearance(appearance);
     }
 
     fn resize(&mut self, width: u32, height: u32) {
@@ -1047,8 +1072,8 @@ impl Gpu {
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.graphics.device, &self.config);
-        let text_width = width.saturating_sub(112) as f32;
-        self.search_buffer.set_size(Some(text_width), Some(56.0));
+        let text_width = width.saturating_sub(layout::CONTENT_LEFT as u32 + 56) as f32;
+        self.search_buffer.set_size(Some(text_width), Some(40.0));
     }
 
     fn render(
@@ -1072,8 +1097,28 @@ impl Gpu {
         );
         self.search_buffer
             .shape_until_scroll(&mut self.font_system, false);
+        let chrome = [
+            "FAVORITES",
+            "ALL APPLICATIONS",
+            "RECENT",
+            "PLACES",
+            "SETTINGS",
+            "NICKEL FILE",
+            "NICKEL PLATING",
+            "POWER",
+        ];
+        for (buffer, label) in self.chrome_buffers.iter_mut().zip(chrome) {
+            buffer.set_size(Some(188.0), Some(34.0));
+            buffer.set_text(
+                label,
+                &Attrs::new().family(Family::SansSerif),
+                Shaping::Advanced,
+                None,
+            );
+            buffer.shape_until_scroll(&mut self.font_system, false);
+        }
 
-        let capacity = layout::visible_capacity(self.config.height);
+        let capacity = layout::visible_capacity(self.config.width, self.config.height);
         let visible_count = launcher
             .result_count()
             .saturating_sub(scroll_offset)
@@ -1081,7 +1126,7 @@ impl Gpu {
             .max(1);
         while self.result_buffers.len() < visible_count {
             self.result_buffers
-                .push(Buffer::new(&mut self.font_system, Metrics::new(24.0, 48.0)));
+                .push(Buffer::new(&mut self.font_system, Metrics::new(17.0, 24.0)));
         }
         let mut row_glyphs = vec![Vec::new(); visible_count];
         for (index, buffer) in self
@@ -1095,17 +1140,7 @@ impl Gpu {
             let text = launcher
                 .result_at(result_index)
                 .map_or("No applications found", |result| result.name());
-            let selected = launcher.result_count() > 0 && result_index == launcher.selected_index();
-            let pinned = launcher
-                .result_at(result_index)
-                .is_some_and(|application| launcher.is_pinned(application.id()));
-            let marker = match (selected, pinned) {
-                (true, true) => "› ★",
-                (true, false) => "›  ",
-                (false, true) => "  ★",
-                (false, false) => "   ",
-            };
-            let text = format!("{marker} {text}");
+            let text = compact_tile_label(text, 25);
             buffer.set_size(Some(row.label.width), Some(row.label.height));
             buffer.set_text(
                 &text,
@@ -1113,6 +1148,9 @@ impl Gpu {
                 Shaping::Advanced,
                 None,
             );
+            for line in &mut buffer.lines {
+                line.set_align(Some(Align::Center));
+            }
             buffer.shape_until_scroll(&mut self.font_system, false);
 
             let Some(source) = launcher.result_at(result_index).and_then(|application| {
@@ -1161,36 +1199,89 @@ impl Gpu {
                 height: self.config.height,
             },
         );
-        let scrollbar = layout::scrollbar(
-            self.config.width,
-            self.config.height,
-            launcher.result_count(),
-            capacity,
-            scroll_offset,
-        );
+        let searching = !editor.text().is_empty() || !editor.preedit().is_empty();
+        let scrollbar = searching
+            .then(|| {
+                layout::scrollbar(
+                    self.config.width,
+                    self.config.height,
+                    launcher.result_count(),
+                    capacity,
+                    scroll_offset,
+                )
+            })
+            .flatten();
         let hovered_row = hovered_result.and_then(|index| index.checked_sub(scroll_offset));
+        let selected_row = launcher
+            .selected_index()
+            .checked_sub(scroll_offset)
+            .filter(|index| *index < visible_count);
         self.rectangle_renderer.update(
             &self.graphics.queue,
             (self.config.width, self.config.height),
             hovered_row.filter(|index| *index < visible_count),
+            selected_row,
             scrollbar,
+            self.palette,
         );
         let icon_images = &self.icon_images;
-        let mut text_areas = Vec::with_capacity(visible_count + 1);
+        let mut text_areas = Vec::with_capacity(visible_count + self.chrome_buffers.len() + 1);
         text_areas.push(TextArea {
             buffer: &self.search_buffer,
-            left: 56.0,
-            top: 48.0,
+            left: layout::CONTENT_LEFT + 14.0,
+            top: 27.0,
             scale: 1.0,
             bounds: TextBounds {
-                left: 56,
-                top: 48,
-                right: self.config.width.saturating_sub(56) as i32,
-                bottom: 108,
+                left: layout::CONTENT_LEFT as i32,
+                top: 22,
+                right: self.config.width.saturating_sub(28) as i32,
+                bottom: 70,
             },
-            default_color: Color::rgb(238, 241, 248),
+            default_color: glyphon_color(self.palette.text),
             custom_glyphs: &[],
         });
+        let chrome_positions = [
+            (18.0, 78.0),
+            (18.0, 120.0),
+            (18.0, 162.0),
+            (18.0, 204.0),
+            (18.0, 246.0),
+            (layout::CONTENT_LEFT, self.config.height as f32 - 48.0),
+            (
+                layout::CONTENT_LEFT + 174.0,
+                self.config.height as f32 - 48.0,
+            ),
+            (
+                self.config.width as f32 - 112.0,
+                self.config.height as f32 - 48.0,
+            ),
+        ];
+        for (index, (buffer, (left, top))) in
+            self.chrome_buffers.iter().zip(chrome_positions).enumerate()
+        {
+            text_areas.push(TextArea {
+                buffer,
+                left,
+                top,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: left as i32,
+                    top: top as i32,
+                    right: if index < 5 {
+                        layout::SIDEBAR_WIDTH as i32
+                    } else {
+                        self.config.width as i32
+                    },
+                    bottom: (top + 34.0) as i32,
+                },
+                default_color: glyphon_color(if index == 1 {
+                    self.palette.text
+                } else {
+                    self.palette.muted
+                }),
+                custom_glyphs: &[],
+            });
+        }
         for (index, buffer) in self.result_buffers.iter().take(visible_count).enumerate() {
             let row = layout::ResultRow::allocate(index, self.config.width);
             text_areas.push(TextArea {
@@ -1204,7 +1295,7 @@ impl Gpu {
                     right: row.outer.right() as i32,
                     bottom: row.outer.bottom() as i32,
                 },
-                default_color: Color::rgb(208, 216, 232),
+                default_color: glyphon_color(self.palette.muted),
                 custom_glyphs: &row_glyphs[index],
             });
         }
@@ -1258,12 +1349,7 @@ impl Gpu {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.035,
-                            g: 0.045,
-                            b: 0.065,
-                            a: 1.0,
-                        }),
+                        load: wgpu::LoadOp::Clear(wgpu_color(self.palette.background)),
                         store: wgpu::StoreOp::Store,
                     },
                     depth_slice: None,
@@ -1278,6 +1364,35 @@ impl Gpu {
 
         self.graphics.queue.submit([encoder.finish()]);
         self.graphics.queue.present(frame);
+    }
+}
+
+fn glyphon_color(rgb: u32) -> Color {
+    Color::rgb(
+        ((rgb >> 16) & 0xff) as u8,
+        ((rgb >> 8) & 0xff) as u8,
+        (rgb & 0xff) as u8,
+    )
+}
+
+fn compact_tile_label(label: &str, maximum_characters: usize) -> String {
+    if label.chars().count() <= maximum_characters {
+        return label.to_owned();
+    }
+    let mut compact = label
+        .chars()
+        .take(maximum_characters.saturating_sub(1))
+        .collect::<String>();
+    compact.push('…');
+    compact
+}
+
+fn wgpu_color(rgb: u32) -> wgpu::Color {
+    wgpu::Color {
+        r: f64::from((rgb >> 16) & 0xff) / 255.0,
+        g: f64::from((rgb >> 8) & 0xff) / 255.0,
+        b: f64::from(rgb & 0xff) / 255.0,
+        a: 1.0,
     }
 }
 
@@ -1353,7 +1468,7 @@ impl ApplicationHandler for Nickel {
             .with_window_level(WindowLevel::Normal);
         if let Some(monitor) = target.as_ref() {
             launcher_attributes =
-                launcher_attributes.with_position(centered_position(monitor, (960, 640)));
+                launcher_attributes.with_position(launcher_position(monitor, (960, 640)));
             run_attributes = run_attributes.with_position(centered_position(
                 monitor,
                 (run_dialog::WIDTH, run_dialog::HEIGHT),
@@ -1501,11 +1616,15 @@ impl ApplicationHandler for Nickel {
             }
         }
         platform::send_shell_command(ShellCommand::HideContextMenu);
-        let Ok(launcher_gpu) = pollster::block_on(Gpu::new(launcher_window.clone())) else {
+        let Ok(mut launcher_gpu) = pollster::block_on(Gpu::new(launcher_window.clone())) else {
             eprintln!("failed to initialize Nickel launcher renderer");
             event_loop.exit();
             return;
         };
+        launcher_gpu.set_appearance(
+            self.shell_settings
+                .resolve_appearance(nickel_platform::appearance()),
+        );
         let shared_graphics = launcher_gpu.graphics.clone();
         let wallpaper = platform::wallpaper();
         let mut desktop_surfaces = Vec::new();
@@ -2125,7 +2244,18 @@ impl ApplicationHandler for Nickel {
                     state: ElementState::Pressed,
                     button: MouseButton::Left,
                     ..
-                } if self.panel_hovered => self.toggle_launcher(),
+                } if self.panel_hovered => {
+                    if let Some(launcher) = &self.window
+                        && let Some(monitor) = self.panel_surfaces[panel_index].0.current_monitor()
+                    {
+                        let size = launcher.inner_size();
+                        launcher.set_outer_position(launcher_position(
+                            &monitor,
+                            (size.width, size.height),
+                        ));
+                    }
+                    self.toggle_launcher();
+                }
                 WindowEvent::MouseInput {
                     state: ElementState::Pressed,
                     button: MouseButton::Left,
@@ -2301,7 +2431,7 @@ impl ApplicationHandler for Nickel {
                     MouseScrollDelta::PixelDelta(position) => (-position.y / 52.0).round() as i32,
                 };
                 if rows != 0 {
-                    self.scroll_by(rows);
+                    self.scroll_by(rows * layout::GRID_COLUMNS as i32);
                     self.hovered_result = None;
                     self.window
                         .as_ref()
@@ -2315,15 +2445,21 @@ impl ApplicationHandler for Nickel {
                 ..
             } => {
                 let (width, height, capacity) = self.viewport_metrics();
+                let searching = !self.launcher_editor.text().is_empty()
+                    || !self.launcher_editor.preedit().is_empty();
                 if let (Some(position), Some(scrollbar)) = (
                     self.cursor_position,
-                    layout::scrollbar(
-                        width,
-                        height,
-                        self.launcher.result_count(),
-                        capacity,
-                        self.scroll_offset,
-                    ),
+                    searching
+                        .then(|| {
+                            layout::scrollbar(
+                                width,
+                                height,
+                                self.launcher.result_count(),
+                                capacity,
+                                self.scroll_offset,
+                            )
+                        })
+                        .flatten(),
                 ) {
                     if layout::rect_contains(scrollbar.thumb, position.x, position.y) {
                         self.scrollbar_drag_offset =
@@ -2413,8 +2549,14 @@ impl ApplicationHandler for Nickel {
                 let mut changed = true;
                 let mut query_changed = false;
                 match event.logical_key {
-                    Key::Named(NamedKey::ArrowDown) => self.launcher.select_next(),
-                    Key::Named(NamedKey::ArrowUp) => self.launcher.select_previous(),
+                    Key::Named(NamedKey::ArrowDown) => {
+                        self.launcher.select_relative(layout::GRID_COLUMNS as isize)
+                    }
+                    Key::Named(NamedKey::ArrowUp) => self
+                        .launcher
+                        .select_relative(-(layout::GRID_COLUMNS as isize)),
+                    Key::Named(NamedKey::ArrowRight) => self.launcher.select_relative(1),
+                    Key::Named(NamedKey::ArrowLeft) => self.launcher.select_relative(-1),
                     Key::Named(NamedKey::Backspace) => {
                         self.launcher_editor.backspace();
                         query_changed = true;
@@ -2636,6 +2778,19 @@ fn centered_position(monitor: &MonitorHandle, window_size: (u32, u32)) -> Physic
     PhysicalPosition::new(x, y)
 }
 
+fn launcher_position(monitor: &MonitorHandle, window_size: (u32, u32)) -> PhysicalPosition<i32> {
+    let origin = monitor.position();
+    let size = monitor.size();
+    PhysicalPosition::new(
+        origin.x,
+        origin.y
+            + size
+                .height
+                .saturating_sub(PANEL_HEIGHT.round() as u32)
+                .saturating_sub(window_size.1) as i32,
+    )
+}
+
 fn sorted_monitors(event_loop: &ActiveEventLoop) -> Vec<MonitorHandle> {
     let mut monitors: Vec<_> = event_loop.available_monitors().collect();
     monitors.sort_by_key(|monitor| {
@@ -2821,6 +2976,18 @@ mod tests {
         assert_eq!(
             next_minute_deadline(now, wall_clock).duration_since(now),
             Duration::from_millis(54_750)
+        );
+    }
+
+    #[test]
+    fn launcher_tile_labels_are_bounded_without_splitting_unicode() {
+        assert_eq!(
+            super::compact_tile_label("Control Panel", 25),
+            "Control Panel"
+        );
+        assert_eq!(
+            super::compact_tile_label("Documentation for Desktop Applications", 25),
+            "Documentation for Deskto…"
         );
     }
 

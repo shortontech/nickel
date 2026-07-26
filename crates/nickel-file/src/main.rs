@@ -8,8 +8,8 @@ use std::{
 };
 
 use nickel_components::{
-    Button, Column, ComponentGpu, Container, Grid, Image, Insets, LinearGradient, Point, Rect, Row,
-    Text, TextAlign, UiTree,
+    Button, Column, ComponentGpu, Container, FileGrid, FileGridItem, Insets, LinearGradient, Point,
+    Rect, Row, Text, UiTree,
 };
 use nickel_core::shell_settings::ShellSettings;
 use nickel_file::{DirectoryBrowser, FileEntry};
@@ -249,10 +249,10 @@ impl FileApp {
                     left: 16.0,
                 })
                 .child(
-                    Grid::columns(columns)
+                    FileGrid::columns(columns)
                         .gap(10.0)
                         .height(grid_height)
-                        .children(tiles),
+                        .items(tiles),
                 )
         };
         let footer_text = if self.status.is_empty() {
@@ -574,7 +574,7 @@ fn file_tile(
     entry: &FileEntry,
     selected: bool,
     icon: Option<(u16, Arc<image::RgbaImage>)>,
-) -> Container {
+) -> FileGridItem {
     let (icon_id, icon_image) = icon.unwrap_or_else(|| {
         (
             0,
@@ -585,28 +585,17 @@ fn file_tile(
             )),
         )
     });
-    Container::new()
-        .background(if selected { TILE_SELECTED } else { TILE })
-        .border(if selected { PRIMARY } else { BORDER }, 1.0)
-        .padding(Insets {
-            top: 12.0,
-            right: 8.0,
-            bottom: 8.0,
-            left: 8.0,
-        })
-        .action(format!("entry:{index}"))
-        .child(
-            Column::new()
-                .gap(7.0)
-                .child(Image::new(icon_id, icon_image).height(62.0))
-                .child(
-                    Text::new(entry.display_name())
-                        .height(27.0)
-                        .scale(1.2)
-                        .align(TextAlign::Center)
-                        .color(TEXT),
-                ),
-        )
+    FileGridItem::new(
+        format!("entry:{index}"),
+        entry.display_name(),
+        icon_id,
+        icon_image,
+    )
+    .colors(
+        if selected { TILE_SELECTED } else { TILE },
+        if selected { PRIMARY } else { BORDER },
+        TEXT,
+    )
 }
 
 #[cfg(not(target_os = "windows"))]

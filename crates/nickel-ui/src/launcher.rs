@@ -176,6 +176,16 @@ impl Launcher {
         }
     }
 
+    pub fn select_relative(&mut self, offset: isize) {
+        if self.results.is_empty() {
+            return;
+        }
+        self.selected = self
+            .selected
+            .saturating_add_signed(offset)
+            .min(self.results.len() - 1);
+    }
+
     fn refresh(&mut self) {
         if self.query.is_empty() {
             let mut results: Vec<_> = (0..self.applications.len()).collect();
