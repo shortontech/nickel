@@ -565,7 +565,8 @@ impl SettingsApp {
                         )
                         .width(135.0)
                         .color(palette.text)
-                        .background(palette.surface),
+                        .background(palette.surface_hover)
+                        .border(palette.muted, 1.0),
                     )
                     .child(
                         UiButton::new(
@@ -574,7 +575,8 @@ impl SettingsApp {
                         )
                         .width(145.0)
                         .color(palette.text)
-                        .background(palette.surface),
+                        .background(palette.surface_hover)
+                        .border(palette.muted, 1.0),
                     )
                     .child(
                         UiButton::new(

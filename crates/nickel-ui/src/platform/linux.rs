@@ -298,6 +298,8 @@ pub fn launcher_hotkey_receiver() -> mpsc::Receiver<GlobalShortcut> {
     receiver
 }
 
+pub fn handle_focused_shortcut(_: nickel_core::hotkeys::Hotkey, _: nickel_core::hotkeys::KeyEdge) {}
+
 pub fn execute_run_command(command: &str) -> bool {
     std::process::Command::new("sh")
         .arg("-c")
