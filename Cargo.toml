@@ -5,6 +5,7 @@ members = [
     "crates/nickel-logging",
     "crates/nickel-file",
     "crates/nickel-i18n",
+    "crates/nickel-i18n-lint",
     "crates/nickel-platform",
     "crates/nickel-session",
     "crates/nickel-settings",
@@ -37,9 +38,11 @@ tracing = "0.1.44"
 shlex = "1.3.0"
 softbuffer = "0.4.8"
 sys-locale = "0.3.2"
+syn = { version = "2.0.106", features = ["full", "visit"] }
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 unicode-segmentation = "1.12.0"
 unic-langid = "0.9.6"
+proc-macro2 = { version = "1.0.101", features = ["span-locations"] }
 wgpu = "30.0.0"
 winit = "0.30.12"
 windows = "0.62.2"
