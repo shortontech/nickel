@@ -301,9 +301,12 @@ pub fn launcher_hotkey_receiver() -> mpsc::Receiver<GlobalShortcut> {
 pub fn handle_focused_shortcut(_: nickel_core::hotkeys::Hotkey, _: nickel_core::hotkeys::KeyEdge) {}
 
 pub fn execute_run_command(command: &str) -> Result<(), super::LaunchError> {
-    std::process::Command::new("sh")
-        .arg("-c")
-        .arg(command)
+    let mut process = std::process::Command::new("sh");
+    process.arg("-c").arg(command);
+    if let Some(home) = std::env::var_os("HOME") {
+        process.current_dir(home);
+    }
+    process
         .spawn()
         .map(|_| ())
         .map_err(|error| super::LaunchError::Platform(error.to_string()))

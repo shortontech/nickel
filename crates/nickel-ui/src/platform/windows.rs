@@ -64,22 +64,23 @@ use windows::{
                 DefWindowProcW, DestroyIcon, DrawIconEx, EnumWindows, GA_ROOT, GA_ROOTOWNER,
                 GCLP_HICON, GCLP_HICONSM, GWL_EXSTYLE, GWLP_WNDPROC, GetAncestor, GetClassLongPtrW,
                 GetClassNameW, GetCursorPos, GetForegroundWindow, GetLastActivePopup, GetMessageW,
-                GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
-                GetWindowThreadProcessId, HICON, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTLEFT,
-                HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_BOTTOM, HWND_BROADCAST, HWND_TOPMOST,
-                IsIconic, IsWindow, IsWindowVisible, IsZoomed, KBDLLHOOKSTRUCT, KillTimer,
-                LWA_ALPHA, MSG, MSLLHOOKSTRUCT, PostMessageW, RegisterClassW,
-                RegisterShellHookWindow, RegisterWindowMessageW, SPI_GETWORKAREA, SPI_SETWORKAREA,
-                SPIF_SENDCHANGE, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW,
-                SW_SHOWNOACTIVATE, SW_SHOWNORMAL, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED,
-                SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendNotifyMessageW,
-                SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW,
-                SetWindowPos, SetWindowsHookExW, ShowWindow, SystemParametersInfoW, WH_KEYBOARD_LL,
-                WH_MOUSE_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_CONTEXTMENU, WM_COPYDATA,
-                WM_HOTKEY, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-                WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSW,
-                WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_APPWINDOW, WS_EX_LAYERED,
-                WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WindowFromPoint,
+                GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW,
+                GetWindowTextW, GetWindowThreadProcessId, HICON, HTBOTTOM, HTBOTTOMLEFT,
+                HTBOTTOMRIGHT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_BOTTOM,
+                HWND_BROADCAST, HWND_TOPMOST, IsIconic, IsWindow, IsWindowVisible, IsZoomed,
+                KBDLLHOOKSTRUCT, KillTimer, LWA_ALPHA, MSG, MSLLHOOKSTRUCT, PostMessageW,
+                RegisterClassW, RegisterShellHookWindow, RegisterWindowMessageW, SM_CXSMICON,
+                SM_CYSMICON, SPI_GETWORKAREA, SPI_SETWORKAREA, SPIF_SENDCHANGE, SW_HIDE,
+                SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, SW_SHOWNORMAL,
+                SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+                SWP_NOZORDER, SendNotifyMessageW, SetForegroundWindow, SetLayeredWindowAttributes,
+                SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowsHookExW, ShowWindow,
+                SystemParametersInfoW, WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_EX_STYLE, WINDOW_STYLE,
+                WM_CLOSE, WM_CONTEXTMENU, WM_COPYDATA, WM_HOTKEY, WM_KEYDOWN, WM_KEYUP,
+                WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP,
+                WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN,
+                WS_CLIPSIBLINGS, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+                WS_EX_TOOLWINDOW, WindowFromPoint,
             },
         },
     },
@@ -1447,6 +1448,14 @@ pub fn launch_application(application: &Application) -> Result<Option<u32>, Laun
 
 fn shell_execute(target: &str, arguments: &[String]) -> Result<(), LaunchError> {
     let target_wide: Vec<u16> = target.encode_utf16().chain([0]).collect();
+    let home_wide = env::var_os("USERPROFILE")
+        .or_else(|| env::var_os("HOME"))
+        .map(|home| {
+            home.to_string_lossy()
+                .encode_utf16()
+                .chain([0])
+                .collect::<Vec<_>>()
+        });
     let argument_line = arguments
         .iter()
         .map(|argument| quote_windows_argument(argument))
@@ -1458,14 +1467,17 @@ fn shell_execute(target: &str, arguments: &[String]) -> Result<(), LaunchError> 
     } else {
         PCWSTR(argument_wide.as_ptr())
     };
-    // SAFETY: Both UTF-16 buffers remain alive through this synchronous Shell32 call.
+    // SAFETY: The target, argument, and optional home-directory UTF-16 buffers remain alive
+    // through this synchronous Shell32 call.
     let result = unsafe {
         ShellExecuteW(
             None,
             w!("open"),
             PCWSTR(target_wide.as_ptr()),
             parameters,
-            None,
+            home_wide
+                .as_ref()
+                .map_or(PCWSTR::null(), |home| PCWSTR(home.as_ptr())),
             SW_SHOWNORMAL,
         )
     }
@@ -1564,8 +1576,9 @@ pub fn configure_desktop_window(window: &winit::window::Window) -> bool {
         return false;
     };
     let hwnd = HWND(handle.hwnd.get() as *mut c_void);
-    // SAFETY: hwnd belongs to the live winit desktop window. The style change prevents activation,
-    // and SetWindowPos moves only its Z-order without changing its monitor geometry.
+    // SAFETY: hwnd belongs to the live winit desktop window. Windows returns a monitor rectangle
+    // for that window, and SetWindowPos applies that rectangle while keeping the desktop at the
+    // bottom of the Z-order. This also corrects stale winit geometry after a display-mode change.
     unsafe {
         let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
         SetWindowLongPtrW(
@@ -1573,14 +1586,23 @@ pub fn configure_desktop_window(window: &winit::window::Window) -> bool {
             GWL_EXSTYLE,
             (style | WS_EX_NOACTIVATE.0 | WS_EX_TOOLWINDOW.0) as isize,
         );
+        let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        let mut monitor_info = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(monitor, &raw mut monitor_info).as_bool() {
+            return false;
+        }
+        let bounds = monitor_info.rcMonitor;
         SetWindowPos(
             hwnd,
             Some(HWND_BOTTOM),
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            bounds.left,
+            bounds.top,
+            bounds.right - bounds.left,
+            bounds.bottom - bounds.top,
+            SWP_NOACTIVATE | SWP_FRAMECHANGED,
         )
         .is_ok()
     }
@@ -2078,7 +2100,7 @@ fn update_tray_icon(message: u32, icon: &TrayNotifyIconData) -> bool {
         .position(|item| tray_icon_matches(item, owner, id, guid));
     match message {
         value if value == NIM_ADD.0 => {
-            let Some(image) = render_icon(HICON(icon.icon as usize as *mut c_void)) else {
+            let Some(image) = render_tray_icon(HICON(icon.icon as usize as *mut c_void)) else {
                 return false;
             };
             let title = wide_text(&icon.tip);
@@ -2119,7 +2141,7 @@ fn update_tray_icon(message: u32, icon: &TrayNotifyIconData) -> bool {
                 items[index].hidden = tray_icon_hidden(icon);
             }
             if icon.flags & NIF_ICON.0 != 0
-                && let Some(image) = render_icon(HICON(icon.icon as usize as *mut c_void))
+                && let Some(image) = render_tray_icon(HICON(icon.icon as usize as *mut c_void))
             {
                 items[index].item.icon = image;
             }
@@ -2852,12 +2874,22 @@ fn window_icon(hwnd: HWND) -> Option<image::RgbaImage> {
 }
 
 fn render_icon(icon: HICON) -> Option<image::RgbaImage> {
-    const SIZE: u32 = 32;
+    render_icon_sized(icon, 32, 32)
+}
+
+fn render_tray_icon(icon: HICON) -> Option<image::RgbaImage> {
+    // SAFETY: GetSystemMetrics reads the current process's DPI-aware small-icon dimensions.
+    let width = unsafe { GetSystemMetrics(SM_CXSMICON) }.max(1) as u32;
+    let height = unsafe { GetSystemMetrics(SM_CYSMICON) }.max(1) as u32;
+    render_icon_sized(icon, width, height)
+}
+
+fn render_icon_sized(icon: HICON, width: u32, height: u32) -> Option<image::RgbaImage> {
     let info = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
             biSize: size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: SIZE as i32,
-            biHeight: -(SIZE as i32),
+            biWidth: width as i32,
+            biHeight: -(height as i32),
             biPlanes: 1,
             biBitCount: 32,
             biCompression: BI_RGB.0,
@@ -2899,14 +2931,14 @@ fn render_icon(icon: HICON) -> Option<image::RgbaImage> {
             0,
             0,
             icon,
-            SIZE as i32,
-            SIZE as i32,
+            width as i32,
+            height as i32,
             0,
             None,
             DI_NORMAL,
         )
         .is_ok();
-        let mut rgba = vec![0_u8; (SIZE * SIZE * 4) as usize];
+        let mut rgba = vec![0_u8; (width * height * 4) as usize];
         if drawn && !pixels.is_null() {
             let bgra = std::slice::from_raw_parts(pixels.cast::<u8>(), rgba.len());
             for (source, target) in bgra.chunks_exact(4).zip(rgba.chunks_exact_mut(4)) {
@@ -2918,7 +2950,7 @@ fn render_icon(icon: HICON) -> Option<image::RgbaImage> {
         let _ = DeleteDC(memory);
         ReleaseDC(None, screen);
         drawn
-            .then(|| image::RgbaImage::from_raw(SIZE, SIZE, rgba))
+            .then(|| image::RgbaImage::from_raw(width, height, rgba))
             .flatten()
     }
 }
