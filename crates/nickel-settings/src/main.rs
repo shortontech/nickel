@@ -16,6 +16,7 @@ use nickel_core::{
     shell_settings::{ShellSettings, ThemePreference},
     theme::{ThemeMode, ThemePalette},
 };
+use nickel_i18n::Localizer;
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalSize, PhysicalPosition},
@@ -225,6 +226,7 @@ struct WifiNetwork {
 }
 
 struct SettingsApp {
+    localizer: Localizer,
     window: Option<Arc<Window>>,
     gpu: Option<ComponentGpu>,
     displays: Vec<DisplayCard>,
@@ -251,7 +253,10 @@ struct SettingsApp {
 
 impl Default for SettingsApp {
     fn default() -> Self {
+        let localizer = Localizer::system();
+        let status = localizer.text("settings-status-changes-not-applied");
         Self {
+            localizer,
             window: None,
             gpu: None,
             displays: vec![
@@ -289,7 +294,7 @@ impl Default for SettingsApp {
             drag_offset: None,
             applied: false,
             pixels_per_logical: 0.14,
-            status: "CHANGES NOT APPLIED".into(),
+            status,
             page: SettingsPage::Display,
             shell_settings: ShellSettings::load_default(),
             desktop_slider_dragging: false,
@@ -385,12 +390,21 @@ impl SettingsApp {
         let palette = self.palette();
         let (title, subtitle) = match self.page {
             SettingsPage::Display => (
-                "DISPLAY SETTINGS",
-                "DRAG DISPLAYS TO MATCH THEIR PHYSICAL POSITION",
+                self.localizer.text("settings-display-title"),
+                self.localizer.text("settings-display-subtitle"),
             ),
-            SettingsPage::Bar => ("NICKEL BAR", "DISPLAYS, WINDOWS, AND DESKTOPS"),
-            SettingsPage::Appearance => ("APPEARANCE", "LIGHT, DARK, AND ONE STARTING HUE"),
-            SettingsPage::Network => ("NETWORK SETTINGS", "WINDOWS NETWORK ADAPTERS"),
+            SettingsPage::Bar => (
+                self.localizer.text("settings-bar-title"),
+                self.localizer.text("settings-bar-subtitle"),
+            ),
+            SettingsPage::Appearance => (
+                self.localizer.text("settings-appearance-title"),
+                self.localizer.text("settings-appearance-subtitle"),
+            ),
+            SettingsPage::Network => (
+                self.localizer.text("settings-network-title"),
+                self.localizer.text("settings-network-subtitle"),
+            ),
         };
         let header_content = Container::new()
             .grow(1.0)
@@ -417,16 +431,17 @@ impl SettingsApp {
                     .background(palette.panel),
             )
             .child(header_content);
-        let mut display_button = UiButton::new("nav:display", "DISPLAY")
-            .width((SIDEBAR_WIDTH - 24) as f32)
-            .height(46.0)
-            .color(palette.text);
+        let mut display_button =
+            UiButton::new("nav:display", self.localizer.text("settings-nav-display"))
+                .width((SIDEBAR_WIDTH - 24) as f32)
+                .height(46.0)
+                .color(palette.text);
         if self.page == SettingsPage::Display {
             display_button = display_button
                 .background(palette.accent_soft)
                 .border(palette.accent, 2.0);
         }
-        let mut bar_button = UiButton::new("nav:bar", "NICKEL BAR")
+        let mut bar_button = UiButton::new("nav:bar", self.localizer.text("settings-nav-bar"))
             .width((SIDEBAR_WIDTH - 24) as f32)
             .height(46.0)
             .color(palette.text);
@@ -435,19 +450,23 @@ impl SettingsApp {
                 .background(palette.accent_soft)
                 .border(palette.accent, 2.0);
         }
-        let mut appearance_button = UiButton::new("nav:appearance", "APPEARANCE")
-            .width((SIDEBAR_WIDTH - 24) as f32)
-            .height(46.0)
-            .color(palette.text);
+        let mut appearance_button = UiButton::new(
+            "nav:appearance",
+            self.localizer.text("settings-nav-appearance"),
+        )
+        .width((SIDEBAR_WIDTH - 24) as f32)
+        .height(46.0)
+        .color(palette.text);
         if self.page == SettingsPage::Appearance {
             appearance_button = appearance_button
                 .background(palette.accent_soft)
                 .border(palette.accent, 2.0);
         }
-        let mut network_button = UiButton::new("nav:network", "NETWORK")
-            .width((SIDEBAR_WIDTH - 24) as f32)
-            .height(46.0)
-            .color(palette.text);
+        let mut network_button =
+            UiButton::new("nav:network", self.localizer.text("settings-nav-network"))
+                .width((SIDEBAR_WIDTH - 24) as f32)
+                .height(46.0)
+                .color(palette.text);
         if self.page == SettingsPage::Network {
             network_button = network_button
                 .background(palette.accent_soft)
@@ -506,22 +525,31 @@ impl SettingsApp {
                     .gap(15.0)
                     .child(Text::new(&selected.name).color(palette.text).width(183.0))
                     .child(
-                        UiButton::new("display:identify", "IDENTIFY")
-                            .width(135.0)
-                            .color(palette.text)
-                            .background(palette.surface),
+                        UiButton::new(
+                            "display:identify",
+                            self.localizer.text("settings-display-identify"),
+                        )
+                        .width(135.0)
+                        .color(palette.text)
+                        .background(palette.surface),
                     )
                     .child(
-                        UiButton::new("display:primary", "MAKE PRIMARY")
-                            .width(145.0)
-                            .color(palette.text)
-                            .background(palette.surface),
+                        UiButton::new(
+                            "display:primary",
+                            self.localizer.text("settings-display-make-primary"),
+                        )
+                        .width(145.0)
+                        .color(palette.text)
+                        .background(palette.surface),
                     )
                     .child(
-                        UiButton::new("display:apply", "APPLY")
-                            .width(105.0)
-                            .color(palette.text)
-                            .background(palette.accent),
+                        UiButton::new(
+                            "display:apply",
+                            self.localizer.text("settings-display-apply"),
+                        )
+                        .width(105.0)
+                        .color(palette.text)
+                        .background(palette.accent),
                     ),
             )
             .child(
@@ -544,11 +572,19 @@ impl SettingsApp {
             .enumerate()
             .map(|(index, network)| {
                 let detail = if network.connected {
-                    format!("CONNECTED  {}%", network.signal)
+                    self.localizer.number(
+                        "settings-network-connected-signal",
+                        "signal",
+                        i64::from(network.signal),
+                    )
                 } else if network.signal == 0 {
-                    "SAVED  NOT IN RANGE".to_owned()
+                    self.localizer.text("settings-network-saved-unavailable")
                 } else {
-                    format!("{}%  CLICK TO CONNECT", network.signal)
+                    self.localizer.number(
+                        "settings-network-connect-action",
+                        "signal",
+                        i64::from(network.signal),
+                    )
                 };
                 Container::new()
                     .height(44.0)
@@ -573,9 +609,13 @@ impl SettingsApp {
             });
         let adapter_cards = self.network_adapters.iter().take(2).map(|adapter| {
             let status = if adapter.connected {
-                format!("CONNECTED  {} MBPS", adapter.speed / 1_000_000)
+                self.localizer.number(
+                    "settings-network-connected-speed",
+                    "speed",
+                    (adapter.speed / 1_000_000) as i64,
+                )
             } else {
-                "DISCONNECTED".to_owned()
+                self.localizer.text("settings-network-disconnected")
             };
             Container::new()
                 .height(72.0)
@@ -618,7 +658,11 @@ impl SettingsApp {
             .child(
                 Row::new()
                     .height(26.0)
-                    .child(Text::new("SAVED WI-FI").color(palette.text).width(308.0))
+                    .child(
+                        Text::new(self.localizer.text("settings-network-saved-wifi"))
+                            .color(palette.text)
+                            .width(308.0),
+                    )
                     .child(Text::new(&self.wifi_status).scale(1.0).color(palette.muted)),
             )
             .child(
@@ -627,7 +671,11 @@ impl SettingsApp {
                     .gap(8.0)
                     .children(wifi_cards),
             )
-            .child(Text::new("ADAPTERS").color(palette.text).height(18.0))
+            .child(
+                Text::new(self.localizer.text("settings-network-adapters"))
+                    .color(palette.text)
+                    .height(18.0),
+            )
             .child(Column::new().gap(12.0).children(adapter_cards))
     }
 
@@ -674,7 +722,7 @@ impl SettingsApp {
             })
             .gap(14.0)
             .child(
-                Text::new("SHOW NICKEL BAR ON")
+                Text::new(self.localizer.text("settings-bar-show-on"))
                     .color(palette.text)
                     .height(20.0),
             )
@@ -685,7 +733,7 @@ impl SettingsApp {
                     .child(
                         RadioButton::new(
                             "bar:displays:primary",
-                            "PRIMARY DISPLAY",
+                            self.localizer.text("settings-bar-primary-display"),
                             !self.shell_settings.bar_on_all_displays,
                         )
                         .colors(
@@ -701,7 +749,11 @@ impl SettingsApp {
                     .child(
                         RadioButton::new(
                             "bar:displays:all",
-                            format!("ALL DISPLAYS ({display_count})"),
+                            self.localizer.number(
+                                "settings-bar-all-displays",
+                                "count",
+                                display_count as i64,
+                            ),
                             self.shell_settings.bar_on_all_displays,
                         )
                         .colors(
@@ -716,7 +768,7 @@ impl SettingsApp {
                     ),
             )
             .child(
-                Text::new("WINDOWS SHOWN ON EACH BAR")
+                Text::new(self.localizer.text("settings-bar-window-scope"))
                     .color(palette.text)
                     .height(20.0),
             )
@@ -727,7 +779,7 @@ impl SettingsApp {
                     .child(
                         RadioButton::new(
                             "bar:windows:display",
-                            "THIS DISPLAY",
+                            self.localizer.text("settings-bar-this-display"),
                             !self.shell_settings.all_windows_on_every_bar,
                         )
                         .colors(
@@ -743,7 +795,7 @@ impl SettingsApp {
                     .child(
                         RadioButton::new(
                             "bar:windows:all",
-                            "ALL WINDOWS",
+                            self.localizer.text("settings-bar-all-windows"),
                             self.shell_settings.all_windows_on_every_bar,
                         )
                         .colors(
@@ -757,16 +809,16 @@ impl SettingsApp {
                         .width(210.0),
                     ),
             )
-            .child(Text::new("DESKTOPS").color(palette.text).height(20.0))
             .child(
-                Text::new(format!(
-                    "{} DESKTOP{}",
-                    self.shell_settings.desktop_count,
-                    if self.shell_settings.desktop_count == 1 {
-                        ""
-                    } else {
-                        "S"
-                    }
+                Text::new(self.localizer.text("settings-bar-desktops"))
+                    .color(palette.text)
+                    .height(20.0),
+            )
+            .child(
+                Text::new(self.localizer.number(
+                    "settings-bar-desktop-count",
+                    "count",
+                    i64::from(self.shell_settings.desktop_count),
                 ))
                 .scale(1.0)
                 .color(palette.muted)
@@ -789,12 +841,12 @@ impl SettingsApp {
         let hue = self.shell_settings.displayed_hue(system);
         let intensity = self.shell_settings.displayed_intensity(system);
         let swatches = [
-            ("BACKGROUND", palette.background),
-            ("PANEL", palette.panel),
-            ("SURFACE", palette.surface),
-            ("HOVER", palette.surface_hover),
-            ("ACCENT", palette.accent),
-            ("COMPLEMENT", palette.complement),
+            ("settings-swatch-background", palette.background),
+            ("settings-swatch-panel", palette.panel),
+            ("settings-swatch-surface", palette.surface),
+            ("settings-swatch-hover", palette.surface_hover),
+            ("settings-swatch-accent", palette.accent),
+            ("settings-swatch-complement", palette.complement),
         ]
         .into_iter()
         .map(|(label, color)| {
@@ -810,7 +862,7 @@ impl SettingsApp {
                     left: 4.0,
                 })
                 .child(
-                    Text::new(label)
+                    Text::new(self.localizer.text(label))
                         .align(TextAlign::Center)
                         .scale(0.72)
                         .color(palette.text),
@@ -825,7 +877,11 @@ impl SettingsApp {
                 left: 20.0,
             })
             .gap(14.0)
-            .child(Text::new("MODE").color(palette.text).height(20.0))
+            .child(
+                Text::new(self.localizer.text("settings-appearance-mode"))
+                    .color(palette.text)
+                    .height(20.0),
+            )
             .child(
                 Row::new()
                     .height(38.0)
@@ -833,7 +889,7 @@ impl SettingsApp {
                     .child(
                         RadioButton::new(
                             "appearance:light",
-                            "LIGHT",
+                            self.localizer.text("settings-appearance-light"),
                             appearance.mode == ThemeMode::Light,
                         )
                         .colors(
@@ -849,7 +905,7 @@ impl SettingsApp {
                     .child(
                         RadioButton::new(
                             "appearance:dark",
-                            "DARK",
+                            self.localizer.text("settings-appearance-dark"),
                             appearance.mode == ThemeMode::Dark,
                         )
                         .colors(
@@ -863,12 +919,20 @@ impl SettingsApp {
                         .width(180.0),
                     ),
             )
-            .child(Text::new("STARTING HUE").color(palette.text).height(20.0))
             .child(
-                Text::new(format!("{hue}°  ALL OTHER COLORS ARE DERIVED"))
-                    .scale(1.0)
-                    .color(palette.muted)
-                    .height(18.0),
+                Text::new(self.localizer.text("settings-appearance-starting-hue"))
+                    .color(palette.text)
+                    .height(20.0),
+            )
+            .child(
+                Text::new(self.localizer.number(
+                    "settings-appearance-hue-value",
+                    "degrees",
+                    i64::from(hue),
+                ))
+                .scale(1.0)
+                .color(palette.muted)
+                .height(18.0),
             )
             .child(
                 Slider::new("appearance:hue", f32::from(hue) / 359.0)
@@ -876,15 +940,19 @@ impl SettingsApp {
                     .width(520.0),
             )
             .child(
-                Text::new("COLOR INTENSITY")
+                Text::new(self.localizer.text("settings-appearance-color-intensity"))
                     .color(palette.text)
                     .height(20.0),
             )
             .child(
-                Text::new(format!("{intensity}%  OKLCH CHROMA"))
-                    .scale(1.0)
-                    .color(palette.muted)
-                    .height(18.0),
+                Text::new(self.localizer.number(
+                    "settings-appearance-intensity-value",
+                    "percent",
+                    i64::from(intensity),
+                ))
+                .scale(1.0)
+                .color(palette.muted)
+                .height(18.0),
             )
             .child(
                 Slider::new("appearance:intensity", f32::from(intensity) / 100.0)
@@ -892,7 +960,7 @@ impl SettingsApp {
                     .width(520.0),
             )
             .child(
-                Text::new("DERIVED PALETTE")
+                Text::new(self.localizer.text("settings-appearance-color-palette"))
                     .color(palette.text)
                     .height(20.0),
             )
@@ -961,15 +1029,17 @@ impl SettingsApp {
                     let _ = self.shell_settings.save_default();
                 }
                 "display:identify" => match session_request("identify-outputs") {
-                    Ok(response) if response == "ok" => self.status = "IDENTIFYING DISPLAYS".into(),
-                    _ => self.status = "IDENTIFY FAILED".into(),
+                    Ok(response) if response == "ok" => {
+                        self.status = self.localizer.text("settings-status-identifying")
+                    }
+                    _ => self.status = self.localizer.text("settings-status-identify-failed"),
                 },
                 "display:primary" => {
                     for (index, display) in self.displays.iter_mut().enumerate() {
                         display.primary = index == self.selected;
                     }
                     self.applied = false;
-                    self.status = "CHANGES NOT APPLIED".into();
+                    self.status = self.localizer.text("settings-status-changes-not-applied");
                 }
                 "display:apply" => self.apply_layout(),
                 _ if action.starts_with("wifi:") => {
@@ -994,7 +1064,7 @@ impl SettingsApp {
             let rect = self.displays[index].rect;
             self.drag_offset = Some((x - rect.x, y - rect.y));
             self.applied = false;
-            self.status = "CHANGES NOT APPLIED".into();
+            self.status = self.localizer.text("settings-status-changes-not-applied");
         }
         self.request_redraw();
     }
@@ -1047,7 +1117,7 @@ impl SettingsApp {
                 .fold(rect, |moving, (_, other)| snap_rect(moving, other.rect, 42));
             self.displays[self.selected].rect = rect;
             self.applied = false;
-            self.status = "CHANGES NOT APPLIED".into();
+            self.status = self.localizer.text("settings-status-changes-not-applied");
             self.request_redraw();
         }
     }
@@ -1112,12 +1182,12 @@ impl SettingsApp {
 
     fn load_outputs(&mut self) {
         let Ok(payload) = session_request("list-outputs") else {
-            self.status = "USING MOCK OUTPUTS".into();
+            self.status = self.localizer.text("settings-status-using-mock-displays");
             return;
         };
         let outputs: Vec<_> = payload.lines().filter_map(parse_output).collect();
         if outputs.is_empty() {
-            self.status = "USING MOCK OUTPUTS".into();
+            self.status = self.localizer.text("settings-status-using-mock-displays");
             return;
         }
         let minimum_x = outputs.iter().map(|output| output.x).min().unwrap_or(0);
@@ -1181,14 +1251,14 @@ impl SettingsApp {
             .iter()
             .position(|display| display.primary)
             .unwrap_or(0);
-        self.status = "LIVE OUTPUTS LOADED".into();
+        self.status.clear();
     }
 
     #[cfg(target_os = "windows")]
     fn load_windows_outputs(&mut self, event_loop: &ActiveEventLoop) {
         let monitors: Vec<_> = event_loop.available_monitors().collect();
         if monitors.is_empty() {
-            self.status = "NO WINDOWS DISPLAYS FOUND".into();
+            self.status = self.localizer.text("settings-status-no-displays");
             return;
         }
         let primary = event_loop.primary_monitor();
@@ -1265,7 +1335,7 @@ impl SettingsApp {
             .position(|display| display.primary)
             .unwrap_or(0);
         self.applied = true;
-        self.status = "WINDOWS DISPLAYS LOADED".into();
+        self.status.clear();
     }
 
     #[cfg(target_os = "windows")]
@@ -1349,7 +1419,7 @@ impl SettingsApp {
         let mut negotiated = 0;
         let mut handle = HANDLE::default();
         if unsafe { WlanOpenHandle(2, None, &mut negotiated, &mut handle) } != NO_ERROR.0 {
-            self.wifi_status = "WINDOWS WI-FI SERVICE UNAVAILABLE".into();
+            self.wifi_status = self.localizer.text("settings-network-service-unavailable");
             return;
         }
         let mut interface_list = std::ptr::null_mut::<WLAN_INTERFACE_INFO_LIST>();
@@ -1359,7 +1429,9 @@ impl SettingsApp {
             unsafe {
                 WlanCloseHandle(handle, None);
             }
-            self.wifi_status = "NO WI-FI INTERFACE FOUND".into();
+            self.wifi_status = self
+                .localizer
+                .text("settings-network-interface-unavailable");
             return;
         }
 
@@ -1456,9 +1528,13 @@ impl SettingsApp {
             )
         });
         self.wifi_status = if networks.is_empty() {
-            "NO SAVED WI-FI PROFILES".into()
+            self.localizer.text("settings-network-no-saved-profiles")
         } else {
-            format!("{} SAVED WI-FI PROFILES", networks.len())
+            self.localizer.number(
+                "settings-network-saved-profile-count",
+                "count",
+                networks.len() as i64,
+            )
         };
         self.wifi_networks = networks;
     }
@@ -1488,7 +1564,7 @@ impl SettingsApp {
         let mut negotiated = 0;
         let mut handle = HANDLE::default();
         if unsafe { WlanOpenHandle(2, None, &mut negotiated, &mut handle) } != NO_ERROR.0 {
-            self.wifi_status = "WINDOWS WI-FI SERVICE UNAVAILABLE".into();
+            self.wifi_status = self.localizer.text("settings-network-service-unavailable");
             return;
         }
         let parameters = WLAN_CONNECTION_PARAMETERS {
@@ -1506,9 +1582,14 @@ impl SettingsApp {
             self.pending_wifi_profile = Some(profile.clone());
             self.next_wifi_refresh = Some(Instant::now() + Duration::from_millis(400));
             self.wifi_refreshes_left = 15;
-            format!("CONNECTING TO {profile}")
+            self.localizer
+                .value("settings-network-connecting", "profile", &profile)
         } else {
-            format!("CONNECTION FAILED ({result})")
+            self.localizer.value(
+                "settings-network-connection-failed",
+                "error",
+                &result.to_string(),
+            )
         };
     }
 
@@ -1529,11 +1610,15 @@ impl SettingsApp {
             match apply_windows_layout(&self.displays, &placements, primary) {
                 Ok(()) => {
                     self.applied = true;
-                    self.status = "LIVE LAYOUT APPLIED".into();
+                    self.status = self.localizer.text("settings-status-layout-applied");
                 }
                 Err(error) => {
                     self.applied = false;
-                    self.status = format!("APPLY FAILED ({error})");
+                    self.status = self.localizer.value(
+                        "settings-status-apply-failed",
+                        "error",
+                        &error.to_string(),
+                    );
                 }
             }
             return;
@@ -1549,18 +1634,19 @@ impl SettingsApp {
         match session_request(&command) {
             Ok(response) if response == "ok" => {
                 self.applied = true;
-                self.status = "LIVE LAYOUT APPLIED".into();
+                self.status = self.localizer.text("settings-status-layout-applied");
             }
             Ok(response) => {
                 self.applied = false;
-                self.status = response
-                    .strip_prefix("error\t")
-                    .unwrap_or("APPLY FAILED")
-                    .to_ascii_uppercase();
+                self.status = self.localizer.value(
+                    "settings-status-apply-failed",
+                    "error",
+                    response.strip_prefix("error\t").unwrap_or(&response),
+                );
             }
             Err(_) => {
                 self.applied = false;
-                self.status = "SESSION NOT AVAILABLE".into();
+                self.status = self.localizer.text("settings-status-session-unavailable");
             }
         }
     }
@@ -1726,7 +1812,7 @@ impl SettingsApp {
             2,
             match self.page {
                 SettingsPage::Display => "DRAG DISPLAYS TO MATCH THEIR PHYSICAL POSITION",
-                SettingsPage::Network => "WINDOWS NETWORK ADAPTERS",
+                SettingsPage::Network => "AVAILABLE CONNECTIONS",
             },
             MUTED,
         );
@@ -2054,18 +2140,24 @@ impl ApplicationHandler for SettingsApp {
         });
         if connected {
             let profile = self.pending_wifi_profile.take().unwrap_or_default();
-            self.wifi_status = format!("CONNECTED TO {profile}");
+            self.wifi_status =
+                self.localizer
+                    .value("settings-network-connected-to", "profile", &profile);
             self.next_wifi_refresh = None;
             self.wifi_refreshes_left = 0;
         } else if self.wifi_refreshes_left > 1 {
             self.wifi_refreshes_left -= 1;
             self.next_wifi_refresh = Some(Instant::now() + Duration::from_millis(400));
             if let Some(profile) = &self.pending_wifi_profile {
-                self.wifi_status = format!("CONNECTING TO {profile}");
+                self.wifi_status =
+                    self.localizer
+                        .value("settings-network-connecting", "profile", profile);
             }
         } else {
             let profile = self.pending_wifi_profile.take().unwrap_or_default();
-            self.wifi_status = format!("CONNECTION TO {profile} TIMED OUT");
+            self.wifi_status =
+                self.localizer
+                    .value("settings-network-connection-timeout", "profile", &profile);
             self.next_wifi_refresh = None;
             self.wifi_refreshes_left = 0;
         }

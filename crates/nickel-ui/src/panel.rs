@@ -104,9 +104,11 @@ impl PanelGpu {
         let rectangles = RectangleRenderer::new(&graphics.device, config.format);
         let theme = ThemePalette::from_appearance(nickel_platform::appearance());
         let panel_icon = tinted_panel_icon(
-            image::load_from_memory(include_bytes!("../../../assets/icons/nickel-panel.png"))
-                .map_err(|error| format!("failed to decode Nickel panel icon: {error}"))?
-                .into_rgba8(),
+            crate::icons::load_svg_bytes(
+                include_bytes!("../../../assets/icons/nickel-start.svg"),
+                96,
+            )
+            .ok_or("failed to render Nickel start icon")?,
             theme.text,
         );
 
@@ -177,9 +179,11 @@ impl PanelGpu {
     pub fn set_appearance(&mut self, appearance: Appearance) {
         self.theme = ThemePalette::from_appearance(appearance);
         self.panel_icon = tinted_panel_icon(
-            image::load_from_memory(include_bytes!("../../../assets/icons/nickel-panel.png"))
-                .expect("embedded Nickel panel icon remains valid")
-                .into_rgba8(),
+            crate::icons::load_svg_bytes(
+                include_bytes!("../../../assets/icons/nickel-start.svg"),
+                96,
+            )
+            .expect("embedded Nickel start icon remains valid"),
             self.theme.text,
         );
     }
@@ -503,6 +507,8 @@ fn tinted_panel_icon(mut icon: image::RgbaImage, color: u32) -> image::RgbaImage
         (color & 0xff) as u8,
     ];
     for pixel in icon.pixels_mut() {
+        let coverage = u8::MAX - pixel.0[0];
+        pixel.0[3] = ((u16::from(pixel.0[3]) * u16::from(coverage)) / u16::from(u8::MAX)) as u8;
         pixel.0[..3].copy_from_slice(&tint);
     }
     icon

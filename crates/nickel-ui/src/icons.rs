@@ -37,9 +37,13 @@ pub fn resized(source: &RgbaImage, width: u32, height: u32) -> RgbaImage {
 
 fn load_svg(path: &Path) -> Option<RgbaImage> {
     let data = fs::read(path).ok()?;
+    load_svg_bytes(&data, RASTER_SIZE)
+}
+
+pub fn load_svg_bytes(data: &[u8], raster_size: u32) -> Option<RgbaImage> {
     let tree = resvg::usvg::Tree::from_data(&data, &Default::default()).ok()?;
     let size = tree.size();
-    let scale = (RASTER_SIZE as f32 / size.width()).min(RASTER_SIZE as f32 / size.height());
+    let scale = (raster_size as f32 / size.width()).min(raster_size as f32 / size.height());
     let width = (size.width() * scale).round().max(1.0) as u32;
     let height = (size.height() * scale).round().max(1.0) as u32;
     let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height)?;
