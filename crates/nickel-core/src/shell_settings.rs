@@ -3,12 +3,23 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::theme::{Appearance, ThemeMode, accent_from_hue, accent_hue};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ThemePreference {
+    System,
+    Light,
+    Dark,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ShellSettings {
     pub bar_on_all_displays: bool,
     pub all_windows_on_every_bar: bool,
     pub desktop_count: u8,
     pub active_desktop: u8,
+    pub theme: ThemePreference,
+    pub accent_hue: Option<u16>,
 }
 
 impl Default for ShellSettings {
@@ -18,6 +29,8 @@ impl Default for ShellSettings {
             all_windows_on_every_bar: true,
             desktop_count: 4,
             active_desktop: 0,
+            theme: ThemePreference::System,
+            accent_hue: None,
         }
     }
 }
@@ -45,6 +58,16 @@ impl ShellSettings {
                     settings.desktop_count = value.trim().parse().unwrap_or(4).clamp(1, 8)
                 }
                 "active_desktop" => settings.active_desktop = value.trim().parse().unwrap_or(0),
+                "theme" => {
+                    settings.theme = match value.trim() {
+                        "light" => ThemePreference::Light,
+                        "dark" => ThemePreference::Dark,
+                        _ => ThemePreference::System,
+                    }
+                }
+                "accent_hue" => {
+                    settings.accent_hue = value.trim().parse::<u16>().ok().map(|hue| hue.min(359))
+                }
                 _ => {}
             }
         }
@@ -62,13 +85,39 @@ impl ShellSettings {
         fs::write(
             path,
             format!(
-                "bar_on_all_displays={}\nall_windows_on_every_bar={}\ndesktop_count={}\nactive_desktop={}\n",
+                "bar_on_all_displays={}\nall_windows_on_every_bar={}\ndesktop_count={}\nactive_desktop={}\ntheme={}\naccent_hue={}\n",
                 self.bar_on_all_displays,
                 self.all_windows_on_every_bar,
                 self.desktop_count,
-                self.active_desktop
+                self.active_desktop,
+                match self.theme {
+                    ThemePreference::System => "system",
+                    ThemePreference::Light => "light",
+                    ThemePreference::Dark => "dark",
+                },
+                self.accent_hue
+                    .map(|hue| hue.to_string())
+                    .unwrap_or_else(|| "system".to_owned()),
             ),
         )
+    }
+
+    pub fn resolve_appearance(self, system: Appearance) -> Appearance {
+        Appearance {
+            mode: match self.theme {
+                ThemePreference::System => system.mode,
+                ThemePreference::Light => ThemeMode::Light,
+                ThemePreference::Dark => ThemeMode::Dark,
+            },
+            accent: self
+                .accent_hue
+                .map(accent_from_hue)
+                .unwrap_or(system.accent),
+        }
+    }
+
+    pub fn displayed_hue(self, system: Appearance) -> u16 {
+        self.accent_hue.unwrap_or_else(|| accent_hue(system.accent))
     }
 }
 

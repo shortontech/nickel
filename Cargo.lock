@@ -1765,6 +1765,7 @@ version = "0.1.0"
 dependencies = [
  "image",
  "nickel-components",
+ "nickel-core",
  "nickel-logging",
  "nickel-platform",
  "tracing",
@@ -1789,6 +1790,7 @@ dependencies = [
  "nickel-core",
  "tracing",
  "windows",
+ "winit",
 ]
 
 [[package]]
@@ -1810,6 +1812,7 @@ dependencies = [
  "nickel-components",
  "nickel-core",
  "nickel-logging",
+ "nickel-platform",
  "tracing",
  "windows",
  "winit",

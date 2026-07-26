@@ -1,5 +1,9 @@
 use crate::model::{TrayItem, WindowId};
 
+pub struct DesktopCapture {
+    pub image: image::RgbaImage,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct NetworkStatus {
     pub available: bool,
@@ -48,6 +52,9 @@ pub enum GlobalShortcut {
     SwitchGroupNext,
     SwitchGroupPrevious,
     CommitSwitch,
+    CaptureActiveWindow,
+    CaptureActiveWindowToFile,
+    ShowScreenshotTool,
     AudioChanged { volume_percent: u8, muted: bool },
 }
 
@@ -90,13 +97,14 @@ pub use linux::{
 mod windows;
 #[cfg(target_os = "windows")]
 pub use windows::{
-    TrayFeed, WindowFeed, application_icon, applications, audio_status, capture_pointer,
-    configure_context_menu_window, configure_desktop_window, configure_launcher_window,
-    configure_panel_window, configure_volume_osd_window, execute_run_command,
-    launcher_has_foreground_focus, launcher_hotkey_receiver, launcher_visibility_applied,
-    network_status, paste_text_if_requested, release_panel_window, release_pointer,
-    select_audio_device, send_shell_command, set_audio_volume, update_panel_fullscreen_state,
-    wallpaper,
+    TrayFeed, WindowFeed, application_icon, applications, audio_status, capture_active_window,
+    capture_active_window_to_file, capture_desktop, capture_pointer, configure_context_menu_window,
+    configure_desktop_window, configure_launcher_window, configure_panel_window,
+    configure_volume_osd_window, copy_image_to_clipboard, copy_temp_image_path,
+    execute_run_command, launcher_has_foreground_focus, launcher_hotkey_receiver,
+    launcher_visibility_applied, network_status, paste_text_if_requested, release_panel_window,
+    release_pointer, select_audio_device, send_shell_command, set_audio_volume,
+    update_panel_fullscreen_state, wallpaper,
 };
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
