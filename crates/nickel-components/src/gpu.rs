@@ -254,6 +254,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
                     scale,
                     color,
                     align,
+                    bold,
                 } => {
                     let font_size = text_size(*scale);
                     let mut buffer = Buffer::new(
@@ -264,12 +265,11 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
                         Some(bounds.size.width.max(1.0)),
                         Some(bounds.size.height.max(font_size * 1.4)),
                     );
-                    buffer.set_text(
-                        text,
-                        &Attrs::new().family(Family::SansSerif),
-                        Shaping::Advanced,
-                        None,
-                    );
+                    let mut attrs = Attrs::new().family(Family::SansSerif);
+                    if *bold {
+                        attrs = attrs.weight(glyphon::Weight::BOLD);
+                    }
+                    buffer.set_text(text, &attrs, Shaping::Advanced, None);
                     for line in &mut buffer.lines {
                         line.set_align(Some(match align {
                             TextAlign::Start => Align::Left,

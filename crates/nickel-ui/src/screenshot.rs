@@ -295,6 +295,7 @@ impl ScreenshotTool {
                 scale: 1.0,
                 color: palette.text,
                 align: TextAlign::Center,
+                bold: false,
             });
         }
         commands.push(PaintCommand::Text {
@@ -303,6 +304,7 @@ impl ScreenshotTool {
             scale: 1.0,
             color: palette.muted,
             align: TextAlign::Start,
+            bold: false,
         });
         if let Err(error) = self.gpu.render(&commands) {
             tracing::warn!(%error, "failed to render screenshot crop surface");
