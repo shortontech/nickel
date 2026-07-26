@@ -1440,14 +1440,14 @@ impl ApplicationHandler for Nickel {
                 return;
             };
             let window = Arc::new(window);
-            #[cfg(target_os = "windows")]
-            if !platform::configure_panel_window(&window) {
-                eprintln!("failed to reserve the Windows work area for a Nickel panel");
-            }
             let is_primary = primary.as_ref() == Some(monitor);
-            if !self.shell_settings.bar_on_all_displays && !is_primary {
+            let should_show = self.shell_settings.bar_on_all_displays || is_primary;
+            if should_show {
                 #[cfg(target_os = "windows")]
-                platform::release_panel_window(&window);
+                if !platform::configure_panel_window(&window) {
+                    eprintln!("failed to reserve the Windows work area for a Nickel panel");
+                }
+            } else {
                 window.set_visible(false);
             }
             panel_windows.push(window);
