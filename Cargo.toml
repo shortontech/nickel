@@ -3,6 +3,8 @@ members = [
     "crates/nickel-components",
     "crates/nickel-core",
     "crates/nickel-logging",
+    "crates/nickel-file",
+    "crates/nickel-platform",
     "crates/nickel-session",
     "crates/nickel-settings",
     "crates/nickel-ui",

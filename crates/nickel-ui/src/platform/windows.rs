@@ -202,7 +202,7 @@ pub fn applications() -> Vec<Application> {
 }
 
 pub fn application_icon(reference: &str) -> Option<image::RgbaImage> {
-    executable_icon(PathBuf::from(reference).as_path())
+    nickel_platform::path_icon(PathBuf::from(reference).as_path())
 }
 
 pub fn network_status() -> super::NetworkStatus {
@@ -539,8 +539,6 @@ static HOTKEY_CONTROLLER: std::sync::OnceLock<Mutex<HotkeyController>> = std::sy
 static RUN_HOTKEY_REGISTERED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static INPUT_TRACE_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-static PANEL_APPBAR_REGISTERED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
 static PANEL_FULLSCREEN_ACTIVE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static ORIGINAL_WORK_AREA: std::sync::Mutex<Option<RECT>> = std::sync::Mutex::new(None);
@@ -1217,7 +1215,6 @@ pub fn configure_panel_window(window: &winit::window::Window) -> bool {
     if !registered {
         return reserve_work_area_without_explorer(rectangle) && topmost;
     }
-    PANEL_APPBAR_REGISTERED.store(true, std::sync::atomic::Ordering::Relaxed);
     unsafe {
         SHAppBarMessage(ABM_QUERYPOS, &mut appbar);
     }
@@ -1754,9 +1751,7 @@ pub fn release_panel_window(window: &winit::window::Window) {
     };
     // SAFETY: Removing an appbar registration is idempotent for a live HWND.
     unsafe {
-        if PANEL_APPBAR_REGISTERED.swap(false, std::sync::atomic::Ordering::Relaxed) {
-            SHAppBarMessage(ABM_REMOVE, &mut appbar);
-        }
+        SHAppBarMessage(ABM_REMOVE, &mut appbar);
     }
     if let Ok(mut saved) = ORIGINAL_WORK_AREA.lock()
         && let Some(mut original) = saved.take()
@@ -2462,7 +2457,8 @@ mod tests {
     use windows::Win32::Foundation::RECT;
 
     use super::{
-        executable_icon, is_shell_infrastructure, rectangle_covers, should_restore_on_activation,
+        application_icon, executable_icon, is_shell_infrastructure, rectangle_covers,
+        should_restore_on_activation,
     };
 
     #[test]
@@ -2470,6 +2466,26 @@ mod tests {
         let image = executable_icon(&std::env::current_exe().expect("test executable path"))
             .expect("Windows Shell returns an executable icon");
         assert!(image.pixels().any(|pixel| pixel.0[3] != 0));
+    }
+
+    #[test]
+    fn installed_shortcut_icon_has_visible_pixels() {
+        let Some(program_data) = std::env::var_os("PROGRAMDATA") else {
+            return;
+        };
+        let root =
+            std::path::PathBuf::from(program_data).join("Microsoft/Windows/Start Menu/Programs");
+        for shortcut in [
+            root.join("Google Chrome.lnk"),
+            root.join("Windows Kits/Application Verifier (X64)/Application Verifier (X64).lnk"),
+        ] {
+            if !shortcut.is_file() {
+                continue;
+            }
+            let image = application_icon(&shortcut.to_string_lossy())
+                .expect("resolve the installed shortcut icon");
+            assert!(image.pixels().any(|pixel| pixel.0[3] != 0));
+        }
     }
 
     #[test]

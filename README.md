@@ -13,7 +13,7 @@ The component names follow the project all the way down:
 
 - **Nickel Bar** — the taskbar and system tray
 - **Nickel Flip** — task switching and live window previews
-- **Nickel File** — the planned file manager
+- **Nickel File** — the file manager
 - **Nickel Plating** — Control Center and system settings
 - **Bare Nickel** — the planned lean Windows configuration
 
@@ -105,6 +105,12 @@ Launch Nickel Settings:
 cargo run -p nickel-settings
 ```
 
+Launch Nickel File:
+
+```bash
+cargo run -p nickel-file
+```
+
 ### Linux Nested Session
 
 Run Nickel inside an existing Linux desktop:
@@ -140,7 +146,7 @@ Set `NICKEL_DRM_DEVICE=/dev/dri/cardN` to select a specific GPU.
 - Some packaged Windows applications and system settings require additional activation support.
 - Accessibility and touch-keyboard integration are incomplete.
 - Multiple-monitor behavior needs more testing.
-- Nickel File has not been built yet.
+- Nickel File currently provides basic directory browsing and file launching.
 - The direct Linux session is not ready for general use.
 - macOS support has not started.
 
@@ -153,7 +159,9 @@ The Windows shell compatibility checklist lives in
 crates/
 |-- nickel-components/  Shared interface components and text editing
 |-- nickel-core/        Shell state and behavior
+|-- nickel-file/        Nickel File browser and file manager
 |-- nickel-logging/     Native logging
+|-- nickel-platform/    Shared native platform adapters
 |-- nickel-session/     Linux compositor and session
 |-- nickel-settings/    Nickel Plating settings application
 `-- nickel-ui/          Desktop shell and platform integration

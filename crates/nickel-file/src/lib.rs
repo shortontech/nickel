@@ -1,0 +1,274 @@
+use std::{
+    cmp::Ordering,
+    collections::HashSet,
+    ffi::OsString,
+    fs, io,
+    path::{Path, PathBuf},
+};
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FileEntry {
+    pub name: OsString,
+    pub path: PathBuf,
+    pub is_directory: bool,
+    pub size: Option<u64>,
+}
+
+impl FileEntry {
+    pub fn display_name(&self) -> String {
+        self.name.to_string_lossy().into_owned()
+    }
+}
+
+#[derive(Debug)]
+pub struct DirectoryBrowser {
+    current: PathBuf,
+    history: Vec<PathBuf>,
+    entries: Vec<FileEntry>,
+    show_hidden: bool,
+}
+
+impl DirectoryBrowser {
+    pub fn open(path: impl Into<PathBuf>) -> io::Result<Self> {
+        Self::open_with_hidden(path, true)
+    }
+
+    pub fn open_with_hidden(path: impl Into<PathBuf>, show_hidden: bool) -> io::Result<Self> {
+        let current = path.into();
+        let entries = read_entries_with_hidden(&current, show_hidden)?;
+        Ok(Self {
+            current,
+            history: Vec::new(),
+            entries,
+            show_hidden,
+        })
+    }
+
+    pub fn current(&self) -> &Path {
+        &self.current
+    }
+
+    pub fn entries(&self) -> &[FileEntry] {
+        &self.entries
+    }
+
+    pub fn can_go_back(&self) -> bool {
+        !self.history.is_empty()
+    }
+
+    pub fn can_go_up(&self) -> bool {
+        self.current.parent().is_some()
+    }
+
+    pub fn enter(&mut self, path: impl Into<PathBuf>) -> io::Result<()> {
+        let next = path.into();
+        let entries = read_entries_with_hidden(&next, self.show_hidden)?;
+        self.history.push(self.current.clone());
+        self.current = next;
+        self.entries = entries;
+        Ok(())
+    }
+
+    pub fn back(&mut self) -> io::Result<bool> {
+        let Some(previous) = self.history.last().cloned() else {
+            return Ok(false);
+        };
+        let entries = read_entries_with_hidden(&previous, self.show_hidden)?;
+        self.history.pop();
+        self.current = previous;
+        self.entries = entries;
+        Ok(true)
+    }
+
+    pub fn up(&mut self) -> io::Result<bool> {
+        let Some(parent) = self.current.parent().map(Path::to_path_buf) else {
+            return Ok(false);
+        };
+        self.enter(parent)?;
+        Ok(true)
+    }
+
+    pub fn refresh(&mut self) -> io::Result<()> {
+        self.entries = read_entries_with_hidden(&self.current, self.show_hidden)?;
+        Ok(())
+    }
+
+    pub fn set_show_hidden(&mut self, show_hidden: bool) -> io::Result<()> {
+        self.show_hidden = show_hidden;
+        self.entries = read_entries_with_hidden(&self.current, self.show_hidden)?;
+        Ok(())
+    }
+}
+
+pub fn read_entries(path: &Path) -> io::Result<Vec<FileEntry>> {
+    read_entries_with_hidden(path, true)
+}
+
+fn read_entries_with_hidden(path: &Path, show_hidden: bool) -> io::Result<Vec<FileEntry>> {
+    let hidden_names = hidden_names(path);
+    let mut entries = fs::read_dir(path)?
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let metadata = entry.metadata().ok()?;
+            if !show_hidden && entry_is_hidden(&entry, &metadata, &hidden_names) {
+                return None;
+            }
+            let is_directory = metadata_is_directory(&metadata);
+            Some(FileEntry {
+                name: entry.file_name(),
+                path: entry.path(),
+                is_directory,
+                size: (!is_directory && metadata.is_file()).then_some(metadata.len()),
+            })
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| {
+        right
+            .is_directory
+            .cmp(&left.is_directory)
+            .then_with(|| compare_names(&left.name, &right.name))
+    });
+    Ok(entries)
+}
+
+fn hidden_names(path: &Path) -> HashSet<OsString> {
+    fs::read_to_string(path.join(".hidden"))
+        .ok()
+        .into_iter()
+        .flat_map(|contents| {
+            contents
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                .map(OsString::from)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn entry_is_hidden(
+    entry: &fs::DirEntry,
+    metadata: &fs::Metadata,
+    hidden_names: &HashSet<OsString>,
+) -> bool {
+    let name = entry.file_name();
+    name.to_string_lossy().starts_with('.')
+        || hidden_names.contains(&name)
+        || metadata_has_hidden_attribute(metadata)
+}
+
+#[cfg(target_os = "windows")]
+fn metadata_has_hidden_attribute(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+    metadata.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0
+}
+
+#[cfg(not(target_os = "windows"))]
+fn metadata_has_hidden_attribute(_metadata: &fs::Metadata) -> bool {
+    false
+}
+
+#[cfg(target_os = "windows")]
+fn metadata_is_directory(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+    metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_DIRECTORY != 0
+}
+
+#[cfg(not(target_os = "windows"))]
+fn metadata_is_directory(metadata: &fs::Metadata) -> bool {
+    metadata.is_dir()
+}
+
+fn compare_names(left: &OsString, right: &OsString) -> Ordering {
+    left.to_string_lossy()
+        .to_lowercase()
+        .cmp(&right.to_string_lossy().to_lowercase())
+        .then_with(|| left.cmp(right))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::DirectoryBrowser;
+
+    fn temporary_directory(name: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "nickel-file-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn directories_sort_before_files_case_insensitively() {
+        let root = temporary_directory("ordering");
+        fs::write(root.join("beta.txt"), b"beta").unwrap();
+        fs::write(root.join("Alpha.txt"), b"alpha").unwrap();
+        fs::create_dir(root.join("zeta")).unwrap();
+        fs::create_dir(root.join("Gamma")).unwrap();
+
+        let browser = DirectoryBrowser::open(&root).unwrap();
+        let names = browser
+            .entries()
+            .iter()
+            .map(|entry| entry.display_name())
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, ["Gamma", "zeta", "Alpha.txt", "beta.txt"]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn back_returns_to_the_previous_directory() {
+        let root = temporary_directory("history");
+        let child = root.join("child");
+        fs::create_dir(&child).unwrap();
+        let mut browser = DirectoryBrowser::open(&root).unwrap();
+
+        browser.enter(&child).unwrap();
+        assert_eq!(browser.current(), child);
+        assert!(browser.back().unwrap());
+        assert_eq!(browser.current(), root);
+        assert!(!browser.back().unwrap());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn hidden_policy_covers_dotfiles_and_hidden_manifest() {
+        let root = temporary_directory("hidden");
+        fs::write(root.join(".secret"), b"dotfile").unwrap();
+        fs::write(root.join("listed.txt"), b"listed").unwrap();
+        fs::write(root.join("visible.txt"), b"visible").unwrap();
+        fs::write(root.join(".hidden"), "listed.txt\n").unwrap();
+
+        let hidden = DirectoryBrowser::open_with_hidden(&root, false).unwrap();
+        let hidden_names = hidden
+            .entries()
+            .iter()
+            .map(|entry| entry.display_name())
+            .collect::<Vec<_>>();
+        assert_eq!(hidden_names, ["visible.txt"]);
+
+        let shown = DirectoryBrowser::open_with_hidden(&root, true).unwrap();
+        let shown_names = shown
+            .entries()
+            .iter()
+            .map(|entry| entry.display_name())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            shown_names,
+            [".hidden", ".secret", "listed.txt", "visible.txt"]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+}

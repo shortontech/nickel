@@ -5,6 +5,7 @@ use glyphon::{
     RasterizeCustomGlyphRequest, RasterizedCustomGlyph, Resolution, Shaping, SwashCache, TextArea,
     TextAtlas, TextBounds, TextRenderer, Viewport, cosmic_text::Align,
 };
+use nickel_core::theme::ThemePalette;
 use winit::window::Window;
 
 use crate::{graphics::SharedGraphics, icons, rectangles::RectangleRenderer};
@@ -16,13 +17,18 @@ const PANEL_ICON_GLYPH_ID: u16 = u16::MAX - 1;
 const TRAY_GLYPH_BASE: u16 = 60_000;
 const TRAY_WIDTH: f64 = 40.0;
 const CLOCK_WIDTH: f64 = 100.0;
+const DESKTOP_SLOT_WIDTH: f64 = 34.0;
+const DESKTOP_WIDTH: f32 = 28.0;
+const DESKTOP_HEIGHT: f32 = 18.0;
 
+#[derive(Clone)]
 pub struct PanelTask {
     pub glyph_id: u16,
     pub active: bool,
     pub icon: image::RgbaImage,
 }
 
+#[derive(Clone)]
 pub struct PanelTrayItem {
     pub icon: image::RgbaImage,
 }
@@ -41,8 +47,11 @@ pub struct PanelGpu {
     icon_buffer: Buffer,
     tasks: Vec<PanelTask>,
     tray_items: Vec<PanelTrayItem>,
+    desktop_count: u8,
+    active_desktop: u8,
     rectangles: RectangleRenderer,
     panel_icon: image::RgbaImage,
+    theme: ThemePalette,
 }
 
 impl PanelGpu {
@@ -98,6 +107,7 @@ impl PanelGpu {
                 .map_err(|error| format!("failed to decode Nickel panel icon: {error}"))?
                 .into_rgba8(),
         );
+        let theme = ThemePalette::from_appearance(nickel_platform::appearance());
 
         Ok(Self {
             surface,
@@ -113,8 +123,11 @@ impl PanelGpu {
             icon_buffer,
             tasks: Vec::new(),
             tray_items: Vec::new(),
+            desktop_count: 4,
+            active_desktop: 0,
             rectangles,
             panel_icon,
+            theme,
         })
     }
 
@@ -155,7 +168,17 @@ impl PanelGpu {
         self.tray_items = items;
     }
 
-    pub fn render(&mut self, launcher_hovered: bool, task_hovered: Option<usize>) {
+    pub fn set_desktops(&mut self, count: u8, active: u8) {
+        self.desktop_count = count.clamp(1, 8);
+        self.active_desktop = active.min(self.desktop_count - 1);
+    }
+
+    pub fn render(
+        &mut self,
+        launcher_hovered: bool,
+        task_hovered: Option<usize>,
+        desktop_hovered: Option<u8>,
+    ) {
         let mut custom_glyphs = vec![CustomGlyph {
             id: PANEL_ICON_GLYPH_ID,
             left: 12.0,
@@ -195,13 +218,13 @@ impl PanelGpu {
         }));
         let mut rectangles = Vec::new();
         if launcher_hovered {
-            rectangles.push(([4.0, 4.0, 52.0, 52.0], [0.12, 0.15, 0.21, 1.0]));
+            rectangles.push(([4.0, 4.0, 52.0, 52.0], color(self.theme.surface_hover)));
         }
         if let Some(index) = task_hovered {
             let left = TASKS_LEFT as f32 + index as f32 * TASK_WIDTH as f32;
             rectangles.push((
                 [left + 2.0, 4.0, left + 46.0, 52.0],
-                [0.12, 0.15, 0.21, 1.0],
+                color(self.theme.surface_hover),
             ));
         }
         for (index, task) in self.tasks.iter().enumerate() {
@@ -209,9 +232,43 @@ impl PanelGpu {
                 let left = TASKS_LEFT as f32 + index as f32 * TASK_WIDTH as f32;
                 rectangles.push((
                     [left + 12.0, 52.0, left + 36.0, 55.0],
-                    [0.3, 0.62, 1.0, 1.0],
+                    color(self.theme.accent),
                 ));
             }
+        }
+        for index in 0..self.desktop_count {
+            let left = desktop_left(
+                self.config.width,
+                self.tray_items.len(),
+                self.desktop_count,
+                index,
+            ) as f32;
+            let top = (56.0 - DESKTOP_HEIGHT) / 2.0;
+            let active = index == self.active_desktop;
+            let hovered = desktop_hovered == Some(index);
+            rectangles.push((
+                [left, top, left + DESKTOP_WIDTH, top + DESKTOP_HEIGHT],
+                if active {
+                    color(self.theme.accent)
+                } else if hovered {
+                    color(self.theme.surface_hover)
+                } else {
+                    color(self.theme.muted)
+                },
+            ));
+            rectangles.push((
+                [
+                    left + 2.0,
+                    top + 2.0,
+                    left + DESKTOP_WIDTH - 2.0,
+                    top + DESKTOP_HEIGHT - 2.0,
+                ],
+                if active {
+                    color(self.theme.accent_soft)
+                } else {
+                    color(self.theme.background)
+                },
+            ));
         }
         self.rectangles.update_raw(
             &self.graphics.queue,
@@ -312,12 +369,7 @@ impl PanelGpu {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.035,
-                            g: 0.045,
-                            b: 0.065,
-                            a: 1.0,
-                        }),
+                        load: wgpu::LoadOp::Clear(wgpu_color(self.theme.panel)),
                         store: wgpu::StoreOp::Store,
                     },
                     depth_slice: None,
@@ -348,6 +400,28 @@ pub fn task_menu_x(index: usize) -> i32 {
 
 fn tray_left(panel_width: u32, count: usize, index: usize) -> f64 {
     f64::from(panel_width) - CLOCK_WIDTH - (count - index) as f64 * TRAY_WIDTH
+}
+
+fn desktop_left(panel_width: u32, tray_count: usize, desktop_count: u8, index: u8) -> f64 {
+    let tray_start = f64::from(panel_width) - CLOCK_WIDTH - tray_count as f64 * TRAY_WIDTH;
+    tray_start - f64::from(desktop_count) * DESKTOP_SLOT_WIDTH
+        + f64::from(index) * DESKTOP_SLOT_WIDTH
+        + (DESKTOP_SLOT_WIDTH - f64::from(DESKTOP_WIDTH)) / 2.0
+}
+
+pub fn desktop_at(
+    position: winit::dpi::PhysicalPosition<f64>,
+    panel_width: u32,
+    tray_count: usize,
+    desktop_count: u8,
+) -> Option<u8> {
+    (0..desktop_count).find(|index| {
+        let left = desktop_left(panel_width, tray_count, desktop_count, *index);
+        position.x >= left
+            && position.x < left + DESKTOP_SLOT_WIDTH
+            && position.y >= 0.0
+            && position.y < 56.0
+    })
 }
 
 pub fn tray_at(
@@ -383,6 +457,24 @@ pub fn fallback_icon() -> image::RgbaImage {
             [70, 80, 100, 255]
         })
     })
+}
+
+fn color(rgb: u32) -> [f32; 4] {
+    [
+        ((rgb >> 16) & 0xff) as f32 / 255.0,
+        ((rgb >> 8) & 0xff) as f32 / 255.0,
+        (rgb & 0xff) as f32 / 255.0,
+        1.0,
+    ]
+}
+
+fn wgpu_color(rgb: u32) -> wgpu::Color {
+    wgpu::Color {
+        r: f64::from((rgb >> 16) & 0xff) / 255.0,
+        g: f64::from((rgb >> 8) & 0xff) / 255.0,
+        b: f64::from(rgb & 0xff) / 255.0,
+        a: 1.0,
+    }
 }
 
 fn tinted_panel_icon(mut icon: image::RgbaImage) -> image::RgbaImage {

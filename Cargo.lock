@@ -1748,6 +1748,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "glyphon",
+ "image",
  "pollster",
  "unicode-segmentation",
  "wgpu",
@@ -1759,12 +1760,35 @@ name = "nickel-core"
 version = "0.1.0"
 
 [[package]]
+name = "nickel-file"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "nickel-components",
+ "nickel-logging",
+ "nickel-platform",
+ "tracing",
+ "windows",
+ "winit",
+]
+
+[[package]]
 name = "nickel-logging"
 version = "0.1.0"
 dependencies = [
  "tempfile",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "nickel-platform"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "nickel-core",
+ "tracing",
+ "windows",
 ]
 
 [[package]]
@@ -1784,6 +1808,7 @@ name = "nickel-settings"
 version = "0.1.0"
 dependencies = [
  "nickel-components",
+ "nickel-core",
  "nickel-logging",
  "tracing",
  "windows",
@@ -1803,6 +1828,7 @@ dependencies = [
  "nickel-components",
  "nickel-core",
  "nickel-logging",
+ "nickel-platform",
  "nucleo-matcher",
  "pollster",
  "redb",

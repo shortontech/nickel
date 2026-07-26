@@ -29,6 +29,7 @@ use glyphon::{
 use nickel_components::{TextEditor, TextField};
 use nickel_core::launcher::LauncherVisibility;
 use nickel_core::run::RunPrompt;
+use nickel_core::shell_settings::ShellSettings;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
@@ -56,7 +57,6 @@ use launcher::Launcher;
 use model::{OpenWindow, TrayItem, WindowGroup, WindowId as ShellWindowId};
 use platform::{GlobalShortcut, ShellCommand, TrayFeed, TraySource, WindowAction, WindowFeed};
 
-const SECONDARY_DISPLAY_ENV: &str = "NICKEL_USE_SECONDARY_DISPLAY";
 const PANEL_HEIGHT: f64 = 56.0;
 
 #[derive(Clone, Copy)]
@@ -68,15 +68,17 @@ enum ContextAction {
 }
 
 struct Nickel {
-    desktop_window: Option<Arc<Window>>,
-    desktop_gpu: Option<desktop::DesktopGpu>,
+    desktop_surfaces: Vec<(Arc<Window>, desktop::DesktopGpu)>,
     window: Option<Arc<Window>>,
     gpu: Option<Gpu>,
-    panel_window: Option<Arc<Window>>,
-    panel_gpu: Option<panel::PanelGpu>,
+    panel_surfaces: Vec<(Arc<Window>, panel::PanelGpu)>,
+    panel_primary: Vec<bool>,
+    shell_settings: ShellSettings,
+    settings_deadline: Instant,
     panel_hovered: bool,
     panel_task_hovered: Option<usize>,
     panel_tray_hovered: Option<usize>,
+    panel_desktop_hovered: Option<u8>,
     panel_control_hovered: bool,
     control_center_window: Option<Arc<Window>>,
     control_center_gpu: Option<control_center::ControlCenterGpu>,
@@ -97,6 +99,7 @@ struct Nickel {
     run_prompt: RunPrompt,
     run_editor: TextEditor,
     run_modifiers: ModifiersState,
+    run_ignoring_trigger_r: bool,
     run_hovered: Option<run_dialog::Action>,
     preview_group: Option<usize>,
     preview_hide_deadline: Option<Instant>,
@@ -153,15 +156,17 @@ impl Default for Nickel {
             }
         };
         Self {
-            desktop_window: None,
-            desktop_gpu: None,
+            desktop_surfaces: Vec::new(),
             window: None,
             gpu: None,
-            panel_window: None,
-            panel_gpu: None,
+            panel_surfaces: Vec::new(),
+            panel_primary: Vec::new(),
+            shell_settings: ShellSettings::load_default(),
+            settings_deadline: Instant::now(),
             panel_hovered: false,
             panel_task_hovered: None,
             panel_tray_hovered: None,
+            panel_desktop_hovered: None,
             panel_control_hovered: false,
             control_center_window: None,
             control_center_gpu: None,
@@ -182,6 +187,7 @@ impl Default for Nickel {
             run_prompt,
             run_editor: TextEditor::default(),
             run_modifiers: ModifiersState::empty(),
+            run_ignoring_trigger_r: false,
             run_hovered: None,
             preview_group: None,
             preview_hide_deadline: None,
@@ -288,6 +294,7 @@ impl Nickel {
         self.set_launcher_visible(false);
         self.run_prompt.clear();
         self.run_editor.clear();
+        self.run_ignoring_trigger_r = true;
         self.run_hovered = None;
         if let Some(window) = &self.run_window {
             window.set_visible(true);
@@ -606,9 +613,9 @@ impl Nickel {
             self.task_switcher_active = true;
             if let Some(window) = &self.context_menu_window {
                 let monitor = window.current_monitor().or_else(|| {
-                    self.panel_window
-                        .as_ref()
-                        .and_then(|panel| panel.current_monitor())
+                    self.panel_surfaces
+                        .first()
+                        .and_then(|(panel, _)| panel.current_monitor())
                 });
                 let x = monitor
                     .as_ref()
@@ -732,10 +739,10 @@ impl Nickel {
         {
             self.hide_context_menu();
         }
-        if let Some(gpu) = &mut self.panel_gpu {
-            gpu.set_tasks(tasks);
+        for (_, gpu) in &mut self.panel_surfaces {
+            gpu.set_tasks(tasks.clone());
         }
-        if let Some(window) = &self.panel_window {
+        for (window, _) in &self.panel_surfaces {
             window.request_redraw();
         }
     }
@@ -746,18 +753,58 @@ impl Nickel {
             return;
         }
         eprintln!("nickel-ui: tray items updated: {}", items.len());
-        let rendered = items
+        let rendered: Vec<_> = items
             .iter()
             .map(|item| panel::PanelTrayItem {
                 icon: item.icon.clone(),
             })
             .collect();
         self.tray_items = items;
-        if let Some(gpu) = &mut self.panel_gpu {
-            gpu.set_tray_items(rendered);
+        for (_, gpu) in &mut self.panel_surfaces {
+            gpu.set_tray_items(rendered.clone());
         }
-        if let Some(window) = &self.panel_window {
+        for (window, _) in &self.panel_surfaces {
             window.request_redraw();
+        }
+    }
+
+    fn refresh_shell_settings(&mut self) {
+        let settings = ShellSettings::load_default();
+        if settings == self.shell_settings {
+            return;
+        }
+        let bar_visibility_changed =
+            settings.bar_on_all_displays != self.shell_settings.bar_on_all_displays;
+        let desktops_changed = settings.desktop_count != self.shell_settings.desktop_count
+            || settings.active_desktop != self.shell_settings.active_desktop;
+        self.shell_settings = settings;
+        if desktops_changed {
+            for (window, gpu) in &mut self.panel_surfaces {
+                gpu.set_desktops(settings.desktop_count, settings.active_desktop);
+                window.request_redraw();
+            }
+        }
+        if !bar_visibility_changed {
+            return;
+        }
+        for (index, (window, _)) in self.panel_surfaces.iter().enumerate() {
+            let should_show = settings.bar_on_all_displays
+                || self.panel_primary.get(index).copied().unwrap_or(index == 0);
+            if window.is_visible() == Some(should_show) {
+                continue;
+            }
+            if should_show {
+                #[cfg(target_os = "windows")]
+                if !platform::configure_panel_window(window) {
+                    eprintln!("failed to restore a Nickel panel AppBar");
+                }
+                window.set_visible(true);
+                window.request_redraw();
+            } else {
+                #[cfg(target_os = "windows")]
+                platform::release_panel_window(window);
+                window.set_visible(false);
+            }
         }
     }
 
@@ -880,12 +927,24 @@ impl Gpu {
             .name("nickel-icon-loader".into())
             .spawn(move || {
                 while let Ok((id, source)) = worker_requests.recv() {
+                    let requested_source = source.clone();
                     let image = match source {
                         LauncherIconSource::File(path) => icons::load(&path),
                         LauncherIconSource::Platform(reference) => {
                             platform::application_icon(&reference)
                         }
                     };
+                    if !image
+                        .as_ref()
+                        .is_some_and(|image| image.pixels().any(|pixel| pixel.0[3] != 0))
+                    {
+                        tracing::warn!(
+                            ?requested_source,
+                            glyph_id = id,
+                            dimensions = ?image.as_ref().map(image::RgbaImage::dimensions),
+                            "launcher icon request returned no visible pixels"
+                        );
+                    }
                     if worker_results.send((id, image)).is_err() {
                         break;
                     }
@@ -1160,12 +1219,11 @@ impl ApplicationHandler for Nickel {
             return;
         }
 
-        let use_secondary = env_flag(SECONDARY_DISPLAY_ENV);
         let monitors: Vec<_> = event_loop.available_monitors().collect();
         let primary = event_loop.primary_monitor();
-        let target = select_monitor(&monitors, primary.as_ref(), use_secondary);
+        let target = primary.clone().or_else(|| monitors.first().cloned());
 
-        let mut desktop_attributes = WindowAttributes::default()
+        let desktop_attributes = WindowAttributes::default()
             .with_title("Nickel Desktop")
             .with_inner_size(PhysicalSize::new(1280, 720))
             .with_decorations(false)
@@ -1218,9 +1276,6 @@ impl ApplicationHandler for Nickel {
             .with_resizable(false)
             .with_window_level(WindowLevel::AlwaysOnTop);
         if let Some(monitor) = target.as_ref() {
-            desktop_attributes = desktop_attributes
-                .with_inner_size(monitor.size())
-                .with_position(monitor.position());
             launcher_attributes =
                 launcher_attributes.with_position(centered_position(monitor, (960, 640)));
             run_attributes = run_attributes.with_position(centered_position(
@@ -1247,34 +1302,34 @@ impl ApplicationHandler for Nickel {
                         - PANEL_HEIGHT as i32
                         - 12,
                 ));
-            let (panel_size, panel_position) =
-                panel_layout(monitor.position(), monitor.size(), monitor.scale_factor());
-            panel_attributes = panel_attributes
-                .with_inner_size(panel_size)
-                .with_position(panel_position);
         }
 
-        let desktop_window = if cfg!(target_os = "windows") {
-            let Ok(window) = event_loop.create_window(desktop_attributes) else {
-                eprintln!("failed to create Nickel desktop window");
-                event_loop.exit();
-                return;
-            };
-            let window = Arc::new(window);
-            #[cfg(target_os = "windows")]
-            {
-                use winit::platform::windows::WindowExtWindows;
-                window.set_skip_taskbar(true);
-                if !platform::configure_desktop_window(&window) {
-                    eprintln!(
-                        "failed to place Nickel desktop at the bottom of the Windows Z-order"
-                    );
+        let mut desktop_windows = Vec::new();
+        if cfg!(target_os = "windows") {
+            for monitor in &monitors {
+                let attributes = desktop_attributes
+                    .clone()
+                    .with_inner_size(monitor.size())
+                    .with_position(monitor.position());
+                let Ok(window) = event_loop.create_window(attributes) else {
+                    eprintln!("failed to create Nickel desktop window");
+                    event_loop.exit();
+                    return;
+                };
+                let window = Arc::new(window);
+                #[cfg(target_os = "windows")]
+                {
+                    use winit::platform::windows::WindowExtWindows;
+                    window.set_skip_taskbar(true);
+                    if !platform::configure_desktop_window(&window) {
+                        eprintln!(
+                            "failed to place Nickel desktop at the bottom of the Windows Z-order"
+                        );
+                    }
                 }
+                desktop_windows.push(window);
             }
-            Some(window)
-        } else {
-            None
-        };
+        }
         let Ok(launcher_window) = event_loop.create_window(launcher_attributes) else {
             eprintln!("failed to create Nickel launcher window");
             event_loop.exit();
@@ -1288,15 +1343,33 @@ impl ApplicationHandler for Nickel {
         if !platform::configure_launcher_window(&launcher_window) {
             eprintln!("failed to register Nickel's launcher window handle");
         }
-        let Ok(panel_window) = event_loop.create_window(panel_attributes) else {
-            eprintln!("failed to create Nickel panel window");
-            event_loop.exit();
-            return;
-        };
-        let panel_window = Arc::new(panel_window);
-        #[cfg(target_os = "windows")]
-        if !platform::configure_panel_window(&panel_window) {
-            eprintln!("failed to reserve the Windows work area for Nickel's panel");
+        let mut panel_windows = Vec::new();
+        let mut panel_primary = Vec::new();
+        for monitor in &monitors {
+            let (panel_size, panel_position) =
+                panel_layout(monitor.position(), monitor.size(), monitor.scale_factor());
+            let attributes = panel_attributes
+                .clone()
+                .with_inner_size(panel_size)
+                .with_position(panel_position);
+            let Ok(window) = event_loop.create_window(attributes) else {
+                eprintln!("failed to create Nickel panel window");
+                event_loop.exit();
+                return;
+            };
+            let window = Arc::new(window);
+            #[cfg(target_os = "windows")]
+            if !platform::configure_panel_window(&window) {
+                eprintln!("failed to reserve the Windows work area for a Nickel panel");
+            }
+            let is_primary = primary.as_ref() == Some(monitor);
+            if !self.shell_settings.bar_on_all_displays && !is_primary {
+                #[cfg(target_os = "windows")]
+                platform::release_panel_window(&window);
+                window.set_visible(false);
+            }
+            panel_windows.push(window);
+            panel_primary.push(is_primary);
         }
         let Ok(context_menu_window) = event_loop.create_window(context_menu_attributes) else {
             eprintln!("failed to create Nickel context menu window");
@@ -1345,26 +1418,31 @@ impl ApplicationHandler for Nickel {
             return;
         };
         let shared_graphics = launcher_gpu.graphics.clone();
-        let desktop_gpu =
-            desktop_window.as_ref().and_then(|window| {
-                match desktop::DesktopGpu::new(
-                    window.clone(),
-                    shared_graphics.clone(),
-                    platform::wallpaper(),
-                ) {
-                    Ok(gpu) => Some(gpu),
-                    Err(error) => {
-                        eprintln!("failed to initialize Nickel desktop renderer: {error}");
-                        None
-                    }
-                }
-            });
-        let Ok(panel_gpu) = panel::PanelGpu::new(panel_window.clone(), shared_graphics.clone())
-        else {
-            eprintln!("failed to initialize Nickel panel renderer");
-            event_loop.exit();
-            return;
-        };
+        let wallpaper = platform::wallpaper();
+        let mut desktop_surfaces = Vec::new();
+        for window in desktop_windows {
+            match desktop::DesktopGpu::new(
+                window.clone(),
+                shared_graphics.clone(),
+                wallpaper.clone(),
+            ) {
+                Ok(gpu) => desktop_surfaces.push((window, gpu)),
+                Err(error) => eprintln!("failed to initialize Nickel desktop renderer: {error}"),
+            }
+        }
+        let mut panel_surfaces = Vec::new();
+        for window in panel_windows {
+            let Ok(mut gpu) = panel::PanelGpu::new(window.clone(), shared_graphics.clone()) else {
+                eprintln!("failed to initialize Nickel panel renderer");
+                event_loop.exit();
+                return;
+            };
+            gpu.set_desktops(
+                self.shell_settings.desktop_count,
+                self.shell_settings.active_desktop,
+            );
+            panel_surfaces.push((window, gpu));
+        }
         let Ok(run_gpu) =
             run_dialog::RunDialogGpu::new(run_window.clone(), shared_graphics.clone())
         else {
@@ -1374,16 +1452,17 @@ impl ApplicationHandler for Nickel {
         };
         let control_center_gpu = None;
         launcher_window.set_title("Nickel Launcher");
-        if let Some(window) = &desktop_window {
+        for (window, _) in &desktop_surfaces {
             window.request_redraw();
         }
-        panel_window.request_redraw();
-        self.desktop_window = desktop_window;
-        self.desktop_gpu = desktop_gpu;
+        for (window, _) in &panel_surfaces {
+            window.request_redraw();
+        }
+        self.desktop_surfaces = desktop_surfaces;
         self.window = Some(launcher_window);
         self.gpu = Some(launcher_gpu);
-        self.panel_window = Some(panel_window);
-        self.panel_gpu = Some(panel_gpu);
+        self.panel_surfaces = panel_surfaces;
+        self.panel_primary = panel_primary;
         self.context_menu_window = Some(context_menu_window);
         self.context_menu_gpu = None;
         self.run_window = Some(run_window);
@@ -1494,21 +1573,22 @@ impl ApplicationHandler for Nickel {
             return;
         }
 
-        if self.desktop_window.as_ref().map(|window| window.id()) == Some(window_id) {
+        if let Some((window, gpu)) = self
+            .desktop_surfaces
+            .iter_mut()
+            .find(|(window, _)| window.id() == window_id)
+        {
             match event {
                 WindowEvent::Resized(size) => {
-                    if let Some(gpu) = &mut self.desktop_gpu {
-                        gpu.resize(size.width, size.height);
-                    }
+                    gpu.resize(size.width, size.height);
                 }
                 WindowEvent::RedrawRequested => {
-                    if let Some(gpu) = &mut self.desktop_gpu {
-                        gpu.render();
-                    }
+                    gpu.render();
                 }
                 WindowEvent::CloseRequested => {}
                 _ => {}
             }
+            let _ = window;
             return;
         }
         if self.context_menu_window.as_ref().map(|window| window.id()) == Some(window_id) {
@@ -1642,7 +1722,7 @@ impl ApplicationHandler for Nickel {
         }
         if self.run_window.as_ref().map(|window| window.id()) == Some(window_id) {
             match event {
-                WindowEvent::CloseRequested | WindowEvent::Focused(false) => self.hide_run(),
+                WindowEvent::CloseRequested => self.hide_run(),
                 WindowEvent::Resized(size) => {
                     if let Some(gpu) = &mut self.run_gpu {
                         gpu.resize(size.width, size.height);
@@ -1734,6 +1814,15 @@ impl ApplicationHandler for Nickel {
                 }
                 WindowEvent::Ime(Ime::Enabled) => {}
                 WindowEvent::KeyboardInput { event, .. }
+                    if event.state == ElementState::Released
+                        && matches!(
+                            &event.logical_key,
+                            Key::Character(text) if text.eq_ignore_ascii_case("r")
+                        ) =>
+                {
+                    self.run_ignoring_trigger_r = false;
+                }
+                WindowEvent::KeyboardInput { event, .. }
                     if event.state == ElementState::Pressed =>
                 {
                     let mut changed = true;
@@ -1778,13 +1867,18 @@ impl ApplicationHandler for Nickel {
                         }
                         Key::Named(NamedKey::Space) => self.run_editor.insert(" "),
                         Key::Character(text) => {
-                            if self.run_modifiers.control_key() && text.eq_ignore_ascii_case("a") {
+                            if self.run_ignoring_trigger_r && text.eq_ignore_ascii_case("r") {
+                                changed = false;
+                            } else if self.run_modifiers.control_key()
+                                && text.eq_ignore_ascii_case("a")
+                            {
                                 self.run_editor.select_all();
                             } else if let Some(pasted) = platform::paste_text_if_requested(&text) {
                                 self.run_editor.insert(&pasted);
                             } else if self.run_modifiers.control_key() {
                                 changed = false;
                             } else {
+                                self.run_ignoring_trigger_r = false;
                                 self.run_editor.insert(&text);
                             }
                         }
@@ -1802,35 +1896,42 @@ impl ApplicationHandler for Nickel {
             return;
         }
 
-        if self.panel_window.as_ref().map(|window| window.id()) == Some(window_id) {
+        if let Some(panel_index) = self
+            .panel_surfaces
+            .iter()
+            .position(|(window, _)| window.id() == window_id)
+        {
             match event {
                 WindowEvent::CloseRequested => event_loop.exit(),
                 WindowEvent::Resized(size) => {
-                    if let Some(gpu) = &mut self.panel_gpu {
-                        gpu.resize(size.width, size.height);
-                    }
-                    self.panel_window
-                        .as_ref()
-                        .expect("panel window exists")
-                        .request_redraw();
+                    self.panel_surfaces[panel_index]
+                        .1
+                        .resize(size.width, size.height);
+                    self.panel_surfaces[panel_index].0.request_redraw();
                 }
                 WindowEvent::RedrawRequested => {
-                    if let Some(gpu) = &mut self.panel_gpu {
-                        gpu.render(self.panel_hovered, self.panel_task_hovered);
-                    }
+                    self.panel_surfaces[panel_index].1.render(
+                        self.panel_hovered,
+                        self.panel_task_hovered,
+                        self.panel_desktop_hovered,
+                    );
                 }
                 WindowEvent::CursorMoved { position, .. } => {
                     let hovered = panel::launcher_button_contains(position);
                     let task_hovered = panel::task_at(position, self.window_groups.len());
-                    let tray_hovered = self.panel_window.as_ref().and_then(|window| {
-                        panel::tray_at(position, window.inner_size().width, self.tray_items.len())
-                    });
-                    let control_hovered = self.panel_window.as_ref().is_some_and(|window| {
-                        panel::control_center_contains(position, window.inner_size().width)
-                    });
+                    let panel_width = self.panel_surfaces[panel_index].0.inner_size().width;
+                    let tray_hovered = panel::tray_at(position, panel_width, self.tray_items.len());
+                    let control_hovered = panel::control_center_contains(position, panel_width);
+                    let desktop_hovered = panel::desktop_at(
+                        position,
+                        panel_width,
+                        self.tray_items.len(),
+                        self.shell_settings.desktop_count,
+                    );
                     if hovered == self.panel_hovered
                         && task_hovered == self.panel_task_hovered
                         && tray_hovered == self.panel_tray_hovered
+                        && desktop_hovered == self.panel_desktop_hovered
                         && control_hovered == self.panel_control_hovered
                     {
                         return;
@@ -1838,6 +1939,7 @@ impl ApplicationHandler for Nickel {
                     self.panel_hovered = hovered;
                     self.panel_task_hovered = task_hovered;
                     self.panel_tray_hovered = tray_hovered;
+                    self.panel_desktop_hovered = desktop_hovered;
                     self.panel_control_hovered = control_hovered;
                     if let Some(index) =
                         task_hovered.filter(|_| self.window_feed.supports_previews())
@@ -1847,11 +1949,12 @@ impl ApplicationHandler for Nickel {
                         self.preview_hide_deadline =
                             Some(Instant::now() + Duration::from_millis(250));
                     }
-                    let window = self.panel_window.as_ref().expect("panel window exists");
+                    let window = &self.panel_surfaces[panel_index].0;
                     window.set_cursor(
                         if hovered
                             || task_hovered.is_some()
                             || tray_hovered.is_some()
+                            || desktop_hovered.is_some()
                             || control_hovered
                         {
                             CursorIcon::Pointer
@@ -1865,12 +1968,13 @@ impl ApplicationHandler for Nickel {
                     self.panel_hovered = false;
                     self.panel_task_hovered = None;
                     self.panel_tray_hovered = None;
+                    self.panel_desktop_hovered = None;
                     self.panel_control_hovered = false;
                     if self.context_preview_mode {
                         self.preview_hide_deadline =
                             Some(Instant::now() + Duration::from_millis(250));
                     }
-                    let window = self.panel_window.as_ref().expect("panel window exists");
+                    let window = &self.panel_surfaces[panel_index].0;
                     window.set_cursor(CursorIcon::Default);
                     window.request_redraw();
                 }
@@ -1887,6 +1991,22 @@ impl ApplicationHandler for Nickel {
                     button: MouseButton::Left,
                     ..
                 } if self.panel_control_hovered => self.toggle_control_center(),
+                WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    button: MouseButton::Left,
+                    ..
+                } if self.panel_desktop_hovered.is_some() => {
+                    self.shell_settings.active_desktop =
+                        self.panel_desktop_hovered.expect("desktop is hovered");
+                    let _ = self.shell_settings.save_default();
+                    for (window, gpu) in &mut self.panel_surfaces {
+                        gpu.set_desktops(
+                            self.shell_settings.desktop_count,
+                            self.shell_settings.active_desktop,
+                        );
+                        window.request_redraw();
+                    }
+                }
                 WindowEvent::MouseInput {
                     state: ElementState::Pressed,
                     button: MouseButton::Left,
@@ -2200,20 +2320,17 @@ impl ApplicationHandler for Nickel {
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         #[cfg(target_os = "windows")]
-        if let Some(window) = &self.panel_window {
+        for (window, _) in &self.panel_surfaces {
             platform::release_panel_window(window);
         }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
-        if self
-            .desktop_gpu
-            .as_ref()
-            .is_some_and(desktop::DesktopGpu::is_animated)
-            && let Some(window) = &self.desktop_window
-        {
-            window.request_redraw();
+        for (window, gpu) in &self.desktop_surfaces {
+            if gpu.is_animated() {
+                window.request_redraw();
+            }
         }
         while let Ok(shortcut) = self.launcher_hotkey_rx.try_recv() {
             match shortcut {
@@ -2278,21 +2395,23 @@ impl ApplicationHandler for Nickel {
             platform::update_panel_fullscreen_state();
             self.fullscreen_deadline = now + Duration::from_secs(1);
         }
+        if now >= self.settings_deadline {
+            self.refresh_shell_settings();
+            self.settings_deadline = now + Duration::from_millis(500);
+        }
         if now >= self.clock_deadline {
-            if self
-                .panel_gpu
-                .as_mut()
-                .is_some_and(panel::PanelGpu::update_clock)
-                && let Some(window) = &self.panel_window
-            {
-                window.request_redraw();
+            for (window, gpu) in &mut self.panel_surfaces {
+                if gpu.update_clock() {
+                    window.request_redraw();
+                }
             }
             self.clock_deadline = next_minute_deadline(now, SystemTime::now());
         }
         let mut deadline = self
             .clock_deadline
             .min(self.window_deadline)
-            .min(self.fullscreen_deadline);
+            .min(self.fullscreen_deadline)
+            .min(self.settings_deadline);
         if let Some(preview_deadline) = self.preview_hide_deadline {
             deadline = deadline.min(preview_deadline);
         }
@@ -2330,22 +2449,6 @@ fn next_minute_deadline(now: Instant, wall_clock: SystemTime) -> Instant {
     now + Duration::from_nanos(remaining)
 }
 
-fn select_monitor(
-    monitors: &[MonitorHandle],
-    primary: Option<&MonitorHandle>,
-    use_secondary: bool,
-) -> Option<MonitorHandle> {
-    if use_secondary {
-        monitors
-            .iter()
-            .find(|monitor| primary != Some(*monitor))
-            .cloned()
-            .or_else(|| primary.cloned())
-    } else {
-        primary.cloned().or_else(|| monitors.first().cloned())
-    }
-}
-
 fn centered_position(monitor: &MonitorHandle, window_size: (u32, u32)) -> PhysicalPosition<i32> {
     let origin = monitor.position();
     let size = monitor.size();
@@ -2357,13 +2460,12 @@ fn centered_position(monitor: &MonitorHandle, window_size: (u32, u32)) -> Physic
 fn panel_layout(
     origin: PhysicalPosition<i32>,
     monitor_size: PhysicalSize<u32>,
-    scale_factor: f64,
-) -> (LogicalSize<f64>, PhysicalPosition<i32>) {
-    let logical_width = f64::from(monitor_size.width) / scale_factor;
-    let physical_height = (PANEL_HEIGHT * scale_factor).round() as u32;
+    _scale_factor: f64,
+) -> (PhysicalSize<u32>, PhysicalPosition<i32>) {
+    let physical_height = PANEL_HEIGHT.round() as u32;
     let y = origin.y + monitor_size.height.saturating_sub(physical_height) as i32;
     (
-        LogicalSize::new(logical_width, PANEL_HEIGHT),
+        PhysicalSize::new(monitor_size.width, physical_height),
         PhysicalPosition::new(origin.x, y),
     )
 }
@@ -2493,14 +2595,14 @@ mod tests {
     }
 
     #[test]
-    fn panel_spans_monitor_and_anchors_to_bottom_at_display_scale() {
+    fn panel_keeps_consistent_physical_height_across_display_scales() {
         let (size, position) = panel_layout(
             PhysicalPosition::new(1920, 0),
             PhysicalSize::new(2560, 1440),
             1.25,
         );
-        assert_eq!(size, LogicalSize::new(2048.0, 56.0));
-        assert_eq!(position, PhysicalPosition::new(1920, 1370));
+        assert_eq!(size, PhysicalSize::new(2560, 56));
+        assert_eq!(position, PhysicalPosition::new(1920, 1384));
     }
 
     #[test]
