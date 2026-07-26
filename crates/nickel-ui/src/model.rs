@@ -70,7 +70,6 @@ impl Application {
         self.icon_path.as_deref()
     }
 
-    #[cfg(test)]
     pub fn launch_command(&self) -> Option<&[String]> {
         self.launch_command.as_deref()
     }

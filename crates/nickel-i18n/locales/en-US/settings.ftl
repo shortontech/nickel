@@ -71,3 +71,17 @@ settings-swatch-surface = Surface
 settings-swatch-hover = Hover
 settings-swatch-accent = Accent
 settings-swatch-complement = Complement
+
+run-title = Run
+run-prompt = Type the name of a program, folder, document, or internet resource.
+run-action-open = Open
+run-action-cancel = Cancel
+run-action-browse = Browse…
+run-error-empty = Enter a program, folder, document, or address.
+run-error-invalid-quotes = The command has unmatched quotes.
+run-error-missing-target = { $target } has no launch target.
+run-error-not-found = Could not find “{ $target }”.
+run-error-path-not-found = Could not find the path for “{ $target }”.
+run-error-access-denied = Access was denied while opening “{ $target }”.
+run-error-no-association = No application is associated with “{ $target }”.
+run-error-platform = Could not open “{ $target }”.

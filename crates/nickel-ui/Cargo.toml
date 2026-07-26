@@ -13,6 +13,7 @@ image.workspace = true
 jiff.workspace = true
 nickel-components = { path = "../nickel-components" }
 nickel-core = { path = "../nickel-core" }
+nickel-i18n = { path = "../nickel-i18n" }
 nickel-logging = { path = "../nickel-logging" }
 nickel-platform = { path = "../nickel-platform" }
 nucleo-matcher.workspace = true

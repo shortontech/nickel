@@ -70,3 +70,17 @@ settings-swatch-panel = Panel
 settings-swatch-surface = Superficie
 settings-swatch-accent = Acento
 settings-swatch-complement = Complementario
+
+run-title = Ejecutar
+run-prompt = Escribe el nombre de un programa, carpeta, documento o recurso de internet.
+run-action-open = Abrir
+run-action-cancel = Cancelar
+run-action-browse = Examinar…
+run-error-empty = Escribe un programa, carpeta, documento o dirección.
+run-error-invalid-quotes = El comando tiene comillas sin cerrar.
+run-error-missing-target = { $target } no tiene un destino para iniciar.
+run-error-not-found = No se encontró “{ $target }”.
+run-error-path-not-found = No se encontró la ruta de “{ $target }”.
+run-error-access-denied = Se denegó el acceso al abrir “{ $target }”.
+run-error-no-association = No hay ninguna aplicación asociada con “{ $target }”.
+run-error-platform = No se pudo abrir “{ $target }”.

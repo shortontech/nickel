@@ -32,6 +32,7 @@ use nickel_core::launcher::LauncherVisibility;
 use nickel_core::run::RunPrompt;
 use nickel_core::shell_settings::ShellSettings;
 use nickel_core::theme::{Appearance, ThemePalette};
+use nickel_i18n::Localizer;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
@@ -71,6 +72,7 @@ enum ContextAction {
 }
 
 struct Nickel {
+    localizer: Localizer,
     desktop_surfaces: Vec<(Arc<Window>, desktop::DesktopGpu)>,
     window: Option<Arc<Window>>,
     gpu: Option<Gpu>,
@@ -105,6 +107,7 @@ struct Nickel {
     run_gpu: Option<run_dialog::RunDialogGpu>,
     run_prompt: RunPrompt,
     run_editor: TextEditor,
+    run_error: Option<String>,
     run_modifiers: ModifiersState,
     run_ignoring_trigger_r: bool,
     run_hovered: Option<run_dialog::Action>,
@@ -137,6 +140,7 @@ struct Nickel {
 
 impl Default for Nickel {
     fn default() -> Self {
+        let localizer = Localizer::system();
         let applications = platform::applications();
 
         let mut launcher = if applications.is_empty() {
@@ -163,6 +167,7 @@ impl Default for Nickel {
             }
         };
         Self {
+            localizer,
             desktop_surfaces: Vec::new(),
             window: None,
             gpu: None,
@@ -197,6 +202,7 @@ impl Default for Nickel {
             run_gpu: None,
             run_prompt,
             run_editor: TextEditor::default(),
+            run_error: None,
             run_modifiers: ModifiersState::empty(),
             run_ignoring_trigger_r: false,
             run_hovered: None,
@@ -305,6 +311,7 @@ impl Nickel {
         self.set_launcher_visible(false);
         self.run_prompt.clear();
         self.run_editor.clear();
+        self.run_error = None;
         self.run_ignoring_trigger_r = true;
         self.run_hovered = None;
         if let Some(window) = &self.run_window {
@@ -329,14 +336,22 @@ impl Nickel {
         else {
             return;
         };
-        if platform::execute_run_command(&command) {
-            self.run_prompt.record(&command);
-            if let Some(store) = &self.pin_store
-                && let Err(error) = store.record_run(self.run_prompt.history())
-            {
-                eprintln!("failed to store Run history: {error}");
+        match platform::execute_run_command(&command) {
+            Ok(()) => {
+                self.run_prompt.record(&command);
+                if let Some(store) = &self.pin_store
+                    && let Err(error) = store.record_run(self.run_prompt.history())
+                {
+                    eprintln!("failed to store Run history: {error}");
+                }
+                self.hide_run();
             }
-            self.hide_run();
+            Err(error) => {
+                self.run_error = Some(localized_launch_error(&self.localizer, error));
+                if let Some(window) = &self.run_window {
+                    window.request_redraw();
+                }
+            }
         }
     }
 
@@ -888,17 +903,19 @@ impl Nickel {
         let Some(result) = self.launcher.result_at(index) else {
             return;
         };
-        match result.launch() {
-            Ok(child) => {
+        match platform::launch_application(result) {
+            Ok(process_id) => {
                 println!(
-                    "launched application: {} (pid {}, icon {})",
+                    "launched application: {} (pid {:?}, icon {})",
                     result.name(),
-                    child.id(),
+                    process_id,
                     result.icon().unwrap_or("none")
                 );
                 self.set_launcher_visible(false);
             }
-            Err(error) => eprintln!("failed to launch application {}: {error}", result.name()),
+            Err(error) => {
+                eprintln!("failed to launch application {}: {error:?}", result.name())
+            }
         }
     }
 
@@ -1656,9 +1673,11 @@ impl ApplicationHandler for Nickel {
             );
             panel_surfaces.push((window, gpu));
         }
-        let Ok(run_gpu) =
-            run_dialog::RunDialogGpu::new(run_window.clone(), shared_graphics.clone())
-        else {
+        let Ok(run_gpu) = run_dialog::RunDialogGpu::new(
+            run_window.clone(),
+            shared_graphics.clone(),
+            &self.localizer,
+        ) else {
             eprintln!("failed to initialize Nickel Run renderer");
             event_loop.exit();
             return;
@@ -2002,6 +2021,7 @@ impl ApplicationHandler for Nickel {
                             self.run_prompt.history_open(),
                             self.run_prompt.history_selection(),
                             self.run_hovered,
+                            self.run_error.as_deref(),
                         );
                     }
                 }
@@ -2064,6 +2084,7 @@ impl ApplicationHandler for Nickel {
                         .request_redraw();
                 }
                 WindowEvent::Ime(Ime::Commit(text)) => {
+                    self.run_error = None;
                     self.run_editor.commit_preedit(&text);
                     self.run_window
                         .as_ref()
@@ -2090,6 +2111,9 @@ impl ApplicationHandler for Nickel {
                 WindowEvent::KeyboardInput { event, .. }
                     if event.state == ElementState::Pressed =>
                 {
+                    if event.logical_key != Key::Named(NamedKey::Enter) {
+                        self.run_error = None;
+                    }
                     let mut changed = true;
                     match event.logical_key {
                         Key::Named(NamedKey::Backspace) => self.run_editor.backspace(),
@@ -2753,6 +2777,7 @@ impl ApplicationHandler for Nickel {
 
 fn focused_shortcut_edge(event: &winit::event::KeyEvent) -> Option<(Hotkey, KeyEdge)> {
     let key = match &event.logical_key {
+        Key::Named(NamedKey::Super) => Hotkey::Super,
         Key::Named(NamedKey::Alt) => Hotkey::Alt,
         Key::Named(NamedKey::Shift) => Hotkey::Shift,
         Key::Named(NamedKey::Tab) => Hotkey::Tab,
@@ -2765,6 +2790,31 @@ fn focused_shortcut_edge(event: &winit::event::KeyEvent) -> Option<(Hotkey, KeyE
         ElementState::Released => KeyEdge::Released,
     };
     Some((key, edge))
+}
+
+fn localized_launch_error(localizer: &Localizer, error: platform::LaunchError) -> String {
+    match error {
+        platform::LaunchError::EmptyCommand => localizer.text("run-error-empty"),
+        platform::LaunchError::InvalidQuotes => localizer.text("run-error-invalid-quotes"),
+        platform::LaunchError::MissingTarget(target) => {
+            localizer.value("run-error-missing-target", "target", &target)
+        }
+        platform::LaunchError::NotFound(target) => {
+            localizer.value("run-error-not-found", "target", &target)
+        }
+        platform::LaunchError::PathNotFound(target) => {
+            localizer.value("run-error-path-not-found", "target", &target)
+        }
+        platform::LaunchError::AccessDenied(target) => {
+            localizer.value("run-error-access-denied", "target", &target)
+        }
+        platform::LaunchError::NoAssociation(target) => {
+            localizer.value("run-error-no-association", "target", &target)
+        }
+        platform::LaunchError::Platform(target) => {
+            localizer.value("run-error-platform", "target", &target)
+        }
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

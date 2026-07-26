@@ -46,14 +46,7 @@ fn load_from_roots(roots: &[PathBuf]) -> Vec<Application> {
             name.to_owned(),
             Some(path.clone()),
             None,
-            Some(vec![
-                "cmd.exe".into(),
-                "/d".into(),
-                "/c".into(),
-                "start".into(),
-                "".into(),
-                path,
-            ]),
+            Some(vec![path]),
         ));
     }
     applications.sort_by(|left, right| {
@@ -117,7 +110,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["Browser", "Calculator"]
         );
-        assert_eq!(applications[0].launch_command().unwrap()[3], "start");
+        assert!(applications[0].launch_command().unwrap()[0].ends_with("Browser.lnk"));
     }
 
     #[test]
