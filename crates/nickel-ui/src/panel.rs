@@ -16,6 +16,10 @@ const TASK_WIDTH: f64 = 48.0;
 const PANEL_ICON_GLYPH_ID: u16 = u16::MAX - 1;
 const TRAY_GLYPH_BASE: u16 = 60_000;
 const TRAY_WIDTH: f64 = 40.0;
+#[cfg(target_os = "windows")]
+const TRAY_ICON_SIZE: f64 = 16.0;
+#[cfg(not(target_os = "windows"))]
+const TRAY_ICON_SIZE: f64 = 32.0;
 const CLOCK_WIDTH: f64 = 100.0;
 const DESKTOP_SLOT_WIDTH: f64 = 34.0;
 const DESKTOP_WIDTH: f32 = 28.0;
@@ -222,10 +226,11 @@ impl PanelGpu {
         custom_glyphs.extend(self.tray_items.iter().enumerate().filter_map(|(index, _)| {
             Some(CustomGlyph {
                 id: TRAY_GLYPH_BASE.checked_add(u16::try_from(index).ok()?)?,
-                left: tray_left(self.config.width, self.tray_items.len(), index) as f32 + 4.0,
-                top: 12.0,
-                width: 32.0,
-                height: 32.0,
+                left: (tray_left(self.config.width, self.tray_items.len(), index)
+                    + (TRAY_WIDTH - TRAY_ICON_SIZE) / 2.0) as f32,
+                top: ((56.0 - TRAY_ICON_SIZE) / 2.0) as f32,
+                width: TRAY_ICON_SIZE as f32,
+                height: TRAY_ICON_SIZE as f32,
                 color: None,
                 snap_to_physical_pixel: true,
                 metadata: 0,

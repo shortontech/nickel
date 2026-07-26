@@ -80,7 +80,12 @@ impl Application {
             .as_deref()
             .and_then(|command| command.split_first())
             .ok_or_else(|| io::Error::other("application has no launch command"))?;
-        Command::new(program).args(arguments).spawn()
+        let mut command = Command::new(program);
+        command.args(arguments);
+        if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+            command.current_dir(home);
+        }
+        command.spawn()
     }
 }
 
