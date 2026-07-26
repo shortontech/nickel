@@ -43,6 +43,7 @@ use winit::window::{CursorIcon, Window, WindowAttributes, WindowId, WindowLevel}
 
 mod context_menu;
 mod control_center;
+mod controller;
 mod desktop;
 mod graphics;
 mod icons;
@@ -136,6 +137,7 @@ struct Nickel {
     scroll_offset: usize,
     cursor_position: Option<PhysicalPosition<f64>>,
     scrollbar_drag_offset: Option<f64>,
+    launcher_controller: controller::LauncherController,
 }
 
 impl Default for Nickel {
@@ -231,6 +233,7 @@ impl Default for Nickel {
             scroll_offset: 0,
             cursor_position: None,
             scrollbar_drag_offset: None,
+            launcher_controller: controller::LauncherController::new(),
         }
     }
 }
@@ -919,6 +922,33 @@ impl Nickel {
         }
     }
 
+    fn handle_launcher_controller_action(&mut self, action: controller::LauncherControllerAction) {
+        if !self.launcher_visibility.is_visible() {
+            return;
+        }
+        use controller::LauncherControllerAction;
+        match action {
+            LauncherControllerAction::Up => self.launcher.select_grid_up(layout::GRID_COLUMNS),
+            LauncherControllerAction::Down => self.launcher.select_grid_down(layout::GRID_COLUMNS),
+            LauncherControllerAction::Left => self.launcher.select_grid_left(layout::GRID_COLUMNS),
+            LauncherControllerAction::Right => {
+                self.launcher.select_grid_right(layout::GRID_COLUMNS)
+            }
+            LauncherControllerAction::Confirm => {
+                self.launch_result(self.launcher.selected_index());
+                return;
+            }
+            LauncherControllerAction::Cancel => {
+                self.set_launcher_visible(false);
+                return;
+            }
+        }
+        self.ensure_selection_visible();
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
     fn viewport_metrics(&self) -> (u32, u32, usize) {
         let size = self.window.as_ref().expect("window exists").inner_size();
         (
@@ -930,10 +960,9 @@ impl Nickel {
 
     fn set_scroll_offset(&mut self, offset: usize) {
         let (_, _, capacity) = self.viewport_metrics();
-        self.scroll_offset = offset.min(layout::max_scroll_offset(
-            self.launcher.result_count(),
-            capacity,
-        ));
+        self.scroll_offset = (offset / layout::GRID_COLUMNS * layout::GRID_COLUMNS).min(
+            layout::max_scroll_offset(self.launcher.result_count(), capacity),
+        );
     }
 
     fn scroll_by(&mut self, rows: i32) {
@@ -953,9 +982,12 @@ impl Nickel {
         }
         let selected = self.launcher.selected_index();
         if selected < self.scroll_offset {
-            self.scroll_offset = selected;
+            self.scroll_offset = selected / layout::GRID_COLUMNS * layout::GRID_COLUMNS;
         } else if selected >= self.scroll_offset + capacity {
-            self.scroll_offset = selected + 1 - capacity;
+            let visible_rows = capacity / layout::GRID_COLUMNS;
+            let selected_row = selected / layout::GRID_COLUMNS;
+            self.scroll_offset =
+                selected_row.saturating_add(1).saturating_sub(visible_rows) * layout::GRID_COLUMNS;
         }
         self.set_scroll_offset(self.scroll_offset);
     }
@@ -2580,13 +2612,17 @@ impl ApplicationHandler for Nickel {
                 let mut query_changed = false;
                 match event.logical_key {
                     Key::Named(NamedKey::ArrowDown) => {
-                        self.launcher.select_relative(layout::GRID_COLUMNS as isize)
+                        self.launcher.select_grid_down(layout::GRID_COLUMNS)
                     }
-                    Key::Named(NamedKey::ArrowUp) => self
-                        .launcher
-                        .select_relative(-(layout::GRID_COLUMNS as isize)),
-                    Key::Named(NamedKey::ArrowRight) => self.launcher.select_relative(1),
-                    Key::Named(NamedKey::ArrowLeft) => self.launcher.select_relative(-1),
+                    Key::Named(NamedKey::ArrowUp) => {
+                        self.launcher.select_grid_up(layout::GRID_COLUMNS)
+                    }
+                    Key::Named(NamedKey::ArrowRight) => {
+                        self.launcher.select_grid_right(layout::GRID_COLUMNS)
+                    }
+                    Key::Named(NamedKey::ArrowLeft) => {
+                        self.launcher.select_grid_left(layout::GRID_COLUMNS)
+                    }
                     Key::Named(NamedKey::Backspace) => {
                         self.launcher_editor.backspace();
                         query_changed = true;
@@ -2676,6 +2712,9 @@ impl ApplicationHandler for Nickel {
                     muted,
                 } => self.show_volume_osd(volume_percent, muted),
             }
+        }
+        for action in self.launcher_controller.poll(now) {
+            self.handle_launcher_controller_action(action);
         }
         if self
             .screenshot_capture_deadline

@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 bytemuck.workspace = true
 glyphon.workspace = true
+gilrs.workspace = true
 image.workspace = true
 jiff.workspace = true
 nickel-components = { path = "../nickel-components" }
