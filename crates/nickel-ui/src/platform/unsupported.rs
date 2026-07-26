@@ -50,6 +50,8 @@ pub fn launcher_hotkey_receiver() -> std::sync::mpsc::Receiver<GlobalShortcut> {
     receiver
 }
 
+pub fn handle_focused_shortcut(_: nickel_core::hotkeys::Hotkey, _: nickel_core::hotkeys::KeyEdge) {}
+
 pub fn execute_run_command(_: &str) -> bool {
     false
 }

@@ -27,6 +27,7 @@ use glyphon::{
     TextAtlas, TextBounds, TextRenderer, Viewport, cosmic_text::Align,
 };
 use nickel_components::{TextEditor, TextField};
+use nickel_core::hotkeys::{Hotkey, KeyEdge};
 use nickel_core::launcher::LauncherVisibility;
 use nickel_core::run::RunPrompt;
 use nickel_core::shell_settings::ShellSettings;
@@ -1698,6 +1699,11 @@ impl ApplicationHandler for Nickel {
         window_id: WindowId,
         event: WindowEvent,
     ) {
+        if let WindowEvent::KeyboardInput { event, .. } = &event
+            && let Some((key, edge)) = focused_shortcut_edge(event)
+        {
+            platform::handle_focused_shortcut(key, edge);
+        }
         if self.screenshot_tool.as_ref().map(|tool| tool.window.id()) == Some(window_id) {
             let tool = self
                 .screenshot_tool
@@ -2743,6 +2749,22 @@ impl ApplicationHandler for Nickel {
         let deadline = deadline.min(now + Duration::from_millis(25));
         event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
     }
+}
+
+fn focused_shortcut_edge(event: &winit::event::KeyEvent) -> Option<(Hotkey, KeyEdge)> {
+    let key = match &event.logical_key {
+        Key::Named(NamedKey::Alt) => Hotkey::Alt,
+        Key::Named(NamedKey::Shift) => Hotkey::Shift,
+        Key::Named(NamedKey::Tab) => Hotkey::Tab,
+        Key::Named(NamedKey::PrintScreen) => Hotkey::PrintScreen,
+        Key::Character(character) if character.as_str() == "`" => Hotkey::Grave,
+        _ => return None,
+    };
+    let edge = match event.state {
+        ElementState::Pressed => KeyEdge::Pressed,
+        ElementState::Released => KeyEdge::Released,
+    };
+    Some((key, edge))
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

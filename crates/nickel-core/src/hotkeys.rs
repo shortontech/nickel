@@ -223,6 +223,15 @@ impl HotkeyController {
         }
     }
 
+    pub fn handle_reconciled(&mut self, key: Hotkey, edge: KeyEdge) -> HotkeyOutcome {
+        if key == Hotkey::PrintScreen && edge == KeyEdge::Released && !self.print_screen_held {
+            let pressed = self.handle(key, KeyEdge::Pressed);
+            self.handle(key, KeyEdge::Released);
+            return pressed;
+        }
+        self.handle(key, edge)
+    }
+
     pub fn begin_pointer_chord(&mut self) -> bool {
         if self.super_held {
             self.super_chorded = true;
@@ -394,6 +403,18 @@ mod tests {
                 .action,
             Some(HotkeyAction::ShowScreenshotTool)
         );
+    }
+
+    #[test]
+    fn orphaned_print_screen_release_opens_crop_tool_once() {
+        let mut controller = HotkeyController::default();
+        assert_eq!(
+            controller
+                .handle_reconciled(Hotkey::PrintScreen, KeyEdge::Released)
+                .action,
+            Some(HotkeyAction::ShowScreenshotTool)
+        );
+        assert!(!controller.snapshot().print_screen_held);
     }
 
     #[test]

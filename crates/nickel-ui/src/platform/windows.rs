@@ -811,6 +811,14 @@ pub fn launcher_hotkey_receiver() -> Receiver<GlobalShortcut> {
     receiver
 }
 
+pub fn handle_focused_shortcut(key: Hotkey, edge: KeyEdge) {
+    let action = hotkey_controller()
+        .lock()
+        .ok()
+        .and_then(|mut controller| controller.handle_reconciled(key, edge).action);
+    send_hotkey_action(action);
+}
+
 fn run_super_key_hook(sender: Sender<GlobalShortcut>) {
     const VK_LWIN: u32 = 0x5b;
     const VK_RWIN: u32 = 0x5c;
