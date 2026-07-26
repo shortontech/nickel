@@ -93,6 +93,7 @@ pub enum PaintCommand {
         scale: f32,
         color: Color,
         align: TextAlign,
+        bold: bool,
     },
     Image {
         bounds: Rect,
@@ -124,6 +125,7 @@ enum Kind {
     Text {
         value: String,
         scale: f32,
+        bold: bool,
     },
     Image {
         id: u16,
@@ -168,6 +170,7 @@ impl Element {
             kind: Kind::Text {
                 value: value.into(),
                 scale,
+                bold: false,
             },
             style: Style::default(),
             action: None,
@@ -472,6 +475,16 @@ impl Text {
 
     pub fn color(mut self, color: Color) -> Self {
         self.0 = self.0.foreground(color);
+        self
+    }
+
+    pub fn bold(mut self, bold: bool) -> Self {
+        if let Kind::Text {
+            bold: text_bold, ..
+        } = &mut self.0.kind
+        {
+            *text_bold = bold;
+        }
         self
     }
 
@@ -990,12 +1003,13 @@ fn layout_element(
 
     let foreground = element.style.foreground.or(inherited_foreground);
     match &element.kind {
-        Kind::Text { value, scale } => tree.commands.push(PaintCommand::Text {
+        Kind::Text { value, scale, bold } => tree.commands.push(PaintCommand::Text {
             bounds: rect,
             text: value.clone(),
             scale: *scale,
             color: foreground.unwrap_or(0x00ff_ffff),
             align: element.style.text_align,
+            bold: *bold,
         }),
         Kind::Image { id, image } => tree.commands.push(PaintCommand::Image {
             bounds: rect,
@@ -1062,6 +1076,7 @@ fn layout_element(
                 scale: 2.0,
                 color: *foreground,
                 align: TextAlign::Start,
+                bold: false,
             });
             tree.commands.push(PaintCommand::Text {
                 bounds: Rect::new(
@@ -1074,6 +1089,7 @@ fn layout_element(
                 scale: 1.0,
                 color: *foreground,
                 align: TextAlign::Center,
+                bold: false,
             });
             if *expanded {
                 let action = element.action.as_deref().unwrap_or("dropdown");
@@ -1099,6 +1115,7 @@ fn layout_element(
                         scale: 2.0,
                         color: *foreground,
                         align: TextAlign::Start,
+                        bold: false,
                     });
                     tree.hits.push(HitRegion {
                         rect: option_rect,

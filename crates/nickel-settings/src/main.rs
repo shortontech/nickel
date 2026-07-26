@@ -386,6 +386,53 @@ impl SettingsApp {
         )
     }
 
+    fn navigation_item(
+        &self,
+        action: &'static str,
+        message: &'static str,
+        glyph: &'static str,
+        selected: bool,
+        palette: ThemePalette,
+    ) -> Container {
+        let label = self.localizer.text(message);
+        let underline_width = (label.chars().count() as f32 * 8.0).clamp(24.0, 112.0);
+        let mut underline = Container::new().width(underline_width).height(2.0);
+        if selected {
+            underline = underline.background(palette.accent);
+        }
+        Container::new()
+            .width((SIDEBAR_WIDTH - 24) as f32)
+            .height(36.0)
+            .padding(Insets {
+                top: 4.0,
+                right: 8.0,
+                bottom: 2.0,
+                left: 8.0,
+            })
+            .action(action)
+            .child(
+                Row::new()
+                    .gap(10.0)
+                    .child(Text::new(glyph).width(22.0).scale(1.6).color(if selected {
+                        palette.accent
+                    } else {
+                        palette.muted
+                    }))
+                    .child(
+                        Column::new()
+                            .gap(2.0)
+                            .child(
+                                Text::new(label)
+                                    .height(20.0)
+                                    .scale(2.0)
+                                    .bold(selected)
+                                    .color(palette.text),
+                            )
+                            .child(underline),
+                    ),
+            )
+    }
+
     fn build_ui(&self, width: f32, height: f32) -> UiTree {
         let palette = self.palette();
         let (title, subtitle) = match self.page {
@@ -431,47 +478,34 @@ impl SettingsApp {
                     .background(palette.panel),
             )
             .child(header_content);
-        let mut display_button =
-            UiButton::new("nav:display", self.localizer.text("settings-nav-display"))
-                .width((SIDEBAR_WIDTH - 24) as f32)
-                .height(46.0)
-                .color(palette.text);
-        if self.page == SettingsPage::Display {
-            display_button = display_button
-                .background(palette.accent_soft)
-                .border(palette.accent, 2.0);
-        }
-        let mut bar_button = UiButton::new("nav:bar", self.localizer.text("settings-nav-bar"))
-            .width((SIDEBAR_WIDTH - 24) as f32)
-            .height(46.0)
-            .color(palette.text);
-        if self.page == SettingsPage::Bar {
-            bar_button = bar_button
-                .background(palette.accent_soft)
-                .border(palette.accent, 2.0);
-        }
-        let mut appearance_button = UiButton::new(
+        let display_button = self.navigation_item(
+            "nav:display",
+            "settings-nav-display",
+            "▣",
+            self.page == SettingsPage::Display,
+            palette,
+        );
+        let bar_button = self.navigation_item(
+            "nav:bar",
+            "settings-nav-bar",
+            "▤",
+            self.page == SettingsPage::Bar,
+            palette,
+        );
+        let appearance_button = self.navigation_item(
             "nav:appearance",
-            self.localizer.text("settings-nav-appearance"),
-        )
-        .width((SIDEBAR_WIDTH - 24) as f32)
-        .height(46.0)
-        .color(palette.text);
-        if self.page == SettingsPage::Appearance {
-            appearance_button = appearance_button
-                .background(palette.accent_soft)
-                .border(palette.accent, 2.0);
-        }
-        let mut network_button =
-            UiButton::new("nav:network", self.localizer.text("settings-nav-network"))
-                .width((SIDEBAR_WIDTH - 24) as f32)
-                .height(46.0)
-                .color(palette.text);
-        if self.page == SettingsPage::Network {
-            network_button = network_button
-                .background(palette.accent_soft)
-                .border(palette.accent, 2.0);
-        }
+            "settings-nav-appearance",
+            "◐",
+            self.page == SettingsPage::Appearance,
+            palette,
+        );
+        let network_button = self.navigation_item(
+            "nav:network",
+            "settings-nav-network",
+            "⌁",
+            self.page == SettingsPage::Network,
+            palette,
+        );
         let sidebar = Column::new()
             .width(SIDEBAR_WIDTH as f32)
             .background(LinearGradient::vertical(palette.panel, palette.background))
@@ -481,7 +515,7 @@ impl SettingsApp {
                 bottom: 12.0,
                 left: 12.0,
             })
-            .gap(8.0)
+            .gap(4.0)
             .child(display_button)
             .child(bar_button)
             .child(appearance_button)
@@ -1710,6 +1744,7 @@ impl SettingsApp {
                     scale: 3.0,
                     color: palette.text,
                     align: TextAlign::Start,
+                    bold: false,
                 });
                 commands.push(PaintCommand::Text {
                     bounds: UiRect::new(
@@ -1722,6 +1757,7 @@ impl SettingsApp {
                     scale: 2.0,
                     color: palette.muted,
                     align: TextAlign::Start,
+                    bold: false,
                 });
                 if display.primary {
                     commands.push(PaintCommand::Text {
@@ -1735,6 +1771,7 @@ impl SettingsApp {
                         scale: 2.0,
                         color: palette.accent,
                         align: TextAlign::Start,
+                        bold: true,
                     });
                 }
             }
