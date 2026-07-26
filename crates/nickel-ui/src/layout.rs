@@ -2,9 +2,11 @@ pub const SIDEBAR_WIDTH: f32 = 220.0;
 pub const CONTENT_LEFT: f32 = 244.0;
 pub const CONTENT_RIGHT_INSET: f32 = 28.0;
 pub const LIST_TOP: f32 = 100.0;
-pub const GRID_COLUMNS: usize = 5;
-const ROW_GAP: f32 = 6.0;
-const COLUMN_GAP: f32 = 6.0;
+// Launcher applications use a dense tile grid. Nickel File deliberately has its own FileGrid
+// policy because filenames and browsing affordances need more room than application launchers.
+pub const GRID_COLUMNS: usize = 6;
+const ROW_GAP: f32 = 10.0;
+const COLUMN_GAP: f32 = 10.0;
 const LIST_BOTTOM_INSET: f32 = 80.0;
 const TILE_PADDING: f32 = 10.0;
 const ICON_SIZE: f32 = 44.0;
@@ -169,7 +171,7 @@ mod tests {
     #[test]
     fn hit_testing_excludes_grid_gap_and_unallocated_rows() {
         assert_eq!(hit_test_result(260.0, 140.0, 960, 3), Some(0));
-        assert_eq!(hit_test_result(379.0, 140.0, 960, 3), None);
+        assert_eq!(hit_test_result(355.0, 140.0, 960, 3), None);
         assert_eq!(hit_test_result(260.0, 300.0, 960, 3), None);
     }
 
