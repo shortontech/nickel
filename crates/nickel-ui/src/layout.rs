@@ -91,7 +91,9 @@ fn grid_cell_size(available_width: u32) -> f32 {
 }
 
 pub fn max_scroll_offset(total: usize, capacity: usize) -> usize {
-    total.saturating_sub(capacity)
+    let total_rows = total.div_ceil(GRID_COLUMNS);
+    let visible_rows = capacity / GRID_COLUMNS;
+    total_rows.saturating_sub(visible_rows) * GRID_COLUMNS
 }
 
 pub fn scrollbar(
@@ -177,13 +179,19 @@ mod tests {
 
     #[test]
     fn scrollbar_thumb_tracks_visible_fraction_and_offset() {
-        let top = super::scrollbar(960, 640, 100, 20, 0).expect("overflow scrollbar");
-        let bottom = super::scrollbar(960, 640, 100, 20, 80).expect("overflow scrollbar");
+        let top = super::scrollbar(960, 640, 100, 24, 0).expect("overflow scrollbar");
+        let bottom = super::scrollbar(960, 640, 100, 24, 78).expect("overflow scrollbar");
         assert_eq!(top.thumb.y, top.track.y);
         assert_eq!(bottom.thumb.bottom(), bottom.track.bottom());
         assert_eq!(
-            super::offset_from_thumb_y(bottom.thumb.y.into(), bottom, 100, 20),
-            80
+            super::offset_from_thumb_y(bottom.thumb.y.into(), bottom, 100, 24),
+            78
         );
+    }
+
+    #[test]
+    fn scrolling_keeps_the_first_visible_item_on_a_row_boundary() {
+        assert_eq!(super::max_scroll_offset(26, 24), 6);
+        assert_eq!(super::max_scroll_offset(24, 24), 0);
     }
 }

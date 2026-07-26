@@ -176,14 +176,31 @@ impl Launcher {
         }
     }
 
-    pub fn select_relative(&mut self, offset: isize) {
-        if self.results.is_empty() {
-            return;
+    pub fn select_grid_left(&mut self, columns: usize) {
+        if columns != 0 && self.selected % columns != 0 {
+            self.selected -= 1;
         }
-        self.selected = self
-            .selected
-            .saturating_add_signed(offset)
-            .min(self.results.len() - 1);
+    }
+
+    pub fn select_grid_right(&mut self, columns: usize) {
+        if columns != 0
+            && self.selected % columns + 1 < columns
+            && self.selected + 1 < self.results.len()
+        {
+            self.selected += 1;
+        }
+    }
+
+    pub fn select_grid_up(&mut self, columns: usize) {
+        if columns != 0 && self.selected >= columns {
+            self.selected -= columns;
+        }
+    }
+
+    pub fn select_grid_down(&mut self, columns: usize) {
+        if columns != 0 && self.selected + columns < self.results.len() {
+            self.selected += columns;
+        }
     }
 
     fn refresh(&mut self) {
@@ -291,6 +308,29 @@ mod tests {
 
         assert_eq!(launcher.query(), "");
         assert_eq!(launcher.selected_index(), 0);
+    }
+
+    #[test]
+    fn horizontal_grid_navigation_stops_at_row_edges() {
+        let mut launcher = Launcher::default();
+        launcher.select(5);
+        launcher.select_grid_right(6);
+        assert_eq!(launcher.selected_index(), 5);
+        launcher.select(6);
+        launcher.select_grid_left(6);
+        assert_eq!(launcher.selected_index(), 6);
+    }
+
+    #[test]
+    fn vertical_grid_navigation_preserves_column_and_stops_at_partial_row() {
+        let mut launcher = Launcher::default();
+        launcher.select(1);
+        launcher.select_grid_down(6);
+        assert_eq!(launcher.selected_index(), 7);
+        launcher.select_grid_down(6);
+        assert_eq!(launcher.selected_index(), 7);
+        launcher.select_grid_up(6);
+        assert_eq!(launcher.selected_index(), 1);
     }
 
     #[test]
