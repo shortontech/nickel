@@ -827,6 +827,7 @@ fn run_super_key_hook(sender: Sender<GlobalShortcut>) {
         unsafe { RegisterHotKey(None, RIGHT_SUPER_HOTKEY, modifiers, VK_RWIN) }.is_ok();
     let run_registered = unsafe { RegisterHotKey(None, RUN_HOTKEY, modifiers, VK_R) }.is_ok();
     let registration_bits = u8::from(left_registered) | (u8::from(right_registered) << 1);
+    BARE_SUPER_REGISTRATION_BITS.store(registration_bits, std::sync::atomic::Ordering::Release);
     RUN_HOTKEY_REGISTERED.store(run_registered, std::sync::atomic::Ordering::Release);
     if registration_bits == 0 {
         tracing::warn!(
@@ -878,6 +879,8 @@ static SHORTCUT_SENDER: std::sync::OnceLock<Sender<GlobalShortcut>> = std::sync:
 static HOTKEY_CONTROLLER: std::sync::OnceLock<Mutex<HotkeyController>> = std::sync::OnceLock::new();
 static RUN_HOTKEY_REGISTERED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+static BARE_SUPER_REGISTRATION_BITS: std::sync::atomic::AtomicU8 =
+    std::sync::atomic::AtomicU8::new(0);
 static INPUT_TRACE_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static PANEL_FULLSCREEN_ACTIVE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -1004,13 +1007,23 @@ unsafe extern "system" fn super_key_hook(code: i32, wparam: WPARAM, lparam: LPAR
     {
         controller.handle(Hotkey::Alt, KeyEdge::Pressed);
     }
-    let (outcome, snapshot) = hotkey_controller()
+    let (mut outcome, snapshot) = hotkey_controller()
         .lock()
         .map(|mut controller| {
             let outcome = controller.handle(key, edge);
             (outcome, controller.snapshot())
         })
         .unwrap_or_default();
+    let bare_super_registered = match event.vkCode {
+        VK_LWIN => BARE_SUPER_REGISTRATION_BITS.load(std::sync::atomic::Ordering::Acquire) & 1 != 0,
+        VK_RWIN => BARE_SUPER_REGISTRATION_BITS.load(std::sync::atomic::Ordering::Acquire) & 2 != 0,
+        _ => false,
+    };
+    if bare_super_registered && key == Hotkey::Super {
+        // RegisterHotKey is the sole dispatcher for bare Super. The hook still tracks physical
+        // edges for Super+pointer gestures, but must not race the registered hotkey.
+        outcome.action = None;
+    }
     if !matches!(key, Hotkey::Run | Hotkey::Other) {
         trace_input("key", Some(key), Some(edge), outcome, snapshot);
     }
@@ -1023,9 +1036,12 @@ unsafe extern "system" fn super_key_hook(code: i32, wparam: WPARAM, lparam: LPAR
 }
 
 fn register_bare_super_press() {
-    // RegisterHotKey owns bare-Super dispatch and suppression, but it can post repeated or
-    // delayed messages. Physical down/up state comes exclusively from the keyboard hook.
     tracing::debug!("bare Super hotkey received");
+    let action = hotkey_controller()
+        .lock()
+        .map(|mut controller| controller.bare_super_pressed())
+        .ok();
+    send_hotkey_action(action);
 }
 
 fn hotkey_controller() -> &'static Mutex<HotkeyController> {
