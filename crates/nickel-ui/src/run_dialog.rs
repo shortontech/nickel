@@ -6,6 +6,8 @@ use glyphon::{
 };
 use winit::{dpi::PhysicalPosition, window::Window};
 
+use nickel_i18n::Localizer;
+
 use crate::{graphics::SharedGraphics, rectangles::RectangleRenderer};
 
 pub const WIDTH: u32 = 520;
@@ -58,6 +60,7 @@ pub struct RunDialogGpu {
     heading: Buffer,
     prompt: Buffer,
     input: Buffer,
+    error: Buffer,
     history_toggle: Buffer,
     buttons: Vec<Buffer>,
     history_labels: Vec<Buffer>,
@@ -65,7 +68,11 @@ pub struct RunDialogGpu {
 }
 
 impl RunDialogGpu {
-    pub fn new(window: Arc<Window>, graphics: Arc<SharedGraphics>) -> Result<Self, String> {
+    pub fn new(
+        window: Arc<Window>,
+        graphics: Arc<SharedGraphics>,
+        localizer: &Localizer,
+    ) -> Result<Self, String> {
         let surface = graphics.create_surface(window)?;
         let mut config = surface
             .get_default_config(&graphics.adapter, WIDTH, HEIGHT)
@@ -83,20 +90,31 @@ impl RunDialogGpu {
             wgpu::MultisampleState::default(),
             None,
         );
-        let heading = text_buffer(&mut font_system, "Run", 24.0, 32.0, 460.0);
+        let heading = text_buffer(
+            &mut font_system,
+            &localizer.text("run-title"),
+            24.0,
+            32.0,
+            460.0,
+        );
         let prompt = text_buffer(
             &mut font_system,
-            "Type the name of a program, folder, document, or internet resource.",
+            &localizer.text("run-prompt"),
             16.0,
             23.0,
             456.0,
         );
         let input = text_buffer(&mut font_system, "", 18.0, 30.0, 430.0);
+        let error = text_buffer(&mut font_system, "", 14.0, 22.0, 464.0);
         let history_toggle = text_buffer(&mut font_system, "v", 16.0, 24.0, 20.0);
-        let buttons = ["OK", "Cancel", "Browse…"]
-            .into_iter()
-            .map(|label| text_buffer(&mut font_system, label, 16.0, 24.0, 90.0))
-            .collect();
+        let buttons = [
+            localizer.text("run-action-open"),
+            localizer.text("run-action-cancel"),
+            localizer.text("run-action-browse"),
+        ]
+        .into_iter()
+        .map(|label| text_buffer(&mut font_system, &label, 16.0, 24.0, 90.0))
+        .collect();
         Ok(Self {
             surface,
             graphics: graphics.clone(),
@@ -109,6 +127,7 @@ impl RunDialogGpu {
             heading,
             prompt,
             input,
+            error,
             history_toggle,
             buttons,
             history_labels: Vec::new(),
@@ -132,6 +151,7 @@ impl RunDialogGpu {
         history_open: bool,
         history_selection: Option<usize>,
         hovered: Option<Action>,
+        error: Option<&str>,
     ) {
         self.input.set_text(
             displayed_command,
@@ -140,6 +160,13 @@ impl RunDialogGpu {
             None,
         );
         self.input.shape_until_scroll(&mut self.font_system, false);
+        self.error.set_text(
+            error.unwrap_or_default(),
+            &Attrs::new().family(Family::SansSerif),
+            Shaping::Advanced,
+            None,
+        );
+        self.error.shape_until_scroll(&mut self.font_system, false);
         self.history_labels = history
             .iter()
             .take(HISTORY_ROWS)
@@ -223,6 +250,14 @@ impl RunDialogGpu {
                 124.0,
                 self.config.width,
                 self.config.height,
+            ),
+            area_with_color(
+                &self.error,
+                28.0,
+                260.0,
+                self.config.width,
+                self.config.height,
+                Color::rgb(242, 130, 130),
             ),
         ];
         if history_open {
@@ -318,6 +353,17 @@ fn text_buffer(
 }
 
 fn area<'a>(buffer: &'a Buffer, left: f32, top: f32, width: u32, height: u32) -> TextArea<'a> {
+    area_with_color(buffer, left, top, width, height, Color::rgb(232, 237, 247))
+}
+
+fn area_with_color<'a>(
+    buffer: &'a Buffer,
+    left: f32,
+    top: f32,
+    width: u32,
+    height: u32,
+    color: Color,
+) -> TextArea<'a> {
     TextArea {
         buffer,
         left,
@@ -329,7 +375,7 @@ fn area<'a>(buffer: &'a Buffer, left: f32, top: f32, width: u32, height: u32) ->
             right: width as i32,
             bottom: height as i32,
         },
-        default_color: Color::rgb(232, 237, 247),
+        default_color: color,
         custom_glyphs: &[],
     }
 }

@@ -266,14 +266,9 @@ impl HotkeyController {
         self.launcher_visible = visible;
     }
 
-    pub fn bare_super_pressed(&mut self) -> HotkeyAction {
-        self.super_held = false;
+    pub fn registered_super_pressed(&mut self) {
+        self.super_held = true;
         self.super_chorded = false;
-        if self.launcher_visible {
-            HotkeyAction::HideLauncher
-        } else {
-            HotkeyAction::ShowLauncher
-        }
     }
 }
 
@@ -297,11 +292,20 @@ mod tests {
     }
 
     #[test]
-    fn registered_bare_super_uses_applied_launcher_visibility() {
+    fn registered_bare_super_toggles_only_when_released() {
         let mut controller = HotkeyController::default();
-        assert_eq!(controller.bare_super_pressed(), HotkeyAction::ShowLauncher);
+        controller.registered_super_pressed();
+        assert!(controller.snapshot().super_held);
+        assert_eq!(
+            controller.handle(Hotkey::Super, KeyEdge::Released).action,
+            Some(HotkeyAction::ShowLauncher)
+        );
         controller.launcher_visibility_applied(true);
-        assert_eq!(controller.bare_super_pressed(), HotkeyAction::HideLauncher);
+        controller.registered_super_pressed();
+        assert_eq!(
+            controller.handle(Hotkey::Super, KeyEdge::Released).action,
+            Some(HotkeyAction::HideLauncher)
+        );
     }
 
     #[test]

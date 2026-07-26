@@ -14,7 +14,8 @@ use std::{
 use windows::{
     Win32::{
         Foundation::{
-            COLORREF, CloseHandle, GlobalFree, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+            COLORREF, CloseHandle, GlobalFree, HANDLE, HWND, LPARAM, LRESULT, LocalFree, POINT,
+            RECT, WPARAM,
         },
         Graphics::Dwm::{
             DWM_THUMBNAIL_PROPERTIES, DWM_TNP_OPACITY, DWM_TNP_RECTDESTINATION,
@@ -52,11 +53,11 @@ use windows::{
             },
             Shell::{
                 ABE_BOTTOM, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, APPBARDATA,
-                DWPOS_CENTER, DWPOS_FILL, DWPOS_FIT, DWPOS_SPAN, DWPOS_STRETCH, DWPOS_TILE,
-                DesktopWallpaper, IDesktopWallpaper, NIF_GUID, NIF_ICON, NIF_MESSAGE, NIF_STATE,
-                NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NIN_SELECT, NIS_HIDDEN,
-                NOTIFYICON_VERSION_4, SHAppBarMessage, SHFILEINFOW, SHGFI_ICON, SHGetFileInfoW,
-                ShellExecuteW,
+                CommandLineToArgvW, DWPOS_CENTER, DWPOS_FILL, DWPOS_FIT, DWPOS_SPAN, DWPOS_STRETCH,
+                DWPOS_TILE, DesktopWallpaper, IDesktopWallpaper, NIF_GUID, NIF_ICON, NIF_MESSAGE,
+                NIF_STATE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NIN_SELECT,
+                NIS_HIDDEN, NOTIFYICON_VERSION_4, SHAppBarMessage, SHFILEINFOW, SHGFI_ICON,
+                SHGetFileInfoW, ShellExecuteW,
             },
             WindowsAndMessaging::{
                 BringWindowToTop, CallNextHookEx, CallWindowProcW, CreateWindowExW, DI_NORMAL,
@@ -66,19 +67,19 @@ use windows::{
                 GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
                 GetWindowThreadProcessId, HICON, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTLEFT,
                 HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_BOTTOM, HWND_BROADCAST, HWND_TOPMOST,
-                IsIconic, IsWindow, IsWindowVisible, IsZoomed, KBDLLHOOKSTRUCT, LWA_ALPHA, MSG,
-                MSLLHOOKSTRUCT, PostMessageW, RegisterClassW, RegisterShellHookWindow,
-                RegisterWindowMessageW, SPI_GETWORKAREA, SPI_SETWORKAREA, SPIF_SENDCHANGE, SW_HIDE,
-                SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, SW_SHOWNORMAL,
-                SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-                SWP_NOZORDER, SendNotifyMessageW, SetForegroundWindow, SetLayeredWindowAttributes,
-                SetWindowLongPtrW, SetWindowPos, SetWindowsHookExW, ShowWindow,
-                SystemParametersInfoW, WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_EX_STYLE, WINDOW_STYLE,
-                WM_CLOSE, WM_CONTEXTMENU, WM_COPYDATA, WM_HOTKEY, WM_KEYDOWN, WM_KEYUP,
-                WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP,
-                WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
-                WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-                WindowFromPoint,
+                IsIconic, IsWindow, IsWindowVisible, IsZoomed, KBDLLHOOKSTRUCT, KillTimer,
+                LWA_ALPHA, MSG, MSLLHOOKSTRUCT, PostMessageW, RegisterClassW,
+                RegisterShellHookWindow, RegisterWindowMessageW, SPI_GETWORKAREA, SPI_SETWORKAREA,
+                SPIF_SENDCHANGE, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW,
+                SW_SHOWNOACTIVATE, SW_SHOWNORMAL, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED,
+                SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendNotifyMessageW,
+                SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW,
+                SetWindowPos, SetWindowsHookExW, ShowWindow, SystemParametersInfoW, WH_KEYBOARD_LL,
+                WH_MOUSE_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_CONTEXTMENU, WM_COPYDATA,
+                WM_HOTKEY, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+                WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSW,
+                WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_APPWINDOW, WS_EX_LAYERED,
+                WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WindowFromPoint,
             },
         },
     },
@@ -94,7 +95,9 @@ use crate::{
     desktop::{Wallpaper, WallpaperPosition},
     launcher::Launcher,
     model::{Application, ApplicationId, OpenWindow, TrayItem, WindowId, WindowPreview},
-    platform::{DesktopCapture, GlobalShortcut, ShellCommand, TraySource, WindowAction},
+    platform::{
+        DesktopCapture, GlobalShortcut, LaunchError, ShellCommand, TraySource, WindowAction,
+    },
 };
 
 pub fn wallpaper() -> Wallpaper {
@@ -826,6 +829,7 @@ fn run_super_key_hook(sender: Sender<GlobalShortcut>) {
     const LEFT_SUPER_HOTKEY: i32 = 0x4e01;
     const RIGHT_SUPER_HOTKEY: i32 = 0x4e02;
     const RUN_HOTKEY: i32 = 0x4e03;
+    const SUPER_RELEASE_TIMER: usize = 0x4e04;
 
     SHORTCUT_SENDER.set(sender).ok();
     let modifiers = MOD_WIN | MOD_NOREPEAT;
@@ -870,7 +874,13 @@ fn run_super_key_hook(sender: Sender<GlobalShortcut>) {
     while unsafe { GetMessageW(&mut message, None, 0, 0).as_bool() } {
         if message.message == WM_HOTKEY {
             match message.wParam.0 as i32 {
-                LEFT_SUPER_HOTKEY | RIGHT_SUPER_HOTKEY => register_bare_super_press(),
+                LEFT_SUPER_HOTKEY | RIGHT_SUPER_HOTKEY => {
+                    register_bare_super_press();
+                    // SAFETY: This thread owns the message loop and uses a process-local timer ID.
+                    unsafe {
+                        SetTimer(None, SUPER_RELEASE_TIMER, 10, None);
+                    }
+                }
                 RUN_HOTKEY => {
                     tracing::debug!("Super+R hotkey received");
                     if let Some(sender) = SHORTCUT_SENDER.get() {
@@ -879,6 +889,17 @@ fn run_super_key_hook(sender: Sender<GlobalShortcut>) {
                 }
                 _ => {}
             }
+        } else if message.message == WM_TIMER
+            && message.wParam.0 == SUPER_RELEASE_TIMER
+            && unsafe {
+                GetAsyncKeyState(VK_LWIN as i32) >= 0 && GetAsyncKeyState(VK_RWIN as i32) >= 0
+            }
+        {
+            // SAFETY: This removes only the timer created above on this message thread.
+            unsafe {
+                let _ = KillTimer(None, SUPER_RELEASE_TIMER);
+            }
+            reconcile_registered_super_release();
         }
     }
 }
@@ -1027,7 +1048,7 @@ unsafe extern "system" fn super_key_hook(code: i32, wparam: WPARAM, lparam: LPAR
         VK_RWIN => BARE_SUPER_REGISTRATION_BITS.load(std::sync::atomic::Ordering::Acquire) & 2 != 0,
         _ => false,
     };
-    if bare_super_registered && key == Hotkey::Super {
+    if bare_super_registered && key == Hotkey::Super && edge == KeyEdge::Pressed {
         // RegisterHotKey is the sole dispatcher for bare Super. The hook still tracks physical
         // edges for Super+pointer gestures, but must not race the registered hotkey.
         outcome.action = None;
@@ -1045,10 +1066,16 @@ unsafe extern "system" fn super_key_hook(code: i32, wparam: WPARAM, lparam: LPAR
 
 fn register_bare_super_press() {
     tracing::debug!("bare Super hotkey received");
+    if let Ok(mut controller) = hotkey_controller().lock() {
+        controller.registered_super_pressed();
+    }
+}
+
+fn reconcile_registered_super_release() {
     let action = hotkey_controller()
         .lock()
-        .map(|mut controller| controller.bare_super_pressed())
-        .ok();
+        .ok()
+        .and_then(|mut controller| controller.handle(Hotkey::Super, KeyEdge::Released).action);
     send_hotkey_action(action);
 }
 
@@ -1369,7 +1396,7 @@ fn resize_hit_test(window: HWND, pointer: POINT) -> u32 {
     }
 }
 
-pub fn execute_run_command(command: &str) -> bool {
+pub fn execute_run_command(command: &str) -> Result<(), LaunchError> {
     if command
         .get(.."ms-settings:".len())
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case("ms-settings:"))
@@ -1383,21 +1410,84 @@ pub fn execute_run_command(command: &str) -> bool {
             Ok(false) => eprintln!("Windows declined to launch Settings URI: {uri}"),
             Err(error) => eprintln!("failed to launch Settings URI {uri}: {error}"),
         });
-        return true;
+        return Ok(());
     }
-    let command: Vec<u16> = command.encode_utf16().chain([0]).collect();
-    // SAFETY: The UTF-16 command buffer remains alive through this synchronous call.
+    let parts = parse_windows_command(command)?;
+    let (target, arguments) = parts.split_first().ok_or(LaunchError::EmptyCommand)?;
+    shell_execute(target, arguments)
+}
+
+fn parse_windows_command(command: &str) -> Result<Vec<String>, LaunchError> {
+    let command_wide: Vec<u16> = command.encode_utf16().chain([0]).collect();
+    let mut count = 0;
+    // SAFETY: command_wide is terminated and remains alive through parsing. Shell32 returns one
+    // LocalAlloc block containing the pointer table and strings; LocalFree releases that block.
+    let arguments = unsafe { CommandLineToArgvW(PCWSTR(command_wide.as_ptr()), &mut count) };
+    if arguments.is_null() || count <= 0 {
+        return Err(LaunchError::InvalidQuotes);
+    }
+    let parts = unsafe { std::slice::from_raw_parts(arguments, count as usize) }
+        .iter()
+        .map(|argument| unsafe { argument.to_string() }.unwrap_or_default())
+        .collect();
+    unsafe {
+        LocalFree(Some(windows::Win32::Foundation::HLOCAL(arguments.cast())));
+    }
+    Ok(parts)
+}
+
+pub fn launch_application(application: &Application) -> Result<Option<u32>, LaunchError> {
+    let (target, arguments) = application
+        .launch_command()
+        .and_then(|command| command.split_first())
+        .ok_or_else(|| LaunchError::MissingTarget(application.name().to_owned()))?;
+    shell_execute(target, arguments)?;
+    Ok(None)
+}
+
+fn shell_execute(target: &str, arguments: &[String]) -> Result<(), LaunchError> {
+    let target_wide: Vec<u16> = target.encode_utf16().chain([0]).collect();
+    let argument_line = arguments
+        .iter()
+        .map(|argument| quote_windows_argument(argument))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let argument_wide: Vec<u16> = argument_line.encode_utf16().chain([0]).collect();
+    let parameters = if arguments.is_empty() {
+        PCWSTR::null()
+    } else {
+        PCWSTR(argument_wide.as_ptr())
+    };
+    // SAFETY: Both UTF-16 buffers remain alive through this synchronous Shell32 call.
     let result = unsafe {
         ShellExecuteW(
             None,
             w!("open"),
-            PCWSTR(command.as_ptr()),
-            None,
+            PCWSTR(target_wide.as_ptr()),
+            parameters,
             None,
             SW_SHOWNORMAL,
         )
-    };
-    result.0 as isize > 32
+    }
+    .0 as isize;
+    if result > 32 {
+        Ok(())
+    } else {
+        Err(match result {
+            2 => LaunchError::NotFound(target.to_owned()),
+            3 => LaunchError::PathNotFound(target.to_owned()),
+            5 => LaunchError::AccessDenied(target.to_owned()),
+            31 => LaunchError::NoAssociation(target.to_owned()),
+            _ => LaunchError::Platform(format!("{target} ({result})")),
+        })
+    }
+}
+
+fn quote_windows_argument(argument: &str) -> String {
+    if !argument.chars().any(char::is_whitespace) && !argument.contains('"') {
+        return argument.to_owned();
+    }
+    format!("\"{}\"", argument.replace('"', "\\\""))
 }
 
 pub fn paste_text_if_requested(character: &str) -> Option<String> {
@@ -2846,8 +2936,8 @@ mod tests {
     use windows::Win32::Foundation::RECT;
 
     use super::{
-        application_icon, executable_icon, is_shell_infrastructure, rectangle_covers,
-        should_restore_on_activation,
+        application_icon, executable_icon, is_shell_infrastructure, parse_windows_command,
+        rectangle_covers, should_restore_on_activation,
     };
 
     #[test]
@@ -2932,5 +3022,18 @@ mod tests {
         assert!(!should_restore_on_activation(false, false));
         assert!(!should_restore_on_activation(false, true));
         assert!(!should_restore_on_activation(true, true));
+    }
+
+    #[test]
+    fn run_parser_preserves_windows_paths_and_quoted_arguments() {
+        assert_eq!(
+            parse_windows_command(r#""C:\Program Files\Nickel\nickel.exe" --name "Nickel Shell""#)
+                .expect("valid Windows command line"),
+            [
+                r"C:\Program Files\Nickel\nickel.exe",
+                "--name",
+                "Nickel Shell"
+            ]
+        );
     }
 }

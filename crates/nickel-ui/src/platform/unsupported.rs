@@ -52,8 +52,12 @@ pub fn launcher_hotkey_receiver() -> std::sync::mpsc::Receiver<GlobalShortcut> {
 
 pub fn handle_focused_shortcut(_: nickel_core::hotkeys::Hotkey, _: nickel_core::hotkeys::KeyEdge) {}
 
-pub fn execute_run_command(_: &str) -> bool {
-    false
+pub fn execute_run_command(_: &str) -> Result<(), super::LaunchError> {
+    Err(super::LaunchError::Platform(String::new()))
+}
+
+pub fn launch_application(_: &Application) -> Result<Option<u32>, super::LaunchError> {
+    Err(super::LaunchError::Platform(String::new()))
 }
 
 pub fn launcher_visibility_applied(_: bool) {}

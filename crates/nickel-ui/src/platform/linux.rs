@@ -300,12 +300,20 @@ pub fn launcher_hotkey_receiver() -> mpsc::Receiver<GlobalShortcut> {
 
 pub fn handle_focused_shortcut(_: nickel_core::hotkeys::Hotkey, _: nickel_core::hotkeys::KeyEdge) {}
 
-pub fn execute_run_command(command: &str) -> bool {
+pub fn execute_run_command(command: &str) -> Result<(), super::LaunchError> {
     std::process::Command::new("sh")
         .arg("-c")
         .arg(command)
         .spawn()
-        .is_ok()
+        .map(|_| ())
+        .map_err(|error| super::LaunchError::Platform(error.to_string()))
+}
+
+pub fn launch_application(application: &Application) -> Result<Option<u32>, super::LaunchError> {
+    application
+        .launch()
+        .map(|child| Some(child.id()))
+        .map_err(|error| super::LaunchError::Platform(error.to_string()))
 }
 
 pub fn launcher_visibility_applied(_: bool) {}
