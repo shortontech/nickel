@@ -1,6 +1,7 @@
 use std::mem;
 
 use bytemuck::{Pod, Zeroable};
+use nickel_core::theme::ThemePalette;
 
 use crate::layout;
 
@@ -98,9 +99,88 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         queue: &wgpu::Queue,
         surface_size: (u32, u32),
         hovered_row: Option<usize>,
+        selected_row: Option<usize>,
         scrollbar: Option<layout::Scrollbar>,
+        palette: ThemePalette,
     ) {
         let mut vertices = Vec::with_capacity(MAX_VERTICES);
+        add_vertical_gradient(
+            &mut vertices,
+            surface_size,
+            [0.0, 0.0, surface_size.0 as f32, surface_size.1 as f32],
+            color_rgba(palette.panel),
+            color_rgba(palette.background),
+        );
+        add_rectangle(
+            &mut vertices,
+            surface_size,
+            [0.0, 0.0, layout::SIDEBAR_WIDTH, surface_size.1 as f32],
+            color_rgba(palette.panel),
+        );
+        add_rectangle(
+            &mut vertices,
+            surface_size,
+            [
+                layout::CONTENT_LEFT,
+                22.0,
+                surface_size.0 as f32 - layout::CONTENT_RIGHT_INSET,
+                70.0,
+            ],
+            color_rgba(palette.surface),
+        );
+        add_rectangle(
+            &mut vertices,
+            surface_size,
+            [
+                layout::CONTENT_LEFT,
+                68.0,
+                surface_size.0 as f32 - layout::CONTENT_RIGHT_INSET,
+                70.0,
+            ],
+            color_rgba(palette.accent),
+        );
+        add_rectangle(
+            &mut vertices,
+            surface_size,
+            [8.0, 112.0, layout::SIDEBAR_WIDTH - 8.0, 154.0],
+            color_rgba(palette.accent_soft),
+        );
+        add_rectangle(
+            &mut vertices,
+            surface_size,
+            [
+                layout::SIDEBAR_WIDTH,
+                surface_size.1 as f32 - 62.0,
+                surface_size.0 as f32,
+                surface_size.1 as f32,
+            ],
+            color_rgba(palette.surface),
+        );
+        if let Some(index) = selected_row {
+            let row = layout::ResultRow::allocate(index, surface_size.0);
+            add_rectangle(
+                &mut vertices,
+                surface_size,
+                [
+                    row.outer.x,
+                    row.outer.y,
+                    row.outer.right(),
+                    row.outer.bottom(),
+                ],
+                color_rgba(palette.accent),
+            );
+            add_rectangle(
+                &mut vertices,
+                surface_size,
+                [
+                    row.outer.x + 2.0,
+                    row.outer.y + 2.0,
+                    row.outer.right() - 2.0,
+                    row.outer.bottom() - 2.0,
+                ],
+                color_rgba(palette.accent_soft),
+            );
+        }
         if let Some(index) = hovered_row {
             let row = layout::ResultRow::allocate(index, surface_size.0);
             add_rectangle(
@@ -112,7 +192,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
                     row.outer.right(),
                     row.outer.bottom(),
                 ],
-                [0.18, 0.42, 0.78, 1.0],
+                color_rgba(palette.text),
             );
             add_rectangle(
                 &mut vertices,
@@ -123,7 +203,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
                     row.outer.right() - 2.0,
                     row.outer.bottom() - 2.0,
                 ],
-                [0.055, 0.07, 0.105, 1.0],
+                color_rgba(palette.surface_hover),
             );
         }
         if let Some(scrollbar) = scrollbar {
@@ -136,7 +216,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
                     scrollbar.track.right(),
                     scrollbar.track.bottom(),
                 ],
-                [0.09, 0.11, 0.15, 1.0],
+                color_rgba(palette.surface_hover),
             );
             add_rectangle(
                 &mut vertices,
@@ -147,7 +227,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
                     scrollbar.thumb.right(),
                     scrollbar.thumb.bottom(),
                 ],
-                [0.38, 0.43, 0.52, 1.0],
+                color_rgba(palette.muted),
             );
         }
         self.vertex_count = vertices.len() as u32;
@@ -180,6 +260,55 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             queue.write_buffer(&self.vertices, 0, bytemuck::cast_slice(&vertices));
         }
     }
+}
+
+fn color_rgba(color: u32) -> [f32; 4] {
+    [
+        ((color >> 16) & 0xff) as f32 / 255.0,
+        ((color >> 8) & 0xff) as f32 / 255.0,
+        (color & 0xff) as f32 / 255.0,
+        1.0,
+    ]
+}
+
+fn add_vertical_gradient(
+    vertices: &mut Vec<Vertex>,
+    surface: (u32, u32),
+    rect: [f32; 4],
+    top: [f32; 4],
+    bottom: [f32; 4],
+) {
+    let [left, top_edge, right, bottom_edge] = rect;
+    let left = left / surface.0 as f32 * 2.0 - 1.0;
+    let right = right / surface.0 as f32 * 2.0 - 1.0;
+    let top_edge = 1.0 - top_edge / surface.1 as f32 * 2.0;
+    let bottom_edge = 1.0 - bottom_edge / surface.1 as f32 * 2.0;
+    vertices.extend_from_slice(&[
+        Vertex {
+            position: [left, top_edge],
+            color: top,
+        },
+        Vertex {
+            position: [left, bottom_edge],
+            color: bottom,
+        },
+        Vertex {
+            position: [right, top_edge],
+            color: top,
+        },
+        Vertex {
+            position: [right, top_edge],
+            color: top,
+        },
+        Vertex {
+            position: [left, bottom_edge],
+            color: bottom,
+        },
+        Vertex {
+            position: [right, bottom_edge],
+            color: bottom,
+        },
+    ]);
 }
 
 fn add_rectangle(

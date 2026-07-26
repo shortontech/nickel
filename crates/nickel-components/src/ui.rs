@@ -366,6 +366,93 @@ impl Component for Grid {
     }
 }
 
+pub struct FileGrid {
+    grid: Grid,
+}
+
+impl FileGrid {
+    pub fn columns(columns: usize) -> Self {
+        Self {
+            grid: Grid::columns(columns),
+        }
+    }
+
+    pub fn items(mut self, items: impl IntoIterator<Item = FileGridItem>) -> Self {
+        self.grid = self.grid.children(items);
+        self
+    }
+
+    pub fn gap(mut self, gap: f32) -> Self {
+        self.grid = self.grid.gap(gap);
+        self
+    }
+
+    pub fn height(mut self, height: f32) -> Self {
+        self.grid = self.grid.height(height);
+        self
+    }
+
+    pub fn grow(mut self, grow: f32) -> Self {
+        self.grid = self.grid.grow(grow);
+        self
+    }
+}
+
+impl Component for FileGrid {
+    fn into_element(self) -> Element {
+        self.grid.into_element()
+    }
+}
+
+pub struct FileGridItem(Container);
+
+impl FileGridItem {
+    pub fn new(
+        action: impl Into<String>,
+        label: impl Into<String>,
+        icon_id: u16,
+        icon: Arc<RgbaImage>,
+    ) -> Self {
+        Self(
+            Container::new()
+                .padding(Insets {
+                    top: 12.0,
+                    right: 8.0,
+                    bottom: 8.0,
+                    left: 8.0,
+                })
+                .action(action)
+                .child(
+                    Column::new()
+                        .gap(7.0)
+                        .child(Image::new(icon_id, icon).height(62.0))
+                        .child(
+                            Text::new(label)
+                                .height(27.0)
+                                .scale(1.2)
+                                .align(TextAlign::Center),
+                        ),
+                ),
+        )
+    }
+
+    pub fn colors(mut self, background: Color, border: Color, foreground: Color) -> Self {
+        self.0 = self.0.background(background).border(border, 1.0);
+        if let Some(column) = self.0.0.children.first_mut()
+            && let Some(label) = column.children.get_mut(1)
+        {
+            label.style.foreground = Some(foreground);
+        }
+        self
+    }
+}
+
+impl Component for FileGridItem {
+    fn into_element(self) -> Element {
+        self.0.into_element()
+    }
+}
+
 pub struct Text(Element);
 
 impl Text {
@@ -1175,6 +1262,34 @@ mod tests {
             Rect::new(0.0, 0.0, 200.0, 100.0),
         );
         assert_eq!(tree.hits.len(), 3);
+    }
+
+    #[test]
+    fn file_grid_tiles_expose_actions_and_centered_labels() {
+        let icon = Arc::new(RgbaImage::new(16, 16));
+        let tree = UiTree::layout(
+            FileGrid::columns(2).gap(8.0).height(120.0).items([
+                FileGridItem::new("file:one", "One", 1, icon.clone())
+                    .colors(0x101010, 0x202020, 0xffffff),
+                FileGridItem::new("file:two", "Two", 2, icon).colors(0x101010, 0x202020, 0xffffff),
+            ]),
+            Rect::new(0.0, 0.0, 240.0, 120.0),
+        );
+        assert_eq!(tree.action_at(Point { x: 20.0, y: 20.0 }), Some("file:one"));
+        assert_eq!(
+            tree.action_at(Point { x: 180.0, y: 20.0 }),
+            Some("file:two")
+        );
+        assert!(tree.commands.iter().any(|command| {
+            matches!(
+                command,
+                PaintCommand::Text {
+                    text,
+                    align: TextAlign::Center,
+                    ..
+                } if text == "One"
+            )
+        }));
     }
 
     #[test]

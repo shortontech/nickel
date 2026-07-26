@@ -1,12 +1,13 @@
-const LIST_LEFT: f32 = 40.0;
-const LIST_RIGHT_INSET: f32 = 40.0;
-const LIST_TOP: f32 = 132.0;
-const ROW_HEIGHT: f32 = 48.0;
-const ROW_GAP: f32 = 4.0;
-const LIST_BOTTOM_INSET: f32 = 32.0;
-const ROW_PADDING: f32 = 16.0;
-const COLUMN_GAP: f32 = 16.0;
-const ICON_SIZE: f32 = 36.0;
+pub const SIDEBAR_WIDTH: f32 = 220.0;
+pub const CONTENT_LEFT: f32 = 244.0;
+pub const CONTENT_RIGHT_INSET: f32 = 28.0;
+pub const LIST_TOP: f32 = 100.0;
+pub const GRID_COLUMNS: usize = 5;
+const ROW_GAP: f32 = 6.0;
+const COLUMN_GAP: f32 = 6.0;
+const LIST_BOTTOM_INSET: f32 = 80.0;
+const TILE_PADDING: f32 = 10.0;
+const ICON_SIZE: f32 = 44.0;
 const SCROLLBAR_RIGHT_INSET: f32 = 18.0;
 const SCROLLBAR_WIDTH: f32 = 6.0;
 const MIN_THUMB_HEIGHT: f32 = 32.0;
@@ -45,24 +46,26 @@ pub struct ResultRow {
 
 impl ResultRow {
     pub fn allocate(index: usize, available_width: u32) -> Self {
+        let cell_width = grid_cell_size(available_width);
+        let column = index % GRID_COLUMNS;
+        let grid_row = index / GRID_COLUMNS;
         let outer = Rect {
-            x: LIST_LEFT,
-            y: LIST_TOP + index as f32 * (ROW_HEIGHT + ROW_GAP),
-            width: (available_width as f32 - LIST_LEFT - LIST_RIGHT_INSET).max(0.0),
-            height: ROW_HEIGHT,
+            x: CONTENT_LEFT + column as f32 * (cell_width + COLUMN_GAP),
+            y: LIST_TOP + grid_row as f32 * (cell_width + ROW_GAP),
+            width: cell_width,
+            height: cell_width,
         };
         let icon = Rect {
-            x: outer.x + ROW_PADDING,
-            y: outer.y + (outer.height - ICON_SIZE) / 2.0,
+            x: outer.x + (outer.width - ICON_SIZE) / 2.0,
+            y: outer.y + TILE_PADDING,
             width: ICON_SIZE,
             height: ICON_SIZE,
         };
-        let label_x = icon.right() + COLUMN_GAP;
         let label = Rect {
-            x: label_x,
-            y: outer.y,
-            width: (outer.right() - ROW_PADDING - label_x).max(0.0),
-            height: outer.height,
+            x: outer.x + TILE_PADDING,
+            y: icon.bottom() + 6.0,
+            width: (outer.width - TILE_PADDING * 2.0).max(0.0),
+            height: (outer.bottom() - icon.bottom() - 12.0).max(0.0),
         };
         Self { outer, icon, label }
     }
@@ -74,9 +77,15 @@ pub struct Scrollbar {
     pub thumb: Rect,
 }
 
-pub fn visible_capacity(available_height: u32) -> usize {
+pub fn visible_capacity(available_width: u32, available_height: u32) -> usize {
     let height = (available_height as f32 - LIST_TOP - LIST_BOTTOM_INSET).max(0.0);
-    ((height + ROW_GAP) / (ROW_HEIGHT + ROW_GAP)).floor() as usize
+    let cell_size = grid_cell_size(available_width);
+    ((height + ROW_GAP) / (cell_size + ROW_GAP)).floor() as usize * GRID_COLUMNS
+}
+
+fn grid_cell_size(available_width: u32) -> f32 {
+    let available = (available_width as f32 - CONTENT_LEFT - CONTENT_RIGHT_INSET).max(0.0);
+    (available - COLUMN_GAP * GRID_COLUMNS.saturating_sub(1) as f32) / GRID_COLUMNS as f32
 }
 
 pub fn max_scroll_offset(total: usize, capacity: usize) -> usize {
@@ -149,30 +158,30 @@ mod tests {
     #[test]
     fn row_allocates_centered_icon_and_flexible_label_column() {
         let row = ResultRow::allocate(0, 960);
-        assert_eq!(row.outer.y, 132.0);
-        assert_eq!(row.icon.y, 138.0);
-        assert_eq!(row.icon.x, 56.0);
-        assert_eq!(row.label.x, 108.0);
-        assert_eq!(row.label.height, row.outer.height);
+        assert_eq!(row.outer.y, 100.0);
+        assert_eq!(row.icon.y, 110.0);
+        assert!(row.icon.x > row.outer.x);
+        assert_eq!(row.label.x, row.outer.x + 10.0);
+        assert_eq!(row.outer.width, row.outer.height);
         assert!(row.label.width > row.icon.width);
     }
 
     #[test]
     fn hit_testing_excludes_grid_gap_and_unallocated_rows() {
-        assert_eq!(hit_test_result(100.0, 140.0, 960, 3), Some(0));
-        assert_eq!(hit_test_result(100.0, 181.0, 960, 3), None);
-        assert_eq!(hit_test_result(100.0, 300.0, 960, 3), None);
+        assert_eq!(hit_test_result(260.0, 140.0, 960, 3), Some(0));
+        assert_eq!(hit_test_result(379.0, 140.0, 960, 3), None);
+        assert_eq!(hit_test_result(260.0, 300.0, 960, 3), None);
     }
 
     #[test]
     fn scrollbar_thumb_tracks_visible_fraction_and_offset() {
-        let top = super::scrollbar(960, 640, 100, 9, 0).expect("overflow scrollbar");
-        let bottom = super::scrollbar(960, 640, 100, 9, 91).expect("overflow scrollbar");
+        let top = super::scrollbar(960, 640, 100, 20, 0).expect("overflow scrollbar");
+        let bottom = super::scrollbar(960, 640, 100, 20, 80).expect("overflow scrollbar");
         assert_eq!(top.thumb.y, top.track.y);
         assert_eq!(bottom.thumb.bottom(), bottom.track.bottom());
         assert_eq!(
-            super::offset_from_thumb_y(bottom.thumb.y.into(), bottom, 100, 9),
-            91
+            super::offset_from_thumb_y(bottom.thumb.y.into(), bottom, 100, 20),
+            80
         );
     }
 }
