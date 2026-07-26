@@ -1809,6 +1809,7 @@ dependencies = [
 name = "nickel-settings"
 version = "0.1.0"
 dependencies = [
+ "image",
  "nickel-components",
  "nickel-core",
  "nickel-logging",

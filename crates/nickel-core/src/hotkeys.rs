@@ -88,7 +88,7 @@ impl HotkeyController {
                     self.super_held = true;
                     self.super_chorded = false;
                 }
-                // Observe the shell modifier without taking it away from Windows or applications.
+                // Observe Super without taking it away from the platform or applications.
                 // This lets another shell present its own Start surface alongside Nickel.
                 HotkeyOutcome::default()
             }
@@ -121,7 +121,7 @@ impl HotkeyController {
             }
             (Hotkey::Run, KeyEdge::Released) if self.run_held => {
                 self.run_held = false;
-                // Super+R transfers focus to the Run window, and Windows may omit the later Super
+                // Super+R transfers focus to Run, and the platform may omit the later Super
                 // release from the low-level hook during that transition. End the completed chord
                 // here so a missed release cannot make subsequent R presses look like shortcuts.
                 self.super_held = false;

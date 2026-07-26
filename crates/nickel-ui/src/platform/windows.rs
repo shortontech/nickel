@@ -805,50 +805,50 @@ pub struct IPolicyConfig_Vtbl {
 pub fn launcher_hotkey_receiver() -> Receiver<GlobalShortcut> {
     let (sender, receiver) = mpsc::channel();
     thread::Builder::new()
-        .name("nickel-windows-key".into())
-        .spawn(move || run_windows_key_hook(sender))
-        .expect("failed to start Windows-key listener");
+        .name("nickel-super-key".into())
+        .spawn(move || run_super_key_hook(sender))
+        .expect("failed to start Super-key listener");
     receiver
 }
 
-fn run_windows_key_hook(sender: Sender<GlobalShortcut>) {
+fn run_super_key_hook(sender: Sender<GlobalShortcut>) {
     const VK_LWIN: u32 = 0x5b;
     const VK_RWIN: u32 = 0x5c;
     const VK_R: u32 = 0x52;
-    const LEFT_WIN_HOTKEY: i32 = 0x4e01;
-    const RIGHT_WIN_HOTKEY: i32 = 0x4e02;
+    const LEFT_SUPER_HOTKEY: i32 = 0x4e01;
+    const RIGHT_SUPER_HOTKEY: i32 = 0x4e02;
     const RUN_HOTKEY: i32 = 0x4e03;
 
-    WINDOWS_KEY_SENDER.set(sender).ok();
+    SHORTCUT_SENDER.set(sender).ok();
     let modifiers = MOD_WIN | MOD_NOREPEAT;
     let left_registered =
-        unsafe { RegisterHotKey(None, LEFT_WIN_HOTKEY, modifiers, VK_LWIN) }.is_ok();
+        unsafe { RegisterHotKey(None, LEFT_SUPER_HOTKEY, modifiers, VK_LWIN) }.is_ok();
     let right_registered =
-        unsafe { RegisterHotKey(None, RIGHT_WIN_HOTKEY, modifiers, VK_RWIN) }.is_ok();
+        unsafe { RegisterHotKey(None, RIGHT_SUPER_HOTKEY, modifiers, VK_RWIN) }.is_ok();
     let run_registered = unsafe { RegisterHotKey(None, RUN_HOTKEY, modifiers, VK_R) }.is_ok();
     let registration_bits = u8::from(left_registered) | (u8::from(right_registered) << 1);
     RUN_HOTKEY_REGISTERED.store(run_registered, std::sync::atomic::Ordering::Release);
     if registration_bits == 0 {
         tracing::warn!(
-            "bare Windows-key hotkey registration unavailable; using passive hook observation"
+            "bare Super hotkey registration unavailable; using passive hook observation"
         );
     } else {
         tracing::info!(
             left_registered,
             right_registered,
             run_registered,
-            "registered bare Windows key through RegisterHotKey"
+            "registered bare Super through RegisterHotKey"
         );
     }
     if !run_registered {
-        tracing::warn!("Win+R registration unavailable; using low-level hook fallback");
+        tracing::warn!("Super+R registration unavailable; using low-level hook fallback");
     }
 
     // SAFETY: The callback remains valid for the process lifetime and this thread owns the
     // message loop required by a low-level keyboard hook.
-    let hook = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(windows_key_hook), None, 0) };
+    let hook = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(super_key_hook), None, 0) };
     let Ok(_hook) = hook else {
-        eprintln!("failed to register the Windows-key launcher hook");
+        eprintln!("failed to register the Super-key launcher hook");
         return;
     };
     let mouse_hook = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(windows_mouse_hook), None, 0) };
@@ -861,10 +861,10 @@ fn run_windows_key_hook(sender: Sender<GlobalShortcut>) {
     while unsafe { GetMessageW(&mut message, None, 0, 0).as_bool() } {
         if message.message == WM_HOTKEY {
             match message.wParam.0 as i32 {
-                LEFT_WIN_HOTKEY | RIGHT_WIN_HOTKEY => register_bare_windows_key_press(),
+                LEFT_SUPER_HOTKEY | RIGHT_SUPER_HOTKEY => register_bare_super_press(),
                 RUN_HOTKEY => {
-                    tracing::debug!("Win+R hotkey received");
-                    if let Some(sender) = WINDOWS_KEY_SENDER.get() {
+                    tracing::debug!("Super+R hotkey received");
+                    if let Some(sender) = SHORTCUT_SENDER.get() {
                         let _ = sender.send(GlobalShortcut::ShowRun);
                     }
                 }
@@ -874,7 +874,7 @@ fn run_windows_key_hook(sender: Sender<GlobalShortcut>) {
     }
 }
 
-static WINDOWS_KEY_SENDER: std::sync::OnceLock<Sender<GlobalShortcut>> = std::sync::OnceLock::new();
+static SHORTCUT_SENDER: std::sync::OnceLock<Sender<GlobalShortcut>> = std::sync::OnceLock::new();
 static HOTKEY_CONTROLLER: std::sync::OnceLock<Mutex<HotkeyController>> = std::sync::OnceLock::new();
 static RUN_HOTKEY_REGISTERED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -949,7 +949,7 @@ struct TrayNotifyIconData {
     balloon_icon: u32,
 }
 
-unsafe extern "system" fn windows_key_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+unsafe extern "system" fn super_key_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     const VK_LWIN: u32 = 0x5b;
     const VK_RWIN: u32 = 0x5c;
     const VK_MENU: u32 = 0x12;
@@ -990,8 +990,8 @@ unsafe extern "system" fn windows_key_hook(code: i32, wparam: WPARAM, lparam: LP
         if edge == KeyEdge::Pressed
             && let Ok(mut controller) = hotkey_controller().lock()
         {
-            // RegisterHotKey owns Win+R dispatch. The hook only records that another key joined
-            // the Windows-key press, preventing the later release from toggling the launcher.
+            // RegisterHotKey owns Super+R dispatch. The hook only records that another key joined
+            // the Super press, preventing the later release from toggling the launcher.
             controller.handle(Hotkey::Other, KeyEdge::Pressed);
         }
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
@@ -1022,10 +1022,10 @@ unsafe extern "system" fn windows_key_hook(code: i32, wparam: WPARAM, lparam: LP
     }
 }
 
-fn register_bare_windows_key_press() {
-    // RegisterHotKey owns bare-Windows dispatch and suppression, but it can post repeated or
+fn register_bare_super_press() {
+    // RegisterHotKey owns bare-Super dispatch and suppression, but it can post repeated or
     // delayed messages. Physical down/up state comes exclusively from the keyboard hook.
-    tracing::debug!("bare Windows hotkey received");
+    tracing::debug!("bare Super hotkey received");
 }
 
 fn hotkey_controller() -> &'static Mutex<HotkeyController> {
@@ -1109,7 +1109,7 @@ fn send_hotkey_action(action: Option<HotkeyAction>) {
         Some(HotkeyAction::ShowScreenshotTool) => GlobalShortcut::ShowScreenshotTool,
         None => return,
     };
-    if let Some(sender) = WINDOWS_KEY_SENDER.get() {
+    if let Some(sender) = SHORTCUT_SENDER.get() {
         let _ = sender.send(shortcut);
     }
 }
@@ -1191,7 +1191,7 @@ unsafe extern "system" fn windows_mouse_hook(code: i32, wparam: WPARAM, lparam: 
         } else {
             "right"
         },
-        "Windows-key mouse gesture candidate"
+        "Super mouse gesture candidate"
     );
     if !chord_started {
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
@@ -1851,7 +1851,7 @@ fn handle_shell_app_command(command: u32) -> bool {
         VOLUME_MUTE | VOLUME_DOWN | VOLUME_UP => {
             match apply_endpoint_app_command(command) {
                 Ok((volume_percent, muted)) => {
-                    if let Some(sender) = WINDOWS_KEY_SENDER.get() {
+                    if let Some(sender) = SHORTCUT_SENDER.get() {
                         let _ = sender.send(GlobalShortcut::AudioChanged {
                             volume_percent,
                             muted,
@@ -2556,7 +2556,7 @@ unsafe extern "system" fn collect_window(hwnd: HWND, state: LPARAM) -> BOOL {
     let Some(class) = window_class(hwnd) else {
         return BOOL(1);
     };
-    if !is_taskbar_window(hwnd, &class) {
+    if !is_bar_eligible_window(hwnd, &class) {
         return BOOL(1);
     }
     let application_id = Some(
@@ -2608,7 +2608,7 @@ fn park_iconic_window(hwnd: HWND) {
     }
 }
 
-fn is_taskbar_window(hwnd: HWND, class: &str) -> bool {
+fn is_bar_eligible_window(hwnd: HWND, class: &str) -> bool {
     if is_shell_infrastructure(class) {
         return false;
     }

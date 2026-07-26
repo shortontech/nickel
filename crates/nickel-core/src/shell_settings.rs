@@ -20,6 +20,7 @@ pub struct ShellSettings {
     pub active_desktop: u8,
     pub theme: ThemePreference,
     pub accent_hue: Option<u16>,
+    pub accent_intensity: Option<u8>,
 }
 
 impl Default for ShellSettings {
@@ -31,6 +32,7 @@ impl Default for ShellSettings {
             active_desktop: 0,
             theme: ThemePreference::System,
             accent_hue: None,
+            accent_intensity: None,
         }
     }
 }
@@ -68,6 +70,10 @@ impl ShellSettings {
                 "accent_hue" => {
                     settings.accent_hue = value.trim().parse::<u16>().ok().map(|hue| hue.min(359))
                 }
+                "accent_intensity" => {
+                    settings.accent_intensity =
+                        value.trim().parse::<u8>().ok().map(|value| value.min(100))
+                }
                 _ => {}
             }
         }
@@ -85,7 +91,7 @@ impl ShellSettings {
         fs::write(
             path,
             format!(
-                "bar_on_all_displays={}\nall_windows_on_every_bar={}\ndesktop_count={}\nactive_desktop={}\ntheme={}\naccent_hue={}\n",
+                "bar_on_all_displays={}\nall_windows_on_every_bar={}\ndesktop_count={}\nactive_desktop={}\ntheme={}\naccent_hue={}\naccent_intensity={}\n",
                 self.bar_on_all_displays,
                 self.all_windows_on_every_bar,
                 self.desktop_count,
@@ -97,6 +103,9 @@ impl ShellSettings {
                 },
                 self.accent_hue
                     .map(|hue| hue.to_string())
+                    .unwrap_or_else(|| "system".to_owned()),
+                self.accent_intensity
+                    .map(|value| value.to_string())
                     .unwrap_or_else(|| "system".to_owned()),
             ),
         )
@@ -113,11 +122,16 @@ impl ShellSettings {
                 .accent_hue
                 .map(accent_from_hue)
                 .unwrap_or(system.accent),
+            intensity: self.accent_intensity.unwrap_or(system.intensity),
         }
     }
 
     pub fn displayed_hue(self, system: Appearance) -> u16 {
         self.accent_hue.unwrap_or_else(|| accent_hue(system.accent))
+    }
+
+    pub fn displayed_intensity(self, system: Appearance) -> u8 {
+        self.accent_intensity.unwrap_or(system.intensity)
     }
 }
 

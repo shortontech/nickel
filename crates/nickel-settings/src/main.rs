@@ -21,7 +21,7 @@ use winit::{
     dpi::{LogicalSize, PhysicalPosition},
     event::{ElementState, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
-    window::{Window, WindowAttributes, WindowId},
+    window::{Icon, Window, WindowAttributes, WindowId},
 };
 
 const SIDEBAR_WIDTH: i32 = 190;
@@ -238,6 +238,8 @@ struct SettingsApp {
     shell_settings: ShellSettings,
     desktop_slider_dragging: bool,
     appearance_slider_dragging: bool,
+    intensity_slider_dragging: bool,
+    window_icon_color: Option<u32>,
     network_adapters: Vec<NetworkAdapter>,
     wifi_networks: Vec<WifiNetwork>,
     wifi_status: String,
@@ -292,6 +294,8 @@ impl Default for SettingsApp {
             shell_settings: ShellSettings::load_default(),
             desktop_slider_dragging: false,
             appearance_slider_dragging: false,
+            intensity_slider_dragging: false,
+            window_icon_color: None,
             network_adapters: Vec::new(),
             wifi_networks: Vec::new(),
             wifi_status: String::new(),
@@ -783,6 +787,7 @@ impl SettingsApp {
         let appearance = self.shell_settings.resolve_appearance(system);
         let palette = ThemePalette::from_appearance(appearance);
         let hue = self.shell_settings.displayed_hue(system);
+        let intensity = self.shell_settings.displayed_intensity(system);
         let swatches = [
             ("BACKGROUND", palette.background),
             ("PANEL", palette.panel),
@@ -871,6 +876,22 @@ impl SettingsApp {
                     .width(520.0),
             )
             .child(
+                Text::new("COLOR INTENSITY")
+                    .color(palette.text)
+                    .height(20.0),
+            )
+            .child(
+                Text::new(format!("{intensity}%  OKLCH CHROMA"))
+                    .scale(1.0)
+                    .color(palette.muted)
+                    .height(18.0),
+            )
+            .child(
+                Slider::new("appearance:intensity", f32::from(intensity) / 100.0)
+                    .colors(palette.surface, palette.accent, palette.text)
+                    .width(520.0),
+            )
+            .child(
                 Text::new("DERIVED PALETTE")
                     .color(palette.text)
                     .height(20.0),
@@ -897,6 +918,14 @@ impl SettingsApp {
         {
             self.appearance_slider_dragging = true;
             self.set_appearance_hue_from_fraction(fraction);
+            self.request_redraw();
+            return;
+        }
+        if let Some(("appearance:intensity", fraction)) =
+            self.ui.action_at_with_horizontal_fraction(point)
+        {
+            self.intensity_slider_dragging = true;
+            self.set_appearance_intensity_from_fraction(fraction);
             self.request_redraw();
             return;
         }
@@ -992,6 +1021,16 @@ impl SettingsApp {
             }
             return;
         }
+        if self.intensity_slider_dragging {
+            if let Some(fraction) = self
+                .ui
+                .horizontal_fraction_for_action("appearance:intensity", position.x as f32)
+            {
+                self.set_appearance_intensity_from_fraction(fraction);
+                self.request_redraw();
+            }
+            return;
+        }
         if self.page != SettingsPage::Display {
             return;
         }
@@ -1016,6 +1055,7 @@ impl SettingsApp {
     fn finish_drag(&mut self) {
         self.desktop_slider_dragging = false;
         self.appearance_slider_dragging = false;
+        self.intensity_slider_dragging = false;
         if self.page != SettingsPage::Display {
             return;
         }
@@ -1058,6 +1098,15 @@ impl SettingsApp {
             return;
         }
         self.shell_settings.accent_hue = Some(hue);
+        let _ = self.shell_settings.save_default();
+    }
+
+    fn set_appearance_intensity_from_fraction(&mut self, fraction: f32) {
+        let intensity = (fraction.clamp(0.0, 1.0) * 100.0).round() as u8;
+        if self.shell_settings.accent_intensity == Some(intensity) {
+            return;
+        }
+        self.shell_settings.accent_intensity = Some(intensity);
         let _ = self.shell_settings.save_default();
     }
 
@@ -1517,12 +1566,25 @@ impl SettingsApp {
     }
 
     fn render(&mut self) {
-        let Some(window) = &self.window else { return };
+        let Some(window) = self.window.clone() else {
+            return;
+        };
         let appearance = self
             .shell_settings
             .resolve_appearance(nickel_platform::appearance());
-        nickel_platform::apply_window_appearance(window, appearance);
+        nickel_platform::apply_window_appearance(&window, appearance);
         let palette = ThemePalette::from_appearance(appearance);
+        if self.window_icon_color != Some(palette.accent) {
+            if let Some(icon) = themed_window_icon(palette.accent) {
+                window.set_window_icon(Some(icon));
+                #[cfg(target_os = "windows")]
+                {
+                    use winit::platform::windows::WindowExtWindows;
+                    window.set_taskbar_icon(themed_window_icon(palette.accent));
+                }
+            }
+            self.window_icon_color = Some(palette.accent);
+        }
         let size = window.inner_size();
         self.ui = self.build_ui(size.width as f32, size.height as f32);
         let mut commands = self.ui.commands().to_vec();
@@ -2395,6 +2457,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.load_outputs();
     event_loop.run_app(&mut app)?;
     Ok(())
+}
+
+fn themed_window_icon(color: u32) -> Option<Icon> {
+    let mut image =
+        image::load_from_memory(include_bytes!("../../../assets/icons/nickel-panel.png"))
+            .ok()?
+            .into_rgba8();
+    let rgb = [
+        ((color >> 16) & 0xff) as u8,
+        ((color >> 8) & 0xff) as u8,
+        (color & 0xff) as u8,
+    ];
+    for pixel in image.pixels_mut() {
+        if pixel.0[3] != 0 {
+            pixel.0[..3].copy_from_slice(&rgb);
+        }
+    }
+    let (width, height) = image.dimensions();
+    Icon::from_rgba(image.into_raw(), width, height).ok()
 }
 
 #[cfg(test)]

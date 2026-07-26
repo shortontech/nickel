@@ -787,7 +787,8 @@ impl Nickel {
         let desktops_changed = settings.desktop_count != self.shell_settings.desktop_count
             || settings.active_desktop != self.shell_settings.active_desktop;
         let appearance_changed = settings.theme != self.shell_settings.theme
-            || settings.accent_hue != self.shell_settings.accent_hue;
+            || settings.accent_hue != self.shell_settings.accent_hue
+            || settings.accent_intensity != self.shell_settings.accent_intensity;
         self.shell_settings = settings;
         if desktops_changed {
             for (window, gpu) in &mut self.panel_surfaces {

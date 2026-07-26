@@ -73,6 +73,12 @@ pub fn appearance() -> Appearance {
             ThemeMode::Dark
         },
         accent,
+        intensity: registry_dword(
+            "Software\\Microsoft\\Windows\\DWM",
+            "ColorizationColorBalance",
+        )
+        .unwrap_or(85)
+        .min(100) as u8,
     }
 }
 

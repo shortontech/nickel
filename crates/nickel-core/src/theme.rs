@@ -8,6 +8,7 @@ pub enum ThemeMode {
 pub struct Appearance {
     pub mode: ThemeMode,
     pub accent: [u8; 3],
+    pub intensity: u8,
 }
 
 impl Default for Appearance {
@@ -15,6 +16,7 @@ impl Default for Appearance {
         Self {
             mode: ThemeMode::Dark,
             accent: [0x4b, 0x8b, 0xd8],
+            intensity: 85,
         }
     }
 }
@@ -35,26 +37,34 @@ pub struct ThemePalette {
 impl ThemePalette {
     pub fn from_appearance(appearance: Appearance) -> Self {
         let seed = Oklch::from_srgb(appearance.accent);
+        let intensity = 0.15 + (f32::from(appearance.intensity.min(100)) / 100.0) * 1.10;
+        let accent = Oklch::new(seed.l, seed.c * intensity, seed.h).to_rgb();
         let dark = appearance.mode == ThemeMode::Dark;
         Self {
-            background: Oklch::new(if dark { 0.115 } else { 0.965 }, 0.018, seed.h).to_rgb(),
+            background: Oklch::new(if dark { 0.115 } else { 0.965 }, 0.018 * intensity, seed.h)
+                .to_rgb(),
             panel: Oklch::new(
                 if dark { 0.220 } else { 0.820 },
-                if dark { 0.055 } else { 0.090 },
+                if dark {
+                    0.055 * intensity
+                } else {
+                    0.090 * intensity
+                },
                 seed.h,
             )
             .to_rgb(),
-            surface: Oklch::new(if dark { 0.205 } else { 0.875 }, 0.027, seed.h).to_rgb(),
-            surface_hover: Oklch::new(if dark { 0.275 } else { 0.815 }, 0.040, seed.h).to_rgb(),
+            surface: Oklch::new(if dark { 0.205 } else { 0.875 }, 0.027 * intensity, seed.h)
+                .to_rgb(),
+            surface_hover: Oklch::new(if dark { 0.275 } else { 0.815 }, 0.040 * intensity, seed.h)
+                .to_rgb(),
             text: Oklch::new(if dark { 0.955 } else { 0.185 }, 0.008, seed.h).to_rgb(),
             muted: Oklch::new(if dark { 0.710 } else { 0.455 }, 0.018, seed.h).to_rgb(),
-            accent: (u32::from(appearance.accent[0]) << 16)
-                | (u32::from(appearance.accent[1]) << 8)
-                | u32::from(appearance.accent[2]),
-            accent_soft: Oklch::new(if dark { 0.315 } else { 0.865 }, 0.075, seed.h).to_rgb(),
+            accent,
+            accent_soft: Oklch::new(if dark { 0.315 } else { 0.865 }, 0.075 * intensity, seed.h)
+                .to_rgb(),
             complement: Oklch::new(
                 if dark { 0.720 } else { 0.525 },
-                (seed.c * 0.72).clamp(0.08, 0.16),
+                (seed.c * intensity * 0.72).clamp(0.02, 0.20),
                 seed.h + 180.0,
             )
             .to_rgb(),
@@ -144,6 +154,7 @@ mod tests {
         let palette = ThemePalette::from_appearance(Appearance {
             mode: ThemeMode::Dark,
             accent: [0x00, 0x78, 0xd4],
+            intensity: 85,
         });
         assert_ne!(palette.background, palette.panel);
         assert_ne!(palette.accent, palette.complement);
