@@ -122,7 +122,7 @@ fn prepare_login_session() -> Result<(), Box<dyn std::error::Error>> {
             OsStr::new("org.freedesktop.DBus"),
             OsStr::new("StartServiceByName"),
             OsStr::new("su"),
-            OsStr::new("org.freedesktop.secrets"),
+            OsStr::new("org.kde.secretservicecompat"),
             OsStr::new("0"),
         ],
     )?;
