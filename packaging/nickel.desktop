@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=Nickel
+Comment=Nickel desktop session
+Exec=/usr/local/bin/nickel-login
+TryExec=/usr/local/bin/nickel-login
+Type=Application
+DesktopNames=Nickel

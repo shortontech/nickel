@@ -22,6 +22,26 @@ pub fn paste_text_if_requested(_: &str) -> Option<String> {
     None
 }
 
+pub fn capture_active_window() -> Result<(), String> {
+    Err("active-window capture is not implemented on Linux".into())
+}
+
+pub fn capture_active_window_to_file() -> Result<(), String> {
+    Err("active-window capture is not implemented on Linux".into())
+}
+
+pub fn capture_desktop() -> Result<super::DesktopCapture, String> {
+    Err("desktop capture is not implemented on Linux".into())
+}
+
+pub fn copy_image_to_clipboard(_: &image::RgbaImage) -> Result<(), String> {
+    Err("image clipboard support is not implemented on Linux".into())
+}
+
+pub fn copy_temp_image_path(_: &image::RgbaImage) -> Result<PathBuf, String> {
+    Err("image clipboard support is not implemented on Linux".into())
+}
+
 pub fn network_status() -> super::NetworkStatus {
     super::NetworkStatus::default()
 }
@@ -39,10 +59,6 @@ pub fn capture_pointer(_window: &winit::window::Window) -> bool {
 }
 
 pub fn release_pointer() {}
-
-pub fn configure_volume_osd_window(_window: &winit::window::Window) -> bool {
-    true
-}
 
 pub fn select_audio_device(_id: &str) -> bool {
     false

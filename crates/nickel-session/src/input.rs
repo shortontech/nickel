@@ -68,7 +68,13 @@ impl NickelSession {
                                     session.alt_tab_order.clear();
                                     session.alt_tab_index = 0;
                                 }
-                                Some(HotkeyAction::ShowRun) | None => {}
+                                Some(
+                                    HotkeyAction::ShowRun
+                                    | HotkeyAction::CaptureActiveWindow
+                                    | HotkeyAction::CaptureActiveWindowToFile
+                                    | HotkeyAction::ShowScreenshotTool,
+                                )
+                                | None => {}
                             }
                             if outcome.suppress {
                                 return FilterResult::Intercept(None);

@@ -138,6 +138,26 @@ RUST_LOG=info target/debug/nickel-session \
 
 Set `NICKEL_DRM_DEVICE=/dev/dri/cardN` to select a specific GPU.
 
+### Linux Login Session
+
+Build the direct compositor, shell, and login launcher:
+
+```bash
+cargo build --release -p nickel-session --no-default-features --features backend-udev
+cargo build --release -p nickel-ui
+```
+
+Install the completed build as an SDDM Wayland session:
+
+```bash
+sudo packaging/install-nickel-session.sh
+```
+
+SDDM's PAM session must start the user's established wallet provider. Nickel imports its Wayland
+environment into D-Bus and systemd, verifies that `org.freedesktop.secrets` exposes an existing
+default collection, and refuses to launch the shell or applications when secure storage is not
+ready. Nickel never creates a replacement collection.
+
 ## Current Limitations
 
 - Notifications are not displayed yet.
