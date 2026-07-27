@@ -236,6 +236,10 @@ pub struct WindowFeed {
     path: PathBuf,
 }
 
+pub fn show_window_system_menu(_: WindowId) -> bool {
+    false
+}
+
 impl WindowFeed {
     pub fn new() -> Self {
         let path = env::temp_dir().join(format!("nickel-ui-{}-windows.sock", std::process::id()));

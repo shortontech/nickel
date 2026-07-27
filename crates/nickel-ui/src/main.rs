@@ -2119,9 +2119,21 @@ impl ApplicationHandler for Nickel {
                     button: MouseButton::Right,
                     ..
                 } if self.context_preview_mode && self.context_menu_hovered.is_some() => {
-                    self.show_window_actions(
-                        self.context_menu_hovered.expect("preview is hovered"),
-                    );
+                    let index = self.context_menu_hovered.expect("preview is hovered");
+                    let target = self
+                        .context_menu_actions
+                        .get(index)
+                        .map(|action| match action {
+                            ContextAction::Activate(window)
+                            | ContextAction::Close(window)
+                            | ContextAction::Maximize(window)
+                            | ContextAction::Minimize(window) => *window,
+                        });
+                    if target.is_some_and(platform::show_window_system_menu) {
+                        self.hide_context_menu();
+                    } else {
+                        self.show_window_actions(index);
+                    }
                 }
                 _ => {}
             }
