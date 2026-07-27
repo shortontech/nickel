@@ -37,14 +37,7 @@ impl XdgShellHandler for NickelSession {
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
         let surface_id = surface.wl_surface().id();
-        let is_shell_client = [
-            self.launcher_window.as_ref(),
-            self.panel_window.as_ref(),
-            self.context_menu_window.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        .any(|window| {
+        let is_shell_client = self.shell_windows().any(|window| {
             window
                 .toplevel()
                 .unwrap()
@@ -77,7 +70,7 @@ impl XdgShellHandler for NickelSession {
                 smithay::utils::SERIAL_COUNTER.next_serial(),
             );
         }
-        if let Some(panel) = self.panel_window.clone() {
+        for panel in self.panel_windows.clone() {
             self.space.raise_element(&panel, false);
         }
     }
@@ -92,13 +85,8 @@ impl XdgShellHandler for NickelSession {
             self.launcher_window = None;
             self.launcher_visibility.set(false);
         }
-        if self
-            .panel_window
-            .as_ref()
-            .is_some_and(|window| window.toplevel().unwrap().wl_surface() == surface.wl_surface())
-        {
-            self.panel_window = None;
-        }
+        self.panel_windows
+            .retain(|window| window.toplevel().unwrap().wl_surface() != surface.wl_surface());
         if self
             .context_menu_window
             .as_ref()
@@ -327,7 +315,7 @@ impl NickelSession {
                 self.register_launcher(launcher);
             }
         }
-        if is_panel && self.panel_window.is_none() {
+        if is_panel {
             let panel = self
                 .space
                 .elements()

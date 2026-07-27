@@ -115,7 +115,7 @@ pub struct NickelSession {
     pub surface_windows: HashMap<ObjectId, WindowId>,
     pub launcher_window: Option<Window>,
     pub launcher_visibility: LauncherVisibility,
-    pub panel_window: Option<Window>,
+    pub panel_windows: Vec<Window>,
     pub context_menu_window: Option<Window>,
     pub primary_output_name: Option<String>,
     pub preview_frames: HashMap<WindowId, PreviewFrame>,
@@ -201,7 +201,7 @@ impl NickelSession {
             surface_windows: HashMap::new(),
             launcher_window: None,
             launcher_visibility: LauncherVisibility::default(),
-            panel_window: None,
+            panel_windows: Vec::new(),
             context_menu_window: None,
             primary_output_name: None,
             preview_frames: HashMap::new(),
@@ -362,19 +362,14 @@ impl NickelSession {
     }
 
     fn window_snapshot_payload(&self) -> String {
-        let shell_ids = [
-            self.launcher_window.as_ref(),
-            self.panel_window.as_ref(),
-            self.context_menu_window.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        .filter_map(|window| {
-            self.surface_windows
-                .get(&window.toplevel()?.wl_surface().id())
-        })
-        .copied()
-        .collect::<Vec<_>>();
+        let shell_ids = self
+            .shell_windows()
+            .filter_map(|window| {
+                self.surface_windows
+                    .get(&window.toplevel()?.wl_surface().id())
+            })
+            .copied()
+            .collect::<Vec<_>>();
         self.windows
             .snapshot()
             .into_iter()
@@ -526,9 +521,7 @@ impl NickelSession {
             self.space.elements().for_each(|window| {
                 window.toplevel().unwrap().send_pending_configure();
             });
-            if let Some(panel) = self.panel_window.clone() {
-                self.space.raise_element(&panel, false);
-            }
+            self.raise_panels();
         } else {
             self.space.unmap_elem(&window);
         }
@@ -548,8 +541,21 @@ impl NickelSession {
         // Smithay's ordinary xdg windows use z-index 30. Keep the Nickel panel
         // in its top shell layer so later application maps cannot cover it.
         window.override_z_index(40);
-        self.panel_window = Some(window);
+        if !self.panel_windows.contains(&window) {
+            self.panel_windows.push(window);
+        }
         self.relayout_shell_surfaces();
+    }
+
+    pub fn is_panel_window(&self, window: &Window) -> bool {
+        self.panel_windows.contains(window)
+    }
+
+    pub fn shell_windows(&self) -> impl Iterator<Item = &Window> {
+        self.launcher_window
+            .iter()
+            .chain(self.panel_windows.iter())
+            .chain(self.context_menu_window.iter())
     }
 
     pub fn register_context_menu(&mut self, window: Window) {
@@ -595,7 +601,7 @@ impl NickelSession {
             window.toplevel().unwrap().send_pending_configure();
         });
         self.space.raise_element(&window, true);
-        self.raise_panel();
+        self.raise_panels();
         eprintln!("nickel-session: context menu shown at {x},{y}");
     }
 
@@ -666,24 +672,19 @@ impl NickelSession {
         self.space.elements().for_each(|window| {
             window.toplevel().unwrap().send_pending_configure();
         });
-        self.raise_panel();
+        self.raise_panels();
     }
 
     pub fn cycle_windows(&mut self, forward: bool) {
         if self.alt_tab_order.is_empty() {
-            let shell_ids = [
-                self.launcher_window.as_ref(),
-                self.panel_window.as_ref(),
-                self.context_menu_window.as_ref(),
-            ]
-            .into_iter()
-            .flatten()
-            .filter_map(|window| {
-                self.surface_windows
-                    .get(&window.toplevel()?.wl_surface().id())
-            })
-            .copied()
-            .collect::<HashSet<_>>();
+            let shell_ids = self
+                .shell_windows()
+                .filter_map(|window| {
+                    self.surface_windows
+                        .get(&window.toplevel()?.wl_surface().id())
+                })
+                .copied()
+                .collect::<HashSet<_>>();
             self.alt_tab_order = self
                 .windows
                 .snapshot()
@@ -729,7 +730,7 @@ impl NickelSession {
         let location = self.space.element_location(&window).unwrap_or_default();
         self.space.unmap_elem(&window);
         self.minimized_windows.insert(id, (window, location));
-        self.raise_panel();
+        self.raise_panels();
     }
 
     pub fn maximize_window(&mut self, id: WindowId) {
@@ -749,10 +750,24 @@ impl NickelSession {
     }
 
     pub fn relayout_shell_surfaces(&mut self) {
-        let Some(output) = self.output_geometry() else {
+        if self.output_geometry().is_none() {
             return;
-        };
-        if let Some(panel) = self.panel_window.clone() {
+        }
+        let mut outputs = self.space.outputs().cloned().collect::<Vec<_>>();
+        // nickel-ui creates panel surfaces in monitor-name order. Preserve the
+        // same stable order here so differently sized outputs receive their
+        // own panel rather than whichever surface happened to commit last.
+        outputs.sort_by_key(|output| output.name());
+        for (panel, output) in self.panel_windows.clone().into_iter().zip(outputs) {
+            let Some(output) = self.space.output_geometry(&output) else {
+                continue;
+            };
+            let output = Geometry {
+                x: output.loc.x,
+                y: output.loc.y,
+                width: output.size.w,
+                height: output.size.h,
+            };
             let geometry = shell_layout::panel(output);
             Self::configure_window(&panel, geometry);
             self.space
@@ -765,9 +780,7 @@ impl NickelSession {
             let geometry = self.launcher_geometry(&launcher);
             self.space
                 .map_element(launcher, (geometry.x, geometry.y), true);
-            if let Some(panel) = self.panel_window.clone() {
-                self.space.raise_element(&panel, false);
-            }
+            self.raise_panels();
         }
         self.relayout_maximized_windows();
     }
@@ -801,7 +814,7 @@ impl NickelSession {
         });
         self.space
             .map_element(window, (geometry.x, geometry.y), true);
-        self.raise_panel();
+        self.raise_panels();
         surface.send_pending_configure();
     }
 
@@ -819,7 +832,7 @@ impl NickelSession {
         if let Some(window) = self.window_for_surface(surface.wl_surface()) {
             self.space.map_element(window, (restore.x, restore.y), true);
         }
-        self.raise_panel();
+        self.raise_panels();
         surface.send_pending_configure();
     }
 
@@ -867,7 +880,7 @@ impl NickelSession {
             window.override_z_index(30);
             self.space.map_element(window, (restore.x, restore.y), true);
         }
-        self.raise_panel();
+        self.raise_panels();
         surface.send_pending_configure();
     }
 
@@ -908,7 +921,7 @@ impl NickelSession {
                 .map_element(window, (geometry.x, geometry.y), true);
             surface.send_pending_configure();
         }
-        self.raise_panel();
+        self.raise_panels();
     }
 
     fn window_for_surface(&self, surface: &WlSurface) -> Option<Window> {
@@ -918,8 +931,8 @@ impl NickelSession {
             .cloned()
     }
 
-    fn raise_panel(&mut self) {
-        if let Some(panel) = self.panel_window.clone() {
+    fn raise_panels(&mut self) {
+        for panel in self.panel_windows.clone() {
             self.space.raise_element(&panel, false);
         }
     }

@@ -169,7 +169,7 @@ impl NickelSession {
                         .element_under(location)
                         .map(|(window, _)| window.clone())
                         .filter(|window| {
-                            self.panel_window.as_ref() != Some(window)
+                            !self.is_panel_window(window)
                                 && self.launcher_window.as_ref() != Some(window)
                         })
                         .filter(|window| {
@@ -225,13 +225,13 @@ impl NickelSession {
                             .get(&window.toplevel().unwrap().wl_surface().id())
                             .copied()
                             .filter(|_| {
-                                self.panel_window.as_ref() != Some(&window)
+                                !self.is_panel_window(&window)
                                     && self.launcher_window.as_ref() != Some(&window)
                             })
                         {
                             self.windows.raise(id);
                         }
-                        if self.panel_window.as_ref() != Some(&window) {
+                        if !self.is_panel_window(&window) {
                             keyboard.set_focus(
                                 self,
                                 Some(window.toplevel().unwrap().wl_surface().clone()),
@@ -259,7 +259,7 @@ impl NickelSession {
                         .element_under(pointer.current_location())
                         .map(|(window, location)| (window.clone(), location))
                         .filter(|(window, _)| {
-                            self.panel_window.as_ref() != Some(window)
+                            !self.is_panel_window(window)
                                 && self.launcher_window.as_ref() != Some(window)
                                 && self.context_menu_window.as_ref() != Some(window)
                         })
@@ -293,7 +293,7 @@ impl NickelSession {
                         .element_under(pointer.current_location())
                         .map(|(window, location)| (window.clone(), location))
                         .filter(|(window, _)| {
-                            self.panel_window.as_ref() != Some(window)
+                            !self.is_panel_window(window)
                                 && self.launcher_window.as_ref() != Some(window)
                                 && self.context_menu_window.as_ref() != Some(window)
                         })
