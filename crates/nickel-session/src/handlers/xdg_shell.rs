@@ -87,6 +87,8 @@ impl XdgShellHandler for NickelSession {
         }
         self.panel_windows
             .retain(|window| window.toplevel().unwrap().wl_surface() != surface.wl_surface());
+        self.desktop_windows
+            .retain(|window| window.toplevel().unwrap().wl_surface() != surface.wl_surface());
         if self
             .context_menu_window
             .as_ref()
@@ -296,6 +298,7 @@ impl NickelSession {
             (attributes.title.clone(), attributes.app_id.clone())
         });
         let is_launcher = title.as_deref() == Some("Nickel Launcher");
+        let is_desktop = title.as_deref() == Some("Nickel Desktop");
         let is_panel = title.as_deref() == Some("Nickel Panel");
         let is_context_menu = title.as_deref() == Some("Nickel Context Menu");
         if let Some(id) = self
@@ -313,6 +316,16 @@ impl NickelSession {
                 .cloned();
             if let Some(launcher) = launcher {
                 self.register_launcher(launcher);
+            }
+        }
+        if is_desktop {
+            let desktop = self
+                .space
+                .elements()
+                .find(|window| window.toplevel().unwrap().wl_surface() == surface.wl_surface())
+                .cloned();
+            if let Some(desktop) = desktop {
+                self.register_desktop(desktop);
             }
         }
         if is_panel {
