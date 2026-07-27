@@ -12,6 +12,7 @@ pub use layout::{Axis, Constraints, FlexItem, Insets, Point, Rect, Size, layout_
 pub use text_editor::TextEditor;
 pub use ui::{
     Background, Button, ButtonLabel, Color, Column, Component, Container, ContentPane, Dropdown,
-    FileGrid, FileGridItem, GradientAxis, Grid, Header, Image, LinearGradient, PaintCommand,
-    RadioButton, Row, ShoulderHints, Sidebar, Slider, Text, TextAlign, TextField, UiTree,
+    FileGrid, FileGridItem, GradientAxis, Grid, Header, HorizontalRule, Image, LinearGradient,
+    PaintCommand, RadioButton, Row, ShoulderHints, Sidebar, SidebarFolder, SidebarItem,
+    SidebarSection, Slider, Text, TextAlign, TextField, UiTree,
 };

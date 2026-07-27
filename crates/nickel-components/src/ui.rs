@@ -69,6 +69,11 @@ pub enum PaintCommand {
         rect: Rect,
         color: Color,
     },
+    TopRoundedFill {
+        rect: Rect,
+        color: Color,
+        radius: f32,
+    },
     Gradient {
         rect: Rect,
         gradient: LinearGradient,
@@ -114,6 +119,7 @@ pub struct Style {
     pub width: Option<f32>,
     pub height: Option<f32>,
     pub grow: f32,
+    pub top_corner_radius: f32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -197,6 +203,11 @@ impl Element {
     pub fn border(mut self, color: Color, width: f32) -> Self {
         self.style.border = Some(color);
         self.style.border_width = width;
+        self
+    }
+
+    pub fn top_corner_radius(mut self, radius: f32) -> Self {
+        self.style.top_corner_radius = radius.max(0.0);
         self
     }
 
@@ -448,6 +459,25 @@ impl FileGridItem {
         }
         self
     }
+
+    pub fn borderless_colors(mut self, background: Color, foreground: Color) -> Self {
+        self.0 = self.0.background(background);
+        if let Some(column) = self.0.0.children.first_mut()
+            && let Some(label) = column.children.get_mut(1)
+        {
+            label.style.foreground = Some(foreground);
+        }
+        self
+    }
+
+    pub fn icon_size(mut self, size: f32) -> Self {
+        if let Some(column) = self.0.0.children.first_mut()
+            && let Some(icon) = column.children.first_mut()
+        {
+            icon.style.height = Some(size.max(1.0));
+        }
+        self
+    }
 }
 
 impl Component for FileGridItem {
@@ -627,6 +657,11 @@ impl Container {
         self
     }
 
+    pub fn top_corner_radius(mut self, radius: f32) -> Self {
+        self.0 = self.0.top_corner_radius(radius);
+        self
+    }
+
     pub fn padding(mut self, padding: Insets) -> Self {
         self.0 = self.0.padding(padding);
         self
@@ -694,6 +729,168 @@ impl Sidebar {
 }
 
 impl Component for Sidebar {
+    fn into_element(self) -> Element {
+        self.0.into_element()
+    }
+}
+
+/// A thematic break with configurable space above and below its one-pixel line.
+pub struct HorizontalRule(Container);
+
+impl HorizontalRule {
+    pub fn new(color: Color) -> Self {
+        Self(
+            Container::new()
+                .height(17.0)
+                .padding(Insets {
+                    top: 8.0,
+                    right: 0.0,
+                    bottom: 8.0,
+                    left: 0.0,
+                })
+                .child(Container::new().height(1.0).background(color)),
+        )
+    }
+
+    pub fn spacing(mut self, top: f32, bottom: f32) -> Self {
+        self.0 = Container(self.0.0.height(top + 1.0 + bottom).padding(Insets {
+            top,
+            right: 0.0,
+            bottom,
+            left: 0.0,
+        }));
+        self
+    }
+}
+
+impl Component for HorizontalRule {
+    fn into_element(self) -> Element {
+        self.0.into_element()
+    }
+}
+
+pub struct SidebarSection(Column);
+
+impl SidebarSection {
+    pub fn new(label: impl Into<String>, color: Color) -> Self {
+        Self(
+            Column::new()
+                .gap(3.0)
+                .child(Text::new(label).height(26.0).scale(0.95).color(color)),
+        )
+    }
+
+    pub fn child(mut self, child: impl Component) -> Self {
+        self.0 = self.0.child(child);
+        self
+    }
+
+    pub fn children(mut self, children: impl IntoIterator<Item = impl Component>) -> Self {
+        self.0 = self.0.children(children);
+        self
+    }
+}
+
+impl Component for SidebarSection {
+    fn into_element(self) -> Element {
+        self.0.into_element()
+    }
+}
+
+pub struct SidebarItem(Container);
+
+impl SidebarItem {
+    pub fn new(action: impl Into<String>, label: impl Into<String>, foreground: Color) -> Self {
+        Self(
+            Container::new()
+                .height(36.0)
+                .action(action)
+                .padding(Insets {
+                    top: 8.0,
+                    right: 8.0,
+                    bottom: 6.0,
+                    left: 10.0,
+                })
+                .child(Text::new(label).scale(1.05).color(foreground)),
+        )
+    }
+
+    pub fn background(mut self, background: impl Into<Background>) -> Self {
+        self.0 = self.0.background(background);
+        self
+    }
+
+    pub fn indent(mut self, depth: usize) -> Self {
+        self.0.0.style.padding.left += depth as f32 * 16.0;
+        self
+    }
+}
+
+impl Component for SidebarItem {
+    fn into_element(self) -> Element {
+        self.0.into_element()
+    }
+}
+
+pub struct SidebarFolder(Container);
+
+impl SidebarFolder {
+    pub fn new(
+        toggle_action: impl Into<String>,
+        open_action: impl Into<String>,
+        label: impl Into<String>,
+        expanded: bool,
+        foreground: Color,
+    ) -> Self {
+        Self(
+            Container::new().height(36.0).child(
+                Row::new()
+                    .child(
+                        Container::new()
+                            .width(28.0)
+                            .height(36.0)
+                            .action(toggle_action)
+                            .padding(Insets {
+                                top: 8.0,
+                                right: 3.0,
+                                bottom: 6.0,
+                                left: 8.0,
+                            })
+                            .child(
+                                Text::new(if expanded { "⌄" } else { "›" })
+                                    .scale(1.05)
+                                    .color(foreground),
+                            ),
+                    )
+                    .child(
+                        Container::new()
+                            .grow(1.0)
+                            .height(36.0)
+                            .action(open_action)
+                            .padding(Insets {
+                                top: 8.0,
+                                right: 8.0,
+                                bottom: 6.0,
+                                left: 2.0,
+                            })
+                            .child(Text::new(label).scale(1.05).color(foreground)),
+                    ),
+            ),
+        )
+    }
+
+    pub fn background(mut self, background: impl Into<Background>) -> Self {
+        self.0 = self.0.background(background);
+        self
+    }
+
+    pub fn indent(mut self, depth: usize) -> Self {
+        self.0.0.style.padding.left = depth as f32 * 16.0;
+        self
+    }
+}
+
+impl Component for SidebarFolder {
     fn into_element(self) -> Element {
         self.0.into_element()
     }
@@ -1073,6 +1270,13 @@ fn layout_element(
     let rect = Rect::new(bounds.origin.x, bounds.origin.y, width, height);
     if let Some(background) = element.style.background {
         tree.commands.push(match background {
+            Background::Solid(color) if element.style.top_corner_radius > 0.0 => {
+                PaintCommand::TopRoundedFill {
+                    rect,
+                    color,
+                    radius: element.style.top_corner_radius,
+                }
+            }
             Background::Solid(color) => PaintCommand::Fill { rect, color },
             Background::LinearGradient(gradient) => PaintCommand::Gradient { rect, gradient },
         });
@@ -1377,7 +1581,8 @@ mod tests {
         let tree = UiTree::layout(
             FileGrid::columns(2).gap(8.0).height(120.0).items([
                 FileGridItem::new("file:one", "One", 1, icon.clone())
-                    .colors(0x101010, 0x202020, 0xffffff),
+                    .colors(0x101010, 0x202020, 0xffffff)
+                    .icon_size(48.0),
                 FileGridItem::new("file:two", "Two", 2, icon).colors(0x101010, 0x202020, 0xffffff),
             ]),
             Rect::new(0.0, 0.0, 240.0, 120.0),
@@ -1397,6 +1602,9 @@ mod tests {
                 } if text == "One"
             )
         }));
+        assert!(tree.commands.iter().any(
+            |command| matches!(command, PaintCommand::Image { bounds, id: 1, .. } if bounds.size.height == 48.0)
+        ));
     }
 
     #[test]
@@ -1426,5 +1634,38 @@ mod tests {
             tree.action_at(Point { x: 20.0, y: 96.0 }),
             Some("audio:option:1")
         );
+    }
+
+    #[test]
+    fn sidebar_folder_separates_toggle_and_open_actions() {
+        let tree = UiTree::layout(
+            Sidebar::new(220.0)
+                .child(HorizontalRule::new(0x808080))
+                .child(SidebarFolder::new(
+                    "toggle", "open", "Desktop", false, 0xffffff,
+                )),
+            Rect::new(0.0, 0.0, 220.0, 100.0),
+        );
+        assert_eq!(tree.action_at(Point { x: 10.0, y: 32.0 }), Some("toggle"));
+        assert_eq!(tree.action_at(Point { x: 80.0, y: 32.0 }), Some("open"));
+        assert!(tree.commands().iter().any(
+            |command| matches!(command, PaintCommand::Fill { rect, .. } if rect.size.height == 1.0)
+        ));
+    }
+
+    #[test]
+    fn top_corner_radius_emits_rounded_fill() {
+        let tree = UiTree::layout(
+            Container::new()
+                .width(120.0)
+                .height(32.0)
+                .background(0xffffff)
+                .top_corner_radius(7.0),
+            Rect::new(0.0, 0.0, 120.0, 32.0),
+        );
+        assert!(tree.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::TopRoundedFill { radius, .. } if *radius == 7.0
+        )));
     }
 }

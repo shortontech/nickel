@@ -24,6 +24,7 @@ impl FileEntry {
 pub struct DirectoryBrowser {
     current: PathBuf,
     history: Vec<PathBuf>,
+    forward_history: Vec<PathBuf>,
     entries: Vec<FileEntry>,
     show_hidden: bool,
 }
@@ -39,6 +40,7 @@ impl DirectoryBrowser {
         Ok(Self {
             current,
             history: Vec::new(),
+            forward_history: Vec::new(),
             entries,
             show_hidden,
         })
@@ -56,6 +58,10 @@ impl DirectoryBrowser {
         !self.history.is_empty()
     }
 
+    pub fn can_go_forward(&self) -> bool {
+        !self.forward_history.is_empty()
+    }
+
     pub fn can_go_up(&self) -> bool {
         self.current.parent().is_some()
     }
@@ -64,6 +70,7 @@ impl DirectoryBrowser {
         let next = path.into();
         let entries = read_entries_with_hidden(&next, self.show_hidden)?;
         self.history.push(self.current.clone());
+        self.forward_history.clear();
         self.current = next;
         self.entries = entries;
         Ok(())
@@ -75,7 +82,20 @@ impl DirectoryBrowser {
         };
         let entries = read_entries_with_hidden(&previous, self.show_hidden)?;
         self.history.pop();
+        self.forward_history.push(self.current.clone());
         self.current = previous;
+        self.entries = entries;
+        Ok(true)
+    }
+
+    pub fn forward(&mut self) -> io::Result<bool> {
+        let Some(next) = self.forward_history.last().cloned() else {
+            return Ok(false);
+        };
+        let entries = read_entries_with_hidden(&next, self.show_hidden)?;
+        self.forward_history.pop();
+        self.history.push(self.current.clone());
+        self.current = next;
         self.entries = entries;
         Ok(true)
     }
@@ -240,6 +260,22 @@ mod tests {
         assert!(browser.back().unwrap());
         assert_eq!(browser.current(), root);
         assert!(!browser.back().unwrap());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn forward_returns_to_a_directory_after_back() {
+        let root = temporary_directory("forward-history");
+        let child = root.join("child");
+        fs::create_dir(&child).unwrap();
+        let mut browser = DirectoryBrowser::open(&root).unwrap();
+
+        browser.enter(&child).unwrap();
+        browser.back().unwrap();
+        assert!(browser.can_go_forward());
+        assert!(browser.forward().unwrap());
+        assert_eq!(browser.current(), child);
+        assert!(!browser.can_go_forward());
         fs::remove_dir_all(root).unwrap();
     }
 

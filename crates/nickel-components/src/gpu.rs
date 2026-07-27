@@ -212,6 +212,19 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
                         color_rgba(*color),
                     );
                 }
+                PaintCommand::TopRoundedFill {
+                    rect,
+                    color,
+                    radius,
+                } => {
+                    add_top_rounded_rectangle(
+                        &mut vertices,
+                        (self.config.width, self.config.height),
+                        *rect,
+                        *radius,
+                        color_rgba(*color),
+                    );
+                }
                 PaintCommand::Gradient { rect, gradient } => {
                     add_gradient(
                         &mut vertices,
@@ -519,6 +532,57 @@ fn add_rectangle(vertices: &mut Vec<Vertex>, surface: (u32, u32), rect: Rect, co
     let y2 = 1.0 - (rect.origin.y + rect.size.height) / surface.1 as f32 * 2.0;
     for position in [[x1, y1], [x1, y2], [x2, y2], [x1, y1], [x2, y2], [x2, y1]] {
         vertices.push(Vertex { position, color });
+    }
+}
+
+fn add_top_rounded_rectangle(
+    vertices: &mut Vec<Vertex>,
+    surface: (u32, u32),
+    rect: Rect,
+    radius: f32,
+    color: [f32; 4],
+) {
+    let radius = radius
+        .max(0.0)
+        .min(rect.size.width / 2.0)
+        .min(rect.size.height);
+    if radius <= 0.0 {
+        add_rectangle(vertices, surface, rect, color);
+        return;
+    }
+    let x = rect.origin.x;
+    let y = rect.origin.y;
+    let right = x + rect.size.width;
+    let bottom = y + rect.size.height;
+    let mut perimeter = vec![[x, bottom], [right, bottom], [right, y + radius]];
+    const STEPS: usize = 6;
+    for step in 1..=STEPS {
+        let angle = -(step as f32 / STEPS as f32) * std::f32::consts::FRAC_PI_2;
+        perimeter.push([
+            right - radius + radius * angle.cos(),
+            y + radius + radius * angle.sin(),
+        ]);
+    }
+    for step in 1..=STEPS {
+        let angle = -std::f32::consts::FRAC_PI_2
+            - (step as f32 / STEPS as f32) * std::f32::consts::FRAC_PI_2;
+        perimeter.push([
+            x + radius + radius * angle.cos(),
+            y + radius + radius * angle.sin(),
+        ]);
+    }
+    let center = [x + rect.size.width / 2.0, y + rect.size.height / 2.0];
+    for index in 0..perimeter.len() {
+        let next = (index + 1) % perimeter.len();
+        for point in [center, perimeter[index], perimeter[next]] {
+            vertices.push(Vertex {
+                position: [
+                    point[0] / surface.0 as f32 * 2.0 - 1.0,
+                    1.0 - point[1] / surface.1 as f32 * 2.0,
+                ],
+                color,
+            });
+        }
     }
 }
 
