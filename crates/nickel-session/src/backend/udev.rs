@@ -50,7 +50,7 @@ use smithay::{
         rustix::fs::OFlags,
         wayland_server::{Resource, backend::GlobalId},
     },
-    utils::{Buffer, DeviceFd, Rectangle, Transform},
+    utils::{Buffer, DeviceFd, Physical, Point, Rectangle, Transform},
 };
 use thiserror::Error;
 
@@ -146,8 +146,14 @@ pub struct UdevData {
     primary_gpu: DrmNode,
     devices: HashMap<DrmNode, DeviceData>,
     layout: OutputLayout,
-    cursor: MemoryRenderBuffer,
+    cursor: CursorBuffer,
     identify_badges: Vec<MemoryRenderBuffer>,
+}
+
+#[derive(Clone)]
+struct CursorBuffer {
+    buffer: MemoryRenderBuffer,
+    hotspot: Point<i32, Physical>,
 }
 
 #[derive(Debug, Error)]
@@ -181,7 +187,7 @@ pub fn init_udev(
         primary_gpu,
         devices: HashMap::new(),
         layout: OutputLayout::default(),
-        cursor: arrow_cursor(),
+        cursor: themed_arrow_cursor(),
         identify_badges: (1..=9).map(identify_badge).collect(),
     });
     let (buffer_commit_tx, buffer_commit_rx) = channel::channel();
@@ -854,11 +860,12 @@ impl CalloopData {
                 if geometry.to_f64().contains(pointer) {
                     let location = (pointer - geometry.loc.to_f64())
                         .to_i32_round()
-                        .to_physical(1);
+                        .to_physical(1)
+                        - cursor.hotspot;
                     match MemoryRenderBufferRenderElement::from_buffer(
                         &mut renderer,
                         location.to_f64(),
-                        &cursor,
+                        &cursor.buffer,
                         None,
                         None,
                         None,
@@ -948,7 +955,92 @@ fn is_evdi_device(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn arrow_cursor() -> MemoryRenderBuffer {
+fn themed_arrow_cursor() -> CursorBuffer {
+    let kde_cursor_settings = kde_cursor_settings();
+    let theme_name = std::env::var("XCURSOR_THEME")
+        .ok()
+        .filter(|theme| !theme.is_empty())
+        .or_else(|| kde_cursor_settings.0.clone())
+        .unwrap_or_else(|| "default".into());
+    let requested_size = std::env::var("XCURSOR_SIZE")
+        .ok()
+        .and_then(|size| size.parse::<u32>().ok())
+        .filter(|size| *size > 0)
+        .or(kde_cursor_settings.1)
+        .unwrap_or(24);
+    let theme = xcursor::CursorTheme::load(&theme_name);
+    if let Some(path) = theme
+        .load_icon("default")
+        .or_else(|| theme.load_icon("left_ptr"))
+        && let Ok(bytes) = std::fs::read(&path)
+        && let Some(images) = xcursor::parser::parse_xcursor(&bytes)
+        && let Some(image) = images
+            .into_iter()
+            .min_by_key(|image| image.size.abs_diff(requested_size))
+    {
+        tracing::info!(
+            theme = %theme_name,
+            size = image.size,
+            path = %path.display(),
+            "loaded desktop cursor theme"
+        );
+        return CursorBuffer {
+            buffer: MemoryRenderBuffer::from_slice(
+                &image.pixels_rgba,
+                Fourcc::Abgr8888,
+                (image.width as i32, image.height as i32),
+                1,
+                Transform::Normal,
+                None,
+            ),
+            hotspot: Point::from((image.xhot as i32, image.yhot as i32)),
+        };
+    }
+    tracing::warn!(theme = %theme_name, "could not load desktop cursor theme; using fallback");
+    fallback_arrow_cursor()
+}
+
+fn kde_cursor_settings() -> (Option<String>, Option<u32>) {
+    let Some(config_home) = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .map(|home| home.join(".config"))
+        })
+    else {
+        return (None, None);
+    };
+    let Ok(contents) = std::fs::read_to_string(config_home.join("kcminputrc")) else {
+        return (None, None);
+    };
+    parse_kde_cursor_settings(&contents)
+}
+
+fn parse_kde_cursor_settings(contents: &str) -> (Option<String>, Option<u32>) {
+    let mut in_mouse_group = false;
+    let mut theme = None;
+    let mut size = None;
+    for line in contents.lines().map(str::trim) {
+        if line.starts_with('[') && line.ends_with(']') {
+            in_mouse_group = line == "[Mouse]";
+            continue;
+        }
+        if !in_mouse_group {
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("cursorTheme=")
+            && !value.is_empty()
+        {
+            theme = Some(value.to_owned());
+        } else if let Some(value) = line.strip_prefix("cursorSize=") {
+            size = value.parse().ok().filter(|size| *size > 0);
+        }
+    }
+    (theme, size)
+}
+
+fn fallback_arrow_cursor() -> CursorBuffer {
     const SCALE: usize = 2;
     const ROWS: &[&str] = &[
         "B...............",
@@ -994,14 +1086,17 @@ fn arrow_cursor() -> MemoryRenderBuffer {
             }
         }
     }
-    MemoryRenderBuffer::from_slice(
-        &rgba,
-        Fourcc::Abgr8888,
-        (width as i32, height as i32),
-        1,
-        Transform::Normal,
-        None,
-    )
+    CursorBuffer {
+        buffer: MemoryRenderBuffer::from_slice(
+            &rgba,
+            Fourcc::Abgr8888,
+            (width as i32, height as i32),
+            1,
+            Transform::Normal,
+            None,
+        ),
+        hotspot: Point::from((0, 0)),
+    }
 }
 
 fn identify_badge(number: usize) -> MemoryRenderBuffer {
@@ -1110,4 +1205,24 @@ fn capture_preview(
         height: HEIGHT as u16,
         rgba,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_kde_cursor_settings;
+
+    #[test]
+    fn reads_cursor_preferences_from_kde_mouse_group() {
+        let settings = parse_kde_cursor_settings(
+            "[Keyboard]\nRepeatDelay=600\n[Mouse]\ncursorTheme=Oxygen_Black\ncursorSize=36\n",
+        );
+        assert_eq!(settings, (Some("Oxygen_Black".into()), Some(36)));
+    }
+
+    #[test]
+    fn ignores_cursor_preferences_outside_kde_mouse_group() {
+        let settings =
+            parse_kde_cursor_settings("[Other]\ncursorTheme=Oxygen_Black\ncursorSize=36\n");
+        assert_eq!(settings, (None, None));
+    }
 }
