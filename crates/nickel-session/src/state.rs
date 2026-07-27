@@ -118,6 +118,7 @@ pub struct NickelSession {
     pub launcher_visibility: LauncherVisibility,
     pub desktop_windows: Vec<Window>,
     pub panel_windows: Vec<Window>,
+    pub utility_windows: Vec<Window>,
     pub context_menu_window: Option<Window>,
     pub server_decorated: HashSet<ObjectId>,
     pub primary_output_name: Option<String>,
@@ -208,6 +209,7 @@ impl NickelSession {
             launcher_visibility: LauncherVisibility::default(),
             desktop_windows: Vec::new(),
             panel_windows: Vec::new(),
+            utility_windows: Vec::new(),
             context_menu_window: None,
             server_decorated: HashSet::new(),
             primary_output_name: None,
@@ -591,7 +593,14 @@ impl NickelSession {
             .iter()
             .chain(self.desktop_windows.iter())
             .chain(self.panel_windows.iter())
+            .chain(self.utility_windows.iter())
             .chain(self.context_menu_window.iter())
+    }
+
+    pub fn register_utility_window(&mut self, window: Window) {
+        if !self.utility_windows.contains(&window) {
+            self.utility_windows.push(window);
+        }
     }
 
     pub fn register_context_menu(&mut self, window: Window) {
