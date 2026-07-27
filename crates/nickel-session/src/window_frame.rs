@@ -3,6 +3,10 @@ use smithay::{
     backend::{allocator::Fourcc, renderer::element::memory::MemoryRenderBuffer},
     utils::Transform,
 };
+use std::{
+    collections::HashMap,
+    sync::{Mutex, OnceLock},
+};
 
 pub const TITLEBAR_HEIGHT: i32 = 40;
 pub const RESIZE_BORDER: i32 = 5;
@@ -54,6 +58,69 @@ fn render_glyph(glyph: char) -> Option<MemoryRenderBuffer> {
         pixmap.data(),
         Fourcc::Abgr8888,
         (SIZE as i32, SIZE as i32),
+        1,
+        Transform::Normal,
+        None,
+    ))
+}
+
+pub fn render_titlebar(
+    width: i32,
+    title: &str,
+    background: u32,
+    foreground: u32,
+) -> Option<MemoryRenderBuffer> {
+    type CacheKey = (i32, String, u32, u32);
+    static CACHE: OnceLock<Mutex<HashMap<CacheKey, MemoryRenderBuffer>>> = OnceLock::new();
+    let key = (width, title.to_owned(), background, foreground);
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(buffer) = cache.lock().ok()?.get(&key).cloned() {
+        return Some(buffer);
+    }
+    let buffer = render_titlebar_uncached(width, title, background, foreground)?;
+    let mut cache = cache.lock().ok()?;
+    if cache.len() >= 128 {
+        cache.clear();
+    }
+    cache.insert(key, buffer.clone());
+    Some(buffer)
+}
+
+fn render_titlebar_uncached(
+    width: i32,
+    title: &str,
+    background: u32,
+    foreground: u32,
+) -> Option<MemoryRenderBuffer> {
+    let width = u32::try_from(width).ok()?.max(1);
+    let title_width = width.saturating_sub((BUTTON_WIDTH * 3 + 20) as u32);
+    let escaped_title = title
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;");
+    let mut options = resvg::usvg::Options::default();
+    options.fontdb_mut().load_system_fonts();
+    let right = width.saturating_sub(10);
+    let svg = format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{TITLEBAR_HEIGHT}">
+<defs><clipPath id="title"><rect x="16" y="0" width="{title_width}" height="{TITLEBAR_HEIGHT}"/></clipPath></defs>
+<path d="M 10 0 H {right} Q {width} 0 {width} 10 V {TITLEBAR_HEIGHT} H 0 V 10 Q 0 0 10 0 Z" fill="#{background:06x}"/>
+<text x="16" y="26" clip-path="url(#title)" font-family="sans-serif" font-size="14" font-weight="500" fill="#{foreground:06x}">{escaped_title}</text>
+</svg>"##
+    );
+    let tree = resvg::usvg::Tree::from_data(svg.as_bytes(), &options).ok()?;
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(width, TITLEBAR_HEIGHT as u32)?;
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::identity(),
+        &mut pixmap.as_mut(),
+    );
+    Some(MemoryRenderBuffer::from_slice(
+        pixmap.data(),
+        Fourcc::Abgr8888,
+        (width as i32, TITLEBAR_HEIGHT),
         1,
         Transform::Normal,
         None,

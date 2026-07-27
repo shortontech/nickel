@@ -54,6 +54,11 @@ use smithay::{
 };
 use thiserror::Error;
 
+use nickel_core::{
+    shell_settings::ShellSettings,
+    theme::{Appearance, ThemePalette},
+};
+
 use crate::{
     CalloopData, NickelSession,
     backend::{
@@ -64,6 +69,15 @@ use crate::{
 };
 
 const FORMATS: &[Fourcc] = &[Fourcc::Abgr8888, Fourcc::Argb8888];
+
+fn render_color(rgb: u32) -> [f32; 4] {
+    [
+        ((rgb >> 16) & 0xff) as f32 / 255.0,
+        ((rgb >> 8) & 0xff) as f32 / 255.0,
+        (rgb & 0xff) as f32 / 255.0,
+        1.0,
+    ]
+}
 
 fn output_model(connector_name: &str) -> String {
     let Ok(entries) = std::fs::read_dir("/sys/class/drm") else {
@@ -824,6 +838,9 @@ impl CalloopData {
                 .shell_windows()
                 .filter_map(|window| window.toplevel().map(|surface| surface.wl_surface().id()))
                 .collect::<Vec<_>>();
+            let frame_palette = ThemePalette::from_appearance(
+                ShellSettings::load_default().resolve_appearance(Appearance::default()),
+            );
             if let Some(output_geometry) = self.state.space.output_geometry(&output) {
                 // Space stores windows back-to-front. Build each window and its
                 // frame together, front-to-back, so overlapping frames obey the
@@ -863,34 +880,47 @@ impl CalloopData {
                     {
                         continue;
                     }
-                    let active = self
-                        .state
-                        .surface_windows
-                        .get(&surface.id())
-                        .is_some_and(|id| self.state.windows.is_active(*id));
+                    let registry_id = self.state.surface_windows.get(&surface.id()).copied();
+                    let active = registry_id.is_some_and(|id| self.state.windows.is_active(id));
+                    let title = registry_id
+                        .and_then(|id| self.state.windows.title(id))
+                        .unwrap_or_default();
                     let maximized = self.state.is_maximized_window(window);
                     let frame_index = elements.len();
-                    let color = if active {
-                        [0.12, 0.16, 0.24, 1.0]
+                    let foreground = if active {
+                        frame_palette.text
                     } else {
-                        [0.08, 0.09, 0.12, 1.0]
+                        frame_palette.muted
                     };
                     let border = if active {
-                        [0.36, 0.58, 0.92, 1.0]
+                        render_color(frame_palette.accent)
                     } else {
-                        [0.25, 0.27, 0.31, 1.0]
+                        render_color(frame_palette.surface_hover)
                     };
-                    let rectangles = [
+                    if let Some(titlebar) = crate::window_frame::render_titlebar(
+                        bounds.size.w,
+                        title,
+                        frame_palette.panel,
+                        foreground,
+                    ) && let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
+                        &mut renderer,
                         (
-                            (bounds.size.w, crate::window_frame::TITLEBAR_HEIGHT),
-                            (
-                                bounds.loc.x - output_geometry.loc.x,
+                            f64::from(bounds.loc.x - output_geometry.loc.x),
+                            f64::from(
                                 bounds.loc.y
                                     - output_geometry.loc.y
                                     - crate::window_frame::TITLEBAR_HEIGHT,
                             ),
-                            color,
                         ),
+                        &titlebar,
+                        None,
+                        None,
+                        None,
+                        Kind::Unspecified,
+                    ) {
+                        elements.push(NativeCustomElement::from(element).into());
+                    }
+                    let rectangles = [
                         (
                             (bounds.size.w + 4, 2),
                             (
