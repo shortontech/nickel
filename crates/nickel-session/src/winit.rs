@@ -172,14 +172,7 @@ pub fn init_winit(
                             let _ = frame.finish().unwrap();
 
                             let mut shell_elements = Vec::new();
-                            for shell in [
-                                state.launcher_window.as_ref(),
-                                state.panel_window.as_ref(),
-                                state.context_menu_window.as_ref(),
-                            ]
-                            .into_iter()
-                            .flatten()
-                            {
+                            for shell in state.shell_windows() {
                                 let Some(location) = state.space.element_location(shell) else {
                                     continue;
                                 };
@@ -209,20 +202,10 @@ pub fn init_winit(
                     backend.submit(Some(&[damage])).unwrap();
 
                     if last_preview_capture.elapsed() >= Duration::from_millis(200) {
-                        let shell_windows = [
-                            state.launcher_window.as_ref(),
-                            state.panel_window.as_ref(),
-                            state.context_menu_window.as_ref(),
-                        ];
                         let windows: Vec<_> = state
                             .space
                             .elements()
-                            .filter(|window| {
-                                !shell_windows
-                                    .into_iter()
-                                    .flatten()
-                                    .any(|shell| shell == *window)
-                            })
+                            .filter(|window| !state.shell_windows().any(|shell| shell == *window))
                             .filter_map(|window| {
                                 let id = state
                                     .surface_windows
