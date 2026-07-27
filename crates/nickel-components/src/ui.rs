@@ -665,6 +665,96 @@ impl Component for Container {
     }
 }
 
+pub struct Sidebar(Column);
+
+impl Sidebar {
+    pub fn new(width: f32) -> Self {
+        Self(Column::new().width(width))
+    }
+
+    pub fn background(mut self, background: impl Into<Background>) -> Self {
+        self.0 = self.0.background(background);
+        self
+    }
+
+    pub fn padding(mut self, padding: Insets) -> Self {
+        self.0 = self.0.padding(padding);
+        self
+    }
+
+    pub fn gap(mut self, gap: f32) -> Self {
+        self.0 = self.0.gap(gap);
+        self
+    }
+
+    pub fn child(mut self, child: impl Component) -> Self {
+        self.0 = self.0.child(child);
+        self
+    }
+}
+
+impl Component for Sidebar {
+    fn into_element(self) -> Element {
+        self.0.into_element()
+    }
+}
+
+pub struct ContentPane(Container);
+
+impl ContentPane {
+    pub fn new(content: impl Component) -> Self {
+        Self(Container::new().grow(1.0).child(content))
+    }
+
+    pub fn background(mut self, background: impl Into<Background>) -> Self {
+        self.0 = self.0.background(background);
+        self
+    }
+}
+
+impl Component for ContentPane {
+    fn into_element(self) -> Element {
+        self.0.into_element()
+    }
+}
+
+pub struct ShoulderHints(Row);
+
+impl ShoulderHints {
+    pub fn new(color: Color, muted: Color) -> Self {
+        fn keycap(label: &str, color: Color, muted: Color) -> Container {
+            Container::new()
+                .width(34.0)
+                .height(24.0)
+                .border(muted, 1.0)
+                .padding(Insets {
+                    top: 2.0,
+                    right: 5.0,
+                    bottom: 2.0,
+                    left: 5.0,
+                })
+                .child(
+                    Text::new(label)
+                        .scale(1.0)
+                        .color(color)
+                        .align(TextAlign::Center),
+                )
+        }
+        Self(
+            Row::new()
+                .gap(8.0)
+                .child(keycap("LB", color, muted))
+                .child(keycap("RB", color, muted)),
+        )
+    }
+}
+
+impl Component for ShoulderHints {
+    fn into_element(self) -> Element {
+        self.0.into_element()
+    }
+}
+
 pub struct Button(Container);
 
 impl Button {

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use nucleo_matcher::{
     Config, Matcher,
@@ -26,7 +26,17 @@ pub struct Launcher {
     applications: Vec<Application>,
     results: Vec<usize>,
     pins: HashMap<String, u64>,
+    place_ids: HashSet<String>,
+    view: LauncherView,
     selected: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum LauncherView {
+    Favorites,
+    #[default]
+    Applications,
+    Places,
 }
 
 impl Default for Launcher {
@@ -56,6 +66,8 @@ impl Launcher {
             applications,
             results: Vec::new(),
             pins: HashMap::new(),
+            place_ids: HashSet::new(),
+            view: LauncherView::default(),
             selected: 0,
         };
         launcher.refresh();
@@ -78,6 +90,26 @@ impl Launcher {
 
     pub fn selected_index(&self) -> usize {
         self.selected
+    }
+
+    pub fn view(&self) -> LauncherView {
+        self.view
+    }
+
+    pub fn set_view(&mut self, view: LauncherView) {
+        self.view = view;
+        self.refresh();
+    }
+
+    pub fn set_places(&mut self, places: Vec<Application>) {
+        self.applications
+            .retain(|application| !self.place_ids.contains(application.id()));
+        self.place_ids.clear();
+        for place in places {
+            self.place_ids.insert(place.id().to_owned());
+            self.applications.push(place);
+        }
+        self.refresh();
     }
 
     #[cfg(test)]
@@ -205,7 +237,17 @@ impl Launcher {
 
     fn refresh(&mut self) {
         if self.query.is_empty() {
-            let mut results: Vec<_> = (0..self.applications.len()).collect();
+            let mut results: Vec<_> = self
+                .applications
+                .iter()
+                .enumerate()
+                .filter(|(_, application)| match self.view {
+                    LauncherView::Favorites => self.pins.contains_key(application.id()),
+                    LauncherView::Applications => !self.place_ids.contains(application.id()),
+                    LauncherView::Places => self.place_ids.contains(application.id()),
+                })
+                .map(|(index, _)| index)
+                .collect();
             results.sort_by_key(|index| {
                 self.pins
                     .get(self.applications[*index].id())
@@ -241,7 +283,7 @@ impl Launcher {
 
 #[cfg(test)]
 mod tests {
-    use super::{Application, Launcher};
+    use super::{Application, Launcher, LauncherView};
 
     #[test]
     fn fuzzy_query_finds_application() {
@@ -308,6 +350,33 @@ mod tests {
 
         assert_eq!(launcher.query(), "");
         assert_eq!(launcher.selected_index(), 0);
+    }
+
+    #[test]
+    fn places_are_separate_from_the_application_catalog() {
+        let mut launcher = Launcher::default();
+        launcher.set_places(vec![Application::new(
+            "place:home".into(),
+            "Home".into(),
+            None,
+            None,
+            Some(vec!["nickel-file".into(), "/home/example".into()]),
+        )]);
+        assert!(
+            launcher
+                .applications()
+                .any(|application| application.name() == "Home")
+        );
+        assert!(
+            launcher
+                .results
+                .iter()
+                .all(|index| launcher.applications[*index].name() != "Home")
+        );
+
+        launcher.set_view(LauncherView::Places);
+        assert_eq!(launcher.result_count(), 1);
+        assert_eq!(launcher.result_at(0).map(Application::name), Some("Home"));
     }
 
     #[test]

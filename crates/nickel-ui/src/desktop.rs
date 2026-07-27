@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Instant};
+use std::sync::Arc;
 
 use image::{Rgba, RgbaImage};
 use wgpu::util::DeviceExt;
@@ -6,15 +6,12 @@ use winit::window::Window;
 
 use crate::graphics::SharedGraphics;
 
-const ANIMATED_WALLPAPER_ENV: &str = "NICKEL_ANIMATED_WALLPAPER";
-
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct WallpaperUniform {
-    seconds: f32,
-    animated: u32,
     position: u32,
     has_image: u32,
+    _padding: [u32; 2],
     source_size: [f32; 2],
     target_size: [f32; 2],
     background: [f32; 4],
@@ -55,9 +52,7 @@ pub struct DesktopGpu {
     _texture: wgpu::Texture,
     bind_group: wgpu::BindGroup,
     pipeline: wgpu::RenderPipeline,
-    time_buffer: wgpu::Buffer,
-    started: Instant,
-    animated: bool,
+    uniform_buffer: wgpu::Buffer,
     uniform: WallpaperUniform,
 }
 
@@ -68,27 +63,17 @@ impl DesktopGpu {
         mut wallpaper: Wallpaper,
     ) -> Result<Self, String> {
         let surface = graphics.create_surface(window.clone())?;
-        let size = window.inner_size();
+        let size = crate::platform::surface_size(&window);
         let mut config = surface
             .get_default_config(&graphics.adapter, size.width.max(1), size.height.max(1))
             .ok_or_else(|| "desktop surface has no supported configuration".to_owned())?;
         config.desired_maximum_frame_latency = 1;
         surface.configure(&graphics.device, &config);
-        let animated = std::env::var_os(ANIMATED_WALLPAPER_ENV).is_some_and(|value| {
-            !matches!(
-                value.to_string_lossy().to_ascii_lowercase().as_str(),
-                "" | "0" | "false" | "no" | "off"
-            )
-        });
         let has_image = wallpaper.image.is_some();
-        let upload_image = if animated {
-            RgbaImage::from_pixel(1, 1, Rgba([255, 255, 255, 255]))
-        } else {
-            wallpaper
-                .image
-                .take()
-                .unwrap_or_else(|| RgbaImage::from_pixel(1, 1, Rgba([255, 255, 255, 255])))
-        };
+        let upload_image = wallpaper
+            .image
+            .take()
+            .unwrap_or_else(|| RgbaImage::from_pixel(1, 1, Rgba([255, 255, 255, 255])));
         let bind_group_layout =
             graphics
                 .device
@@ -161,55 +146,48 @@ fn vs_main(@builtin(vertex_index) index: u32) -> VertexOutput {
 
 @group(0) @binding(0) var wallpaper: texture_2d<f32>;
 @group(0) @binding(1) var wallpaper_sampler: sampler;
-struct HueTime {
-    seconds: f32,
-    animated: u32,
+struct WallpaperSettings {
     position: u32,
     has_image: u32,
+    padding: vec2<u32>,
     source_size: vec2<f32>,
     target_size: vec2<f32>,
     background: vec4<f32>,
 };
-@group(0) @binding(2) var<uniform> hue_time: HueTime;
+@group(0) @binding(2) var<uniform> settings: WallpaperSettings;
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    if hue_time.animated == 0u {
-        if hue_time.has_image == 0u {
-            return hue_time.background;
-        }
-        var uv = input.uv;
-        var inside = true;
-        if hue_time.position == 1u {
-            uv = fract(input.uv * hue_time.target_size / hue_time.source_size);
-        } else if hue_time.position != 2u {
-            var displayed = hue_time.source_size;
-            if hue_time.position == 3u {
+    if settings.has_image == 0u {
+        return settings.background;
+    }
+    var uv = input.uv;
+    var inside = true;
+    if settings.position == 1u {
+        uv = fract(input.uv * settings.target_size / settings.source_size);
+    } else if settings.position != 2u {
+        var displayed = settings.source_size;
+        if settings.position == 3u {
                 let scale = min(
-                    hue_time.target_size.x / hue_time.source_size.x,
-                    hue_time.target_size.y / hue_time.source_size.y,
+                    settings.target_size.x / settings.source_size.x,
+                    settings.target_size.y / settings.source_size.y,
                 );
                 displayed *= scale;
-            } else if hue_time.position == 4u || hue_time.position == 5u {
+            } else if settings.position == 4u || settings.position == 5u {
                 let scale = max(
-                    hue_time.target_size.x / hue_time.source_size.x,
-                    hue_time.target_size.y / hue_time.source_size.y,
+                    settings.target_size.x / settings.source_size.x,
+                    settings.target_size.y / settings.source_size.y,
                 );
                 displayed *= scale;
             }
-            let pixel = input.uv * hue_time.target_size;
-            uv = (pixel - (hue_time.target_size - displayed) * 0.5) / displayed;
+            let pixel = input.uv * settings.target_size;
+            uv = (pixel - (settings.target_size - displayed) * 0.5) / displayed;
             inside = all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0));
-        }
-        if !inside {
-            return hue_time.background;
-        }
-        return textureSample(wallpaper, wallpaper_sampler, uv);
     }
-    let phase = hue_time.seconds * 1.4 + input.uv.x * 3.0 + input.uv.y * 1.7;
-    let color = 0.52 + 0.48 * cos(phase + vec3<f32>(0.0, 2.094, 4.189));
-    let triangle_tint = select(0.82, 1.0, input.uv.x + input.uv.y > 1.0);
-    return vec4<f32>(color * triangle_tint, 1.0);
+    if !inside {
+        return settings.background;
+    }
+    return textureSample(wallpaper, wallpaper_sampler, uv);
 }
 "#
                     .into(),
@@ -247,18 +225,22 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             &upload_image,
             config.width,
             config.height,
-            animated,
             has_image,
         );
-        let time_buffer = graphics
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Nickel desktop hue time"),
-                contents: bytemuck::bytes_of(&uniform),
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            });
-        let (texture, bind_group) =
-            upload_wallpaper(&graphics, &bind_group_layout, &upload_image, &time_buffer);
+        let uniform_buffer =
+            graphics
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Nickel desktop wallpaper settings"),
+                    contents: bytemuck::bytes_of(&uniform),
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                });
+        let (texture, bind_group) = upload_wallpaper(
+            &graphics,
+            &bind_group_layout,
+            &upload_image,
+            &uniform_buffer,
+        );
         Ok(Self {
             surface,
             graphics,
@@ -266,15 +248,9 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             _texture: texture,
             bind_group,
             pipeline,
-            time_buffer,
-            started: Instant::now(),
-            animated,
+            uniform_buffer,
             uniform,
         })
-    }
-
-    pub fn is_animated(&self) -> bool {
-        self.animated
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -288,16 +264,21 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     pub fn render(&mut self) {
-        self.uniform.seconds = self.started.elapsed().as_secs_f32();
-        self.graphics
-            .queue
-            .write_buffer(&self.time_buffer, 0, bytemuck::bytes_of(&self.uniform));
+        self.graphics.queue.write_buffer(
+            &self.uniform_buffer,
+            0,
+            bytemuck::bytes_of(&self.uniform),
+        );
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 self.surface.configure(&self.graphics.device, &self.config);
-                return;
+                match self.surface.get_current_texture() {
+                    wgpu::CurrentSurfaceTexture::Success(frame)
+                    | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
+                    _ => return,
+                }
             }
             _ => return,
         };
@@ -333,7 +314,7 @@ fn upload_wallpaper(
     graphics: &SharedGraphics,
     layout: &wgpu::BindGroupLayout,
     image: &RgbaImage,
-    time_buffer: &wgpu::Buffer,
+    uniform_buffer: &wgpu::Buffer,
 ) -> (wgpu::Texture, wgpu::BindGroup) {
     let size = wgpu::Extent3d {
         width: image.width(),
@@ -388,7 +369,7 @@ fn upload_wallpaper(
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: time_buffer.as_entire_binding(),
+                    resource: uniform_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -400,7 +381,6 @@ fn wallpaper_uniform(
     image: &RgbaImage,
     width: u32,
     height: u32,
-    animated: bool,
     has_image: bool,
 ) -> WallpaperUniform {
     let position = match wallpaper.position {
@@ -412,10 +392,9 @@ fn wallpaper_uniform(
         WallpaperPosition::Fill => 5,
     };
     WallpaperUniform {
-        seconds: 0.0,
-        animated: u32::from(animated),
         position,
         has_image: u32::from(has_image),
+        _padding: [0; 2],
         source_size: [image.width().max(1) as f32, image.height().max(1) as f32],
         target_size: [width.max(1) as f32, height.max(1) as f32],
         background: [
@@ -439,27 +418,10 @@ mod tests {
             color: [0, 0, 255],
             position: WallpaperPosition::Fit,
         };
-        let uniform = wallpaper_uniform(
-            &wallpaper,
-            wallpaper.image.as_ref().unwrap(),
-            4,
-            4,
-            false,
-            true,
-        );
+        let uniform = wallpaper_uniform(&wallpaper, wallpaper.image.as_ref().unwrap(), 4, 4, true);
         assert_eq!(uniform.position, 3);
         assert_eq!(uniform.source_size, [4.0, 2.0]);
         assert_eq!(uniform.target_size, [4.0, 4.0]);
         assert_eq!(uniform.background, [0.0, 0.0, 1.0, 1.0]);
-    }
-
-    #[test]
-    fn animated_wallpaper_uses_tiny_texture_metadata() {
-        let wallpaper = Wallpaper::default();
-        let image = RgbaImage::from_pixel(1, 1, Rgba([255, 255, 255, 255]));
-        let uniform = wallpaper_uniform(&wallpaper, &image, 1920, 1080, true, false);
-        assert_eq!(uniform.source_size, [1.0, 1.0]);
-        assert_eq!(uniform.animated, 1);
-        assert_eq!(uniform.has_image, 0);
     }
 }

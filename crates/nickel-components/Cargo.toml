@@ -8,8 +8,10 @@ rust-version.workspace = true
 [dependencies]
 bytemuck.workspace = true
 glyphon.workspace = true
+gilrs.workspace = true
 image.workspace = true
 pollster.workspace = true
 unicode-segmentation.workspace = true
 wgpu.workspace = true
 winit.workspace = true
+tracing.workspace = true

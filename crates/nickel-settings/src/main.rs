@@ -9,8 +9,10 @@ use std::{
 use std::collections::HashMap;
 
 use nickel_components::{
-    Button as UiButton, Column, ComponentGpu, Container, Insets, LinearGradient, PaintCommand,
-    Point as UiPoint, RadioButton, Rect as UiRect, Row, Slider, Text, TextAlign, UiTree,
+    Button as UiButton, Column, ComponentGpu, Container, ContentPane, ControllerAction,
+    ControllerInput, Insets, LinearGradient, NavigationPane, PaintCommand, PaneNavigation,
+    Point as UiPoint, RadioButton, Rect as UiRect, Row, ShoulderHints, Sidebar, Slider, Text,
+    TextAlign, UiTree,
 };
 use nickel_core::{
     shell_settings::{ShellSettings, ThemePreference},
@@ -211,6 +213,26 @@ enum SettingsPage {
     Network,
 }
 
+impl SettingsPage {
+    fn previous(self) -> Self {
+        match self {
+            Self::Display => Self::Display,
+            Self::Bar => Self::Display,
+            Self::Appearance => Self::Bar,
+            Self::Network => Self::Appearance,
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            Self::Display => Self::Bar,
+            Self::Bar => Self::Appearance,
+            Self::Appearance => Self::Network,
+            Self::Network => Self::Network,
+        }
+    }
+}
+
 struct NetworkAdapter {
     name: String,
     description: String,
@@ -249,6 +271,9 @@ struct SettingsApp {
     next_wifi_refresh: Option<Instant>,
     wifi_refreshes_left: u8,
     ui: UiTree,
+    controller: ControllerInput,
+    navigation: PaneNavigation,
+    controller_page: SettingsPage,
 }
 
 impl Default for SettingsApp {
@@ -308,6 +333,9 @@ impl Default for SettingsApp {
             next_wifi_refresh: None,
             wifi_refreshes_left: 0,
             ui: UiTree::default(),
+            controller: ControllerInput::new(),
+            navigation: PaneNavigation::default(),
+            controller_page: SettingsPage::Display,
         }
     }
 }
@@ -433,6 +461,32 @@ impl SettingsApp {
             )
     }
 
+    fn handle_controller_action(&mut self, action: ControllerAction) {
+        if self.navigation.handle(action) {
+            self.controller_page = self.page;
+            self.request_redraw();
+            return;
+        }
+        if self.navigation.pane() == NavigationPane::Sidebar {
+            self.controller_page = match action {
+                ControllerAction::Up => self.controller_page.previous(),
+                ControllerAction::Down => self.controller_page.next(),
+                ControllerAction::Confirm => {
+                    self.page = self.controller_page;
+                    self.controller_page
+                }
+                ControllerAction::Cancel => {
+                    if let Some(window) = &self.window {
+                        window.set_visible(false);
+                    }
+                    self.controller_page
+                }
+                _ => self.controller_page,
+            };
+            self.request_redraw();
+        }
+    }
+
     fn build_ui(&self, width: f32, height: f32) -> UiTree {
         let palette = self.palette();
         let (title, subtitle) = match self.page {
@@ -478,36 +532,40 @@ impl SettingsApp {
                     .background(palette.panel),
             )
             .child(header_content);
+        let selected_page = if self.navigation.pane() == NavigationPane::Sidebar {
+            self.controller_page
+        } else {
+            self.page
+        };
         let display_button = self.navigation_item(
             "nav:display",
             "settings-nav-display",
             "▣",
-            self.page == SettingsPage::Display,
+            selected_page == SettingsPage::Display,
             palette,
         );
         let bar_button = self.navigation_item(
             "nav:bar",
             "settings-nav-bar",
             "▤",
-            self.page == SettingsPage::Bar,
+            selected_page == SettingsPage::Bar,
             palette,
         );
         let appearance_button = self.navigation_item(
             "nav:appearance",
             "settings-nav-appearance",
             "◐",
-            self.page == SettingsPage::Appearance,
+            selected_page == SettingsPage::Appearance,
             palette,
         );
         let network_button = self.navigation_item(
             "nav:network",
             "settings-nav-network",
             "⌁",
-            self.page == SettingsPage::Network,
+            selected_page == SettingsPage::Network,
             palette,
         );
-        let sidebar = Column::new()
-            .width(SIDEBAR_WIDTH as f32)
+        let mut sidebar = Sidebar::new(SIDEBAR_WIDTH as f32)
             .background(LinearGradient::vertical(palette.panel, palette.background))
             .padding(Insets {
                 top: 20.0,
@@ -520,6 +578,19 @@ impl SettingsApp {
             .child(bar_button)
             .child(appearance_button)
             .child(network_button);
+        if self.controller.connected() {
+            sidebar = sidebar.child(
+                Container::new()
+                    .grow(1.0)
+                    .padding(Insets {
+                        top: 12.0,
+                        right: 0.0,
+                        bottom: 0.0,
+                        left: 8.0,
+                    })
+                    .child(ShoulderHints::new(palette.text, palette.muted)),
+            );
+        }
 
         let content = match self.page {
             SettingsPage::Display => self.display_components(),
@@ -531,7 +602,12 @@ impl SettingsApp {
             .height(height)
             .background(palette.background)
             .child(header)
-            .child(Row::new().grow(1.0).child(sidebar).child(content));
+            .child(
+                Row::new()
+                    .grow(1.0)
+                    .child(sidebar)
+                    .child(ContentPane::new(content)),
+            );
         UiTree::layout(root, UiRect::new(0.0, 0.0, width, height))
     }
 
@@ -2162,11 +2238,16 @@ impl ApplicationHandler for SettingsApp {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let now = Instant::now();
+        let actions = self.controller.poll(now);
+        for action in actions {
+            self.handle_controller_action(action);
+        }
         let Some(refresh_at) = self.next_wifi_refresh else {
-            event_loop.set_control_flow(ControlFlow::Wait);
+            event_loop.set_control_flow(ControlFlow::WaitUntil(now + Duration::from_millis(16)));
             return;
         };
-        if Instant::now() < refresh_at {
+        if now < refresh_at {
             event_loop.set_control_flow(ControlFlow::WaitUntil(refresh_at));
             return;
         }

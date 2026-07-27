@@ -1,5 +1,16 @@
 use crate::model::{TrayItem, WindowId};
 
+pub fn surface_size(window: &winit::window::Window) -> winit::dpi::PhysicalSize<u32> {
+    #[cfg(target_os = "windows")]
+    {
+        return windows::surface_size(window);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        window.inner_size()
+    }
+}
+
 pub struct DesktopCapture {
     pub image: image::RgbaImage,
 }

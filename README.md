@@ -21,7 +21,7 @@ The component names follow the project all the way down:
 
 ### Desktop and Nickel Bar
 
-- Draws the desktop wallpaper, including an optional animated wallpaper
+- Draws the desktop wallpaper
 - Shows running applications with native icons
 - Groups and cycles multiple windows from the same application
 - Tracks the active window

@@ -13,6 +13,9 @@ const ICON_SIZE: f32 = 44.0;
 const SCROLLBAR_RIGHT_INSET: f32 = 18.0;
 const SCROLLBAR_WIDTH: f32 = 6.0;
 const MIN_THUMB_HEIGHT: f32 = 32.0;
+const SIDEBAR_TOP: f32 = 70.0;
+const SIDEBAR_ITEM_HEIGHT: f32 = 42.0;
+const SIDEBAR_ITEM_COUNT: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rect {
@@ -157,7 +160,7 @@ pub fn hit_test_result(x: f64, y: f64, available_width: u32, count: usize) -> Op
 
 #[cfg(test)]
 mod tests {
-    use super::{ResultRow, hit_test_result};
+    use super::{ResultRow, hit_test_result, hit_test_sidebar};
 
     #[test]
     fn row_allocates_centered_icon_and_flexible_label_column() {
@@ -178,6 +181,15 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_hit_testing_has_no_recent_history_slot() {
+        assert_eq!(hit_test_sidebar(24.0, 90.0), Some(0));
+        assert_eq!(hit_test_sidebar(24.0, 132.0), Some(1));
+        assert_eq!(hit_test_sidebar(24.0, 174.0), Some(2));
+        assert_eq!(hit_test_sidebar(24.0, 216.0), Some(3));
+        assert_eq!(hit_test_sidebar(24.0, 258.0), None);
+    }
+
+    #[test]
     fn scrollbar_thumb_tracks_visible_fraction_and_offset() {
         let top = super::scrollbar(960, 640, 100, 24, 0).expect("overflow scrollbar");
         let bottom = super::scrollbar(960, 640, 100, 24, 78).expect("overflow scrollbar");
@@ -193,5 +205,22 @@ mod tests {
     fn scrolling_keeps_the_first_visible_item_on_a_row_boundary() {
         assert_eq!(super::max_scroll_offset(26, 24), 6);
         assert_eq!(super::max_scroll_offset(24, 24), 0);
+    }
+}
+
+pub fn hit_test_sidebar(x: f64, y: f64) -> Option<usize> {
+    if x < 8.0 || x >= f64::from(SIDEBAR_WIDTH - 8.0) || y < f64::from(SIDEBAR_TOP) {
+        return None;
+    }
+    let index = ((y as f32 - SIDEBAR_TOP) / SIDEBAR_ITEM_HEIGHT).floor() as usize;
+    (index < SIDEBAR_ITEM_COUNT).then_some(index)
+}
+
+pub fn sidebar_item_bounds(index: usize) -> Rect {
+    Rect {
+        x: 8.0,
+        y: SIDEBAR_TOP + index as f32 * SIDEBAR_ITEM_HEIGHT,
+        width: SIDEBAR_WIDTH - 16.0,
+        height: SIDEBAR_ITEM_HEIGHT,
     }
 }
