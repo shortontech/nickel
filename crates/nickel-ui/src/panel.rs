@@ -113,7 +113,7 @@ impl PanelGpu {
                 96,
             )
             .ok_or("failed to render Nickel start icon")?,
-            theme.text,
+            0xffffff,
         );
 
         Ok(Self {
@@ -188,7 +188,7 @@ impl PanelGpu {
                 96,
             )
             .expect("embedded Nickel start icon remains valid"),
-            self.theme.text,
+            0xffffff,
         );
     }
 

@@ -2276,10 +2276,15 @@ impl ApplicationHandler for SettingsApp {
             self.load_windows_network();
             self.load_windows_wifi();
         }
-        let attributes = WindowAttributes::default()
+        let mut attributes = WindowAttributes::default()
             .with_title("Nickel Settings")
             .with_inner_size(LogicalSize::new(850.0, 580.0))
             .with_min_inner_size(LogicalSize::new(850.0, 580.0));
+        #[cfg(target_os = "linux")]
+        {
+            use winit::platform::wayland::WindowAttributesExtWayland;
+            attributes = attributes.with_name("nickel-settings", "nickel-settings");
+        }
         let window = Arc::new(
             event_loop
                 .create_window(attributes)

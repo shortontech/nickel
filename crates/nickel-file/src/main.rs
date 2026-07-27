@@ -758,18 +758,22 @@ impl ApplicationHandler for FileApp {
         if self.window.is_some() {
             return;
         }
+        let mut attributes = WindowAttributes::default()
+            .with_title(format!(
+                "Nickel File — {}",
+                self.browser.current().display()
+            ))
+            .with_window_icon(nickel_file_icon())
+            .with_inner_size(LogicalSize::new(860.0, 620.0))
+            .with_min_inner_size(LogicalSize::new(560.0, 360.0));
+        #[cfg(target_os = "linux")]
+        {
+            use winit::platform::wayland::WindowAttributesExtWayland;
+            attributes = attributes.with_name("nickel-file", "nickel-file");
+        }
         let window = Arc::new(
             event_loop
-                .create_window(
-                    WindowAttributes::default()
-                        .with_title(format!(
-                            "Nickel File — {}",
-                            self.browser.current().display()
-                        ))
-                        .with_window_icon(nickel_file_icon())
-                        .with_inner_size(LogicalSize::new(860.0, 620.0))
-                        .with_min_inner_size(LogicalSize::new(560.0, 360.0)),
-                )
+                .create_window(attributes)
                 .expect("create Nickel File window"),
         );
         #[cfg(target_os = "windows")]
