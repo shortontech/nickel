@@ -61,7 +61,7 @@ pub struct PanelGpu {
 impl PanelGpu {
     pub fn new(window: Arc<Window>, graphics: Arc<SharedGraphics>) -> Result<Self, String> {
         let surface = graphics.create_surface(window.clone())?;
-        let size = window.inner_size();
+        let size = crate::platform::surface_size(&window);
         let mut config = surface
             .get_default_config(&graphics.adapter, size.width.max(1), size.height.max(1))
             .ok_or_else(|| "panel surface has no supported configuration".to_owned())?;

@@ -100,7 +100,10 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         surface_size: (u32, u32),
         hovered_row: Option<usize>,
         selected_row: Option<usize>,
+        selected_sidebar: usize,
         scrollbar: Option<layout::Scrollbar>,
+        controller_connected: bool,
+        navigation_pane: nickel_components::NavigationPane,
         palette: ThemePalette,
     ) {
         let mut vertices = Vec::with_capacity(MAX_VERTICES);
@@ -128,6 +131,30 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             ],
             color_rgba(palette.surface),
         );
+        if controller_connected {
+            for (index, left) in [14.0, 60.0].into_iter().enumerate() {
+                let selected = matches!(
+                    (index, navigation_pane),
+                    (0, nickel_components::NavigationPane::Sidebar)
+                        | (1, nickel_components::NavigationPane::Content)
+                );
+                add_rectangle(
+                    &mut vertices,
+                    surface_size,
+                    [
+                        left,
+                        surface_size.1 as f32 - 52.0,
+                        left + 36.0,
+                        surface_size.1 as f32 - 22.0,
+                    ],
+                    color_rgba(if selected {
+                        palette.accent_soft
+                    } else {
+                        palette.surface
+                    }),
+                );
+            }
+        }
         add_rectangle(
             &mut vertices,
             surface_size,
@@ -139,10 +166,16 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             ],
             color_rgba(palette.accent),
         );
+        let selected_sidebar = layout::sidebar_item_bounds(selected_sidebar);
         add_rectangle(
             &mut vertices,
             surface_size,
-            [8.0, 112.0, layout::SIDEBAR_WIDTH - 8.0, 154.0],
+            [
+                selected_sidebar.x,
+                selected_sidebar.y,
+                selected_sidebar.right(),
+                selected_sidebar.bottom(),
+            ],
             color_rgba(palette.accent_soft),
         );
         add_rectangle(

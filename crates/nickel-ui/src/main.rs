@@ -26,7 +26,9 @@ use glyphon::{
     RasterizeCustomGlyphRequest, RasterizedCustomGlyph, Resolution, Shaping, SwashCache, TextArea,
     TextAtlas, TextBounds, TextRenderer, Viewport, cosmic_text::Align,
 };
-use nickel_components::{TextEditor, TextField};
+use nickel_components::{
+    ControllerAction, ControllerInput, NavigationPane, PaneNavigation, TextEditor, TextField,
+};
 use nickel_core::hotkeys::{Hotkey, KeyEdge};
 use nickel_core::launcher::LauncherVisibility;
 use nickel_core::run::RunPrompt;
@@ -43,7 +45,6 @@ use winit::window::{CursorIcon, Window, WindowAttributes, WindowId, WindowLevel}
 
 mod context_menu;
 mod control_center;
-mod controller;
 mod desktop;
 mod graphics;
 mod icons;
@@ -51,6 +52,7 @@ mod launcher;
 mod layout;
 mod model;
 mod panel;
+mod places;
 mod platform;
 mod rectangles;
 mod run_dialog;
@@ -58,7 +60,7 @@ mod screenshot;
 mod storage;
 mod volume_osd;
 
-use launcher::Launcher;
+use launcher::{Launcher, LauncherView};
 use model::{OpenWindow, TrayItem, WindowGroup, WindowId as ShellWindowId};
 use platform::{GlobalShortcut, ShellCommand, TrayFeed, TraySource, WindowAction, WindowFeed};
 
@@ -137,7 +139,9 @@ struct Nickel {
     scroll_offset: usize,
     cursor_position: Option<PhysicalPosition<f64>>,
     scrollbar_drag_offset: Option<f64>,
-    launcher_controller: controller::LauncherController,
+    launcher_controller: ControllerInput,
+    launcher_navigation: PaneNavigation,
+    launcher_sidebar_selection: usize,
 }
 
 impl Default for Nickel {
@@ -150,6 +154,7 @@ impl Default for Nickel {
         } else {
             Launcher::new(applications)
         };
+        launcher.set_places(places::applications());
         let mut run_prompt = RunPrompt::default();
         let pin_store = match storage::PinStore::open_default() {
             Ok(store) => {
@@ -233,7 +238,9 @@ impl Default for Nickel {
             scroll_offset: 0,
             cursor_position: None,
             scrollbar_drag_offset: None,
-            launcher_controller: controller::LauncherController::new(),
+            launcher_controller: ControllerInput::new(),
+            launcher_navigation: PaneNavigation::default(),
+            launcher_sidebar_selection: 1,
         }
     }
 }
@@ -873,11 +880,16 @@ impl Nickel {
 
         let primary = event_loop.primary_monitor();
         self.panel_primary.clear();
-        for ((desktop_window, _), monitor) in self.desktop_surfaces.iter().zip(&monitors) {
+        for ((desktop_window, _), monitor) in self.desktop_surfaces.iter_mut().zip(&monitors) {
             desktop_window.set_outer_position(monitor.position());
             let _ = desktop_window.request_inner_size(monitor.size());
+            desktop_window.request_redraw();
             #[cfg(target_os = "windows")]
-            if !platform::configure_desktop_window(desktop_window) {
+            if !platform::configure_desktop_window(
+                desktop_window,
+                monitor.position(),
+                monitor.size(),
+            ) {
                 eprintln!("failed to reposition a Nickel desktop surface");
             }
         }
@@ -922,26 +934,81 @@ impl Nickel {
         }
     }
 
-    fn handle_launcher_controller_action(&mut self, action: controller::LauncherControllerAction) {
+    fn set_launcher_view(&mut self, view: LauncherView) {
+        self.launcher_sidebar_selection = match view {
+            LauncherView::Favorites => 0,
+            LauncherView::Applications => 1,
+            LauncherView::Places => 2,
+        };
+        self.launcher_editor.clear();
+        self.launcher.set_query("");
+        self.launcher.set_view(view);
+        self.scroll_offset = 0;
+        self.hovered_result = None;
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    fn launch_settings(&mut self) {
+        let executable = env::current_exe().ok().and_then(|path| {
+            path.parent()
+                .map(|parent| parent.join("nickel-settings.exe"))
+        });
+        match executable.and_then(|path| std::process::Command::new(path).spawn().ok()) {
+            Some(_) => self.set_launcher_visible(false),
+            None => tracing::warn!("failed to launch Nickel Plating"),
+        }
+    }
+
+    fn handle_launcher_controller_action(&mut self, action: ControllerAction) {
         if !self.launcher_visibility.is_visible() {
             return;
         }
-        use controller::LauncherControllerAction;
-        match action {
-            LauncherControllerAction::Up => self.launcher.select_grid_up(layout::GRID_COLUMNS),
-            LauncherControllerAction::Down => self.launcher.select_grid_down(layout::GRID_COLUMNS),
-            LauncherControllerAction::Left => self.launcher.select_grid_left(layout::GRID_COLUMNS),
-            LauncherControllerAction::Right => {
-                self.launcher.select_grid_right(layout::GRID_COLUMNS)
+        if self.launcher_navigation.handle(action) {
+            if let Some(window) = &self.window {
+                window.request_redraw();
             }
-            LauncherControllerAction::Confirm => {
+            return;
+        }
+        if self.launcher_navigation.pane() == NavigationPane::Sidebar {
+            match action {
+                ControllerAction::Up => {
+                    self.launcher_sidebar_selection =
+                        self.launcher_sidebar_selection.saturating_sub(1);
+                }
+                ControllerAction::Down => {
+                    self.launcher_sidebar_selection = (self.launcher_sidebar_selection + 1).min(3);
+                }
+                ControllerAction::Confirm => match self.launcher_sidebar_selection {
+                    0 => self.set_launcher_view(LauncherView::Favorites),
+                    1 => self.set_launcher_view(LauncherView::Applications),
+                    2 => self.set_launcher_view(LauncherView::Places),
+                    3 => self.launch_settings(),
+                    _ => {}
+                },
+                ControllerAction::Cancel => self.set_launcher_visible(false),
+                _ => {}
+            }
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+            return;
+        }
+        match action {
+            ControllerAction::Up => self.launcher.select_grid_up(layout::GRID_COLUMNS),
+            ControllerAction::Down => self.launcher.select_grid_down(layout::GRID_COLUMNS),
+            ControllerAction::Left => self.launcher.select_grid_left(layout::GRID_COLUMNS),
+            ControllerAction::Right => self.launcher.select_grid_right(layout::GRID_COLUMNS),
+            ControllerAction::Confirm => {
                 self.launch_result(self.launcher.selected_index());
                 return;
             }
-            LauncherControllerAction::Cancel => {
+            ControllerAction::Cancel => {
                 self.set_launcher_visible(false);
                 return;
             }
+            ControllerAction::PreviousPane | ControllerAction::NextPane => unreachable!(),
         }
         self.ensure_selection_visible();
         if let Some(window) = &self.window {
@@ -1051,7 +1118,7 @@ impl Gpu {
             ),
             Some(40.0),
         );
-        let chrome_buffers = (0..8)
+        let chrome_buffers = (0..9)
             .map(|_| Buffer::new(&mut font_system, Metrics::new(17.0, 30.0)))
             .collect();
         let result_buffers = (0..12)
@@ -1132,6 +1199,9 @@ impl Gpu {
         editor: &TextEditor,
         hovered_result: Option<usize>,
         scroll_offset: usize,
+        sidebar_selection: usize,
+        navigation_pane: NavigationPane,
+        controller_connected: bool,
     ) {
         while let Ok((id, image)) = self.icon_results.try_recv() {
             if let Some(slot) = self.icon_images.get_mut(id as usize) {
@@ -1150,12 +1220,13 @@ impl Gpu {
         let chrome = [
             "FAVORITES",
             "ALL APPLICATIONS",
-            "RECENT",
             "PLACES",
             "SETTINGS",
             "NICKEL FILE",
             "NICKEL PLATING",
             "POWER",
+            "LB",
+            "RB",
         ];
         for (buffer, label) in self.chrome_buffers.iter_mut().zip(chrome) {
             buffer.set_size(Some(188.0), Some(34.0));
@@ -1271,7 +1342,10 @@ impl Gpu {
             (self.config.width, self.config.height),
             hovered_row.filter(|index| *index < visible_count),
             selected_row,
+            sidebar_selection,
             scrollbar,
+            controller_connected,
+            navigation_pane,
             self.palette,
         );
         let icon_images = &self.icon_images;
@@ -1295,7 +1369,6 @@ impl Gpu {
             (18.0, 120.0),
             (18.0, 162.0),
             (18.0, 204.0),
-            (18.0, 246.0),
             (layout::CONTENT_LEFT, self.config.height as f32 - 48.0),
             (
                 layout::CONTENT_LEFT + 174.0,
@@ -1305,10 +1378,15 @@ impl Gpu {
                 self.config.width as f32 - 112.0,
                 self.config.height as f32 - 48.0,
             ),
+            (20.0, self.config.height as f32 - 47.0),
+            (66.0, self.config.height as f32 - 47.0),
         ];
         for (index, (buffer, (left, top))) in
             self.chrome_buffers.iter().zip(chrome_positions).enumerate()
         {
+            if index >= 7 && !controller_connected {
+                continue;
+            }
             text_areas.push(TextArea {
                 buffer,
                 left,
@@ -1317,18 +1395,23 @@ impl Gpu {
                 bounds: TextBounds {
                     left: left as i32,
                     top: top as i32,
-                    right: if index < 5 {
+                    right: if index < 4 {
                         layout::SIDEBAR_WIDTH as i32
                     } else {
                         self.config.width as i32
                     },
                     bottom: (top + 34.0) as i32,
                 },
-                default_color: glyphon_color(if index == 1 {
-                    self.palette.text
-                } else {
-                    self.palette.muted
-                }),
+                default_color: glyphon_color(
+                    if (index < 4 && index == sidebar_selection)
+                        || (index == 7 && navigation_pane == NavigationPane::Sidebar)
+                        || (index == 8 && navigation_pane == NavigationPane::Content)
+                    {
+                        self.palette.text
+                    } else {
+                        self.palette.muted
+                    },
+                ),
                 custom_glyphs: &[],
             });
         }
@@ -1568,7 +1651,11 @@ impl ApplicationHandler for Nickel {
                 {
                     use winit::platform::windows::WindowExtWindows;
                     window.set_skip_taskbar(true);
-                    if !platform::configure_desktop_window(&window) {
+                    if !platform::configure_desktop_window(
+                        &window,
+                        monitor.position(),
+                        monitor.size(),
+                    ) {
                         eprintln!(
                             "failed to place Nickel desktop at the bottom of the Windows Z-order"
                         );
@@ -1897,9 +1984,13 @@ impl ApplicationHandler for Nickel {
             match event {
                 WindowEvent::Resized(size) => {
                     gpu.resize(size.width, size.height);
+                    window.request_redraw();
                 }
                 WindowEvent::RedrawRequested => {
                     gpu.render();
+                }
+                WindowEvent::Focused(_) | WindowEvent::Occluded(false) => {
+                    window.request_redraw();
                 }
                 WindowEvent::CloseRequested => {}
                 _ => {}
@@ -2432,6 +2523,9 @@ impl ApplicationHandler for Nickel {
                         &self.launcher_editor,
                         self.hovered_result,
                         self.scroll_offset,
+                        self.launcher_sidebar_selection,
+                        self.launcher_navigation.pane(),
+                        self.launcher_controller.connected(),
                     );
                 }
             }
@@ -2506,6 +2600,17 @@ impl ApplicationHandler for Nickel {
                 button: MouseButton::Left,
                 ..
             } => {
+                if let Some(position) = self.cursor_position
+                    && let Some(index) = layout::hit_test_sidebar(position.x, position.y)
+                {
+                    match index {
+                        0 => self.set_launcher_view(LauncherView::Favorites),
+                        1 => self.set_launcher_view(LauncherView::Applications),
+                        2 => self.set_launcher_view(LauncherView::Places),
+                        _ => {}
+                    }
+                    return;
+                }
                 let (width, height, capacity) = self.viewport_metrics();
                 let searching = !self.launcher_editor.text().is_empty()
                     || !self.launcher_editor.preedit().is_empty();
@@ -2675,11 +2780,6 @@ impl ApplicationHandler for Nickel {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
-        for (window, gpu) in &self.desktop_surfaces {
-            if gpu.is_animated() {
-                window.request_redraw();
-            }
-        }
         while let Ok(shortcut) = self.launcher_hotkey_rx.try_recv() {
             match shortcut {
                 GlobalShortcut::ShowLauncher => self.set_launcher_visible(true),
@@ -2857,6 +2957,16 @@ fn localized_launch_error(localizer: &Localizer, error: platform::LaunchError) -
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::UI::HiDpi::{
+            DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
+        };
+        // SAFETY: This process-wide setting is made before creating the event loop or any windows.
+        // Windows may reject it when an application manifest has already selected the same mode.
+        let _ =
+            unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+    }
     let _log_path = nickel_logging::init("nickel-ui").ok();
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Wait);

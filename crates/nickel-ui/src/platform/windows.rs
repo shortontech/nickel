@@ -25,9 +25,10 @@ use windows::{
         },
         Graphics::Gdi::{
             BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleBitmap,
-            CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC,
-            GetMonitorInfoW, HGDIOBJ, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
-            ReleaseDC, SRCCOPY, SelectObject,
+            CreateCompatibleDC, CreateDIBSection, DEVMODEW, DIB_RGB_COLORS, DeleteDC, DeleteObject,
+            ENUM_CURRENT_SETTINGS, EnumDisplaySettingsW, GetDC, GetMonitorInfoW, HGDIOBJ,
+            MONITOR_DEFAULTTONEAREST, MONITORINFO, MONITORINFOEXW, MonitorFromWindow, ReleaseDC,
+            SRCCOPY, SelectObject,
         },
         Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES,
         System::LibraryLoader::GetModuleHandleW,
@@ -47,6 +48,7 @@ use windows::{
             Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock},
         },
         UI::{
+            HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext},
             Input::KeyboardAndMouse::{
                 GetAsyncKeyState, GetCapture, MOD_NOREPEAT, MOD_WIN, RegisterHotKey,
                 ReleaseCapture, SetCapture, SetFocus,
@@ -63,24 +65,24 @@ use windows::{
                 BringWindowToTop, CallNextHookEx, CallWindowProcW, CreateWindowExW, DI_NORMAL,
                 DefWindowProcW, DestroyIcon, DrawIconEx, EnumWindows, GA_ROOT, GA_ROOTOWNER,
                 GCLP_HICON, GCLP_HICONSM, GWL_EXSTYLE, GWLP_WNDPROC, GetAncestor, GetClassLongPtrW,
-                GetClassNameW, GetCursorPos, GetForegroundWindow, GetLastActivePopup, GetMessageW,
-                GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW,
-                GetWindowTextW, GetWindowThreadProcessId, HICON, HTBOTTOM, HTBOTTOMLEFT,
-                HTBOTTOMRIGHT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_BOTTOM,
-                HWND_BROADCAST, HWND_TOPMOST, IsIconic, IsWindow, IsWindowVisible, IsZoomed,
-                KBDLLHOOKSTRUCT, KillTimer, LWA_ALPHA, MSG, MSLLHOOKSTRUCT, PostMessageW,
-                RegisterClassW, RegisterShellHookWindow, RegisterWindowMessageW, SM_CXSMICON,
-                SM_CYSMICON, SPI_GETWORKAREA, SPI_SETWORKAREA, SPIF_SENDCHANGE, SW_HIDE,
-                SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, SW_SHOWNORMAL,
-                SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-                SWP_NOZORDER, SendNotifyMessageW, SetForegroundWindow, SetLayeredWindowAttributes,
-                SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowsHookExW, ShowWindow,
-                SystemParametersInfoW, WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_EX_STYLE, WINDOW_STYLE,
-                WM_CLOSE, WM_CONTEXTMENU, WM_COPYDATA, WM_HOTKEY, WM_KEYDOWN, WM_KEYUP,
-                WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP,
-                WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN,
-                WS_CLIPSIBLINGS, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-                WS_EX_TOOLWINDOW, WindowFromPoint,
+                GetClassNameW, GetClientRect, GetCursorPos, GetForegroundWindow,
+                GetLastActivePopup, GetMessageW, GetSystemMetrics, GetWindowLongPtrW,
+                GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
+                HICON, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT,
+                HTTOPRIGHT, HWND_BOTTOM, HWND_BROADCAST, HWND_TOPMOST, IsIconic, IsWindow,
+                IsWindowVisible, IsZoomed, KBDLLHOOKSTRUCT, KillTimer, LWA_ALPHA, MSG,
+                MSLLHOOKSTRUCT, PostMessageW, RegisterClassW, RegisterShellHookWindow,
+                RegisterWindowMessageW, SM_CXSMICON, SM_CYSMICON, SPI_GETWORKAREA, SPI_SETWORKAREA,
+                SPIF_SENDCHANGE, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW,
+                SW_SHOWNOACTIVATE, SW_SHOWNORMAL, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED,
+                SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendNotifyMessageW,
+                SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW,
+                SetWindowPos, SetWindowsHookExW, ShowWindow, SystemParametersInfoW, WH_KEYBOARD_LL,
+                WH_MOUSE_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_CONTEXTMENU, WM_COPYDATA,
+                WM_HOTKEY, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+                WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSW,
+                WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_APPWINDOW, WS_EX_LAYERED,
+                WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WindowFromPoint,
             },
         },
     },
@@ -1568,7 +1570,11 @@ fn launch_uri(uri: &str) -> windows::core::Result<bool> {
     result
 }
 
-pub fn configure_desktop_window(window: &winit::window::Window) -> bool {
+pub fn configure_desktop_window(
+    window: &winit::window::Window,
+    physical_position: winit::dpi::PhysicalPosition<i32>,
+    physical_size: winit::dpi::PhysicalSize<u32>,
+) -> bool {
     let Ok(handle) = window.window_handle() else {
         return false;
     };
@@ -1580,32 +1586,71 @@ pub fn configure_desktop_window(window: &winit::window::Window) -> bool {
     // for that window, and SetWindowPos applies that rectangle while keeping the desktop at the
     // bottom of the Z-order. This also corrects stale winit geometry after a display-mode change.
     unsafe {
-        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
-        SetWindowLongPtrW(
-            hwnd,
-            GWL_EXSTYLE,
-            (style | WS_EX_NOACTIVATE.0 | WS_EX_TOOLWINDOW.0) as isize,
-        );
-        let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-        let mut monitor_info = MONITORINFO {
-            cbSize: size_of::<MONITORINFO>() as u32,
-            ..Default::default()
-        };
-        if !GetMonitorInfoW(monitor, &raw mut monitor_info).as_bool() {
-            return false;
+        let previous_dpi_context =
+            SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        let result = (|| {
+            let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+            SetWindowLongPtrW(
+                hwnd,
+                GWL_EXSTYLE,
+                (style | WS_EX_NOACTIVATE.0 | WS_EX_TOOLWINDOW.0) as isize,
+            );
+            let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            let mut monitor_info = MONITORINFOEXW {
+                monitorInfo: MONITORINFO {
+                    cbSize: size_of::<MONITORINFOEXW>() as u32,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut mode = DEVMODEW {
+                dmSize: size_of::<DEVMODEW>() as u16,
+                ..Default::default()
+            };
+            let mode_size = GetMonitorInfoW(monitor, &raw mut monitor_info.monitorInfo)
+                .as_bool()
+                .then(|| {
+                    EnumDisplaySettingsW(
+                        windows::core::PCWSTR(monitor_info.szDevice.as_ptr()),
+                        ENUM_CURRENT_SETTINGS,
+                        &mut mode,
+                    )
+                    .as_bool()
+                    .then_some((mode.dmPelsWidth, mode.dmPelsHeight))
+                })
+                .flatten();
+            let (width, height) = mode_size.unwrap_or((physical_size.width, physical_size.height));
+            SetWindowPos(
+                hwnd,
+                Some(HWND_BOTTOM),
+                physical_position.x,
+                physical_position.y,
+                width as i32,
+                height as i32,
+                SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            )
+            .is_ok()
+        })();
+        if !previous_dpi_context.is_invalid() {
+            let _ = SetThreadDpiAwarenessContext(previous_dpi_context);
         }
-        let bounds = monitor_info.rcMonitor;
-        SetWindowPos(
-            hwnd,
-            Some(HWND_BOTTOM),
-            bounds.left,
-            bounds.top,
-            bounds.right - bounds.left,
-            bounds.bottom - bounds.top,
-            SWP_NOACTIVATE | SWP_FRAMECHANGED,
-        )
-        .is_ok()
+        result
     }
+}
+
+pub fn surface_size(window: &winit::window::Window) -> winit::dpi::PhysicalSize<u32> {
+    let Some(hwnd) = window_hwnd(window) else {
+        return window.inner_size();
+    };
+    let mut bounds = RECT::default();
+    // SAFETY: hwnd is the live window supplied by winit and bounds is writable storage.
+    if unsafe { GetClientRect(hwnd, &raw mut bounds) }.is_err() {
+        return window.inner_size();
+    }
+    winit::dpi::PhysicalSize::new(
+        (bounds.right - bounds.left).max(1) as u32,
+        (bounds.bottom - bounds.top).max(1) as u32,
+    )
 }
 
 pub fn configure_launcher_window(window: &winit::window::Window) -> bool {

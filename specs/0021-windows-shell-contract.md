@@ -37,7 +37,7 @@ An item is not complete merely because it works while Explorer is also running.
 
 | Responsibility | Status | Windows contract or evidence | Required verification |
 | --- | --- | --- | --- |
-| Own the desktop surface and current wallpaper | Implemented | `IDesktopWallpaper`, DWM surface | Static and animated wallpaper; Fill, Fit, Stretch, Center, Tile, and Span |
+| Own the desktop surface and current wallpaper | Implemented | `IDesktopWallpaper`, DWM surface | Fill, Fit, Stretch, Center, Tile, and Span |
 | Keep the desktop behind application windows | Implemented | Native window ownership and z-order | Focus, minimize, show desktop, fullscreen exit, and shell restart |
 | Reserve panel space for maximized windows | Implemented | AppBar messages and work area | Maximize native, borderless, terminal, and browser windows |
 | Detect borderless fullscreen applications | Implemented | Window/frame bounds versus monitor bounds | Games and media windows hide the panel and restore it after focus leaves |

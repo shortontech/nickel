@@ -1872,9 +1872,11 @@ name = "nickel-components"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "gilrs",
  "glyphon",
  "image",
  "pollster",
+ "tracing",
  "unicode-segmentation",
  "wgpu",
  "winit",
@@ -1969,7 +1971,6 @@ dependencies = [
  "bytemuck",
  "freedesktop-desktop-entry",
  "freedesktop-icons",
- "gilrs",
  "glyphon",
  "image",
  "jiff",
