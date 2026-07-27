@@ -1961,6 +1961,7 @@ version = "0.1.0"
 dependencies = [
  "bitflags 2.13.1",
  "nickel-core",
+ "resvg",
  "smithay",
  "thiserror 2.0.19",
  "tracing",
