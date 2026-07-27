@@ -1552,6 +1552,7 @@ impl ApplicationHandler for Nickel {
             .with_visible(false)
             .with_decorations(false)
             .with_window_level(WindowLevel::AlwaysOnTop);
+        #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
         let mut panel_attributes = WindowAttributes::default()
             .with_title("Nickel Panel")
             .with_inner_size(LogicalSize::new(960.0, PANEL_HEIGHT))

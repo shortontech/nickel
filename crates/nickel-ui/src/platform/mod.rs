@@ -109,11 +109,13 @@ pub enum ShellCommand {
 mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::{
-    TrayFeed, WindowFeed, application_icon, applications, audio_status, capture_pointer,
-    configure_volume_osd_window, execute_run_command, handle_focused_shortcut, launch_application,
+    TrayFeed, WindowFeed, application_icon, applications, audio_status, capture_active_window,
+    capture_active_window_to_file, capture_desktop, capture_pointer, copy_image_to_clipboard,
+    copy_temp_image_path, execute_run_command, handle_focused_shortcut, launch_application,
     launcher_has_foreground_focus, launcher_hotkey_receiver, launcher_visibility_applied,
-    network_status, release_pointer, select_audio_device, send_shell_command, set_audio_volume,
-    show_window_system_menu, update_panel_fullscreen_state, wallpaper,
+    network_status, paste_text_if_requested, release_pointer, select_audio_device,
+    send_shell_command, set_audio_volume, show_window_system_menu, update_panel_fullscreen_state,
+    wallpaper,
 };
 
 #[cfg(target_os = "windows")]
