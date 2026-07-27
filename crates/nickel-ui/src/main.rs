@@ -1672,34 +1672,29 @@ impl ApplicationHandler for Nickel {
         }
 
         let mut desktop_windows = Vec::new();
-        if cfg!(target_os = "windows") {
-            for monitor in &monitors {
-                let attributes = desktop_attributes
-                    .clone()
-                    .with_inner_size(monitor.size())
-                    .with_position(monitor.position());
-                let Ok(window) = event_loop.create_window(attributes) else {
-                    eprintln!("failed to create Nickel desktop window");
-                    event_loop.exit();
-                    return;
-                };
-                let window = Arc::new(window);
-                #[cfg(target_os = "windows")]
+        for monitor in &monitors {
+            let attributes = desktop_attributes
+                .clone()
+                .with_inner_size(monitor.size())
+                .with_position(monitor.position());
+            let Ok(window) = event_loop.create_window(attributes) else {
+                eprintln!("failed to create Nickel desktop window");
+                event_loop.exit();
+                return;
+            };
+            let window = Arc::new(window);
+            #[cfg(target_os = "windows")]
+            {
+                use winit::platform::windows::WindowExtWindows;
+                window.set_skip_taskbar(true);
+                if !platform::configure_desktop_window(&window, monitor.position(), monitor.size())
                 {
-                    use winit::platform::windows::WindowExtWindows;
-                    window.set_skip_taskbar(true);
-                    if !platform::configure_desktop_window(
-                        &window,
-                        monitor.position(),
-                        monitor.size(),
-                    ) {
-                        eprintln!(
-                            "failed to place Nickel desktop at the bottom of the Windows Z-order"
-                        );
-                    }
+                    eprintln!(
+                        "failed to place Nickel desktop at the bottom of the Windows Z-order"
+                    );
                 }
-                desktop_windows.push(window);
             }
+            desktop_windows.push(window);
         }
         let Ok(launcher_window) = event_loop.create_window(launcher_attributes) else {
             eprintln!("failed to create Nickel launcher window");

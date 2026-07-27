@@ -115,6 +115,7 @@ pub struct NickelSession {
     pub surface_windows: HashMap<ObjectId, WindowId>,
     pub launcher_window: Option<Window>,
     pub launcher_visibility: LauncherVisibility,
+    pub desktop_windows: Vec<Window>,
     pub panel_windows: Vec<Window>,
     pub context_menu_window: Option<Window>,
     pub primary_output_name: Option<String>,
@@ -201,6 +202,7 @@ impl NickelSession {
             surface_windows: HashMap::new(),
             launcher_window: None,
             launcher_visibility: LauncherVisibility::default(),
+            desktop_windows: Vec::new(),
             panel_windows: Vec::new(),
             context_menu_window: None,
             primary_output_name: None,
@@ -547,6 +549,14 @@ impl NickelSession {
         self.relayout_shell_surfaces();
     }
 
+    pub fn register_desktop(&mut self, window: Window) {
+        window.override_z_index(0);
+        if !self.desktop_windows.contains(&window) {
+            self.desktop_windows.push(window);
+        }
+        self.relayout_shell_surfaces();
+    }
+
     pub fn is_panel_window(&self, window: &Window) -> bool {
         self.panel_windows.contains(window)
     }
@@ -554,6 +564,7 @@ impl NickelSession {
     pub fn shell_windows(&self) -> impl Iterator<Item = &Window> {
         self.launcher_window
             .iter()
+            .chain(self.desktop_windows.iter())
             .chain(self.panel_windows.iter())
             .chain(self.context_menu_window.iter())
     }
@@ -758,6 +769,20 @@ impl NickelSession {
         // same stable order here so differently sized outputs receive their
         // own panel rather than whichever surface happened to commit last.
         outputs.sort_by_key(|output| output.name());
+        for (desktop, output) in self.desktop_windows.clone().into_iter().zip(&outputs) {
+            let Some(geometry) = self.space.output_geometry(output) else {
+                continue;
+            };
+            let geometry = Geometry {
+                x: geometry.loc.x,
+                y: geometry.loc.y,
+                width: geometry.size.w,
+                height: geometry.size.h,
+            };
+            Self::configure_window(&desktop, geometry);
+            self.space
+                .map_element(desktop, (geometry.x, geometry.y), false);
+        }
         for (panel, output) in self.panel_windows.clone().into_iter().zip(outputs) {
             let Some(output) = self.space.output_geometry(&output) else {
                 continue;
