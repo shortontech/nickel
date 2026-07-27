@@ -8,6 +8,7 @@ mod input;
 mod login_services;
 mod shell_layout;
 mod state;
+mod window_frame;
 mod window_registry;
 #[cfg(feature = "backend-winit")]
 mod winit;
