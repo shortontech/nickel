@@ -17,6 +17,7 @@ use smithay::{
 use crate::{
     grabs::{MoveSurfaceGrab, ResizeEdge, ResizeSurfaceGrab},
     state::NickelSession,
+    window_frame::{self, FramePart},
 };
 
 impl NickelSession {
@@ -154,8 +155,8 @@ impl NickelSession {
 
                 const DOUBLE_CLICK_MS: u32 = 500;
                 const DOUBLE_CLICK_DISTANCE: f64 = 6.0;
-                const TITLEBAR_HEIGHT: f64 = 40.0;
                 let mut suppress_pointer_event = false;
+                let mut frame_handled = false;
                 let mouse_button = event.button();
                 let super_pressed = keyboard.modifier_state().logo;
 
@@ -164,43 +165,160 @@ impl NickelSession {
                     && !super_pressed
                 {
                     let location = pointer.current_location();
-                    let titlebar_window = self
+                    let frame_target = self
                         .space
-                        .element_under(location)
-                        .map(|(window, _)| window.clone())
+                        .elements()
                         .filter(|window| {
-                            !self.is_panel_window(window)
-                                && self.launcher_window.as_ref() != Some(window)
+                            !self.shell_windows().any(|shell| shell == *window)
+                                && !self.is_fullscreen_window(window)
+                                && self.is_server_decorated(window)
                         })
-                        .filter(|window| {
-                            self.space.element_bbox(window).is_some_and(|bbox| {
-                                location.y >= f64::from(bbox.loc.y)
-                                    && location.y < f64::from(bbox.loc.y) + TITLEBAR_HEIGHT
-                            })
-                        });
+                        .filter_map(|window| {
+                            let bounds = self.space.element_bbox(window)?;
+                            let geometry = crate::shell_layout::Geometry {
+                                x: bounds.loc.x,
+                                y: bounds.loc.y,
+                                width: bounds.size.w,
+                                height: bounds.size.h,
+                            };
+                            window_frame::hit_test(
+                                geometry,
+                                location.x.round() as i32,
+                                location.y.round() as i32,
+                            )
+                            .map(|part| (window.clone(), part))
+                        })
+                        .next_back();
 
-                    if let Some(window) = titlebar_window {
+                    if let Some((window, part)) = frame_target {
                         let surface = window.toplevel().unwrap().clone();
                         let id = surface.wl_surface().id();
-                        let is_double_click = self.last_titlebar_click.as_ref().is_some_and(
-                            |(previous_id, previous_time, previous_location)| {
-                                previous_id == &id
-                                    && event.time_msec().wrapping_sub(*previous_time)
-                                        <= DOUBLE_CLICK_MS
-                                    && (location.x - previous_location.x).abs()
-                                        <= DOUBLE_CLICK_DISTANCE
-                                    && (location.y - previous_location.y).abs()
-                                        <= DOUBLE_CLICK_DISTANCE
-                            },
-                        );
-
-                        if is_double_click {
-                            self.last_titlebar_click = None;
-                            self.suppress_left_button_release = true;
-                            suppress_pointer_event = true;
-                            self.toggle_maximized_toplevel(&surface);
-                        } else {
-                            self.last_titlebar_click = Some((id, event.time_msec(), location));
+                        let registry_id = self.surface_windows.get(&id).copied();
+                        frame_handled = true;
+                        suppress_pointer_event = true;
+                        self.space.raise_element(&window, true);
+                        if let Some(id) = registry_id {
+                            self.windows.raise(id);
+                        }
+                        keyboard.set_focus(self, Some(surface.wl_surface().clone()), serial);
+                        self.space.elements().for_each(|window| {
+                            window.toplevel().unwrap().send_pending_configure();
+                        });
+                        match part {
+                            FramePart::Close => {
+                                self.suppress_left_button_release = true;
+                                if let Some(id) = registry_id {
+                                    self.close_window(id);
+                                }
+                            }
+                            FramePart::Minimize => {
+                                self.suppress_left_button_release = true;
+                                if let Some(id) = registry_id {
+                                    self.minimize_window(id);
+                                }
+                            }
+                            FramePart::Maximize => {
+                                self.suppress_left_button_release = true;
+                                self.toggle_maximized_toplevel(&surface);
+                            }
+                            FramePart::Titlebar => {
+                                let is_double_click =
+                                    self.last_titlebar_click.as_ref().is_some_and(
+                                        |(previous_id, previous_time, previous_location)| {
+                                            previous_id == &id
+                                                && event.time_msec().wrapping_sub(*previous_time)
+                                                    <= DOUBLE_CLICK_MS
+                                                && (location.x - previous_location.x).abs()
+                                                    <= DOUBLE_CLICK_DISTANCE
+                                                && (location.y - previous_location.y).abs()
+                                                    <= DOUBLE_CLICK_DISTANCE
+                                        },
+                                    );
+                                if is_double_click {
+                                    self.last_titlebar_click = None;
+                                    self.suppress_left_button_release = true;
+                                    self.toggle_maximized_toplevel(&surface);
+                                } else {
+                                    self.last_titlebar_click =
+                                        Some((id, event.time_msec(), location));
+                                    let initial_window_location =
+                                        self.space.element_location(&window).unwrap_or_default();
+                                    let start_data = GrabStartData {
+                                        focus: None,
+                                        button,
+                                        location,
+                                    };
+                                    pointer.set_grab(
+                                        self,
+                                        MoveSurfaceGrab {
+                                            start_data,
+                                            window,
+                                            initial_window_location,
+                                        },
+                                        serial,
+                                        Focus::Clear,
+                                    );
+                                    pointer.button(
+                                        self,
+                                        &ButtonEvent {
+                                            button,
+                                            state: button_state,
+                                            serial,
+                                            time: event.time_msec(),
+                                        },
+                                    );
+                                }
+                            }
+                            edge => {
+                                let edges = match edge {
+                                    FramePart::ResizeNorth => ResizeEdge::TOP,
+                                    FramePart::ResizeNorthEast => {
+                                        ResizeEdge::TOP | ResizeEdge::RIGHT
+                                    }
+                                    FramePart::ResizeEast => ResizeEdge::RIGHT,
+                                    FramePart::ResizeSouthEast => {
+                                        ResizeEdge::BOTTOM | ResizeEdge::RIGHT
+                                    }
+                                    FramePart::ResizeSouth => ResizeEdge::BOTTOM,
+                                    FramePart::ResizeSouthWest => {
+                                        ResizeEdge::BOTTOM | ResizeEdge::LEFT
+                                    }
+                                    FramePart::ResizeWest => ResizeEdge::LEFT,
+                                    FramePart::ResizeNorthWest => {
+                                        ResizeEdge::TOP | ResizeEdge::LEFT
+                                    }
+                                    _ => unreachable!(),
+                                };
+                                let initial_window_location =
+                                    self.space.element_location(&window).unwrap_or_default();
+                                let initial_rect =
+                                    Rectangle::new(initial_window_location, window.geometry().size);
+                                let start_data = GrabStartData {
+                                    focus: None,
+                                    button,
+                                    location,
+                                };
+                                pointer.set_grab(
+                                    self,
+                                    ResizeSurfaceGrab::start(
+                                        start_data,
+                                        window,
+                                        edges,
+                                        initial_rect,
+                                    ),
+                                    serial,
+                                    Focus::Clear,
+                                );
+                                pointer.button(
+                                    self,
+                                    &ButtonEvent {
+                                        button,
+                                        state: button_state,
+                                        serial,
+                                        time: event.time_msec(),
+                                    },
+                                );
+                            }
                         }
                     } else {
                         self.last_titlebar_click = None;
@@ -213,7 +331,7 @@ impl NickelSession {
                     suppress_pointer_event = true;
                 }
 
-                if ButtonState::Pressed == button_state && !pointer.is_grabbed() {
+                if ButtonState::Pressed == button_state && !pointer.is_grabbed() && !frame_handled {
                     if let Some((window, _loc)) = self
                         .space
                         .element_under(pointer.current_location())

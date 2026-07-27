@@ -1,6 +1,8 @@
-#![allow(dead_code)]
-
 use crate::shell_layout::Geometry;
+use smithay::{
+    backend::{allocator::Fourcc, renderer::element::memory::MemoryRenderBuffer},
+    utils::Transform,
+};
 
 pub const TITLEBAR_HEIGHT: i32 = 40;
 pub const RESIZE_BORDER: i32 = 5;
@@ -9,6 +11,54 @@ pub const MINIMIZE_GLYPH: char = '\u{f2d1}';
 pub const MAXIMIZE_GLYPH: char = '\u{f2d0}';
 pub const RESTORE_GLYPH: char = '\u{f2d2}';
 pub const CLOSE_GLYPH: char = '\u{f2d3}';
+
+#[derive(Clone)]
+pub struct FrameIcons {
+    pub minimize: MemoryRenderBuffer,
+    pub maximize: MemoryRenderBuffer,
+    pub restore: MemoryRenderBuffer,
+    pub close: MemoryRenderBuffer,
+}
+
+impl FrameIcons {
+    pub fn load() -> Option<Self> {
+        Some(Self {
+            minimize: render_glyph(MINIMIZE_GLYPH)?,
+            maximize: render_glyph(MAXIMIZE_GLYPH)?,
+            restore: render_glyph(RESTORE_GLYPH)?,
+            close: render_glyph(CLOSE_GLYPH)?,
+        })
+    }
+}
+
+fn render_glyph(glyph: char) -> Option<MemoryRenderBuffer> {
+    const SIZE: u32 = 24;
+    let mut options = resvg::usvg::Options::default();
+    options
+        .fontdb_mut()
+        .load_font_file("/usr/share/fonts/opentype/font-awesome/FontAwesome.otf")
+        .ok()?;
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{SIZE}" height="{SIZE}">
+<text x="12" y="18" text-anchor="middle" font-family="FontAwesome" font-size="16" fill="white">{glyph}</text>
+</svg>"#
+    );
+    let tree = resvg::usvg::Tree::from_data(svg.as_bytes(), &options).ok()?;
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(SIZE, SIZE)?;
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::identity(),
+        &mut pixmap.as_mut(),
+    );
+    Some(MemoryRenderBuffer::from_slice(
+        pixmap.data(),
+        Fourcc::Abgr8888,
+        (SIZE as i32, SIZE as i32),
+        1,
+        Transform::Normal,
+        None,
+    ))
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FramePart {

@@ -23,7 +23,7 @@ use smithay::{
         compositor::{CompositorClientState, CompositorState},
         output::OutputManagerState,
         selection::data_device::DataDeviceState,
-        shell::xdg::{ToplevelSurface, XdgShellState},
+        shell::xdg::{ToplevelSurface, XdgShellState, decoration::XdgDecorationState},
         shm::ShmState,
         socket::ListeningSocketSource,
     },
@@ -104,6 +104,7 @@ pub struct NickelSession {
     // Smithay State
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
+    pub decoration_state: XdgDecorationState,
     pub shm_state: ShmState,
     pub output_manager_state: OutputManagerState,
     pub seat_state: SeatState<NickelSession>,
@@ -118,6 +119,7 @@ pub struct NickelSession {
     pub desktop_windows: Vec<Window>,
     pub panel_windows: Vec<Window>,
     pub context_menu_window: Option<Window>,
+    pub server_decorated: HashSet<ObjectId>,
     pub primary_output_name: Option<String>,
     pub preview_frames: HashMap<WindowId, PreviewFrame>,
     pub preview_requests: HashSet<WindowId>,
@@ -150,6 +152,7 @@ impl NickelSession {
 
         let compositor_state = CompositorState::new::<Self>(&dh);
         let xdg_shell_state = XdgShellState::new::<Self>(&dh);
+        let decoration_state = XdgDecorationState::new::<Self>(&dh);
         let shm_state = ShmState::new::<Self>(&dh, vec![]);
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&dh);
         let mut seat_state = SeatState::new();
@@ -192,6 +195,7 @@ impl NickelSession {
 
             compositor_state,
             xdg_shell_state,
+            decoration_state,
             shm_state,
             output_manager_state,
             seat_state,
@@ -205,6 +209,7 @@ impl NickelSession {
             desktop_windows: Vec::new(),
             panel_windows: Vec::new(),
             context_menu_window: None,
+            server_decorated: HashSet::new(),
             primary_output_name: None,
             preview_frames: HashMap::new(),
             preview_requests: HashSet::new(),
@@ -561,6 +566,26 @@ impl NickelSession {
         self.panel_windows.contains(window)
     }
 
+    pub fn is_fullscreen_window(&self, window: &Window) -> bool {
+        window.toplevel().is_some_and(|surface| {
+            self.fullscreen_restore
+                .contains_key(&surface.wl_surface().id())
+        })
+    }
+
+    pub fn is_maximized_window(&self, window: &Window) -> bool {
+        window.toplevel().is_some_and(|surface| {
+            self.maximized_restore
+                .contains_key(&surface.wl_surface().id())
+        })
+    }
+
+    pub fn is_server_decorated(&self, window: &Window) -> bool {
+        window
+            .toplevel()
+            .is_some_and(|surface| self.server_decorated.contains(&surface.wl_surface().id()))
+    }
+
     pub fn shell_windows(&self) -> impl Iterator<Item = &Window> {
         self.launcher_window
             .iter()
@@ -830,7 +855,12 @@ impl NickelSession {
                 height: size.h.max(1),
             });
 
-        let geometry = self.work_area_for_output(output);
+        let work_area = self.work_area_for_output(output);
+        let geometry = if self.server_decorated.contains(&surface.wl_surface().id()) {
+            decorated_content_geometry(work_area)
+        } else {
+            work_area
+        };
         surface.with_pending_state(|state| {
             state
                 .states
@@ -940,7 +970,12 @@ impl NickelSession {
             let Some(output) = self.output_geometry_for_window(&window) else {
                 continue;
             };
-            let geometry = self.work_area_for_output(output);
+            let work_area = self.work_area_for_output(output);
+            let geometry = if self.server_decorated.contains(&surface.wl_surface().id()) {
+                decorated_content_geometry(work_area)
+            } else {
+                work_area
+            };
             Self::configure_window(&window, geometry);
             self.space
                 .map_element(window, (geometry.x, geometry.y), true);
@@ -1091,6 +1126,18 @@ impl NickelSession {
                     .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
                     .map(|(s, p)| (s, (p + location).to_f64()))
             })
+    }
+}
+
+fn decorated_content_geometry(frame: Geometry) -> Geometry {
+    Geometry {
+        x: frame.x + crate::window_frame::RESIZE_BORDER,
+        y: frame.y + crate::window_frame::TITLEBAR_HEIGHT + crate::window_frame::RESIZE_BORDER,
+        width: (frame.width - crate::window_frame::RESIZE_BORDER * 2).max(1),
+        height: (frame.height
+            - crate::window_frame::TITLEBAR_HEIGHT
+            - crate::window_frame::RESIZE_BORDER * 2)
+            .max(1),
     }
 }
 

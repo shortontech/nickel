@@ -147,6 +147,7 @@ pub struct UdevData {
     devices: HashMap<DrmNode, DeviceData>,
     layout: OutputLayout,
     cursor: CursorBuffer,
+    frame_icons: Option<crate::window_frame::FrameIcons>,
     identify_badges: Vec<MemoryRenderBuffer>,
 }
 
@@ -188,6 +189,7 @@ pub fn init_udev(
         devices: HashMap::new(),
         layout: OutputLayout::default(),
         cursor: themed_arrow_cursor(),
+        frame_icons: crate::window_frame::FrameIcons::load(),
         identify_badges: (1..=9).map(identify_badge).collect(),
     });
     let (buffer_commit_tx, buffer_commit_rx) = channel::channel();
@@ -746,6 +748,7 @@ impl CalloopData {
             };
             let output = surface.output.clone();
             let cursor = native.cursor.clone();
+            let frame_icons = native.frame_icons.clone();
             let background = surface.background.clone();
             let identify_badge = identify_index
                 .and_then(|index| native.identify_badges.get(index))
@@ -825,6 +828,141 @@ impl CalloopData {
                     return;
                 }
             };
+            let shell_surfaces = self
+                .state
+                .shell_windows()
+                .filter_map(|window| window.toplevel().map(|surface| surface.wl_surface().id()))
+                .collect::<Vec<_>>();
+            let frame_rectangles = self
+                .state
+                .space
+                .elements()
+                .filter_map(|window| {
+                    let surface = window.toplevel()?.wl_surface();
+                    if shell_surfaces.contains(&surface.id())
+                        || self.state.is_fullscreen_window(window)
+                        || !self.state.is_server_decorated(window)
+                    {
+                        return None;
+                    }
+                    let bounds = self.state.space.element_bbox(window)?;
+                    let active = self
+                        .state
+                        .surface_windows
+                        .get(&surface.id())
+                        .is_some_and(|id| self.state.windows.is_active(*id));
+                    Some((bounds, active, self.state.is_maximized_window(window)))
+                })
+                .collect::<Vec<_>>();
+            if let Some(output_geometry) = self.state.space.output_geometry(&output) {
+                for (bounds, active, maximized) in frame_rectangles {
+                    let color = if active {
+                        [0.12, 0.16, 0.24, 1.0]
+                    } else {
+                        [0.08, 0.09, 0.12, 1.0]
+                    };
+                    let border = if active {
+                        [0.36, 0.58, 0.92, 1.0]
+                    } else {
+                        [0.25, 0.27, 0.31, 1.0]
+                    };
+                    let rectangles = [
+                        (
+                            (bounds.size.w, crate::window_frame::TITLEBAR_HEIGHT),
+                            (
+                                bounds.loc.x - output_geometry.loc.x,
+                                bounds.loc.y
+                                    - output_geometry.loc.y
+                                    - crate::window_frame::TITLEBAR_HEIGHT,
+                            ),
+                            color,
+                        ),
+                        (
+                            (bounds.size.w + 4, 2),
+                            (
+                                bounds.loc.x - output_geometry.loc.x - 2,
+                                bounds.loc.y
+                                    - output_geometry.loc.y
+                                    - crate::window_frame::TITLEBAR_HEIGHT
+                                    - 2,
+                            ),
+                            border,
+                        ),
+                        (
+                            (2, bounds.size.h + crate::window_frame::TITLEBAR_HEIGHT + 4),
+                            (
+                                bounds.loc.x - output_geometry.loc.x - 2,
+                                bounds.loc.y
+                                    - output_geometry.loc.y
+                                    - crate::window_frame::TITLEBAR_HEIGHT
+                                    - 2,
+                            ),
+                            border,
+                        ),
+                        (
+                            (2, bounds.size.h + crate::window_frame::TITLEBAR_HEIGHT + 4),
+                            (
+                                bounds.loc.x - output_geometry.loc.x + bounds.size.w,
+                                bounds.loc.y
+                                    - output_geometry.loc.y
+                                    - crate::window_frame::TITLEBAR_HEIGHT
+                                    - 2,
+                            ),
+                            border,
+                        ),
+                        (
+                            (bounds.size.w + 4, 2),
+                            (
+                                bounds.loc.x - output_geometry.loc.x - 2,
+                                bounds.loc.y - output_geometry.loc.y + bounds.size.h,
+                            ),
+                            border,
+                        ),
+                    ];
+                    for (size, location, color) in rectangles {
+                        let buffer = SolidColorBuffer::new(size, color);
+                        let element = SolidColorRenderElement::from_buffer(
+                            &buffer,
+                            location,
+                            1.0,
+                            1.0,
+                            Kind::Unspecified,
+                        );
+                        elements.insert(0, NativeCustomElement::from(element).into());
+                    }
+                    if let Some(icons) = &frame_icons {
+                        let icon_y = bounds.loc.y
+                            - output_geometry.loc.y
+                            - crate::window_frame::TITLEBAR_HEIGHT
+                            + 8;
+                        let icon_x = bounds.loc.x - output_geometry.loc.x + bounds.size.w;
+                        for (buffer, offset) in [
+                            (&icons.close, 35),
+                            (
+                                if maximized {
+                                    &icons.restore
+                                } else {
+                                    &icons.maximize
+                                },
+                                81,
+                            ),
+                            (&icons.minimize, 127),
+                        ] {
+                            if let Ok(icon) = MemoryRenderBufferRenderElement::from_buffer(
+                                &mut renderer,
+                                ((icon_x - offset) as f64, icon_y as f64),
+                                buffer,
+                                None,
+                                None,
+                                None,
+                                Kind::Unspecified,
+                            ) {
+                                elements.insert(0, NativeCustomElement::from(icon).into());
+                            }
+                        }
+                    }
+                }
+            }
             elements.push(
                 NativeCustomElement::from(SolidColorRenderElement::from_buffer(
                     &background,

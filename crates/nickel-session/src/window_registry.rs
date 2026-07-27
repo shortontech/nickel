@@ -76,6 +76,10 @@ impl WindowRegistry {
             .collect()
     }
 
+    pub fn is_active(&self, id: WindowId) -> bool {
+        self.windows.get(&id).is_some_and(|window| window.active)
+    }
+
     #[cfg(test)]
     fn test_snapshot(&self) -> Vec<&WindowInfo> {
         self.snapshot()
