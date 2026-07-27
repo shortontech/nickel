@@ -88,6 +88,19 @@ fn configured_wallpaper(settings: &WallpaperSettings) -> desktop::Wallpaper {
     wallpaper
 }
 
+fn nickel_task_icon(name: &str) -> Option<image::RgbaImage> {
+    let bytes: &[u8] = if name.starts_with("Nickel Settings") {
+        include_bytes!("../../../assets/icons/nickel-settings.png")
+    } else if name.starts_with("Nickel File") {
+        include_bytes!("../../../assets/icons/nickel-file.png")
+    } else {
+        return None;
+    };
+    image::load_from_memory(bytes)
+        .ok()
+        .map(image::DynamicImage::into_rgba8)
+}
+
 #[derive(Clone, Copy)]
 enum ContextAction {
     Activate(ShellWindowId),
@@ -772,6 +785,7 @@ impl Nickel {
                 .and_then(|id| self.launcher.application(id))
                 .and_then(|application| application.icon_path())
                 .and_then(icons::load)
+                .or_else(|| nickel_task_icon(&group.application_name))
                 .or_else(|| {
                     group
                         .windows
