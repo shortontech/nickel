@@ -93,6 +93,8 @@ fn import_runtime_environment() {
             "--systemd",
             "DISPLAY",
             "WAYLAND_DISPLAY",
+            "KDE_FULL_SESSION",
+            "KDE_SESSION_VERSION",
             "XDG_CURRENT_DESKTOP",
             "XDG_SESSION_DESKTOP",
             "XDG_SESSION_TYPE",

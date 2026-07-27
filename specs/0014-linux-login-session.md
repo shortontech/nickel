@@ -7,7 +7,7 @@ Make Nickel selectable from a display manager and establish the user-session env
 ## Behavior
 
 - Provide a Wayland session desktop entry and a Rust session launcher with development and installed-path support.
-- Set `XDG_SESSION_TYPE=wayland`, `XDG_CURRENT_DESKTOP=Nickel`, `XDG_SESSION_DESKTOP=Nickel`, and the compositor-selected `WAYLAND_DISPLAY`.
+- Set `XDG_SESSION_TYPE=wayland`, `XDG_CURRENT_DESKTOP=Nickel:KDE`, `XDG_SESSION_DESKTOP=Nickel`, `KDE_FULL_SESSION=true`, `KDE_SESSION_VERSION=6`, and the compositor-selected `WAYLAND_DISPLAY`. The KDE compatibility identity keeps applications on the established KDE Wallet backend while Nickel remains the primary desktop identity.
 - Import the environment into the D-Bus and systemd user sessions before starting desktop services or applications.
 - Start `nickel-session`, then its supervised `nickel-ui` child, with structured logs and actionable fatal errors.
 - Integrate existing user-session D-Bus, PipeWire/WirePlumber, keyring, policy agent, and portal services without reimplementing them in Nickel.
