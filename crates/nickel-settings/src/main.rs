@@ -17,6 +17,7 @@ use nickel_components::{
 use nickel_core::{
     shell_settings::{ShellSettings, ThemePreference},
     theme::{ThemeMode, ThemePalette},
+    wallpaper_settings::{WallpaperPosition, WallpaperSettings},
 };
 use nickel_i18n::Localizer;
 use winit::{
@@ -260,6 +261,7 @@ struct SettingsApp {
     status: String,
     page: SettingsPage,
     shell_settings: ShellSettings,
+    wallpaper_settings: WallpaperSettings,
     desktop_slider_dragging: bool,
     appearance_slider_dragging: bool,
     intensity_slider_dragging: bool,
@@ -322,6 +324,7 @@ impl Default for SettingsApp {
             status,
             page: SettingsPage::Display,
             shell_settings: ShellSettings::load_default(),
+            wallpaper_settings: WallpaperSettings::load_default(),
             desktop_slider_dragging: false,
             appearance_slider_dragging: false,
             intensity_slider_dragging: false,
@@ -1032,6 +1035,67 @@ impl SettingsApp {
                     ),
             )
             .child(
+                Text::new(self.localizer.text("settings-wallpaper-image"))
+                    .color(palette.text)
+                    .height(20.0),
+            )
+            .child(
+                Row::new()
+                    .height(38.0)
+                    .gap(12.0)
+                    .child(
+                        UiButton::new(
+                            "wallpaper:choose",
+                            self.localizer.text("settings-wallpaper-choose"),
+                        )
+                        .width(150.0)
+                        .color(palette.text)
+                        .background(palette.surface_hover),
+                    )
+                    .child(
+                        Text::new(
+                            self.wallpaper_settings
+                                .image
+                                .as_deref()
+                                .and_then(|path| path.file_name())
+                                .map(|name| name.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| self.localizer.text("settings-wallpaper-none")),
+                        )
+                        .color(palette.muted)
+                        .width(370.0),
+                    ),
+            )
+            .child(
+                Row::new().height(34.0).gap(10.0).children(
+                    [
+                        ("fill", "settings-wallpaper-fill", WallpaperPosition::Fill),
+                        ("fit", "settings-wallpaper-fit", WallpaperPosition::Fit),
+                        (
+                            "stretch",
+                            "settings-wallpaper-stretch",
+                            WallpaperPosition::Stretch,
+                        ),
+                        (
+                            "center",
+                            "settings-wallpaper-center",
+                            WallpaperPosition::Center,
+                        ),
+                        ("tile", "settings-wallpaper-tile", WallpaperPosition::Tile),
+                        ("span", "settings-wallpaper-span", WallpaperPosition::Span),
+                    ]
+                    .into_iter()
+                    .map(|(action, label, position)| {
+                        RadioButton::new(
+                            format!("wallpaper:{action}"),
+                            self.localizer.text(label),
+                            self.wallpaper_settings.position == position,
+                        )
+                        .colors(palette.accent, palette.text)
+                        .width(82.0)
+                    }),
+                ),
+            )
+            .child(
                 Text::new(self.localizer.text("settings-appearance-starting-hue"))
                     .color(palette.text)
                     .height(20.0),
@@ -1123,6 +1187,23 @@ impl SettingsApp {
                 "appearance:dark" => {
                     self.shell_settings.theme = ThemePreference::Dark;
                     let _ = self.shell_settings.save_default();
+                }
+                "wallpaper:choose" => {
+                    if let Some(path) = choose_wallpaper() {
+                        self.wallpaper_settings.image = Some(path);
+                        let _ = self.wallpaper_settings.save_default();
+                    }
+                }
+                _ if action.starts_with("wallpaper:") => {
+                    self.wallpaper_settings.position = match &action["wallpaper:".len()..] {
+                        "center" => WallpaperPosition::Center,
+                        "tile" => WallpaperPosition::Tile,
+                        "stretch" => WallpaperPosition::Stretch,
+                        "fit" => WallpaperPosition::Fit,
+                        "span" => WallpaperPosition::Span,
+                        _ => WallpaperPosition::Fill,
+                    };
+                    let _ = self.wallpaper_settings.save_default();
                 }
                 "bar:displays:primary" => {
                     self.shell_settings.bar_on_all_displays = false;
@@ -2321,6 +2402,29 @@ fn snap_rect(mut moving: Rect, fixed: Rect, threshold: i32) -> Rect {
         }
     }
     moving
+}
+
+#[cfg(target_os = "linux")]
+fn choose_wallpaper() -> Option<std::path::PathBuf> {
+    let output = std::process::Command::new("kdialog")
+        .args([
+            "--getopenfilename",
+            "",
+            "image/png image/jpeg image/webp image/bmp",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8(output.stdout).ok()?;
+    let path = path.trim();
+    (!path.is_empty()).then(|| path.into())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn choose_wallpaper() -> Option<std::path::PathBuf> {
+    None
 }
 
 fn attach_rect_centered(moving: Rect, fixed: Rect) -> Rect {

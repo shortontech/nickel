@@ -50,6 +50,7 @@ pub struct DesktopGpu {
     graphics: Arc<SharedGraphics>,
     config: wgpu::SurfaceConfiguration,
     _texture: wgpu::Texture,
+    bind_group_layout: wgpu::BindGroupLayout,
     bind_group: wgpu::BindGroup,
     pipeline: wgpu::RenderPipeline,
     uniform_buffer: wgpu::Buffer,
@@ -246,6 +247,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             graphics,
             config,
             _texture: texture,
+            bind_group_layout,
             bind_group,
             pipeline,
             uniform_buffer,
@@ -261,6 +263,29 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         self.config.height = height;
         self.surface.configure(&self.graphics.device, &self.config);
         self.uniform.target_size = [width as f32, height as f32];
+    }
+
+    pub fn set_wallpaper(&mut self, mut wallpaper: Wallpaper) {
+        let has_image = wallpaper.image.is_some();
+        let image = wallpaper
+            .image
+            .take()
+            .unwrap_or_else(|| RgbaImage::from_pixel(1, 1, Rgba([255, 255, 255, 255])));
+        self.uniform = wallpaper_uniform(
+            &wallpaper,
+            &image,
+            self.config.width,
+            self.config.height,
+            has_image,
+        );
+        let (texture, bind_group) = upload_wallpaper(
+            &self.graphics,
+            &self.bind_group_layout,
+            &image,
+            &self.uniform_buffer,
+        );
+        self._texture = texture;
+        self.bind_group = bind_group;
     }
 
     pub fn render(&mut self) {
