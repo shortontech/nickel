@@ -90,6 +90,10 @@ pub fn send_shell_command(_: ShellCommand) -> bool {
 
 pub struct WindowFeed;
 
+pub fn show_window_system_menu(_: WindowId) -> bool {
+    false
+}
+
 impl WindowFeed {
     pub fn new() -> Self {
         Self

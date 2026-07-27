@@ -66,23 +66,25 @@ use windows::{
                 DefWindowProcW, DestroyIcon, DrawIconEx, EnumWindows, GA_ROOT, GA_ROOTOWNER,
                 GCLP_HICON, GCLP_HICONSM, GWL_EXSTYLE, GWLP_WNDPROC, GetAncestor, GetClassLongPtrW,
                 GetClassNameW, GetClientRect, GetCursorPos, GetForegroundWindow,
-                GetLastActivePopup, GetMessageW, GetSystemMetrics, GetWindowLongPtrW,
-                GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
-                HICON, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT,
-                HTTOPRIGHT, HWND_BOTTOM, HWND_BROADCAST, HWND_TOPMOST, IsIconic, IsWindow,
-                IsWindowVisible, IsZoomed, KBDLLHOOKSTRUCT, KillTimer, LWA_ALPHA, MSG,
-                MSLLHOOKSTRUCT, PostMessageW, RegisterClassW, RegisterShellHookWindow,
-                RegisterWindowMessageW, SM_CXSMICON, SM_CYSMICON, SPI_GETWORKAREA, SPI_SETWORKAREA,
-                SPIF_SENDCHANGE, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW,
-                SW_SHOWNOACTIVATE, SW_SHOWNORMAL, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED,
-                SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendNotifyMessageW,
-                SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW,
-                SetWindowPos, SetWindowsHookExW, ShowWindow, SystemParametersInfoW, WH_KEYBOARD_LL,
-                WH_MOUSE_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_CONTEXTMENU, WM_COPYDATA,
-                WM_HOTKEY, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-                WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSW,
-                WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_APPWINDOW, WS_EX_LAYERED,
-                WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WindowFromPoint,
+                GetLastActivePopup, GetMessageW, GetSystemMenu, GetSystemMetrics,
+                GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
+                GetWindowThreadProcessId, HICON, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTLEFT,
+                HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_BOTTOM, HWND_BROADCAST, HWND_TOPMOST,
+                IsIconic, IsWindow, IsWindowVisible, IsZoomed, KBDLLHOOKSTRUCT, KillTimer,
+                LWA_ALPHA, MSG, MSLLHOOKSTRUCT, PostMessageW, RegisterClassW,
+                RegisterShellHookWindow, RegisterWindowMessageW, SM_CXSMICON, SM_CYSMICON,
+                SPI_GETWORKAREA, SPI_SETWORKAREA, SPIF_SENDCHANGE, SW_HIDE, SW_MAXIMIZE,
+                SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, SW_SHOWNORMAL,
+                SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+                SWP_NOZORDER, SendNotifyMessageW, SetForegroundWindow, SetLayeredWindowAttributes,
+                SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowsHookExW, ShowWindow,
+                SystemParametersInfoW, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
+                WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE,
+                WM_CONTEXTMENU, WM_COPYDATA, WM_HOTKEY, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
+                WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSCOMMAND,
+                WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN,
+                WS_CLIPSIBLINGS, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+                WS_EX_TOOLWINDOW, WindowFromPoint,
             },
         },
     },
@@ -1671,6 +1673,52 @@ pub fn configure_context_menu_window(window: &winit::window::Window) -> bool {
     };
     CONTEXT_MENU_WINDOW_HANDLE.store(hwnd.0 as isize, Ordering::Relaxed);
     true
+}
+
+pub fn show_window_system_menu(window: WindowId) -> bool {
+    use std::sync::atomic::Ordering;
+
+    let target = hwnd(window);
+    let owner_raw = CONTEXT_MENU_WINDOW_HANDLE.load(Ordering::Relaxed);
+    let owner = if owner_raw == 0 {
+        target
+    } else {
+        HWND(owner_raw as *mut c_void)
+    };
+    // SAFETY: both handles are revalidated by the operating system. GetSystemMenu returns a menu
+    // owned by the target window; TrackPopupMenu only borrows it for this synchronous call.
+    unsafe {
+        if !IsWindow(Some(target)).as_bool() {
+            return false;
+        }
+        let menu = GetSystemMenu(target, false);
+        if menu.is_invalid() {
+            return false;
+        }
+        let mut cursor = POINT::default();
+        if GetCursorPos(&mut cursor).is_err() {
+            return false;
+        }
+        let selected = TrackPopupMenu(
+            menu,
+            TPM_RETURNCMD | TPM_RIGHTBUTTON,
+            cursor.x,
+            cursor.y,
+            None,
+            owner,
+            None,
+        )
+        .0;
+        if selected != 0 {
+            let _ = PostMessageW(
+                Some(target),
+                WM_SYSCOMMAND,
+                WPARAM(selected as usize),
+                LPARAM(0),
+            );
+        }
+        true
+    }
 }
 
 pub fn configure_volume_osd_window(window: &winit::window::Window) -> bool {
