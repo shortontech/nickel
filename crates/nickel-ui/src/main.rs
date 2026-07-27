@@ -34,6 +34,9 @@ use nickel_core::launcher::LauncherVisibility;
 use nickel_core::run::RunPrompt;
 use nickel_core::shell_settings::ShellSettings;
 use nickel_core::theme::{Appearance, ThemePalette};
+use nickel_core::wallpaper_settings::{
+    WallpaperPosition as SavedWallpaperPosition, WallpaperSettings,
+};
 use nickel_i18n::Localizer;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
@@ -66,6 +69,25 @@ use platform::{GlobalShortcut, ShellCommand, TrayFeed, TraySource, WindowAction,
 
 const PANEL_HEIGHT: f64 = 56.0;
 
+fn configured_wallpaper(settings: &WallpaperSettings) -> desktop::Wallpaper {
+    let mut wallpaper = platform::wallpaper();
+    wallpaper.position = match settings.position {
+        SavedWallpaperPosition::Center => desktop::WallpaperPosition::Center,
+        SavedWallpaperPosition::Tile => desktop::WallpaperPosition::Tile,
+        SavedWallpaperPosition::Stretch => desktop::WallpaperPosition::Stretch,
+        SavedWallpaperPosition::Fit => desktop::WallpaperPosition::Fit,
+        SavedWallpaperPosition::Span => desktop::WallpaperPosition::Span,
+        SavedWallpaperPosition::Fill => desktop::WallpaperPosition::Fill,
+    };
+    if let Some(path) = &settings.image {
+        match image::open(path) {
+            Ok(image) => wallpaper.image = Some(image.into_rgba8()),
+            Err(error) => eprintln!("failed to load wallpaper {}: {error}", path.display()),
+        }
+    }
+    wallpaper
+}
+
 #[derive(Clone, Copy)]
 enum ContextAction {
     Activate(ShellWindowId),
@@ -82,6 +104,7 @@ struct Nickel {
     panel_surfaces: Vec<(Arc<Window>, panel::PanelGpu)>,
     panel_primary: Vec<bool>,
     shell_settings: ShellSettings,
+    wallpaper_settings: WallpaperSettings,
     settings_deadline: Instant,
     display_deadline: Instant,
     display_topology: Vec<(String, i32, i32, u32, u32, u64)>,
@@ -181,6 +204,7 @@ impl Default for Nickel {
             panel_surfaces: Vec::new(),
             panel_primary: Vec::new(),
             shell_settings: ShellSettings::load_default(),
+            wallpaper_settings: WallpaperSettings::load_default(),
             settings_deadline: Instant::now(),
             display_deadline: Instant::now(),
             display_topology: Vec::new(),
@@ -806,6 +830,15 @@ impl Nickel {
 
     fn refresh_shell_settings(&mut self) {
         let settings = ShellSettings::load_default();
+        let wallpaper_settings = WallpaperSettings::load_default();
+        if wallpaper_settings != self.wallpaper_settings {
+            self.wallpaper_settings = wallpaper_settings;
+            let wallpaper = configured_wallpaper(&self.wallpaper_settings);
+            for (window, gpu) in &mut self.desktop_surfaces {
+                gpu.set_wallpaper(wallpaper.clone());
+                window.request_redraw();
+            }
+        }
         if settings == self.shell_settings {
             return;
         }
@@ -951,10 +984,13 @@ impl Nickel {
     }
 
     fn launch_settings(&mut self) {
-        let executable = env::current_exe().ok().and_then(|path| {
-            path.parent()
-                .map(|parent| parent.join("nickel-settings.exe"))
-        });
+        #[cfg(target_os = "windows")]
+        const SETTINGS_BINARY: &str = "nickel-settings.exe";
+        #[cfg(not(target_os = "windows"))]
+        const SETTINGS_BINARY: &str = "nickel-settings";
+        let executable = env::current_exe()
+            .ok()
+            .and_then(|path| path.parent().map(|parent| parent.join(SETTINGS_BINARY)));
         match executable.and_then(|path| std::process::Command::new(path).spawn().ok()) {
             Some(_) => self.set_launcher_visible(false),
             None => tracing::warn!("failed to launch Nickel Plating"),
@@ -1764,7 +1800,7 @@ impl ApplicationHandler for Nickel {
                 .resolve_appearance(nickel_platform::appearance()),
         );
         let shared_graphics = launcher_gpu.graphics.clone();
-        let wallpaper = platform::wallpaper();
+        let wallpaper = configured_wallpaper(&self.wallpaper_settings);
         let mut desktop_surfaces = Vec::new();
         for window in desktop_windows {
             match desktop::DesktopGpu::new(
@@ -2620,6 +2656,7 @@ impl ApplicationHandler for Nickel {
                         0 => self.set_launcher_view(LauncherView::Favorites),
                         1 => self.set_launcher_view(LauncherView::Applications),
                         2 => self.set_launcher_view(LauncherView::Places),
+                        3 => self.launch_settings(),
                         _ => {}
                     }
                     return;
