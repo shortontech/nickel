@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     path::Path,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use smithay::{
@@ -69,15 +69,7 @@ use crate::{
 };
 
 const FORMATS: &[Fourcc] = &[Fourcc::Abgr8888, Fourcc::Argb8888];
-
-fn render_color(rgb: u32) -> [f32; 4] {
-    [
-        ((rgb >> 16) & 0xff) as f32 / 255.0,
-        ((rgb >> 8) & 0xff) as f32 / 255.0,
-        (rgb & 0xff) as f32 / 255.0,
-        1.0,
-    ]
-}
+const BOOTSTRAP_RENDER_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn output_model(connector_name: &str) -> String {
     let Ok(entries) = std::fs::read_dir("/sys/class/drm") else {
@@ -151,6 +143,7 @@ struct DeviceData {
     scanner: DrmScanner,
     render_node: DrmNode,
     is_evdi: bool,
+    render_scheduled: bool,
     surfaces: HashMap<crtc::Handle, SurfaceData>,
 }
 
@@ -161,7 +154,9 @@ pub struct UdevData {
     primary_gpu: DrmNode,
     devices: HashMap<DrmNode, DeviceData>,
     layout: OutputLayout,
-    cursor: CursorBuffer,
+    bootstrap_render_until: Instant,
+    client_bootstrap_started: bool,
+    cursors: HashMap<crate::window_frame::FrameCursor, CursorBuffer>,
     frame_icons: Option<crate::window_frame::FrameIcons>,
     identify_badges: Vec<MemoryRenderBuffer>,
 }
@@ -203,7 +198,9 @@ pub fn init_udev(
         primary_gpu,
         devices: HashMap::new(),
         layout: OutputLayout::default(),
-        cursor: themed_arrow_cursor(),
+        bootstrap_render_until: Instant::now() + BOOTSTRAP_RENDER_TIMEOUT,
+        client_bootstrap_started: false,
+        cursors: themed_cursors(),
         frame_icons: crate::window_frame::FrameIcons::load(),
         identify_badges: (1..=9).map(identify_badge).collect(),
     });
@@ -215,6 +212,12 @@ pub fn init_udev(
             let channel::Event::Msg(surface) = event else {
                 return;
             };
+            if let Some(native) = data.native.as_mut()
+                && !native.client_bootstrap_started
+            {
+                native.client_bootstrap_started = true;
+                native.bootstrap_render_until = Instant::now() + BOOTSTRAP_RENDER_TIMEOUT;
+            }
             let mut root = surface.clone();
             while let Some(parent) = smithay::wayland::compositor::get_parent(&root) {
                 root = parent;
@@ -237,6 +240,9 @@ pub fn init_udev(
                         .collect::<HashSet<_>>()
                 })
                 .unwrap_or_default();
+            let client_bootstrapping = data.native.as_ref().is_some_and(|native| {
+                native.client_bootstrap_started && Instant::now() < native.bootstrap_render_until
+            });
             if let Some(native) = data.native.as_mut()
                 && let Err(error) = native.gpus.early_import(native.primary_gpu, &surface)
             {
@@ -246,10 +252,34 @@ pub fn init_udev(
                 native
                     .devices
                     .values_mut()
-                    .filter(|device| device.is_evdi)
+                    .filter(|device| client_bootstrapping || device.is_evdi)
                     .flat_map(|device| device.surfaces.values_mut())
-                    .filter(|surface| affected_outputs.contains(&surface.output.name()))
+                    .filter(|surface| {
+                        client_bootstrapping
+                            || affected_outputs.is_empty()
+                            || affected_outputs.contains(&surface.output.name())
+                    })
                     .for_each(|surface| surface.invalidate_pending = true);
+            }
+            let nodes = data
+                .native
+                .as_ref()
+                .map(|native| {
+                    native
+                        .devices
+                        .iter()
+                        .filter(|(_, device)| {
+                            affected_outputs.is_empty()
+                                || device.surfaces.values().any(|surface| {
+                                    affected_outputs.contains(&surface.output.name())
+                                })
+                        })
+                        .map(|(node, _)| *node)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            for node in nodes {
+                data.schedule_render(node, Duration::ZERO);
             }
         })?;
 
@@ -286,6 +316,14 @@ pub fn init_udev(
             && let Err(error) = native.session.change_vt(vt)
         {
             tracing::error!(vt, ?error, "failed to switch virtual terminal");
+        }
+        let nodes = data
+            .native
+            .as_ref()
+            .map(|native| native.devices.keys().copied().collect::<Vec<_>>())
+            .unwrap_or_default();
+        for node in nodes {
+            data.schedule_render(node, Duration::ZERO);
         }
     })?;
 
@@ -453,6 +491,7 @@ impl CalloopData {
                 scanner: DrmScanner::new(),
                 render_node,
                 is_evdi,
+                render_scheduled: false,
                 surfaces: HashMap::new(),
             },
         );
@@ -676,11 +715,29 @@ impl CalloopData {
         tracing::info!(%node, "DRM device removed");
     }
 
-    fn schedule_render(&self, node: DrmNode, delay: Duration) {
+    fn schedule_render(&mut self, node: DrmNode, delay: Duration) {
+        let Some(device) = self
+            .native
+            .as_mut()
+            .and_then(|native| native.devices.get_mut(&node))
+        else {
+            return;
+        };
+        if device.render_scheduled {
+            return;
+        }
+        device.render_scheduled = true;
         let timer = Timer::from_duration(delay);
         let _ = self
             .event_loop_handle
             .insert_source(timer, move |_, _, data| {
+                if let Some(device) = data
+                    .native
+                    .as_mut()
+                    .and_then(|native| native.devices.get_mut(&node))
+                {
+                    device.render_scheduled = false;
+                }
                 data.render_node(node);
                 TimeoutAction::Drop
             });
@@ -727,6 +784,7 @@ impl CalloopData {
     }
 
     fn render_output(&mut self, node: DrmNode, crtc: crtc::Handle) {
+        let shell_bootstrapping = self.state.launcher_window.is_none();
         let identify_index = self
             .state
             .identify_outputs_until
@@ -762,7 +820,12 @@ impl CalloopData {
                 return;
             };
             let output = surface.output.clone();
-            let cursor = native.cursor.clone();
+            let cursor = native
+                .cursors
+                .get(&self.state.frame_cursor)
+                .or_else(|| native.cursors.get(&crate::window_frame::FrameCursor::Arrow))
+                .cloned()
+                .unwrap_or_else(fallback_arrow_cursor);
             let frame_icons = native.frame_icons.clone();
             let background = surface.background.clone();
             let identify_badge = identify_index
@@ -801,6 +864,8 @@ impl CalloopData {
                 surface.render_path_logged = true;
             }
             let target_gpu = device.render_node;
+            let bootstrapping =
+                shell_bootstrapping && Instant::now() < native.bootstrap_render_until;
             let frame_flags = if device.is_evdi {
                 FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT
             } else {
@@ -892,11 +957,6 @@ impl CalloopData {
                     } else {
                         frame_palette.muted
                     };
-                    let border = if active {
-                        render_color(frame_palette.accent)
-                    } else {
-                        render_color(frame_palette.surface_hover)
-                    };
                     if let Some(titlebar) = crate::window_frame::render_titlebar(
                         bounds.size.w,
                         title,
@@ -915,64 +975,29 @@ impl CalloopData {
                         &titlebar,
                         None,
                         None,
-                        None,
+                        Some((bounds.size.w, crate::window_frame::TITLEBAR_HEIGHT).into()),
                         Kind::Unspecified,
                     ) {
                         elements.push(NativeCustomElement::from(element).into());
                     }
-                    let rectangles = [
-                        (
-                            (bounds.size.w + 4, 2),
-                            (
-                                bounds.loc.x - output_geometry.loc.x - 2,
-                                bounds.loc.y
-                                    - output_geometry.loc.y
-                                    - crate::window_frame::TITLEBAR_HEIGHT
-                                    - 2,
-                            ),
-                            border,
-                        ),
-                        (
-                            (2, bounds.size.h + crate::window_frame::TITLEBAR_HEIGHT + 4),
-                            (
-                                bounds.loc.x - output_geometry.loc.x - 2,
-                                bounds.loc.y
-                                    - output_geometry.loc.y
-                                    - crate::window_frame::TITLEBAR_HEIGHT
-                                    - 2,
-                            ),
-                            border,
-                        ),
-                        (
-                            (2, bounds.size.h + crate::window_frame::TITLEBAR_HEIGHT + 4),
-                            (
-                                bounds.loc.x - output_geometry.loc.x + bounds.size.w,
-                                bounds.loc.y
-                                    - output_geometry.loc.y
-                                    - crate::window_frame::TITLEBAR_HEIGHT
-                                    - 2,
-                            ),
-                            border,
-                        ),
-                        (
-                            (bounds.size.w + 4, 2),
-                            (
-                                bounds.loc.x - output_geometry.loc.x - 2,
-                                bounds.loc.y - output_geometry.loc.y + bounds.size.h,
-                            ),
-                            border,
-                        ),
-                    ];
-                    for (size, location, color) in rectangles {
-                        let buffer = SolidColorBuffer::new(size, color);
-                        let element = SolidColorRenderElement::from_buffer(
-                            &buffer,
-                            location,
-                            1.0,
-                            1.0,
-                            Kind::Unspecified,
+                    let frame_height = bounds.size.h + crate::window_frame::TITLEBAR_HEIGHT;
+                    for shadow in crate::window_frame::shadow_layers(bounds.size.w, frame_height) {
+                        elements.push(
+                            NativeCustomElement::from(SolidColorRenderElement::from_buffer(
+                                &shadow.buffer,
+                                (
+                                    bounds.loc.x - output_geometry.loc.x + shadow.offset.0,
+                                    bounds.loc.y
+                                        - output_geometry.loc.y
+                                        - crate::window_frame::TITLEBAR_HEIGHT
+                                        + shadow.offset.1,
+                                ),
+                                1.0,
+                                1.0,
+                                Kind::Unspecified,
+                            ))
+                            .into(),
                         );
-                        elements.push(NativeCustomElement::from(element).into());
                     }
                     if let Some(icons) = &frame_icons {
                         let icon_y = bounds.loc.y
@@ -1081,7 +1106,7 @@ impl CalloopData {
                 }
                 Ok(_) => {
                     tracing::trace!(output = %output.name(), "DRM frame contained no damage");
-                    true
+                    bootstrapping
                 }
                 Err(error) => {
                     tracing::warn!(
@@ -1139,6 +1164,42 @@ fn is_evdi_device(path: &Path) -> bool {
 }
 
 fn themed_arrow_cursor() -> CursorBuffer {
+    themed_cursor(&["default", "left_ptr"]).unwrap_or_else(fallback_arrow_cursor)
+}
+
+fn themed_cursors() -> HashMap<crate::window_frame::FrameCursor, CursorBuffer> {
+    use crate::window_frame::FrameCursor;
+
+    let arrow = themed_arrow_cursor();
+    let mut cursors = HashMap::from([(FrameCursor::Arrow, arrow.clone())]);
+    for (kind, names) in [
+        (FrameCursor::North, &["n-resize", "top_side"][..]),
+        (
+            FrameCursor::NorthEast,
+            &["ne-resize", "top_right_corner"][..],
+        ),
+        (FrameCursor::East, &["e-resize", "right_side"][..]),
+        (
+            FrameCursor::SouthEast,
+            &["se-resize", "bottom_right_corner"][..],
+        ),
+        (FrameCursor::South, &["s-resize", "bottom_side"][..]),
+        (
+            FrameCursor::SouthWest,
+            &["sw-resize", "bottom_left_corner"][..],
+        ),
+        (FrameCursor::West, &["w-resize", "left_side"][..]),
+        (
+            FrameCursor::NorthWest,
+            &["nw-resize", "top_left_corner"][..],
+        ),
+    ] {
+        cursors.insert(kind, themed_cursor(names).unwrap_or_else(|| arrow.clone()));
+    }
+    cursors
+}
+
+fn themed_cursor(names: &[&str]) -> Option<CursorBuffer> {
     let kde_cursor_settings = kde_cursor_settings();
     let theme_name = std::env::var("XCURSOR_THEME")
         .ok()
@@ -1152,9 +1213,7 @@ fn themed_arrow_cursor() -> CursorBuffer {
         .or(kde_cursor_settings.1)
         .unwrap_or(24);
     let theme = xcursor::CursorTheme::load(&theme_name);
-    if let Some(path) = theme
-        .load_icon("default")
-        .or_else(|| theme.load_icon("left_ptr"))
+    if let Some(path) = names.iter().find_map(|name| theme.load_icon(name))
         && let Ok(bytes) = std::fs::read(&path)
         && let Some(images) = xcursor::parser::parse_xcursor(&bytes)
         && let Some(image) = images
@@ -1165,9 +1224,10 @@ fn themed_arrow_cursor() -> CursorBuffer {
             theme = %theme_name,
             size = image.size,
             path = %path.display(),
-            "loaded desktop cursor theme"
+            cursor = ?names.first().copied().unwrap_or("default"),
+            "loaded desktop cursor"
         );
-        return CursorBuffer {
+        return Some(CursorBuffer {
             buffer: MemoryRenderBuffer::from_slice(
                 &image.pixels_rgba,
                 Fourcc::Abgr8888,
@@ -1177,10 +1237,10 @@ fn themed_arrow_cursor() -> CursorBuffer {
                 None,
             ),
             hotspot: Point::from((image.xhot as i32, image.yhot as i32)),
-        };
+        });
     }
-    tracing::warn!(theme = %theme_name, "could not load desktop cursor theme; using fallback");
-    fallback_arrow_cursor()
+    tracing::warn!(theme = %theme_name, ?names, "could not load desktop cursor");
+    None
 }
 
 fn kde_cursor_settings() -> (Option<String>, Option<u32>) {

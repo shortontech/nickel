@@ -16,11 +16,38 @@ pub struct DesktopCapture {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct WifiNetworkStatus {
+    pub id: String,
+    pub name: String,
+    pub signal_percent: u32,
+    pub connected: bool,
+    pub saved: bool,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct NetworkStatus {
     pub available: bool,
+    pub enabled: bool,
     pub connected: bool,
     pub name: String,
     pub signal_percent: u32,
+    pub networks: Vec<WifiNetworkStatus>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct BluetoothDeviceStatus {
+    pub id: String,
+    pub name: String,
+    pub paired: bool,
+    pub connected: bool,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct BluetoothStatus {
+    pub available: bool,
+    pub powered: bool,
+    pub discovering: bool,
+    pub devices: Vec<BluetoothDeviceStatus>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -109,37 +136,41 @@ pub enum ShellCommand {
 mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::{
-    TrayFeed, WindowFeed, application_icon, applications, audio_status, capture_active_window,
-    capture_active_window_to_file, capture_desktop, capture_pointer, copy_image_to_clipboard,
-    copy_temp_image_path, execute_run_command, handle_focused_shortcut, launch_application,
-    launcher_has_foreground_focus, launcher_hotkey_receiver, launcher_visibility_applied,
-    network_status, paste_text_if_requested, release_pointer, select_audio_device,
-    send_shell_command, set_audio_volume, show_window_system_menu, update_panel_fullscreen_state,
-    wallpaper,
+    TrayFeed, WindowFeed, activate_wifi_network, application_icon, applications, audio_status,
+    bluetooth_status, capture_active_window, capture_active_window_to_file, capture_desktop,
+    capture_pointer, copy_image_to_clipboard, copy_temp_image_path, execute_run_command,
+    handle_focused_shortcut, launch_application, launcher_has_foreground_focus,
+    launcher_hotkey_receiver, launcher_visibility_applied, network_status, paste_text_if_requested,
+    release_pointer, select_audio_device, send_shell_command, set_audio_volume,
+    set_bluetooth_discovery, set_bluetooth_powered, set_wifi_enabled, show_window_system_menu,
+    toggle_bluetooth_device, update_panel_fullscreen_state, wallpaper,
 };
 
 #[cfg(target_os = "windows")]
 mod windows;
 #[cfg(target_os = "windows")]
 pub use windows::{
-    TrayFeed, WindowFeed, application_icon, applications, audio_status, capture_active_window,
-    capture_active_window_to_file, capture_desktop, capture_pointer, configure_context_menu_window,
-    configure_desktop_window, configure_launcher_window, configure_panel_window,
-    configure_volume_osd_window, copy_image_to_clipboard, copy_temp_image_path,
-    execute_run_command, handle_focused_shortcut, launch_application,
-    launcher_has_foreground_focus, launcher_hotkey_receiver, launcher_visibility_applied,
-    network_status, paste_text_if_requested, release_panel_window, release_pointer,
-    select_audio_device, send_shell_command, set_audio_volume, show_window_system_menu,
-    update_panel_fullscreen_state, wallpaper,
+    TrayFeed, WindowFeed, activate_wifi_network, application_icon, applications, audio_status,
+    bluetooth_status, capture_active_window, capture_active_window_to_file, capture_desktop,
+    capture_pointer, configure_context_menu_window, configure_desktop_window,
+    configure_launcher_window, configure_panel_window, configure_volume_osd_window,
+    copy_image_to_clipboard, copy_temp_image_path, execute_run_command, handle_focused_shortcut,
+    launch_application, launcher_has_foreground_focus, launcher_hotkey_receiver,
+    launcher_visibility_applied, network_status, paste_text_if_requested, release_panel_window,
+    release_pointer, select_audio_device, send_shell_command, set_audio_volume,
+    set_bluetooth_discovery, set_bluetooth_powered, set_wifi_enabled, show_window_system_menu,
+    toggle_bluetooth_device, update_panel_fullscreen_state, wallpaper,
 };
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 mod unsupported;
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 pub use unsupported::{
-    TrayFeed, WindowFeed, application_icon, applications, audio_status, capture_pointer,
-    configure_volume_osd_window, execute_run_command, handle_focused_shortcut, launch_application,
-    launcher_has_foreground_focus, launcher_hotkey_receiver, launcher_visibility_applied,
-    network_status, release_pointer, select_audio_device, send_shell_command, set_audio_volume,
-    show_window_system_menu, update_panel_fullscreen_state, wallpaper,
+    TrayFeed, WindowFeed, activate_wifi_network, application_icon, applications, audio_status,
+    bluetooth_status, capture_pointer, configure_volume_osd_window, execute_run_command,
+    handle_focused_shortcut, launch_application, launcher_has_foreground_focus,
+    launcher_hotkey_receiver, launcher_visibility_applied, network_status, release_pointer,
+    select_audio_device, send_shell_command, set_audio_volume, set_bluetooth_discovery,
+    set_bluetooth_powered, set_wifi_enabled, show_window_system_menu, toggle_bluetooth_device,
+    update_panel_fullscreen_state, wallpaper,
 };

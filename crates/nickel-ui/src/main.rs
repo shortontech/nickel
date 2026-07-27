@@ -2942,6 +2942,14 @@ impl ApplicationHandler for Nickel {
         }
         if now >= self.display_deadline {
             self.reconcile_display_topology(event_loop);
+            if self.control_center_visible {
+                if let Some(gpu) = &mut self.control_center_gpu {
+                    gpu.refresh();
+                }
+                if let Some(window) = &self.control_center_window {
+                    window.request_redraw();
+                }
+            }
             self.display_deadline = now + Duration::from_secs(1);
         }
         if now >= self.clock_deadline {

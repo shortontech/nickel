@@ -92,6 +92,9 @@ pub fn init_winit(
                     let _ = state.process_input_event(event);
                 }
                 WinitEvent::Redraw => {
+                    backend
+                        .window()
+                        .set_cursor(frame_cursor_icon(state.frame_cursor));
                     let size = backend.window_size();
                     let damage = Rectangle::from_size(size);
                     if state.preview_highlight.is_some()
@@ -249,6 +252,23 @@ pub fn init_winit(
         })?;
 
     Ok(())
+}
+
+fn frame_cursor_icon(cursor: crate::window_frame::FrameCursor) -> ::winit::window::CursorIcon {
+    use crate::window_frame::FrameCursor;
+    use ::winit::window::CursorIcon;
+
+    match cursor {
+        FrameCursor::Arrow => CursorIcon::Default,
+        FrameCursor::North => CursorIcon::NResize,
+        FrameCursor::NorthEast => CursorIcon::NeResize,
+        FrameCursor::East => CursorIcon::EResize,
+        FrameCursor::SouthEast => CursorIcon::SeResize,
+        FrameCursor::South => CursorIcon::SResize,
+        FrameCursor::SouthWest => CursorIcon::SwResize,
+        FrameCursor::West => CursorIcon::WResize,
+        FrameCursor::NorthWest => CursorIcon::NwResize,
+    }
 }
 
 fn capture_preview(renderer: &mut GlesRenderer, window: &Window) -> Option<PreviewFrame> {

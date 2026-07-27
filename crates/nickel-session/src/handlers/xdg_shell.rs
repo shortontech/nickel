@@ -235,9 +235,9 @@ impl XdgDecorationHandler for NickelSession {
     fn request_mode(
         &mut self,
         toplevel: ToplevelSurface,
-        _mode: smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode,
+        mode: smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode,
     ) {
-        self.prefer_server_decoration(toplevel);
+        self.configure_decoration(toplevel, mode);
     }
 
     fn unset_mode(&mut self, toplevel: ToplevelSurface) {
@@ -248,8 +248,25 @@ impl XdgDecorationHandler for NickelSession {
 impl NickelSession {
     fn prefer_server_decoration(&mut self, toplevel: ToplevelSurface) {
         use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode;
-        self.server_decorated.insert(toplevel.wl_surface().id());
-        toplevel.with_pending_state(|state| state.decoration_mode = Some(Mode::ServerSide));
+        self.configure_decoration(toplevel, Mode::ServerSide);
+    }
+
+    fn configure_decoration(
+        &mut self,
+        toplevel: ToplevelSurface,
+        mode: smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode,
+    ) {
+        use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode;
+        match mode {
+            Mode::ServerSide => {
+                self.server_decorated.insert(toplevel.wl_surface().id());
+            }
+            Mode::ClientSide => {
+                self.server_decorated.remove(&toplevel.wl_surface().id());
+            }
+            _ => return,
+        }
+        toplevel.with_pending_state(|state| state.decoration_mode = Some(mode));
         toplevel.send_pending_configure();
     }
 }
