@@ -1,6 +1,9 @@
 use crate::shell_layout::Geometry;
 use smithay::{
-    backend::{allocator::Fourcc, renderer::element::memory::MemoryRenderBuffer},
+    backend::{
+        allocator::Fourcc,
+        renderer::element::{memory::MemoryRenderBuffer, solid::SolidColorBuffer},
+    },
     utils::Transform,
 };
 use std::{
@@ -15,6 +18,41 @@ pub const MINIMIZE_GLYPH: char = '\u{f2d1}';
 pub const MAXIMIZE_GLYPH: char = '\u{f2d0}';
 pub const RESTORE_GLYPH: char = '\u{f2d2}';
 pub const CLOSE_GLYPH: char = '\u{f2d3}';
+
+#[derive(Clone)]
+pub struct ShadowLayer {
+    pub buffer: SolidColorBuffer,
+    pub offset: (i32, i32),
+}
+
+pub fn shadow_layers(width: i32, height: i32) -> Vec<ShadowLayer> {
+    type ShadowCache = HashMap<(i32, i32), Vec<ShadowLayer>>;
+    static CACHE: OnceLock<Mutex<ShadowCache>> = OnceLock::new();
+    let key = (width.max(1), height.max(1));
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(cache) = cache.lock()
+        && let Some(layers) = cache.get(&key)
+    {
+        return layers.clone();
+    }
+    let layers = [(16, 7, 0.08), (10, 5, 0.12), (5, 3, 0.18)]
+        .into_iter()
+        .map(|(spread, vertical_offset, alpha)| ShadowLayer {
+            buffer: SolidColorBuffer::new(
+                (key.0 + spread * 2, key.1 + spread * 2),
+                [0.0, 0.0, 0.0, alpha],
+            ),
+            offset: (-spread, -spread + vertical_offset),
+        })
+        .collect::<Vec<_>>();
+    if let Ok(mut cache) = cache.lock() {
+        if cache.len() >= 128 {
+            cache.clear();
+        }
+        cache.insert(key, layers.clone());
+    }
+    layers
+}
 
 #[derive(Clone)]
 pub struct FrameIcons {
@@ -70,6 +108,10 @@ pub fn render_titlebar(
     background: u32,
     foreground: u32,
 ) -> Option<MemoryRenderBuffer> {
+    // Resizing can produce a new width for every pointer event. Quantizing the
+    // raster width keeps the expensive SVG/text asset stable while the render
+    // element scales it by only a few pixels.
+    let width = ((width.max(1) + 31) / 32) * 32;
     type CacheKey = (i32, String, u32, u32);
     static CACHE: OnceLock<Mutex<HashMap<CacheKey, MemoryRenderBuffer>>> = OnceLock::new();
     let key = (width, title.to_owned(), background, foreground);
@@ -141,6 +183,36 @@ pub enum FramePart {
     ResizeSouthWest,
     ResizeWest,
     ResizeNorthWest,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum FrameCursor {
+    #[default]
+    Arrow,
+    North,
+    NorthEast,
+    East,
+    SouthEast,
+    South,
+    SouthWest,
+    West,
+    NorthWest,
+}
+
+impl FramePart {
+    pub fn cursor(self) -> FrameCursor {
+        match self {
+            Self::ResizeNorth => FrameCursor::North,
+            Self::ResizeNorthEast => FrameCursor::NorthEast,
+            Self::ResizeEast => FrameCursor::East,
+            Self::ResizeSouthEast => FrameCursor::SouthEast,
+            Self::ResizeSouth => FrameCursor::South,
+            Self::ResizeSouthWest => FrameCursor::SouthWest,
+            Self::ResizeWest => FrameCursor::West,
+            Self::ResizeNorthWest => FrameCursor::NorthWest,
+            Self::Titlebar | Self::Minimize | Self::Maximize | Self::Close => FrameCursor::Arrow,
+        }
+    }
 }
 
 pub fn outer_geometry(content: Geometry) -> Geometry {
@@ -227,5 +299,15 @@ mod tests {
             hit_test(CONTENT, 604, 444),
             Some(FramePart::ResizeSouthEast)
         );
+    }
+
+    #[test]
+    fn resize_parts_select_directional_cursors() {
+        assert_eq!(
+            FramePart::ResizeNorthWest.cursor(),
+            super::FrameCursor::NorthWest
+        );
+        assert_eq!(FramePart::ResizeEast.cursor(), super::FrameCursor::East);
+        assert_eq!(FramePart::Titlebar.cursor(), super::FrameCursor::Arrow);
     }
 }

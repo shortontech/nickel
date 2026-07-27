@@ -17,6 +17,30 @@ pub fn network_status() -> super::NetworkStatus {
     super::NetworkStatus::default()
 }
 
+pub fn set_wifi_enabled(_enabled: bool) -> bool {
+    false
+}
+
+pub fn activate_wifi_network(_id: &str) -> bool {
+    false
+}
+
+pub fn bluetooth_status() -> super::BluetoothStatus {
+    super::BluetoothStatus::default()
+}
+
+pub fn set_bluetooth_powered(_powered: bool) -> bool {
+    false
+}
+
+pub fn set_bluetooth_discovery(_discovering: bool) -> bool {
+    false
+}
+
+pub fn toggle_bluetooth_device(_id: &str) -> bool {
+    false
+}
+
 pub fn audio_status() -> super::AudioStatus {
     super::AudioStatus::default()
 }

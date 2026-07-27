@@ -77,8 +77,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         import_runtime_environment();
     }
 
-    if let Some((program, arguments)) = arguments.command {
-        spawn_supervised(program, arguments);
+    let prepare_login_services = arguments.backend == backend::BackendKind::Udev;
+    if let Some((program, command_arguments)) = arguments.command {
+        spawn_supervised(program, command_arguments, prepare_login_services);
     }
 
     event_loop.run(None, &mut data, move |_| {
@@ -106,11 +107,19 @@ fn import_runtime_environment() {
     }
 }
 
-fn spawn_supervised(program: OsString, arguments: Vec<OsString>) {
+fn spawn_supervised(program: OsString, arguments: Vec<OsString>, prepare_login_services: bool) {
     thread::spawn(move || {
-        if let Err(error) = login_services::prepare_secure_storage() {
-            tracing::error!(%error, "secure storage unavailable; Nickel shell remains stopped");
-            return;
+        if prepare_login_services {
+            let _ = thread::Builder::new()
+                .name("nickel-login-services".into())
+                .spawn(|| {
+                    if let Err(error) = login_services::prepare_secure_storage() {
+                        tracing::error!(
+                            %error,
+                            "secure storage unavailable; applications requiring credentials may fail"
+                        );
+                    }
+                });
         }
 
         const MAX_STARTS: usize = 4;

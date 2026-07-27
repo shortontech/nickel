@@ -14,6 +14,9 @@ use crate::{
     platform::{GlobalShortcut, ShellCommand, TraySource, WindowAction},
 };
 
+#[path = "linux_control.rs"]
+mod linux_control;
+
 pub fn wallpaper() -> Wallpaper {
     Wallpaper::default()
 }
@@ -43,7 +46,31 @@ pub fn copy_temp_image_path(_: &image::RgbaImage) -> Result<PathBuf, String> {
 }
 
 pub fn network_status() -> super::NetworkStatus {
-    super::NetworkStatus::default()
+    linux_control::network_status()
+}
+
+pub fn set_wifi_enabled(enabled: bool) -> bool {
+    linux_control::set_wifi_enabled(enabled)
+}
+
+pub fn activate_wifi_network(id: &str) -> bool {
+    linux_control::activate_wifi_network(id)
+}
+
+pub fn bluetooth_status() -> super::BluetoothStatus {
+    linux_control::bluetooth_status()
+}
+
+pub fn set_bluetooth_powered(powered: bool) -> bool {
+    linux_control::set_bluetooth_powered(powered)
+}
+
+pub fn set_bluetooth_discovery(discovering: bool) -> bool {
+    linux_control::set_bluetooth_discovery(discovering)
+}
+
+pub fn toggle_bluetooth_device(id: &str) -> bool {
+    linux_control::toggle_bluetooth_device(id)
 }
 
 pub fn audio_status() -> super::AudioStatus {

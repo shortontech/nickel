@@ -21,6 +21,34 @@ use crate::{
 };
 
 impl NickelSession {
+    fn update_frame_cursor(&mut self, position: smithay::utils::Point<f64, Logical>) {
+        self.frame_cursor = self
+            .space
+            .elements()
+            .filter(|window| {
+                !self.shell_windows().any(|shell| shell == *window)
+                    && !self.is_fullscreen_window(window)
+                    && self.is_server_decorated(window)
+            })
+            .filter_map(|window| {
+                let bounds = self.space.element_bbox(window)?;
+                let geometry = crate::shell_layout::Geometry {
+                    x: bounds.loc.x,
+                    y: bounds.loc.y,
+                    width: bounds.size.w,
+                    height: bounds.size.h,
+                };
+                window_frame::hit_test(
+                    geometry,
+                    position.x.round() as i32,
+                    position.y.round() as i32,
+                )
+            })
+            .next_back()
+            .map(FramePart::cursor)
+            .unwrap_or_default();
+    }
+
     pub fn process_input_event<I: InputBackend>(&mut self, event: InputEvent<I>) -> Option<i32> {
         match event {
             InputEvent::Keyboard { event, .. } => {
@@ -107,6 +135,7 @@ impl NickelSession {
                     (current.y + delta.y).clamp(0.0, f64::from(max_y.saturating_sub(1))),
                 )
                     .into();
+                self.update_frame_cursor(position);
                 let pointer = self.seat.get_pointer().unwrap();
                 pointer.motion(
                     self,
@@ -125,6 +154,7 @@ impl NickelSession {
                 let output_geo = self.space.output_geometry(output).unwrap();
 
                 let pos = event.position_transformed(output_geo.size) + output_geo.loc.to_f64();
+                self.update_frame_cursor(pos);
 
                 let serial = SERIAL_COUNTER.next_serial();
 

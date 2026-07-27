@@ -13,11 +13,12 @@ smithay.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+winit = { workspace = true, optional = true }
 xcursor.workspace = true
 
 [features]
 default = ["backend-winit"]
-backend-winit = ["smithay/backend_winit"]
+backend-winit = ["smithay/backend_winit", "dep:winit"]
 backend-udev = [
     "smithay/backend_drm",
     "smithay/backend_egl",

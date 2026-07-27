@@ -1,32 +1,30 @@
 # Nickel
 
-Nickel is a cross-platform desktop shell written in Rust. It provides a desktop, taskbar,
-application launcher, task switching, system controls, and settings without requiring Windows
-Explorer or a Linux desktop environment.
+Nickel is an experimental desktop shell written entirely in Rust. On Windows, it provides a
+GPU-rendered desktop, taskbar, application launcher, task switching, system controls, settings,
+and a file browser without requiring Windows Explorer as the desktop shell.
 
-Nickel currently works best on Windows. Linux session support is under active development, with
-macOS planned for later.
+The repository also contains a Linux compositor built with Smithay. It runs as a nested development
+session or directly through DRM and udev. The Windows implementation is currently the most
+complete.
 
-## The Nickel Family
+## Included Applications
 
-The component names follow the project all the way down:
-
-- **Nickel Bar** — the taskbar and system tray
-- **Nickel Flip** — task switching and live window previews
-- **Nickel File** — the file manager
-- **Nickel Plating** — Control Center and system settings
-- **Bare Nickel** — the planned lean Windows configuration
+- **Nickel UI** — the desktop shell, taskbar, launcher, task switcher, and system controls
+- **Nickel Settings** — display and system settings
+- **Nickel File** — directory browsing and file launching
+- **Nickel Session** — the Linux compositor and session host
 
 ## What Nickel Does
 
-### Desktop and Nickel Bar
+### Desktop and Taskbar
 
 - Draws the desktop wallpaper
 - Shows running applications with native icons
 - Groups and cycles multiple windows from the same application
 - Tracks the active window
 - Hosts notification-area icons and their context menus
-- Displays the clock and opens Nickel Plating
+- Displays the clock and opens system controls
 - Reserves space when applications are maximized
 - Hides behind borderless fullscreen applications
 
@@ -39,7 +37,7 @@ The component names follow the project all the way down:
 - Provides keyboard navigation and scrolling
 - Opens Run with command history, clipboard support, and IME-aware text input
 
-### Nickel Flip
+### Task Switching
 
 - Switches between windows with live DWM previews on Windows
 - Cycles forward or backward
@@ -47,7 +45,7 @@ The component names follow the project all the way down:
 - Supports mouse selection from the preview
 - Preserves fullscreen applications while switching
 
-### Nickel Plating
+### System Controls and Settings
 
 - Shows the real display layout
 - Identifies displays and selects the primary display
@@ -154,11 +152,11 @@ sudo packaging/install-nickel-session.sh
 ```
 
 SDDM's PAM session must start the user's established wallet provider. Nickel imports its Wayland
-environment into D-Bus and systemd, verifies that `org.freedesktop.secrets` exposes an existing
-default collection, and refuses to launch the shell or applications when secure storage is not
-ready. Nickel never creates a replacement collection.
+environment into D-Bus and systemd and verifies that `org.freedesktop.secrets` exposes an existing
+default collection. Wallet verification does not block the desktop shell from starting, and Nickel
+never creates a replacement collection.
 
-## Current Limitations
+## Project Status
 
 - Notifications are not displayed yet.
 - Battery, brightness, Bluetooth, and power controls are not implemented.
@@ -168,7 +166,6 @@ ready. Nickel never creates a replacement collection.
 - Multiple-monitor behavior needs more testing.
 - Nickel File currently provides basic directory browsing and file launching.
 - The direct Linux session is not ready for general use.
-- macOS support has not started.
 
 The Windows shell compatibility checklist lives in
 [`specs/0021-windows-shell-contract.md`](specs/0021-windows-shell-contract.md).
@@ -206,9 +203,3 @@ Include behavior tests where practical and record the platforms tested.
 
 Nickel is dual-licensed under the [MIT License](LICENSE-MIT) or the
 [Apache License, Version 2.0](LICENSE-APACHE), at your option.
-
-## Eventually: Bare Nickel
-
-**Bare Nickel** will be a lean Windows configuration with replaceable shell components and bundled
-bloat removed. Keep what makes Windows useful, replace the desktop ecosystem with Nickel, and plate
-the remainder.
