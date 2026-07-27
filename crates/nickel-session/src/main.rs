@@ -5,6 +5,7 @@ mod handlers;
 mod backend;
 mod grabs;
 mod input;
+mod login_services;
 mod shell_layout;
 mod state;
 mod window_registry;
@@ -104,6 +105,11 @@ fn import_runtime_environment() {
 
 fn spawn_supervised(program: OsString, arguments: Vec<OsString>) {
     thread::spawn(move || {
+        if let Err(error) = login_services::prepare_secure_storage() {
+            tracing::error!(%error, "secure storage unavailable; Nickel shell remains stopped");
+            return;
+        }
+
         const MAX_STARTS: usize = 4;
         for attempt in 1..=MAX_STARTS {
             match Command::new(&program).args(&arguments).status() {
