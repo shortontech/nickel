@@ -1773,12 +1773,12 @@ impl SettingsApp {
         nickel_platform::apply_window_appearance(&window, appearance);
         let palette = ThemePalette::from_appearance(appearance);
         if self.window_icon_color != Some(palette.accent) {
-            if let Some(icon) = themed_window_icon(palette.accent) {
+            if let Some(icon) = settings_window_icon() {
                 window.set_window_icon(Some(icon));
                 #[cfg(target_os = "windows")]
                 {
                     use winit::platform::windows::WindowExtWindows;
-                    window.set_taskbar_icon(themed_window_icon(palette.accent));
+                    window.set_taskbar_icon(settings_window_icon());
                 }
             }
             self.window_icon_color = Some(palette.accent);
@@ -2671,21 +2671,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn themed_window_icon(color: u32) -> Option<Icon> {
-    let mut image =
-        image::load_from_memory(include_bytes!("../../../assets/icons/nickel-panel.png"))
+fn settings_window_icon() -> Option<Icon> {
+    let image =
+        image::load_from_memory(include_bytes!("../../../assets/icons/nickel-settings.png"))
             .ok()?
             .into_rgba8();
-    let rgb = [
-        ((color >> 16) & 0xff) as u8,
-        ((color >> 8) & 0xff) as u8,
-        (color & 0xff) as u8,
-    ];
-    for pixel in image.pixels_mut() {
-        if pixel.0[3] != 0 {
-            pixel.0[..3].copy_from_slice(&rgb);
-        }
-    }
     let (width, height) = image.dimensions();
     Icon::from_rgba(image.into_raw(), width, height).ok()
 }

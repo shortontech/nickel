@@ -25,3 +25,8 @@ windows = { workspace = true, features = [
     "Win32_NetworkManagement_WiFi",
     "Win32_Networking_WinSock",
 ] }
+
+[target.'cfg(target_os = "windows")'.build-dependencies]
+ico.workspace = true
+image.workspace = true
+winresource.workspace = true

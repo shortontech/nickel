@@ -19,7 +19,7 @@ use winit::{
     event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop},
     keyboard::{Key, NamedKey},
-    window::{Window, WindowAttributes, WindowId},
+    window::{Icon, Window, WindowAttributes, WindowId},
 };
 
 const BACKGROUND: u32 = 0x16191f;
@@ -39,6 +39,14 @@ const TOOLBAR_HEIGHT: f32 = 58.0;
 const FOOTER_HEIGHT: f32 = 30.0;
 const TILE_HEIGHT: f32 = 122.0;
 const TILE_MIN_WIDTH: f32 = 126.0;
+
+fn nickel_file_icon() -> Option<Icon> {
+    let image = image::load_from_memory(include_bytes!("../../../assets/icons/nickel-file.png"))
+        .ok()?
+        .into_rgba8();
+    let (width, height) = image.dimensions();
+    Icon::from_rgba(image.into_raw(), width, height).ok()
+}
 
 struct FileApp {
     window: Option<Arc<Window>>,
@@ -494,11 +502,17 @@ impl ApplicationHandler for FileApp {
                             "Nickel File — {}",
                             self.browser.current().display()
                         ))
+                        .with_window_icon(nickel_file_icon())
                         .with_inner_size(LogicalSize::new(860.0, 620.0))
                         .with_min_inner_size(LogicalSize::new(560.0, 360.0)),
                 )
                 .expect("create Nickel File window"),
         );
+        #[cfg(target_os = "windows")]
+        {
+            use winit::platform::windows::WindowExtWindows;
+            window.set_taskbar_icon(nickel_file_icon());
+        }
         let size = window.inner_size();
         self.gpu = Some(
             ComponentGpu::new(window.clone(), size.width, size.height)
