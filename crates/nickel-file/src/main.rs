@@ -63,6 +63,18 @@ struct FileApp {
     control_down: bool,
     tile_width: f32,
     tab_icon: Option<(u16, Arc<image::RgbaImage>)>,
+    tabs: Vec<Option<FileTab>>,
+    active_tab: usize,
+    exit_requested: bool,
+}
+
+struct FileTab {
+    browser: DirectoryBrowser,
+    selected: Option<usize>,
+    scroll_offset: usize,
+    status: String,
+    last_click: Option<(usize, Instant)>,
+    tab_icon: Option<(u16, Arc<image::RgbaImage>)>,
 }
 
 impl FileApp {
@@ -102,10 +114,97 @@ impl FileApp {
             control_down: false,
             tile_width: DEFAULT_TILE_WIDTH,
             tab_icon: None,
+            tabs: vec![None],
+            active_tab: 0,
+            exit_requested: false,
         };
         app.refresh_icons();
         app.refresh_tab_icon();
         app
+    }
+
+    fn inactive_tab(&self, index: usize) -> Option<&FileTab> {
+        self.tabs.get(index).and_then(Option::as_ref)
+    }
+
+    fn switch_tab(&mut self, index: usize) {
+        if index == self.active_tab || index >= self.tabs.len() {
+            return;
+        }
+        let Some(mut target) = self.tabs[index].take() else {
+            return;
+        };
+        std::mem::swap(&mut self.browser, &mut target.browser);
+        std::mem::swap(&mut self.selected, &mut target.selected);
+        std::mem::swap(&mut self.scroll_offset, &mut target.scroll_offset);
+        std::mem::swap(&mut self.status, &mut target.status);
+        std::mem::swap(&mut self.last_click, &mut target.last_click);
+        std::mem::swap(&mut self.tab_icon, &mut target.tab_icon);
+        self.tabs[self.active_tab] = Some(target);
+        self.active_tab = index;
+        self.refresh_icons();
+        self.update_window_title();
+        self.request_redraw();
+    }
+
+    fn new_tab(&mut self) {
+        let path = home_directory();
+        let show_hidden = nickel_platform::show_hidden_files();
+        let Ok(browser) = DirectoryBrowser::open_with_hidden(path, show_hidden) else {
+            return;
+        };
+        let tab_icon = nickel_platform::path_icon(browser.current()).map(|image| {
+            let id = self.next_icon_id;
+            self.next_icon_id = self.next_icon_id.checked_add(1).unwrap_or(1);
+            (id, Arc::new(image))
+        });
+        self.tabs.push(Some(FileTab {
+            browser,
+            selected: None,
+            scroll_offset: 0,
+            status: String::new(),
+            last_click: None,
+            tab_icon,
+        }));
+        self.switch_tab(self.tabs.len() - 1);
+    }
+
+    fn close_tab(&mut self, index: usize) {
+        if index >= self.tabs.len() {
+            return;
+        }
+        if self.tabs.len() == 1 {
+            self.exit_requested = true;
+            return;
+        }
+        if index != self.active_tab {
+            self.tabs.remove(index);
+            if index < self.active_tab {
+                self.active_tab -= 1;
+            }
+            self.request_redraw();
+            return;
+        }
+        let target = if index + 1 < self.tabs.len() {
+            index + 1
+        } else {
+            index - 1
+        };
+        self.switch_tab(target);
+        self.tabs.remove(index);
+        if index < self.active_tab {
+            self.active_tab -= 1;
+        }
+        self.request_redraw();
+    }
+
+    fn update_window_title(&self) {
+        if let Some(window) = &self.window {
+            window.set_title(&format!(
+                "Nickel File — {}",
+                self.browser.current().display()
+            ));
+        }
     }
 
     fn request_redraw(&self) {
@@ -149,12 +248,32 @@ impl FileApp {
     }
 
     fn build_ui(&self, width: f32, height: f32, palette: ThemePalette, light_mode: bool) -> UiTree {
-        let tab_name = self
-            .browser
-            .current()
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| self.browser.current().display().to_string());
+        let tabs = (0..self.tabs.len()).map(|index| {
+            let active = index == self.active_tab;
+            let tab = if active {
+                file_tab_element(
+                    index,
+                    &self.browser,
+                    self.tab_icon.as_ref(),
+                    true,
+                    palette,
+                    light_mode,
+                )
+            } else {
+                let tab = self
+                    .inactive_tab(index)
+                    .expect("inactive tab slot must contain state");
+                file_tab_element(
+                    index,
+                    &tab.browser,
+                    tab.tab_icon.as_ref(),
+                    false,
+                    palette,
+                    light_mode,
+                )
+            };
+            tab.into_element()
+        });
         let breadcrumbs = breadcrumb_paths(self.browser.current());
         let tab_strip = Container::new()
             .height(32.0)
@@ -166,54 +285,18 @@ impl FileApp {
                 left: 12.0,
             })
             .child(
-                Row::new()
-                    .gap(16.0)
-                    .child(
-                        Container::new()
-                            .width(190.0)
-                            .background(if light_mode {
-                                0xffffff
-                            } else {
-                                palette.background
-                            })
-                            .top_corner_radius(5.0)
-                            .child(
-                                Column::new()
-                                    .child(
-                                        Row::new()
-                                            .grow(1.0)
-                                            .gap(6.0)
-                                            .padding(Insets {
-                                                top: 1.0,
-                                                right: 4.0,
-                                                bottom: 0.0,
-                                                left: 9.0,
-                                            })
-                                            .child(
-                                                self.tab_icon
-                                                    .as_ref()
-                                                    .map(|(id, icon)| {
-                                                        Image::new(*id, icon.clone())
-                                                            .width(18.0)
-                                                            .height(18.0)
-                                                            .into_element()
-                                                    })
-                                                    .unwrap_or_else(|| {
-                                                        Container::new().width(18.0).into_element()
-                                                    }),
-                                            )
-                                            .child(
-                                                Text::new(tab_name)
-                                                    .width(126.0)
-                                                    .scale(1.05)
-                                                    .color(palette.text),
-                                            )
-                                            .child(Text::new("×").width(20.0).color(palette.muted)),
-                                    )
-                                    .child(Container::new().height(2.0).background(palette.accent)),
-                            ),
-                    )
-                    .child(Text::new("+").width(24.0).scale(1.25).color(palette.muted)),
+                Row::new().gap(3.0).children(tabs).child(
+                    Container::new()
+                        .width(28.0)
+                        .action("tab:new")
+                        .padding(Insets {
+                            top: 1.0,
+                            right: 4.0,
+                            bottom: 0.0,
+                            left: 4.0,
+                        })
+                        .child(Text::new("+").width(20.0).scale(1.25).color(palette.muted)),
+                ),
             );
         let breadcrumb_row = Row::new()
             .gap(7.0)
@@ -510,12 +593,7 @@ impl FileApp {
         self.status.clear();
         self.refresh_icons();
         self.refresh_tab_icon();
-        if let Some(window) = &self.window {
-            window.set_title(&format!(
-                "Nickel File — {}",
-                self.browser.current().display()
-            ));
-        }
+        self.update_window_title();
         self.request_redraw();
     }
 
@@ -591,6 +669,7 @@ impl FileApp {
                 self.resizing_sidebar = true;
                 self.request_redraw();
             }
+            "tab:new" => self.new_tab(),
             "nav:back" => self.go_back(),
             "nav:forward" => self.go_forward(),
             "nav:up" => self.go_up(),
@@ -607,6 +686,20 @@ impl FileApp {
                 self.request_redraw();
             }
             _ => {
+                if let Some(index) = action
+                    .strip_prefix("tab:close:")
+                    .and_then(|index| index.parse::<usize>().ok())
+                {
+                    self.close_tab(index);
+                    return;
+                }
+                if let Some(index) = action
+                    .strip_prefix("tab:switch:")
+                    .and_then(|index| index.parse::<usize>().ok())
+                {
+                    self.switch_tab(index);
+                    return;
+                }
                 if let Some(path) = action.strip_prefix("folder-toggle:") {
                     let path = PathBuf::from(path);
                     if !self.expanded_folders.remove(&path) {
@@ -731,7 +824,12 @@ impl ApplicationHandler for FileApp {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
-            } => self.pointer_pressed(),
+            } => {
+                self.pointer_pressed();
+                if self.exit_requested {
+                    event_loop.exit();
+                }
+            }
             WindowEvent::MouseInput {
                 state: ElementState::Released,
                 button: MouseButton::Left,
@@ -788,6 +886,86 @@ impl ApplicationHandler for FileApp {
             _ => {}
         }
     }
+}
+
+fn file_tab_element(
+    index: usize,
+    browser: &DirectoryBrowser,
+    icon: Option<&(u16, Arc<image::RgbaImage>)>,
+    active: bool,
+    palette: ThemePalette,
+    light_mode: bool,
+) -> Container {
+    let label = browser
+        .current()
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| browser.current().display().to_string());
+    Container::new()
+        .width(170.0)
+        .action(format!("tab:switch:{index}"))
+        .background(if active {
+            if light_mode {
+                0xffffff
+            } else {
+                palette.background
+            }
+        } else if light_mode {
+            mix_rgb(palette.panel, 0xffffff)
+        } else {
+            palette.panel
+        })
+        .top_corner_radius(5.0)
+        .child(
+            Column::new()
+                .child(
+                    Row::new()
+                        .height(25.0)
+                        .gap(6.0)
+                        .padding(Insets {
+                            top: 4.0,
+                            right: 4.0,
+                            bottom: 3.0,
+                            left: 9.0,
+                        })
+                        .child(
+                            icon.map(|(id, icon)| {
+                                Image::new(*id, icon.clone())
+                                    .width(16.0)
+                                    .height(16.0)
+                                    .into_element()
+                            })
+                            .unwrap_or_else(|| Container::new().width(16.0).into_element()),
+                        )
+                        .child(
+                            Text::new(label)
+                                .width(108.0)
+                                .height(18.0)
+                                .scale(1.05)
+                                .color(if active { palette.text } else { palette.muted }),
+                        )
+                        .child(
+                            Container::new()
+                                .width(20.0)
+                                .action(format!("tab:close:{index}"))
+                                .child(Text::new("×").width(20.0).color(palette.muted)),
+                        ),
+                )
+                .child(Container::new().height(2.0).background(if active {
+                    palette.accent
+                } else {
+                    palette.panel
+                })),
+        )
+}
+
+fn mix_rgb(left: u32, right: u32) -> u32 {
+    let channel = |shift: u32| {
+        let left = (left >> shift) & 0xff_u32;
+        let right = (right >> shift) & 0xff_u32;
+        (left + right) / 2
+    };
+    (channel(16) << 16) | (channel(8) << 8) | channel(0)
 }
 
 fn breadcrumb_paths(current: &Path) -> Vec<(String, PathBuf)> {
