@@ -86,7 +86,15 @@ fn verify_default_collection() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let response = String::from_utf8_lossy(&output.stdout);
     let collection = default_collection_path(&response)?;
-    let locked = output_timed(
+    if collection_is_locked(collection)? {
+        unlock_collection(collection)?;
+        wait_for_collection_unlock(collection, Duration::from_secs(120))?;
+    }
+    Ok(())
+}
+
+fn collection_is_locked(collection: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    let output = output_timed(
         "busctl",
         [
             "--user",
@@ -97,16 +105,59 @@ fn verify_default_collection() -> Result<(), Box<dyn std::error::Error>> {
             "Locked",
         ],
     )?;
-    if String::from_utf8_lossy(&locked.stdout)
+    Ok(String::from_utf8_lossy(&output.stdout)
         .split_whitespace()
         .last()
-        != Some("false")
-    {
-        return Err(
-            "the existing Secret Service collection is locked; shell was not started".into(),
-        );
+        != Some("false"))
+}
+
+fn unlock_collection(collection: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let output = output_timed(
+        "busctl",
+        [
+            "--user",
+            "call",
+            "org.freedesktop.secrets",
+            "/org/freedesktop/secrets",
+            "org.freedesktop.Secret.Service",
+            "Unlock",
+            "ao",
+            "1",
+            collection,
+        ],
+    )?;
+    let response = String::from_utf8_lossy(&output.stdout);
+    let prompt = unlock_prompt_path(&response)?;
+    if prompt == "/" {
+        return Ok(());
     }
-    Ok(())
+    run_timed(
+        "busctl",
+        [
+            OsStr::new("--user"),
+            OsStr::new("call"),
+            OsStr::new("org.freedesktop.secrets"),
+            OsStr::new(prompt),
+            OsStr::new("org.freedesktop.Secret.Prompt"),
+            OsStr::new("Prompt"),
+            OsStr::new("s"),
+            OsStr::new(""),
+        ],
+    )
+}
+
+fn wait_for_collection_unlock(
+    collection: &str,
+    timeout: Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let started = Instant::now();
+    while started.elapsed() < timeout {
+        if !collection_is_locked(collection)? {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    Err("KDE Wallet remained locked; shell was not started".into())
 }
 
 fn run_timed<I, S>(program: &str, arguments: I) -> Result<(), Box<dyn std::error::Error>>
@@ -160,9 +211,17 @@ fn default_collection_path(response: &str) -> Result<&str, &'static str> {
     }
 }
 
+fn unlock_prompt_path(response: &str) -> Result<&str, &'static str> {
+    response
+        .split_whitespace()
+        .last()
+        .map(|path| path.trim_matches('"'))
+        .ok_or("Secret Service returned no unlock prompt identity")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::default_collection_path;
+    use super::{default_collection_path, unlock_prompt_path};
 
     #[test]
     fn accepts_existing_default_collection() {
@@ -176,5 +235,13 @@ mod tests {
     #[test]
     fn rejects_missing_default_collection() {
         assert!(default_collection_path("o \"/\"\n").is_err());
+    }
+
+    #[test]
+    fn extracts_unlock_prompt_path() {
+        assert_eq!(
+            unlock_prompt_path("aoo 0 \"/org/freedesktop/secrets/prompt/p0\"\n").unwrap(),
+            "/org/freedesktop/secrets/prompt/p0"
+        );
     }
 }
