@@ -22,7 +22,7 @@ use smithay::{
         renderer::{
             Bind, Color32F, ExportMem, Frame, ImportAll, ImportDma, ImportMem, Offscreen, Renderer,
             element::{
-                Kind,
+                AsRenderElements, Kind,
                 memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
                 solid::{SolidColorBuffer, SolidColorRenderElement},
                 surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
@@ -50,7 +50,7 @@ use smithay::{
         rustix::fs::OFlags,
         wayland_server::{Resource, backend::GlobalId},
     },
-    utils::{Buffer, DeviceFd, Physical, Point, Rectangle, Transform},
+    utils::{Buffer, DeviceFd, Physical, Point, Rectangle, Scale, Transform},
 };
 use thiserror::Error;
 
@@ -98,6 +98,7 @@ type NativeRenderer<'a> =
     smithay::backend::renderer::multigpu::MultiRenderer<'a, 'a, RendererBackend, RendererBackend>;
 smithay::backend::renderer::element::render_elements! {
     NativeCustomElement<R> where R: ImportAll + ImportMem;
+    Surface=WaylandSurfaceRenderElement<R>,
     Pointer=MemoryRenderBufferRenderElement<R>,
     Solid=SolidColorRenderElement,
 }
@@ -817,59 +818,58 @@ impl CalloopData {
             }
             let mut elements: Vec<
                 NativeElement<NativeRenderer<'_>, WaylandSurfaceRenderElement<NativeRenderer<'_>>>,
-            > = match self
-                .state
-                .space
-                .render_elements_for_output(&mut renderer, &output, 1.0)
-            {
-                Ok(elements) => elements.into_iter().map(NativeElement::from).collect(),
-                Err(error) => {
-                    tracing::warn!(?error, "failed to build output elements");
-                    return;
-                }
-            };
+            > = Vec::new();
             let shell_surfaces = self
                 .state
                 .shell_windows()
                 .filter_map(|window| window.toplevel().map(|surface| surface.wl_surface().id()))
                 .collect::<Vec<_>>();
-            let frame_rectangles = self
-                .state
-                .space
-                .elements()
-                .filter_map(|window| {
-                    let surface = window.toplevel()?.wl_surface();
-                    if shell_surfaces.contains(&surface.id())
+            if let Some(output_geometry) = self.state.space.output_geometry(&output) {
+                // Space stores windows back-to-front. Build each window and its
+                // frame together, front-to-back, so overlapping frames obey the
+                // same stacking order as their client surfaces.
+                for window in self.state.space.elements().rev() {
+                    let Some(bounds) = self.state.space.element_bbox(window) else {
+                        continue;
+                    };
+                    if !output_geometry.overlaps(bounds) {
+                        continue;
+                    }
+                    let Some(location) = self.state.space.element_location(window) else {
+                        continue;
+                    };
+                    let render_location = location - window.geometry().loc - output_geometry.loc;
+                    let window_elements = window
+                        .render_elements::<WaylandSurfaceRenderElement<NativeRenderer<'_>>>(
+                            &mut renderer,
+                            render_location.to_physical_precise_round(Scale::from(1.0)),
+                            Scale::from(1.0),
+                            1.0,
+                        );
+                    let has_content = !window_elements.is_empty();
+                    elements.extend(
+                        window_elements
+                            .into_iter()
+                            .map(|element| NativeElement::from(NativeCustomElement::from(element))),
+                    );
+
+                    let Some(surface) = window.toplevel().map(|top| top.wl_surface()) else {
+                        continue;
+                    };
+                    if !has_content
+                        || shell_surfaces.contains(&surface.id())
                         || self.state.is_fullscreen_window(window)
                         || !self.state.is_server_decorated(window)
                     {
-                        return None;
-                    }
-                    let bounds = self.state.space.element_bbox(window)?;
-                    if render_elements_from_surface_tree::<
-                        NativeRenderer<'_>,
-                        WaylandSurfaceRenderElement<NativeRenderer<'_>>,
-                    >(
-                        &mut renderer, surface, (0, 0), 1.0, 1.0, Kind::Unspecified
-                    )
-                    .is_empty()
-                    {
-                        return None;
+                        continue;
                     }
                     let active = self
                         .state
                         .surface_windows
                         .get(&surface.id())
                         .is_some_and(|id| self.state.windows.is_active(*id));
-                    Some((bounds, active, self.state.is_maximized_window(window)))
-                })
-                .collect::<Vec<_>>();
-            if let Some(output_geometry) = self.state.space.output_geometry(&output) {
-                for (bounds, active, maximized) in frame_rectangles {
-                    // Render the active window's frame above application content.
-                    // Inactive frames belong below all higher stacked windows rather
-                    // than in a compositor-global overlay.
-                    let frame_index = if active { 0 } else { elements.len() };
+                    let maximized = self.state.is_maximized_window(window);
+                    let frame_index = elements.len();
                     let color = if active {
                         [0.12, 0.16, 0.24, 1.0]
                     } else {
@@ -942,7 +942,7 @@ impl CalloopData {
                             1.0,
                             Kind::Unspecified,
                         );
-                        elements.insert(frame_index, NativeCustomElement::from(element).into());
+                        elements.push(NativeCustomElement::from(element).into());
                     }
                     if let Some(icons) = &frame_icons {
                         let icon_y = bounds.loc.y
