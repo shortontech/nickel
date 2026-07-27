@@ -846,6 +846,16 @@ impl CalloopData {
                         return None;
                     }
                     let bounds = self.state.space.element_bbox(window)?;
+                    if render_elements_from_surface_tree::<
+                        NativeRenderer<'_>,
+                        WaylandSurfaceRenderElement<NativeRenderer<'_>>,
+                    >(
+                        &mut renderer, surface, (0, 0), 1.0, 1.0, Kind::Unspecified
+                    )
+                    .is_empty()
+                    {
+                        return None;
+                    }
                     let active = self
                         .state
                         .surface_windows
@@ -856,6 +866,10 @@ impl CalloopData {
                 .collect::<Vec<_>>();
             if let Some(output_geometry) = self.state.space.output_geometry(&output) {
                 for (bounds, active, maximized) in frame_rectangles {
+                    // Render the active window's frame above application content.
+                    // Inactive frames belong below all higher stacked windows rather
+                    // than in a compositor-global overlay.
+                    let frame_index = if active { 0 } else { elements.len() };
                     let color = if active {
                         [0.12, 0.16, 0.24, 1.0]
                     } else {
@@ -928,7 +942,7 @@ impl CalloopData {
                             1.0,
                             Kind::Unspecified,
                         );
-                        elements.insert(0, NativeCustomElement::from(element).into());
+                        elements.insert(frame_index, NativeCustomElement::from(element).into());
                     }
                     if let Some(icons) = &frame_icons {
                         let icon_y = bounds.loc.y
@@ -957,7 +971,8 @@ impl CalloopData {
                                 None,
                                 Kind::Unspecified,
                             ) {
-                                elements.insert(0, NativeCustomElement::from(icon).into());
+                                elements
+                                    .insert(frame_index, NativeCustomElement::from(icon).into());
                             }
                         }
                     }
