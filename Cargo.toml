@@ -49,4 +49,5 @@ wgpu = "30.0.0"
 winit = "0.30.12"
 windows = "0.62.2"
 winresource = "0.1.31"
+xcursor = "0.3.10"
 zbus = { version = "5.12.0", default-features = false, features = ["blocking-api", "async-io"] }

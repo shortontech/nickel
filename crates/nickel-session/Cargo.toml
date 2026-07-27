@@ -12,6 +12,7 @@ smithay.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+xcursor.workspace = true
 
 [features]
 default = ["backend-winit"]
