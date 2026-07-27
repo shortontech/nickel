@@ -80,6 +80,10 @@ impl WindowRegistry {
         self.windows.get(&id).is_some_and(|window| window.active)
     }
 
+    pub fn title(&self, id: WindowId) -> Option<&str> {
+        self.windows.get(&id).map(|window| window.title.as_str())
+    }
+
     #[cfg(test)]
     fn test_snapshot(&self) -> Vec<&WindowInfo> {
         self.snapshot()
