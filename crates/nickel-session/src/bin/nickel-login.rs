@@ -5,6 +5,9 @@ use std::{
     process::Command,
 };
 
+const CURRENT_DESKTOP: &str = "Nickel:KDE";
+const KDE_SESSION_VERSION: &str = "6";
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let executable = env::current_exe()?;
     let directory = executable
@@ -28,8 +31,10 @@ fn prepare_login_environment() -> Result<(), Box<dyn std::error::Error>> {
     // SAFETY: nickel-login is single-threaded and has not launched a child.
     unsafe {
         env::set_var("XDG_SESSION_TYPE", "wayland");
-        env::set_var("XDG_CURRENT_DESKTOP", "Nickel");
+        env::set_var("XDG_CURRENT_DESKTOP", CURRENT_DESKTOP);
         env::set_var("XDG_SESSION_DESKTOP", "Nickel");
+        env::set_var("KDE_FULL_SESSION", "true");
+        env::set_var("KDE_SESSION_VERSION", KDE_SESSION_VERSION);
     }
 
     let pam_socket = env::var_os("PAM_KWALLET5_LOGIN")
@@ -55,7 +60,16 @@ fn sibling_binary(directory: &Path, name: &str) -> Result<PathBuf, Box<dyn std::
 
 #[cfg(test)]
 mod tests {
-    use super::sibling_binary;
+    use super::{CURRENT_DESKTOP, KDE_SESSION_VERSION, sibling_binary};
+
+    #[test]
+    fn advertises_kde_compatibility() {
+        assert_eq!(
+            CURRENT_DESKTOP.split(':').collect::<Vec<_>>(),
+            ["Nickel", "KDE"]
+        );
+        assert_eq!(KDE_SESSION_VERSION, "6");
+    }
 
     #[test]
     fn rejects_missing_sibling() {

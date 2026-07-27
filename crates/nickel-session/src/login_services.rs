@@ -12,6 +12,8 @@ pub fn prepare_secure_storage() -> Result<(), Box<dyn std::error::Error>> {
             OsStr::new("--systemd"),
             OsStr::new("PAM_KWALLET5_LOGIN"),
             OsStr::new("WAYLAND_DISPLAY"),
+            OsStr::new("KDE_FULL_SESSION"),
+            OsStr::new("KDE_SESSION_VERSION"),
             OsStr::new("XDG_CURRENT_DESKTOP"),
             OsStr::new("XDG_SESSION_DESKTOP"),
             OsStr::new("XDG_SESSION_TYPE"),
