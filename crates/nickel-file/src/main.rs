@@ -8,22 +8,22 @@ use std::{
 };
 
 use nickel_components::{
-    Button, Column, Component, ComponentGpu, Container, FileGrid, FileGridItem, HorizontalRule,
-    Image, Insets, LinearGradient, Point, Rect, Row, Sidebar, SidebarFolder, SidebarSection, Text,
-    UiTree,
+    Button, Column, Component, Container, FileGrid, FileGridItem, HorizontalRule, Image, Insets,
+    LinearGradient, PaintCommand, Point, Rect, Row, SdlComponentRenderer, Sidebar, SidebarFolder,
+    SidebarSection, Text, TextAlign, UiTree,
 };
 use nickel_core::{
     shell_settings::ShellSettings,
     theme::{ThemeMode, ThemePalette},
 };
 use nickel_file::{DirectoryBrowser, FileEntry};
-use winit::{
-    application::ApplicationHandler,
-    dpi::LogicalSize,
-    event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
-    event_loop::{ActiveEventLoop, EventLoop},
-    keyboard::{Key, NamedKey},
-    window::{Icon, Window, WindowAttributes, WindowId},
+use sdl3::{
+    event::{Event, WindowEvent},
+    keyboard::{Keycode, Mod},
+    mouse::MouseButton,
+    pixels::PixelFormat,
+    surface::Surface,
+    video::Window,
 };
 
 const DEFAULT_SIDEBAR_WIDTH: f32 = 190.0;
@@ -36,21 +36,35 @@ const DEFAULT_TILE_WIDTH: f32 = 150.0;
 const MIN_TILE_WIDTH: f32 = 110.0;
 const MAX_TILE_WIDTH: f32 = 240.0;
 
-fn nickel_file_icon() -> Option<Icon> {
-    let image = image::load_from_memory(include_bytes!("../../../assets/icons/nickel-file.png"))
-        .ok()?
-        .into_rgba8();
+fn set_nickel_file_icon(window: &mut Window) {
+    let Ok(image) =
+        image::load_from_memory(include_bytes!("../../../assets/icons/nickel-file.png"))
+    else {
+        return;
+    };
+    let mut image = image.into_rgba8();
     let (width, height) = image.dimensions();
-    Icon::from_rgba(image.into_raw(), width, height).ok()
+    if let Ok(surface) = Surface::from_data(
+        image.as_mut(),
+        width,
+        height,
+        width * 4,
+        PixelFormat::ABGR8888,
+    ) {
+        window.set_icon(&surface);
+    }
 }
 
 struct FileApp {
-    window: Option<Arc<Window>>,
-    gpu: Option<ComponentGpu>,
+    window: Option<Window>,
+    renderer: Option<SdlComponentRenderer>,
+    dirty: bool,
     browser: DirectoryBrowser,
     ui: UiTree,
     cursor: Point,
     selected: Option<usize>,
+    selected_entries: HashSet<usize>,
+    selection_anchor: Option<usize>,
     scroll_offset: usize,
     status: String,
     last_click: Option<(usize, Instant)>,
@@ -61,6 +75,9 @@ struct FileApp {
     expanded_folders: HashSet<PathBuf>,
     hovered_action: Option<String>,
     control_down: bool,
+    shift_down: bool,
+    selection_drag: Option<Point>,
+    context_menu: Option<(Point, Option<usize>)>,
     tile_width: f32,
     tab_icon: Option<(u16, Arc<image::RgbaImage>)>,
     tabs: Vec<Option<FileTab>>,
@@ -71,6 +88,8 @@ struct FileApp {
 struct FileTab {
     browser: DirectoryBrowser,
     selected: Option<usize>,
+    selected_entries: HashSet<usize>,
+    selection_anchor: Option<usize>,
     scroll_offset: usize,
     status: String,
     last_click: Option<(usize, Instant)>,
@@ -97,11 +116,14 @@ impl FileApp {
         };
         let mut app = Self {
             window: None,
-            gpu: None,
+            renderer: None,
+            dirty: true,
             browser,
             ui: UiTree::default(),
             cursor: Point { x: 0.0, y: 0.0 },
             selected: None,
+            selected_entries: HashSet::new(),
+            selection_anchor: None,
             scroll_offset: 0,
             status,
             last_click: None,
@@ -112,6 +134,9 @@ impl FileApp {
             expanded_folders: HashSet::new(),
             hovered_action: None,
             control_down: false,
+            shift_down: false,
+            selection_drag: None,
+            context_menu: None,
             tile_width: DEFAULT_TILE_WIDTH,
             tab_icon: None,
             tabs: vec![None],
@@ -136,6 +161,8 @@ impl FileApp {
         };
         std::mem::swap(&mut self.browser, &mut target.browser);
         std::mem::swap(&mut self.selected, &mut target.selected);
+        std::mem::swap(&mut self.selected_entries, &mut target.selected_entries);
+        std::mem::swap(&mut self.selection_anchor, &mut target.selection_anchor);
         std::mem::swap(&mut self.scroll_offset, &mut target.scroll_offset);
         std::mem::swap(&mut self.status, &mut target.status);
         std::mem::swap(&mut self.last_click, &mut target.last_click);
@@ -148,7 +175,10 @@ impl FileApp {
     }
 
     fn new_tab(&mut self) {
-        let path = home_directory();
+        self.new_tab_at(home_directory());
+    }
+
+    fn new_tab_at(&mut self, path: PathBuf) {
         let show_hidden = nickel_platform::show_hidden_files();
         let Ok(browser) = DirectoryBrowser::open_with_hidden(path, show_hidden) else {
             return;
@@ -161,6 +191,8 @@ impl FileApp {
         self.tabs.push(Some(FileTab {
             browser,
             selected: None,
+            selected_entries: HashSet::new(),
+            selection_anchor: None,
             scroll_offset: 0,
             status: String::new(),
             last_click: None,
@@ -198,19 +230,17 @@ impl FileApp {
         self.request_redraw();
     }
 
-    fn update_window_title(&self) {
-        if let Some(window) = &self.window {
-            window.set_title(&format!(
+    fn update_window_title(&mut self) {
+        if let Some(window) = &mut self.window {
+            let _ = window.set_title(&format!(
                 "Nickel File — {}",
                 self.browser.current().display()
             ));
         }
     }
 
-    fn request_redraw(&self) {
-        if let Some(window) = &self.window {
-            window.request_redraw();
-        }
+    fn request_redraw(&mut self) {
+        self.dirty = true;
     }
 
     fn tile_height(&self) -> f32 {
@@ -233,10 +263,10 @@ impl FileApp {
         self.window
             .as_ref()
             .map(|window| {
-                let size = window.inner_size();
+                let size = window.size();
                 (
-                    self.grid_columns_for_width(size.width as f32),
-                    self.grid_rows_for_height(size.height as f32),
+                    self.grid_columns_for_width(size.0 as f32),
+                    self.grid_rows_for_height(size.1 as f32),
                 )
             })
             .unwrap_or((5, 4))
@@ -427,7 +457,7 @@ impl FileApp {
                 file_tile(
                     index,
                     entry,
-                    self.selected == Some(index),
+                    self.selected_entries.contains(&index),
                     self.icons.get(&entry.path).cloned(),
                     palette,
                     (self.tile_width * 0.42).clamp(42.0, 96.0),
@@ -497,29 +527,97 @@ impl FileApp {
             .child(toolbar)
             .child(content)
             .child(footer);
-        UiTree::layout(root, Rect::new(0.0, 0.0, width, height))
+        let mut tree = UiTree::layout(root, Rect::new(0.0, 0.0, width, height));
+        if let Some(start) = self.selection_drag {
+            let rect = rect_between(start, self.cursor);
+            tree.push_overlay_command(PaintCommand::OverlayFill {
+                rect,
+                color: 0x4068_b8ff,
+            });
+            tree.push_overlay_command(PaintCommand::OverlayStroke {
+                rect,
+                color: palette.accent,
+                width: 1.0,
+            });
+        }
+        if let Some((point, entry)) = self.context_menu {
+            let labels: [(&str, &str); 2] = if entry.is_some() {
+                [
+                    ("context:open", "Open"),
+                    ("context:open-new-tab", "Open in New Tab"),
+                ]
+            } else {
+                [
+                    ("context:refresh", "Refresh"),
+                    ("context:select-all", "Select All"),
+                ]
+            };
+            let menu_width = 170.0;
+            let row_height = 34.0;
+            let menu_height = labels.len() as f32 * row_height + 8.0;
+            let origin = Point {
+                x: point.x.min((width - menu_width - 4.0).max(4.0)),
+                y: point.y.min((height - menu_height - 4.0).max(4.0)),
+            };
+            let menu = Rect::new(origin.x, origin.y, menu_width, menu_height);
+            tree.push_overlay_command(PaintCommand::OverlayFill {
+                rect: menu,
+                color: palette.surface,
+            });
+            tree.push_overlay_command(PaintCommand::OverlayStroke {
+                rect: menu,
+                color: palette.muted,
+                width: 1.0,
+            });
+            for (row, (action, label)) in labels.into_iter().enumerate() {
+                let bounds = Rect::new(
+                    origin.x + 8.0,
+                    origin.y + 4.0 + row as f32 * row_height,
+                    menu_width - 16.0,
+                    row_height,
+                );
+                tree.push_overlay_command(PaintCommand::Text {
+                    bounds,
+                    text: label.to_owned(),
+                    scale: 1.2,
+                    color: palette.text,
+                    align: TextAlign::Start,
+                    bold: false,
+                });
+                tree.push_overlay_action(bounds, action);
+            }
+        }
+        tree
     }
 
-    fn render(&mut self) {
+    fn render(&mut self, events: &sdl3::EventPump) {
         let Some(window) = &self.window else {
             return;
         };
         let appearance =
             ShellSettings::load_default().resolve_appearance(nickel_platform::appearance());
-        nickel_platform::apply_window_appearance(window, appearance);
         let palette = ThemePalette::from_appearance(appearance);
-        let size = window.inner_size();
+        let size = window.size();
         self.ui = self.build_ui(
-            size.width as f32,
-            size.height as f32,
+            size.0 as f32,
+            size.1 as f32,
             palette,
             appearance.mode == ThemeMode::Light,
         );
-        if let Some(gpu) = &mut self.gpu
-            && let Err(error) = gpu.render(self.ui.commands())
-        {
-            tracing::warn!(%error, "failed to render Nickel File");
+        if let Some(renderer) = &mut self.renderer {
+            renderer.invalidate();
+            let result = window
+                .surface(events)
+                .map_err(|error| error.to_string())
+                .and_then(|mut surface| {
+                    renderer.present(&mut surface, self.ui.commands())?;
+                    surface.finish().map_err(|error| error.to_string())
+                });
+            if let Err(error) = result {
+                tracing::warn!(%error, "failed to render Nickel File");
+            }
         }
+        self.dirty = false;
     }
 
     fn activate_selected(&mut self) {
@@ -589,6 +687,8 @@ impl FileApp {
 
     fn navigation_changed(&mut self) {
         self.selected = None;
+        self.selected_entries.clear();
+        self.selection_anchor = None;
         self.scroll_offset = 0;
         self.status.clear();
         self.refresh_icons();
@@ -629,10 +729,23 @@ impl FileApp {
         let len = self.browser.entries().len();
         if len == 0 {
             self.selected = None;
+            self.selected_entries.clear();
+            self.selection_anchor = None;
             return;
         }
         let current = self.selected.unwrap_or(0) as isize;
-        self.selected = Some((current + delta).clamp(0, len as isize - 1) as usize);
+        let next = (current + delta).clamp(0, len as isize - 1) as usize;
+        self.selected = Some(next);
+        if self.shift_down {
+            let anchor = self.selection_anchor.unwrap_or(current as usize);
+            self.selected_entries.clear();
+            self.selected_entries
+                .extend(anchor.min(next)..=anchor.max(next));
+        } else {
+            self.selected_entries.clear();
+            self.selected_entries.insert(next);
+            self.selection_anchor = Some(next);
+        }
         self.ensure_selection_visible();
         self.request_redraw();
     }
@@ -662,10 +775,55 @@ impl FileApp {
 
     fn pointer_pressed(&mut self) {
         let Some(action) = self.ui.action_at(self.cursor).map(str::to_owned) else {
+            self.context_menu = None;
+            self.selection_drag = Some(self.cursor);
+            if !self.control_down && !self.shift_down {
+                self.selected = None;
+                self.selected_entries.clear();
+                self.selection_anchor = None;
+            }
+            self.request_redraw();
             return;
         };
+        if !action.starts_with("context:") {
+            self.context_menu = None;
+        }
         match action.as_str() {
+            "context:open" => {
+                self.context_menu = None;
+                self.activate_selected();
+            }
+            "context:open-new-tab" => {
+                let entry = self
+                    .selected
+                    .and_then(|index| self.browser.entries().get(index))
+                    .cloned();
+                self.context_menu = None;
+                if let Some(entry) = entry {
+                    if entry.is_directory || entry.path.is_dir() {
+                        self.new_tab_at(entry.path);
+                    } else if let Err(error) = open_path(&entry.path) {
+                        self.status = format!("Could not open {}: {error}", entry.display_name());
+                    }
+                }
+            }
+            "context:refresh" => {
+                self.context_menu = None;
+                if let Err(error) = self.browser.refresh() {
+                    self.status = format!("Could not refresh: {error}");
+                }
+                self.refresh_icons();
+                self.request_redraw();
+            }
+            "context:select-all" => {
+                self.context_menu = None;
+                self.selected_entries = (0..self.browser.entries().len()).collect();
+                self.selected = (!self.browser.entries().is_empty()).then_some(0);
+                self.selection_anchor = self.selected;
+                self.request_redraw();
+            }
             "sidebar:resize" => {
+                self.context_menu = None;
                 self.resizing_sidebar = true;
                 self.request_redraw();
             }
@@ -682,6 +840,8 @@ impl FileApp {
                 }
                 self.refresh_icons();
                 self.selected = None;
+                self.selected_entries.clear();
+                self.selection_anchor = None;
                 self.scroll_offset = 0;
                 self.request_redraw();
             }
@@ -740,9 +900,24 @@ impl FileApp {
                 let activate = self.last_click.is_some_and(|(previous, when)| {
                     previous == index && now.duration_since(when) <= Duration::from_millis(450)
                 });
+                if self.shift_down {
+                    let anchor = self.selection_anchor.unwrap_or(index);
+                    self.selected_entries.clear();
+                    self.selected_entries
+                        .extend(anchor.min(index)..=anchor.max(index));
+                } else if self.control_down {
+                    if !self.selected_entries.remove(&index) {
+                        self.selected_entries.insert(index);
+                    }
+                    self.selection_anchor = Some(index);
+                } else {
+                    self.selected_entries.clear();
+                    self.selected_entries.insert(index);
+                    self.selection_anchor = Some(index);
+                }
                 self.selected = Some(index);
                 self.last_click = Some((index, now));
-                if activate {
+                if activate && !self.control_down && !self.shift_down {
                     self.activate_selected();
                     self.last_click = None;
                 } else {
@@ -753,59 +928,59 @@ impl FileApp {
     }
 }
 
-impl ApplicationHandler for FileApp {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_some() {
-            return;
-        }
-        let mut attributes = WindowAttributes::default()
-            .with_title(format!(
-                "Nickel File — {}",
-                self.browser.current().display()
-            ))
-            .with_window_icon(nickel_file_icon())
-            .with_inner_size(LogicalSize::new(860.0, 620.0))
-            .with_min_inner_size(LogicalSize::new(560.0, 360.0));
-        #[cfg(target_os = "linux")]
-        {
-            use winit::platform::wayland::WindowAttributesExtWayland;
-            attributes = attributes.with_name("nickel-file", "nickel-file");
-        }
-        let window = Arc::new(
-            event_loop
-                .create_window(attributes)
-                .expect("create Nickel File window"),
-        );
-        #[cfg(target_os = "windows")]
-        {
-            use winit::platform::windows::WindowExtWindows;
-            window.set_taskbar_icon(nickel_file_icon());
-        }
-        let size = window.inner_size();
-        self.gpu = Some(
-            ComponentGpu::new(window.clone(), size.width, size.height)
-                .expect("create Nickel File renderer"),
-        );
+impl FileApp {
+    fn attach_window(&mut self, window: Window) {
+        let (width, height) = window.size_in_pixels();
+        let scale = window.pixel_density();
+        self.renderer = Some(SdlComponentRenderer::new(width, height, scale));
         self.window = Some(window);
         self.request_redraw();
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn handle_event(&mut self, event: Event) -> bool {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::RedrawRequested => self.render(),
-            WindowEvent::Resized(size) => {
-                if let Some(gpu) = &mut self.gpu {
-                    gpu.resize(size.width, size.height);
+            Event::Quit { .. }
+            | Event::Window {
+                win_event: WindowEvent::CloseRequested,
+                ..
+            } => return false,
+            Event::Window {
+                win_event: WindowEvent::Exposed,
+                ..
+            } => self.request_redraw(),
+            Event::Window {
+                win_event: WindowEvent::Resized(_, _),
+                ..
+            } => {
+                self.ensure_selection_visible();
+                self.request_redraw();
+            }
+            Event::Window {
+                win_event: WindowEvent::PixelSizeChanged(width, height),
+                ..
+            } => {
+                let scale = self.window.as_ref().map_or(1.0, Window::pixel_density);
+                if let Some(renderer) = &mut self.renderer {
+                    renderer.resize(width.max(1) as u32, height.max(1) as u32, scale);
                 }
                 self.ensure_selection_visible();
                 self.request_redraw();
             }
-            WindowEvent::CursorMoved { position, .. } => {
-                self.cursor = Point {
-                    x: position.x as f32,
-                    y: position.y as f32,
-                };
+            Event::MouseMotion { x, y, .. } => {
+                self.cursor = Point { x, y };
+                if let Some(start) = self.selection_drag {
+                    let selection = rect_between(start, self.cursor);
+                    let entries = self
+                        .ui
+                        .actions_intersecting(selection)
+                        .into_iter()
+                        .filter_map(|action| action.strip_prefix("entry:"))
+                        .filter_map(|index| index.parse::<usize>().ok())
+                        .collect::<HashSet<_>>();
+                    self.selected_entries = entries;
+                    self.selected = self.selected_entries.iter().copied().min();
+                    self.request_redraw();
+                }
                 if self.resizing_sidebar {
                     self.sidebar_width = self.cursor.x.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
                     self.ensure_selection_visible();
@@ -817,68 +992,90 @@ impl ApplicationHandler for FileApp {
                     self.request_redraw();
                 }
             }
-            WindowEvent::CursorLeft { .. } => {
+            Event::Window {
+                win_event: WindowEvent::MouseLeave,
+                ..
+            } => {
                 self.hovered_action = None;
                 self.request_redraw();
             }
-            WindowEvent::ModifiersChanged(modifiers) => {
-                self.control_down = modifiers.state().control_key();
-            }
-            WindowEvent::MouseInput {
-                state: ElementState::Pressed,
-                button: MouseButton::Left,
+            Event::MouseButtonDown {
+                mouse_btn: MouseButton::Left,
                 ..
             } => {
                 self.pointer_pressed();
                 if self.exit_requested {
-                    event_loop.exit();
+                    return false;
                 }
             }
-            WindowEvent::MouseInput {
-                state: ElementState::Released,
-                button: MouseButton::Left,
+            Event::MouseButtonDown {
+                mouse_btn: MouseButton::Right,
+                ..
+            } => {
+                let entry = self
+                    .ui
+                    .action_at(self.cursor)
+                    .and_then(|action| action.strip_prefix("entry:"))
+                    .and_then(|index| index.parse::<usize>().ok());
+                if let Some(index) = entry
+                    && !self.selected_entries.contains(&index)
+                {
+                    self.selected_entries.clear();
+                    self.selected_entries.insert(index);
+                    self.selected = Some(index);
+                    self.selection_anchor = Some(index);
+                }
+                self.context_menu = Some((self.cursor, entry));
+                self.selection_drag = None;
+                self.request_redraw();
+            }
+            Event::MouseButtonUp {
+                mouse_btn: MouseButton::Left,
                 ..
             } => {
                 self.resizing_sidebar = false;
+                self.selection_drag = None;
                 self.request_redraw();
             }
-            WindowEvent::MouseWheel { delta, .. } => {
+            Event::MouseWheel { y, .. } => {
                 if self.control_down {
-                    let direction = match delta {
-                        MouseScrollDelta::LineDelta(_, y) => y.signum(),
-                        MouseScrollDelta::PixelDelta(position) => position.y.signum() as f32,
-                    };
+                    let direction = y.signum();
                     self.tile_width =
                         (self.tile_width + direction * 12.0).clamp(MIN_TILE_WIDTH, MAX_TILE_WIDTH);
                     self.ensure_selection_visible();
                     self.request_redraw();
-                    return;
+                    return true;
                 }
-                let rows = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => {
-                        -(y.round() as isize) * self.grid_dimensions().0 as isize
-                    }
-                    MouseScrollDelta::PixelDelta(position) => {
-                        -(position.y / f64::from(self.tile_height())).round() as isize
-                            * self.grid_dimensions().0 as isize
-                    }
-                };
+                let rows = -(y.round() as isize) * self.grid_dimensions().0 as isize;
                 self.scroll(rows);
             }
-            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                match event.logical_key {
-                    Key::Named(NamedKey::ArrowDown) => {
-                        self.select_relative(self.grid_dimensions().0 as isize)
+            Event::KeyDown {
+                keycode, keymod, ..
+            } => {
+                self.control_down = keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD);
+                self.shift_down = keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD);
+                match keycode {
+                    Some(Keycode::Down) => self.select_relative(self.grid_dimensions().0 as isize),
+                    Some(Keycode::Up) => self.select_relative(-(self.grid_dimensions().0 as isize)),
+                    Some(Keycode::Right) => self.select_relative(1),
+                    Some(Keycode::Left) => self.select_relative(-1),
+                    Some(Keycode::Return | Keycode::Return2) => self.activate_selected(),
+                    Some(Keycode::Backspace) => self.go_back(),
+                    Some(Keycode::Escape) => {
+                        self.selected = None;
+                        self.selected_entries.clear();
+                        self.selection_anchor = None;
+                        self.request_redraw();
                     }
-                    Key::Named(NamedKey::ArrowUp) => {
-                        self.select_relative(-(self.grid_dimensions().0 as isize))
+                    Some(Keycode::A) if self.control_down => {
+                        self.selected_entries = (0..self.browser.entries().len()).collect();
+                        self.selected = self
+                            .selected
+                            .or_else(|| (!self.browser.entries().is_empty()).then_some(0));
+                        self.selection_anchor = self.selected;
+                        self.request_redraw();
                     }
-                    Key::Named(NamedKey::ArrowRight) => self.select_relative(1),
-                    Key::Named(NamedKey::ArrowLeft) => self.select_relative(-1),
-                    Key::Named(NamedKey::Enter) => self.activate_selected(),
-                    Key::Named(NamedKey::Backspace) => self.go_back(),
-                    Key::Named(NamedKey::Escape) => self.selected = None,
-                    Key::Named(NamedKey::F5) => {
+                    Some(Keycode::F5) => {
                         if let Err(error) = self.browser.refresh() {
                             self.status = format!("Could not refresh: {error}");
                         }
@@ -887,8 +1084,16 @@ impl ApplicationHandler for FileApp {
                     _ => {}
                 }
             }
+            Event::KeyUp { keymod, .. } => {
+                self.control_down = keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD);
+                self.shift_down = keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD);
+            }
+            // SDL keeps text input and IME composition in the event stream. Nickel File
+            // currently has no editable field, so these remain intentionally unconsumed.
+            Event::TextInput { .. } | Event::TextEditing { .. } => {}
             _ => {}
         }
+        true
     }
 }
 
@@ -1259,13 +1464,53 @@ fn open_path(_path: &Path) -> Result<(), String> {
     Err("opening files is unsupported on this platform".into())
 }
 
+fn rect_between(start: Point, end: Point) -> Rect {
+    Rect::new(
+        start.x.min(end.x),
+        start.y.min(end.y),
+        (start.x - end.x).abs().max(1.0),
+        (start.y - end.y).abs().max(1.0),
+    )
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _log_path = nickel_logging::init("nickel-file").ok();
     let path = std::env::args_os()
         .nth(1)
         .map(PathBuf::from)
         .unwrap_or_else(home_directory);
-    let event_loop = EventLoop::new()?;
-    event_loop.run_app(&mut FileApp::new(path))?;
+    let sdl = sdl3::init()?;
+    let video = sdl.video()?;
+    let mut events = sdl.event_pump()?;
+    let title = format!("Nickel File — {}", path.display());
+    let mut window = video
+        .window(&title, 860, 620)
+        .position_centered()
+        .resizable()
+        .high_pixel_density()
+        .build()?;
+    window.set_minimum_size(560, 360)?;
+    set_nickel_file_icon(&mut window);
+
+    let mut app = FileApp::new(path);
+    app.attach_window(window);
+    app.update_window_title();
+    while !app.exit_requested {
+        if app.dirty {
+            app.render(&events);
+        }
+        let Some(event) = events.wait_event_timeout(Duration::from_millis(16)) else {
+            continue;
+        };
+        if !app.handle_event(event) {
+            break;
+        }
+        for event in events.poll_iter() {
+            if !app.handle_event(event) {
+                app.exit_requested = true;
+                break;
+            }
+        }
+    }
     Ok(())
 }

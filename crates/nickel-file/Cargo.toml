@@ -12,7 +12,7 @@ nickel-core = { path = "../nickel-core" }
 nickel-logging = { path = "../nickel-logging" }
 nickel-platform = { path = "../nickel-platform" }
 tracing.workspace = true
-winit.workspace = true
+sdl3.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { workspace = true, features = [

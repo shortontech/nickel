@@ -81,7 +81,7 @@ pub fn set_audio_volume(_volume_percent: u8) -> bool {
     false
 }
 
-pub fn capture_pointer(_window: &winit::window::Window) -> bool {
+pub fn capture_pointer(_window: &sdl3::video::Window) -> bool {
     false
 }
 
@@ -307,6 +307,15 @@ impl WindowFeed {
                 .filter_map(|line| parse_window(line, launcher))
                 .collect(),
         )
+    }
+
+    pub fn launcher_visible(&self) -> Option<bool> {
+        let socket = self.socket.as_ref()?;
+        socket
+            .send_to(b"launcher-visible", env::var_os(SESSION_CONTROL_ENV)?)
+            .ok()?;
+        let mut response = [0_u8; 1];
+        (socket.recv(&mut response).ok()? == 1).then_some(response[0] == b'1')
     }
 
     pub fn preview(&self, window: WindowId) -> Option<WindowPreview> {

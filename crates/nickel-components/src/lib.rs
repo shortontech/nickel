@@ -7,7 +7,7 @@ pub mod text_editor;
 pub mod ui;
 
 pub use controller::{ControllerAction, ControllerInput, NavigationPane, PaneNavigation};
-pub use gpu::ComponentGpu;
+pub use gpu::{ComponentGpu, DamageRegion, Pixel, SdlComponentRenderer};
 pub use layout::{Axis, Constraints, FlexItem, Insets, Point, Rect, Size, layout_flex};
 pub use text_editor::TextEditor;
 pub use ui::{

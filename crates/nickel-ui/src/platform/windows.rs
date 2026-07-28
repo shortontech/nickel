@@ -90,7 +90,6 @@ use windows::{
     },
     core::{BOOL, PCWSTR, PWSTR, w},
 };
-use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use nickel_core::hotkeys::{
     Hotkey, HotkeyAction, HotkeyController, HotkeyOutcome, HotkeySnapshot, KeyEdge,
@@ -745,11 +744,11 @@ pub fn set_audio_volume(volume_percent: u8) -> bool {
     }
 }
 
-pub fn capture_pointer(window: &winit::window::Window) -> bool {
+pub fn capture_pointer(window: &sdl3::video::Window) -> bool {
     let Some(hwnd) = window_hwnd(window) else {
         return false;
     };
-    // SAFETY: `hwnd` belongs to the live winit window supplied by the caller.
+    // SAFETY: `hwnd` belongs to the live SDL window supplied by the caller.
     unsafe {
         let _ = SetCapture(hwnd);
         GetCapture() == hwnd
@@ -1432,7 +1431,7 @@ pub fn execute_run_command(command: &str) -> Result<(), LaunchError> {
     {
         let uri = command.to_owned();
         // Windows can take an unbounded amount of time to activate the packaged Settings app.
-        // Waiting here blocks winit's only event thread, which also makes the keyboard and mouse
+        // Waiting here blocks SDL's event thread, which also makes the keyboard and mouse
         // hooks appear wedged. Treat a well-formed Settings URI as submitted and wait off-thread.
         thread::spawn(move || match launch_uri(&uri) {
             Ok(true) => {}
@@ -1597,20 +1596,16 @@ fn launch_uri(uri: &str) -> windows::core::Result<bool> {
 }
 
 pub fn configure_desktop_window(
-    window: &winit::window::Window,
-    physical_position: winit::dpi::PhysicalPosition<i32>,
-    physical_size: winit::dpi::PhysicalSize<u32>,
+    window: &sdl3::video::Window,
+    physical_position: (i32, i32),
+    physical_size: (u32, u32),
 ) -> bool {
-    let Ok(handle) = window.window_handle() else {
+    let Some(hwnd) = window_hwnd(window) else {
         return false;
     };
-    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
-        return false;
-    };
-    let hwnd = HWND(handle.hwnd.get() as *mut c_void);
-    // SAFETY: hwnd belongs to the live winit desktop window. Windows returns a monitor rectangle
+    // SAFETY: hwnd belongs to the live SDL desktop window. Windows returns a monitor rectangle
     // for that window, and SetWindowPos applies that rectangle while keeping the desktop at the
-    // bottom of the Z-order. This also corrects stale winit geometry after a display-mode change.
+    // bottom of the Z-order. This also corrects stale SDL geometry after a display-mode change.
     unsafe {
         let previous_dpi_context =
             SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -1645,12 +1640,12 @@ pub fn configure_desktop_window(
                     .then_some((mode.dmPelsWidth, mode.dmPelsHeight))
                 })
                 .flatten();
-            let (width, height) = mode_size.unwrap_or((physical_size.width, physical_size.height));
+            let (width, height) = mode_size.unwrap_or(physical_size);
             SetWindowPos(
                 hwnd,
                 Some(HWND_BOTTOM),
-                physical_position.x,
-                physical_position.y,
+                physical_position.0,
+                physical_position.1,
                 width as i32,
                 height as i32,
                 SWP_NOACTIVATE | SWP_FRAMECHANGED,
@@ -1664,22 +1659,22 @@ pub fn configure_desktop_window(
     }
 }
 
-pub fn surface_size(window: &winit::window::Window) -> winit::dpi::PhysicalSize<u32> {
+pub fn surface_size(window: &sdl3::video::Window) -> (u32, u32) {
     let Some(hwnd) = window_hwnd(window) else {
-        return window.inner_size();
+        return window.size_in_pixels();
     };
     let mut bounds = RECT::default();
-    // SAFETY: hwnd is the live window supplied by winit and bounds is writable storage.
+    // SAFETY: hwnd is the live window supplied by SDL and bounds is writable storage.
     if unsafe { GetClientRect(hwnd, &raw mut bounds) }.is_err() {
-        return window.inner_size();
+        return window.size_in_pixels();
     }
-    winit::dpi::PhysicalSize::new(
+    (
         (bounds.right - bounds.left).max(1) as u32,
         (bounds.bottom - bounds.top).max(1) as u32,
     )
 }
 
-pub fn configure_launcher_window(window: &winit::window::Window) -> bool {
+pub fn configure_launcher_window(window: &sdl3::video::Window) -> bool {
     use std::sync::atomic::Ordering;
 
     let Some(hwnd) = window_hwnd(window) else {
@@ -1689,7 +1684,7 @@ pub fn configure_launcher_window(window: &winit::window::Window) -> bool {
     true
 }
 
-pub fn configure_context_menu_window(window: &winit::window::Window) -> bool {
+pub fn configure_context_menu_window(window: &sdl3::video::Window) -> bool {
     use std::sync::atomic::Ordering;
 
     let Some(hwnd) = window_hwnd(window) else {
@@ -1745,7 +1740,7 @@ pub fn show_window_system_menu(window: WindowId) -> bool {
     }
 }
 
-pub fn configure_volume_osd_window(window: &winit::window::Window) -> bool {
+pub fn configure_volume_osd_window(window: &sdl3::video::Window) -> bool {
     let Some(hwnd) = window_hwnd(window) else {
         return false;
     };
@@ -1786,12 +1781,12 @@ pub fn launcher_has_foreground_focus() -> bool {
     launcher != 0 && unsafe { GetForegroundWindow().0 as isize == launcher }
 }
 
-pub fn configure_panel_window(window: &winit::window::Window) -> bool {
+pub fn configure_panel_window(window: &sdl3::video::Window) -> bool {
     let Some(hwnd) = window_hwnd(window) else {
         return false;
     };
     let mut rectangle = Default::default();
-    // SAFETY: hwnd belongs to the live winit panel and rectangle is writable storage.
+    // SAFETY: hwnd belongs to the live SDL panel and rectangle is writable storage.
     if unsafe { GetWindowRect(hwnd, &mut rectangle) }.is_err() {
         return false;
     }
@@ -1952,7 +1947,7 @@ fn install_tray_host(hwnd: HWND) {
     if PANEL_WINDOW_PROC.load(Ordering::Relaxed) != 0 {
         return;
     }
-    // SAFETY: hwnd is Nickel's live winit panel. We retain and call its original window procedure
+    // SAFETY: hwnd is Nickel's live SDL panel. We retain and call its original window procedure
     // for every message except the tray protocol message handled synchronously below.
     let previous = unsafe {
         SetWindowLongPtrW(
@@ -2079,7 +2074,7 @@ unsafe extern "system" fn tray_window_proc(
     let previous = PANEL_WINDOW_PROC.load(Ordering::Relaxed);
     let panel = PANEL_WINDOW_HANDLE.load(Ordering::Relaxed);
     if previous != 0 && hwnd.0 as isize == panel {
-        // SAFETY: previous is the live winit WNDPROC returned by SetWindowLongPtrW.
+        // SAFETY: previous is the live SDL WNDPROC returned by SetWindowLongPtrW.
         let procedure = unsafe { std::mem::transmute(previous) };
         return unsafe { CallWindowProcW(procedure, hwnd, message, wparam, lparam) };
     }
@@ -2358,7 +2353,7 @@ fn reserve_work_area_without_explorer(panel: RECT) -> bool {
     }
 }
 
-pub fn release_panel_window(window: &winit::window::Window) {
+pub fn release_panel_window(window: &sdl3::video::Window) {
     let Some(hwnd) = window_hwnd(window) else {
         return;
     };
@@ -2386,12 +2381,21 @@ pub fn release_panel_window(window: &winit::window::Window) {
     }
 }
 
-fn window_hwnd(window: &winit::window::Window) -> Option<HWND> {
-    let handle = window.window_handle().ok()?;
-    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+fn window_hwnd(window: &sdl3::video::Window) -> Option<HWND> {
+    // SAFETY: SDL owns the live window and exposes its HWND through the documented window
+    // property. The returned handle remains valid for the lifetime of `window`.
+    let properties = unsafe { sdl3::sys::video::SDL_GetWindowProperties(window.raw()) };
+    if properties.0 == 0 {
         return None;
+    }
+    let pointer = unsafe {
+        sdl3::sys::properties::SDL_GetPointerProperty(
+            properties,
+            sdl3::sys::video::SDL_PROP_WINDOW_WIN32_HWND_POINTER,
+            std::ptr::null_mut(),
+        )
     };
-    Some(HWND(handle.hwnd.get() as *mut c_void))
+    (!pointer.is_null()).then_some(HWND(pointer))
 }
 
 pub struct TrayFeed;
@@ -2680,7 +2684,8 @@ fn show_dwm_previews(windows: &[WindowId]) -> bool {
         let Ok(thumbnail) = (unsafe { DwmRegisterThumbnail(destination, source) }) else {
             continue;
         };
-        let left = 10 + index as i32 * crate::context_menu::PREVIEW_CARD_WIDTH as i32;
+        const PREVIEW_CARD_WIDTH: i32 = 260;
+        let left = 10 + index as i32 * PREVIEW_CARD_WIDTH;
         let properties = DWM_THUMBNAIL_PROPERTIES {
             dwFlags: DWM_TNP_RECTDESTINATION
                 | DWM_TNP_OPACITY
@@ -2754,6 +2759,9 @@ pub fn launcher_visibility_applied(visible: bool) {
 pub struct WindowFeed;
 
 impl WindowFeed {
+    pub fn launcher_visible(&self) -> Option<bool> {
+        None
+    }
     pub fn new() -> Self {
         Self
     }

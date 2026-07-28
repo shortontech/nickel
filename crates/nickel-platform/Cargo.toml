@@ -11,6 +11,10 @@ nickel-core = { path = "../nickel-core" }
 tracing.workspace = true
 winit.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+freedesktop-icons.workspace = true
+resvg.workspace = true
+
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { workspace = true, features = [
     "Win32_Foundation",

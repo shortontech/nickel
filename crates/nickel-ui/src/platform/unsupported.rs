@@ -49,13 +49,13 @@ pub fn set_audio_volume(_volume_percent: u8) -> bool {
     false
 }
 
-pub fn capture_pointer(_window: &winit::window::Window) -> bool {
+pub fn capture_pointer(_window: &sdl3::video::Window) -> bool {
     false
 }
 
 pub fn release_pointer() {}
 
-pub fn configure_volume_osd_window(_window: &winit::window::Window) -> bool {
+pub fn configure_volume_osd_window(_window: &sdl3::video::Window) -> bool {
     true
 }
 
@@ -119,6 +119,9 @@ pub fn show_window_system_menu(_: WindowId) -> bool {
 }
 
 impl WindowFeed {
+    pub fn launcher_visible(&self) -> Option<bool> {
+        None
+    }
     pub fn new() -> Self {
         Self
     }

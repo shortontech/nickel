@@ -159,6 +159,20 @@ impl Launcher {
         self.pins.contains_key(application_id)
     }
 
+    pub fn toggle_pin(&mut self, application_id: &str) {
+        if self.pins.remove(application_id).is_none() {
+            let order = self
+                .pins
+                .values()
+                .copied()
+                .max()
+                .unwrap_or_default()
+                .saturating_add(1);
+            self.pins.insert(application_id.to_owned(), order);
+        }
+        self.refresh();
+    }
+
     pub fn set_pins(&mut self, pins: Vec<(String, u64)>) {
         self.pins = pins.into_iter().collect();
         self.refresh();
