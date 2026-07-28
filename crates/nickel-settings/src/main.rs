@@ -1,7 +1,7 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 use std::{
-    sync::Arc,
+    cell::Cell,
     time::{Duration, Instant},
 };
 
@@ -20,12 +20,11 @@ use nickel_core::{
     wallpaper_settings::{WallpaperPosition, WallpaperSettings},
 };
 use nickel_i18n::Localizer;
-use winit::{
-    application::ApplicationHandler,
-    dpi::{LogicalSize, PhysicalPosition},
-    event::{ElementState, MouseButton, WindowEvent},
-    event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
-    window::{Icon, Window, WindowAttributes, WindowId},
+use sdl3::{
+    event::{Event, WindowEvent},
+    keyboard::Keycode,
+    mouse::MouseButton,
+    video::Window,
 };
 
 const SIDEBAR_WIDTH: i32 = 190;
@@ -250,8 +249,9 @@ struct WifiNetwork {
 
 struct SettingsApp {
     localizer: Localizer,
-    window: Option<Arc<Window>>,
     gpu: Option<ComponentGpu>,
+    redraw_requested: Cell<bool>,
+    running: bool,
     displays: Vec<DisplayCard>,
     selected: usize,
     cursor: (i32, i32),
@@ -265,7 +265,8 @@ struct SettingsApp {
     desktop_slider_dragging: bool,
     appearance_slider_dragging: bool,
     intensity_slider_dragging: bool,
-    window_icon_color: Option<u32>,
+    appearance_save_deadline: Option<Instant>,
+    frame_interval: Duration,
     network_adapters: Vec<NetworkAdapter>,
     wifi_networks: Vec<WifiNetwork>,
     wifi_status: String,
@@ -284,8 +285,9 @@ impl Default for SettingsApp {
         let status = localizer.text("settings-status-changes-not-applied");
         Self {
             localizer,
-            window: None,
             gpu: None,
+            redraw_requested: Cell::new(true),
+            running: true,
             displays: vec![
                 DisplayCard {
                     connector: "DVI-I-1".into(),
@@ -328,7 +330,8 @@ impl Default for SettingsApp {
             desktop_slider_dragging: false,
             appearance_slider_dragging: false,
             intensity_slider_dragging: false,
-            window_icon_color: None,
+            appearance_save_deadline: None,
+            frame_interval: Duration::from_millis(16),
             network_adapters: Vec::new(),
             wifi_networks: Vec::new(),
             wifi_status: String::new(),
@@ -405,9 +408,7 @@ impl SettingsApp {
     }
 
     fn request_redraw(&self) {
-        if let Some(window) = &self.window {
-            window.request_redraw();
-        }
+        self.redraw_requested.set(true);
     }
 
     fn palette(&self) -> ThemePalette {
@@ -479,9 +480,7 @@ impl SettingsApp {
                     self.controller_page
                 }
                 ControllerAction::Cancel => {
-                    if let Some(window) = &self.window {
-                        window.set_visible(false);
-                    }
+                    self.running = false;
                     self.controller_page
                 }
                 _ => self.controller_page,
@@ -1262,12 +1261,12 @@ impl SettingsApp {
         self.request_redraw();
     }
 
-    fn pointer_moved(&mut self, position: PhysicalPosition<f64>) {
-        self.cursor = (position.x.round() as i32, position.y.round() as i32);
+    fn pointer_moved(&mut self, x: f32, y: f32) {
+        self.cursor = (x.round() as i32, y.round() as i32);
         if self.desktop_slider_dragging {
             if let Some(fraction) = self
                 .ui
-                .horizontal_fraction_for_action("bar:desktop-count", position.x as f32)
+                .horizontal_fraction_for_action("bar:desktop-count", x)
             {
                 self.set_desktop_count_from_fraction(fraction);
                 self.request_redraw();
@@ -1275,10 +1274,7 @@ impl SettingsApp {
             return;
         }
         if self.appearance_slider_dragging {
-            if let Some(fraction) = self
-                .ui
-                .horizontal_fraction_for_action("appearance:hue", position.x as f32)
-            {
+            if let Some(fraction) = self.ui.horizontal_fraction_for_action("appearance:hue", x) {
                 self.set_appearance_hue_from_fraction(fraction);
                 self.request_redraw();
             }
@@ -1287,7 +1283,7 @@ impl SettingsApp {
         if self.intensity_slider_dragging {
             if let Some(fraction) = self
                 .ui
-                .horizontal_fraction_for_action("appearance:intensity", position.x as f32)
+                .horizontal_fraction_for_action("appearance:intensity", x)
             {
                 self.set_appearance_intensity_from_fraction(fraction);
                 self.request_redraw();
@@ -1361,7 +1357,7 @@ impl SettingsApp {
             return;
         }
         self.shell_settings.accent_hue = Some(hue);
-        let _ = self.shell_settings.save_default();
+        self.appearance_save_deadline = Some(Instant::now() + self.frame_interval);
     }
 
     fn set_appearance_intensity_from_fraction(&mut self, fraction: f32) {
@@ -1370,7 +1366,7 @@ impl SettingsApp {
             return;
         }
         self.shell_settings.accent_intensity = Some(intensity);
-        let _ = self.shell_settings.save_default();
+        self.appearance_save_deadline = Some(Instant::now() + self.frame_interval);
     }
 
     fn load_outputs(&mut self) {
@@ -1448,31 +1444,44 @@ impl SettingsApp {
     }
 
     #[cfg(target_os = "windows")]
-    fn load_windows_outputs(&mut self, event_loop: &ActiveEventLoop) {
-        let monitors: Vec<_> = event_loop.available_monitors().collect();
+    fn load_windows_outputs(&mut self, video: &sdl3::VideoSubsystem) {
+        let monitors = video.displays().unwrap_or_default();
         if monitors.is_empty() {
             self.status = self.localizer.text("settings-status-no-displays");
             return;
         }
-        let primary = event_loop.primary_monitor();
+        let primary = video
+            .get_primary_display()
+            .ok()
+            .map(|display| display.to_ll());
         let minimum_x = monitors
             .iter()
-            .map(|monitor| monitor.position().x)
+            .filter_map(|monitor| monitor.get_bounds().ok().map(|bounds| bounds.x()))
             .min()
             .unwrap_or(0);
         let minimum_y = monitors
             .iter()
-            .map(|monitor| monitor.position().y)
+            .filter_map(|monitor| monitor.get_bounds().ok().map(|bounds| bounds.y()))
             .min()
             .unwrap_or(0);
         let maximum_x = monitors
             .iter()
-            .map(|monitor| monitor.position().x + monitor.size().width as i32)
+            .filter_map(|monitor| {
+                monitor
+                    .get_bounds()
+                    .ok()
+                    .map(|bounds| bounds.x() + bounds.width() as i32)
+            })
             .max()
             .unwrap_or(1);
         let maximum_y = monitors
             .iter()
-            .map(|monitor| monitor.position().y + monitor.size().height as i32)
+            .filter_map(|monitor| {
+                monitor
+                    .get_bounds()
+                    .ok()
+                    .map(|bounds| bounds.y() + bounds.height() as i32)
+            })
             .max()
             .unwrap_or(1);
         let desktop_width = (maximum_x - minimum_x).max(1);
@@ -1489,11 +1498,10 @@ impl SettingsApp {
             .into_iter()
             .enumerate()
             .map(|(index, monitor)| {
-                let position = monitor.position();
-                let size = monitor.size();
+                let bounds = monitor.get_bounds().unwrap_or_default();
                 let raw_name = monitor
-                    .name()
-                    .unwrap_or_else(|| format!("Display {}", index + 1));
+                    .get_name()
+                    .unwrap_or_else(|_| format!("Display {}", index + 1));
                 let connector = raw_name
                     .strip_prefix(r"\\.\")
                     .unwrap_or(&raw_name)
@@ -1505,20 +1513,20 @@ impl SettingsApp {
                 DisplayCard {
                     connector: connector.clone(),
                     name: name.clone(),
-                    detail: format!("{}  {} X {}", connector, size.width, size.height),
-                    logical_width: size.width as i32,
-                    logical_height: size.height as i32,
+                    detail: format!("{}  {} X {}", connector, bounds.width(), bounds.height()),
+                    logical_width: bounds.width() as i32,
+                    logical_height: bounds.height() as i32,
                     rect: Rect {
                         x: origin_x
-                            + (f64::from(position.x - minimum_x) * self.pixels_per_logical).round()
+                            + (f64::from(bounds.x() - minimum_x) * self.pixels_per_logical).round()
                                 as i32,
                         y: origin_y
-                            + (f64::from(position.y - minimum_y) * self.pixels_per_logical).round()
+                            + (f64::from(bounds.y() - minimum_y) * self.pixels_per_logical).round()
                                 as i32,
-                        w: (f64::from(size.width) * self.pixels_per_logical).round() as i32,
-                        h: (f64::from(size.height) * self.pixels_per_logical).round() as i32,
+                        w: (f64::from(bounds.width()) * self.pixels_per_logical).round() as i32,
+                        h: (f64::from(bounds.height()) * self.pixels_per_logical).round() as i32,
                     },
-                    primary: primary.as_ref() == Some(&monitor),
+                    primary: primary == Some(monitor.to_ll()),
                 }
             })
             .collect();
@@ -1844,28 +1852,15 @@ impl SettingsApp {
         }
     }
 
-    fn render(&mut self) {
-        let Some(window) = self.window.clone() else {
-            return;
-        };
+    fn render(&mut self, window: &mut Window, event_pump: &sdl3::EventPump) -> Result<(), String> {
         let appearance = self
             .shell_settings
             .resolve_appearance(nickel_platform::appearance());
-        nickel_platform::apply_window_appearance(&window, appearance);
         let palette = ThemePalette::from_appearance(appearance);
-        if self.window_icon_color != Some(palette.accent) {
-            if let Some(icon) = settings_window_icon() {
-                window.set_window_icon(Some(icon));
-                #[cfg(target_os = "windows")]
-                {
-                    use winit::platform::windows::WindowExtWindows;
-                    window.set_taskbar_icon(settings_window_icon());
-                }
-            }
-            self.window_icon_color = Some(palette.accent);
-        }
-        let size = window.inner_size();
-        self.ui = self.build_ui(size.width as f32, size.height as f32);
+        let (logical_width, logical_height) = window.size();
+        let (pixel_width, pixel_height) = window.size_in_pixels();
+        let scale = pixel_width as f32 / logical_width.max(1) as f32;
+        self.ui = self.build_ui(logical_width as f32, logical_height as f32);
         let mut commands = self.ui.commands().to_vec();
         if self.page == SettingsPage::Display {
             for (index, display) in self.displays.iter().enumerate() {
@@ -1936,8 +1931,14 @@ impl SettingsApp {
             }
         }
         if let Some(gpu) = &mut self.gpu {
-            gpu.render(&commands).expect("render settings components");
+            gpu.resize(pixel_width, pixel_height, scale);
+            let mut surface = window
+                .surface(event_pump)
+                .map_err(|error| error.to_string())?;
+            gpu.present(&mut surface, &commands)?;
+            surface.finish().map_err(|error| error.to_string())?;
         }
+        Ok(())
     }
 
     #[cfg(any())]
@@ -2265,76 +2266,64 @@ impl SettingsApp {
     }
 }
 
-impl ApplicationHandler for SettingsApp {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_some() {
-            return;
-        }
-        #[cfg(target_os = "windows")]
-        {
-            self.load_windows_outputs(event_loop);
-            self.load_windows_network();
-            self.load_windows_wifi();
-        }
-        let mut attributes = WindowAttributes::default()
-            .with_title("Nickel Settings")
-            .with_inner_size(LogicalSize::new(850.0, 580.0))
-            .with_min_inner_size(LogicalSize::new(850.0, 580.0));
-        #[cfg(target_os = "linux")]
-        {
-            use winit::platform::wayland::WindowAttributesExtWayland;
-            attributes = attributes.with_name("nickel-settings", "nickel-settings");
-        }
-        let window = Arc::new(
-            event_loop
-                .create_window(attributes)
-                .expect("create settings window"),
-        );
-        let size = window.inner_size();
-        let gpu = ComponentGpu::new(window.clone(), size.width, size.height)
-            .expect("create settings component renderer");
-        self.window = Some(window);
-        self.gpu = Some(gpu);
-        self.request_redraw();
-    }
-
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+impl SettingsApp {
+    fn handle_event(&mut self, event: Event) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::CursorMoved { position, .. } => self.pointer_moved(position),
-            WindowEvent::MouseInput {
-                state: ElementState::Pressed,
-                button: MouseButton::Left,
+            Event::Quit { .. }
+            | Event::KeyDown {
+                keycode: Some(Keycode::Escape),
                 ..
-            } => self.pointer_pressed(),
-            WindowEvent::MouseInput {
-                state: ElementState::Released,
-                button: MouseButton::Left,
+            }
+            | Event::Window {
+                win_event: WindowEvent::CloseRequested,
                 ..
-            } => self.finish_drag(),
-            WindowEvent::RedrawRequested => self.render(),
-            WindowEvent::Resized(size) => {
-                if let Some(gpu) = &mut self.gpu {
-                    gpu.resize(size.width, size.height);
-                }
-                self.request_redraw();
+            } => self.running = false,
+            Event::Window {
+                win_event:
+                    WindowEvent::Exposed
+                    | WindowEvent::Resized(_, _)
+                    | WindowEvent::PixelSizeChanged(_, _),
+                ..
+            } => self.request_redraw(),
+            Event::MouseMotion { x, y, .. } => self.pointer_moved(x, y),
+            Event::MouseButtonDown {
+                mouse_btn: MouseButton::Left,
+                x,
+                y,
+                ..
+            } => {
+                self.pointer_moved(x, y);
+                self.pointer_pressed();
+            }
+            Event::MouseButtonUp {
+                mouse_btn: MouseButton::Left,
+                x,
+                y,
+                ..
+            } => {
+                self.pointer_moved(x, y);
+                self.finish_drag();
             }
             _ => {}
         }
     }
 
-    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+    fn tick(&mut self) {
         let now = Instant::now();
-        let actions = self.controller.poll(now);
-        for action in actions {
+        if self
+            .appearance_save_deadline
+            .is_some_and(|deadline| now >= deadline)
+        {
+            let _ = self.shell_settings.save_default();
+            self.appearance_save_deadline = None;
+        }
+        for action in self.controller.poll(now) {
             self.handle_controller_action(action);
         }
         let Some(refresh_at) = self.next_wifi_refresh else {
-            event_loop.set_control_flow(ControlFlow::WaitUntil(now + Duration::from_millis(16)));
             return;
         };
         if now < refresh_at {
-            event_loop.set_control_flow(ControlFlow::WaitUntil(refresh_at));
             return;
         }
 
@@ -2773,20 +2762,59 @@ fn glyph(character: char) -> [u8; 7] {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _log_path = nickel_logging::init("nickel-settings").ok();
-    let event_loop = EventLoop::new()?;
+    sdl3::hint::set("SDL_APP_ID", "nickel-settings");
+    let sdl = sdl3::init()?;
+    let video = sdl.video()?;
+    let mut window = video
+        .window("Nickel Settings", 850, 580)
+        .position_centered()
+        .resizable()
+        .build()
+        .map_err(|error| error.to_string())?;
+    window.set_minimum_size(850, 580)?;
+    video.text_input().start(&window);
+    let mut events = sdl.event_pump()?;
     let mut app = SettingsApp::default();
+    app.frame_interval = window
+        .get_display()
+        .ok()
+        .and_then(|display| display.get_mode().ok())
+        .map(|mode| mode.refresh_rate)
+        .filter(|refresh_rate| refresh_rate.is_finite() && *refresh_rate > 1.0)
+        .map(|refresh_rate| Duration::from_secs_f64(1.0 / f64::from(refresh_rate)))
+        .unwrap_or_else(|| Duration::from_millis(16));
     app.load_outputs();
-    event_loop.run_app(&mut app)?;
-    Ok(())
-}
+    #[cfg(target_os = "windows")]
+    {
+        app.load_windows_outputs(&video);
+        app.load_windows_network();
+        app.load_windows_wifi();
+    }
+    let (width, height) = window.size_in_pixels();
+    let (logical_width, _) = window.size();
+    let scale = width as f32 / logical_width.max(1) as f32;
+    app.gpu = Some(ComponentGpu::new(width, height, scale));
+    let mut next_frame = Instant::now();
 
-fn settings_window_icon() -> Option<Icon> {
-    let image =
-        image::load_from_memory(include_bytes!("../../../assets/icons/nickel-settings.png"))
-            .ok()?
-            .into_rgba8();
-    let (width, height) = image.dimensions();
-    Icon::from_rgba(image.into_raw(), width, height).ok()
+    while app.running {
+        if let Some(event) = events.wait_event_timeout(app.frame_interval) {
+            app.handle_event(event);
+            for event in events.poll_iter() {
+                app.handle_event(event);
+            }
+        }
+        app.tick();
+        let now = Instant::now();
+        if app.redraw_requested.get() && now >= next_frame {
+            app.redraw_requested.set(false);
+            if let Err(error) = app.render(&mut window, &events) {
+                tracing::error!(%error, "failed to render Nickel Settings");
+                app.running = false;
+            }
+            next_frame = Instant::now() + app.frame_interval;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

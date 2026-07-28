@@ -2,26 +2,22 @@
 name = "nickel-ui"
 version = "0.1.0"
 default-run = "nickel-ui"
+autobins = false
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-bytemuck.workspace = true
-glyphon.workspace = true
 image.workspace = true
 jiff.workspace = true
 nickel-components = { path = "../nickel-components" }
 nickel-core = { path = "../nickel-core" }
 nickel-i18n = { path = "../nickel-i18n" }
 nickel-logging = { path = "../nickel-logging" }
-nickel-platform = { path = "../nickel-platform" }
 nucleo-matcher.workspace = true
-pollster.workspace = true
 redb.workspace = true
 resvg.workspace = true
-wgpu.workspace = true
-winit.workspace = true
+sdl3.workspace = true
 tracing.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -31,6 +27,8 @@ shlex.workspace = true
 zbus.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
+nickel-platform = { path = "../nickel-platform" }
+pollster.workspace = true
 windows-core = "0.62.2"
 windows = { workspace = true, features = [
     "Foundation",
@@ -62,6 +60,10 @@ windows = { workspace = true, features = [
 
 [dev-dependencies]
 tempfile = "3.25.0"
+
+[[bin]]
+name = "nickel-ui"
+path = "src/bin/nickel-sdl-shell.rs"
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 ico.workspace = true

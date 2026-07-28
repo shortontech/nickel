@@ -866,11 +866,11 @@ impl CalloopData {
             let target_gpu = device.render_node;
             let bootstrapping =
                 shell_bootstrapping && Instant::now() < native.bootstrap_render_until;
-            let frame_flags = if device.is_evdi {
-                FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT
-            } else {
-                FrameFlags::DEFAULT
-            };
+            // Keep application and video surfaces in one composited scene.
+            // Assigning video to an overlay plane can leak stale plane content
+            // through windows above it when occlusion changes. A hardware
+            // cursor remains safe because it is always the topmost element.
+            let frame_flags = FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT;
             let renderer = if native.primary_gpu == target_gpu {
                 native.gpus.single_renderer(&target_gpu)
             } else {
@@ -1083,6 +1083,19 @@ impl CalloopData {
                         Err(error) => tracing::warn!(?error, "failed to upload cursor"),
                     }
                 }
+            }
+            let is_primary = self
+                .state
+                .primary_output_name
+                .as_deref()
+                .is_none_or(|name| name == output.name());
+            if is_primary
+                && let Some(path) = self.state.output_capture_path.take()
+                && let Some(mode) = output.current_mode()
+                && let Err(error) =
+                    capture_composited_output(&mut renderer, &elements, mode.size, &path)
+            {
+                tracing::warn!(%error, path = %path.display(), "failed to capture output");
             }
             let retry = match surface.drm.render_frame(
                 &mut renderer,
@@ -1448,6 +1461,60 @@ fn capture_preview(
         height: HEIGHT as u16,
         rgba,
     })
+}
+
+fn capture_composited_output<'a>(
+    renderer: &mut NativeRenderer<'a>,
+    elements: &[NativeElement<
+        NativeRenderer<'a>,
+        WaylandSurfaceRenderElement<NativeRenderer<'a>>,
+    >],
+    size: smithay::utils::Size<i32, Physical>,
+    path: &Path,
+) -> Result<(), String> {
+    if size.w <= 0 || size.h <= 0 {
+        return Err("output has no drawable size".into());
+    }
+    let buffer_size = smithay::utils::Size::<i32, Buffer>::from((size.w, size.h));
+    let mut texture = <NativeRenderer<'a> as Offscreen<GlesTexture>>::create_buffer(
+        renderer,
+        Fourcc::Abgr8888,
+        buffer_size,
+    )
+    .map_err(|error| error.to_string())?;
+    let mut framebuffer = renderer
+        .bind(&mut texture)
+        .map_err(|error| error.to_string())?;
+    let damage = Rectangle::from_size(size);
+    let mut frame = renderer
+        .render(&mut framebuffer, size, Transform::Normal)
+        .map_err(|error| error.to_string())?;
+    frame
+        .clear(Color32F::new(0.1, 0.1, 0.1, 1.0), &[damage])
+        .map_err(|error| error.to_string())?;
+    draw_render_elements(&mut frame, 1.0, elements, &[damage])
+        .map_err(|error| error.to_string())?;
+    frame
+        .finish()
+        .map_err(|error| error.to_string())?
+        .wait()
+        .map_err(|error| error.to_string())?;
+    let region = Rectangle::<i32, Buffer>::from_size(buffer_size);
+    let mapping = renderer
+        .copy_framebuffer(&framebuffer, region, Fourcc::Abgr8888)
+        .map_err(|error| error.to_string())?;
+    let rgba = renderer
+        .map_texture(&mapping)
+        .map_err(|error| error.to_string())?
+        .to_vec();
+    image::save_buffer(
+        path,
+        &rgba,
+        size.w as u32,
+        size.h as u32,
+        image::ColorType::Rgba8,
+    )
+    .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

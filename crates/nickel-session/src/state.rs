@@ -136,6 +136,7 @@ pub struct NickelSession {
     pub frame_cursor: crate::window_frame::FrameCursor,
     pub buffer_commit_tx: Option<smithay::reexports::calloop::channel::Sender<WlSurface>>,
     pub identify_outputs_until: Option<std::time::Instant>,
+    pub output_capture_path: Option<PathBuf>,
     control_socket_path: PathBuf,
 }
 
@@ -228,6 +229,7 @@ impl NickelSession {
             frame_cursor: crate::window_frame::FrameCursor::Arrow,
             buffer_commit_tx: None,
             identify_outputs_until: None,
+            output_capture_path: None,
             control_socket_path,
         }
     }
@@ -260,6 +262,16 @@ impl NickelSession {
                             b"toggle-launcher" => data.state.toggle_launcher(),
                             b"hide-launcher" => data.state.set_launcher_visible(false),
                             b"show-launcher" => data.state.set_launcher_visible(true),
+                            b"launcher-visible" => {
+                                if let Some(path) = source.as_pathname() {
+                                    let visible = if data.state.launcher_visibility.is_visible() {
+                                        b"1"
+                                    } else {
+                                        b"0"
+                                    };
+                                    let _ = socket.as_ref().send_to(visible, path);
+                                }
+                            }
                             b"hide-context-menu" => data.state.hide_context_menu(),
                             b"list-windows" => {
                                 if let Some(path) = source.as_pathname() {
@@ -285,6 +297,22 @@ impl NickelSession {
                             }
                             _ => {
                                 if let Ok(message) = std::str::from_utf8(message)
+                                    && let Some(path) = message.strip_prefix("capture-output\t")
+                                    && !path.is_empty()
+                                {
+                                    data.state.output_capture_path = Some(PathBuf::from(path));
+                                    #[cfg(feature = "backend-udev")]
+                                    data.render_all_outputs();
+                                    if let Some(source) = source.as_pathname() {
+                                        let response = if std::path::Path::new(path).is_file() {
+                                            "ok"
+                                        } else {
+                                            "error\tcapture failed"
+                                        };
+                                        let _ =
+                                            socket.as_ref().send_to(response.as_bytes(), source);
+                                    }
+                                } else if let Ok(message) = std::str::from_utf8(message)
                                     && message.starts_with("apply-outputs\n")
                                 {
                                     let response = match data.state.apply_output_layout(message) {
@@ -545,7 +573,7 @@ impl NickelSession {
     pub fn register_launcher(&mut self, window: Window) {
         self.space.unmap_elem(&window);
         self.launcher_window = Some(window);
-        self.launcher_visibility.set(false);
+        self.apply_launcher_visibility(self.launcher_visibility.is_visible());
     }
 
     pub fn register_panel(&mut self, window: Window) {

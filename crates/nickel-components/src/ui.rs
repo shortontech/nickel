@@ -74,6 +74,11 @@ pub enum PaintCommand {
         color: Color,
         radius: f32,
     },
+    RoundedFill {
+        rect: Rect,
+        color: Color,
+        radius: f32,
+    },
     Gradient {
         rect: Rect,
         gradient: LinearGradient,
@@ -105,6 +110,8 @@ pub enum PaintCommand {
         id: u16,
         image: Arc<RgbaImage>,
     },
+    PushClip(Rect),
+    PopClip,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -1249,6 +1256,32 @@ impl UiTree {
             .find(|hit| hit.action == action)
             .map(|hit| ((x - hit.rect.origin.x) / hit.rect.size.width.max(1.0)).clamp(0.0, 1.0))
     }
+
+    pub fn actions_intersecting(&self, rect: Rect) -> Vec<&str> {
+        self.hits
+            .iter()
+            .filter(|hit| rects_intersect(hit.rect, rect))
+            .map(|hit| hit.action.as_str())
+            .collect()
+    }
+
+    pub fn push_overlay_command(&mut self, command: PaintCommand) {
+        self.commands.push(command);
+    }
+
+    pub fn push_overlay_action(&mut self, rect: Rect, action: impl Into<String>) {
+        self.hits.push(HitRegion {
+            rect,
+            action: action.into(),
+        });
+    }
+}
+
+fn rects_intersect(left: Rect, right: Rect) -> bool {
+    left.origin.x < right.origin.x + right.size.width
+        && left.origin.x + left.size.width > right.origin.x
+        && left.origin.y < right.origin.y + right.size.height
+        && left.origin.y + left.size.height > right.origin.y
 }
 
 fn layout_element(
