@@ -97,6 +97,11 @@ pub fn update_panel_fullscreen_state() {}
 mod desktop_entries;
 
 const SESSION_CONTROL_ENV: &str = "NICKEL_SESSION_CONTROL";
+const STATUS_NOTIFIER_WATCHER: &str = "org.kde.StatusNotifierWatcher";
+const STATUS_NOTIFIER_PATH: &str = "/StatusNotifierWatcher";
+const STATUS_NOTIFIER_INTERFACE: &str = "org.kde.StatusNotifierWatcher";
+const TRAY_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const TRAY_RETRY_MAX: Duration = Duration::from_secs(60);
 
 pub struct TrayFeed {
     items: Arc<Mutex<Vec<TrayItem>>>,
@@ -108,9 +113,12 @@ impl TrayFeed {
         let items = Arc::new(Mutex::new(Vec::new()));
         let (actions, receiver) = mpsc::channel();
         let worker_items = items.clone();
-        let _ = thread::Builder::new()
+        if let Err(error) = thread::Builder::new()
             .name("nickel-status-notifier".into())
-            .spawn(move || tray_worker(worker_items, receiver));
+            .spawn(move || tray_worker(worker_items, receiver))
+        {
+            tracing::warn!(%error, "failed to start status-notifier worker");
+        }
         Self { items, actions }
     }
 }
@@ -133,47 +141,103 @@ impl TraySource for TrayFeed {
 }
 
 fn tray_worker(items: Arc<Mutex<Vec<TrayItem>>>, actions: mpsc::Receiver<(String, bool)>) {
-    let Ok(connection) = zbus::blocking::Connection::session() else {
+    let connection = match zbus::blocking::Connection::session() {
+        Ok(connection) => connection,
+        Err(error) => {
+            tracing::warn!(%error, "status notifier could not connect to the session bus");
+            return;
+        }
+    };
+    let Ok(dbus) = zbus::blocking::fdo::DBusProxy::new(&connection) else {
+        tracing::warn!("status notifier could not create a D-Bus daemon proxy");
         return;
     };
-    if let (Some(name), Ok(watcher)) = (
-        connection.unique_name(),
-        zbus::blocking::Proxy::new(
-            &connection,
-            "org.kde.StatusNotifierWatcher",
-            "/StatusNotifierWatcher",
-            "org.kde.StatusNotifierWatcher",
-        ),
-    ) {
-        let _ = watcher.call_method("RegisterStatusNotifierHost", &(name.as_str()));
-    }
+    let watcher_name: zbus::names::BusName<'_> = STATUS_NOTIFIER_WATCHER
+        .try_into()
+        .expect("status notifier watcher name is valid");
+    let mut watcher = None;
+    let mut failures = 0_u32;
+    let mut next_attempt = std::time::Instant::now();
     loop {
-        let snapshot = read_tray_items(&connection);
-        if let Ok(mut current) = items.lock() {
-            *current = snapshot;
+        let now = std::time::Instant::now();
+        if watcher.is_none() && now >= next_attempt {
+            watcher = dbus
+                .name_has_owner(watcher_name.clone())
+                .ok()
+                .filter(|owned| *owned)
+                .and_then(|_| {
+                    zbus::blocking::Proxy::new(
+                        &connection,
+                        STATUS_NOTIFIER_WATCHER,
+                        STATUS_NOTIFIER_PATH,
+                        STATUS_NOTIFIER_INTERFACE,
+                    )
+                    .ok()
+                });
+            if let Some(proxy) = &watcher {
+                failures = 0;
+                if let Some(name) = connection.unique_name()
+                    && let Err(error) =
+                        proxy.call_method("RegisterStatusNotifierHost", &(name.as_str()))
+                {
+                    tracing::warn!(%error, "failed to register Nickel as a status-notifier host");
+                }
+                tracing::info!("status-notifier watcher connected");
+            } else {
+                failures = failures.saturating_add(1);
+                let delay = tray_retry_delay(failures);
+                next_attempt = now + delay;
+                if failures == 1 {
+                    tracing::warn!(
+                        retry_seconds = delay.as_secs(),
+                        "status-notifier watcher is unavailable; tray will reconnect in the background"
+                    );
+                } else {
+                    tracing::debug!(
+                        retry_seconds = delay.as_secs(),
+                        "status-notifier watcher remains unavailable"
+                    );
+                }
+            }
+        }
+        if let Some(proxy) = &watcher {
+            if let Some(snapshot) = read_tray_items(proxy) {
+                if let Ok(mut current) = items.lock() {
+                    *current = snapshot;
+                }
+            } else {
+                watcher = None;
+                failures = failures.saturating_add(1);
+                next_attempt = now + tray_retry_delay(failures);
+                if let Ok(mut current) = items.lock() {
+                    current.clear();
+                }
+                tracing::warn!(
+                    "status-notifier watcher stopped responding; tray will reconnect in the background"
+                );
+            }
         }
         while let Ok((id, context_menu)) = actions.try_recv() {
             activate_tray_item(&connection, &id, context_menu);
         }
-        thread::sleep(Duration::from_millis(250));
+        thread::sleep(TRAY_POLL_INTERVAL);
     }
 }
 
-fn read_tray_items(connection: &zbus::blocking::Connection) -> Vec<TrayItem> {
-    let Ok(watcher) = zbus::blocking::Proxy::new(
-        connection,
-        "org.kde.StatusNotifierWatcher",
-        "/StatusNotifierWatcher",
-        "org.kde.StatusNotifierWatcher",
-    ) else {
-        return Vec::new();
-    };
-    let Ok(ids) = watcher.get_property::<Vec<String>>("RegisteredStatusNotifierItems") else {
-        return Vec::new();
-    };
-    ids.into_iter()
-        .filter_map(|id| read_tray_item(connection, id))
-        .collect()
+fn tray_retry_delay(failures: u32) -> Duration {
+    let exponent = failures.saturating_sub(1).min(6);
+    Duration::from_secs(1_u64 << exponent).min(TRAY_RETRY_MAX)
+}
+
+fn read_tray_items(watcher: &zbus::blocking::Proxy<'_>) -> Option<Vec<TrayItem>> {
+    let ids = watcher
+        .get_property::<Vec<String>>("RegisteredStatusNotifierItems")
+        .ok()?;
+    Some(
+        ids.into_iter()
+            .filter_map(|id| read_tray_item(watcher.connection(), id))
+            .collect(),
+    )
 }
 
 fn item_address(id: &str) -> (&str, &str) {
@@ -420,9 +484,11 @@ fn resolve_application_id(native_app_id: &str, launcher: &Launcher) -> Option<Ap
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use crate::{launcher::Launcher, model::Application};
 
-    use super::{parse_window, pixmap_to_rgba, resolve_application_id};
+    use super::{parse_window, pixmap_to_rgba, resolve_application_id, tray_retry_delay};
 
     #[test]
     fn wayland_app_id_resolution_stays_in_linux_adapter() {
@@ -443,6 +509,15 @@ mod tests {
     fn status_notifier_argb_pixmap_becomes_rgba() {
         let image = pixmap_to_rgba((1, 1, vec![128, 10, 20, 30])).expect("valid pixmap");
         assert_eq!(image.get_pixel(0, 0).0, [10, 20, 30, 128]);
+    }
+
+    #[test]
+    fn status_notifier_retries_back_off_and_cap() {
+        assert_eq!(tray_retry_delay(1), Duration::from_secs(1));
+        assert_eq!(tray_retry_delay(2), Duration::from_secs(2));
+        assert_eq!(tray_retry_delay(6), Duration::from_secs(32));
+        assert_eq!(tray_retry_delay(7), Duration::from_secs(60));
+        assert_eq!(tray_retry_delay(20), Duration::from_secs(60));
     }
 
     #[test]
