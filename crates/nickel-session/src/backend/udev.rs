@@ -304,6 +304,20 @@ pub fn init_udev(
     {
         return Err("no usable DRM device was found".into());
     }
+    let usable_outputs = data
+        .native
+        .as_ref()
+        .map(|native| {
+            native
+                .devices
+                .values()
+                .map(|device| device.surfaces.len())
+                .sum::<usize>()
+        })
+        .unwrap_or_default();
+    if usable_outputs == 0 {
+        return Err("DRM devices were opened, but no connected output could be initialized".into());
+    }
 
     let mut libinput =
         Libinput::new_with_udev::<LibinputSessionInterface<LibSeatSession>>(session.clone().into());
