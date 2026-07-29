@@ -222,6 +222,7 @@ impl LiveShell {
         true
     }
 
+    #[allow(dead_code)]
     pub fn hide_overlay(&mut self, role: SurfaceRole) -> bool {
         match role {
             SurfaceRole::Launcher if self.launcher_visible => {

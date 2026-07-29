@@ -36,7 +36,7 @@ nucleo-matcher = "0.3.1"
 pollster = "0.4.0"
 redb = "4.1.0"
 resvg = "0.47.0"
-sdl3 = { version = "0.18.4", features = ["use-pkg-config"] }
+sdl3 = { version = "0.18.4", features = ["unsafe_textures", "use-pkg-config"] }
 smithay = { version = "0.7.0", default-features = false, features = ["wayland_frontend", "desktop"] }
 thiserror = "2.0.17"
 tracing = "0.1.44"

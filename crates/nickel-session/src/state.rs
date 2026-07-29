@@ -137,6 +137,7 @@ pub struct NickelSession {
     pub buffer_commit_tx: Option<smithay::reexports::calloop::channel::Sender<WlSurface>>,
     pub identify_outputs_until: Option<std::time::Instant>,
     pub output_capture_path: Option<PathBuf>,
+    pub output_capture_reply_path: Option<PathBuf>,
     control_socket_path: PathBuf,
 }
 
@@ -230,6 +231,7 @@ impl NickelSession {
             buffer_commit_tx: None,
             identify_outputs_until: None,
             output_capture_path: None,
+            output_capture_reply_path: None,
             control_socket_path,
         }
     }
@@ -301,16 +303,15 @@ impl NickelSession {
                                     && !path.is_empty()
                                 {
                                     data.state.output_capture_path = Some(PathBuf::from(path));
+                                    data.state.output_capture_reply_path =
+                                        source.as_pathname().map(PathBuf::from);
                                     #[cfg(feature = "backend-udev")]
                                     data.render_all_outputs();
+                                    #[cfg(not(feature = "backend-udev"))]
                                     if let Some(source) = source.as_pathname() {
-                                        let response = if std::path::Path::new(path).is_file() {
-                                            "ok"
-                                        } else {
-                                            "error\tcapture failed"
-                                        };
-                                        let _ =
-                                            socket.as_ref().send_to(response.as_bytes(), source);
+                                        let _ = socket
+                                            .as_ref()
+                                            .send_to(b"error\tcapture unsupported", source);
                                     }
                                 } else if let Ok(message) = std::str::from_utf8(message)
                                     && message.starts_with("apply-outputs\n")

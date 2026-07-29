@@ -1,7 +1,4 @@
-use std::{
-    collections::HashMap,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 #[allow(dead_code)]
 mod desktop {
@@ -48,51 +45,28 @@ mod sdl_live_shell;
 #[allow(dead_code)]
 mod sdl_shell;
 
-use nickel_components::SdlComponentRenderer;
 use sdl_live_shell::LiveShell;
-use sdl_shell::{SdlShell, ShellEvent, SurfaceId, SurfaceRole};
+use sdl_shell::{SdlShell, ShellEvent, SurfaceRole};
 
-fn render_all(
-    shell: &mut SdlShell,
-    renderers: &mut HashMap<SurfaceId, SdlComponentRenderer>,
-    state: &mut LiveShell,
-) -> Result<(), String> {
+fn render_all(shell: &mut SdlShell, state: &mut LiveShell) -> Result<(), String> {
     let surfaces = shell
         .surfaces()
         .map(|surface| {
-            let (width, height) = surface.window().size_in_pixels();
             let (logical_width, logical_height) = surface.window().size();
-            (
-                surface.id(),
-                surface.role(),
-                width,
-                height,
-                logical_width,
-                logical_height,
-                surface.window().display_scale(),
-            )
+            (surface.id(), surface.role(), logical_width, logical_height)
         })
         .collect::<Vec<_>>();
-    for (id, role, width, height, logical_width, logical_height, scale) in surfaces {
+    for (id, role, logical_width, logical_height) in surfaces {
         if !state.surface_visible(role) {
             continue;
         }
-        let renderer = renderers
-            .entry(id)
-            .or_insert_with(|| SdlComponentRenderer::new(width, height, scale));
-        renderer.resize(width, height, scale);
-        shell.present(
-            id,
-            renderer,
-            &state.scene(role, logical_width, logical_height),
-        )?;
+        shell.present(id, &state.scene(role, logical_width, logical_height))?;
     }
     Ok(())
 }
 
 fn render_role(
     shell: &mut SdlShell,
-    renderers: &mut HashMap<SurfaceId, SdlComponentRenderer>,
     state: &mut LiveShell,
     wanted: SurfaceRole,
 ) -> Result<(), String> {
@@ -100,32 +74,34 @@ fn render_role(
         .surfaces()
         .filter(|surface| surface.role() == wanted)
         .map(|surface| {
-            let (width, height) = surface.window().size_in_pixels();
             let (logical_width, logical_height) = surface.window().size();
-            (
-                surface.id(),
-                surface.role(),
-                width,
-                height,
-                logical_width,
-                logical_height,
-                surface.window().display_scale(),
-            )
+            (surface.id(), surface.role(), logical_width, logical_height)
         })
         .collect::<Vec<_>>();
-    for (id, role, width, height, logical_width, logical_height, scale) in surfaces {
+    for (id, role, logical_width, logical_height) in surfaces {
         if !state.surface_visible(role) {
             continue;
         }
-        let renderer = renderers
-            .entry(id)
-            .or_insert_with(|| SdlComponentRenderer::new(width, height, scale));
-        renderer.resize(width, height, scale);
-        shell.present(
-            id,
-            renderer,
-            &state.scene(role, logical_width, logical_height),
-        )?;
+        shell.present(id, &state.scene(role, logical_width, logical_height))?;
+    }
+    Ok(())
+}
+
+fn prewarm_role(
+    shell: &mut SdlShell,
+    state: &mut LiveShell,
+    wanted: SurfaceRole,
+) -> Result<(), String> {
+    let surfaces = shell
+        .surfaces()
+        .filter(|surface| surface.role() == wanted)
+        .map(|surface| {
+            let (logical_width, logical_height) = surface.window().size();
+            (surface.id(), logical_width, logical_height)
+        })
+        .collect::<Vec<_>>();
+    for (id, logical_width, logical_height) in surfaces {
+        shell.present(id, &state.scene(wanted, logical_width, logical_height))?;
     }
     Ok(())
 }
@@ -150,9 +126,8 @@ fn main() -> Result<(), String> {
     let mut shell = SdlShell::new(started)?;
     shell.create_shell_surfaces()?;
     let mut state = LiveShell::new();
-    let mut renderers = HashMap::<SurfaceId, SdlComponentRenderer>::new();
     sync_visibility(&mut shell, &state);
-    render_all(&mut shell, &mut renderers, &mut state)?;
+    render_all(&mut shell, &mut state)?;
     println!(
         "time_to_first_shell_ms={:.3}",
         started.elapsed().as_secs_f64() * 1_000.0
@@ -161,6 +136,12 @@ fn main() -> Result<(), String> {
     tracing::info!(
         elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0,
         "SDL Nickel shell presented"
+    );
+    let launcher_warm_started = Instant::now();
+    prewarm_role(&mut shell, &mut state, SurfaceRole::Launcher)?;
+    tracing::info!(
+        elapsed_ms = launcher_warm_started.elapsed().as_secs_f64() * 1_000.0,
+        "SDL launcher presenter and frame prewarmed"
     );
     let mut refresh_deadline = Instant::now() + Duration::from_millis(100);
     let mut launcher_hover_deadline: Option<Instant> = None;
@@ -186,18 +167,10 @@ fn main() -> Result<(), String> {
                     .unwrap_or_default();
                 if state.panel_click(x, width) {
                     sync_visibility(&mut shell, &state);
-                    render_role(
-                        &mut shell,
-                        &mut renderers,
-                        &mut state,
-                        SurfaceRole::Launcher,
-                    )?;
-                    render_role(
-                        &mut shell,
-                        &mut renderers,
-                        &mut state,
-                        SurfaceRole::ControlCenter,
-                    )?;
+                    // The launcher owns a persistent accelerated presenter and a
+                    // pre-rendered buffer. Showing it must not synchronously
+                    // rebuild and submit the whole scene on the click path.
+                    render_role(&mut shell, &mut state, SurfaceRole::ControlCenter)?;
                 }
             }
             Some(ShellEvent::PointerButton {
@@ -228,7 +201,7 @@ fn main() -> Result<(), String> {
                 };
                 if changed {
                     sync_visibility(&mut shell, &state);
-                    render_role(&mut shell, &mut renderers, &mut state, role)?;
+                    render_role(&mut shell, &mut state, role)?;
                 }
             }
             // SDL reports an initial focus loss while a newly shown Wayland
@@ -237,10 +210,10 @@ fn main() -> Result<(), String> {
             // window. Explicit dismissal and Escape remain authoritative.
             Some(ShellEvent::FocusChanged { .. }) => {}
             Some(ShellEvent::Text { surface, value }) => {
-                if state.insert_launcher_text(&value) {
-                    if let Some(role) = shell.surface(surface).map(|entry| entry.role()) {
-                        render_role(&mut shell, &mut renderers, &mut state, role)?;
-                    }
+                if state.insert_launcher_text(&value)
+                    && let Some(role) = shell.surface(surface).map(|entry| entry.role())
+                {
+                    render_role(&mut shell, &mut state, role)?;
                 }
             }
             Some(ShellEvent::Key {
@@ -250,10 +223,10 @@ fn main() -> Result<(), String> {
                 pressed: true,
                 ..
             }) => {
-                if state.launcher_key(key, modifiers) {
-                    if let Some(role) = shell.surface(surface).map(|entry| entry.role()) {
-                        render_role(&mut shell, &mut renderers, &mut state, role)?;
-                    }
+                if state.launcher_key(key, modifiers)
+                    && let Some(role) = shell.surface(surface).map(|entry| entry.role())
+                {
+                    render_role(&mut shell, &mut state, role)?;
                 }
             }
             Some(ShellEvent::PointerMoved { surface, x, y }) => {
@@ -277,70 +250,38 @@ fn main() -> Result<(), String> {
                     continue;
                 }
                 if state.scroll(y) {
-                    render_role(
-                        &mut shell,
-                        &mut renderers,
-                        &mut state,
-                        role.unwrap_or(SurfaceRole::Desktop),
-                    )?;
+                    render_role(&mut shell, &mut state, role.unwrap_or(SurfaceRole::Desktop))?;
                 }
             }
-            Some(ShellEvent::PixelResize {
-                surface,
-                width,
-                height,
-                scale,
-            }) => {
+            Some(ShellEvent::PixelResize { surface, .. }) => {
                 let Some(role) = shell.surface(surface).map(|entry| entry.role()) else {
                     continue;
                 };
-                let renderer = renderers
-                    .entry(surface)
-                    .or_insert_with(|| SdlComponentRenderer::new(width, height, scale));
-                renderer.resize(width, height, scale);
                 let (logical_width, logical_height) = shell
                     .surface(surface)
                     .map(|entry| entry.window().size())
-                    .unwrap_or((width, height));
-                shell.present(
-                    surface,
-                    renderer,
-                    &state.scene(role, logical_width, logical_height),
-                )?;
+                    .unwrap_or_default();
+                shell.present(surface, &state.scene(role, logical_width, logical_height))?;
             }
             Some(ShellEvent::Redraw(surface)) => {
                 let Some(entry) = shell.surface(surface) else {
                     continue;
                 };
-                let (width, height) = entry.window().size_in_pixels();
                 let (logical_width, logical_height) = entry.window().size();
                 let role = entry.role();
-                let scale = entry.window().display_scale();
-                let renderer = renderers
-                    .entry(surface)
-                    .or_insert_with(|| SdlComponentRenderer::new(width, height, scale));
-                shell.present(
-                    surface,
-                    renderer,
-                    &state.scene(role, logical_width, logical_height),
-                )?;
+                shell.present(surface, &state.scene(role, logical_width, logical_height))?;
             }
             Some(event) => tracing::debug!(?event, "SDL shell event"),
             None => {}
         }
         if launcher_hover_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            render_role(
-                &mut shell,
-                &mut renderers,
-                &mut state,
-                SurfaceRole::Launcher,
-            )?;
+            render_role(&mut shell, &mut state, SurfaceRole::Launcher)?;
             launcher_hover_deadline = None;
         }
         if Instant::now() >= refresh_deadline {
             if state.refresh() {
                 sync_visibility(&mut shell, &state);
-                render_all(&mut shell, &mut renderers, &mut state)?;
+                render_all(&mut shell, &mut state)?;
             }
             refresh_deadline = Instant::now() + Duration::from_millis(100);
         }

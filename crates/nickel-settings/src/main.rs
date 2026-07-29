@@ -5,14 +5,20 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use std::collections::HashMap;
 
+#[cfg(target_os = "linux")]
+use zbus::{
+    blocking::{Connection, Proxy},
+    zvariant::{OwnedObjectPath, OwnedValue},
+};
+
 use nickel_components::{
-    Button as UiButton, Column, ComponentGpu, Container, ContentPane, ControllerAction,
-    ControllerInput, Insets, LinearGradient, NavigationPane, PaintCommand, PaneNavigation,
-    Point as UiPoint, RadioButton, Rect as UiRect, Row, ShoulderHints, Sidebar, Slider, Text,
-    TextAlign, UiTree,
+    Button as UiButton, Column, Container, ContentPane, ControllerAction, ControllerInput, Insets,
+    LinearGradient, NavigationPane, PaintCommand, PaneNavigation, Point as UiPoint, RadioButton,
+    Rect as UiRect, Row, SdlCanvasPresenter, ShoulderHints, Sidebar, Slider, Text, TextAlign,
+    UiTree, VerticalScroll,
 };
 use nickel_core::{
     shell_settings::{ShellSettings, ThemePreference},
@@ -23,8 +29,7 @@ use nickel_i18n::Localizer;
 use sdl3::{
     event::{Event, WindowEvent},
     keyboard::Keycode,
-    mouse::MouseButton,
-    video::Window,
+    mouse::{MouseButton, MouseWheelDirection},
 };
 
 const SIDEBAR_WIDTH: i32 = 190;
@@ -68,6 +73,388 @@ fn parse_output(line: &str) -> Option<OutputSnapshot> {
         physical_height: fields.next()?.parse().ok()?,
         primary: fields.next()? == "1",
     })
+}
+
+#[cfg(target_os = "linux")]
+type BluezProperties = HashMap<String, OwnedValue>;
+#[cfg(target_os = "linux")]
+type BluezInterfaces = HashMap<String, BluezProperties>;
+#[cfg(target_os = "linux")]
+type BluezObjects = HashMap<OwnedObjectPath, BluezInterfaces>;
+
+#[cfg(target_os = "linux")]
+const NETWORK_MANAGER: &str = "org.freedesktop.NetworkManager";
+#[cfg(target_os = "linux")]
+const NETWORK_MANAGER_PATH: &str = "/org/freedesktop/NetworkManager";
+
+#[cfg(target_os = "linux")]
+fn bluez_objects(connection: &Connection) -> zbus::Result<BluezObjects> {
+    Proxy::new(
+        connection,
+        "org.bluez",
+        "/",
+        "org.freedesktop.DBus.ObjectManager",
+    )?
+    .call("GetManagedObjects", &())
+}
+
+#[cfg(target_os = "linux")]
+fn bluez_property<T>(properties: &BluezProperties, name: &str) -> Option<T>
+where
+    T: TryFrom<OwnedValue>,
+{
+    properties
+        .get(name)?
+        .try_clone()
+        .ok()
+        .and_then(|value| T::try_from(value).ok())
+}
+
+#[cfg(target_os = "linux")]
+fn read_bluetooth_snapshot() -> Result<BluetoothSnapshot, String> {
+    let connection = Connection::system().map_err(|error| error.to_string())?;
+    let objects = bluez_objects(&connection).map_err(|error| error.to_string())?;
+    let Some((_, adapter_interfaces)) = objects
+        .iter()
+        .find(|(_, interfaces)| interfaces.contains_key("org.bluez.Adapter1"))
+    else {
+        return Ok(BluetoothSnapshot::default());
+    };
+    let adapter = &adapter_interfaces["org.bluez.Adapter1"];
+    let mut devices = objects
+        .iter()
+        .filter_map(|(path, interfaces)| {
+            let properties = interfaces.get("org.bluez.Device1")?;
+            let battery_percent = interfaces
+                .get("org.bluez.Battery1")
+                .and_then(|battery| bluez_property::<u8>(battery, "Percentage"));
+            Some(BluetoothDevice {
+                id: path.as_str().to_owned(),
+                name: bluez_property::<String>(properties, "Alias")
+                    .or_else(|| bluez_property::<String>(properties, "Name"))
+                    .unwrap_or_else(|| "Unknown device".into()),
+                paired: bluez_property::<bool>(properties, "Paired").unwrap_or(false),
+                connected: bluez_property::<bool>(properties, "Connected").unwrap_or(false),
+                battery_percent,
+            })
+        })
+        .collect::<Vec<_>>();
+    devices.sort_by(|left, right| {
+        right
+            .connected
+            .cmp(&left.connected)
+            .then_with(|| right.paired.cmp(&left.paired))
+            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+    });
+    Ok(BluetoothSnapshot {
+        available: true,
+        powered: bluez_property::<bool>(adapter, "Powered").unwrap_or(false),
+        discovering: bluez_property::<bool>(adapter, "Discovering").unwrap_or(false),
+        adapter_name: bluez_property::<String>(adapter, "Alias").unwrap_or_default(),
+        devices,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn set_bluetooth_adapter_property(name: &str, value: bool) -> Result<(), String> {
+    let connection = Connection::system().map_err(|error| error.to_string())?;
+    let objects = bluez_objects(&connection).map_err(|error| error.to_string())?;
+    let path = objects
+        .iter()
+        .find(|(_, interfaces)| interfaces.contains_key("org.bluez.Adapter1"))
+        .map(|(path, _)| path)
+        .ok_or_else(|| "no Bluetooth adapter is available".to_owned())?;
+    let proxy = Proxy::new(
+        &connection,
+        "org.bluez",
+        path.as_str(),
+        "org.bluez.Adapter1",
+    )
+    .map_err(|error| error.to_string())?;
+    if name == "Discovering" {
+        proxy
+            .call_method(
+                if value {
+                    "StartDiscovery"
+                } else {
+                    "StopDiscovery"
+                },
+                &(),
+            )
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    } else {
+        proxy
+            .set_property(name, value)
+            .map_err(|error| error.to_string())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn toggle_bluetooth_device(device: &BluetoothDevice) -> Result<(), String> {
+    let connection = Connection::system().map_err(|error| error.to_string())?;
+    Proxy::new(
+        &connection,
+        "org.bluez",
+        device.id.as_str(),
+        "org.bluez.Device1",
+    )
+    .map_err(|error| error.to_string())?
+    .call_method(
+        if device.connected {
+            "Disconnect"
+        } else {
+            "Connect"
+        },
+        &(),
+    )
+    .map(|_| ())
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn saved_wifi_connections(connection: &Connection) -> HashMap<Vec<u8>, OwnedObjectPath> {
+    let Ok(settings) = Proxy::new(
+        connection,
+        NETWORK_MANAGER,
+        "/org/freedesktop/NetworkManager/Settings",
+        "org.freedesktop.NetworkManager.Settings",
+    ) else {
+        return HashMap::new();
+    };
+    settings
+        .call::<_, _, Vec<OwnedObjectPath>>("ListConnections", &())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|path| {
+            let proxy = Proxy::new(
+                connection,
+                NETWORK_MANAGER,
+                path.as_str(),
+                "org.freedesktop.NetworkManager.Settings.Connection",
+            )
+            .ok()?;
+            let values = proxy
+                .call::<_, _, HashMap<String, BluezProperties>>("GetSettings", &())
+                .ok()?;
+            let ssid = values
+                .get("802-11-wireless")?
+                .get("ssid")?
+                .try_clone()
+                .ok()
+                .and_then(|value| Vec::<u8>::try_from(value).ok())?;
+            Some((ssid, path.clone()))
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn read_linux_network() -> Result<(bool, Vec<WifiNetwork>, Vec<NetworkAdapter>), String> {
+    let connection = Connection::system().map_err(|error| error.to_string())?;
+    let manager = Proxy::new(
+        &connection,
+        NETWORK_MANAGER,
+        NETWORK_MANAGER_PATH,
+        NETWORK_MANAGER,
+    )
+    .map_err(|error| error.to_string())?;
+    let enabled = manager
+        .get_property::<bool>("WirelessEnabled")
+        .unwrap_or(false);
+    let devices = manager
+        .call::<_, _, Vec<OwnedObjectPath>>("GetDevices", &())
+        .map_err(|error| error.to_string())?;
+    let saved = saved_wifi_connections(&connection);
+    let mut networks = Vec::new();
+    let mut adapters = Vec::new();
+
+    for device_path in devices {
+        let device = Proxy::new(
+            &connection,
+            NETWORK_MANAGER,
+            device_path.as_str(),
+            "org.freedesktop.NetworkManager.Device",
+        )
+        .map_err(|error| error.to_string())?;
+        let device_type = device.get_property::<u32>("DeviceType").unwrap_or(0);
+        let name = device
+            .get_property::<String>("Interface")
+            .unwrap_or_else(|_| device_path.as_str().to_owned());
+        let connected = device.get_property::<u32>("State").unwrap_or(0) == 100;
+        let (description, speed) = match device_type {
+            1 => {
+                let speed = Proxy::new(
+                    &connection,
+                    NETWORK_MANAGER,
+                    device_path.as_str(),
+                    "org.freedesktop.NetworkManager.Device.Wired",
+                )
+                .ok()
+                .and_then(|proxy| proxy.get_property::<u32>("Speed").ok())
+                .map(u64::from)
+                .unwrap_or(0)
+                    * 1_000_000;
+                ("Ethernet".to_owned(), speed)
+            }
+            2 => {
+                let speed = Proxy::new(
+                    &connection,
+                    NETWORK_MANAGER,
+                    device_path.as_str(),
+                    "org.freedesktop.NetworkManager.Device.Wireless",
+                )
+                .ok()
+                .and_then(|proxy| proxy.get_property::<u32>("Bitrate").ok())
+                .map(u64::from)
+                .unwrap_or(0)
+                    * 1_000;
+                ("Wi-Fi".to_owned(), speed)
+            }
+            _ => continue,
+        };
+        adapters.push(NetworkAdapter {
+            name,
+            description,
+            connected,
+            speed,
+        });
+        if device_type != 2 {
+            continue;
+        }
+
+        let wireless = Proxy::new(
+            &connection,
+            NETWORK_MANAGER,
+            device_path.as_str(),
+            "org.freedesktop.NetworkManager.Device.Wireless",
+        )
+        .map_err(|error| error.to_string())?;
+        let active = wireless
+            .get_property::<OwnedObjectPath>("ActiveAccessPoint")
+            .ok();
+        let access_points = wireless
+            .call::<_, _, Vec<OwnedObjectPath>>("GetAllAccessPoints", &())
+            .or_else(|_| wireless.get_property::<Vec<OwnedObjectPath>>("AccessPoints"))
+            .unwrap_or_default();
+        for access_point_path in access_points {
+            let access_point = Proxy::new(
+                &connection,
+                NETWORK_MANAGER,
+                access_point_path.as_str(),
+                "org.freedesktop.NetworkManager.AccessPoint",
+            )
+            .map_err(|error| error.to_string())?;
+            let ssid = access_point
+                .get_property::<Vec<u8>>("Ssid")
+                .unwrap_or_default();
+            let profile = String::from_utf8_lossy(&ssid).trim().to_owned();
+            if profile.is_empty() {
+                continue;
+            }
+            let flags = access_point.get_property::<u32>("Flags").unwrap_or(0);
+            let wpa_flags = access_point.get_property::<u32>("WpaFlags").unwrap_or(0);
+            let rsn_flags = access_point.get_property::<u32>("RsnFlags").unwrap_or(0);
+            networks.push(WifiNetwork {
+                id: format!("{}\t{}", device_path.as_str(), access_point_path.as_str()),
+                profile,
+                signal: u32::from(access_point.get_property::<u8>("Strength").unwrap_or(0)),
+                connected: active.as_ref() == Some(&access_point_path),
+                saved: saved.contains_key(&ssid),
+                secure: flags & 1 != 0 || wpa_flags != 0 || rsn_flags != 0,
+            });
+        }
+    }
+    networks.sort_by(|left, right| {
+        right
+            .connected
+            .cmp(&left.connected)
+            .then_with(|| right.signal.cmp(&left.signal))
+            .then_with(|| {
+                left.profile
+                    .to_lowercase()
+                    .cmp(&right.profile.to_lowercase())
+            })
+    });
+    networks.dedup_by(|left, right| left.profile == right.profile);
+    adapters.sort_by_key(|adapter| (!adapter.connected, adapter.name.to_lowercase()));
+    Ok((enabled, networks, adapters))
+}
+
+#[cfg(target_os = "linux")]
+fn set_linux_wifi_enabled(enabled: bool) -> Result<(), String> {
+    let connection = Connection::system().map_err(|error| error.to_string())?;
+    Proxy::new(
+        &connection,
+        NETWORK_MANAGER,
+        NETWORK_MANAGER_PATH,
+        NETWORK_MANAGER,
+    )
+    .map_err(|error| error.to_string())?
+    .set_property("WirelessEnabled", enabled)
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn activate_linux_wifi(network: &WifiNetwork) -> Result<(), String> {
+    let (device_path, access_point_path) = network
+        .id
+        .split_once('\t')
+        .ok_or_else(|| "invalid Wi-Fi network identity".to_owned())?;
+    let connection = Connection::system().map_err(|error| error.to_string())?;
+    if network.connected {
+        return Proxy::new(
+            &connection,
+            NETWORK_MANAGER,
+            device_path,
+            "org.freedesktop.NetworkManager.Device",
+        )
+        .map_err(|error| error.to_string())?
+        .call_method("Disconnect", &())
+        .map(|_| ())
+        .map_err(|error| error.to_string());
+    }
+    let access_point = Proxy::new(
+        &connection,
+        NETWORK_MANAGER,
+        access_point_path,
+        "org.freedesktop.NetworkManager.AccessPoint",
+    )
+    .map_err(|error| error.to_string())?;
+    let ssid = access_point
+        .get_property::<Vec<u8>>("Ssid")
+        .map_err(|error| error.to_string())?;
+    let saved = saved_wifi_connections(&connection);
+    let connection_path = saved
+        .get(&ssid)
+        .ok_or_else(|| "network has no saved connection profile".to_owned())?;
+    let specific =
+        OwnedObjectPath::try_from(access_point_path).map_err(|error| error.to_string())?;
+    let device = OwnedObjectPath::try_from(device_path).map_err(|error| error.to_string())?;
+    Proxy::new(
+        &connection,
+        NETWORK_MANAGER,
+        NETWORK_MANAGER_PATH,
+        NETWORK_MANAGER,
+    )
+    .map_err(|error| error.to_string())?
+    .call_method("ActivateConnection", &(connection_path, device, specific))
+    .map(|_| ())
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn read_bluetooth_snapshot() -> Result<BluetoothSnapshot, String> {
+    Ok(BluetoothSnapshot::default())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn set_bluetooth_adapter_property(_name: &str, _value: bool) -> Result<(), String> {
+    Err("Bluetooth settings are unavailable on this platform".into())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn toggle_bluetooth_device(_device: &BluetoothDevice) -> Result<(), String> {
+    Err("Bluetooth settings are unavailable on this platform".into())
 }
 
 #[cfg(target_os = "windows")]
@@ -205,12 +592,31 @@ struct DisplayCard {
     primary: bool,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct BluetoothDevice {
+    id: String,
+    name: String,
+    paired: bool,
+    connected: bool,
+    battery_percent: Option<u8>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct BluetoothSnapshot {
+    available: bool,
+    powered: bool,
+    discovering: bool,
+    adapter_name: String,
+    devices: Vec<BluetoothDevice>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SettingsPage {
     Display,
     Bar,
     Appearance,
     Network,
+    Bluetooth,
 }
 
 impl SettingsPage {
@@ -220,6 +626,7 @@ impl SettingsPage {
             Self::Bar => Self::Display,
             Self::Appearance => Self::Bar,
             Self::Network => Self::Appearance,
+            Self::Bluetooth => Self::Network,
         }
     }
 
@@ -228,7 +635,8 @@ impl SettingsPage {
             Self::Display => Self::Bar,
             Self::Bar => Self::Appearance,
             Self::Appearance => Self::Network,
-            Self::Network => Self::Network,
+            Self::Network => Self::Bluetooth,
+            Self::Bluetooth => Self::Bluetooth,
         }
     }
 }
@@ -241,15 +649,18 @@ struct NetworkAdapter {
 }
 
 struct WifiNetwork {
+    id: String,
     profile: String,
     signal: u32,
     connected: bool,
+    saved: bool,
+    secure: bool,
+    #[cfg(target_os = "windows")]
     interface: u128,
 }
 
 struct SettingsApp {
     localizer: Localizer,
-    gpu: Option<ComponentGpu>,
     redraw_requested: Cell<bool>,
     running: bool,
     displays: Vec<DisplayCard>,
@@ -266,13 +677,23 @@ struct SettingsApp {
     appearance_slider_dragging: bool,
     intensity_slider_dragging: bool,
     appearance_save_deadline: Option<Instant>,
+    resize_deadline: Option<Instant>,
     frame_interval: Duration,
     network_adapters: Vec<NetworkAdapter>,
     wifi_networks: Vec<WifiNetwork>,
+    network_available: bool,
+    wifi_enabled: bool,
     wifi_status: String,
     pending_wifi_profile: Option<String>,
     next_wifi_refresh: Option<Instant>,
     wifi_refreshes_left: u8,
+    bluetooth: BluetoothSnapshot,
+    next_bluetooth_refresh: Instant,
+    hovered_bluetooth_device: Option<usize>,
+    hovered_wifi_network: Option<usize>,
+    network_scroll: f32,
+    bluetooth_scroll: f32,
+    next_network_refresh: Instant,
     ui: UiTree,
     controller: ControllerInput,
     navigation: PaneNavigation,
@@ -285,7 +706,6 @@ impl Default for SettingsApp {
         let status = localizer.text("settings-status-changes-not-applied");
         Self {
             localizer,
-            gpu: None,
             redraw_requested: Cell::new(true),
             running: true,
             displays: vec![
@@ -296,8 +716,8 @@ impl Default for SettingsApp {
                     logical_width: 1920,
                     logical_height: 1080,
                     rect: Rect {
-                        x: 125,
-                        y: 205,
+                        x: 225,
+                        y: 186,
                         w: 270,
                         h: 160,
                     },
@@ -310,8 +730,8 @@ impl Default for SettingsApp {
                     logical_width: 1920,
                     logical_height: 1080,
                     rect: Rect {
-                        x: 405,
-                        y: 185,
+                        x: 495,
+                        y: 176,
                         w: 300,
                         h: 180,
                     },
@@ -331,13 +751,23 @@ impl Default for SettingsApp {
             appearance_slider_dragging: false,
             intensity_slider_dragging: false,
             appearance_save_deadline: None,
+            resize_deadline: None,
             frame_interval: Duration::from_millis(16),
             network_adapters: Vec::new(),
             wifi_networks: Vec::new(),
+            network_available: false,
+            wifi_enabled: false,
             wifi_status: String::new(),
             pending_wifi_profile: None,
             next_wifi_refresh: None,
             wifi_refreshes_left: 0,
+            bluetooth: BluetoothSnapshot::default(),
+            next_bluetooth_refresh: Instant::now(),
+            hovered_bluetooth_device: None,
+            hovered_wifi_network: None,
+            network_scroll: 0.0,
+            bluetooth_scroll: 0.0,
+            next_network_refresh: Instant::now(),
             ui: UiTree::default(),
             controller: ControllerInput::new(),
             navigation: PaneNavigation::default(),
@@ -508,6 +938,10 @@ impl SettingsApp {
                 self.localizer.text("settings-network-title"),
                 self.localizer.text("settings-network-subtitle"),
             ),
+            SettingsPage::Bluetooth => (
+                self.localizer.text("settings-bluetooth-title"),
+                self.localizer.text("settings-bluetooth-subtitle"),
+            ),
         };
         let header_content = Container::new()
             .grow(1.0)
@@ -567,6 +1001,13 @@ impl SettingsApp {
             selected_page == SettingsPage::Network,
             palette,
         );
+        let bluetooth_button = self.navigation_item(
+            "nav:bluetooth",
+            "settings-nav-bluetooth",
+            "ᛒ",
+            selected_page == SettingsPage::Bluetooth,
+            palette,
+        );
         let mut sidebar = Sidebar::new(SIDEBAR_WIDTH as f32)
             .background(LinearGradient::vertical(palette.panel, palette.background))
             .padding(Insets {
@@ -579,7 +1020,8 @@ impl SettingsApp {
             .child(display_button)
             .child(bar_button)
             .child(appearance_button)
-            .child(network_button);
+            .child(network_button)
+            .child(bluetooth_button);
         if self.controller.connected() {
             sidebar = sidebar.child(
                 Container::new()
@@ -599,6 +1041,7 @@ impl SettingsApp {
             SettingsPage::Bar => self.bar_components(),
             SettingsPage::Appearance => self.appearance_components(),
             SettingsPage::Network => self.network_components(),
+            SettingsPage::Bluetooth => self.bluetooth_components(),
         };
         let root = Column::new()
             .height(height)
@@ -682,7 +1125,6 @@ impl SettingsApp {
         let wifi_cards = self
             .wifi_networks
             .iter()
-            .take(4)
             .enumerate()
             .map(|(index, network)| {
                 let detail = if network.connected {
@@ -691,8 +1133,16 @@ impl SettingsApp {
                         "signal",
                         i64::from(network.signal),
                     )
-                } else if network.signal == 0 {
-                    self.localizer.text("settings-network-saved-unavailable")
+                } else if !network.saved {
+                    self.localizer.number(
+                        if network.secure {
+                            "settings-network-secured-signal"
+                        } else {
+                            "settings-network-open-signal"
+                        },
+                        "signal",
+                        i64::from(network.signal),
+                    )
                 } else {
                     self.localizer.number(
                         "settings-network-connect-action",
@@ -702,8 +1152,19 @@ impl SettingsApp {
                 };
                 Container::new()
                     .height(44.0)
-                    .background(palette.surface)
-                    .border(palette.muted, 1.0)
+                    .background(if self.hovered_wifi_network == Some(index) {
+                        palette.surface_hover
+                    } else {
+                        palette.surface
+                    })
+                    .border(
+                        if network.connected {
+                            palette.accent
+                        } else {
+                            palette.muted
+                        },
+                        if network.connected { 2.0 } else { 1.0 },
+                    )
                     .padding(Insets {
                         top: 12.0,
                         right: 14.0,
@@ -721,13 +1182,17 @@ impl SettingsApp {
                             })),
                     )
             });
-        let adapter_cards = self.network_adapters.iter().take(2).map(|adapter| {
+        let adapter_cards = self.network_adapters.iter().map(|adapter| {
             let status = if adapter.connected {
-                self.localizer.number(
-                    "settings-network-connected-speed",
-                    "speed",
-                    (adapter.speed / 1_000_000) as i64,
-                )
+                if adapter.speed > 0 {
+                    self.localizer.number(
+                        "settings-network-connected-speed",
+                        "speed",
+                        (adapter.speed / 1_000_000) as i64,
+                    )
+                } else {
+                    self.localizer.text("settings-network-connected")
+                }
             } else {
                 self.localizer.text("settings-network-disconnected")
             };
@@ -760,6 +1225,104 @@ impl SettingsApp {
                         ),
                 )
         });
+        let wifi_height = if self.wifi_networks.is_empty() {
+            44.0
+        } else {
+            self.wifi_networks.len() as f32 * 52.0 - 8.0
+        };
+        let adapter_height = if self.network_adapters.is_empty() {
+            44.0
+        } else {
+            self.network_adapters.len() as f32 * 84.0 - 12.0
+        };
+        let wifi_list = if self.wifi_networks.is_empty() {
+            Column::new()
+                .height(wifi_height)
+                .child(Text::new(&self.wifi_status).scale(1.0).color(palette.muted))
+        } else {
+            Column::new()
+                .height(wifi_height)
+                .gap(8.0)
+                .children(wifi_cards)
+        };
+        let adapter_list = if self.network_adapters.is_empty() {
+            Column::new().height(adapter_height).child(
+                Text::new(self.localizer.text("settings-network-no-adapters"))
+                    .scale(1.0)
+                    .color(palette.muted),
+            )
+        } else {
+            Column::new()
+                .height(adapter_height)
+                .gap(12.0)
+                .children(adapter_cards)
+        };
+        let content_height =
+            58.0 + 12.0 + 26.0 + 12.0 + wifi_height + 12.0 + 18.0 + 12.0 + adapter_height;
+        let content = Column::new()
+            .height(content_height)
+            .gap(12.0)
+            .child(
+                Container::new()
+                    .height(58.0)
+                    .background(palette.surface)
+                    .border(
+                        if self.wifi_enabled {
+                            palette.accent
+                        } else {
+                            palette.muted
+                        },
+                        2.0,
+                    )
+                    .action("network:wifi-power")
+                    .padding(Insets {
+                        top: 10.0,
+                        right: 14.0,
+                        bottom: 10.0,
+                        left: 14.0,
+                    })
+                    .child(
+                        Row::new()
+                            .child(
+                                Text::new(self.localizer.text("settings-network-wifi"))
+                                    .width(500.0)
+                                    .color(palette.text),
+                            )
+                            .child(
+                                Text::new(if self.wifi_enabled {
+                                    self.localizer.text("settings-network-wifi-on")
+                                } else if !self.network_available {
+                                    self.localizer.text("settings-network-wifi-unavailable")
+                                } else {
+                                    self.localizer.text("settings-network-wifi-off")
+                                })
+                                .bold(true)
+                                .color(if self.wifi_enabled {
+                                    palette.accent
+                                } else {
+                                    palette.muted
+                                }),
+                            ),
+                    ),
+            )
+            .child(
+                Row::new()
+                    .height(26.0)
+                    .child(
+                        Text::new(self.localizer.text("settings-network-visible-wifi"))
+                            .color(palette.text)
+                            .width(308.0),
+                    )
+                    .child(Text::new(&self.wifi_status).scale(1.0).color(palette.muted)),
+            )
+            .child(wifi_list)
+            .child(
+                Text::new(self.localizer.text("settings-network-adapters"))
+                    .color(palette.text)
+                    .height(18.0),
+            )
+            .child(adapter_list);
+
         Column::new()
             .grow(1.0)
             .padding(Insets {
@@ -768,29 +1331,189 @@ impl SettingsApp {
                 bottom: 20.0,
                 left: 20.0,
             })
-            .gap(8.0)
+            .child(
+                VerticalScroll::new("network:scroll", self.network_scroll, 468.0, content_height)
+                    .child(content),
+            )
+    }
+
+    fn bluetooth_components(&self) -> Column {
+        let palette = self.palette();
+        let device_cards = self
+            .bluetooth
+            .devices
+            .iter()
+            .enumerate()
+            .map(|(index, device)| {
+                let status = if device.connected {
+                    self.localizer.text("settings-bluetooth-connected")
+                } else if device.paired {
+                    self.localizer.text("settings-bluetooth-paired")
+                } else {
+                    self.localizer.text("settings-bluetooth-available")
+                };
+                let detail = device
+                    .battery_percent
+                    .map(|percent| format!("{percent}%"))
+                    .unwrap_or_default();
+                Container::new()
+                    .height(68.0)
+                    .background(if self.hovered_bluetooth_device == Some(index) {
+                        palette.surface_hover
+                    } else {
+                        palette.surface
+                    })
+                    .border(
+                        if device.connected {
+                            palette.accent
+                        } else {
+                            palette.muted
+                        },
+                        if device.connected { 2.0 } else { 1.0 },
+                    )
+                    .action(format!("bluetooth:device:{index}"))
+                    .padding(Insets {
+                        top: 12.0,
+                        right: 14.0,
+                        bottom: 10.0,
+                        left: 14.0,
+                    })
+                    .child(
+                        Row::new()
+                            .child(
+                                Column::new()
+                                    .grow(1.0)
+                                    .gap(7.0)
+                                    .child(Text::new(&device.name).color(palette.text))
+                                    .child(Text::new(status).scale(1.0).color(
+                                        if device.connected {
+                                            palette.complement
+                                        } else {
+                                            palette.muted
+                                        },
+                                    )),
+                            )
+                            .child(Text::new(detail).color(palette.muted)),
+                    )
+            });
+
+        let adapter_status = if !self.bluetooth.available {
+            self.localizer
+                .text("settings-bluetooth-service-unavailable")
+        } else if self.bluetooth.powered {
+            self.localizer.text("settings-bluetooth-on")
+        } else {
+            self.localizer.text("settings-bluetooth-off")
+        };
+        let discoverability = if self.bluetooth.discovering {
+            self.localizer.text("settings-bluetooth-discovery-stop")
+        } else {
+            self.localizer.text("settings-bluetooth-discovery-start")
+        };
+        let device_height = if self.bluetooth.devices.is_empty() {
+            44.0
+        } else {
+            self.bluetooth.devices.len() as f32 * 78.0 - 10.0
+        };
+        let device_list = if self.bluetooth.devices.is_empty() {
+            Column::new().height(device_height).child(
+                Text::new(if self.bluetooth.available {
+                    self.localizer.text("settings-bluetooth-no-devices")
+                } else {
+                    self.localizer
+                        .text("settings-bluetooth-service-unavailable")
+                })
+                .color(palette.muted),
+            )
+        } else {
+            Column::new()
+                .height(device_height)
+                .gap(10.0)
+                .children(device_cards)
+        };
+        let content_height = 58.0 + 12.0 + 36.0 + 12.0 + device_height;
+        let content = Column::new()
+            .height(content_height)
+            .gap(12.0)
+            .child(
+                Container::new()
+                    .height(58.0)
+                    .background(palette.surface)
+                    .border(palette.accent, 2.0)
+                    .action("bluetooth:power")
+                    .padding(Insets {
+                        top: 10.0,
+                        right: 14.0,
+                        bottom: 10.0,
+                        left: 14.0,
+                    })
+                    .child(
+                        Row::new()
+                            .child(
+                                Column::new()
+                                    .grow(1.0)
+                                    .gap(5.0)
+                                    .child(
+                                        Text::new(
+                                            self.localizer.text("settings-bluetooth-enabled"),
+                                        )
+                                        .color(palette.text),
+                                    )
+                                    .child(
+                                        Text::new(if self.bluetooth.adapter_name.is_empty() {
+                                            self.localizer
+                                                .text("settings-bluetooth-adapter-unnamed")
+                                        } else {
+                                            self.bluetooth.adapter_name.clone()
+                                        })
+                                        .scale(1.0)
+                                        .color(palette.muted),
+                                    ),
+                            )
+                            .child(Text::new(adapter_status).bold(true).color(
+                                if self.bluetooth.powered {
+                                    palette.accent
+                                } else {
+                                    palette.muted
+                                },
+                            )),
+                    ),
+            )
             .child(
                 Row::new()
-                    .height(26.0)
+                    .height(36.0)
                     .child(
-                        Text::new(self.localizer.text("settings-network-saved-wifi"))
-                            .color(palette.text)
-                            .width(308.0),
+                        Text::new(self.localizer.text("settings-bluetooth-devices"))
+                            .width(390.0)
+                            .color(palette.text),
                     )
-                    .child(Text::new(&self.wifi_status).scale(1.0).color(palette.muted)),
+                    .child(
+                        UiButton::new("bluetooth:discovery", discoverability)
+                            .width(150.0)
+                            .color(palette.text)
+                            .background(palette.surface_hover)
+                            .border(palette.muted, 1.0),
+                    ),
             )
+            .child(device_list);
+
+        Column::new()
+            .grow(1.0)
+            .padding(Insets {
+                top: 20.0,
+                right: 40.0,
+                bottom: 20.0,
+                left: 20.0,
+            })
             .child(
-                Column::new()
-                    .height((self.wifi_networks.len().min(4) as f32 * 52.0).max(44.0))
-                    .gap(8.0)
-                    .children(wifi_cards),
+                VerticalScroll::new(
+                    "bluetooth:scroll",
+                    self.bluetooth_scroll,
+                    468.0,
+                    content_height,
+                )
+                .child(content),
             )
-            .child(
-                Text::new(self.localizer.text("settings-network-adapters"))
-                    .color(palette.text)
-                    .height(18.0),
-            )
-            .child(Column::new().gap(12.0).children(adapter_cards))
     }
 
     fn bar_components(&self) -> Column {
@@ -1178,7 +1901,42 @@ impl SettingsApp {
                 "nav:display" => self.page = SettingsPage::Display,
                 "nav:bar" => self.page = SettingsPage::Bar,
                 "nav:appearance" => self.page = SettingsPage::Appearance,
-                "nav:network" => self.page = SettingsPage::Network,
+                "nav:network" => {
+                    self.page = SettingsPage::Network;
+                    self.load_linux_network();
+                }
+                "nav:bluetooth" => {
+                    self.page = SettingsPage::Bluetooth;
+                    self.load_bluetooth();
+                }
+                "bluetooth:power" => {
+                    let _ = set_bluetooth_adapter_property("Powered", !self.bluetooth.powered);
+                    self.next_bluetooth_refresh = Instant::now();
+                }
+                "bluetooth:discovery" => {
+                    let _ =
+                        set_bluetooth_adapter_property("Discovering", !self.bluetooth.discovering);
+                    self.next_bluetooth_refresh = Instant::now();
+                }
+                "network:wifi-power" => {
+                    #[cfg(target_os = "linux")]
+                    if let Err(error) = set_linux_wifi_enabled(!self.wifi_enabled) {
+                        self.wifi_status = self.localizer.value(
+                            "settings-network-connection-failed",
+                            "error",
+                            &error,
+                        );
+                    }
+                    self.next_network_refresh = Instant::now();
+                }
+                _ if action.starts_with("bluetooth:device:") => {
+                    if let Ok(index) = action["bluetooth:device:".len()..].parse::<usize>()
+                        && let Some(device) = self.bluetooth.devices.get(index)
+                    {
+                        let _ = toggle_bluetooth_device(device);
+                        self.next_bluetooth_refresh = Instant::now();
+                    }
+                }
                 "appearance:light" => {
                     self.shell_settings.theme = ThemePreference::Light;
                     let _ = self.shell_settings.save_default();
@@ -1290,6 +2048,30 @@ impl SettingsApp {
             }
             return;
         }
+        if self.page == SettingsPage::Bluetooth {
+            let hovered = self
+                .ui
+                .action_at(UiPoint { x, y })
+                .and_then(|action| action.strip_prefix("bluetooth:device:"))
+                .and_then(|index| index.parse().ok());
+            if hovered != self.hovered_bluetooth_device {
+                self.hovered_bluetooth_device = hovered;
+                self.request_redraw();
+            }
+            return;
+        }
+        if self.page == SettingsPage::Network {
+            let hovered = self
+                .ui
+                .action_at(UiPoint { x, y })
+                .and_then(|action| action.strip_prefix("wifi:"))
+                .and_then(|index| index.parse().ok());
+            if hovered != self.hovered_wifi_network {
+                self.hovered_wifi_network = hovered;
+                self.request_redraw();
+            }
+            return;
+        }
         if self.page != SettingsPage::Display {
             return;
         }
@@ -1338,6 +2120,46 @@ impl SettingsApp {
         self.request_redraw();
     }
 
+    fn scroll_settings(&mut self, wheel_y: f32) {
+        let delta = -wheel_y * 42.0;
+        match self.page {
+            SettingsPage::Network => {
+                let maximum = (self.network_content_height() - 468.0).max(0.0);
+                self.network_scroll = (self.network_scroll + delta).clamp(0.0, maximum);
+                self.request_redraw();
+            }
+            SettingsPage::Bluetooth => {
+                let maximum = (self.bluetooth_content_height() - 468.0).max(0.0);
+                self.bluetooth_scroll = (self.bluetooth_scroll + delta).clamp(0.0, maximum);
+                self.request_redraw();
+            }
+            _ => {}
+        }
+    }
+
+    fn network_content_height(&self) -> f32 {
+        let wifi = if self.wifi_networks.is_empty() {
+            44.0
+        } else {
+            self.wifi_networks.len() as f32 * 52.0 - 8.0
+        };
+        let adapters = if self.network_adapters.is_empty() {
+            44.0
+        } else {
+            self.network_adapters.len() as f32 * 84.0 - 12.0
+        };
+        58.0 + 12.0 + 26.0 + 12.0 + wifi + 12.0 + 18.0 + 12.0 + adapters
+    }
+
+    fn bluetooth_content_height(&self) -> f32 {
+        let devices = if self.bluetooth.devices.is_empty() {
+            44.0
+        } else {
+            self.bluetooth.devices.len() as f32 * 78.0 - 10.0
+        };
+        58.0 + 12.0 + 36.0 + 12.0 + devices
+    }
+
     fn set_desktop_count_from_fraction(&mut self, fraction: f32) {
         let count = 1 + (fraction.clamp(0.0, 1.0) * 7.0).round() as u8;
         if count == self.shell_settings.desktop_count {
@@ -1367,6 +2189,76 @@ impl SettingsApp {
         }
         self.shell_settings.accent_intensity = Some(intensity);
         self.appearance_save_deadline = Some(Instant::now() + self.frame_interval);
+    }
+
+    fn load_bluetooth(&mut self) {
+        self.bluetooth = match read_bluetooth_snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                tracing::warn!(%error, "failed to read Bluetooth settings");
+                BluetoothSnapshot::default()
+            }
+        };
+        tracing::debug!(
+            available = self.bluetooth.available,
+            powered = self.bluetooth.powered,
+            discovering = self.bluetooth.discovering,
+            devices = self.bluetooth.devices.len(),
+            "Bluetooth settings refreshed"
+        );
+        self.next_bluetooth_refresh = Instant::now() + Duration::from_secs(2);
+        self.request_redraw();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn load_linux_network(&mut self) {
+        match read_linux_network() {
+            Ok((enabled, networks, adapters)) => {
+                self.network_available = true;
+                self.wifi_enabled = enabled;
+                self.wifi_status = if !enabled {
+                    self.localizer.text("settings-network-wifi-disabled")
+                } else if networks.is_empty() {
+                    self.localizer.text("settings-network-no-visible-networks")
+                } else {
+                    self.localizer.number(
+                        "settings-network-visible-count",
+                        "count",
+                        networks.len() as i64,
+                    )
+                };
+                self.wifi_networks = networks;
+                self.network_adapters = adapters;
+                tracing::debug!(
+                    enabled,
+                    networks = self.wifi_networks.len(),
+                    adapters = self.network_adapters.len(),
+                    "NetworkManager settings refreshed"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(%error, "failed to read NetworkManager settings");
+                self.network_available = false;
+                self.wifi_enabled = false;
+                self.wifi_networks.clear();
+                self.network_adapters.clear();
+                self.wifi_status = self.localizer.text("settings-network-service-unavailable");
+            }
+        }
+        self.next_network_refresh = Instant::now() + Duration::from_secs(2);
+        self.request_redraw();
+    }
+
+    #[cfg(target_os = "windows")]
+    fn load_linux_network(&mut self) {
+        self.load_windows_network();
+        self.load_windows_wifi();
+        self.next_network_refresh = Instant::now() + Duration::from_secs(2);
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    fn load_linux_network(&mut self) {
+        self.next_network_refresh = Instant::now() + Duration::from_secs(2);
     }
 
     fn load_outputs(&mut self) {
@@ -1498,7 +2390,9 @@ impl SettingsApp {
             .into_iter()
             .enumerate()
             .map(|(index, monitor)| {
-                let bounds = monitor.get_bounds().unwrap_or_default();
+                let bounds = monitor
+                    .get_bounds()
+                    .unwrap_or_else(|_| sdl3::rect::Rect::new(0, 0, 1, 1));
                 let raw_name = monitor
                     .get_name()
                     .unwrap_or_else(|_| format!("Display {}", index + 1));
@@ -1600,9 +2494,6 @@ impl SettingsApp {
         adapters.sort_by_key(|adapter| (!adapter.connected, adapter.name.to_ascii_lowercase()));
         self.network_adapters = adapters;
     }
-
-    #[cfg(not(target_os = "windows"))]
-    fn load_windows_network(&mut self) {}
 
     #[cfg(target_os = "windows")]
     fn load_windows_wifi(&mut self) {
@@ -1707,9 +2598,12 @@ impl SettingsApp {
                 let (signal, connected) =
                     available_profiles.get(&key).copied().unwrap_or((0, false));
                 networks_by_profile.entry(key).or_insert(WifiNetwork {
+                    id: profile.clone(),
                     profile,
                     signal,
                     connected,
+                    saved: true,
+                    secure: true,
                     interface: interface_id,
                 });
             }
@@ -1737,6 +2631,8 @@ impl SettingsApp {
                 networks.len() as i64,
             )
         };
+        self.network_available = true;
+        self.wifi_enabled = true;
         self.wifi_networks = networks;
     }
 
@@ -1794,7 +2690,33 @@ impl SettingsApp {
         };
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    fn connect_windows_wifi(&mut self, index: usize) {
+        let Some(network) = self.wifi_networks.get(index) else {
+            return;
+        };
+        if !network.connected && !network.saved {
+            self.wifi_status = self.localizer.text("settings-network-profile-required");
+            return;
+        }
+        let profile = network.profile.clone();
+        self.wifi_status = match activate_linux_wifi(network) {
+            Ok(()) if network.connected => {
+                self.localizer
+                    .value("settings-network-disconnecting", "profile", &profile)
+            }
+            Ok(()) => self
+                .localizer
+                .value("settings-network-connecting", "profile", &profile),
+            Err(error) => {
+                self.localizer
+                    .value("settings-network-connection-failed", "error", &error)
+            }
+        };
+        self.next_network_refresh = Instant::now() + Duration::from_millis(400);
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     fn connect_windows_wifi(&mut self, _index: usize) {}
 
     fn apply_layout(&mut self) {
@@ -1852,13 +2774,13 @@ impl SettingsApp {
         }
     }
 
-    fn render(&mut self, window: &mut Window, event_pump: &sdl3::EventPump) -> Result<(), String> {
+    fn render(&mut self, presenter: &mut SdlCanvasPresenter) -> Result<(), String> {
         let appearance = self
             .shell_settings
             .resolve_appearance(nickel_platform::appearance());
         let palette = ThemePalette::from_appearance(appearance);
-        let (logical_width, logical_height) = window.size();
-        let (pixel_width, pixel_height) = window.size_in_pixels();
+        let (logical_width, logical_height) = presenter.window().size();
+        let pixel_width = presenter.window().size_in_pixels().0;
         let scale = pixel_width as f32 / logical_width.max(1) as f32;
         self.ui = self.build_ui(logical_width as f32, logical_height as f32);
         let mut commands = self.ui.commands().to_vec();
@@ -1930,14 +2852,7 @@ impl SettingsApp {
                 }
             }
         }
-        if let Some(gpu) = &mut self.gpu {
-            gpu.resize(pixel_width, pixel_height, scale);
-            let mut surface = window
-                .surface(event_pump)
-                .map_err(|error| error.to_string())?;
-            gpu.present(&mut surface, &commands)?;
-            surface.finish().map_err(|error| error.to_string())?;
-        }
+        presenter.present_accelerated(&commands, scale)?;
         Ok(())
     }
 
@@ -2267,6 +3182,16 @@ impl SettingsApp {
 }
 
 impl SettingsApp {
+    fn finish_resize_if_due(&mut self) {
+        let Some(deadline) = self.resize_deadline else {
+            return;
+        };
+        if Instant::now() >= deadline {
+            self.resize_deadline = None;
+            self.request_redraw();
+        }
+    }
+
     fn handle_event(&mut self, event: Event) {
         match event {
             Event::Quit { .. }
@@ -2279,12 +3204,23 @@ impl SettingsApp {
                 ..
             } => self.running = false,
             Event::Window {
-                win_event:
-                    WindowEvent::Exposed
-                    | WindowEvent::Resized(_, _)
-                    | WindowEvent::PixelSizeChanged(_, _),
+                win_event: WindowEvent::Exposed,
                 ..
             } => self.request_redraw(),
+            Event::Window {
+                win_event: WindowEvent::MouseLeave,
+                ..
+            } => {
+                if self.hovered_bluetooth_device.take().is_some() {
+                    self.request_redraw();
+                }
+            }
+            Event::Window {
+                win_event: WindowEvent::Resized(_, _) | WindowEvent::PixelSizeChanged(_, _),
+                ..
+            } => {
+                self.resize_deadline = Some(Instant::now() + Duration::from_millis(24));
+            }
             Event::MouseMotion { x, y, .. } => self.pointer_moved(x, y),
             Event::MouseButtonDown {
                 mouse_btn: MouseButton::Left,
@@ -2304,6 +3240,21 @@ impl SettingsApp {
                 self.pointer_moved(x, y);
                 self.finish_drag();
             }
+            Event::MouseWheel {
+                y,
+                direction,
+                mouse_x,
+                mouse_y,
+                ..
+            } => {
+                self.pointer_moved(mouse_x, mouse_y);
+                let wheel_y = if direction == MouseWheelDirection::Flipped {
+                    -y
+                } else {
+                    y
+                };
+                self.scroll_settings(wheel_y);
+            }
             _ => {}
         }
     }
@@ -2319,6 +3270,12 @@ impl SettingsApp {
         }
         for action in self.controller.poll(now) {
             self.handle_controller_action(action);
+        }
+        if self.page == SettingsPage::Bluetooth && now >= self.next_bluetooth_refresh {
+            self.load_bluetooth();
+        }
+        if self.page == SettingsPage::Network && now >= self.next_network_refresh {
+            self.load_linux_network();
         }
         let Some(refresh_at) = self.next_wifi_refresh else {
             return;
@@ -2566,14 +3523,8 @@ fn apply_windows_layout(
 }
 
 fn constrain_center(mut monitor: Rect, plane: Rect) -> Rect {
-    let half_width = monitor.w / 2;
-    let half_height = monitor.h / 2;
-    monitor.x = monitor
-        .x
-        .clamp(plane.x - half_width, plane.x + plane.w - half_width);
-    monitor.y = monitor
-        .y
-        .clamp(plane.y - half_height, plane.y + plane.h - half_height);
+    monitor.x = monitor.x.clamp(plane.x, plane.x + plane.w - monitor.w);
+    monitor.y = monitor.y.clamp(plane.y, plane.y + plane.h - monitor.h);
     monitor
 }
 
@@ -2761,6 +3712,7 @@ fn glyph(character: char) -> [u8; 7] {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let started = Instant::now();
     let _log_path = nickel_logging::init("nickel-settings").ok();
     sdl3::hint::set("SDL_APP_ID", "nickel-settings");
     let sdl = sdl3::init()?;
@@ -2774,8 +3726,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     window.set_minimum_size(850, 580)?;
     video.text_input().start(&window);
     let mut events = sdl.event_pump()?;
-    let mut app = SettingsApp::default();
-    app.frame_interval = window
+    let frame_interval = window
         .get_display()
         .ok()
         .and_then(|display| display.get_mode().ok())
@@ -2783,17 +3734,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .filter(|refresh_rate| refresh_rate.is_finite() && *refresh_rate > 1.0)
         .map(|refresh_rate| Duration::from_secs_f64(1.0 / f64::from(refresh_rate)))
         .unwrap_or_else(|| Duration::from_millis(16));
+    let mut app = SettingsApp {
+        frame_interval,
+        ..SettingsApp::default()
+    };
+    let mut presenter = SdlCanvasPresenter::new(window)?;
+    app.render(&mut presenter)?;
+    tracing::info!(
+        target: "nickel",
+        elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0,
+        "Nickel Settings first frame presented"
+    );
     app.load_outputs();
+    app.load_bluetooth();
+    app.load_linux_network();
     #[cfg(target_os = "windows")]
     {
         app.load_windows_outputs(&video);
         app.load_windows_network();
         app.load_windows_wifi();
     }
-    let (width, height) = window.size_in_pixels();
-    let (logical_width, _) = window.size();
-    let scale = width as f32 / logical_width.max(1) as f32;
-    app.gpu = Some(ComponentGpu::new(width, height, scale));
     let mut next_frame = Instant::now();
 
     while app.running {
@@ -2804,10 +3764,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         app.tick();
+        app.finish_resize_if_due();
         let now = Instant::now();
         if app.redraw_requested.get() && now >= next_frame {
             app.redraw_requested.set(false);
-            if let Err(error) = app.render(&mut window, &events) {
+            if let Err(error) = app.render(&mut presenter) {
                 tracing::error!(%error, "failed to render Nickel Settings");
                 app.running = false;
             }
@@ -2822,7 +3783,7 @@ mod tests {
     use super::{Rect, attach_rect_centered, constrain_center, snap_rect};
 
     #[test]
-    fn display_center_remains_inside_plane_while_edges_may_leave() {
+    fn display_remains_completely_inside_plane() {
         let plane = Rect {
             x: 40,
             y: 120,
@@ -2837,8 +3798,8 @@ mod tests {
         };
 
         let constrained = constrain_center(monitor, plane);
-        assert_eq!(constrained.x, plane.x - monitor.w / 2);
-        assert_eq!(constrained.y, plane.y - monitor.h / 2);
+        assert_eq!(constrained.x, plane.x);
+        assert_eq!(constrained.y, plane.y);
     }
 
     #[test]

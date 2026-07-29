@@ -6,11 +6,14 @@ settings-appearance-title = Appearance
 settings-appearance-subtitle = Light, dark, and one starting hue
 settings-network-title = Network settings
 settings-network-subtitle = Available connections
+settings-bluetooth-title = Bluetooth settings
+settings-bluetooth-subtitle = Connect and manage nearby devices
 
 settings-nav-display = Display
 settings-nav-bar = Nickel Bar
 settings-nav-appearance = Appearance
 settings-nav-network = Network
+settings-nav-bluetooth = Bluetooth
 
 settings-display-identify = Identify
 settings-display-make-primary = Make primary
@@ -25,10 +28,23 @@ settings-status-apply-failed = Apply failed: { $error }
 settings-status-session-unavailable = Display service unavailable
 
 settings-network-saved-wifi = Saved Wi-Fi
+settings-network-visible-wifi = Visible Wi-Fi
 settings-network-adapters = Adapters
+settings-network-wifi = Wi-Fi
+settings-network-wifi-on = On
+settings-network-wifi-off = Off
+settings-network-wifi-unavailable = Unavailable
 settings-network-service-unavailable = Wi-Fi service unavailable
 settings-network-interface-unavailable = No Wi-Fi interface found
 settings-network-no-saved-profiles = No saved Wi-Fi profiles
+settings-network-no-visible-networks = No Wi-Fi networks found
+settings-network-no-adapters = No network adapters found
+settings-network-wifi-disabled = Wi-Fi is off
+settings-network-visible-count =
+    { $count ->
+        [one] { $count } visible network
+       *[other] { $count } visible networks
+    }
 settings-network-saved-profile-count =
     { $count ->
         [one] { $count } saved Wi-Fi profile
@@ -41,8 +57,26 @@ settings-network-connection-timeout = Connection to { $profile } timed out
 settings-network-connected-signal = Connected  { $signal }%
 settings-network-saved-unavailable = Saved  Not in range
 settings-network-connect-action = { $signal }%  Click to connect
+settings-network-secured-signal = { $signal }%  Secured
+settings-network-open-signal = { $signal }%  Open
 settings-network-connected-speed = Connected  { $speed } Mbps
+settings-network-connected = Connected
 settings-network-disconnected = Disconnected
+settings-network-disconnecting = Disconnecting from { $profile }
+settings-network-profile-required = Save this network before connecting
+
+settings-bluetooth-enabled = Bluetooth
+settings-bluetooth-on = On
+settings-bluetooth-off = Off
+settings-bluetooth-adapter-unnamed = Bluetooth adapter
+settings-bluetooth-devices = Devices
+settings-bluetooth-connected = Connected
+settings-bluetooth-paired = Paired
+settings-bluetooth-available = Available
+settings-bluetooth-discovery-start = Find devices
+settings-bluetooth-discovery-stop = Stop scanning
+settings-bluetooth-no-devices = No Bluetooth devices found
+settings-bluetooth-service-unavailable = Bluetooth service unavailable
 
 settings-bar-show-on = Show Nickel Bar on
 settings-bar-primary-display = Primary display
