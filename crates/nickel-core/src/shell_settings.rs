@@ -39,11 +39,11 @@ impl Default for ShellSettings {
 
 impl ShellSettings {
     pub fn load_default() -> Self {
-        Self::load(settings_path()).unwrap_or_default()
+        settings_path().and_then(Self::load).unwrap_or_default()
     }
 
     pub fn save_default(self) -> io::Result<()> {
-        self.save(settings_path())
+        self.save(settings_path()?)
     }
 
     pub fn load(path: impl AsRef<Path>) -> io::Result<Self> {
@@ -139,16 +139,29 @@ fn parse_bool(value: &str) -> bool {
     matches!(value.trim(), "1" | "true" | "yes" | "on")
 }
 
-fn settings_path() -> PathBuf {
+fn settings_path() -> io::Result<PathBuf> {
     #[cfg(target_os = "windows")]
     if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-        return PathBuf::from(local).join("Nickel").join("shell-settings");
+        return Ok(PathBuf::from(local).join("Nickel").join("shell-settings"));
     }
+    #[cfg(target_os = "windows")]
+    return Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        "LOCALAPPDATA is not set",
+    ));
     #[cfg(not(target_os = "windows"))]
-    if let Some(config) = std::env::var_os("XDG_CONFIG_HOME") {
-        return PathBuf::from(config).join("nickel").join("shell-settings");
+    {
+        let config = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "XDG_CONFIG_HOME and HOME are not set",
+                )
+            })?;
+        Ok(config.join("nickel").join("shell-settings"))
     }
-    std::env::temp_dir().join("nickel-shell-settings")
 }
 
 #[cfg(test)]

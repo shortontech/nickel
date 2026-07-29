@@ -93,7 +93,7 @@ mod windows_probe {
     fn log_path() -> PathBuf {
         env::var_os("LOCALAPPDATA")
             .map(PathBuf::from)
-            .unwrap_or_else(env::temp_dir)
+            .expect("LOCALAPPDATA is not set")
             .join("Nickel")
             .join("logs")
             .join("nickel-mouse-probe.log")

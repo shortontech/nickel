@@ -11,7 +11,7 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
 
 pub fn init(application: &str) -> io::Result<PathBuf> {
-    let directory = log_directory();
+    let directory = log_directory()?;
     fs::create_dir_all(&directory)?;
     let path = directory.join(format!("{application}.log"));
     rotate_if_needed(&path)?;
@@ -30,17 +30,32 @@ pub fn init(application: &str) -> io::Result<PathBuf> {
     Ok(path)
 }
 
-fn log_directory() -> PathBuf {
+fn log_directory() -> io::Result<PathBuf> {
     #[cfg(target_os = "windows")]
     {
         if let Some(local_app_data) = env::var_os("LOCALAPPDATA") {
-            return PathBuf::from(local_app_data).join("Nickel").join("logs");
+            return Ok(PathBuf::from(local_app_data).join("Nickel").join("logs"));
         }
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "LOCALAPPDATA is not set",
+        ));
     }
-    if let Some(state_home) = env::var_os("XDG_STATE_HOME") {
-        return PathBuf::from(state_home).join("nickel").join("logs");
+    #[cfg(not(target_os = "windows"))]
+    {
+        let state_home = env::var_os("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| {
+                env::var_os("HOME").map(|home| PathBuf::from(home).join(".local").join("state"))
+            })
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "XDG_STATE_HOME and HOME are not set",
+                )
+            })?;
+        Ok(state_home.join("nickel").join("logs"))
     }
-    env::temp_dir().join("nickel").join("logs")
 }
 
 fn rotate_if_needed(path: &Path) -> io::Result<()> {

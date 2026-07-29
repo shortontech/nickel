@@ -53,17 +53,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let control = env::var_os("NICKEL_SESSION_CONTROL")
         .map(PathBuf::from)
         .ok_or("NICKEL_SESSION_CONTROL is not set")?;
-    let output = output.unwrap_or_else(|| {
+    let output = if let Some(output) = output {
+        output
+    } else {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
         let pictures = env::var_os("HOME")
             .map(PathBuf::from)
-            .unwrap_or_else(env::temp_dir)
+            .ok_or("HOME is not set; provide an explicit screenshot output path")?
             .join("Pictures");
         pictures.join(format!("Nickel Screenshot {timestamp}.png"))
-    });
+    };
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent)?;
     }

@@ -226,11 +226,14 @@ impl ScreenshotTool {
 
     fn save(&mut self) {
         let Some(image) = self.cropped() else { return };
-        let directory = env::var_os("USERPROFILE")
+        let Some(home) = env::var_os("USERPROFILE")
+            .or_else(|| env::var_os("HOME"))
             .map(PathBuf::from)
-            .unwrap_or_else(env::temp_dir)
-            .join("Pictures")
-            .join("Screenshots");
+        else {
+            self.status = "SAVE FAILED · HOME DIRECTORY IS UNKNOWN".into();
+            return;
+        };
+        let directory = home.join("Pictures").join("Screenshots");
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()

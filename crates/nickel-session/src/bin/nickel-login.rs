@@ -7,6 +7,12 @@ use std::{
 
 const CURRENT_DESKTOP: &str = "Nickel:KDE";
 const KDE_SESSION_VERSION: &str = "6";
+const XDG_HOME_DEFAULTS: [(&str, &str); 4] = [
+    ("XDG_CONFIG_HOME", ".config"),
+    ("XDG_DATA_HOME", ".local/share"),
+    ("XDG_STATE_HOME", ".local/state"),
+    ("XDG_CACHE_HOME", ".cache"),
+];
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let executable = env::current_exe()?;
@@ -28,6 +34,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn prepare_login_environment() -> Result<(), Box<dyn std::error::Error>> {
+    let home = env::var_os("HOME").map(PathBuf::from);
     // SAFETY: nickel-login is single-threaded and has not launched a child.
     unsafe {
         env::set_var("XDG_SESSION_TYPE", "wayland");
@@ -35,6 +42,15 @@ fn prepare_login_environment() -> Result<(), Box<dyn std::error::Error>> {
         env::set_var("XDG_SESSION_DESKTOP", "Nickel");
         env::set_var("KDE_FULL_SESSION", "true");
         env::set_var("KDE_SESSION_VERSION", KDE_SESSION_VERSION);
+        for (variable, relative) in XDG_HOME_DEFAULTS {
+            if env::var_os(variable).is_none() {
+                let directory = home
+                    .as_deref()
+                    .ok_or_else(|| format!("{variable} and HOME are not set"))?
+                    .join(relative);
+                env::set_var(variable, directory);
+            }
+        }
     }
 
     let pam_socket = env::var_os("PAM_KWALLET5_LOGIN")
@@ -60,7 +76,7 @@ fn sibling_binary(directory: &Path, name: &str) -> Result<PathBuf, Box<dyn std::
 
 #[cfg(test)]
 mod tests {
-    use super::{CURRENT_DESKTOP, KDE_SESSION_VERSION, sibling_binary};
+    use super::{CURRENT_DESKTOP, KDE_SESSION_VERSION, XDG_HOME_DEFAULTS, sibling_binary};
 
     #[test]
     fn advertises_kde_compatibility() {
@@ -69,6 +85,19 @@ mod tests {
             ["Nickel", "KDE"]
         );
         assert_eq!(KDE_SESSION_VERSION, "6");
+    }
+
+    #[test]
+    fn provides_standard_xdg_home_defaults() {
+        assert_eq!(
+            XDG_HOME_DEFAULTS,
+            [
+                ("XDG_CONFIG_HOME", ".config"),
+                ("XDG_DATA_HOME", ".local/share"),
+                ("XDG_STATE_HOME", ".local/state"),
+                ("XDG_CACHE_HOME", ".cache"),
+            ]
+        );
     }
 
     #[test]
