@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 use std::time::Instant;
 
-use nickel_components::{DamageRegion, PaintCommand, SdlComponentRenderer};
+use nickel_components::{DamageRegion, PaintCommand, SdlCanvasPresenter};
 use sdl3::event::{Event, WindowEvent};
 use sdl3::keyboard::{Keycode, Mod};
 use sdl3::mouse::MouseButton;
@@ -101,7 +101,8 @@ pub struct ShellSurface {
     id: SurfaceId,
     role: SurfaceRole,
     display_index: usize,
-    window: Window,
+    window: Option<Window>,
+    presenter: Option<SdlCanvasPresenter>,
 }
 
 impl ShellSurface {
@@ -118,11 +119,30 @@ impl ShellSurface {
     }
 
     pub fn window(&self) -> &Window {
-        &self.window
+        if let Some(presenter) = &self.presenter {
+            presenter.window()
+        } else {
+            self.window.as_ref().expect("shell surface owns a window")
+        }
     }
 
     pub fn window_mut(&mut self) -> &mut Window {
-        &mut self.window
+        if let Some(presenter) = &mut self.presenter {
+            presenter.window_mut()
+        } else {
+            self.window.as_mut().expect("shell surface owns a window")
+        }
+    }
+
+    fn ensure_presenter(&mut self) -> Result<&mut SdlCanvasPresenter, String> {
+        if self.presenter.is_none() {
+            let window = self.window.take().expect("pending shell window exists");
+            self.presenter = Some(SdlCanvasPresenter::new(window)?);
+        }
+        Ok(self
+            .presenter
+            .as_mut()
+            .expect("shell presenter initialized"))
     }
 }
 
@@ -199,29 +219,29 @@ impl SdlShell {
     pub fn present(
         &mut self,
         id: SurfaceId,
-        renderer: &mut SdlComponentRenderer,
         commands: &[PaintCommand],
     ) -> Result<DamageRegion, String> {
         let index = *self
             .surface_indices
             .get(&id.0)
             .ok_or_else(|| "unknown SDL shell surface".to_owned())?;
-        let events = &self.events;
-        let window = &self.surfaces[index].window;
-        let mut surface = window.surface(events).map_err(|error| error.to_string())?;
-        let damage = renderer.present(&mut surface, commands)?;
-        surface.finish().map_err(|error| error.to_string())?;
-        Ok(damage)
+        let window = self.surfaces[index].window();
+        let logical_width = window.size().0.max(1);
+        let pixel_width = window.size_in_pixels().0;
+        let scale = pixel_width as f32 / logical_width as f32;
+        self.surfaces[index]
+            .ensure_presenter()?
+            .present_accelerated(commands, scale)
     }
 
     pub fn show(&mut self, id: SurfaceId) -> bool {
         self.surface_mut(id)
-            .is_some_and(|surface| surface.window.show())
+            .is_some_and(|surface| surface.window_mut().show())
     }
 
     pub fn hide(&mut self, id: SurfaceId) -> bool {
         self.surface_mut(id)
-            .is_some_and(|surface| surface.window.hide())
+            .is_some_and(|surface| surface.window_mut().hide())
     }
 
     pub fn poll_events(&mut self) -> Vec<ShellEvent> {
@@ -320,7 +340,8 @@ impl SdlShell {
             id,
             role,
             display_index,
-            window,
+            window: Some(window),
+            presenter: None,
         });
         Ok(())
     }
@@ -437,7 +458,7 @@ impl SdlShell {
                 height: u32::try_from(height).unwrap_or_default(),
                 scale: self
                     .surface(surface)
-                    .map(|surface| surface.window.display_scale())
+                    .map(|surface| surface.window().display_scale())
                     .unwrap_or(1.0),
             }),
             WindowEvent::Exposed => Some(ShellEvent::Redraw(surface)),

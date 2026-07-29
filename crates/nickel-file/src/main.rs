@@ -3,13 +3,16 @@
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        mpsc::{self, Receiver, TryRecvError},
+    },
     time::{Duration, Instant},
 };
 
 use nickel_components::{
     Button, Column, Component, Container, FileGrid, FileGridItem, HorizontalRule, Image, Insets,
-    LinearGradient, PaintCommand, Point, Rect, Row, SdlComponentRenderer, Sidebar, SidebarFolder,
+    LinearGradient, PaintCommand, Point, Rect, Row, SdlCanvasPresenter, Sidebar, SidebarFolder,
     SidebarSection, Text, TextAlign, UiTree,
 };
 use nickel_core::{
@@ -56,8 +59,7 @@ fn set_nickel_file_icon(window: &mut Window) {
 }
 
 struct FileApp {
-    window: Option<Window>,
-    renderer: Option<SdlComponentRenderer>,
+    presenter: Option<SdlCanvasPresenter>,
     dirty: bool,
     browser: DirectoryBrowser,
     ui: UiTree,
@@ -69,6 +71,7 @@ struct FileApp {
     status: String,
     last_click: Option<(usize, Instant)>,
     icons: HashMap<PathBuf, (u16, Arc<image::RgbaImage>)>,
+    icon_rx: Option<Receiver<(PathBuf, Option<image::RgbaImage>)>>,
     next_icon_id: u16,
     sidebar_width: f32,
     resizing_sidebar: bool,
@@ -78,6 +81,7 @@ struct FileApp {
     shift_down: bool,
     selection_drag: Option<Point>,
     context_menu: Option<(Point, Option<usize>)>,
+    resize_deadline: Option<Instant>,
     tile_width: f32,
     tab_icon: Option<(u16, Arc<image::RgbaImage>)>,
     tabs: Vec<Option<FileTab>>,
@@ -115,8 +119,7 @@ impl FileApp {
             }
         };
         let mut app = Self {
-            window: None,
-            renderer: None,
+            presenter: None,
             dirty: true,
             browser,
             ui: UiTree::default(),
@@ -128,6 +131,7 @@ impl FileApp {
             status,
             last_click: None,
             icons: HashMap::new(),
+            icon_rx: None,
             next_icon_id: 1,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             resizing_sidebar: false,
@@ -137,6 +141,7 @@ impl FileApp {
             shift_down: false,
             selection_drag: None,
             context_menu: None,
+            resize_deadline: None,
             tile_width: DEFAULT_TILE_WIDTH,
             tab_icon: None,
             tabs: vec![None],
@@ -183,11 +188,6 @@ impl FileApp {
         let Ok(browser) = DirectoryBrowser::open_with_hidden(path, show_hidden) else {
             return;
         };
-        let tab_icon = nickel_platform::path_icon(browser.current()).map(|image| {
-            let id = self.next_icon_id;
-            self.next_icon_id = self.next_icon_id.checked_add(1).unwrap_or(1);
-            (id, Arc::new(image))
-        });
         self.tabs.push(Some(FileTab {
             browser,
             selected: None,
@@ -196,7 +196,7 @@ impl FileApp {
             scroll_offset: 0,
             status: String::new(),
             last_click: None,
-            tab_icon,
+            tab_icon: None,
         }));
         self.switch_tab(self.tabs.len() - 1);
     }
@@ -231,8 +231,8 @@ impl FileApp {
     }
 
     fn update_window_title(&mut self) {
-        if let Some(window) = &mut self.window {
-            let _ = window.set_title(&format!(
+        if let Some(presenter) = &mut self.presenter {
+            let _ = presenter.window_mut().set_title(&format!(
                 "Nickel File — {}",
                 self.browser.current().display()
             ));
@@ -241,6 +241,18 @@ impl FileApp {
 
     fn request_redraw(&mut self) {
         self.dirty = true;
+    }
+
+    fn finish_resize_if_due(&mut self) {
+        let Some(deadline) = self.resize_deadline else {
+            return;
+        };
+        if Instant::now() < deadline {
+            return;
+        }
+        self.resize_deadline = None;
+        self.ensure_selection_visible();
+        self.request_redraw();
     }
 
     fn tile_height(&self) -> f32 {
@@ -260,10 +272,10 @@ impl FileApp {
     }
 
     fn grid_dimensions(&self) -> (usize, usize) {
-        self.window
+        self.presenter
             .as_ref()
-            .map(|window| {
-                let size = window.size();
+            .map(|presenter| {
+                let size = presenter.window().size();
                 (
                     self.grid_columns_for_width(size.0 as f32),
                     self.grid_rows_for_height(size.1 as f32),
@@ -590,29 +602,27 @@ impl FileApp {
         tree
     }
 
-    fn render(&mut self, events: &sdl3::EventPump) {
-        let Some(window) = &self.window else {
+    fn render(&mut self, _events: &sdl3::EventPump) {
+        let Some(size) = self
+            .presenter
+            .as_ref()
+            .map(|presenter| presenter.window().size())
+        else {
             return;
         };
         let appearance =
             ShellSettings::load_default().resolve_appearance(nickel_platform::appearance());
         let palette = ThemePalette::from_appearance(appearance);
-        let size = window.size();
         self.ui = self.build_ui(
             size.0 as f32,
             size.1 as f32,
             palette,
             appearance.mode == ThemeMode::Light,
         );
-        if let Some(renderer) = &mut self.renderer {
-            renderer.invalidate();
-            let result = window
-                .surface(events)
-                .map_err(|error| error.to_string())
-                .and_then(|mut surface| {
-                    renderer.present(&mut surface, self.ui.commands())?;
-                    surface.finish().map_err(|error| error.to_string())
-                });
+        if let Some(presenter) = &mut self.presenter {
+            let pixel_width = presenter.window().size_in_pixels().0;
+            let scale = pixel_width as f32 / size.0.max(1) as f32;
+            let result = presenter.present_accelerated(self.ui.commands(), scale);
             if let Err(error) = result {
                 tracing::warn!(%error, "failed to render Nickel File");
             }
@@ -705,24 +715,59 @@ impl FileApp {
             .map(|entry| entry.path.clone())
             .collect::<Vec<_>>();
         self.icons.retain(|path, _| entries.contains(path));
-        for path in entries {
-            if self.icons.contains_key(&path) {
-                continue;
-            }
-            if let Some(image) = nickel_platform::path_icon(&path) {
-                let id = self.next_icon_id;
-                self.next_icon_id = self.next_icon_id.checked_add(1).unwrap_or(1);
-                self.icons.insert(path, (id, Arc::new(image)));
+        let mut paths = entries
+            .into_iter()
+            .filter(|path| !self.icons.contains_key(path))
+            .collect::<Vec<_>>();
+        paths.push(self.browser.current().to_path_buf());
+        let (tx, rx) = mpsc::channel();
+        self.icon_rx = Some(rx);
+        let _ = std::thread::Builder::new()
+            .name("nickel-file-icons".into())
+            .spawn(move || {
+                for path in paths {
+                    let image = nickel_platform::path_icon(&path);
+                    if tx.send((path, image)).is_err() {
+                        break;
+                    }
+                }
+            });
+    }
+
+    fn poll_icons(&mut self) {
+        loop {
+            let result = match self.icon_rx.as_ref() {
+                Some(rx) => rx.try_recv(),
+                None => return,
+            };
+            match result {
+                Ok((path, Some(image))) => {
+                    let id = self.next_icon_id;
+                    self.next_icon_id = self.next_icon_id.checked_add(1).unwrap_or(1);
+                    if path == self.browser.current() {
+                        self.tab_icon = Some((id, Arc::new(image)));
+                    } else if self
+                        .browser
+                        .entries()
+                        .iter()
+                        .any(|entry| entry.path == path)
+                    {
+                        self.icons.insert(path, (id, Arc::new(image)));
+                    }
+                    self.request_redraw();
+                }
+                Ok((_, None)) => {}
+                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Disconnected) => {
+                    self.icon_rx = None;
+                    return;
+                }
             }
         }
     }
 
     fn refresh_tab_icon(&mut self) {
-        self.tab_icon = nickel_platform::path_icon(self.browser.current()).map(|image| {
-            let id = self.next_icon_id;
-            self.next_icon_id = self.next_icon_id.checked_add(1).unwrap_or(1);
-            (id, Arc::new(image))
-        });
+        self.tab_icon = None;
     }
 
     fn select_relative(&mut self, delta: isize) {
@@ -930,10 +975,8 @@ impl FileApp {
 
 impl FileApp {
     fn attach_window(&mut self, window: Window) {
-        let (width, height) = window.size_in_pixels();
-        let scale = window.pixel_density();
-        self.renderer = Some(SdlComponentRenderer::new(width, height, scale));
-        self.window = Some(window);
+        self.presenter =
+            Some(SdlCanvasPresenter::new(window).expect("create accelerated presenter"));
         self.request_redraw();
     }
 
@@ -951,20 +994,12 @@ impl FileApp {
             Event::Window {
                 win_event: WindowEvent::Resized(_, _),
                 ..
-            } => {
-                self.ensure_selection_visible();
-                self.request_redraw();
-            }
+            } => {}
             Event::Window {
-                win_event: WindowEvent::PixelSizeChanged(width, height),
+                win_event: WindowEvent::PixelSizeChanged(_, _),
                 ..
             } => {
-                let scale = self.window.as_ref().map_or(1.0, Window::pixel_density);
-                if let Some(renderer) = &mut self.renderer {
-                    renderer.resize(width.max(1) as u32, height.max(1) as u32, scale);
-                }
-                self.ensure_selection_visible();
-                self.request_redraw();
+                self.resize_deadline = Some(Instant::now() + Duration::from_millis(24));
             }
             Event::MouseMotion { x, y, .. } => {
                 self.cursor = Point { x, y };
@@ -1207,6 +1242,7 @@ fn sidebar_folder_elements(
     hovered_action: Option<&str>,
     palette: ThemePalette,
 ) -> Vec<nickel_components::ui::Element> {
+    #[allow(clippy::too_many_arguments)]
     fn append_folder(
         rows: &mut Vec<nickel_components::ui::Element>,
         label: String,
@@ -1474,6 +1510,7 @@ fn rect_between(start: Point, end: Point) -> Rect {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let started = Instant::now();
     let _log_path = nickel_logging::init("nickel-file").ok();
     let path = std::env::args_os()
         .nth(1)
@@ -1495,7 +1532,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = FileApp::new(path);
     app.attach_window(window);
     app.update_window_title();
+    app.render(&events);
+    tracing::info!(
+        target: "nickel",
+        elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0,
+        "Nickel File first frame presented"
+    );
     while !app.exit_requested {
+        app.poll_icons();
+        app.finish_resize_if_due();
         if app.dirty {
             app.render(&events);
         }

@@ -9,6 +9,7 @@ rust-version.workspace = true
 cosmic-text.workspace = true
 gilrs.workspace = true
 image.workspace = true
+nickel-render-assets = { path = "../nickel-render-assets" }
 sdl3.workspace = true
 unicode-segmentation.workspace = true
 tracing.workspace = true

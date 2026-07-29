@@ -21,6 +21,7 @@ use smithay::{
         libinput::{LibinputInputBackend, LibinputSessionInterface},
         renderer::{
             Bind, Color32F, ExportMem, Frame, ImportAll, ImportDma, ImportMem, Offscreen, Renderer,
+            TextureMapping,
             element::{
                 AsRenderElements, Kind,
                 memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
@@ -1089,13 +1090,25 @@ impl CalloopData {
                 .primary_output_name
                 .as_deref()
                 .is_none_or(|name| name == output.name());
-            if is_primary
-                && let Some(path) = self.state.output_capture_path.take()
-                && let Some(mode) = output.current_mode()
-                && let Err(error) =
-                    capture_composited_output(&mut renderer, &elements, mode.size, &path)
-            {
-                tracing::warn!(%error, path = %path.display(), "failed to capture output");
+            if is_primary && let Some(path) = self.state.output_capture_path.take() {
+                let result = output
+                    .current_mode()
+                    .ok_or_else(|| "output has no active mode".to_owned())
+                    .and_then(|mode| {
+                        capture_composited_output(&mut renderer, &elements, mode.size, &path)
+                    });
+                let response = match result {
+                    Ok(()) => "ok\tnative".to_owned(),
+                    Err(error) => {
+                        tracing::warn!(%error, path = %path.display(), "failed to capture output");
+                        format!("error\t{error}")
+                    }
+                };
+                if let Some(reply_path) = self.state.output_capture_reply_path.take()
+                    && let Ok(socket) = std::os::unix::net::UnixDatagram::unbound()
+                {
+                    let _ = socket.send_to(response.as_bytes(), reply_path);
+                }
             }
             let retry = match surface.drm.render_frame(
                 &mut renderer,
@@ -1503,10 +1516,11 @@ fn capture_composited_output<'a>(
     let mapping = renderer
         .copy_framebuffer(&framebuffer, region, Fourcc::Abgr8888)
         .map_err(|error| error.to_string())?;
-    let rgba = renderer
+    let flipped = mapping.flipped();
+    let mapped = renderer
         .map_texture(&mapping)
-        .map_err(|error| error.to_string())?
-        .to_vec();
+        .map_err(|error| error.to_string())?;
+    let rgba = normalize_capture_rows(mapped, size.w as usize, size.h as usize, flipped)?;
     image::save_buffer(
         path,
         &rgba,
@@ -1517,9 +1531,41 @@ fn capture_composited_output<'a>(
     .map_err(|error| error.to_string())
 }
 
+fn normalize_capture_rows(
+    mapped: &[u8],
+    width: usize,
+    height: usize,
+    flipped: bool,
+) -> Result<Vec<u8>, String> {
+    let row_bytes = width
+        .checked_mul(4)
+        .ok_or_else(|| "capture row size overflowed".to_owned())?;
+    let expected = row_bytes
+        .checked_mul(height)
+        .ok_or_else(|| "capture buffer size overflowed".to_owned())?;
+    if mapped.len() < expected {
+        return Err(format!(
+            "renderer returned {} bytes for a {} byte output",
+            mapped.len(),
+            expected
+        ));
+    }
+    let mut rgba = vec![0; expected];
+    for destination_y in 0..height {
+        let source_y = if flipped {
+            destination_y
+        } else {
+            height - 1 - destination_y
+        };
+        rgba[destination_y * row_bytes..(destination_y + 1) * row_bytes]
+            .copy_from_slice(&mapped[source_y * row_bytes..(source_y + 1) * row_bytes]);
+    }
+    Ok(rgba)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse_kde_cursor_settings;
+    use super::{normalize_capture_rows, parse_kde_cursor_settings};
 
     #[test]
     fn reads_cursor_preferences_from_kde_mouse_group() {
@@ -1534,5 +1580,25 @@ mod tests {
         let settings =
             parse_kde_cursor_settings("[Other]\ncursorTheme=Oxygen_Black\ncursorSize=36\n");
         assert_eq!(settings, (None, None));
+    }
+
+    #[test]
+    fn preserves_rows_from_a_flipped_renderer_mapping() {
+        let bottom = [9_u8; 8];
+        let top = [3_u8; 8];
+        let mapped = [bottom, top].concat();
+        let normalized = normalize_capture_rows(&mapped, 2, 2, true).unwrap();
+        assert_eq!(&normalized[..8], &bottom);
+        assert_eq!(&normalized[8..], &top);
+    }
+
+    #[test]
+    fn reverses_rows_from_an_unflipped_renderer_mapping() {
+        let bottom = [9_u8; 8];
+        let top = [3_u8; 8];
+        let mapped = [bottom, top].concat();
+        let normalized = normalize_capture_rows(&mapped, 2, 2, false).unwrap();
+        assert_eq!(&normalized[..8], &top);
+        assert_eq!(&normalized[8..], &bottom);
     }
 }

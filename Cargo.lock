@@ -1646,6 +1646,7 @@ dependencies = [
  "cosmic-text",
  "gilrs",
  "image",
+ "nickel-render-assets",
  "sdl3",
  "tracing",
  "unicode-segmentation",
@@ -1749,6 +1750,7 @@ dependencies = [
  "tracing",
  "windows",
  "winresource",
+ "zbus",
 ]
 
 [[package]]

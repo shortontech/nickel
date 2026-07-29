@@ -2,7 +2,14 @@ use cosmic_text::{
     Align, Attrs, Buffer, Color as TextColor, Family, FontSystem, Metrics, Shaping, SwashCache,
     Weight,
 };
-use sdl3::{pixels::PixelFormat, rect::Rect as SdlRect, render::BlendMode, surface::SurfaceRef};
+use nickel_render_assets::{TextAssetCache, TextRequest, TextWeight};
+use sdl3::{
+    pixels::{Color as SdlColor, PixelFormat},
+    rect::Rect as SdlRect,
+    render::{BlendMode, FRect, Texture, WindowCanvas},
+    surface::{Surface, SurfaceRef},
+    video::Window,
+};
 
 use crate::{Color, GradientAxis, PaintCommand, Rect, TextAlign};
 
@@ -44,26 +51,427 @@ pub struct SdlComponentRenderer {
     height: u32,
     scale: f32,
     pixels: Vec<Pixel>,
+    upload: Surface<'static>,
     previous_commands: Vec<PaintCommand>,
     font_system: FontSystem,
     swash_cache: SwashCache,
+    text_cache: HashMap<TextCacheKey, Arc<Vec<CachedGlyphPixel>>>,
 }
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct TextCacheKey {
+    text: String,
+    font_size: u32,
+    width: u32,
+    height: u32,
+    align: u8,
+    bold: bool,
+    color: Color,
+}
+
+type CachedGlyphPixel = (i32, i32, u32, u32, TextColor);
 
 /// Transitional name retained while callers move from the old wgpu backend.
 pub type ComponentGpu = SdlComponentRenderer;
+
+pub struct SdlCanvasPresenter {
+    canvas: WindowCanvas,
+    text_assets: TextAssetCache,
+    text_textures: HashMap<DirectTextKey, Texture>,
+    image_textures: HashMap<u16, Texture>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct DirectTextKey {
+    text: String,
+    size: u32,
+    color: Color,
+    bold: bool,
+}
+
+impl SdlCanvasPresenter {
+    pub fn new(window: Window) -> Result<Self, String> {
+        sdl3::hint::set("SDL_RENDER_VSYNC", "0");
+        let canvas = window.into_canvas();
+        let vsync_disabled = unsafe { sdl3::sys::render::SDL_SetRenderVSync(canvas.raw(), 0) };
+        if !vsync_disabled {
+            tracing::warn!(
+                target: "nickel",
+                error = %sdl3::get_error(),
+                "failed to disable SDL renderer vsync"
+            );
+        }
+        tracing::info!(
+            target: "nickel",
+            renderer = %canvas.renderer_name,
+            "SDL accelerated presenter initialized"
+        );
+        Ok(Self {
+            canvas,
+            text_assets: TextAssetCache::new(),
+            text_textures: HashMap::new(),
+            image_textures: HashMap::new(),
+        })
+    }
+
+    pub fn window(&self) -> &Window {
+        self.canvas.window()
+    }
+
+    pub fn window_mut(&mut self) -> &mut Window {
+        self.canvas.window_mut()
+    }
+
+    pub fn present_accelerated(
+        &mut self,
+        commands: &[PaintCommand],
+        scale: f32,
+    ) -> Result<DamageRegion, String> {
+        let (width, height) = self.canvas.window().size_in_pixels();
+        self.canvas.set_blend_mode(BlendMode::Blend);
+        self.canvas.set_clip_rect(None);
+        self.canvas.set_draw_color(SdlColor::RGBA(0, 0, 0, 0));
+        self.canvas.clear();
+        let mut clips = vec![Rect::new(0.0, 0.0, width as f32, height as f32)];
+        for command in commands {
+            self.draw_accelerated(command, scale, &mut clips)?;
+        }
+        self.canvas.set_clip_rect(None);
+        self.canvas.present();
+        Ok(DamageRegion {
+            rects: vec![Rect::new(0.0, 0.0, width as f32, height as f32)],
+        })
+    }
+
+    fn draw_accelerated(
+        &mut self,
+        command: &PaintCommand,
+        scale: f32,
+        clips: &mut Vec<Rect>,
+    ) -> Result<(), String> {
+        let clip = *clips.last().expect("accelerated clip stack has a root");
+        self.canvas.set_clip_rect(Some(sdl_rect(clip)));
+        match command {
+            PaintCommand::Fill { rect, color } | PaintCommand::OverlayFill { rect, color } => {
+                self.direct_fill(physical_rect(*rect, scale), *color)?;
+            }
+            PaintCommand::TopRoundedFill {
+                rect,
+                color,
+                radius,
+            } => self.direct_rounded_fill(
+                physical_rect(*rect, scale),
+                radius * scale,
+                0b0011,
+                *color,
+            )?,
+            PaintCommand::RoundedFill {
+                rect,
+                color,
+                radius,
+            } => self.direct_rounded_fill(
+                physical_rect(*rect, scale),
+                radius * scale,
+                0b1111,
+                *color,
+            )?,
+            PaintCommand::Gradient { rect, gradient } => {
+                self.direct_gradient(physical_rect(*rect, scale), *gradient)?;
+            }
+            PaintCommand::Stroke { rect, color, width }
+            | PaintCommand::OverlayStroke { rect, color, width } => {
+                self.direct_stroke(physical_rect(*rect, scale), width * scale, *color)?;
+            }
+            PaintCommand::Text {
+                bounds,
+                text,
+                scale: text_scale,
+                color,
+                align,
+                bold,
+            } => self.direct_text(
+                physical_rect(*bounds, scale),
+                text,
+                text_size(*text_scale) * scale,
+                *color,
+                *align,
+                *bold,
+                clip,
+            )?,
+            PaintCommand::Image {
+                bounds, id, image, ..
+            } => self.direct_image(physical_rect(*bounds, scale), *id, image)?,
+            PaintCommand::PushClip(rect) => {
+                let rect = physical_rect(*rect, scale);
+                clips.push(intersection(clip, rect).unwrap_or_default());
+                self.canvas
+                    .set_clip_rect(Some(sdl_rect(*clips.last().expect("pushed clip"))));
+            }
+            PaintCommand::PopClip => {
+                if clips.len() > 1 {
+                    clips.pop();
+                }
+                self.canvas
+                    .set_clip_rect(Some(sdl_rect(*clips.last().expect("restored clip"))));
+            }
+        }
+        Ok(())
+    }
+
+    fn direct_fill(&mut self, rect: Rect, color: Color) -> Result<(), String> {
+        self.canvas.set_draw_color(sdl_color(color));
+        self.canvas
+            .fill_rect(frect(rect))
+            .map_err(|error| error.to_string())
+    }
+
+    fn direct_stroke(&mut self, rect: Rect, width: f32, color: Color) -> Result<(), String> {
+        let width = width.max(1.0);
+        for edge in [
+            Rect::new(rect.origin.x, rect.origin.y, rect.size.width, width),
+            Rect::new(
+                rect.origin.x,
+                rect.origin.y + rect.size.height - width,
+                rect.size.width,
+                width,
+            ),
+            Rect::new(rect.origin.x, rect.origin.y, width, rect.size.height),
+            Rect::new(
+                rect.origin.x + rect.size.width - width,
+                rect.origin.y,
+                width,
+                rect.size.height,
+            ),
+        ] {
+            self.direct_fill(edge, color)?;
+        }
+        Ok(())
+    }
+
+    fn direct_rounded_fill(
+        &mut self,
+        rect: Rect,
+        radius: f32,
+        corners: u8,
+        color: Color,
+    ) -> Result<(), String> {
+        if radius <= 0.5 {
+            return self.direct_fill(rect, color);
+        }
+        self.canvas.set_draw_color(sdl_color(color));
+        let rows = rect.size.height.ceil().max(1.0) as u32;
+        for row in 0..rows {
+            let y = row as f32 + 0.5;
+            let top = y;
+            let bottom = rect.size.height - y;
+            let top_corner = top < radius && corners & 0b0011 != 0;
+            let bottom_corner = bottom < radius && corners & 0b1100 != 0;
+            let inset = if top_corner {
+                (radius - (radius * radius - (radius - top).powi(2)).sqrt()).max(0.0)
+            } else if bottom_corner {
+                (radius - (radius * radius - (radius - bottom).powi(2)).sqrt()).max(0.0)
+            } else {
+                0.0
+            };
+            self.canvas
+                .fill_rect(FRect::new(
+                    rect.origin.x + inset,
+                    rect.origin.y + row as f32,
+                    (rect.size.width - inset * 2.0).max(0.0),
+                    1.0,
+                ))
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    fn direct_gradient(
+        &mut self,
+        rect: Rect,
+        gradient: crate::LinearGradient,
+    ) -> Result<(), String> {
+        let steps = match gradient.axis {
+            GradientAxis::Horizontal => rect.size.width,
+            GradientAxis::Vertical => rect.size.height,
+        }
+        .ceil()
+        .max(1.0) as u32;
+        for step in 0..steps {
+            let progress = if steps <= 1 {
+                0.0
+            } else {
+                step as f32 / (steps - 1) as f32
+            };
+            self.canvas.set_draw_color(sdl_pixel(lerp_color(
+                gradient.start,
+                gradient.end,
+                progress,
+            )));
+            let strip = match gradient.axis {
+                GradientAxis::Horizontal => FRect::new(
+                    rect.origin.x + step as f32,
+                    rect.origin.y,
+                    1.0,
+                    rect.size.height,
+                ),
+                GradientAxis::Vertical => FRect::new(
+                    rect.origin.x,
+                    rect.origin.y + step as f32,
+                    rect.size.width,
+                    1.0,
+                ),
+            };
+            self.canvas
+                .fill_rect(strip)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn direct_text(
+        &mut self,
+        bounds: Rect,
+        text: &str,
+        size: f32,
+        color: Color,
+        align: TextAlign,
+        bold: bool,
+        parent_clip: Rect,
+    ) -> Result<(), String> {
+        let key = DirectTextKey {
+            text: text.to_owned(),
+            size: size.to_bits(),
+            color,
+            bold,
+        };
+        if !self.text_textures.contains_key(&key) {
+            if self.text_textures.len() >= 512 {
+                for (_, texture) in self.text_textures.drain() {
+                    // SAFETY: every texture was created by `self.canvas`, which
+                    // remains alive for the duration of this presenter.
+                    unsafe { texture.destroy() };
+                }
+                self.text_assets.clear();
+            }
+            let rgba = pixel(color);
+            let asset = self.text_assets.get(TextRequest {
+                text,
+                size,
+                line_height: size * 1.3,
+                max_width: None,
+                color: [rgba.r, rgba.g, rgba.b, rgba.a],
+                weight: if bold {
+                    TextWeight::Bold
+                } else {
+                    TextWeight::Normal
+                },
+            });
+            let creator = self.canvas.texture_creator();
+            let mut texture = creator
+                .create_texture_streaming(PixelFormat::ABGR8888, asset.width(), asset.height())
+                .map_err(|error| error.to_string())?;
+            texture
+                .update(None, asset.pixels(), asset.pitch())
+                .map_err(|error| error.to_string())?;
+            texture.set_blend_mode(BlendMode::Blend);
+            self.text_textures.insert(key.clone(), texture);
+        }
+        let texture = self
+            .text_textures
+            .get(&key)
+            .expect("inserted accelerated text texture");
+        let query = texture.query();
+        let x = match align {
+            TextAlign::Start => bounds.origin.x,
+            TextAlign::Center => bounds.origin.x + (bounds.size.width - query.width as f32) * 0.5,
+            TextAlign::End => bounds.origin.x + bounds.size.width - query.width as f32,
+        };
+        let clip = intersection(parent_clip, bounds).unwrap_or_default();
+        self.canvas.set_clip_rect(Some(sdl_rect(clip)));
+        self.canvas
+            .copy(
+                texture,
+                None,
+                FRect::new(x, bounds.origin.y, query.width as f32, query.height as f32),
+            )
+            .map_err(|error| error.to_string())?;
+        self.canvas.set_clip_rect(Some(sdl_rect(parent_clip)));
+        Ok(())
+    }
+
+    fn direct_image(
+        &mut self,
+        bounds: Rect,
+        id: u16,
+        image: &image::RgbaImage,
+    ) -> Result<(), String> {
+        if !self.image_textures.contains_key(&id) {
+            if self.image_textures.len() >= 512 {
+                for (_, texture) in self.image_textures.drain() {
+                    // SAFETY: every texture was created by `self.canvas`, which
+                    // remains alive for the duration of this presenter.
+                    unsafe { texture.destroy() };
+                }
+            }
+            let creator = self.canvas.texture_creator();
+            let mut texture = creator
+                .create_texture_streaming(
+                    PixelFormat::ABGR8888,
+                    image.width().max(1),
+                    image.height().max(1),
+                )
+                .map_err(|error| error.to_string())?;
+            texture
+                .update(None, image.as_raw(), image.width().max(1) as usize * 4)
+                .map_err(|error| error.to_string())?;
+            texture.set_blend_mode(BlendMode::Blend);
+            self.image_textures.insert(id, texture);
+        }
+        if image.width() == 0 || image.height() == 0 {
+            return Ok(());
+        }
+        let fit = (bounds.size.width / image.width() as f32)
+            .min(bounds.size.height / image.height() as f32);
+        let width = image.width() as f32 * fit;
+        let height = image.height() as f32 * fit;
+        let destination = FRect::new(
+            bounds.origin.x + (bounds.size.width - width) * 0.5,
+            bounds.origin.y + (bounds.size.height - height) * 0.5,
+            width,
+            height,
+        );
+        self.canvas
+            .copy(
+                self.image_textures
+                    .get(&id)
+                    .expect("inserted accelerated image texture"),
+                None,
+                destination,
+            )
+            .map_err(|error| error.to_string())
+    }
+}
 
 impl SdlComponentRenderer {
     pub fn new(width: u32, height: u32, scale: f32) -> Self {
         let width = width.max(1);
         let height = height.max(1);
+        let mut upload =
+            Surface::new(width, height, PixelFormat::ABGR8888).expect("create SDL upload surface");
+        upload
+            .set_blend_mode(BlendMode::None)
+            .expect("disable SDL upload blending");
         Self {
             width,
             height,
             scale: scale.max(0.25),
             pixels: vec![Pixel::TRANSPARENT; (width * height) as usize],
+            upload,
             previous_commands: Vec::new(),
             font_system: FontSystem::new(),
             swash_cache: SwashCache::new(),
+            text_cache: HashMap::new(),
         }
     }
 
@@ -76,6 +484,11 @@ impl SdlComponentRenderer {
             self.height = height;
             self.pixels
                 .resize((self.width * self.height) as usize, Pixel::TRANSPARENT);
+            self.upload = Surface::new(self.width, self.height, PixelFormat::ABGR8888)
+                .expect("resize SDL upload surface");
+            self.upload
+                .set_blend_mode(BlendMode::None)
+                .expect("disable SDL upload blending");
             self.previous_commands.clear();
         }
     }
@@ -146,18 +559,12 @@ impl SdlComponentRenderer {
         if damage.is_empty() {
             return Ok(damage);
         }
-        let mut upload =
-            sdl3::surface::Surface::new(self.width, self.height, PixelFormat::ABGR8888)
-                .map_err(|error| error.to_string())?;
-        upload
-            .set_blend_mode(BlendMode::None)
-            .map_err(|error| error.to_string())?;
-        upload.with_lock_mut(|bytes| {
+        self.upload.with_lock_mut(|bytes| {
             for (color, pixel) in self.pixels.iter().zip(bytes.chunks_exact_mut(4)) {
                 pixel.copy_from_slice(&[color.r, color.g, color.b, color.a]);
             }
         });
-        upload
+        self.upload
             .blit(None, surface, SdlRect::new(0, 0, self.width, self.height))
             .map_err(|error| error.to_string())?;
         Ok(damage)
@@ -333,40 +740,68 @@ impl SdlComponentRenderer {
         };
         let font_size = text_size(*scale) * self.scale;
         let physical = physical_rect(*bounds, self.scale);
-        let mut buffer = Buffer::new(
-            &mut self.font_system,
-            Metrics::new(font_size, font_size * 1.3),
-        );
-        buffer.set_size(
-            Some(physical.size.width.max(1.0)),
-            Some(physical.size.height.max(font_size * 1.4)),
-        );
-        let mut attrs = Attrs::new().family(Family::SansSerif);
-        if *bold {
-            attrs = attrs.weight(Weight::BOLD);
-        }
-        buffer.set_text(text, &attrs, Shaping::Advanced, None);
-        for line in &mut buffer.lines {
-            line.set_align(Some(match align {
-                TextAlign::Start => Align::Left,
-                TextAlign::Center => Align::Center,
-                TextAlign::End => Align::Right,
-            }));
-        }
-        buffer.shape_until_scroll(&mut self.font_system, false);
-        let origin = physical.origin;
-        let pixel = pixel(*color);
-        let text_color = TextColor::rgba(pixel.r, pixel.g, pixel.b, pixel.a);
-        let mut glyph_pixels = Vec::new();
-        buffer.draw(
-            &mut self.font_system,
-            &mut self.swash_cache,
-            text_color,
-            |x, y, width, height, glyph_color| {
-                glyph_pixels.push((x, y, width, height, glyph_color));
+        let buffer_width = physical.size.width.max(1.0);
+        let buffer_height = physical.size.height.max(font_size * 1.4);
+        let key = TextCacheKey {
+            text: text.clone(),
+            font_size: font_size.to_bits(),
+            width: buffer_width.to_bits(),
+            height: buffer_height.to_bits(),
+            align: match align {
+                TextAlign::Start => 0,
+                TextAlign::Center => 1,
+                TextAlign::End => 2,
             },
-        );
-        for (x, y, width, height, glyph_color) in glyph_pixels {
+            bold: *bold,
+            color: *color,
+        };
+        let glyph_pixels = if let Some(cached) = self.text_cache.get(&key) {
+            Arc::clone(cached)
+        } else {
+            let mut buffer = Buffer::new(
+                &mut self.font_system,
+                Metrics::new(font_size, font_size * 1.3),
+            );
+            buffer.set_size(Some(buffer_width), Some(buffer_height));
+            let mut attrs = Attrs::new().family(Family::SansSerif);
+            if *bold {
+                attrs = attrs.weight(Weight::BOLD);
+            }
+            buffer.set_text(text, &attrs, Shaping::Advanced, None);
+            for line in &mut buffer.lines {
+                line.set_align(Some(match align {
+                    TextAlign::Start => Align::Left,
+                    TextAlign::Center => Align::Center,
+                    TextAlign::End => Align::Right,
+                }));
+            }
+            buffer.shape_until_scroll(&mut self.font_system, false);
+            let pixel = pixel(*color);
+            let text_color = TextColor::rgba(pixel.r, pixel.g, pixel.b, pixel.a);
+            let mut pixels = Vec::new();
+            buffer.draw(
+                &mut self.font_system,
+                &mut self.swash_cache,
+                text_color,
+                |x, y, width, height, glyph_color| {
+                    pixels.push((x, y, width, height, glyph_color));
+                },
+            );
+            if self.text_cache.len() >= 2048 {
+                self.text_cache.clear();
+            }
+            let pixels = Arc::new(pixels);
+            self.text_cache.insert(key, Arc::clone(&pixels));
+            pixels
+        };
+        // Cosmic Text emits already-rasterized 1x1 physical pixels. Keep their
+        // origin on the physical pixel grid; a fractional origin would make
+        // `for_pixels` expand each sample across adjacent pixels.
+        let origin = crate::Point {
+            x: physical.origin.x.round(),
+            y: physical.origin.y.round(),
+        };
+        for &(x, y, width, height, glyph_color) in glyph_pixels.iter() {
             let glyph = Rect::new(
                 origin.x + x as f32,
                 origin.y + y as f32,
@@ -476,6 +911,36 @@ fn physical_rect(rect: Rect, scale: f32) -> Rect {
     )
 }
 
+fn frect(rect: Rect) -> FRect {
+    FRect::new(
+        rect.origin.x,
+        rect.origin.y,
+        rect.size.width.max(0.0),
+        rect.size.height.max(0.0),
+    )
+}
+
+fn sdl_rect(rect: Rect) -> SdlRect {
+    let left = rect.origin.x.floor() as i32;
+    let top = rect.origin.y.floor() as i32;
+    let right = (rect.origin.x + rect.size.width).ceil() as i32;
+    let bottom = (rect.origin.y + rect.size.height).ceil() as i32;
+    SdlRect::new(
+        left,
+        top,
+        right.saturating_sub(left) as u32,
+        bottom.saturating_sub(top) as u32,
+    )
+}
+
+fn sdl_color(color: Color) -> SdlColor {
+    sdl_pixel(pixel(color))
+}
+
+fn sdl_pixel(color: Pixel) -> SdlColor {
+    SdlColor::RGBA(color.r, color.g, color.b, color.a)
+}
+
 fn intersection(left: Rect, right: Rect) -> Option<Rect> {
     let x = left.origin.x.max(right.origin.x);
     let y = left.origin.y.max(right.origin.y);
@@ -531,3 +996,4 @@ fn text_size(scale: f32) -> f32 {
 fn px(value: u32) -> u32 {
     value
 }
+use std::{collections::HashMap, sync::Arc};

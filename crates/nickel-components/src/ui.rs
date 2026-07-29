@@ -132,6 +132,10 @@ pub struct Style {
 #[derive(Clone, Debug, PartialEq)]
 enum Kind {
     Flex(Axis),
+    VerticalScroll {
+        offset: f32,
+        content_height: f32,
+    },
     Grid {
         columns: usize,
     },
@@ -335,6 +339,45 @@ macro_rules! flex_component {
 
 flex_component!(Column, Axis::Vertical);
 flex_component!(Row, Axis::Horizontal);
+
+pub struct VerticalScroll(Element);
+
+impl VerticalScroll {
+    pub fn new(
+        action: impl Into<String>,
+        offset: f32,
+        viewport_height: f32,
+        content_height: f32,
+    ) -> Self {
+        let mut element = Element {
+            kind: Kind::VerticalScroll {
+                offset: offset.clamp(0.0, (content_height - viewport_height).max(0.0)),
+                content_height: content_height.max(viewport_height),
+            },
+            style: Style::default(),
+            action: Some(action.into()),
+            children: Vec::new(),
+        };
+        element.style.height = Some(viewport_height.max(0.0));
+        Self(element)
+    }
+
+    pub fn child(mut self, child: impl Component) -> Self {
+        self.0 = self.0.child(child);
+        self
+    }
+
+    pub fn background(mut self, background: impl Into<Background>) -> Self {
+        self.0 = self.0.background(background);
+        self
+    }
+}
+
+impl Component for VerticalScroll {
+    fn into_element(self) -> Element {
+        self.0
+    }
+}
 
 pub struct Grid(Element);
 
@@ -1221,7 +1264,7 @@ pub struct UiTree {
 impl UiTree {
     pub fn layout(root: impl Component, bounds: Rect) -> Self {
         let mut tree = Self::default();
-        layout_element(&root.into_element(), bounds, None, &mut tree);
+        layout_element(&root.into_element(), bounds, None, None, &mut tree);
         tree
     }
 
@@ -1284,10 +1327,19 @@ fn rects_intersect(left: Rect, right: Rect) -> bool {
         && left.origin.y + left.size.height > right.origin.y
 }
 
+fn intersection(left: Rect, right: Rect) -> Option<Rect> {
+    let x = left.origin.x.max(right.origin.x);
+    let y = left.origin.y.max(right.origin.y);
+    let right_edge = (left.origin.x + left.size.width).min(right.origin.x + right.size.width);
+    let bottom_edge = (left.origin.y + left.size.height).min(right.origin.y + right.size.height);
+    (right_edge > x && bottom_edge > y).then(|| Rect::new(x, y, right_edge - x, bottom_edge - y))
+}
+
 fn layout_element(
     element: &Element,
     bounds: Rect,
     inherited_foreground: Option<Color>,
+    inherited_clip: Option<Rect>,
     tree: &mut UiTree,
 ) {
     let width = element
@@ -1321,7 +1373,11 @@ fn layout_element(
             width: element.style.border_width,
         });
     }
-    if let Some(action) = &element.action {
+    if let Some(action) = &element.action
+        && let Some(rect) = inherited_clip
+            .map(|clip| intersection(rect, clip))
+            .unwrap_or(Some(rect))
+    {
         tree.hits.push(HitRegion {
             rect,
             action: action.clone(),
@@ -1455,8 +1511,33 @@ fn layout_element(
             let content = rect.inset(element.style.padding);
             let child_bounds = flex_bounds(content, *axis, element.style.gap, &element.children);
             for (child, bounds) in element.children.iter().zip(child_bounds) {
-                layout_element(child, bounds, foreground, tree);
+                layout_element(child, bounds, foreground, inherited_clip, tree);
             }
+        }
+        Kind::VerticalScroll {
+            offset,
+            content_height,
+        } => {
+            let viewport = rect.inset(element.style.padding);
+            let clip = inherited_clip
+                .and_then(|parent| intersection(parent, viewport))
+                .unwrap_or(viewport);
+            tree.commands.push(PaintCommand::PushClip(viewport));
+            if let Some(child) = element.children.first() {
+                layout_element(
+                    child,
+                    Rect::new(
+                        viewport.origin.x,
+                        viewport.origin.y - offset,
+                        viewport.size.width,
+                        *content_height,
+                    ),
+                    foreground,
+                    Some(clip),
+                    tree,
+                );
+            }
+            tree.commands.push(PaintCommand::PopClip);
         }
         Kind::Grid { columns } => {
             let content = rect.inset(element.style.padding);
@@ -1482,6 +1563,7 @@ fn layout_element(
                         cell_height,
                     ),
                     foreground,
+                    inherited_clip,
                     tree,
                 );
             }
@@ -1655,6 +1737,45 @@ mod tests {
             tree.horizontal_fraction_for_action("volume", 250.0),
             Some(1.0)
         );
+    }
+
+    #[test]
+    fn vertical_scroll_clips_painting_and_hit_regions() {
+        let tree = UiTree::layout(
+            VerticalScroll::new("scroll", 50.0, 100.0, 200.0).child(
+                Column::new()
+                    .gap(10.0)
+                    .child(Container::new().height(60.0).action("one"))
+                    .child(Container::new().height(60.0).action("two"))
+                    .child(Container::new().height(60.0).action("three")),
+            ),
+            Rect::new(0.0, 0.0, 200.0, 100.0),
+        );
+
+        assert!(matches!(
+            tree.commands.first(),
+            Some(PaintCommand::PushClip(rect)) if *rect == Rect::new(0.0, 0.0, 200.0, 100.0)
+        ));
+        assert!(matches!(tree.commands.last(), Some(PaintCommand::PopClip)));
+        assert_eq!(tree.action_at(Point { x: 20.0, y: 5.0 }), Some("one"));
+        assert_eq!(tree.action_at(Point { x: 20.0, y: 40.0 }), Some("two"));
+        assert_eq!(tree.action_at(Point { x: 20.0, y: 95.0 }), Some("three"));
+        assert_eq!(tree.action_at(Point { x: 20.0, y: 105.0 }), None);
+    }
+
+    #[test]
+    fn vertical_scroll_clamps_offset_to_content_end() {
+        let tree = UiTree::layout(
+            VerticalScroll::new("scroll", 500.0, 100.0, 200.0).child(
+                Column::new()
+                    .gap(10.0)
+                    .child(Container::new().height(60.0).action("one"))
+                    .child(Container::new().height(60.0).action("two")),
+            ),
+            Rect::new(0.0, 0.0, 200.0, 100.0),
+        );
+
+        assert_eq!(tree.action_at(Point { x: 20.0, y: 10.0 }), Some("two"));
     }
 
     #[test]
