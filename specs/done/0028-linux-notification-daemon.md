@@ -1,6 +1,6 @@
 # Linux Notification Daemon
 
-Status: active.
+Status: complete.
 
 ## Goal
 
@@ -13,7 +13,8 @@ Plasma Shell.
   `GetCapabilities`, `GetServerInformation`, `Notify`, and `CloseNotification` methods.
 - Keep at most 100 notifications in memory. New notifications receive nonzero monotonically
   increasing IDs; a valid `replaces_id` updates the existing notification in place.
-- Honor positive expiration timeouts. Use a five-second default for zero or negative timeouts.
+- Honor positive expiration timeouts, keep zero-timeout notifications until explicitly closed,
+  and use a five-second server default for negative timeouts.
 - Present the newest live notification in a non-taskbar Nickel toast surface on the primary
   output. Notifications with an empty summary may use the application name as their heading.
 - Emit `NotificationClosed` when a notification expires, is explicitly closed, or is discarded

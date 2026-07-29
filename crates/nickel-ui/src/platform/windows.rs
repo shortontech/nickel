@@ -100,7 +100,8 @@ use crate::{
     launcher::Launcher,
     model::{Application, ApplicationId, OpenWindow, TrayItem, WindowId, WindowPreview},
     platform::{
-        DesktopCapture, GlobalShortcut, LaunchError, ShellCommand, TraySource, WindowAction,
+        DesktopCapture, GlobalShortcut, LaunchError, NotificationSource, ShellCommand, TraySource,
+        WindowAction,
     },
 };
 
@@ -2420,6 +2421,19 @@ impl TraySource for TrayFeed {
     fn context_menu(&self, id: &str) {
         self.send_callback(id, WM_RBUTTONDOWN, WM_RBUTTONUP);
     }
+}
+
+pub struct NotificationFeed;
+impl NotificationFeed {
+    pub fn new() -> Result<Self, String> {
+        Ok(Self)
+    }
+}
+impl NotificationSource for NotificationFeed {
+    fn snapshot(&self) -> Option<crate::notification::DesktopNotification> {
+        None
+    }
+    fn dismiss(&self, _: u32) {}
 }
 
 impl TrayFeed {

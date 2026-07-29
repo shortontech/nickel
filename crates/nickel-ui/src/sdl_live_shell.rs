@@ -11,9 +11,10 @@ use nickel_core::{
 use crate::{
     launcher::Launcher,
     model::{OpenWindow, TrayItem},
+    notification::DesktopNotification,
     platform::{
-        self, AudioStatus, BluetoothStatus, NetworkStatus, ShellCommand, TrayFeed, TraySource,
-        WindowAction, WindowFeed,
+        self, AudioStatus, BluetoothStatus, NetworkStatus, NotificationFeed, NotificationSource,
+        ShellCommand, TrayFeed, TraySource, WindowAction, WindowFeed,
     },
     sdl_control_view::{ControlAction, ControlCenterFrame, ControlViewState, build_control_center},
     sdl_launcher_view::{
@@ -29,8 +30,10 @@ pub struct LiveShell {
     launcher: Launcher,
     window_feed: WindowFeed,
     tray_feed: TrayFeed,
+    notification_feed: NotificationFeed,
     windows: Vec<OpenWindow>,
     tray: Vec<TrayItem>,
+    notification: Option<DesktopNotification>,
     wallpaper: Option<Arc<image::RgbaImage>>,
     panel_icon: Arc<image::RgbaImage>,
     palette: ThemePalette,
@@ -46,7 +49,7 @@ pub struct LiveShell {
 }
 
 impl LiveShell {
-    pub fn new() -> Self {
+    pub fn new() -> Result<Self, String> {
         let mut launcher = Launcher::new(platform::applications());
         launcher.set_places(crate::places::applications());
         let wallpaper_settings = WallpaperSettings::load_default();
@@ -68,17 +71,20 @@ impl LiveShell {
         .expect("embedded Nickel start icon remains valid");
         let window_feed = WindowFeed::new();
         let tray_feed = TrayFeed::new();
+        let notification_feed = NotificationFeed::new()?;
         let windows = window_feed.snapshot(&launcher).unwrap_or_default();
         let tray = tray_feed.snapshot();
         let network = platform::network_status();
         let bluetooth = platform::bluetooth_status();
         let audio = platform::audio_status();
-        Self {
+        Ok(Self {
             launcher,
             window_feed,
             tray_feed,
+            notification_feed,
             windows,
             tray,
+            notification: None,
             wallpaper,
             panel_icon,
             palette,
@@ -91,7 +97,7 @@ impl LiveShell {
             launcher_view: LauncherViewState::default(),
             launcher_icons: LauncherIconCache::new(),
             launcher_frame: None,
-        }
+        })
     }
 
     pub fn refresh(&mut self) -> bool {
@@ -128,6 +134,11 @@ impl LiveShell {
             self.tray = tray;
             changed = true;
         }
+        let notification = self.notification_feed.snapshot();
+        if notification != self.notification {
+            self.notification = notification;
+            changed = true;
+        }
         let network = platform::network_status();
         if network != self.network {
             self.network = network;
@@ -152,6 +163,7 @@ impl LiveShell {
             SurfaceRole::Panel => self.panel_scene(width, height),
             SurfaceRole::Launcher => self.launcher_scene(width, height),
             SurfaceRole::ControlCenter => self.control_frame(width, height).commands,
+            SurfaceRole::Notification => self.notification_scene(width, height),
         }
     }
 
@@ -160,7 +172,16 @@ impl LiveShell {
             SurfaceRole::Desktop | SurfaceRole::Panel => true,
             SurfaceRole::Launcher => self.launcher_visible,
             SurfaceRole::ControlCenter => self.control_visible,
+            SurfaceRole::Notification => self.notification.is_some(),
         }
+    }
+
+    pub fn dismiss_notification(&mut self) -> bool {
+        let Some(notification) = self.notification.take() else {
+            return false;
+        };
+        self.notification_feed.dismiss(notification.id);
+        true
     }
 
     pub fn panel_click(&mut self, x: f32, width: u32) -> bool {
@@ -369,6 +390,45 @@ impl LiveShell {
             });
         }
         commands
+    }
+
+    fn notification_scene(&self, width: u32, height: u32) -> Vec<PaintCommand> {
+        let Some(notification) = &self.notification else {
+            return Vec::new();
+        };
+        let heading = if notification.summary.trim().is_empty() {
+            &notification.app_name
+        } else {
+            &notification.summary
+        };
+        vec![
+            PaintCommand::RoundedFill {
+                rect: Rect::new(0.0, 0.0, width as f32, height as f32),
+                color: self.palette.panel,
+                radius: 16.0,
+            },
+            PaintCommand::Stroke {
+                rect: Rect::new(0.5, 0.5, width as f32 - 1.0, height as f32 - 1.0),
+                color: self.palette.surface_hover,
+                width: 1.0,
+            },
+            text(
+                Rect::new(20.0, 18.0, width as f32 - 40.0, 32.0),
+                heading,
+                20.0,
+                self.palette.text,
+                TextAlign::Start,
+                true,
+            ),
+            text(
+                Rect::new(20.0, 55.0, width as f32 - 40.0, height as f32 - 70.0),
+                &notification.body,
+                16.0,
+                self.palette.muted,
+                TextAlign::Start,
+                false,
+            ),
+        ]
     }
 
     fn launcher_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {

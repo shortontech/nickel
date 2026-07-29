@@ -18,6 +18,7 @@ pub const DESKTOP_TITLE: &str = "Nickel Desktop";
 pub const PANEL_TITLE: &str = "Nickel Panel";
 pub const LAUNCHER_TITLE: &str = "Nickel Launcher";
 pub const CONTROL_CENTER_TITLE: &str = "Nickel Control Center";
+pub const NOTIFICATION_TITLE: &str = "Nickel Notification";
 pub const PANEL_HEIGHT: u32 = 56;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -29,6 +30,7 @@ pub enum SurfaceRole {
     Panel,
     Launcher,
     ControlCenter,
+    Notification,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -193,6 +195,7 @@ impl SdlShell {
         let primary = displays[0];
         self.create_surface(SurfaceRole::Launcher, 0, primary)?;
         self.create_surface(SurfaceRole::ControlCenter, 0, primary)?;
+        self.create_surface(SurfaceRole::Notification, 0, primary)?;
         tracing::info!(
             elapsed_ms = self.started.elapsed().as_secs_f64() * 1_000.0,
             surface_count = self.surfaces.len(),
@@ -321,6 +324,14 @@ impl SdlShell {
                 geometry.y + geometry.height.saturating_sub(672) as i32,
                 420.min(geometry.width),
                 600.min(geometry.height),
+                true,
+            ),
+            SurfaceRole::Notification => (
+                NOTIFICATION_TITLE,
+                geometry.x + geometry.width.saturating_sub(438) as i32,
+                geometry.y + 24,
+                420.min(geometry.width),
+                140.min(geometry.height),
                 true,
             ),
         };
