@@ -11,7 +11,8 @@ use crate::{
     icons,
     launcher::Launcher,
     model::{Application, ApplicationId, OpenWindow, TrayItem, WindowId, WindowPreview},
-    platform::{GlobalShortcut, ShellCommand, TraySource, WindowAction},
+    notification::{ClosedNotification, DesktopNotification, NotificationStore},
+    platform::{GlobalShortcut, NotificationSource, ShellCommand, TraySource, WindowAction},
 };
 
 #[path = "linux_control.rs"]
@@ -102,6 +103,8 @@ const STATUS_NOTIFIER_PATH: &str = "/StatusNotifierWatcher";
 const STATUS_NOTIFIER_INTERFACE: &str = "org.kde.StatusNotifierWatcher";
 const TRAY_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const TRAY_RETRY_MAX: Duration = Duration::from_secs(60);
+const NOTIFICATION_SERVICE: &str = "org.freedesktop.Notifications";
+const NOTIFICATION_PATH: &str = "/org/freedesktop/Notifications";
 
 pub struct TrayFeed {
     items: Arc<Mutex<Vec<TrayItem>>>,
@@ -137,6 +140,174 @@ impl TraySource for TrayFeed {
 
     fn context_menu(&self, id: &str) {
         let _ = self.actions.send((id.to_owned(), true));
+    }
+}
+
+pub struct NotificationFeed {
+    store: Arc<Mutex<NotificationStore>>,
+    connection: zbus::blocking::Connection,
+}
+
+impl NotificationFeed {
+    pub fn new() -> Result<Self, String> {
+        let store = Arc::new(Mutex::new(NotificationStore::default()));
+        let connection = zbus::blocking::connection::Builder::session()
+            .map_err(|error| error.to_string())?
+            .serve_at(
+                NOTIFICATION_PATH,
+                NotificationService {
+                    store: store.clone(),
+                },
+            )
+            .map_err(|error| error.to_string())?
+            .name(NOTIFICATION_SERVICE)
+            .map_err(|error| error.to_string())?
+            .build()
+            .map_err(|error| format!("could not own {NOTIFICATION_SERVICE}: {error}"))?;
+        let worker_store = store.clone();
+        let worker_connection = connection.clone();
+        thread::Builder::new()
+            .name("nickel-notification-expiry".into())
+            .spawn(move || notification_expiry_worker(worker_store, worker_connection))
+            .map_err(|error| error.to_string())?;
+        tracing::info!("Nickel notification daemon owns org.freedesktop.Notifications");
+        Ok(Self { store, connection })
+    }
+}
+
+impl NotificationSource for NotificationFeed {
+    fn snapshot(&self) -> Option<DesktopNotification> {
+        self.store.lock().ok()?.newest()
+    }
+
+    fn dismiss(&self, id: u32) {
+        let closed = self
+            .store
+            .lock()
+            .ok()
+            .and_then(|mut store| store.close(id, 2));
+        if let Some(closed) = closed {
+            emit_notification_closed(&self.connection, closed);
+        }
+    }
+}
+
+struct NotificationService {
+    store: Arc<Mutex<NotificationStore>>,
+}
+
+#[zbus::interface(name = "org.freedesktop.Notifications")]
+impl NotificationService {
+    fn get_capabilities(&self) -> Vec<String> {
+        vec!["body".into(), "persistence".into()]
+    }
+
+    fn get_server_information(&self) -> (String, String, String, String) {
+        (
+            "Nickel".into(),
+            "Nickel".into(),
+            env!("CARGO_PKG_VERSION").into(),
+            "1.2".into(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn notify(
+        &self,
+        app_name: String,
+        replaces_id: u32,
+        _app_icon: String,
+        summary: String,
+        body: String,
+        _actions: Vec<String>,
+        _hints: std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
+        expire_timeout: i32,
+        #[zbus(signal_emitter)] emitter: zbus::object_server::SignalEmitter<'_>,
+    ) -> u32 {
+        let (id, discarded) = {
+            let Ok(mut store) = self.store.lock() else {
+                return 0;
+            };
+            store.notify(
+                replaces_id,
+                app_name,
+                summary,
+                body,
+                expire_timeout,
+                std::time::Instant::now(),
+            )
+        };
+        if let Some(discarded) = discarded
+            && let Err(error) =
+                Self::notification_closed(&emitter, discarded.id, discarded.reason).await
+        {
+            tracing::warn!(
+                %error,
+                id = discarded.id,
+                "failed to emit NotificationClosed"
+            );
+        }
+        id
+    }
+
+    async fn close_notification(
+        &self,
+        id: u32,
+        #[zbus(signal_emitter)] emitter: zbus::object_server::SignalEmitter<'_>,
+    ) {
+        let closed = {
+            self.store
+                .lock()
+                .ok()
+                .and_then(|mut store| store.close(id, 3))
+        };
+        if let Some(closed) = closed
+            && let Err(error) = Self::notification_closed(&emitter, closed.id, closed.reason).await
+        {
+            tracing::warn!(%error, id = closed.id, "failed to emit NotificationClosed");
+        }
+    }
+
+    #[zbus(signal)]
+    async fn notification_closed(
+        emitter: &zbus::object_server::SignalEmitter<'_>,
+        id: u32,
+        reason: u32,
+    ) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    async fn action_invoked(
+        emitter: &zbus::object_server::SignalEmitter<'_>,
+        id: u32,
+        action_key: &str,
+    ) -> zbus::Result<()>;
+}
+
+fn notification_expiry_worker(
+    store: Arc<Mutex<NotificationStore>>,
+    connection: zbus::blocking::Connection,
+) {
+    loop {
+        let expired = store
+            .lock()
+            .map(|mut store| store.expire(std::time::Instant::now()))
+            .unwrap_or_default();
+        for closed in expired {
+            emit_notification_closed(&connection, closed);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn emit_notification_closed(connection: &zbus::blocking::Connection, closed: ClosedNotification) {
+    if let Err(error) = connection.emit_signal(
+        None::<&str>,
+        NOTIFICATION_PATH,
+        NOTIFICATION_SERVICE,
+        "NotificationClosed",
+        &(closed.id, closed.reason),
+    ) {
+        tracing::warn!(%error, id = closed.id, "failed to emit NotificationClosed");
     }
 }
 

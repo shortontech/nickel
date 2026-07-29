@@ -83,6 +83,11 @@ pub trait TraySource {
     fn context_menu(&self, id: &str);
 }
 
+pub trait NotificationSource {
+    fn snapshot(&self) -> Option<crate::notification::DesktopNotification>;
+    fn dismiss(&self, id: u32);
+}
+
 #[derive(Clone, Copy)]
 pub enum WindowAction {
     Activate,
@@ -136,23 +141,24 @@ pub enum ShellCommand {
 mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::{
-    TrayFeed, WindowFeed, activate_wifi_network, application_icon, applications, audio_status,
-    bluetooth_status, capture_active_window, capture_active_window_to_file, capture_desktop,
-    capture_pointer, copy_image_to_clipboard, copy_temp_image_path, execute_run_command,
-    handle_focused_shortcut, launch_application, launcher_has_foreground_focus,
-    launcher_hotkey_receiver, launcher_visibility_applied, network_status, paste_text_if_requested,
-    release_pointer, select_audio_device, send_shell_command, set_audio_volume,
-    set_bluetooth_discovery, set_bluetooth_powered, set_wifi_enabled, show_window_system_menu,
-    toggle_bluetooth_device, update_panel_fullscreen_state, wallpaper,
+    NotificationFeed, TrayFeed, WindowFeed, activate_wifi_network, application_icon, applications,
+    audio_status, bluetooth_status, capture_active_window, capture_active_window_to_file,
+    capture_desktop, capture_pointer, copy_image_to_clipboard, copy_temp_image_path,
+    execute_run_command, handle_focused_shortcut, launch_application,
+    launcher_has_foreground_focus, launcher_hotkey_receiver, launcher_visibility_applied,
+    network_status, paste_text_if_requested, release_pointer, select_audio_device,
+    send_shell_command, set_audio_volume, set_bluetooth_discovery, set_bluetooth_powered,
+    set_wifi_enabled, show_window_system_menu, toggle_bluetooth_device,
+    update_panel_fullscreen_state, wallpaper,
 };
 
 #[cfg(target_os = "windows")]
 mod windows;
 #[cfg(target_os = "windows")]
 pub use windows::{
-    TrayFeed, WindowFeed, activate_wifi_network, application_icon, applications, audio_status,
-    bluetooth_status, capture_active_window, capture_active_window_to_file, capture_desktop,
-    capture_pointer, configure_context_menu_window, configure_desktop_window,
+    NotificationFeed, TrayFeed, WindowFeed, activate_wifi_network, application_icon, applications,
+    audio_status, bluetooth_status, capture_active_window, capture_active_window_to_file,
+    capture_desktop, capture_pointer, configure_context_menu_window, configure_desktop_window,
     configure_launcher_window, configure_panel_window, configure_volume_osd_window,
     copy_image_to_clipboard, copy_temp_image_path, execute_run_command, handle_focused_shortcut,
     launch_application, launcher_has_foreground_focus, launcher_hotkey_receiver,
@@ -166,11 +172,11 @@ pub use windows::{
 mod unsupported;
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 pub use unsupported::{
-    TrayFeed, WindowFeed, activate_wifi_network, application_icon, applications, audio_status,
-    bluetooth_status, capture_pointer, configure_volume_osd_window, execute_run_command,
-    handle_focused_shortcut, launch_application, launcher_has_foreground_focus,
-    launcher_hotkey_receiver, launcher_visibility_applied, network_status, release_pointer,
-    select_audio_device, send_shell_command, set_audio_volume, set_bluetooth_discovery,
-    set_bluetooth_powered, set_wifi_enabled, show_window_system_menu, toggle_bluetooth_device,
-    update_panel_fullscreen_state, wallpaper,
+    NotificationFeed, TrayFeed, WindowFeed, activate_wifi_network, application_icon, applications,
+    audio_status, bluetooth_status, capture_pointer, configure_volume_osd_window,
+    execute_run_command, handle_focused_shortcut, launch_application,
+    launcher_has_foreground_focus, launcher_hotkey_receiver, launcher_visibility_applied,
+    network_status, release_pointer, select_audio_device, send_shell_command, set_audio_volume,
+    set_bluetooth_discovery, set_bluetooth_powered, set_wifi_enabled, show_window_system_menu,
+    toggle_bluetooth_device, update_panel_fullscreen_state, wallpaper,
 };

@@ -65,6 +65,10 @@ tempfile = "3.25.0"
 name = "nickel-ui"
 path = "src/bin/nickel-sdl-shell.rs"
 
+[[bin]]
+name = "nickel-test-notification"
+path = "src/bin/nickel-test-notification.rs"
+
 [target.'cfg(target_os = "windows")'.build-dependencies]
 ico.workspace = true
 image.workspace = true

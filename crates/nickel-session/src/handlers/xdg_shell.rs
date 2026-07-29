@@ -350,9 +350,16 @@ impl NickelSession {
         let is_desktop = title.as_deref() == Some("Nickel Desktop");
         let is_panel = title.as_deref() == Some("Nickel Panel");
         let is_context_menu = title.as_deref() == Some("Nickel Context Menu");
+        let is_notification = title.as_deref() == Some("Nickel Notification");
         let is_utility = matches!(
             title.as_deref(),
-            Some("Run" | "Nickel Screenshot" | "Nickel Volume" | "Nickel Control Center")
+            Some(
+                "Run"
+                    | "Nickel Screenshot"
+                    | "Nickel Volume"
+                    | "Nickel Control Center"
+                    | "Nickel Notification"
+            )
         );
         if let Some(id) = self
             .surface_windows
@@ -408,6 +415,9 @@ impl NickelSession {
                 .find(|window| window.toplevel().unwrap().wl_surface() == surface.wl_surface())
                 .cloned();
             if let Some(utility) = utility {
+                if is_notification {
+                    utility.override_z_index(45);
+                }
                 self.register_utility_window(utility);
             }
         }

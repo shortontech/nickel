@@ -29,6 +29,8 @@ mod launcher;
 #[path = "../model.rs"]
 #[allow(dead_code)]
 mod model;
+#[path = "../notification.rs"]
+mod notification;
 #[path = "../places.rs"]
 #[allow(dead_code)]
 mod places;
@@ -125,7 +127,7 @@ fn main() -> Result<(), String> {
     let started = Instant::now();
     let mut shell = SdlShell::new(started)?;
     shell.create_shell_surfaces()?;
-    let mut state = LiveShell::new();
+    let mut state = LiveShell::new()?;
     sync_visibility(&mut shell, &state);
     render_all(&mut shell, &mut state)?;
     println!(
@@ -176,6 +178,18 @@ fn main() -> Result<(), String> {
             Some(ShellEvent::PointerButton {
                 surface,
                 pressed: true,
+                ..
+            }) if shell
+                .surface(surface)
+                .is_some_and(|entry| entry.role() == SurfaceRole::Notification) =>
+            {
+                if state.dismiss_notification() {
+                    sync_visibility(&mut shell, &state);
+                }
+            }
+            Some(ShellEvent::PointerButton {
+                surface,
+                pressed: true,
                 x,
                 y,
                 ..
@@ -197,6 +211,7 @@ fn main() -> Result<(), String> {
                 let changed = match role {
                     SurfaceRole::Launcher => state.launcher_click(x, y),
                     SurfaceRole::ControlCenter => state.control_click(x, y, width, height),
+                    SurfaceRole::Notification => state.dismiss_notification(),
                     _ => false,
                 };
                 if changed {

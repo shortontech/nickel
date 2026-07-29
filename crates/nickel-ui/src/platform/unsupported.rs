@@ -2,7 +2,7 @@ use crate::{
     desktop::Wallpaper,
     launcher::Launcher,
     model::{Application, OpenWindow, TrayItem, WindowId, WindowPreview},
-    platform::{GlobalShortcut, ShellCommand, TraySource},
+    platform::{GlobalShortcut, NotificationSource, ShellCommand, TraySource},
 };
 
 pub fn wallpaper() -> Wallpaper {
@@ -106,6 +106,19 @@ impl TraySource for TrayFeed {
     }
     fn activate(&self, _: &str) {}
     fn context_menu(&self, _: &str) {}
+}
+
+pub struct NotificationFeed;
+impl NotificationFeed {
+    pub fn new() -> Result<Self, String> {
+        Ok(Self)
+    }
+}
+impl NotificationSource for NotificationFeed {
+    fn snapshot(&self) -> Option<crate::notification::DesktopNotification> {
+        None
+    }
+    fn dismiss(&self, _: u32) {}
 }
 
 pub fn send_shell_command(_: ShellCommand) -> bool {
