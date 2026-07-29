@@ -185,14 +185,14 @@ impl SdlShell {
     pub fn create_shell_surfaces(&mut self) -> Result<(), String> {
         self.surfaces.clear();
         self.surface_indices.clear();
-        for (display_index, geometry) in self.display_geometries()?.into_iter().enumerate() {
+        let displays = require_displays(self.display_geometries()?)?;
+        for (display_index, geometry) in displays.iter().copied().enumerate() {
             self.create_surface(SurfaceRole::Desktop, display_index, geometry)?;
             self.create_surface(SurfaceRole::Panel, display_index, geometry)?;
         }
-        if let Some(primary) = self.display_geometries()?.first().copied() {
-            self.create_surface(SurfaceRole::Launcher, 0, primary)?;
-            self.create_surface(SurfaceRole::ControlCenter, 0, primary)?;
-        }
+        let primary = displays[0];
+        self.create_surface(SurfaceRole::Launcher, 0, primary)?;
+        self.create_surface(SurfaceRole::ControlCenter, 0, primary)?;
         tracing::info!(
             elapsed_ms = self.started.elapsed().as_secs_f64() * 1_000.0,
             surface_count = self.surfaces.len(),
@@ -465,5 +465,38 @@ impl SdlShell {
             WindowEvent::DisplayChanged(_) => Some(ShellEvent::DisplayTopologyChanged),
             _ => None,
         }
+    }
+}
+
+fn require_displays(displays: Vec<DisplayGeometry>) -> Result<Vec<DisplayGeometry>, String> {
+    if displays.is_empty() {
+        Err("SDL reported no displays; refusing to start a headless Nickel shell".into())
+    } else {
+        Ok(displays)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DisplayGeometry, require_displays};
+
+    #[test]
+    fn rejects_a_headless_shell_startup() {
+        assert_eq!(
+            require_displays(Vec::new()).unwrap_err(),
+            "SDL reported no displays; refusing to start a headless Nickel shell"
+        );
+    }
+
+    #[test]
+    fn accepts_visible_displays() {
+        let display = DisplayGeometry {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            scale: 1.0,
+        };
+        assert_eq!(require_displays(vec![display]).unwrap(), vec![display]);
     }
 }
