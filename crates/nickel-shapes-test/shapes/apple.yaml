@@ -1,0 +1,14 @@
+name: apple
+seed: orchard-demo
+
+root:
+  kind: sphere
+  skin: apple
+  children:
+    - kind: branch
+      children:
+        - kind: leaf
+        - kind: leaf
+
+# Future articulation remains semantic:
+# motion: walking

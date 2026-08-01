@@ -1,0 +1,8 @@
+name: grapes
+seed: vineyard-demo
+
+root:
+  kind: branch
+  children:
+    - kind: leaf
+    - kind: grape_cluster

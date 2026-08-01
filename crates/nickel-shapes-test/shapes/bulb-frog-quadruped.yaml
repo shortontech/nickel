@@ -1,0 +1,17 @@
+name: bulb-backed marsh grazer
+seed: mossy-pond
+
+root:
+  kind: creature
+  torso: fruit
+  head: frog
+  terminal_component:
+    recipe: ../components/paw.yaml
+    overrides:
+      digits:
+        count: 3
+      constraints:
+        grasping: moderate
+  back: bulb
+  locomotion: quadruped
+  diet: herbivore

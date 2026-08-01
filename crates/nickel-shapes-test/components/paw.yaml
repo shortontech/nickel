@@ -1,0 +1,21 @@
+component: paw
+version: 1
+
+structure:
+  palm:
+    kind: soft_mass
+  digits:
+    count:
+      min: 3
+      max: 5
+    bones_per_digit:
+      min: 2
+      max: 3
+    spread: moderate
+  pads:
+    material: resilient_tissue
+
+constraints:
+  supports_weight: true
+  traction: high
+  grasping: low
