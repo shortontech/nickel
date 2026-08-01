@@ -1,0 +1,324 @@
+generator_version: 1
+recipe_name: bulb-backed marsh grazer
+seed: mossy-pond
+morphology:
+  locomotion: quadruped
+  diet: herbivore
+  pressures:
+    binocular_vision: 0.28576756
+    peripheral_vision: 0.8542325
+    bite_force: 0.40288377
+    digestive_volume: 0.837693
+    pursuit_speed: 0.30576757
+    camouflage: 0.6171162
+  posture_bias: defensive
+  mouth: cropping_grinder
+  terminal_component:
+    recipe: ../components/paw.yaml
+    component: paw
+    version: 1
+    digit_count: 3
+    bones_per_digit: 3
+    supports_weight: true
+    traction: high
+    grasping: moderate
+  dependencies:
+    hind_limb_role: support
+    fore_limb_role: support
+    pelvis_pitch_degrees: 4.0
+    shoulder_pitch_degrees: 2.0
+    spine_pitch_degrees: 8.0
+    spine_curve: 0.26052314
+    center_of_mass:
+    - 0.0
+    - 0.74
+    - 0.037015438
+    neck_compensation_degrees: 6.0
+    head_resting_angle_degrees: 14.0
+    gait:
+      supporting_pairs:
+      - - left_fore
+        - right_hind
+      - - right_fore
+        - left_hind
+      stride_bias: 0.6964419
+      balance_compensation: 0.18
+  bones:
+  - name: pelvis
+    parent: null
+    start:
+    - 0.0
+    - 0.74
+    - 0.037015438
+    end:
+    - 0.0
+    - 0.94
+    - 0.0
+    load_bearing: true
+  - name: spine
+    parent: 0
+    start:
+    - 0.0
+    - 0.74
+    - 0.037015438
+    end:
+    - 0.0
+    - 0.9741838
+    - -1.418613
+    load_bearing: true
+  - name: neck
+    parent: 1
+    start:
+    - 0.0
+    - 0.9741838
+    - -1.418613
+    end:
+    - 0.0
+    - 0.9741838
+    - -1.2186129
+    load_bearing: false
+  - name: left_hind
+    parent: 0
+    start:
+    - -0.48
+    - 0.76
+    - 0.58
+    end:
+    - -0.38
+    - -0.05
+    - 0.53999996
+    load_bearing: true
+  - name: left_fore
+    parent: 1
+    start:
+    - -0.5
+    - 0.8
+    - -0.58
+    end:
+    - -0.42
+    - -0.05
+    - -0.53999996
+    load_bearing: true
+  - name: right_hind
+    parent: 0
+    start:
+    - 0.48
+    - 0.76
+    - 0.58
+    end:
+    - 0.38
+    - -0.05
+    - 0.53999996
+    load_bearing: true
+  - name: right_fore
+    parent: 1
+    start:
+    - 0.5
+    - 0.8
+    - -0.58
+    end:
+    - 0.42
+    - -0.05
+    - -0.53999996
+    load_bearing: true
+  parts:
+  - kind: ellipsoid
+    role: fruit_torso
+    center:
+    - 0.0
+    - 0.74
+    - 0.037015438
+    radii:
+    - 0.76
+    - 0.6956974
+    - 1.02
+    color:
+    - 72
+    - 143
+    - 62
+  - kind: ellipsoid
+    role: frog_head
+    center:
+    - 0.0
+    - 0.9741838
+    - -1.418613
+    radii:
+    - 0.62
+    - 0.46
+    - 0.52
+    color:
+    - 83
+    - 163
+    - 76
+  - kind: ellipsoid
+    role: back_bulb
+    center:
+    - 0.0
+    - 1.31
+    - 0.15701544
+    radii:
+    - 0.48
+    - 0.56
+    - 0.48
+    color:
+    - 80
+    - 116
+    - 55
+  - kind: limb
+    role: left_hind
+    start:
+    - -0.48
+    - 0.76
+    - 0.58
+    end:
+    - -0.38
+    - -0.05
+    - 0.53999996
+    radius: 0.16
+    color:
+    - 72
+    - 143
+    - 62
+  - kind: ellipsoid
+    role: left_hind_paw
+    center:
+    - -0.38
+    - -0.05
+    - 0.53999996
+    radii:
+    - 0.24
+    - 0.12
+    - 0.32
+    color:
+    - 61
+    - 118
+    - 52
+  - kind: limb
+    role: left_fore
+    start:
+    - -0.5
+    - 0.8
+    - -0.58
+    end:
+    - -0.42
+    - -0.05
+    - -0.53999996
+    radius: 0.16
+    color:
+    - 72
+    - 143
+    - 62
+  - kind: ellipsoid
+    role: left_fore_paw
+    center:
+    - -0.42
+    - -0.05
+    - -0.53999996
+    radii:
+    - 0.24
+    - 0.12
+    - 0.32
+    color:
+    - 61
+    - 118
+    - 52
+  - kind: limb
+    role: right_hind
+    start:
+    - 0.48
+    - 0.76
+    - 0.58
+    end:
+    - 0.38
+    - -0.05
+    - 0.53999996
+    radius: 0.16
+    color:
+    - 72
+    - 143
+    - 62
+  - kind: ellipsoid
+    role: right_hind_paw
+    center:
+    - 0.38
+    - -0.05
+    - 0.53999996
+    radii:
+    - 0.24
+    - 0.12
+    - 0.32
+    color:
+    - 61
+    - 118
+    - 52
+  - kind: limb
+    role: right_fore
+    start:
+    - 0.5
+    - 0.8
+    - -0.58
+    end:
+    - 0.42
+    - -0.05
+    - -0.53999996
+    radius: 0.16
+    color:
+    - 72
+    - 143
+    - 62
+  - kind: ellipsoid
+    role: right_fore_paw
+    center:
+    - 0.42
+    - -0.05
+    - -0.53999996
+    radii:
+    - 0.24
+    - 0.12
+    - 0.32
+    color:
+    - 61
+    - 118
+    - 52
+  - kind: ellipsoid
+    role: eye
+    center:
+    - -0.5573
+    - 1.1351838
+    - -1.7350137
+    radii:
+    - 0.13
+    - 0.15
+    - 0.1
+    color:
+    - 29
+    - 35
+    - 18
+  - kind: ellipsoid
+    role: eye
+    center:
+    - 0.5573
+    - 1.1351838
+    - -1.7350137
+    radii:
+    - 0.13
+    - 0.15
+    - 0.1
+    color:
+    - 29
+    - 35
+    - 18
+  - kind: ellipsoid
+    role: cropping_mouth
+    center:
+    - 0.0
+    - 0.81418383
+    - -1.898613
+    radii:
+    - 0.34
+    - 0.13
+    - 0.23251908
+    color:
+    - 62
+    - 75
+    - 40
