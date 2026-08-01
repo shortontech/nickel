@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{BackKind, CapabilityLevel, ComponentUse, HeadKind, TorsoKind, Vec3};
 
-pub const GENERATOR_VERSION: u32 = 1;
+pub const GENERATOR_VERSION: u32 = 2;
 
 #[derive(Clone, Copy, Debug, Deserialize, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -251,7 +251,7 @@ fn resolve_dependencies(
         LocomotionKind::Biped => 0.30 + pressures.digestive_volume * 0.10,
     };
     let center_of_mass = match locomotion {
-        LocomotionKind::Quadruped => [0.0, 0.74, -0.03 + pressures.digestive_volume * 0.08],
+        LocomotionKind::Quadruped => [0.0, 0.90, -0.03 + pressures.digestive_volume * 0.08],
         LocomotionKind::Biped => [0.0, 1.05, -0.16 + pressures.digestive_volume * 0.10],
     };
     let neck_compensation = match locomotion {
@@ -368,8 +368,8 @@ fn build_body(
     ];
 
     let (fore_top_y, hind_top_y, ground_y, fore_z, hind_z) = match locomotion {
-        LocomotionKind::Quadruped => (0.80, 0.76, -0.05, -0.58, 0.58),
-        LocomotionKind::Biped => (1.42, 1.05, 0.02, -0.20, 0.12),
+        LocomotionKind::Quadruped => (0.92, 0.88, -0.05, -0.58, 0.58),
+        LocomotionKind::Biped => (1.48, 1.05, 0.02, -0.12, 0.12),
     };
     for (side_name, side) in [("left", -1.0_f32), ("right", 1.0_f32)] {
         let hind_start = [side * 0.48, hind_top_y, hind_z];
@@ -388,7 +388,7 @@ fn build_body(
         let fore_start = [side * 0.50, fore_top_y, fore_z];
         let fore_end = match locomotion {
             LocomotionKind::Quadruped => [side * 0.42, ground_y, fore_z + 0.04],
-            LocomotionKind::Biped => [side * 0.76, 1.05, 0.34],
+            LocomotionKind::Biped => [side * 1.02, 1.08, -0.18],
         };
         add_limb(
             &mut bones,

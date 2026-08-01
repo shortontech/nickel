@@ -133,7 +133,9 @@ impl GpuPreview {
                 compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState {
-                cull_mode: Some(wgpu::Face::Back),
+                // Implicit surfaces are emitted a tetrahedron at a time. Render them two-sided
+                // until extraction shares vertices and guarantees globally consistent winding.
+                cull_mode: None,
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {

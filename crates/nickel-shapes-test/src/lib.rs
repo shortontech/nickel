@@ -677,36 +677,299 @@ fn generate_sphere(lod: Lod, center: Vec3, radius: f32, color: [u8; 3]) -> Mesh 
 }
 
 fn generate_morphology_mesh(morphology: &ResolvedMorphology, lod: Lod, origin: Vec3) -> Mesh {
-    let mut mesh = Mesh::default();
+    let mut mesh = generate_skin_mesh(morphology, lod, origin);
     for part in &morphology.parts {
         match part {
             ResolvedPart::Ellipsoid {
+                role,
                 center,
                 radii,
                 color,
                 ..
-            } => mesh.append(generate_ellipsoid(
+            } if is_surface_component(role) => mesh.append(generate_ellipsoid(
                 lod,
                 origin + array_vec(*center),
                 array_vec(*radii),
                 *color,
             )),
-            ResolvedPart::Limb {
-                start,
-                end,
-                radius,
-                color,
-                ..
-            } => mesh.append(generate_limb_volume(
-                lod,
-                origin + array_vec(*start),
-                origin + array_vec(*end),
-                *radius,
-                *color,
-            )),
+            ResolvedPart::Ellipsoid { .. } | ResolvedPart::Limb { .. } => {}
         }
     }
     mesh
+}
+
+fn is_surface_component(role: &str) -> bool {
+    role == "eye"
+        || role == "back_bulb"
+        || role == "cropping_mouth"
+        || role == "leveraged_jaw"
+        || role.ends_with("_paw")
+}
+
+struct SkinField<'a> {
+    morphology: &'a ResolvedMorphology,
+}
+
+impl SkinField<'_> {
+    fn sample(&self, point: Vec3) -> f32 {
+        let mut distance = f32::INFINITY;
+        for bone in &self.morphology.bones {
+            let radius = match bone.name.as_str() {
+                "pelvis" => 0.50 + self.morphology.pressures.digestive_volume * 0.18,
+                "spine" => 0.48 + self.morphology.pressures.digestive_volume * 0.22,
+                "neck" => 0.46,
+                name if name.ends_with("_hind") => 0.19,
+                name if name.ends_with("_fore") => 0.17,
+                _ => 0.16,
+            };
+            distance = smooth_min(
+                distance,
+                capsule_distance(point, array_vec(bone.start), array_vec(bone.end), radius),
+                0.22,
+            );
+        }
+        for part in &self.morphology.parts {
+            if let ResolvedPart::Ellipsoid {
+                role,
+                center,
+                radii,
+                ..
+            } = part
+                && (role == "fruit_torso" || role == "frog_head")
+            {
+                distance = smooth_min(
+                    distance,
+                    ellipsoid_distance(point, array_vec(*center), array_vec(*radii)),
+                    0.28,
+                );
+            }
+        }
+        distance
+    }
+
+    fn normal(&self, point: Vec3) -> Vec3 {
+        let epsilon = 0.008;
+        Vec3::new(
+            self.sample(point + Vec3::new(epsilon, 0.0, 0.0))
+                - self.sample(point - Vec3::new(epsilon, 0.0, 0.0)),
+            self.sample(point + Vec3::new(0.0, epsilon, 0.0))
+                - self.sample(point - Vec3::new(0.0, epsilon, 0.0)),
+            self.sample(point + Vec3::new(0.0, 0.0, epsilon))
+                - self.sample(point - Vec3::new(0.0, 0.0, epsilon)),
+        )
+        .normalized()
+    }
+}
+
+fn generate_skin_mesh(morphology: &ResolvedMorphology, lod: Lod, origin: Vec3) -> Mesh {
+    let resolution = match lod {
+        Lod::Distant => 16,
+        Lod::Gameplay => 24,
+        Lod::Close => 34,
+        Lod::Inspection => 44,
+    };
+    let field = SkinField { morphology };
+    let (minimum, maximum) = skeleton_bounds(morphology);
+    let size = maximum - minimum;
+    let step = Vec3::new(
+        size.x / resolution as f32,
+        size.y / resolution as f32,
+        size.z / resolution as f32,
+    );
+    let mut mesh = Mesh::default();
+    let tetrahedra = [
+        [0, 5, 1, 6],
+        [0, 1, 2, 6],
+        [0, 2, 3, 6],
+        [0, 3, 7, 6],
+        [0, 7, 4, 6],
+        [0, 4, 5, 6],
+    ];
+    let skin_color = match morphology.diet {
+        DietKind::Herbivore => [91, 174, 82],
+        DietKind::Carnivore => [65, 132, 80],
+    };
+
+    for z in 0..resolution {
+        for y in 0..resolution {
+            for x in 0..resolution {
+                let base =
+                    minimum + Vec3::new(x as f32 * step.x, y as f32 * step.y, z as f32 * step.z);
+                let points = [
+                    base,
+                    base + Vec3::new(step.x, 0.0, 0.0),
+                    base + Vec3::new(step.x, step.y, 0.0),
+                    base + Vec3::new(0.0, step.y, 0.0),
+                    base + Vec3::new(0.0, 0.0, step.z),
+                    base + Vec3::new(step.x, 0.0, step.z),
+                    base + Vec3::new(step.x, step.y, step.z),
+                    base + Vec3::new(0.0, step.y, step.z),
+                ];
+                let values = points.map(|point| field.sample(point));
+                if values.iter().all(|value| *value > 0.0)
+                    || values.iter().all(|value| *value <= 0.0)
+                {
+                    continue;
+                }
+                for tetrahedron in tetrahedra {
+                    polygonize_tetrahedron(
+                        &mut mesh,
+                        &field,
+                        origin,
+                        skin_color,
+                        tetrahedron.map(|index| points[index]),
+                        tetrahedron.map(|index| values[index]),
+                    );
+                }
+            }
+        }
+    }
+    mesh
+}
+
+fn polygonize_tetrahedron(
+    mesh: &mut Mesh,
+    field: &SkinField<'_>,
+    origin: Vec3,
+    color: [u8; 3],
+    points: [Vec3; 4],
+    values: [f32; 4],
+) {
+    let inside: Vec<_> = (0..4).filter(|index| values[*index] <= 0.0).collect();
+    let outside: Vec<_> = (0..4).filter(|index| values[*index] > 0.0).collect();
+    match inside.len() {
+        1 => {
+            let center = inside[0];
+            let triangle: [Vec3; 3] = std::array::from_fn(|index| {
+                skin_intersection(points, values, center, outside[index])
+            });
+            push_skin_triangle(
+                mesh,
+                field,
+                origin,
+                color,
+                triangle[0],
+                triangle[1],
+                triangle[2],
+            );
+        }
+        3 => {
+            let center = outside[0];
+            let triangle: [Vec3; 3] = std::array::from_fn(|index| {
+                skin_intersection(points, values, center, inside[index])
+            });
+            push_skin_triangle(
+                mesh,
+                field,
+                origin,
+                color,
+                triangle[0],
+                triangle[1],
+                triangle[2],
+            );
+        }
+        2 => {
+            let a = skin_intersection(points, values, inside[0], outside[0]);
+            let b = skin_intersection(points, values, inside[1], outside[0]);
+            let c = skin_intersection(points, values, inside[0], outside[1]);
+            let d = skin_intersection(points, values, inside[1], outside[1]);
+            push_skin_triangle(mesh, field, origin, color, a, b, c);
+            push_skin_triangle(mesh, field, origin, color, c, b, d);
+        }
+        0 | 4 => {}
+        _ => unreachable!("a tetrahedron has four vertices"),
+    }
+}
+
+fn skin_intersection(points: [Vec3; 4], values: [f32; 4], a: usize, b: usize) -> Vec3 {
+    let amount = values[a] / (values[a] - values[b]);
+    points[a] + (points[b] - points[a]) * amount
+}
+
+fn push_skin_triangle(
+    mesh: &mut Mesh,
+    field: &SkinField<'_>,
+    origin: Vec3,
+    color: [u8; 3],
+    mut a: Vec3,
+    mut b: Vec3,
+    c: Vec3,
+) {
+    let average = (a + b + c) * (1.0 / 3.0);
+    let outward = field.normal(average);
+    if (b - a).cross(c - a).dot(outward) < 0.0 {
+        std::mem::swap(&mut a, &mut b);
+    }
+    let start = mesh.vertices.len() as u32;
+    for point in [a, b, c] {
+        mesh.vertices.push(Vertex {
+            position: origin + point,
+            normal: field.normal(point),
+            color,
+        });
+    }
+    mesh.indices
+        .extend_from_slice(&[start, start + 1, start + 2]);
+}
+
+fn skeleton_bounds(morphology: &ResolvedMorphology) -> (Vec3, Vec3) {
+    let mut minimum = Vec3::new(f32::INFINITY, f32::INFINITY, f32::INFINITY);
+    let mut maximum = Vec3::new(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+    for bone in &morphology.bones {
+        for point in [array_vec(bone.start), array_vec(bone.end)] {
+            minimum.x = minimum.x.min(point.x);
+            minimum.y = minimum.y.min(point.y);
+            minimum.z = minimum.z.min(point.z);
+            maximum.x = maximum.x.max(point.x);
+            maximum.y = maximum.y.max(point.y);
+            maximum.z = maximum.z.max(point.z);
+        }
+    }
+    for part in &morphology.parts {
+        if let ResolvedPart::Ellipsoid {
+            role,
+            center,
+            radii,
+            ..
+        } = part
+            && (role == "fruit_torso" || role == "frog_head")
+        {
+            let center = array_vec(*center);
+            let radii = array_vec(*radii);
+            minimum.x = minimum.x.min(center.x - radii.x);
+            minimum.y = minimum.y.min(center.y - radii.y);
+            minimum.z = minimum.z.min(center.z - radii.z);
+            maximum.x = maximum.x.max(center.x + radii.x);
+            maximum.y = maximum.y.max(center.y + radii.y);
+            maximum.z = maximum.z.max(center.z + radii.z);
+        }
+    }
+    let padding = Vec3::new(0.34, 0.34, 0.34);
+    (minimum - padding, maximum + padding)
+}
+
+fn capsule_distance(point: Vec3, start: Vec3, end: Vec3, radius: f32) -> f32 {
+    let segment = end - start;
+    let amount = ((point - start).dot(segment) / segment.dot(segment).max(1.0e-6)).clamp(0.0, 1.0);
+    (point - (start + segment * amount)).length() - radius
+}
+
+fn ellipsoid_distance(point: Vec3, center: Vec3, radii: Vec3) -> f32 {
+    let relative = point - center;
+    let normalized = Vec3::new(
+        relative.x / radii.x,
+        relative.y / radii.y,
+        relative.z / radii.z,
+    );
+    (normalized.length() - 1.0) * radii.x.min(radii.y).min(radii.z)
+}
+
+fn smooth_min(a: f32, b: f32, blend: f32) -> f32 {
+    if !a.is_finite() {
+        return b;
+    }
+    let amount = (0.5 + 0.5 * (b - a) / blend).clamp(0.0, 1.0);
+    b * (1.0 - amount) + a * amount - blend * amount * (1.0 - amount)
 }
 
 fn generate_ellipsoid(lod: Lod, center: Vec3, radii: Vec3, color: [u8; 3]) -> Mesh {
@@ -723,33 +986,6 @@ fn generate_ellipsoid(lod: Lod, center: Vec3, radii: Vec3, color: [u8; 3]) -> Me
             vertex.normal.y / radii.y.max(1.0e-4),
             vertex.normal.z / radii.z.max(1.0e-4),
         )
-        .normalized();
-    }
-    mesh
-}
-
-fn generate_limb_volume(lod: Lod, start: Vec3, end: Vec3, radius: f32, color: [u8; 3]) -> Mesh {
-    let center = (start + end) * 0.5;
-    let axis = end - start;
-    let half_length = axis.length() * 0.56;
-    let up = axis.normalized();
-    let reference = if up.y.abs() < 0.9 {
-        Vec3::new(0.0, 1.0, 0.0)
-    } else {
-        Vec3::new(1.0, 0.0, 0.0)
-    };
-    let right = reference.cross(up).normalized();
-    let forward = up.cross(right).normalized();
-    let mut mesh = generate_sphere(lod, Vec3::default(), 1.0, color);
-    for vertex in &mut mesh.vertices {
-        let local = vertex.position;
-        vertex.position = center
-            + right * (local.x * radius)
-            + up * (local.y * half_length)
-            + forward * (local.z * radius);
-        vertex.normal = (right * (vertex.normal.x / radius.max(1.0e-4))
-            + up * (vertex.normal.y / half_length.max(1.0e-4))
-            + forward * (vertex.normal.z / radius.max(1.0e-4)))
         .normalized();
     }
     mesh
