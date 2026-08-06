@@ -5,9 +5,8 @@ GPU-rendered desktop, taskbar, application launcher, task switching, system cont
 and a file browser without requiring Windows Explorer as the desktop shell.
 
 The repository also contains a Linux compositor built with Smithay. It runs as a nested development
-session or directly through DRM and udev. Nickel also has rudimentary macOS support for dogfooding
-the SDL shell as an overlay panel and launcher. The Windows implementation is currently the most
-complete.
+session or directly through DRM and udev. Nickel also supports macOS as an SDL overlay shell with
+Nickel Bar, launcher, native app icons, and visible-window control.
 
 ## Included Applications
 
@@ -20,13 +19,13 @@ complete.
 
 ### Desktop and Taskbar
 
-- Draws the desktop wallpaper
+- Draws the desktop wallpaper on Windows and Linux
 - Shows running applications with native icons
 - Groups and cycles multiple windows from the same application
 - Tracks the active window
-- Hosts notification-area icons and their context menus
+- Hosts notification-area icons and their context menus on supported platforms
 - Displays the clock and opens system controls on Windows and Linux
-- Reserves space when applications are maximized
+- Reserves space when applications are maximized on Windows and Linux
 - Hides behind borderless fullscreen applications
 
 ### Launcher and Run
@@ -81,10 +80,10 @@ Nickel is the Windows shell.
 - Click the Nickel Bar button to open or close the launcher.
 - Click an application on Nickel Bar to activate it.
 - Repeatedly click a grouped application to cycle through its windows.
-- Hover a grouped application to see live window previews.
-- Click the clock and system area to open Nickel Plating.
-- Hold `Windows` and left-drag to move a window.
-- Hold `Windows` and right-drag to resize a window.
+- Hover a grouped application to see live window previews on Windows.
+- Click the clock and system area to open Nickel Plating on Windows and Linux.
+- Hold `Windows` and left-drag to move a window on Windows and Linux.
+- Hold `Windows` and right-drag to resize a window on Windows and Linux.
 
 ## Running Nickel
 
@@ -174,11 +173,11 @@ never creates a replacement collection.
 - Notifications are not displayed yet.
 - Battery, brightness, Bluetooth, and power controls are not implemented.
 - Wi-Fi connection management is incomplete.
-- macOS support is an overlay shell, not a desktop replacement: it can show Nickel Bar, open the
-  launcher with `Option` + `Space`, index and launch `.app` bundles, display native app icons, and
-  activate/minimize/close visible application windows when Accessibility permission is granted.
-- macOS live previews, Run, tray/menu-bar integration, Nickel Bar clock and control center,
-  Wi-Fi/Bluetooth controls, and background desktop rendering are not implemented.
+- macOS support runs as an overlay shell: it shows Nickel Bar, opens the launcher with
+  `Option` + `Space`, indexes and launches `.app` bundles, displays native app icons, and
+  activates/minimizes/closes visible application windows when Accessibility permission is granted.
+- macOS live previews, Run, tray/menu-bar integration, Nickel Bar clock and control center, and
+  Wi-Fi/Bluetooth/audio controls are not implemented.
 - Some packaged Windows applications and system settings require additional activation support.
 - Accessibility and touch-keyboard integration are incomplete.
 - Multiple-monitor behavior needs more testing.
