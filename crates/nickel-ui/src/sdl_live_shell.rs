@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+#[cfg(not(target_os = "macos"))]
 use jiff::Zoned;
 use nickel_components::{PaintCommand, Point, Rect, TextAlign};
 use nickel_core::{
@@ -26,6 +27,15 @@ use sdl3::keyboard::{Keycode, Mod};
 
 const PANEL_ITEM_WIDTH: f32 = 52.0;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PanelHover {
+    Launcher,
+    Task(usize),
+    Tray(usize),
+    #[cfg(not(target_os = "macos"))]
+    Control,
+}
+
 pub struct LiveShell {
     launcher: Launcher,
     window_feed: WindowFeed,
@@ -42,6 +52,7 @@ pub struct LiveShell {
     audio: AudioStatus,
     launcher_visible: bool,
     control_visible: bool,
+    panel_hover: Option<PanelHover>,
     control_state: ControlViewState,
     launcher_view: LauncherViewState,
     launcher_icons: LauncherIconCache,
@@ -93,6 +104,7 @@ impl LiveShell {
             audio,
             launcher_visible: false,
             control_visible: false,
+            panel_hover: None,
             control_state: ControlViewState::default(),
             launcher_view: LauncherViewState::default(),
             launcher_icons: LauncherIconCache::new(),
@@ -205,7 +217,8 @@ impl LiveShell {
             }
             return true;
         }
-        let control_start = width.saturating_sub(190) as f32;
+        let control_start = panel_control_start(width);
+        #[cfg(not(target_os = "macos"))]
         if x >= control_start {
             self.control_visible = !self.control_visible;
             self.launcher_visible = false;
@@ -220,6 +233,21 @@ impl LiveShell {
             return true;
         }
         false
+    }
+
+    pub fn panel_pointer_moved(&mut self, x: f32, width: u32) -> bool {
+        let hovered = self.panel_hover_at(x, width);
+        let changed = hovered != self.panel_hover;
+        self.panel_hover = hovered;
+        changed
+    }
+
+    pub fn panel_pointer_left(&mut self) -> bool {
+        if self.panel_hover.is_none() {
+            return false;
+        }
+        self.panel_hover = None;
+        true
     }
 
     pub fn global_shortcut(&mut self, shortcut: platform::GlobalShortcut) -> bool {
@@ -489,6 +517,13 @@ impl LiveShell {
             rect: Rect::new(0.0, 0.0, width as f32, height as f32),
             color: self.palette.panel,
         }];
+        if self.panel_hover == Some(PanelHover::Launcher) {
+            commands.push(PaintCommand::RoundedFill {
+                rect: Rect::new(6.0, 7.0, 44.0, 42.0),
+                color: self.palette.surface_hover,
+                radius: 8.0,
+            });
+        }
         commands.push(PaintCommand::Image {
             bounds: Rect::new(12.0, 12.0, 32.0, 32.0),
             id: 2,
@@ -497,10 +532,15 @@ impl LiveShell {
         let groups = self.launcher.group_windows(&self.windows);
         for (index, group) in groups.iter().take(12).enumerate() {
             let x = PANEL_ITEM_WIDTH + index as f32 * PANEL_ITEM_WIDTH;
-            if group.active() {
+            let hovered = self.panel_hover == Some(PanelHover::Task(index));
+            if group.active() || hovered {
                 commands.push(PaintCommand::RoundedFill {
                     rect: Rect::new(x + 4.0, 7.0, 44.0, 42.0),
-                    color: self.palette.accent_soft,
+                    color: if group.active() {
+                        self.palette.accent_soft
+                    } else {
+                        self.palette.surface_hover
+                    },
                     radius: 8.0,
                 });
             }
@@ -532,28 +572,66 @@ impl LiveShell {
                     true,
                 ));
             }
+            commands.push(PaintCommand::RoundedFill {
+                rect: Rect::new(
+                    x + if group.active() { 16.0 } else { 20.0 },
+                    height as f32 - 6.0,
+                    if group.active() { 20.0 } else { 12.0 },
+                    3.0,
+                ),
+                color: if group.active() {
+                    self.palette.accent
+                } else {
+                    self.palette.muted
+                },
+                radius: 1.5,
+            });
+            if group.windows.len() > 1 {
+                commands.push(PaintCommand::RoundedFill {
+                    rect: Rect::new(x + 38.0, 35.0, 5.0, 5.0),
+                    color: self.palette.complement,
+                    radius: 2.5,
+                });
+            }
         }
-        let now = Zoned::now();
-        let clock = now.strftime("%-I:%M %p").to_string();
-        let date = now.strftime("%-m/%-d/%Y").to_string();
-        commands.push(text(
-            Rect::new(width.saturating_sub(150) as f32, 6.0, 132.0, 22.0),
-            &clock,
-            0.78,
-            self.palette.text,
-            TextAlign::End,
-            false,
-        ));
-        commands.push(text(
-            Rect::new(width.saturating_sub(150) as f32, 28.0, 132.0, 20.0),
-            &date,
-            0.72,
-            self.palette.text,
-            TextAlign::End,
-            false,
-        ));
+        #[cfg(not(target_os = "macos"))]
+        {
+            let now = Zoned::now();
+            let clock = now.strftime("%-I:%M %p").to_string();
+            let date = now.strftime("%-m/%-d/%Y").to_string();
+            if self.panel_hover == Some(PanelHover::Control) {
+                commands.push(PaintCommand::RoundedFill {
+                    rect: Rect::new(width.saturating_sub(154) as f32, 7.0, 140.0, 42.0),
+                    color: self.palette.surface_hover,
+                    radius: 8.0,
+                });
+            }
+            commands.push(text(
+                Rect::new(width.saturating_sub(150) as f32, 6.0, 132.0, 22.0),
+                &clock,
+                0.78,
+                self.palette.text,
+                TextAlign::End,
+                false,
+            ));
+            commands.push(text(
+                Rect::new(width.saturating_sub(150) as f32, 28.0, 132.0, 20.0),
+                &date,
+                0.72,
+                self.palette.text,
+                TextAlign::End,
+                false,
+            ));
+        }
         for (index, item) in self.tray.iter().rev().take(4).rev().enumerate() {
-            let x = width.saturating_sub(190 + (self.tray.len().min(4) - index) as u32 * 34) as f32;
+            let x = panel_control_start(width) - (self.tray.len().min(4) - index) as f32 * 34.0;
+            if self.panel_hover == Some(PanelHover::Tray(index)) {
+                commands.push(PaintCommand::RoundedFill {
+                    rect: Rect::new(x + 1.0, 9.0, 28.0, 38.0),
+                    color: self.palette.surface_hover,
+                    radius: 7.0,
+                });
+            }
             commands.push(text(
                 Rect::new(x, 14.0, 30.0, 26.0),
                 &item.title.chars().next().unwrap_or('•').to_string(),
@@ -564,6 +642,31 @@ impl LiveShell {
             ));
         }
         commands
+    }
+
+    fn panel_hover_at(&self, x: f32, width: u32) -> Option<PanelHover> {
+        if x < PANEL_ITEM_WIDTH {
+            return Some(PanelHover::Launcher);
+        }
+        let groups = self.launcher.group_windows(&self.windows);
+        let task_count = groups.len().min(12);
+        let task_end = PANEL_ITEM_WIDTH + task_count as f32 * PANEL_ITEM_WIDTH;
+        if x < task_end {
+            return Some(PanelHover::Task(
+                ((x - PANEL_ITEM_WIDTH) / PANEL_ITEM_WIDTH) as usize,
+            ));
+        }
+        let control_start = panel_control_start(width);
+        #[cfg(not(target_os = "macos"))]
+        if x >= control_start {
+            return Some(PanelHover::Control);
+        }
+        let tray_count = self.tray.len().min(4);
+        let tray_start = control_start - tray_count as f32 * 34.0;
+        if x >= tray_start {
+            return Some(PanelHover::Tray(((x - tray_start) / 34.0) as usize));
+        }
+        None
     }
 
     fn control_frame(&self, width: u32, height: u32) -> ControlCenterFrame {
@@ -626,6 +729,17 @@ impl LiveShell {
             }
         }
         let _ = self.refresh();
+    }
+}
+
+fn panel_control_start(width: u32) -> f32 {
+    #[cfg(target_os = "macos")]
+    {
+        width as f32
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        width.saturating_sub(190) as f32
     }
 }
 

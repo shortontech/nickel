@@ -25,7 +25,7 @@ complete.
 - Groups and cycles multiple windows from the same application
 - Tracks the active window
 - Hosts notification-area icons and their context menus
-- Displays the clock and opens system controls
+- Displays the clock and opens system controls on Windows and Linux
 - Reserves space when applications are maximized
 - Hides behind borderless fullscreen applications
 
@@ -177,8 +177,8 @@ never creates a replacement collection.
 - macOS support is an overlay shell, not a desktop replacement: it can show Nickel Bar, open the
   launcher with `Option` + `Space`, index and launch `.app` bundles, display native app icons, and
   activate/minimize/close visible application windows when Accessibility permission is granted.
-- macOS live previews, Run, tray/menu-bar integration, Wi-Fi/Bluetooth controls, and background
-  desktop rendering are not implemented.
+- macOS live previews, Run, tray/menu-bar integration, Nickel Bar clock and control center,
+  Wi-Fi/Bluetooth controls, and background desktop rendering are not implemented.
 - Some packaged Windows applications and system settings require additional activation support.
 - Accessibility and touch-keyboard integration are incomplete.
 - Multiple-monitor behavior needs more testing.
