@@ -456,6 +456,7 @@ fn visible_windows() -> Vec<MacWindow> {
     }
     let count = unsafe { CFArrayGetCount(array) };
     let mut windows = Vec::new();
+    let own_pid = std::process::id() as i32;
     for index in 0..count {
         let dictionary = unsafe { CFArrayGetValueAtIndex(array, index) };
         if dictionary.is_null() {
@@ -464,7 +465,9 @@ fn visible_windows() -> Vec<MacWindow> {
         let Some(window) = read_window(dictionary.cast()) else {
             continue;
         };
-        if window.owner == "nickel-ui"
+        if window.pid == own_pid
+            || window.owner.eq_ignore_ascii_case("nickel-ui")
+            || window.owner.to_ascii_lowercase().contains("nickel")
             || window.width < 80.0
             || window.height < 40.0
             || window.y < 24.0 && window.height <= 64.0
