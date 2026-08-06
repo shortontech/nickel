@@ -11,6 +11,10 @@ pub fn surface_size(window: &sdl3::video::Window) -> (u32, u32) {
     }
 }
 
+pub fn renders_desktop_background() -> bool {
+    cfg!(any(target_os = "linux", target_os = "windows"))
+}
+
 pub struct DesktopCapture {
     pub image: image::RgbaImage,
 }
@@ -168,9 +172,24 @@ pub use windows::{
     toggle_bluetooth_device, update_panel_fullscreen_state, wallpaper,
 };
 
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
 mod unsupported;
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+#[cfg(target_os = "macos")]
+pub use macos::{
+    NotificationFeed, TrayFeed, WindowFeed, activate_wifi_network, application_icon, applications,
+    audio_status, bluetooth_status, capture_pointer, configure_volume_osd_window,
+    execute_run_command, handle_focused_shortcut, launch_application,
+    launcher_has_foreground_focus, launcher_hotkey_receiver, launcher_visibility_applied,
+    network_status, release_pointer, select_audio_device, send_shell_command, set_audio_volume,
+    set_bluetooth_discovery, set_bluetooth_powered, set_wifi_enabled, show_window_system_menu,
+    toggle_bluetooth_device, update_panel_fullscreen_state, wallpaper,
+};
+
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+mod unsupported;
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 pub use unsupported::{
     NotificationFeed, TrayFeed, WindowFeed, activate_wifi_network, application_icon, applications,
     audio_status, bluetooth_status, capture_pointer, configure_volume_osd_window,

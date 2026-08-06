@@ -122,12 +122,21 @@ fn sync_visibility(shell: &mut SdlShell, state: &LiveShell) {
     }
 }
 
+fn focus_visible_overlay(shell: &mut SdlShell, state: &LiveShell) {
+    for role in [SurfaceRole::Launcher, SurfaceRole::ControlCenter] {
+        if state.surface_visible(role) {
+            shell.raise_role(role);
+        }
+    }
+}
+
 fn main() -> Result<(), String> {
     nickel_logging::init("nickel-sdl-shell").map_err(|error| error.to_string())?;
     let started = Instant::now();
     let mut shell = SdlShell::new(started)?;
     shell.create_shell_surfaces()?;
     let mut state = LiveShell::new()?;
+    let hotkey_rx = platform::launcher_hotkey_receiver();
     sync_visibility(&mut shell, &state);
     render_all(&mut shell, &mut state)?;
     println!(
@@ -148,6 +157,14 @@ fn main() -> Result<(), String> {
     let mut refresh_deadline = Instant::now() + Duration::from_millis(100);
     let mut launcher_hover_deadline: Option<Instant> = None;
     loop {
+        while let Ok(shortcut) = hotkey_rx.try_recv() {
+            if state.global_shortcut(shortcut) {
+                sync_visibility(&mut shell, &state);
+                focus_visible_overlay(&mut shell, &state);
+                render_role(&mut shell, &mut state, SurfaceRole::Launcher)?;
+                render_role(&mut shell, &mut state, SurfaceRole::ControlCenter)?;
+            }
+        }
         let next_deadline = launcher_hover_deadline
             .map(|deadline| deadline.min(refresh_deadline))
             .unwrap_or(refresh_deadline);
@@ -169,6 +186,7 @@ fn main() -> Result<(), String> {
                     .unwrap_or_default();
                 if state.panel_click(x, width) {
                     sync_visibility(&mut shell, &state);
+                    focus_visible_overlay(&mut shell, &state);
                     // The launcher owns a persistent accelerated presenter and a
                     // pre-rendered buffer. Showing it must not synchronously
                     // rebuild and submit the whole scene on the click path.
@@ -223,6 +241,18 @@ fn main() -> Result<(), String> {
             // surface is waiting for the compositor's focus configure. Hiding
             // an overlay here races its first frame and leaves a brief blank
             // window. Explicit dismissal and Escape remain authoritative.
+            Some(ShellEvent::FocusChanged {
+                surface,
+                focused: false,
+            }) => {
+                #[cfg(target_os = "macos")]
+                if let Some(role @ (SurfaceRole::Launcher | SurfaceRole::ControlCenter)) =
+                    shell.surface(surface).map(|entry| entry.role())
+                    && state.hide_overlay(role)
+                {
+                    sync_visibility(&mut shell, &state);
+                }
+            }
             Some(ShellEvent::FocusChanged { .. }) => {}
             Some(ShellEvent::Text { surface, value }) => {
                 if state.insert_launcher_text(&value)
