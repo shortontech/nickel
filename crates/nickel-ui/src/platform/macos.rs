@@ -183,20 +183,28 @@ fn plist_value(path: &Path, key: &str) -> Option<String> {
 
 fn bundle_for_pid(pid: i32) -> Option<PathBuf> {
     let output = Command::new("/bin/ps")
-        .args(["-p", &pid.to_string(), "-o", "comm="])
+        .args(["-p", &pid.to_string(), "-o", "args="])
         .output()
         .ok()?;
     if !output.status.success() {
         return None;
     }
-    let executable = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
-    executable
-        .ancestors()
-        .find(|path| {
-            path.extension()
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
-        })
-        .map(Path::to_path_buf)
+    let command = String::from_utf8_lossy(&output.stdout);
+    let app_end = command.find(".app/").map(|index| index + ".app".len())?;
+    let path = PathBuf::from(&command[..app_end]);
+    path.exists().then_some(path)
+}
+
+fn bundle_for_window(window: &MacWindow) -> Option<PathBuf> {
+    bundle_for_pid(window.pid).or_else(|| bundle_for_owner(&window.owner))
+}
+
+fn bundle_for_owner(owner: &str) -> Option<PathBuf> {
+    let owner = normalized_app_name(owner);
+    discover_app_bundles()
+        .into_iter()
+        .find(|bundle| normalized_app_name(&bundle.name) == owner)
+        .map(|bundle| bundle.path)
 }
 
 fn bundle_icon_path(bundle: &Path) -> Option<PathBuf> {
@@ -305,7 +313,7 @@ impl WindowFeed {
         let target = visible_windows()
             .into_iter()
             .find(|candidate| candidate.id == window.0)?;
-        let bundle = bundle_for_pid(target.pid)?;
+        let bundle = bundle_for_window(&target)?;
         application_icon(&bundle.to_string_lossy())
     }
 }
@@ -706,13 +714,28 @@ fn cf_string(value: CFStringRef) -> Option<String> {
 }
 
 fn application_id(owner: &str, pid: i32) -> ApplicationId {
-    if let Some(bundle) = bundle_for_pid(pid) {
+    if let Some(bundle) = bundle_for_pid(pid).or_else(|| bundle_for_owner(owner)) {
         let info = bundle.join("Contents/Info.plist");
         if let Some(id) = plist_value(&info, "CFBundleIdentifier") {
             return ApplicationId::new(id);
         }
     }
     ApplicationId::new(format!("macos:{}:{pid}", owner.to_ascii_lowercase()))
+}
+
+fn normalized_app_name(name: &str) -> String {
+    name.chars()
+        .filter(|character| {
+            !matches!(
+                *character,
+                '\u{200e}'
+                    | '\u{200f}'
+                    | '\u{202a}'..='\u{202e}'
+                    | '\u{2066}'..='\u{2069}'
+            ) && !character.is_control()
+        })
+        .collect::<String>()
+        .to_ascii_lowercase()
 }
 
 fn ax_windows_attribute() -> CFStringRef {
