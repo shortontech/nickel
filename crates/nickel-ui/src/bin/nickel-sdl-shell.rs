@@ -160,7 +160,7 @@ fn main() -> Result<(), String> {
         "SDL launcher presenter and frame prewarmed"
     );
     let mut refresh_deadline = Instant::now() + REFRESH_INTERVAL;
-    let mut launcher_hover_deadline: Option<Instant> = None;
+    let mut hover_repaint: Option<(SurfaceRole, Instant)> = None;
     loop {
         while let Ok(shortcut) = hotkey_rx.try_recv() {
             if state.global_shortcut(shortcut) {
@@ -170,8 +170,8 @@ fn main() -> Result<(), String> {
                 render_role(&mut shell, &mut state, SurfaceRole::ControlCenter)?;
             }
         }
-        let next_deadline = launcher_hover_deadline
-            .map(|deadline| deadline.min(refresh_deadline))
+        let next_deadline = hover_repaint
+            .map(|(_, deadline)| deadline.min(refresh_deadline))
             .unwrap_or(refresh_deadline);
         let timeout = next_deadline.saturating_duration_since(Instant::now());
         match shell.wait_event_timeout(timeout) {
@@ -281,6 +281,19 @@ fn main() -> Result<(), String> {
             }
             Some(ShellEvent::PointerMoved { surface, x, y }) => {
                 let role = shell.surface(surface).map(|entry| entry.role());
+                if role == Some(SurfaceRole::Panel) {
+                    let width = shell
+                        .surface(surface)
+                        .map(|entry| entry.window().size().0)
+                        .unwrap_or_default();
+                    if state.panel_pointer_moved(x, width) {
+                        hover_repaint = Some((
+                            SurfaceRole::Panel,
+                            Instant::now() + Duration::from_millis(24),
+                        ));
+                    }
+                    continue;
+                }
                 if !matches!(
                     role,
                     Some(SurfaceRole::Launcher | SurfaceRole::ControlCenter)
@@ -288,9 +301,22 @@ fn main() -> Result<(), String> {
                     continue;
                 }
                 if state.pointer_moved(x, y) {
-                    launcher_hover_deadline = Some(Instant::now() + Duration::from_millis(24));
+                    hover_repaint =
+                        Some((role.unwrap(), Instant::now() + Duration::from_millis(24)));
                 }
             }
+            Some(ShellEvent::PointerEntered {
+                surface,
+                entered: false,
+            }) if shell
+                .surface(surface)
+                .is_some_and(|entry| entry.role() == SurfaceRole::Panel) =>
+            {
+                if state.panel_pointer_left() {
+                    render_role(&mut shell, &mut state, SurfaceRole::Panel)?;
+                }
+            }
+            Some(ShellEvent::PointerEntered { .. }) => {}
             Some(ShellEvent::MouseWheel { surface, y, .. }) => {
                 let role = shell.surface(surface).map(|entry| entry.role());
                 if !matches!(
@@ -324,9 +350,10 @@ fn main() -> Result<(), String> {
             Some(event) => tracing::debug!(?event, "SDL shell event"),
             None => {}
         }
-        if launcher_hover_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            render_role(&mut shell, &mut state, SurfaceRole::Launcher)?;
-            launcher_hover_deadline = None;
+        if hover_repaint.is_some_and(|(_, deadline)| Instant::now() >= deadline) {
+            if let Some((role, _)) = hover_repaint.take() {
+                render_role(&mut shell, &mut state, role)?;
+            }
         }
         if Instant::now() >= refresh_deadline {
             if state.refresh() {
