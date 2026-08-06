@@ -444,10 +444,7 @@ impl SdlShell {
                 surface: surface?,
                 value: text,
             }),
-            Event::TextEditing { text, .. } => Some(ShellEvent::Text {
-                surface: surface?,
-                value: text,
-            }),
+            Event::TextEditing { .. } => None,
             _ => None,
         }
     }
