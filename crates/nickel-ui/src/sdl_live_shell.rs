@@ -102,6 +102,10 @@ impl LiveShell {
 
     pub fn refresh(&mut self) -> bool {
         let mut changed = false;
+        #[cfg(target_os = "macos")]
+        if self.launcher_visible || self.control_visible {
+            return false;
+        }
         let palette = ThemePalette::from_appearance(
             ShellSettings::load_default().resolve_appearance(Appearance::default()),
         );
@@ -366,27 +370,35 @@ impl LiveShell {
                 if modifiers.intersects(control_modifier) {
                     return false;
                 }
-                let name = key.name();
-                let mut characters = name.chars();
-                let Some(mut character) = characters.next() else {
+                #[cfg(target_os = "macos")]
+                {
+                    let _ = key;
                     return false;
-                };
-                if characters.next().is_some() {
-                    if key == Keycode::Space {
-                        character = ' ';
-                    } else {
-                        return false;
-                    }
-                } else if character.is_ascii_alphabetic() {
-                    let shifted = modifiers.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD);
-                    let caps = modifiers.contains(Mod::CAPSMOD);
-                    character = if shifted ^ caps {
-                        character.to_ascii_uppercase()
-                    } else {
-                        character.to_ascii_lowercase()
-                    };
                 }
-                self.launcher.insert(&character.to_string());
+                #[cfg(not(target_os = "macos"))]
+                {
+                    let name = key.name();
+                    let mut characters = name.chars();
+                    let Some(mut character) = characters.next() else {
+                        return false;
+                    };
+                    if characters.next().is_some() {
+                        if key == Keycode::Space {
+                            character = ' ';
+                        } else {
+                            return false;
+                        }
+                    } else if character.is_ascii_alphabetic() {
+                        let shifted = modifiers.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD);
+                        let caps = modifiers.contains(Mod::CAPSMOD);
+                        character = if shifted ^ caps {
+                            character.to_ascii_uppercase()
+                        } else {
+                            character.to_ascii_lowercase()
+                        };
+                    }
+                    self.launcher.insert(&character.to_string());
+                }
             }
             None => return false,
         }

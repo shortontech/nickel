@@ -50,6 +50,11 @@ mod sdl_shell;
 use sdl_live_shell::LiveShell;
 use sdl_shell::{SdlShell, ShellEvent, SurfaceRole};
 
+#[cfg(target_os = "macos")]
+const REFRESH_INTERVAL: Duration = Duration::from_millis(500);
+#[cfg(not(target_os = "macos"))]
+const REFRESH_INTERVAL: Duration = Duration::from_millis(100);
+
 fn render_all(shell: &mut SdlShell, state: &mut LiveShell) -> Result<(), String> {
     let surfaces = shell
         .surfaces()
@@ -154,7 +159,7 @@ fn main() -> Result<(), String> {
         elapsed_ms = launcher_warm_started.elapsed().as_secs_f64() * 1_000.0,
         "SDL launcher presenter and frame prewarmed"
     );
-    let mut refresh_deadline = Instant::now() + Duration::from_millis(100);
+    let mut refresh_deadline = Instant::now() + REFRESH_INTERVAL;
     let mut launcher_hover_deadline: Option<Instant> = None;
     loop {
         while let Ok(shortcut) = hotkey_rx.try_recv() {
@@ -328,7 +333,7 @@ fn main() -> Result<(), String> {
                 sync_visibility(&mut shell, &state);
                 render_all(&mut shell, &mut state)?;
             }
-            refresh_deadline = Instant::now() + Duration::from_millis(100);
+            refresh_deadline = Instant::now() + REFRESH_INTERVAL;
         }
     }
     Ok(())
