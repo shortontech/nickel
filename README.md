@@ -5,7 +5,8 @@ GPU-rendered desktop, taskbar, application launcher, task switching, system cont
 and a file browser without requiring Windows Explorer as the desktop shell.
 
 The repository also contains a Linux compositor built with Smithay. It runs as a nested development
-session or directly through DRM and udev. The Windows implementation is currently the most
+session or directly through DRM and udev. Nickel also has rudimentary macOS support for dogfooding
+the SDL shell as an overlay panel and launcher. The Windows implementation is currently the most
 complete.
 
 ## Included Applications
@@ -30,7 +31,8 @@ complete.
 
 ### Launcher and Run
 
-- Indexes installed applications and Start Menu shortcuts
+- Indexes installed applications and Start Menu shortcuts on Windows
+- Indexes `.desktop` applications on Linux and `.app` bundles on macOS
 - Includes shortcuts from the user Desktop
 - Searches applications with fuzzy matching
 - Supports pinned applications and launch history
@@ -40,6 +42,7 @@ complete.
 ### Task Switching
 
 - Switches between windows with live DWM previews on Windows
+- Shows visible application windows with native app icons on macOS
 - Cycles forward or backward
 - Cycles windows within one application
 - Supports mouse selection from the preview
@@ -61,10 +64,11 @@ complete.
 
 | Input | Action |
 | --- | --- |
-| `Windows` | Open or close the launcher |
-| `Windows` + `R` | Open Run |
-| `Alt` + `Tab` | Open Nickel Flip and move to the next window |
-| `Alt` + `` ` `` | Cycle windows in the current application |
+| `Windows` | Open or close the launcher on Windows and Linux |
+| `Option` + `Space` | Open or close the launcher on macOS |
+| `Windows` + `R` | Open Run on Windows and Linux |
+| `Alt` + `Tab` | Open Nickel Flip and move to the next window on Windows and Linux |
+| `Alt` + `` ` `` | Cycle windows in the current application on Windows and Linux |
 | Arrow keys | Move through launcher results |
 | `Enter` | Launch the selected result |
 | `Escape` | Close the active Nickel surface |
@@ -96,6 +100,15 @@ Launch the desktop shell:
 ```bash
 cargo run -p nickel-ui
 ```
+
+On macOS, install SDL3 first:
+
+```bash
+brew install sdl3
+```
+
+macOS window activation, minimize, and close use Accessibility APIs. Grant the terminal running
+Nickel permission in System Settings > Privacy & Security > Accessibility.
 
 Launch Nickel Settings:
 
@@ -161,6 +174,11 @@ never creates a replacement collection.
 - Notifications are not displayed yet.
 - Battery, brightness, Bluetooth, and power controls are not implemented.
 - Wi-Fi connection management is incomplete.
+- macOS support is an overlay shell, not a desktop replacement: it can show Nickel Bar, open the
+  launcher with `Option` + `Space`, index and launch `.app` bundles, display native app icons, and
+  activate/minimize/close visible application windows when Accessibility permission is granted.
+- macOS live previews, Run, tray/menu-bar integration, Wi-Fi/Bluetooth controls, and background
+  desktop rendering are not implemented.
 - Some packaged Windows applications and system settings require additional activation support.
 - Accessibility and touch-keyboard integration are incomplete.
 - Multiple-monitor behavior needs more testing.
