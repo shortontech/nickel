@@ -847,10 +847,12 @@ impl Nickel {
         let wallpaper_settings = WallpaperSettings::load_default();
         if wallpaper_settings != self.wallpaper_settings {
             self.wallpaper_settings = wallpaper_settings;
-            let wallpaper = configured_wallpaper(&self.wallpaper_settings);
-            for (window, gpu) in &mut self.desktop_surfaces {
-                gpu.set_wallpaper(wallpaper.clone());
-                window.request_redraw();
+            if !self.desktop_surfaces.is_empty() {
+                let wallpaper = configured_wallpaper(&self.wallpaper_settings);
+                for (window, gpu) in &mut self.desktop_surfaces {
+                    gpu.set_wallpaper(wallpaper.clone());
+                    window.request_redraw();
+                }
             }
         }
         if settings == self.shell_settings {
@@ -913,12 +915,17 @@ impl Nickel {
         if topology == self.display_topology {
             return;
         }
-        if monitors.len() != self.desktop_surfaces.len()
+        let expected_desktop_surfaces = if platform::renders_desktop_background() {
+            monitors.len()
+        } else {
+            0
+        };
+        if expected_desktop_surfaces != self.desktop_surfaces.len()
             || monitors.len() != self.panel_surfaces.len()
         {
             eprintln!(
                 "display count changed from {} to {}; surface recreation required",
-                self.desktop_surfaces.len(),
+                self.panel_surfaces.len(),
                 monitors.len()
             );
             self.display_topology = topology;
@@ -1686,29 +1693,34 @@ impl ApplicationHandler for Nickel {
         }
 
         let mut desktop_windows = Vec::new();
-        for monitor in &monitors {
-            let attributes = desktop_attributes
-                .clone()
-                .with_inner_size(monitor.size())
-                .with_position(monitor.position());
-            let Ok(window) = event_loop.create_window(attributes) else {
-                eprintln!("failed to create Nickel desktop window");
-                event_loop.exit();
-                return;
-            };
-            let window = Arc::new(window);
-            #[cfg(target_os = "windows")]
-            {
-                use winit::platform::windows::WindowExtWindows;
-                window.set_skip_taskbar(true);
-                if !platform::configure_desktop_window(&window, monitor.position(), monitor.size())
+        if platform::renders_desktop_background() {
+            for monitor in &monitors {
+                let attributes = desktop_attributes
+                    .clone()
+                    .with_inner_size(monitor.size())
+                    .with_position(monitor.position());
+                let Ok(window) = event_loop.create_window(attributes) else {
+                    eprintln!("failed to create Nickel desktop window");
+                    event_loop.exit();
+                    return;
+                };
+                let window = Arc::new(window);
+                #[cfg(target_os = "windows")]
                 {
-                    eprintln!(
-                        "failed to place Nickel desktop at the bottom of the Windows Z-order"
-                    );
+                    use winit::platform::windows::WindowExtWindows;
+                    window.set_skip_taskbar(true);
+                    if !platform::configure_desktop_window(
+                        &window,
+                        monitor.position(),
+                        monitor.size(),
+                    ) {
+                        eprintln!(
+                            "failed to place Nickel desktop at the bottom of the Windows Z-order"
+                        );
+                    }
                 }
+                desktop_windows.push(window);
             }
-            desktop_windows.push(window);
         }
         let Ok(launcher_window) = event_loop.create_window(launcher_attributes) else {
             eprintln!("failed to create Nickel launcher window");
@@ -1809,16 +1821,20 @@ impl ApplicationHandler for Nickel {
                 .resolve_appearance(nickel_platform::appearance()),
         );
         let shared_graphics = launcher_gpu.graphics.clone();
-        let wallpaper = configured_wallpaper(&self.wallpaper_settings);
         let mut desktop_surfaces = Vec::new();
-        for window in desktop_windows {
-            match desktop::DesktopGpu::new(
-                window.clone(),
-                shared_graphics.clone(),
-                wallpaper.clone(),
-            ) {
-                Ok(gpu) => desktop_surfaces.push((window, gpu)),
-                Err(error) => eprintln!("failed to initialize Nickel desktop renderer: {error}"),
+        if !desktop_windows.is_empty() {
+            let wallpaper = configured_wallpaper(&self.wallpaper_settings);
+            for window in desktop_windows {
+                match desktop::DesktopGpu::new(
+                    window.clone(),
+                    shared_graphics.clone(),
+                    wallpaper.clone(),
+                ) {
+                    Ok(gpu) => desktop_surfaces.push((window, gpu)),
+                    Err(error) => {
+                        eprintln!("failed to initialize Nickel desktop renderer: {error}")
+                    }
+                }
             }
         }
         let mut panel_surfaces = Vec::new();
@@ -1860,6 +1876,17 @@ impl ApplicationHandler for Nickel {
         }
         for (window, _) in &panel_surfaces {
             window.request_redraw();
+        }
+        #[cfg(target_os = "macos")]
+        {
+            launcher_window.set_visible(false);
+            context_menu_window.set_visible(false);
+            run_window.set_visible(false);
+            control_center_window.set_visible(false);
+            volume_osd_window.set_visible(false);
+            if let Some(tool) = &screenshot_tool {
+                tool.window.set_visible(false);
+            }
         }
         self.desktop_surfaces = desktop_surfaces;
         self.window = Some(launcher_window);

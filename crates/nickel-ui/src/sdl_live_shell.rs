@@ -186,13 +186,7 @@ impl LiveShell {
 
     pub fn panel_click(&mut self, x: f32, width: u32) -> bool {
         if x < PANEL_ITEM_WIDTH {
-            self.launcher_visible = !self.launcher_visible;
-            self.control_visible = false;
-            let _ = platform::send_shell_command(if self.launcher_visible {
-                ShellCommand::Show
-            } else {
-                ShellCommand::Hide
-            });
+            self.set_launcher_visible(!self.launcher_visible);
             return true;
         }
         let groups = self.launcher.group_windows(&self.windows);
@@ -222,6 +216,39 @@ impl LiveShell {
             return true;
         }
         false
+    }
+
+    pub fn global_shortcut(&mut self, shortcut: platform::GlobalShortcut) -> bool {
+        match shortcut {
+            platform::GlobalShortcut::ShowLauncher => {
+                self.set_launcher_visible(true);
+                true
+            }
+            platform::GlobalShortcut::HideLauncher => {
+                self.set_launcher_visible(false);
+                true
+            }
+            platform::GlobalShortcut::ShowRun => {
+                tracing::warn!("Nickel Run is not implemented in the SDL shell yet");
+                false
+            }
+            _ => false,
+        }
+    }
+
+    fn set_launcher_visible(&mut self, visible: bool) {
+        self.launcher_visible = visible;
+        if visible {
+            self.control_visible = false;
+        } else {
+            self.launcher.clear();
+        }
+        let _ = platform::send_shell_command(if visible {
+            ShellCommand::Show
+        } else {
+            ShellCommand::Hide
+        });
+        platform::launcher_visibility_applied(visible);
     }
 
     pub fn launcher_click(&mut self, x: f32, y: f32) -> bool {

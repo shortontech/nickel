@@ -189,7 +189,9 @@ impl SdlShell {
         self.surface_indices.clear();
         let displays = require_displays(self.display_geometries()?)?;
         for (display_index, geometry) in displays.iter().copied().enumerate() {
-            self.create_surface(SurfaceRole::Desktop, display_index, geometry)?;
+            if crate::platform::renders_desktop_background() {
+                self.create_surface(SurfaceRole::Desktop, display_index, geometry)?;
+            }
             self.create_surface(SurfaceRole::Panel, display_index, geometry)?;
         }
         let primary = displays[0];
@@ -245,6 +247,22 @@ impl SdlShell {
     pub fn hide(&mut self, id: SurfaceId) -> bool {
         self.surface_mut(id)
             .is_some_and(|surface| surface.window_mut().hide())
+    }
+
+    pub fn raise_role(&mut self, role: SurfaceRole) -> bool {
+        let ids = self
+            .surfaces
+            .iter()
+            .filter(|surface| surface.role() == role)
+            .map(ShellSurface::id)
+            .collect::<Vec<_>>();
+        let mut raised = false;
+        for id in ids {
+            if let Some(surface) = self.surface_mut(id) {
+                raised |= surface.window_mut().raise();
+            }
+        }
+        raised
     }
 
     pub fn poll_events(&mut self) -> Vec<ShellEvent> {
