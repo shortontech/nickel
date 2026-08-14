@@ -78,7 +78,12 @@ pub struct SdlCanvasPresenter {
     canvas: WindowCanvas,
     text_assets: TextAssetCache,
     text_textures: HashMap<DirectTextKey, Texture>,
-    image_textures: HashMap<u16, Texture>,
+    image_textures: HashMap<u16, CachedImageTexture>,
+}
+
+struct CachedImageTexture {
+    identity: usize,
+    texture: Texture,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -200,7 +205,12 @@ impl SdlCanvasPresenter {
             )?,
             PaintCommand::Image {
                 bounds, id, image, ..
-            } => self.direct_image(physical_rect(*bounds, scale), *id, image)?,
+            } => self.direct_image(
+                physical_rect(*bounds, scale),
+                *id,
+                Arc::as_ptr(image) as usize,
+                image,
+            )?,
             PaintCommand::PushClip(rect) => {
                 let rect = physical_rect(*rect, scale);
                 clips.push(intersection(clip, rect).unwrap_or_default());
@@ -404,14 +414,15 @@ impl SdlCanvasPresenter {
         &mut self,
         bounds: Rect,
         id: u16,
+        identity: usize,
         image: &image::RgbaImage,
     ) -> Result<(), String> {
         if !self.image_textures.contains_key(&id) {
             if self.image_textures.len() >= 512 {
-                for (_, texture) in self.image_textures.drain() {
+                for (_, cached) in self.image_textures.drain() {
                     // SAFETY: every texture was created by `self.canvas`, which
                     // remains alive for the duration of this presenter.
-                    unsafe { texture.destroy() };
+                    unsafe { cached.texture.destroy() };
                 }
             }
             let creator = self.canvas.texture_creator();
@@ -426,7 +437,22 @@ impl SdlCanvasPresenter {
                 .update(None, image.as_raw(), image.width().max(1) as usize * 4)
                 .map_err(|error| error.to_string())?;
             texture.set_blend_mode(BlendMode::Blend);
-            self.image_textures.insert(id, texture);
+            self.image_textures
+                .insert(id, CachedImageTexture { identity, texture });
+        } else if self
+            .image_textures
+            .get(&id)
+            .is_some_and(|cached| cached.identity != identity)
+        {
+            let cached = self
+                .image_textures
+                .get_mut(&id)
+                .expect("cached image texture");
+            cached
+                .texture
+                .update(None, image.as_raw(), image.width().max(1) as usize * 4)
+                .map_err(|error| error.to_string())?;
+            cached.identity = identity;
         }
         if image.width() == 0 || image.height() == 0 {
             return Ok(());
@@ -443,9 +469,11 @@ impl SdlCanvasPresenter {
         );
         self.canvas
             .copy(
-                self.image_textures
+                &self
+                    .image_textures
                     .get(&id)
-                    .expect("inserted accelerated image texture"),
+                    .expect("inserted accelerated image texture")
+                    .texture,
                 None,
                 destination,
             )

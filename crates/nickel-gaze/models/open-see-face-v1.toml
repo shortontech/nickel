@@ -1,0 +1,26 @@
+name = "OpenSeeFace gaze probe bundle"
+version = "1.20.4-85aa70f"
+source_revision = "85aa70fc67582d046e771ea73625182a0d8f7475"
+license = "BSD-2-Clause"
+license_file = "LICENSE.OpenSeeFace"
+
+[[artifacts]]
+role = "face_detection"
+file = "mnv3_detection_opt.onnx"
+url = "https://raw.githubusercontent.com/emilianavt/OpenSeeFace/85aa70fc67582d046e771ea73625182a0d8f7475/models/mnv3_detection_opt.onnx"
+bytes = 568302
+sha256 = "0e8e4806766d85ab067a52c7af0dcb59eb7f9dfe580b44f20a8e6ab712d89809"
+
+[[artifacts]]
+role = "face_landmarks_wink_optimized"
+file = "lm_model4_opt.onnx"
+url = "https://raw.githubusercontent.com/emilianavt/OpenSeeFace/85aa70fc67582d046e771ea73625182a0d8f7475/models/lm_model4_opt.onnx"
+bytes = 13501414
+sha256 = "2aae9c99a700f756e71781f114ebeac87cdf635f9275a71df80456388c29ceef"
+
+[[artifacts]]
+role = "pupil_gaze"
+file = "mnv3_gaze32_split_opt.onnx"
+url = "https://raw.githubusercontent.com/emilianavt/OpenSeeFace/85aa70fc67582d046e771ea73625182a0d8f7475/models/mnv3_gaze32_split_opt.onnx"
+bytes = 3922610
+sha256 = "1d49e9675cfda0cc26a2e7758af2105c50141753c6e538f0dbafcf651a03a6c0"
