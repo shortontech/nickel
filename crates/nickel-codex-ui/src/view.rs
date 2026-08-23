@@ -7,6 +7,8 @@ use crate::{
     ControllerCommand, PendingInteraction,
 };
 
+mod sidebar;
+
 const BACKGROUND: Color = 0x101318;
 const SIDEBAR: Color = 0x171b22;
 const PANEL: Color = 0x202630;
@@ -376,44 +378,9 @@ pub fn chat_view(state: &ChatState) -> impl View<ChatMessage> {
     );
     let transcript_range = transcript_window.range.clone();
     let transcript_document = state.transcript_selection_document();
-    let account = if state.account.authenticated {
-        "Authenticated"
-    } else {
-        "Not authenticated"
-    };
-    let status = match state.status {
-        ConnectionStatus::Loading => "Connecting…",
-        ConnectionStatus::Ready => "Ready",
-        ConnectionStatus::Disconnected => "Disconnected",
-        ConnectionStatus::Incompatible => "Incompatible backend",
-    };
     ui! {
         <Row fill_width fill_height background={BACKGROUND}>
-            <Column id={id!(thread_sidebar)} width={260.0} min_width={260.0} shrink={0.0} fill_height
-                padding={Insets::all(14.0)} gap={10.0}
-                background={SIDEBAR} border={Border::new(BORDER, 1.0)}>
-                <Text scale={1.6} color={TEXT}>{"Nickel Codex"}</Text>
-                <Text color={ACCENT}>{status}</Text>
-                <Text color={MUTED} scale={0.85}>{&state.provenance}</Text>
-                <Text color={MUTED} scale={0.85}>{account}</Text>
-                <Row gap={6.0}>
-                    <Button on_press={ChatMessage::NewChat} background={0x244a73} color={TEXT}>{"New"}</Button>
-                    {if matches!(state.status, ConnectionStatus::Disconnected | ConnectionStatus::Incompatible) {
-                        ui! { <Button on_press={ChatMessage::Reconnect} background={0x4a3030} color={TEXT}>{"Reconnect"}</Button> }
-                    } else {
-                        ui! { <Button on_press={ChatMessage::Refresh} background={PANEL} color={TEXT}>{"Refresh"}</Button> }
-                    }}
-                </Row>
-                <Column grow={1.0} gap={6.0} overflow_y={Overflow::Auto}>
-                    {state.threads.iter().map(|thread| ui! {
-                        <Button key={thread.id.0.clone()} on_press={ChatMessage::SelectThread(thread.id.clone())}
-                            background={if state.selected_thread.as_ref() == Some(&thread.id) { 0x2a4261 } else { PANEL }}
-                            color={TEXT}>
-                            {thread.title.as_deref().unwrap_or("Untitled conversation")}
-                        </Button>
-                    })}
-                </Column>
-            </Column>
+            {sidebar::thread_sidebar(state)}
             <Column grow={1.0} min_width={0.0} fill_height padding={Insets::all(18.0)} gap={12.0}>
                 <Column id={id!(conversation)} grow={1.0} fill_width gap={10.0}
                     overflow_y={Overflow::Auto} follow_scroll_end={state.conversation_pinned}

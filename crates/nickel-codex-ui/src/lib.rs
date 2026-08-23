@@ -9,7 +9,8 @@ pub use view::{ChatApplication, ChatMessage};
 #[cfg(test)]
 mod tests {
     use nickel_codex::{
-        BackendChoice, CodexEvent, EventKind, ReplayBackend, ServerRequestId, ThreadId, TurnId,
+        BackendChoice, CodexEvent, EventKind, ReplayBackend, ServerRequestId, Thread, ThreadId,
+        TurnId,
     };
     use nickel_ui::{
         Application, DocumentSelection, PaintCommand, Point, Rect, SdlComponentRenderer,
@@ -276,6 +277,59 @@ mod tests {
                 |command| matches!(command, PaintCommand::Text { text, .. } if text.contains("Hello"))
             ));
         }
+    }
+
+    #[test]
+    fn grouped_sidebar_scrolls_without_crushing_header_or_actions() {
+        let mut state = ChatState::default();
+        state.status = ConnectionStatus::Ready;
+        state.threads = (0..200)
+            .map(|index| Thread {
+                id: ThreadId(format!("thread-{index}")),
+                title: Some(format!("Task {index}")),
+                cwd: Some(
+                    if index % 2 == 0 {
+                        "/projects/nickel"
+                    } else {
+                        "/projects/galen"
+                    }
+                    .into(),
+                ),
+                turns: Vec::new(),
+            })
+            .collect();
+        let tree = UiTree::layout(view::chat_view(&state), Rect::new(0.0, 0.0, 1120.0, 600.0));
+        let title = tree
+            .resolved_layout()
+            .find(&nickel_ui::UiId::from("root/thread-sidebar/sidebar-title"))
+            .expect("sidebar title");
+        let actions = tree
+            .resolved_layout()
+            .find(&nickel_ui::UiId::from(
+                "root/thread-sidebar/sidebar-actions",
+            ))
+            .expect("sidebar actions");
+        let projects = tree
+            .resolved_layout()
+            .find(&nickel_ui::UiId::from("root/thread-sidebar/project-list"))
+            .expect("project list");
+        assert!(title.allocated.size.height > 10.0);
+        assert!(actions.allocated.size.height > 10.0);
+        assert!(projects.scroll.is_some_and(|extent| extent.can_scroll()));
+
+        let message = ChatMessage::SelectThread(ThreadId("thread-0".into()));
+        let button = tree.message_rect(&message).expect("first task button");
+        let point = Point {
+            x: button.origin.x + 2.0,
+            y: button.origin.y + 2.0,
+        };
+        let mut ui_state = UiStateStore::default();
+        tree.handle_event(&mut ui_state, UiEvent::PointerPressed(point));
+        assert_eq!(
+            tree.handle_event(&mut ui_state, UiEvent::PointerReleased(point))
+                .messages,
+            vec![message]
+        );
     }
 
     #[test]
