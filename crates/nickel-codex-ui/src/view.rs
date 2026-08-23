@@ -256,7 +256,7 @@ impl Application for ChatApplication {
     }
 
     fn title(&self) -> &str {
-        "Nickel Codex"
+        "Nickel"
     }
 
     fn initial_size(&self) -> (u32, u32) {

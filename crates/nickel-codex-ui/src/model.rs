@@ -108,7 +108,7 @@ impl Default for ChatState {
         Self {
             generation: 1,
             status: ConnectionStatus::Loading,
-            provenance: "Selecting Codex…".into(),
+            provenance: "Locating OpenAI Codex CLI…".into(),
             account: AccountState::default(),
             models: Vec::new(),
             threads: Vec::new(),

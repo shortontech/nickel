@@ -109,7 +109,7 @@ pub(super) fn thread_sidebar(state: &ChatState) -> impl View<ChatMessage> {
         <Column id={id!(thread_sidebar)} width={260.0} min_width={260.0} shrink={0.0}
             fill_height padding={Insets::all(14.0)} gap={10.0}
             background={SIDEBAR} border={Border::new(BORDER, 1.0)}>
-            <Text id={id!(sidebar_title)} scale={1.6} color={TEXT} shrink={0.0}>{"Nickel Codex"}</Text>
+            <Text id={id!(sidebar_title)} scale={1.6} color={TEXT} shrink={0.0}>{"Nickel"}</Text>
             <Text color={ACCENT} shrink={0.0}>{status}</Text>
             <Text color={MUTED} scale={0.85} shrink={0.0}>{&state.provenance}</Text>
             <Text color={MUTED} scale={0.85} shrink={0.0}>{account}</Text>

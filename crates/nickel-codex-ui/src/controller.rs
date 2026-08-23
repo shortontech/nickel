@@ -143,7 +143,7 @@ fn run_worker(
                 .find(|probe| probe.candidate == candidate)
                 .and_then(|probe| probe.version.clone())
                 .unwrap_or_else(|| "compatible version".into());
-            let provenance = format!("{:?} · {version}", candidate.source);
+            let provenance = codex_attribution(&version);
             match CodexClient::spawn(&candidate.path, &cwd) {
                 Ok(client) => (Box::new(client), cwd, provenance),
                 Err(error) => {
@@ -251,6 +251,14 @@ fn run_worker(
             return;
         }
     }
+}
+
+pub(crate) fn codex_attribution(version: &str) -> String {
+    let version = version
+        .trim()
+        .strip_prefix("codex-cli ")
+        .unwrap_or(version.trim());
+    format!("powered by OpenAI Codex CLI v{version}.")
 }
 
 fn snapshot(backend: &dyn CodexBackend, provenance: String) -> ControllerEvent {

@@ -258,7 +258,7 @@ mod tests {
     fn canonical_states_layout_at_small_normal_and_large_sizes() {
         let mut state = ChatState::default();
         state.status = ConnectionStatus::Ready;
-        state.provenance = "Installed · codex-cli fixture".into();
+        state.provenance = "powered by OpenAI Codex CLI vfixture.".into();
         state.items.push_back(ChatItem {
             id: "unicode".into(),
             kind: ChatItemKind::Agent,
@@ -279,6 +279,28 @@ mod tests {
                 |command| matches!(command, PaintCommand::Text { text, .. } if text.contains("Hello"))
             ));
         }
+    }
+
+    #[test]
+    fn sidebar_attributes_the_codex_cli_without_branding_nickel_as_codex() {
+        assert_eq!(
+            controller::codex_attribution("codex-cli 0.149.0"),
+            "powered by OpenAI Codex CLI v0.149.0."
+        );
+        let mut state = ChatState::default();
+        state.provenance = "powered by OpenAI Codex CLI v0.149.0.".into();
+        let tree = UiTree::layout(view::chat_view(&state), Rect::new(0.0, 0.0, 900.0, 640.0));
+        assert!(
+            tree.commands().iter().any(
+                |command| matches!(command, PaintCommand::Text { text, .. } if text == "Nickel")
+            )
+        );
+        assert!(tree.commands().iter().any(
+            |command| matches!(command, PaintCommand::Text { text, .. } if text == "powered by OpenAI Codex CLI v0.149.0.")
+        ));
+        assert!(!tree.commands().iter().any(
+            |command| matches!(command, PaintCommand::Text { text, .. } if text == "Nickel Codex")
+        ));
     }
 
     #[test]
