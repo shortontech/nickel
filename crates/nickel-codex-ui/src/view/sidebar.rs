@@ -6,12 +6,37 @@ use nickel_ui::prelude::*;
 use super::{ACCENT, BORDER, ChatMessage, MUTED, PANEL, SIDEBAR, TEXT};
 use crate::{ChatState, ConnectionStatus};
 
+const DEFAULT_TASK_LIMIT: usize = 10;
+
 #[derive(Debug)]
 struct ProjectSection<'a> {
     key: String,
     name: String,
     path: Option<String>,
     threads: Vec<&'a Thread>,
+}
+
+impl<'a> ProjectSection<'a> {
+    fn visible_threads(&self, state: &ChatState) -> Vec<&'a Thread> {
+        if state.expanded_projects.contains(&self.key) {
+            return self.threads.clone();
+        }
+        let mut visible = self
+            .threads
+            .iter()
+            .take(DEFAULT_TASK_LIMIT)
+            .copied()
+            .collect::<Vec<_>>();
+        if let Some(selected) = self
+            .threads
+            .iter()
+            .skip(DEFAULT_TASK_LIMIT)
+            .find(|thread| state.selected_thread.as_ref() == Some(&thread.id))
+        {
+            visible.push(*selected);
+        }
+        visible
+    }
 }
 
 fn project_name(path: &Path) -> String {
@@ -78,13 +103,15 @@ pub(super) fn thread_sidebar(state: &ChatState) -> impl View<ChatMessage> {
             </Row>
             <Column id={id!(project_list)} grow={1.0} min_height={0.0} shrink={1.0}
                 gap={12.0} overflow_y={Overflow::Auto}>
-                {projects.iter().map(|project| ui! {
-                    <Column key={project.key.clone()} fill_width shrink={0.0} gap={5.0}>
+                {projects.iter().map(|project| {
+                    let visible_threads = project.visible_threads(state);
+                    let expanded = state.expanded_projects.contains(&project.key);
+                    ui! { <Column key={project.key.clone()} fill_width shrink={0.0} gap={5.0}>
                         <Text color={TEXT} scale={0.92} shrink={0.0}>{&project.name}</Text>
                         {project.path.as_ref().map(|path| ui! {
                             <Text color={MUTED} scale={0.72} ellipsis={true} shrink={0.0}>{path}</Text>
                         })}
-                        {project.threads.iter().map(|thread| ui! {
+                        {visible_threads.iter().map(|thread| ui! {
                             <Button key={thread.id.0.clone()}
                                 on_press={ChatMessage::SelectThread(thread.id.clone())}
                                 background={if state.selected_thread.as_ref() == Some(&thread.id) { 0x2a4261 } else { PANEL }}
@@ -92,7 +119,21 @@ pub(super) fn thread_sidebar(state: &ChatState) -> impl View<ChatMessage> {
                                 {thread.title.as_deref().unwrap_or("Untitled conversation")}
                             </Button>
                         })}
-                    </Column>
+                        {if project.threads.len() > DEFAULT_TASK_LIMIT {
+                            let label = if expanded {
+                                "Show less".to_owned()
+                            } else {
+                                format!("Show {} more", project.threads.len() - DEFAULT_TASK_LIMIT)
+                            };
+                            ui! {
+                                <Button key={format!("{}-disclosure", project.key)}
+                                    on_press={ChatMessage::ToggleProject(project.key.clone())}
+                                    background={SIDEBAR} color={MUTED} fill_width>{label}</Button>
+                            }
+                        } else {
+                            ui! { <Spacer height={0.0} /> }
+                        }}
+                    </Column> }
                 })}
             </Column>
         </Column>
@@ -140,5 +181,40 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["a", "c"]
         );
+    }
+
+    #[test]
+    fn project_disclosure_is_bounded_independent_and_keeps_selection_visible() {
+        let threads = (0..11)
+            .map(|index| thread(&format!("task-{index}"), Some("/projects/nickel")))
+            .chain((0..11).map(|index| thread(&format!("other-{index}"), Some("/projects/galen"))))
+            .collect::<Vec<_>>();
+        let sections = project_sections(&threads);
+        let mut state = ChatState::default();
+        assert_eq!(
+            sections[0].visible_threads(&state).len(),
+            DEFAULT_TASK_LIMIT
+        );
+        assert_eq!(
+            sections[1].visible_threads(&state).len(),
+            DEFAULT_TASK_LIMIT
+        );
+
+        state.selected_thread = Some(ThreadId("task-10".into()));
+        assert_eq!(
+            sections[0].visible_threads(&state).len(),
+            DEFAULT_TASK_LIMIT + 1
+        );
+        assert_eq!(
+            sections[0].visible_threads(&state).last().unwrap().id.0,
+            "task-10"
+        );
+
+        state.expanded_projects.insert("/projects/galen".into());
+        assert_eq!(
+            sections[0].visible_threads(&state).len(),
+            DEFAULT_TASK_LIMIT + 1
+        );
+        assert_eq!(sections[1].visible_threads(&state).len(), 11);
     }
 }

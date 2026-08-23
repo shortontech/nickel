@@ -343,7 +343,13 @@ mod tests {
             vec![message]
         );
 
-        tree.handle_event(
+        state.expanded_projects.insert("/projects/galen".into());
+        let expanded = UiTree::layout_with_state(
+            view::chat_view(&state),
+            Rect::new(0.0, 0.0, 1120.0, 600.0),
+            &mut ui_state,
+        );
+        expanded.handle_event(
             &mut ui_state,
             UiEvent::Scroll {
                 point: Point {
@@ -360,6 +366,51 @@ mod tests {
         );
         assert!(scrolled.commands().iter().any(
             |command| matches!(command, PaintCommand::Text { text, .. } if text == "Task 199")
+        ));
+    }
+
+    #[test]
+    fn project_disclosure_emits_toggle_and_changes_its_label() {
+        let mut state = ChatState::default();
+        state.status = ConnectionStatus::Ready;
+        state.threads = (0..11)
+            .map(|index| Thread {
+                id: ThreadId(format!("thread-{index}")),
+                title: Some(format!("Task {index}")),
+                cwd: Some("/projects/nickel".into()),
+                turns: Vec::new(),
+            })
+            .collect();
+        let mut ui_state = UiStateStore::default();
+        let tree = UiTree::layout_with_state(
+            view::chat_view(&state),
+            Rect::new(0.0, 0.0, 1120.0, 900.0),
+            &mut ui_state,
+        );
+        assert!(tree.commands().iter().any(
+            |command| matches!(command, PaintCommand::Text { text, .. } if text == "Show 1 more")
+        ));
+        let toggle = ChatMessage::ToggleProject("/projects/nickel".into());
+        let rect = tree.message_rect(&toggle).expect("visible disclosure");
+        let point = Point {
+            x: rect.origin.x + 2.0,
+            y: rect.origin.y + 2.0,
+        };
+        tree.handle_event(&mut ui_state, UiEvent::PointerPressed(point));
+        assert_eq!(
+            tree.handle_event(&mut ui_state, UiEvent::PointerReleased(point))
+                .messages,
+            vec![toggle]
+        );
+
+        state.expanded_projects.insert("/projects/nickel".into());
+        let expanded = UiTree::layout_with_state(
+            view::chat_view(&state),
+            Rect::new(0.0, 0.0, 1120.0, 900.0),
+            &mut ui_state,
+        );
+        assert!(expanded.commands().iter().any(
+            |command| matches!(command, PaintCommand::Text { text, .. } if text == "Show less")
         ));
     }
 

@@ -514,8 +514,7 @@ impl SdlCanvasPresenter {
             align,
             bold,
         );
-        let clip = intersection(parent_clip, bounds).unwrap_or_default();
-        self.canvas.set_clip_rect(Some(sdl_rect(clip)));
+        self.canvas.set_clip_rect(Some(sdl_rect(parent_clip)));
         for (glyph, glyph_color) in glyphs {
             let Some(entry) = self.glyph_atlas.entry(
                 &mut self.font_system,
@@ -531,7 +530,7 @@ impl SdlCanvasPresenter {
                 entry.source.width() as f32,
                 entry.source.height() as f32,
             );
-            if intersection(destination, clip).is_none() {
+            if intersection(destination, parent_clip).is_none() {
                 continue;
             }
             if entry.colored {

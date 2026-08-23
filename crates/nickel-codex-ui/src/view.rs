@@ -37,6 +37,7 @@ pub enum ChatMessage {
     SubmitInput(ServerRequestId, Vec<String>),
     DismissInput(ServerRequestId),
     ConversationScrolled(f32),
+    ToggleProject(String),
 }
 
 fn draft_changed(value: String) -> ChatMessage {
@@ -220,6 +221,11 @@ impl Application for ChatApplication {
                 let maximum = (total - TRANSCRIPT_VIEWPORT_ESTIMATE).max(0.0);
                 self.state.conversation_scroll = offset;
                 self.state.conversation_pinned = offset >= maximum - 2.0;
+            }
+            ChatMessage::ToggleProject(project) => {
+                if !self.state.expanded_projects.remove(&project) {
+                    self.state.expanded_projects.insert(project);
+                }
             }
         }
     }
@@ -446,6 +452,8 @@ pub fn chat_view(state: &ChatState) -> impl View<ChatMessage> {
 
 #[cfg(test)]
 mod tests {
+    use nickel_ui::{PaintCommand, Rect, UiTree};
+
     use super::*;
 
     #[test]
@@ -465,5 +473,40 @@ mod tests {
                 TranscriptBlock::Paragraph("<b>plain</b>".into()),
             ]
         );
+    }
+
+    #[test]
+    fn multiline_code_block_reserves_padding_beyond_both_text_lines() {
+        let item = ChatItem {
+            id: "code".into(),
+            kind: ChatItemKind::Agent,
+            text: "```text\nfirst line\nsecond line\n```".into(),
+            complete: true,
+        };
+        let tree = UiTree::layout(
+            ui! { <ItemCard item={&item} /> },
+            Rect::new(0.0, 0.0, 600.0, 200.0),
+        );
+        let text_bounds = tree
+            .commands()
+            .iter()
+            .find_map(|command| match command {
+                PaintCommand::Text { bounds, text, .. } if text.contains("second line") => {
+                    Some(*bounds)
+                }
+                _ => None,
+            })
+            .expect("multiline code text");
+        let code_bounds = tree
+            .commands()
+            .iter()
+            .find_map(|command| match command {
+                PaintCommand::RoundedFill { rect, color, .. } if *color == 0x11151b => Some(*rect),
+                _ => None,
+            })
+            .expect("code container");
+        assert!(text_bounds.size.height >= 31.0);
+        assert!(code_bounds.size.height >= text_bounds.size.height + 18.0);
+        assert!(text_bounds.origin.y >= code_bounds.origin.y + 9.0);
     }
 }

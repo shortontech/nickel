@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell,
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     sync::Arc,
 };
 
@@ -94,6 +94,7 @@ pub struct ChatState {
     pub diagnostics: VecDeque<String>,
     pub conversation_scroll: f32,
     pub conversation_pinned: bool,
+    pub expanded_projects: HashSet<String>,
     local_sequence: u64,
     item_indexes: HashMap<String, usize>,
     item_height_estimates: VecDeque<f32>,
@@ -121,6 +122,7 @@ impl Default for ChatState {
             diagnostics: VecDeque::new(),
             conversation_scroll: 0.0,
             conversation_pinned: true,
+            expanded_projects: HashSet::new(),
             local_sequence: 0,
             item_indexes: HashMap::new(),
             item_height_estimates: VecDeque::new(),
