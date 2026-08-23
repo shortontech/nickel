@@ -68,8 +68,11 @@ pub struct ChatState {
     pub interaction_answer: String,
     pub pending: Vec<PendingInteraction>,
     pub diagnostics: VecDeque<String>,
+    pub conversation_scroll: f32,
+    pub conversation_pinned: bool,
     local_sequence: u64,
     item_indexes: HashMap<String, usize>,
+    item_height_estimates: VecDeque<f32>,
 }
 
 impl Default for ChatState {
@@ -89,8 +92,11 @@ impl Default for ChatState {
             interaction_answer: String::new(),
             pending: Vec::new(),
             diagnostics: VecDeque::new(),
+            conversation_scroll: 0.0,
+            conversation_pinned: true,
             local_sequence: 0,
             item_indexes: HashMap::new(),
+            item_height_estimates: VecDeque::new(),
         }
     }
 }
@@ -164,16 +170,22 @@ impl ChatState {
         self.active_turn = None;
         self.interrupt_requested = false;
         self.items.clear();
+        self.item_height_estimates.clear();
         self.item_indexes.clear();
         self.pending.clear();
+        self.conversation_scroll = 0.0;
+        self.conversation_pinned = true;
     }
 
     fn hydrate_thread(&mut self, thread: &Thread) {
         self.items.clear();
+        self.item_height_estimates.clear();
         self.item_indexes.clear();
         self.pending.clear();
         self.active_turn = None;
         self.interrupt_requested = false;
+        self.conversation_scroll = 0.0;
+        self.conversation_pinned = true;
         for turn in &thread.turns {
             for item in &turn.items {
                 self.push_item(ChatItem {
@@ -220,7 +232,9 @@ impl ChatState {
             EventKind::ItemCompleted { item_id } => {
                 if let Some(index) = self.item_indexes.get(&item_id).copied() {
                     if self.items[index].text.is_empty() {
+                        self.reconcile_height_estimates();
                         self.items.remove(index);
+                        self.item_height_estimates.remove(index);
                         self.reindex();
                     } else {
                         self.items[index].complete = true;
@@ -271,9 +285,13 @@ impl ChatState {
     }
 
     fn push_item(&mut self, item: ChatItem) {
+        self.reconcile_height_estimates();
         if self.items.len() == MAX_ITEMS {
             self.items.pop_front();
+            self.item_height_estimates.pop_front();
         }
+        self.item_height_estimates
+            .push_back(estimate_item_height(&item));
         self.items.push_back(item);
         self.reindex();
     }
@@ -307,8 +325,10 @@ impl ChatState {
     }
 
     fn append_delta(&mut self, item_id: String, delta: String, inferred_kind: ChatItemKind) {
-        if let Some(item) = self.item_mut(&item_id) {
-            item.text.push_str(&delta);
+        if let Some(index) = self.item_indexes.get(&item_id).copied() {
+            self.reconcile_height_estimates();
+            self.items[index].text.push_str(&delta);
+            self.item_height_estimates[index] = estimate_item_height(&self.items[index]);
         } else {
             self.push_item(ChatItem {
                 id: item_id,
@@ -317,11 +337,6 @@ impl ChatState {
                 complete: false,
             });
         }
-    }
-
-    fn item_mut(&mut self, id: &str) -> Option<&mut ChatItem> {
-        let index = *self.item_indexes.get(id)?;
-        self.items.get_mut(index)
     }
 
     fn reindex(&mut self) {
@@ -339,6 +354,35 @@ impl ChatState {
         }
         self.diagnostics.push_back(sanitize_diagnostic(&message));
     }
+
+    fn reconcile_height_estimates(&mut self) {
+        if self.item_height_estimates.len() != self.items.len() {
+            self.item_height_estimates = self.items.iter().map(estimate_item_height).collect();
+        }
+    }
+
+    pub fn estimated_item_heights(&self) -> Vec<f32> {
+        if self.item_height_estimates.len() == self.items.len() {
+            self.item_height_estimates.iter().copied().collect()
+        } else {
+            self.items.iter().map(estimate_item_height).collect()
+        }
+    }
+}
+
+fn estimate_item_height(item: &ChatItem) -> f32 {
+    let characters_per_line = if item.kind == ChatItemKind::User {
+        78
+    } else {
+        98
+    };
+    let lines = item
+        .text
+        .lines()
+        .map(|line| line.chars().count().max(1).div_ceil(characters_per_line))
+        .sum::<usize>()
+        .max(1);
+    58.0 + lines as f32 * 21.0
 }
 
 fn chat_item_kind(item_type: &str) -> ChatItemKind {

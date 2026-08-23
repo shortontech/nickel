@@ -2,6 +2,7 @@ use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
     fmt::Write,
+    ops::Range,
     sync::Arc,
 };
 
@@ -576,6 +577,11 @@ impl<Message> Element<Message> {
         self
     }
 
+    pub fn on_scroll(mut self, map: fn(f32) -> Message) -> Self {
+        self.message_mapper = Some(map);
+        self
+    }
+
     pub fn min_width(mut self, width: f32) -> Self {
         self.style.min_width = width.max(0.0);
         self
@@ -1048,6 +1054,11 @@ macro_rules! flex_component {
                 self.0 = self.0.follow_scroll_end(follow);
                 self
             }
+
+            pub fn on_scroll(mut self, map: fn(f32) -> Message) -> Self {
+                self.0 = self.0.on_scroll(map);
+                self
+            }
         }
 
         impl<Message> Component<Message> for $name<Message> {
@@ -1082,9 +1093,127 @@ impl<Message> Spacer<Message> {
         Self(Element::flex(Axis::Horizontal).width(size).height(size))
     }
 
+    pub fn vertical(height: f32) -> Self {
+        Self(Element::flex(Axis::Horizontal).height(height).grow(0.0))
+    }
+
     pub fn grow(mut self, grow: f32) -> Self {
         self.0 = self.0.grow(grow);
         self
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct VirtualWindow {
+    pub range: Range<usize>,
+    pub leading: f32,
+    pub trailing: f32,
+    pub total: f32,
+}
+
+impl VirtualWindow {
+    pub fn from_heights(
+        heights: &[f32],
+        gap: f32,
+        offset: f32,
+        viewport: f32,
+        overscan: f32,
+    ) -> Self {
+        let gap = gap.max(0.0);
+        let viewport = viewport.max(0.0);
+        let overscan = overscan.max(0.0);
+        let mut starts = Vec::with_capacity(heights.len());
+        let mut ends = Vec::with_capacity(heights.len());
+        let mut cursor = 0.0;
+        for (index, height) in heights.iter().enumerate() {
+            if index > 0 {
+                cursor += gap;
+            }
+            starts.push(cursor);
+            cursor += height.max(0.0);
+            ends.push(cursor);
+        }
+        let total = cursor;
+        let offset = offset.clamp(0.0, (total - viewport).max(0.0));
+        let minimum = (offset - overscan).max(0.0);
+        let maximum = (offset + viewport + overscan).min(total);
+        let first = ends
+            .iter()
+            .position(|end| *end >= minimum)
+            .unwrap_or(heights.len());
+        let end = starts
+            .iter()
+            .rposition(|start| *start <= maximum)
+            .map_or(first, |index| index + 1)
+            .max(first);
+        let leading = starts.get(first).copied().unwrap_or(total);
+        let visible_end = end
+            .checked_sub(1)
+            .and_then(|index| ends.get(index))
+            .copied()
+            .unwrap_or(leading);
+        Self {
+            range: first..end,
+            leading,
+            trailing: (total - visible_end).max(0.0),
+            total,
+        }
+    }
+}
+
+pub struct VirtualColumn<Message = String> {
+    window: VirtualWindow,
+    visible: Column<Message>,
+}
+
+impl<Message> VirtualColumn<Message> {
+    pub fn new() -> Self {
+        Self {
+            window: VirtualWindow::from_heights(&[], 0.0, 0.0, 0.0, 0.0),
+            visible: Column::new().fill_width(),
+        }
+    }
+
+    pub fn window(mut self, window: VirtualWindow) -> Self {
+        self.window = window;
+        self
+    }
+
+    pub fn gap(mut self, gap: f32) -> Self {
+        self.visible = self.visible.gap(gap);
+        self
+    }
+
+    pub fn children(mut self, children: impl IntoIterator<Item = impl Component<Message>>) -> Self {
+        self.visible = self.visible.children(children);
+        self
+    }
+
+    pub fn max_width(mut self, width: f32) -> Self {
+        self.visible = self.visible.max_width(width);
+        self
+    }
+
+    pub fn align_self(mut self, align: Align) -> Self {
+        self.visible = self.visible.align_self(align);
+        self
+    }
+}
+
+impl<Message> Default for VirtualColumn<Message> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<Message> Component<Message> for VirtualColumn<Message> {
+    fn into_element(self) -> Element<Message> {
+        Column::new()
+            .fill_width()
+            .child(Spacer::vertical(self.window.leading))
+            .child(self.visible)
+            .child(Spacer::vertical(self.window.trailing))
+            .into_element()
     }
 }
 
@@ -2484,6 +2613,7 @@ impl ScrollExtent {
 struct ScrollRegion<Message> {
     id: UiId,
     message: Option<Message>,
+    offset_mapper: Option<fn(f32) -> Message>,
     rect: Rect,
     extent: ScrollExtent,
 }
@@ -2967,19 +3097,28 @@ impl<Message: Clone> UiTree<Message> {
                     .merge(state.set_capture(None))
                     .merge(dropdown_invalidation)
             }
-            UiEvent::Scroll { point, delta_y } => self
-                .scrolls
-                .iter()
-                .rev()
-                .find(|scroll| contains(scroll.rect, point))
-                .map(|scroll| {
-                    state.scroll_by(
-                        scroll.id.clone(),
-                        delta_y,
-                        (scroll.extent.content.height - scroll.extent.viewport.height).max(0.0),
-                    )
-                })
-                .unwrap_or(Invalidation::None),
+            UiEvent::Scroll { point, delta_y } => {
+                let Some(scroll) = self
+                    .scrolls
+                    .iter()
+                    .rev()
+                    .find(|scroll| contains(scroll.rect, point))
+                else {
+                    return outcome;
+                };
+                let invalidation = state.scroll_by(
+                    scroll.id.clone(),
+                    delta_y,
+                    (scroll.extent.content.height - scroll.extent.viewport.height).max(0.0),
+                );
+                if invalidation != Invalidation::None
+                    && let Some(map) = scroll.offset_mapper
+                    && let Some(offset) = state.state(&scroll.id).map(|entry| entry.scroll_offset)
+                {
+                    outcome.messages.push(map(offset));
+                }
+                invalidation
+            }
             UiEvent::ScrollHorizontal { point, delta_x } => self
                 .scrolls
                 .iter()
@@ -4183,6 +4322,7 @@ fn layout_element<Message: Clone>(
                 tree.scrolls.push(ScrollRegion {
                     id: id.clone(),
                     message: element.message.clone(),
+                    offset_mapper: element.message_mapper,
                     rect: content,
                     extent,
                 });
@@ -4201,6 +4341,7 @@ fn layout_element<Message: Clone>(
                 tree.scrolls.push(ScrollRegion {
                     id: id.clone(),
                     message: element.message.clone(),
+                    offset_mapper: element.message_mapper,
                     rect: content,
                     extent,
                 });
@@ -4263,6 +4404,7 @@ fn layout_element<Message: Clone>(
                     tree.scrolls.push(ScrollRegion {
                         id: id.clone(),
                         message: Some(message.clone()),
+                        offset_mapper: element.message_mapper,
                         rect: viewport,
                         extent,
                     });
@@ -4364,6 +4506,7 @@ fn layout_element<Message: Clone>(
                 tree.scrolls.push(ScrollRegion {
                     id: id.clone(),
                     message: element.message.clone(),
+                    offset_mapper: element.message_mapper,
                     rect: content,
                     extent,
                 });
@@ -5914,6 +6057,56 @@ mod tests {
             .scroll
             .expect("scroll extent");
         assert_eq!(followed_extent.offset, 120.0);
+    }
+
+    #[test]
+    fn virtual_window_bounds_variable_height_work_at_start_middle_and_end() {
+        let heights = [100.0, 200.0, 300.0];
+        let start = VirtualWindow::from_heights(&heights, 10.0, 0.0, 100.0, 0.0);
+        assert_eq!(start.range, 0..1);
+        assert_eq!(
+            (start.leading, start.trailing, start.total),
+            (0.0, 520.0, 620.0)
+        );
+
+        let middle = VirtualWindow::from_heights(&heights, 10.0, 120.0, 100.0, 0.0);
+        assert_eq!(middle.range, 1..2);
+        assert_eq!((middle.leading, middle.trailing), (110.0, 310.0));
+
+        let end = VirtualWindow::from_heights(&heights, 10.0, f32::MAX, 100.0, 0.0);
+        assert_eq!(end.range, 2..3);
+        assert_eq!((end.leading, end.trailing), (320.0, 0.0));
+
+        let empty = VirtualWindow::from_heights(&[], 10.0, 0.0, 100.0, 100.0);
+        assert_eq!(empty.range, 0..0);
+        assert_eq!(empty.total, 0.0);
+    }
+
+    #[test]
+    fn vertical_scroll_emits_the_resulting_offset() {
+        fn scrolled(offset: f32) -> TestMessage {
+            TestMessage::Volume(offset.round() as u8)
+        }
+
+        let mut state = UiStateStore::default();
+        let tree = UiTree::layout_with_state(
+            Column::new()
+                .id("scroll")
+                .height(60.0)
+                .overflow_y(Overflow::Auto)
+                .on_scroll(scrolled)
+                .children((0..4).map(|_| Spacer::vertical(30.0))),
+            Rect::new(0.0, 0.0, 200.0, 60.0),
+            &mut state,
+        );
+        let outcome = tree.handle_event(
+            &mut state,
+            UiEvent::Scroll {
+                point: Point { x: 10.0, y: 10.0 },
+                delta_y: 30.0,
+            },
+        );
+        assert_eq!(outcome.messages, vec![TestMessage::Volume(30)]);
     }
 
     #[test]

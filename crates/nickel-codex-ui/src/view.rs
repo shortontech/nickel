@@ -15,6 +15,9 @@ const MUTED: Color = 0x9ca8b8;
 const ACCENT: Color = 0x70a5ff;
 const USER: Color = 0x1d3557;
 const ERROR: Color = 0x542a2a;
+const TRANSCRIPT_GAP: f32 = 10.0;
+const TRANSCRIPT_VIEWPORT_ESTIMATE: f32 = 600.0;
+const TRANSCRIPT_OVERSCAN: f32 = 900.0;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ChatMessage {
@@ -30,6 +33,7 @@ pub enum ChatMessage {
     InteractionAnswerChanged(String),
     SubmitInput(ServerRequestId, Vec<String>),
     DismissInput(ServerRequestId),
+    ConversationScrolled(f32),
 }
 
 fn draft_changed(value: String) -> ChatMessage {
@@ -38,6 +42,14 @@ fn draft_changed(value: String) -> ChatMessage {
 
 fn interaction_answer_changed(value: String) -> ChatMessage {
     ChatMessage::InteractionAnswerChanged(value)
+}
+
+fn conversation_scrolled(offset: f32) -> ChatMessage {
+    ChatMessage::ConversationScrolled(offset)
+}
+
+fn transcript_heights(state: &ChatState) -> Vec<f32> {
+    state.estimated_item_heights()
 }
 
 pub struct ChatApplication {
@@ -92,6 +104,8 @@ impl Application for ChatApplication {
             }
             ChatMessage::SelectThread(id) => {
                 self.state.items.clear();
+                self.state.conversation_scroll = 0.0;
+                self.state.conversation_pinned = true;
                 self.controller.send(ControllerCommand::SelectThread(id));
             }
             ChatMessage::Interrupt => {
@@ -189,6 +203,20 @@ impl Application for ChatApplication {
                     request_id,
                     answers: Vec::new(),
                 });
+            }
+            ChatMessage::ConversationScrolled(offset) => {
+                let heights = transcript_heights(&self.state);
+                let total = VirtualWindow::from_heights(
+                    &heights,
+                    TRANSCRIPT_GAP,
+                    f32::MAX,
+                    TRANSCRIPT_VIEWPORT_ESTIMATE,
+                    0.0,
+                )
+                .total;
+                let maximum = (total - TRANSCRIPT_VIEWPORT_ESTIMATE).max(0.0);
+                self.state.conversation_scroll = offset;
+                self.state.conversation_pinned = offset >= maximum - 2.0;
             }
         }
     }
@@ -390,6 +418,20 @@ fn InteractionCard(interaction: &PendingInteraction, answer: &str) -> impl View<
 }
 
 pub fn chat_view(state: &ChatState) -> impl View<ChatMessage> {
+    let transcript_heights = transcript_heights(state);
+    let transcript_offset = if state.conversation_pinned {
+        f32::MAX
+    } else {
+        state.conversation_scroll
+    };
+    let transcript_window = VirtualWindow::from_heights(
+        &transcript_heights,
+        TRANSCRIPT_GAP,
+        transcript_offset,
+        TRANSCRIPT_VIEWPORT_ESTIMATE,
+        TRANSCRIPT_OVERSCAN,
+    );
+    let transcript_range = transcript_window.range.clone();
     let account = if state.account.authenticated {
         "Authenticated"
     } else {
@@ -430,7 +472,8 @@ pub fn chat_view(state: &ChatState) -> impl View<ChatMessage> {
             </Column>
             <Column grow={1.0} min_width={0.0} fill_height padding={Insets::all(18.0)} gap={12.0}>
                 <Column id={id!(conversation)} grow={1.0} fill_width gap={10.0}
-                    overflow_y={Overflow::Auto} follow_scroll_end={true}>
+                    overflow_y={Overflow::Auto} follow_scroll_end={state.conversation_pinned}
+                    on_scroll={conversation_scrolled}>
                     {if state.items.is_empty() {
                         ui! {
                             <Container grow={1.0} fill_width padding={Insets::all(28.0)}>
@@ -440,9 +483,15 @@ pub fn chat_view(state: &ChatState) -> impl View<ChatMessage> {
                         }
                     } else {
                         ui! {
-                            <Column fill_width max_width={1000.0} align_self={Align::Center} gap={10.0}>
-                                {state.items.iter().map(|item| ui! { <ItemCard key={item.id.clone()} item={item} /> })}
-                            </Column>
+                            {VirtualColumn::new()
+                                .window(transcript_window)
+                                .gap(TRANSCRIPT_GAP)
+                                .max_width(1000.0)
+                                .align_self(Align::Center)
+                                .children(state.items.iter().enumerate()
+                                    .skip(transcript_range.start)
+                                    .take(transcript_range.len())
+                                    .map(|(_, item)| ui! { <ItemCard key={item.id.clone()} item={item} /> }))}
                         }
                     }}
                 </Column>

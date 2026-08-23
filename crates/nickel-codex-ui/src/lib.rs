@@ -459,6 +459,41 @@ mod tests {
     }
 
     #[test]
+    fn long_transcript_builds_only_the_pinned_virtual_window() {
+        let mut state = ChatState::default();
+        state.status = ConnectionStatus::Ready;
+        for index in 0..2_000 {
+            state.items.push_back(ChatItem {
+                id: format!("message-{index}"),
+                kind: ChatItemKind::Agent,
+                text: format!("history message {index}"),
+                complete: true,
+            });
+        }
+
+        let tree = UiTree::layout(view::chat_view(&state), Rect::new(0.0, 0.0, 1120.0, 760.0));
+        assert!(tree.commands().iter().any(
+            |command| matches!(command, PaintCommand::Text { text, .. } if text.contains("history message 1999"))
+        ));
+        assert!(!tree.commands().iter().any(
+            |command| matches!(command, PaintCommand::Text { text, .. } if text.contains("history message 0"))
+        ));
+        assert!(
+            tree.commands().len() < 500,
+            "{} commands",
+            tree.commands().len()
+        );
+        let conversation = tree
+            .resolved_layout()
+            .nodes()
+            .iter()
+            .find(|node| node.id.as_str().ends_with("/conversation"))
+            .and_then(|node| node.scroll)
+            .expect("virtual transcript scroll extent");
+        assert!(conversation.content.height > 100_000.0);
+    }
+
+    #[test]
     fn state_is_bounded_and_sensitive_diagnostics_are_redacted() {
         let mut state = ChatState::default();
         for sequence in 0..2_100 {
