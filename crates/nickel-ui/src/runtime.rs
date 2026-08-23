@@ -168,10 +168,14 @@ pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
                     keycode: Some(Keycode::Escape),
                     ..
                 } => {
-                    if application.shortcut(Shortcut::Escape) {
-                        dirty = true;
+                    if state.selection_owner().is_some() {
+                        UiEvent::SelectionClear
+                    } else {
+                        if application.shortcut(Shortcut::Escape) {
+                            dirty = true;
+                        }
+                        continue;
                     }
-                    continue;
                 }
                 Event::KeyDown {
                     keycode: Some(Keycode::Tab),
@@ -264,9 +268,27 @@ pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
                     keycode: Some(Keycode::Home),
                     keymod,
                     ..
+                } if keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD) => {
+                    UiEvent::TextMoveDocumentHome {
+                        extend_selection: keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD),
+                    }
+                }
+                Event::KeyDown {
+                    keycode: Some(Keycode::Home),
+                    keymod,
+                    ..
                 } => UiEvent::TextMoveHome {
                     extend_selection: keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD),
                 },
+                Event::KeyDown {
+                    keycode: Some(Keycode::End),
+                    keymod,
+                    ..
+                } if keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD) => {
+                    UiEvent::TextMoveDocumentEnd {
+                        extend_selection: keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD),
+                    }
+                }
                 Event::KeyDown {
                     keycode: Some(Keycode::End),
                     keymod,
@@ -296,6 +318,8 @@ pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
                     | UiEvent::TextMoveWordRight { .. }
                     | UiEvent::TextMoveHome { .. }
                     | UiEvent::TextMoveEnd { .. }
+                    | UiEvent::TextMoveDocumentHome { .. }
+                    | UiEvent::TextMoveDocumentEnd { .. }
                     | UiEvent::TextSelectAll
                     | UiEvent::TextCut
                     | UiEvent::TextPaste(_)

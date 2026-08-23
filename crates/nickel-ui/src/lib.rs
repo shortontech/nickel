@@ -29,9 +29,9 @@ pub use ui::{
     ComponentBuilderExt, Container, ContentPane, DiagnosticKind, Dropdown, EventOutcome, FileGrid,
     FileGridItem, GradientAxis, Grid, GridColumnSpec, Header, HorizontalRule, Image,
     InteractionState, LayoutDiagnostic, LinearGradient, PaintCommand, RadioButton, ResolvedGrid,
-    ResolvedLayout, ResolvedNode, Row, ScrollExtent, ShoulderHints, Sidebar, SidebarFolder,
-    SidebarItem, SidebarSection, Slider, SourceLocation, Spacer, Text, TextAlign, TextField, Tone,
-    UiEvent, UiTree, VerticalScroll, VirtualColumn, VirtualWindow,
+    ResolvedLayout, ResolvedNode, Row, ScrollExtent, SelectionRegion, ShoulderHints, Sidebar,
+    SidebarFolder, SidebarItem, SidebarSection, Slider, SourceLocation, Spacer, Text, TextAlign,
+    TextField, Tone, UiEvent, UiTree, VerticalScroll, VirtualColumn, VirtualWindow,
 };
 pub use ui_declarative_macros::{component, id, ui};
 
@@ -45,9 +45,9 @@ pub mod prelude {
     pub use crate::{
         Align, AnyView, Application, Background, Border, Button, Color, Column, Component,
         ComponentBuilderExt, Container, DiagnosticKind, Dropdown, Fragment, Grid, GridColumnSpec,
-        Insets, Justify, Length, Overflow, RadioButton, Row, Shortcut, Slider, Spacer, Text,
-        TextAlign, TextField, Tone, Track, UiEvent, UiId, UiStateStore, View, VirtualColumn,
-        VirtualWindow, component, id, run, ui,
+        Insets, Justify, Length, Overflow, RadioButton, Row, SelectionRegion, Shortcut, Slider,
+        Spacer, Text, TextAlign, TextField, Tone, Track, UiEvent, UiId, UiStateStore, View,
+        VirtualColumn, VirtualWindow, component, id, run, ui,
     };
 }
 

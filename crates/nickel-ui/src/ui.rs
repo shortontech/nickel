@@ -12,7 +12,8 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
     Align, Axis, Constraints, FlexItem, Insets, Invalidation, Justify, Length, Overflow, Point,
-    Rect, Size, TextEditor, Track, UiId, UiStateStore, layout_flex,
+    Rect, SelectionDocument, SelectionEndpoint, SelectionRun, Size, TextBoundary, TextEditor,
+    Track, UiId, UiStateStore, layout_flex,
 };
 
 pub type Color = u32;
@@ -80,10 +81,13 @@ pub enum UiEvent {
     TextMoveWordRight { extend_selection: bool },
     TextMoveHome { extend_selection: bool },
     TextMoveEnd { extend_selection: bool },
+    TextMoveDocumentHome { extend_selection: bool },
+    TextMoveDocumentEnd { extend_selection: bool },
     TextSelectAll,
     TextCopy,
     TextCut,
     TextPaste(String),
+    SelectionClear,
     CaretBlink,
     FocusLost,
     Suspended,
@@ -266,6 +270,16 @@ pub struct Style {
     pub scroll_offset: f32,
     pub corner_radius: f32,
     pub top_corner_radius: f32,
+    #[doc(hidden)]
+    pub selection_region: bool,
+    #[doc(hidden)]
+    pub selection_document: Option<Arc<SelectionDocument>>,
+    #[doc(hidden)]
+    pub selectable: Option<bool>,
+    #[doc(hidden)]
+    pub selection_run_id: Option<String>,
+    #[doc(hidden)]
+    pub selection_boundary: TextBoundary,
 }
 
 impl Default for Style {
@@ -297,6 +311,11 @@ impl Default for Style {
             scroll_offset: 0.0,
             corner_radius: 0.0,
             top_corner_radius: 0.0,
+            selection_region: false,
+            selection_document: None,
+            selectable: None,
+            selection_run_id: None,
+            selection_boundary: TextBoundary::Inline,
         }
     }
 }
@@ -1656,9 +1675,77 @@ impl<Message> Text<Message> {
         self.0 = self.0.text_align(align);
         self
     }
+
+    pub fn selectable(mut self, selectable: bool) -> Self {
+        self.0.style.selectable = Some(selectable);
+        self
+    }
+
+    pub fn selection_run_id(mut self, id: impl Into<String>) -> Self {
+        self.0.style.selection_run_id = Some(id.into());
+        self
+    }
+
+    pub fn selection_boundary(mut self, boundary: TextBoundary) -> Self {
+        self.0.style.selection_boundary = boundary;
+        self
+    }
 }
 
 impl<Message> Component<Message> for Text<Message> {
+    fn into_element(self) -> Element<Message> {
+        self.0
+    }
+}
+
+pub struct SelectionRegion<Message = String>(Element<Message>);
+
+impl<Message> SelectionRegion<Message> {
+    pub fn new(document: impl Into<Arc<SelectionDocument>>) -> Self {
+        let mut element = Element::flex(Axis::Vertical);
+        element.style.selection_region = true;
+        element.style.selection_document = Some(document.into());
+        Self(element)
+    }
+
+    pub fn automatic() -> Self {
+        let mut element = Element::flex(Axis::Vertical);
+        element.style.selection_region = true;
+        Self(element)
+    }
+
+    pub fn id(mut self, id: impl Into<UiId>) -> Self {
+        self.0 = self.0.id(id);
+        self
+    }
+
+    pub fn child(mut self, child: impl Component<Message>) -> Self {
+        self.0 = self.0.child(child);
+        self
+    }
+
+    pub fn children(mut self, children: impl IntoIterator<Item = impl Component<Message>>) -> Self {
+        self.0 = self.0.children(children);
+        self
+    }
+
+    pub fn fill_width(mut self) -> Self {
+        self.0 = self.0.fill_width();
+        self
+    }
+
+    pub fn fill_height(mut self) -> Self {
+        self.0 = self.0.fill_height();
+        self
+    }
+
+    pub fn grow(mut self, grow: f32) -> Self {
+        self.0 = self.0.grow(grow);
+        self
+    }
+}
+
+impl<Message> Component<Message> for SelectionRegion<Message> {
     fn into_element(self) -> Element<Message> {
         self.0
     }
@@ -2567,6 +2654,79 @@ struct TextInputRegion<Message> {
     map: fn(String) -> Message,
 }
 
+#[derive(Clone, Debug)]
+struct SelectionGlyph {
+    rect: Rect,
+    start: usize,
+    end: usize,
+    rtl: bool,
+}
+
+#[derive(Clone, Debug)]
+struct SelectionRunGeometry {
+    node_index: usize,
+    run_id: String,
+    glyphs: Vec<SelectionGlyph>,
+}
+
+#[derive(Clone, Debug)]
+struct SelectionRegionLayout {
+    id: UiId,
+    rect: Rect,
+    document: Arc<SelectionDocument>,
+    runs: Vec<SelectionRunGeometry>,
+}
+
+impl SelectionRegionLayout {
+    fn endpoint_at(&self, point: Point, nearest: bool) -> Option<SelectionEndpoint> {
+        let mut best: Option<(f32, SelectionEndpoint)> = None;
+        for run in &self.runs {
+            for glyph in &run.glyphs {
+                let inside = contains(glyph.rect, point);
+                if !inside && !nearest {
+                    continue;
+                }
+                let midpoint = glyph.rect.origin.x + glyph.rect.size.width * 0.5;
+                let before = point.x < midpoint;
+                let offset = match (glyph.rtl, before) {
+                    (false, true) | (true, false) => glyph.start,
+                    _ => glyph.end,
+                };
+                let dx = if point.x < glyph.rect.origin.x {
+                    glyph.rect.origin.x - point.x
+                } else if point.x > glyph.rect.origin.x + glyph.rect.size.width {
+                    point.x - (glyph.rect.origin.x + glyph.rect.size.width)
+                } else {
+                    0.0
+                };
+                let dy = if point.y < glyph.rect.origin.y {
+                    glyph.rect.origin.y - point.y
+                } else if point.y > glyph.rect.origin.y + glyph.rect.size.height {
+                    point.y - (glyph.rect.origin.y + glyph.rect.size.height)
+                } else {
+                    0.0
+                };
+                let distance = dx * dx + dy * dy;
+                if inside || best.as_ref().is_none_or(|(current, _)| distance < *current) {
+                    best = Some((distance, SelectionEndpoint::new(run.run_id.clone(), offset)));
+                    if inside {
+                        return best.map(|(_, endpoint)| endpoint);
+                    }
+                }
+            }
+        }
+        best.map(|(_, endpoint)| endpoint)
+    }
+}
+
+struct SelectionRegionBuilder {
+    id: UiId,
+    rect: Rect,
+    supplied: Option<Arc<SelectionDocument>>,
+    runs: Vec<SelectionRunGeometry>,
+    logical_runs: Vec<SelectionRun>,
+}
+
 fn text_offset_at<Message>(input: &TextInputRegion<Message>, pointer_x: f32) -> usize {
     if pointer_x <= input.rect.origin.x {
         return 0;
@@ -2753,6 +2913,8 @@ pub struct UiTree<Message = String> {
     hits: Vec<HitRegion<Message>>,
     messages: Vec<MessageRegion<Message>>,
     text_inputs: Vec<TextInputRegion<Message>>,
+    selection_regions: Vec<SelectionRegionLayout>,
+    selection_paints: HashMap<usize, Vec<Rect>>,
     scrolls: Vec<ScrollRegion<Message>>,
     grids: Vec<ResolvedGrid>,
     accessibility: Vec<AccessibilityNode>,
@@ -2770,6 +2932,8 @@ impl<Message> Default for UiTree<Message> {
             hits: Vec::new(),
             messages: Vec::new(),
             text_inputs: Vec::new(),
+            selection_regions: Vec::new(),
+            selection_paints: HashMap::new(),
             scrolls: Vec::new(),
             grids: Vec::new(),
             accessibility: Vec::new(),
@@ -2783,10 +2947,65 @@ impl<Message> Default for UiTree<Message> {
 }
 
 impl<Message: Clone> UiTree<Message> {
+    fn selection_hit_at(
+        &self,
+        point: Point,
+    ) -> Option<(&SelectionRegionLayout, SelectionEndpoint)> {
+        self.selection_regions
+            .iter()
+            .rev()
+            .filter(|region| contains(region.rect, point))
+            .find_map(|region| {
+                region
+                    .endpoint_at(point, false)
+                    .map(|endpoint| (region, endpoint))
+            })
+    }
+
+    fn selection_region(&self, id: &UiId) -> Option<&SelectionRegionLayout> {
+        self.selection_regions
+            .iter()
+            .find(|region| &region.id == id)
+    }
+
     pub fn selected_text(&self, state: &UiStateStore) -> Option<String> {
-        self.focused_editor(state)
+        if let Some(text) = self
+            .focused_editor(state)
             .and_then(TextEditor::selected_text)
             .map(ToOwned::to_owned)
+        {
+            return Some(text);
+        }
+        let owner = state.selection_owner()?;
+        let region = self
+            .selection_regions
+            .iter()
+            .find(|region| &region.id == owner)?;
+        region
+            .document
+            .selected_text(state.document_selection(owner)?)
+    }
+
+    fn prepare_selection_paints(&mut self, state: &UiStateStore) {
+        self.selection_paints.clear();
+        for region in &self.selection_regions {
+            let Some(selection) = state.document_selection(&region.id) else {
+                continue;
+            };
+            for run in &region.runs {
+                let Some(range) = region.document.selected_range_in(selection, &run.run_id) else {
+                    continue;
+                };
+                for glyph in &run.glyphs {
+                    if glyph.end > range.start && glyph.start < range.end {
+                        self.selection_paints
+                            .entry(run.node_index)
+                            .or_default()
+                            .push(glyph.rect);
+                    }
+                }
+            }
+        }
     }
 
     pub fn layout(root: impl Component<Message>, bounds: Rect) -> Self {
@@ -2823,6 +3042,13 @@ impl<Message: Clone> UiTree<Message> {
             ..Self::default()
         };
         layout_element(&root, &root_id, bounds, None, None, &mut tree);
+        tree.selection_regions = collect_selection_regions(&root, &tree.resolved);
+        for region in &tree.selection_regions {
+            state.touch(region.id.clone());
+            let selection = state.document_selection_mut(region.id.clone());
+            region.document.reconcile(selection);
+        }
+        tree.prepare_selection_paints(state);
         tree.reset_emission();
         emit_element(&root, 0, None, &mut tree);
         tree.emit_accessibility_geometry();
@@ -2848,6 +3074,7 @@ impl<Message: Clone> UiTree<Message> {
             |id| UiId::from("root").scoped(id.as_str()),
         );
         layout_element(&root, &root_id, bounds, None, None, &mut tree);
+        tree.selection_regions = collect_selection_regions(&root, &tree.resolved);
         tree.reset_emission();
         emit_element(&root, 0, None, &mut tree);
         tree.emit_accessibility_geometry();
@@ -3048,6 +3275,17 @@ impl<Message: Clone> UiTree<Message> {
         outcome.invalidation = match event {
             UiEvent::PointerMoved(point) => {
                 let mut invalidation = state.set_hovered(self.id_at(point).cloned());
+                if let Some(region_id) = state.captured().cloned()
+                    && let Some(region) = self.selection_region(&region_id)
+                    && let Some(endpoint) = region.endpoint_at(point, true)
+                {
+                    state.document_selection_mut(region_id).focus = Some(endpoint);
+                    return EventOutcome {
+                        messages: outcome.messages,
+                        clipboard_text: outcome.clipboard_text,
+                        invalidation: invalidation.merge(Invalidation::Paint),
+                    };
+                }
                 if let Some(id) = state.captured().cloned()
                     && let Some(input) = self.text_inputs.iter().find(|input| input.id == id)
                 {
@@ -3060,9 +3298,26 @@ impl<Message: Clone> UiTree<Message> {
                 invalidation
             }
             UiEvent::PointerPressed(point) => {
+                if let Some((region, endpoint)) = self.selection_hit_at(point) {
+                    let region_id = region.id.clone();
+                    let selection = state.document_selection_mut(region_id.clone());
+                    selection.anchor = Some(endpoint.clone());
+                    selection.focus = Some(endpoint);
+                    return EventOutcome {
+                        messages: outcome.messages,
+                        clipboard_text: outcome.clipboard_text,
+                        invalidation: state
+                            .set_focus(None)
+                            .merge(state.set_selection_owner(Some(region_id.clone())))
+                            .merge(state.set_pressed(Some(region_id.clone())))
+                            .merge(state.set_capture(Some(region_id)))
+                            .merge(Invalidation::Paint),
+                    };
+                }
                 let id = self.id_at(point).cloned();
                 let mut invalidation = state
-                    .set_focus(id.clone())
+                    .clear_document_selection()
+                    .merge(state.set_focus(id.clone()))
                     .merge(state.set_pressed(id.clone()))
                     .merge(state.set_capture(id.clone()));
                 if let Some(id) = id
@@ -3205,55 +3460,85 @@ impl<Message: Clone> UiTree<Message> {
                     Invalidation::Layout
                 })
                 .unwrap_or(Invalidation::None),
-            UiEvent::TextMoveLeft { extend_selection } => self
-                .edit_focused_text(state, |editor| editor.move_left(extend_selection))
-                .map(|message| {
+            UiEvent::TextMoveLeft { extend_selection } => {
+                if let Some(message) =
+                    self.edit_focused_text(state, |editor| editor.move_left(extend_selection))
+                {
                     outcome.messages.push(message);
                     Invalidation::Paint
-                })
-                .unwrap_or(Invalidation::None),
-            UiEvent::TextMoveRight { extend_selection } => self
-                .edit_focused_text(state, |editor| editor.move_right(extend_selection))
-                .map(|message| {
+                } else {
+                    self.move_document_selection(state, -1, false, extend_selection)
+                }
+            }
+            UiEvent::TextMoveRight { extend_selection } => {
+                if let Some(message) =
+                    self.edit_focused_text(state, |editor| editor.move_right(extend_selection))
+                {
                     outcome.messages.push(message);
                     Invalidation::Paint
-                })
-                .unwrap_or(Invalidation::None),
-            UiEvent::TextMoveWordLeft { extend_selection } => self
-                .edit_focused_text(state, |editor| editor.move_word_left(extend_selection))
-                .map(|message| {
+                } else {
+                    self.move_document_selection(state, 1, false, extend_selection)
+                }
+            }
+            UiEvent::TextMoveWordLeft { extend_selection } => {
+                if let Some(message) =
+                    self.edit_focused_text(state, |editor| editor.move_word_left(extend_selection))
+                {
                     outcome.messages.push(message);
                     Invalidation::Paint
-                })
-                .unwrap_or(Invalidation::None),
-            UiEvent::TextMoveWordRight { extend_selection } => self
-                .edit_focused_text(state, |editor| editor.move_word_right(extend_selection))
-                .map(|message| {
+                } else {
+                    self.move_document_selection(state, -1, true, extend_selection)
+                }
+            }
+            UiEvent::TextMoveWordRight { extend_selection } => {
+                if let Some(message) =
+                    self.edit_focused_text(state, |editor| editor.move_word_right(extend_selection))
+                {
                     outcome.messages.push(message);
                     Invalidation::Paint
-                })
-                .unwrap_or(Invalidation::None),
-            UiEvent::TextMoveHome { extend_selection } => self
-                .edit_focused_text(state, |editor| editor.move_home(extend_selection))
-                .map(|message| {
+                } else {
+                    self.move_document_selection(state, 1, true, extend_selection)
+                }
+            }
+            UiEvent::TextMoveHome { extend_selection } => {
+                if let Some(message) =
+                    self.edit_focused_text(state, |editor| editor.move_home(extend_selection))
+                {
                     outcome.messages.push(message);
                     Invalidation::Paint
-                })
-                .unwrap_or(Invalidation::None),
-            UiEvent::TextMoveEnd { extend_selection } => self
-                .edit_focused_text(state, |editor| editor.move_end(extend_selection))
-                .map(|message| {
+                } else {
+                    self.move_document_boundary(state, false, false, extend_selection)
+                }
+            }
+            UiEvent::TextMoveEnd { extend_selection } => {
+                if let Some(message) =
+                    self.edit_focused_text(state, |editor| editor.move_end(extend_selection))
+                {
                     outcome.messages.push(message);
                     Invalidation::Paint
-                })
-                .unwrap_or(Invalidation::None),
-            UiEvent::TextSelectAll => self
-                .edit_focused_text(state, TextEditor::select_all)
-                .map(|message| {
+                } else {
+                    self.move_document_boundary(state, true, false, extend_selection)
+                }
+            }
+            UiEvent::TextMoveDocumentHome { extend_selection } => {
+                self.move_document_boundary(state, false, true, extend_selection)
+            }
+            UiEvent::TextMoveDocumentEnd { extend_selection } => {
+                self.move_document_boundary(state, true, true, extend_selection)
+            }
+            UiEvent::TextSelectAll => {
+                if let Some(message) = self.edit_focused_text(state, TextEditor::select_all) {
                     outcome.messages.push(message);
                     Invalidation::Paint
-                })
-                .unwrap_or(Invalidation::None),
+                } else if let Some(owner) = state.selection_owner().cloned()
+                    && let Some(region) = self.selection_region(&owner)
+                {
+                    *state.document_selection_mut(owner) = region.document.select_all();
+                    Invalidation::Paint
+                } else {
+                    Invalidation::None
+                }
+            }
             UiEvent::TextCopy => {
                 outcome.clipboard_text = self.selected_text(state);
                 Invalidation::None
@@ -3282,6 +3567,7 @@ impl<Message: Clone> UiTree<Message> {
                     Invalidation::Layout
                 })
                 .unwrap_or(Invalidation::None),
+            UiEvent::SelectionClear => state.clear_document_selection(),
             UiEvent::CaretBlink => state.toggle_caret(),
             UiEvent::FocusLost => state.focus_lost(),
             UiEvent::Suspended => state.suspended(),
@@ -3307,6 +3593,86 @@ impl<Message: Clone> UiTree<Message> {
     fn focused_editor<'a>(&self, state: &'a UiStateStore) -> Option<&'a TextEditor> {
         let id = state.focused()?;
         state.state(id)?.editor.as_ref()
+    }
+
+    fn move_document_selection(
+        &self,
+        state: &mut UiStateStore,
+        direction: isize,
+        word: bool,
+        extend: bool,
+    ) -> Invalidation {
+        let Some(owner) = state.selection_owner().cloned() else {
+            return Invalidation::None;
+        };
+        let Some(region) = self.selection_region(&owner) else {
+            return Invalidation::None;
+        };
+        let selection = state
+            .document_selection(&owner)
+            .cloned()
+            .unwrap_or_default();
+        let current = if !extend {
+            region.document.normalized(&selection).map(|(start, end)| {
+                if direction.is_negative() { start } else { end }
+            })
+        } else {
+            selection.focus.clone()
+        }
+        .or_else(|| region.document.document_boundary(!direction.is_negative()));
+        let Some(current) = current else {
+            return Invalidation::None;
+        };
+        let next = if word {
+            region.document.move_word(&current, direction)
+        } else {
+            region.document.move_grapheme(&current, direction)
+        }
+        .unwrap_or_else(|| current.clone());
+        let selection = state.document_selection_mut(owner);
+        if !extend {
+            selection.anchor = Some(next.clone());
+        } else if selection.anchor.is_none() {
+            selection.anchor = Some(current);
+        }
+        selection.focus = Some(next);
+        Invalidation::Paint
+    }
+
+    fn move_document_boundary(
+        &self,
+        state: &mut UiStateStore,
+        end: bool,
+        document: bool,
+        extend: bool,
+    ) -> Invalidation {
+        let Some(owner) = state.selection_owner().cloned() else {
+            return Invalidation::None;
+        };
+        let Some(region) = self.selection_region(&owner) else {
+            return Invalidation::None;
+        };
+        let current = state
+            .document_selection(&owner)
+            .and_then(|selection| selection.focus.clone())
+            .or_else(|| region.document.document_boundary(end));
+        let Some(current) = current else {
+            return Invalidation::None;
+        };
+        let next = if document {
+            region.document.document_boundary(end)
+        } else {
+            region.document.block_boundary(&current, end)
+        }
+        .unwrap_or_else(|| current.clone());
+        let selection = state.document_selection_mut(owner);
+        if !extend {
+            selection.anchor = Some(next.clone());
+        } else if selection.anchor.is_none() {
+            selection.anchor = Some(current);
+        }
+        selection.focus = Some(next);
+        Invalidation::Paint
     }
 
     fn move_focus(&self, state: &mut UiStateStore, direction: isize) -> Invalidation {
@@ -3785,6 +4151,163 @@ fn measure_element<Message>(element: &Element<Message>, constraints: Constraints
     ))
 }
 
+fn collect_selection_regions<Message>(
+    root: &Element<Message>,
+    resolved: &ResolvedLayout,
+) -> Vec<SelectionRegionLayout> {
+    fn visit<Message>(
+        element: &Element<Message>,
+        node_index: usize,
+        resolved: &ResolvedLayout,
+        builders: &mut Vec<SelectionRegionBuilder>,
+        active: Option<usize>,
+        excluded: bool,
+    ) {
+        let node = &resolved.nodes[node_index];
+        let active = if element.style.selection_region {
+            builders.push(SelectionRegionBuilder {
+                id: node.id.clone(),
+                rect: node.content,
+                supplied: element.style.selection_document.clone(),
+                runs: Vec::new(),
+                logical_runs: Vec::new(),
+            });
+            Some(builders.len() - 1)
+        } else {
+            active
+        };
+        let excluded = excluded
+            || element.message.is_some()
+            || element.text_mapper.is_some()
+            || matches!(element.kind, Kind::Slider { .. } | Kind::Dropdown { .. });
+        if let Some(region_index) = active
+            && !excluded
+            && element.style.selectable != Some(false)
+            && let Kind::Text {
+                value,
+                scale,
+                bold,
+                wrap,
+                line_height,
+                max_lines,
+                ..
+            } = &element.kind
+        {
+            let run_id = element
+                .style
+                .selection_run_id
+                .clone()
+                .unwrap_or_else(|| node.id.as_str().to_owned());
+            let text = value.clone();
+            let glyphs = shape_selection_glyphs(
+                &text,
+                node.content,
+                node.clip,
+                *scale,
+                *bold,
+                *wrap,
+                *line_height,
+                *max_lines,
+                element.style.text_align,
+            );
+            builders[region_index].logical_runs.push(SelectionRun {
+                id: run_id.clone(),
+                text: text.clone(),
+                boundary_before: element.style.selection_boundary,
+            });
+            builders[region_index].runs.push(SelectionRunGeometry {
+                node_index,
+                run_id,
+                glyphs,
+            });
+        }
+        for (&child_index, child) in node.children.iter().zip(&element.children) {
+            visit(child, child_index, resolved, builders, active, excluded);
+        }
+    }
+
+    let mut builders = Vec::new();
+    visit(root, 0, resolved, &mut builders, None, false);
+    builders
+        .into_iter()
+        .map(|builder| SelectionRegionLayout {
+            id: builder.id,
+            rect: builder.rect,
+            document: builder
+                .supplied
+                .unwrap_or_else(|| Arc::new(SelectionDocument::new(builder.logical_runs))),
+            runs: builder.runs,
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn shape_selection_glyphs(
+    text: &str,
+    rect: Rect,
+    clip: Option<Rect>,
+    scale: f32,
+    bold: bool,
+    wrap: bool,
+    line_height: Option<f32>,
+    max_lines: Option<usize>,
+    align: TextAlign,
+) -> Vec<SelectionGlyph> {
+    let font_size = text_font_size(scale);
+    let line_height = line_height.unwrap_or(font_size * 1.3).max(1.0);
+    let mut line_bases = Vec::new();
+    let mut base = 0;
+    for line in text.split_inclusive('\n') {
+        line_bases.push(base);
+        base += line.len();
+    }
+    if line_bases.is_empty() {
+        line_bases.push(0);
+    }
+    TEXT_MEASURER.with(|measurer| {
+        let mut measurer = measurer.borrow_mut();
+        let font_system = &mut measurer.0;
+        let mut buffer = Buffer::new(font_system, Metrics::new(font_size, line_height));
+        buffer.set_wrap(if wrap { Wrap::WordOrGlyph } else { Wrap::None });
+        buffer.set_size(wrap.then_some(rect.size.width.max(1.0)), None);
+        let mut attrs = Attrs::new().family(Family::SansSerif);
+        if bold {
+            attrs = attrs.weight(Weight::BOLD);
+        }
+        buffer.set_text(text, &attrs, Shaping::Advanced, None);
+        buffer.shape_until_scroll(font_system, false);
+        let mut glyphs = Vec::new();
+        for run in buffer.layout_runs().take(max_lines.unwrap_or(usize::MAX)) {
+            let align_offset = match align {
+                TextAlign::Start => 0.0,
+                TextAlign::Center => (rect.size.width - run.line_w).max(0.0) * 0.5,
+                TextAlign::End => (rect.size.width - run.line_w).max(0.0),
+            };
+            let line_base = line_bases.get(run.line_i).copied().unwrap_or(0);
+            for glyph in run.glyphs {
+                let glyph_rect = Rect::new(
+                    rect.origin.x + align_offset + glyph.x,
+                    rect.origin.y + run.line_top,
+                    glyph.w.max(1.0),
+                    run.line_height,
+                );
+                let visible = clip
+                    .and_then(|clip| intersection(glyph_rect, clip))
+                    .or_else(|| clip.is_none().then_some(glyph_rect));
+                if let Some(rect) = visible {
+                    glyphs.push(SelectionGlyph {
+                        rect,
+                        start: line_base + glyph.start,
+                        end: line_base + glyph.end,
+                        rtl: glyph.level.is_rtl(),
+                    });
+                }
+            }
+        }
+        glyphs
+    })
+}
+
 fn emit_element<Message: Clone>(
     element: &Element<Message>,
     node_index: usize,
@@ -3878,6 +4401,13 @@ fn emit_element<Message: Clone>(
         || element.style.overflow_y != Overflow::Visible;
     if clips_descendants {
         tree.commands.push(PaintCommand::PushClip(rect));
+    }
+    if let Some(rects) = tree.selection_paints.get(&node_index) {
+        tree.commands
+            .extend(rects.iter().map(|rect| PaintCommand::Fill {
+                rect: *rect,
+                color: 0x315a8f,
+            }));
     }
     if let Kind::Text {
         scale,
@@ -5559,6 +6089,109 @@ mod tests {
                 .invalidation,
             Invalidation::Paint
         );
+    }
+
+    #[test]
+    fn document_selection_crosses_text_runs_and_skips_buttons() {
+        let build = |state: &mut UiStateStore| {
+            UiTree::layout_with_state(
+                SelectionRegion::automatic().id("document").child(
+                    Column::new()
+                        .gap(8.0)
+                        .child(
+                            Text::new("First")
+                                .id("first")
+                                .selection_boundary(TextBoundary::Block),
+                        )
+                        .child(Button::new(TestMessage::Named("button"), "Excluded").id("button"))
+                        .child(
+                            Text::new("Second")
+                                .id("second")
+                                .selection_boundary(TextBoundary::Block),
+                        ),
+                ),
+                Rect::new(0.0, 0.0, 240.0, 140.0),
+                state,
+            )
+        };
+
+        let mut state = UiStateStore::default();
+        let tree = build(&mut state);
+        let first = tree
+            .resolved_layout()
+            .find(&UiId::from("root/document/#0/first"))
+            .expect("first text")
+            .allocated;
+        let second = tree
+            .resolved_layout()
+            .find(&UiId::from("root/document/#0/second"))
+            .expect("second text")
+            .allocated;
+        tree.handle_event(
+            &mut state,
+            UiEvent::PointerPressed(Point {
+                x: first.origin.x + 1.0,
+                y: first.origin.y + first.size.height * 0.5,
+            }),
+        );
+        tree.handle_event(
+            &mut state,
+            UiEvent::PointerMoved(Point {
+                x: second.origin.x + second.size.width - 1.0,
+                y: second.origin.y + second.size.height * 0.5,
+            }),
+        );
+        let release = tree.handle_event(
+            &mut state,
+            UiEvent::PointerReleased(Point {
+                x: second.origin.x + second.size.width - 1.0,
+                y: second.origin.y + second.size.height * 0.5,
+            }),
+        );
+        assert!(release.messages.is_empty());
+        assert_eq!(tree.selected_text(&state).as_deref(), Some("First\nSecond"));
+        tree.handle_event(&mut state, UiEvent::TextSelectAll);
+        let copied = tree.handle_event(&mut state, UiEvent::TextCopy);
+        assert_eq!(copied.clipboard_text.as_deref(), Some("First\nSecond"));
+        let cut = tree.handle_event(&mut state, UiEvent::TextCut);
+        assert!(cut.clipboard_text.is_none());
+        assert!(cut.messages.is_empty());
+
+        let selected = build(&mut state);
+        assert!(
+            selected
+                .commands()
+                .iter()
+                .filter(|command| matches!(
+                    command,
+                    PaintCommand::Fill {
+                        color: 0x315a8f,
+                        ..
+                    }
+                ))
+                .count()
+                >= 2
+        );
+
+        let button = selected
+            .message_rect(&TestMessage::Named("button"))
+            .expect("button bounds");
+        selected.handle_event(
+            &mut state,
+            UiEvent::PointerPressed(Point {
+                x: button.origin.x + 2.0,
+                y: button.origin.y + 2.0,
+            }),
+        );
+        let activated = selected.handle_event(
+            &mut state,
+            UiEvent::PointerReleased(Point {
+                x: button.origin.x + 2.0,
+                y: button.origin.y + 2.0,
+            }),
+        );
+        assert_eq!(activated.messages, vec![TestMessage::Named("button")]);
+        assert!(state.selection_owner().is_none());
     }
 
     #[test]
