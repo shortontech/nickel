@@ -57,7 +57,7 @@ fn usage() -> &'static str {
     "nickel-codex-test probe [--backend auto|installed|bundled|PATH]\n\
      nickel-codex-test replay SCENARIO.json\n\
      nickel-codex-test account|models|threads [--backend ...]\n\
-     nickel-codex-test start-thread --cwd PATH [--model MODEL]\n\
+     nickel-codex-test start-thread --cwd PATH [--model MODEL] [--text TEXT]\n\
      nickel-codex-test resume-thread THREAD_ID\n\
      nickel-codex-test turn THREAD_ID --text TEXT\n\
      nickel-codex-test interrupt THREAD_ID TURN_ID"
@@ -132,13 +132,35 @@ fn live(command: &str, args: &[String]) -> ExitCode {
         Err(error) => return failure(4, "protocol_failure", error),
     };
     let events = client.subscribe();
+    if command == "turn" {
+        let values = positional(args);
+        let Some(thread_id) = values.first() else {
+            client.shutdown();
+            return failure(2, "invalid_usage", "turn requires THREAD_ID");
+        };
+        if let Err(error) = client.resume_thread(ThreadId((**thread_id).clone())) {
+            client.shutdown();
+            return failure(4, "operation_failed", error);
+        }
+    }
     let result = backend_operation(&client, command, args, cwd);
     match result {
         Ok(value) => {
-            emit("result", value);
-            if command == "turn" {
-                let values = positional(args);
-                let thread = ThreadId(values.first().map(|id| (**id).clone()).unwrap_or_default());
+            emit("result", value.clone());
+            let streams_turn = command == "turn"
+                || (command == "start-thread" && option(args, "--text").is_some());
+            if streams_turn {
+                let thread = if command == "turn" {
+                    let values = positional(args);
+                    ThreadId(values.first().map(|id| (**id).clone()).unwrap_or_default())
+                } else {
+                    ThreadId(
+                        value["thread"]["id"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_owned(),
+                    )
+                };
                 let turn = client.projection().active_turn;
                 match stream_turn(&client, events, thread, turn) {
                     Ok(status) if status == "interrupted" => {
@@ -181,12 +203,22 @@ fn backend_operation(
                 limit: Some(100),
             })
             .and_then(|page| json_value(page.threads)),
-        "start-thread" => backend
-            .start_thread(StartThread {
+        "start-thread" => {
+            let thread = backend.start_thread(StartThread {
                 cwd,
                 model: option(args, "--model").map(Into::into),
-            })
-            .and_then(json_value),
+            })?;
+            if option(args, "--text").is_some() {
+                let text = turn_text(args)?;
+                let turn = backend.start_turn(StartTurn {
+                    thread_id: thread.id.clone(),
+                    text,
+                })?;
+                json_value(json!({"thread": thread, "turn": turn}))
+            } else {
+                json_value(thread)
+            }
+        }
         "resume-thread" => match positional(args).first() {
             Some(id) => backend
                 .resume_thread(ThreadId((**id).clone()))
@@ -403,6 +435,15 @@ mod tests {
             ("models", vec![]),
             ("threads", vec![]),
             ("start-thread", vec!["--cwd".into(), "/fixture".into()]),
+            (
+                "start-thread",
+                vec![
+                    "--cwd".into(),
+                    "/fixture".into(),
+                    "--text".into(),
+                    "first turn".into(),
+                ],
+            ),
             ("resume-thread", vec!["known-thread".into()]),
             (
                 "turn",

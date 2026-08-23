@@ -230,6 +230,14 @@ cargo run -p nickel-codex --bin nickel-codex-test -- probe --backend installed
 schema and initialization compatibility checks; release builds retain a pinned bundled fallback. Nickel
 does not implement Codex authentication or call OpenAI subscription APIs directly.
 
+An authenticated first turn must be started on the same app-server connection that creates its thread;
+subsequent one-shot turns resume the persisted thread explicitly:
+
+```bash
+cargo run -p nickel-codex --bin nickel-codex-test -- start-thread --cwd "$PWD" --text "Hello"
+cargo run -p nickel-codex --bin nickel-codex-test -- turn THREAD_ID --text "Continue"
+```
+
 ## Contributing
 
 Before submitting a change:
