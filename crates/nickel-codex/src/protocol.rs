@@ -52,6 +52,8 @@ pub struct Thread {
     pub title: Option<String>,
     pub cwd: Option<PathBuf>,
     #[serde(default)]
+    pub last_used_at: Option<i64>,
+    #[serde(default)]
     pub turns: Vec<ThreadHistoryTurn>,
 }
 

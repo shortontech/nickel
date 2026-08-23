@@ -49,7 +49,12 @@ fn project_name(path: &Path) -> String {
 
 fn project_sections(threads: &[Thread]) -> Vec<ProjectSection<'_>> {
     let mut sections: Vec<ProjectSection<'_>> = Vec::new();
-    for thread in threads {
+    for thread in threads.iter().filter(|thread| {
+        thread
+            .cwd
+            .as_deref()
+            .is_none_or(|path| !path.starts_with("/tmp"))
+    }) {
         let key = thread.cwd.as_ref().map_or_else(
             || "other-tasks".to_owned(),
             |path| path.display().to_string(),
@@ -68,6 +73,21 @@ fn project_sections(threads: &[Thread]) -> Vec<ProjectSection<'_>> {
             threads: vec![thread],
         });
     }
+    for section in &mut sections {
+        section
+            .threads
+            .sort_by_key(|thread| std::cmp::Reverse(thread.last_used_at.unwrap_or(i64::MIN)));
+    }
+    sections.sort_by_key(|section| {
+        std::cmp::Reverse(
+            section
+                .threads
+                .iter()
+                .filter_map(|thread| thread.last_used_at)
+                .max()
+                .unwrap_or(i64::MIN),
+        )
+    });
     sections
 }
 
@@ -153,7 +173,15 @@ mod tests {
             id: ThreadId(id.into()),
             title: Some(id.into()),
             cwd: cwd.map(PathBuf::from),
+            last_used_at: None,
             turns: Vec::new(),
+        }
+    }
+
+    fn recent_thread(id: &str, cwd: Option<&str>, last_used_at: i64) -> Thread {
+        Thread {
+            last_used_at: Some(last_used_at),
+            ..thread(id, cwd)
         }
     }
 
@@ -216,5 +244,48 @@ mod tests {
             DEFAULT_TASK_LIMIT + 1
         );
         assert_eq!(sections[1].visible_threads(&state).len(), 11);
+    }
+
+    #[test]
+    fn projects_and_tasks_sort_by_recency_and_temporary_work_is_hidden() {
+        let threads = vec![
+            recent_thread("nickel-old", Some("/projects/nickel"), 10),
+            recent_thread("galen", Some("/projects/galen"), 30),
+            recent_thread("nickel-new", Some("/projects/nickel"), 20),
+            recent_thread("temporary", Some("/tmp/codex-worktree"), 100),
+            recent_thread("not-temporary", Some("/tmp-project"), 40),
+            thread("stable-a", Some("/projects/stable")),
+            thread("stable-b", Some("/projects/stable")),
+        ];
+
+        let sections = project_sections(&threads);
+        assert_eq!(
+            sections
+                .iter()
+                .map(|section| section.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["tmp-project", "galen", "nickel", "stable"]
+        );
+        assert_eq!(
+            sections[2]
+                .threads
+                .iter()
+                .map(|thread| thread.id.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["nickel-new", "nickel-old"]
+        );
+        assert_eq!(
+            sections[3]
+                .threads
+                .iter()
+                .map(|thread| thread.id.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["stable-a", "stable-b"]
+        );
+        assert!(
+            sections
+                .iter()
+                .all(|section| section.name != "codex-worktree")
+        );
     }
 }

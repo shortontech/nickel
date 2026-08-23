@@ -38,6 +38,7 @@ pub enum ChatMessage {
     DismissInput(ServerRequestId),
     ConversationScrolled(f32),
     ToggleProject(String),
+    ToggleFileMenu,
 }
 
 fn draft_changed(value: String) -> ChatMessage {
@@ -227,6 +228,7 @@ impl Application for ChatApplication {
                     self.state.expanded_projects.insert(project);
                 }
             }
+            ChatMessage::ToggleFileMenu => {}
         }
     }
 
@@ -385,9 +387,16 @@ pub fn chat_view(state: &ChatState) -> impl View<ChatMessage> {
     let transcript_range = transcript_window.range.clone();
     let transcript_document = state.transcript_selection_document();
     ui! {
-        <Row fill_width fill_height background={BACKGROUND}>
-            {sidebar::thread_sidebar(state)}
-            <Column grow={1.0} min_width={0.0} fill_height padding={Insets::all(18.0)} gap={12.0}>
+        <Column fill_width fill_height background={BACKGROUND}>
+            <MenuBar id={id!(menu_bar)}>
+                <Menu id={id!(file_menu)} on_toggle={ChatMessage::ToggleFileMenu} label={"File"}>
+                    <MenuItem label={"New conversation"} on_press={ChatMessage::NewChat} />
+                    <MenuItem label={"Refresh"} on_press={ChatMessage::Refresh} />
+                </Menu>
+            </MenuBar>
+            <Row fill_width grow={1.0} min_height={0.0}>
+                {sidebar::thread_sidebar(state)}
+                <Column grow={1.0} min_width={0.0} fill_height padding={Insets::all(18.0)} gap={12.0}>
                 <Column id={id!(conversation)} grow={1.0} fill_width gap={10.0}
                     overflow_y={Overflow::Auto} follow_scroll_end={state.conversation_pinned}
                     on_scroll={conversation_scrolled}>
@@ -445,8 +454,9 @@ pub fn chat_view(state: &ChatState) -> impl View<ChatMessage> {
                         }}
                     </Row>
                 </Column>
-            </Column>
-        </Row>
+                </Column>
+            </Row>
+        </Column>
     }
 }
 

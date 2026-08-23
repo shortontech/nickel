@@ -201,8 +201,9 @@ pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
                     } else {
                         if application.shortcut(Shortcut::Escape) {
                             scheduler.invalidate();
+                            continue;
                         }
-                        continue;
+                        UiEvent::Dismiss
                     }
                 }
                 Event::KeyDown {

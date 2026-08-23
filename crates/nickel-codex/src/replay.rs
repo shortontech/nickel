@@ -73,6 +73,7 @@ impl CodexBackend for ReplayBackend {
             id: ThreadId("fixture-thread".into()),
             title: Some("Fixture thread".into()),
             cwd: Some(request.cwd),
+            last_used_at: None,
             turns: Vec::new(),
         })
     }

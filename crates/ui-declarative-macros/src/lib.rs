@@ -223,6 +223,32 @@ fn expand_element(mut element: ElementNode) -> Result<TokenStream2> {
             let label = expand_raw_child(element.children.remove(0))?;
             quote! { ::nickel_ui::Button::new(#message, #label) }
         }
+        "Menu" => {
+            let toggle = required_value(&mut element.attributes, "on_toggle", tag.span())?;
+            let label = required_value(&mut element.attributes, "label", tag.span())?;
+            let items = element
+                .children
+                .drain(..)
+                .map(|child| match child {
+                    Node::Element(mut item) if item.tag == "MenuItem" => {
+                        let item_label =
+                            required_value(&mut item.attributes, "label", item.tag.span())?;
+                        if take_attribute(&mut item.attributes, "disabled").is_some() {
+                            Ok(quote! { ::nickel_ui::MenuItem::disabled(#item_label) })
+                        } else {
+                            let message =
+                                required_value(&mut item.attributes, "on_press", item.tag.span())?;
+                            Ok(quote! { ::nickel_ui::MenuItem::new(#item_label, #message) })
+                        }
+                    }
+                    _ => Err(Error::new(
+                        tag.span(),
+                        "`Menu` children must be `MenuItem` elements",
+                    )),
+                })
+                .collect::<Result<Vec<_>>>()?;
+            quote! { ::nickel_ui::Menu::new(#toggle, #label, [#(#items),*]) }
+        }
         "Slider" => {
             let value = required_value(&mut element.attributes, "value", tag.span())?;
             let mapper = required_value(&mut element.attributes, "on_change", tag.span())?;
@@ -338,7 +364,7 @@ fn expand_element(mut element: ElementNode) -> Result<TokenStream2> {
             }
             quote! { ::nickel_ui::Image::new(#asset_id, #image) }
         }
-        "Column" | "Row" | "Container" | "Grid" | "Fragment" => {
+        "Column" | "Row" | "Container" | "Grid" | "Fragment" | "MenuBar" => {
             quote! { ::nickel_ui::#tag::new() }
         }
         "Spacer" => quote! { ::nickel_ui::Spacer::new() },

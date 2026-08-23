@@ -28,10 +28,11 @@ pub use ui::{
     AccessibilityNode, AnyView, Background, Border, Button, ButtonLabel, Color, Column, Component,
     ComponentBuilderExt, Container, ContentPane, DiagnosticKind, Dropdown, EventOutcome, FileGrid,
     FileGridItem, GradientAxis, Grid, GridColumnSpec, Header, HorizontalRule, Image,
-    InteractionState, LayoutDiagnostic, LinearGradient, PaintCommand, RadioButton, ResolvedGrid,
-    ResolvedLayout, ResolvedNode, Row, ScrollExtent, SelectionRegion, ShoulderHints, Sidebar,
-    SidebarFolder, SidebarItem, SidebarSection, Slider, SourceLocation, Spacer, Text, TextAlign,
-    TextField, Tone, UiEvent, UiTree, VerticalScroll, VirtualColumn, VirtualWindow,
+    InteractionState, LayoutDiagnostic, LinearGradient, Menu, MenuBar, MenuItem, PaintCommand,
+    RadioButton, ResolvedGrid, ResolvedLayout, ResolvedNode, Row, ScrollExtent, SelectionRegion,
+    ShoulderHints, Sidebar, SidebarFolder, SidebarItem, SidebarSection, Slider, SourceLocation,
+    Spacer, Text, TextAlign, TextField, Tone, UiEvent, UiTree, VerticalScroll, VirtualColumn,
+    VirtualWindow,
 };
 pub use ui_declarative_macros::{component, id, ui};
 
@@ -45,9 +46,10 @@ pub mod prelude {
     pub use crate::{
         Align, AnyView, Application, Background, Border, Button, Color, Column, Component,
         ComponentBuilderExt, Container, DiagnosticKind, Dropdown, Fragment, Grid, GridColumnSpec,
-        Insets, Justify, Length, Overflow, RadioButton, Row, SelectionRegion, Shortcut, Slider,
-        Spacer, Text, TextAlign, TextBoundary, TextField, Tone, Track, UiEvent, UiId, UiStateStore,
-        View, VirtualColumn, VirtualWindow, component, id, run, ui,
+        Insets, Justify, Length, Menu, MenuBar, MenuItem, Overflow, RadioButton, Row,
+        SelectionRegion, Shortcut, Slider, Spacer, Text, TextAlign, TextBoundary, TextField, Tone,
+        Track, UiEvent, UiId, UiStateStore, View, VirtualColumn, VirtualWindow, component, id, run,
+        ui,
     };
 }
 
@@ -59,9 +61,26 @@ mod declarative_tests {
     #[derive(Clone, Debug, PartialEq)]
     enum Message {
         Save,
+        ToggleMenu,
         Select(u32),
         Volume(f32),
         Query(String),
+    }
+
+    #[test]
+    fn declarative_menu_preserves_typed_item_messages() {
+        let tree = UiTree::layout(
+            ui! {
+                <MenuBar>
+                    <Menu id={id!(file_menu)} on_toggle={Message::ToggleMenu} label={"File"}>
+                        <MenuItem label={"Save"} on_press={Message::Save} />
+                        <MenuItem label={"Unavailable"} disabled />
+                    </Menu>
+                </MenuBar>
+            },
+            Rect::new(0.0, 0.0, 240.0, 120.0),
+        );
+        assert!(tree.message_rect(&Message::ToggleMenu).is_some());
     }
 
     fn volume(value: f32) -> Message {

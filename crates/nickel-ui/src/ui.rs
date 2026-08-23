@@ -88,6 +88,7 @@ pub enum UiEvent {
     TextCut,
     TextPaste(String),
     SelectionClear,
+    Dismiss,
     CaretBlink,
     FocusLost,
     Suspended,
@@ -355,6 +356,7 @@ enum Kind {
         selected: String,
         options: Vec<String>,
         expanded: bool,
+        overlay: bool,
         background: Color,
         option_background: Color,
         foreground: Color,
@@ -413,7 +415,7 @@ pub struct Element<Message = String> {
     message: Option<Message>,
     message_mapper: Option<fn(f32) -> Message>,
     text_mapper: Option<fn(String) -> Message>,
-    option_messages: Vec<Message>,
+    option_messages: Vec<Option<Message>>,
     children: Vec<Element<Message>>,
 }
 
@@ -663,7 +665,11 @@ impl<Message> Element<Message> {
             message: self.message.map(&mut *map),
             message_mapper: None,
             text_mapper: None,
-            option_messages: self.option_messages.into_iter().map(&mut *map).collect(),
+            option_messages: self
+                .option_messages
+                .into_iter()
+                .map(|message| message.map(&mut *map))
+                .collect(),
             children: self
                 .children
                 .into_iter()
@@ -2574,7 +2580,7 @@ impl<Message> Dropdown<Message> {
     ) -> Self {
         let (options, option_messages): (Vec<_>, Vec<_>) = options
             .into_iter()
-            .map(|(label, message)| (label.into(), message))
+            .map(|(label, message)| (label.into(), Some(message)))
             .unzip();
         let mut element = Element {
             id: None,
@@ -2583,6 +2589,7 @@ impl<Message> Dropdown<Message> {
                 selected: selected.into(),
                 options,
                 expanded: false,
+                overlay: false,
                 background: 0x27344c,
                 option_background: 0x34445f,
                 foreground: 0xf4f7ff,
@@ -2650,6 +2657,127 @@ impl<Message> Dropdown<Message> {
 impl<Message> Component<Message> for Dropdown<Message> {
     fn into_element(self) -> Element<Message> {
         self.0
+    }
+}
+
+pub struct MenuItem<Message = String> {
+    label: String,
+    message: Option<Message>,
+}
+
+impl<Message> MenuItem<Message> {
+    pub fn new(label: impl Into<String>, message: Message) -> Self {
+        Self {
+            label: label.into(),
+            message: Some(message),
+        }
+    }
+
+    pub fn disabled(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            message: None,
+        }
+    }
+}
+
+pub struct Menu<Message = String>(Element<Message>);
+
+impl<Message> Menu<Message> {
+    pub fn new(
+        toggle_message: Message,
+        label: impl Into<String>,
+        items: impl IntoIterator<Item = MenuItem<Message>>,
+    ) -> Self {
+        let items = items.into_iter().collect::<Vec<_>>();
+        let mut element = Element {
+            id: None,
+            source: None,
+            kind: Kind::Dropdown {
+                selected: label.into(),
+                options: items.iter().map(|item| item.label.clone()).collect(),
+                expanded: false,
+                overlay: true,
+                background: 0x171b22,
+                option_background: 0x202630,
+                foreground: 0xe8edf4,
+            },
+            style: Style::default(),
+            message: Some(toggle_message),
+            message_mapper: None,
+            text_mapper: None,
+            option_messages: items.into_iter().map(|item| item.message).collect(),
+            children: Vec::new(),
+        };
+        element.style.height = Length::Px(30.0);
+        Self(element)
+    }
+
+    pub fn id(mut self, id: impl Into<UiId>) -> Self {
+        self.0 = self.0.id(id);
+        self
+    }
+
+    pub fn width(mut self, width: f32) -> Self {
+        self.0 = self.0.width(width);
+        self
+    }
+
+    pub fn colors(
+        mut self,
+        background: Color,
+        option_background: Color,
+        foreground: Color,
+    ) -> Self {
+        if let Kind::Dropdown {
+            background: header,
+            option_background: options,
+            foreground: text,
+            ..
+        } = &mut self.0.kind
+        {
+            *header = background;
+            *options = option_background;
+            *text = foreground;
+        }
+        self
+    }
+}
+
+impl<Message> Component<Message> for Menu<Message> {
+    fn into_element(self) -> Element<Message> {
+        self.0
+    }
+}
+
+pub struct MenuBar<Message = String>(Row<Message>);
+
+impl<Message> MenuBar<Message> {
+    pub fn new() -> Self {
+        Self(Row::new().height(30.0).background(0x171b22))
+    }
+    pub fn child(mut self, child: impl Component<Message>) -> Self {
+        self.0 = self.0.child(child);
+        self
+    }
+    pub fn id(mut self, id: impl Into<UiId>) -> Self {
+        self.0 = self.0.id(id);
+        self
+    }
+    pub fn background(mut self, background: impl Into<Background>) -> Self {
+        self.0 = self.0.background(background);
+        self
+    }
+}
+
+impl<Message> Default for MenuBar<Message> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl<Message> Component<Message> for MenuBar<Message> {
+    fn into_element(self) -> Element<Message> {
+        self.0.into_element()
     }
 }
 
@@ -2947,6 +3075,7 @@ impl ResolvedLayout {
 #[derive(Clone, Debug)]
 pub struct UiTree<Message = String> {
     commands: Vec<PaintCommand>,
+    overlay_commands: Vec<PaintCommand>,
     hits: Vec<HitRegion<Message>>,
     messages: Vec<MessageRegion<Message>>,
     text_inputs: Vec<TextInputRegion<Message>>,
@@ -2966,6 +3095,7 @@ impl<Message> Default for UiTree<Message> {
     fn default() -> Self {
         Self {
             commands: Vec::new(),
+            overlay_commands: Vec::new(),
             hits: Vec::new(),
             messages: Vec::new(),
             text_inputs: Vec::new(),
@@ -3091,6 +3221,7 @@ impl<Message: Clone> UiTree<Message> {
         tree.prepare_selection_paints(state);
         tree.reset_emission();
         emit_element(&root, 0, None, &mut tree);
+        tree.commands.append(&mut tree.overlay_commands);
         tree.emit_accessibility_geometry();
         tree.validate_clip_commands();
         for scroll in &tree.scrolls {
@@ -3117,6 +3248,7 @@ impl<Message: Clone> UiTree<Message> {
         tree.selection_regions = collect_selection_regions(&root, &tree.resolved);
         tree.reset_emission();
         emit_element(&root, 0, None, &mut tree);
+        tree.commands.append(&mut tree.overlay_commands);
         tree.emit_accessibility_geometry();
         tree.validate_clip_commands();
         tree
@@ -3374,6 +3506,23 @@ impl<Message: Clone> UiTree<Message> {
                 invalidation
             }
             UiEvent::PointerPressed(point) => {
+                let clicked = self.id_at(point).map(UiId::as_str);
+                let mut dismissed = Invalidation::None;
+                for node in self
+                    .resolved_layout()
+                    .nodes()
+                    .iter()
+                    .filter(|node| node.component == "Dropdown")
+                {
+                    if state
+                        .state(&node.id)
+                        .is_some_and(|entry| entry.dropdown_open)
+                        && !clicked.is_some_and(|id| id.starts_with(node.id.as_str()))
+                    {
+                        dismissed =
+                            dismissed.merge(state.set_dropdown_open(node.id.clone(), false));
+                    }
+                }
                 if let Some((region, endpoint)) = self.selection_hit_at(point) {
                     let region_id = region.id.clone();
                     let selection = state.document_selection_mut(region_id.clone());
@@ -3403,7 +3552,7 @@ impl<Message: Clone> UiTree<Message> {
                     state.editor(id, &input.initial).place_cursor(cursor);
                     invalidation = invalidation.merge(state.show_caret());
                 }
-                invalidation
+                invalidation.merge(dismissed)
             }
             UiEvent::PointerReleased(point) => {
                 let released = self.id_at(point);
@@ -3423,10 +3572,19 @@ impl<Message: Clone> UiTree<Message> {
                     let open = !state.state(&id).is_some_and(|entry| entry.dropdown_open);
                     state.set_dropdown_open(id, open)
                 });
+                let option_parent = state.captured().and_then(|id| {
+                    id.as_str()
+                        .rsplit_once("/option-")
+                        .map(|(parent, _)| UiId::from(parent.to_owned()))
+                });
+                let option_invalidation = option_parent
+                    .map(|id| state.set_dropdown_open(id, false))
+                    .unwrap_or(Invalidation::None);
                 state
                     .set_pressed(None)
                     .merge(state.set_capture(None))
                     .merge(dropdown_invalidation)
+                    .merge(option_invalidation)
             }
             UiEvent::Scroll { point, delta_y } => {
                 let Some(scroll) = self
@@ -3647,6 +3805,14 @@ impl<Message: Clone> UiTree<Message> {
                 })
                 .unwrap_or(Invalidation::None),
             UiEvent::SelectionClear => state.clear_document_selection(),
+            UiEvent::Dismiss => self
+                .resolved_layout()
+                .nodes()
+                .iter()
+                .filter(|node| node.component == "Dropdown")
+                .fold(Invalidation::None, |invalidation, node| {
+                    invalidation.merge(state.set_dropdown_open(node.id.clone(), false))
+                }),
             UiEvent::CaretBlink => state.toggle_caret(),
             UiEvent::FocusLost => state.focus_lost(),
             UiEvent::Suspended => state.suspended(),
@@ -4004,6 +4170,7 @@ impl<Message: Clone> UiTree<Message> {
 
     fn reset_emission(&mut self) {
         self.commands.clear();
+        self.overlay_commands.clear();
         self.hits.clear();
         self.messages.clear();
         self.text_inputs.clear();
@@ -4108,6 +4275,7 @@ fn measure_element<Message>(element: &Element<Message>, constraints: Constraints
             selected,
             options,
             expanded,
+            overlay,
             ..
         } => {
             let width = std::iter::once(selected)
@@ -4119,10 +4287,14 @@ fn measure_element<Message>(element: &Element<Message>, constraints: Constraints
                 + 48.0;
             Size::new(
                 width,
-                42.0 + if *expanded {
-                    options.len() as f32 * 36.0
+                if *overlay {
+                    30.0
                 } else {
-                    0.0
+                    42.0 + if *expanded {
+                        options.len() as f32 * 36.0
+                    } else {
+                        0.0
+                    }
                 },
             )
         }
@@ -4609,11 +4781,14 @@ fn emit_element<Message: Clone>(
             selected,
             options,
             expanded,
+            overlay,
             background,
             option_background,
             foreground,
         } => {
-            let header = Rect::new(rect.origin.x, rect.origin.y, rect.size.width, 42.0);
+            let header_height = if *overlay { 30.0 } else { 42.0 };
+            let option_height = if *overlay { 34.0 } else { 36.0 };
+            let header = Rect::new(rect.origin.x, rect.origin.y, rect.size.width, header_height);
             tree.commands.push(PaintCommand::Fill {
                 rect: header,
                 color: *background,
@@ -4634,7 +4809,7 @@ fn emit_element<Message: Clone>(
             tree.commands.push(PaintCommand::Text {
                 bounds: Rect::new(
                     header.origin.x + header.size.width - 32.0,
-                    header.origin.y + 10.0,
+                    header.origin.y + if *overlay { 5.0 } else { 10.0 },
                     20.0,
                     22.0,
                 ),
@@ -4648,15 +4823,20 @@ fn emit_element<Message: Clone>(
                 for (index, option) in options.iter().enumerate() {
                     let option_rect = Rect::new(
                         rect.origin.x,
-                        rect.origin.y + 42.0 + index as f32 * 36.0,
+                        rect.origin.y + header_height + index as f32 * option_height,
                         rect.size.width,
-                        36.0,
+                        option_height,
                     );
-                    tree.commands.push(PaintCommand::Fill {
+                    let commands = if *overlay {
+                        &mut tree.overlay_commands
+                    } else {
+                        &mut tree.commands
+                    };
+                    commands.push(PaintCommand::Fill {
                         rect: option_rect,
                         color: *option_background,
                     });
-                    tree.commands.push(PaintCommand::Text {
+                    commands.push(PaintCommand::Text {
                         bounds: option_rect.inset(Insets {
                             top: 7.0,
                             right: 12.0,
@@ -4669,7 +4849,7 @@ fn emit_element<Message: Clone>(
                         align: TextAlign::Start,
                         bold: false,
                     });
-                    if let Some(message) = element.option_messages.get(index) {
+                    if let Some(Some(message)) = element.option_messages.get(index) {
                         let option_id = node.id.scoped(format!("option-{index}"));
                         tree.messages.push(MessageRegion {
                             id: option_id.clone(),
@@ -5206,10 +5386,15 @@ fn apply_transient_state<Message>(
         match &mut element.kind {
             Kind::VerticalScroll { offset } => *offset = scroll_offset.max(0.0),
             Kind::Dropdown {
-                expanded, options, ..
+                expanded,
+                options,
+                overlay,
+                ..
             } => {
                 *expanded = dropdown_open;
-                element.style.height = Length::Px(if *expanded {
+                element.style.height = Length::Px(if *overlay {
+                    30.0
+                } else if *expanded {
                     42.0 + options.len() as f32 * 36.0
                 } else {
                     42.0
@@ -6639,6 +6824,96 @@ mod tests {
                 .expect("scroll extent")
                 .offset,
             30.0
+        );
+    }
+
+    #[test]
+    fn application_menu_overlays_content_selects_items_and_dismisses() {
+        let build = |state: &mut UiStateStore| {
+            UiTree::layout_with_state(
+                Column::new()
+                    .child(
+                        MenuBar::new().id("bar").child(
+                            Menu::new(
+                                TestMessage::Named("toggle"),
+                                "File",
+                                [
+                                    MenuItem::new("New", TestMessage::Named("new")),
+                                    MenuItem::disabled("Unavailable"),
+                                ],
+                            )
+                            .id("file"),
+                        ),
+                    )
+                    .child(Container::new().id("body").height(100.0)),
+                Rect::new(0.0, 0.0, 240.0, 160.0),
+                state,
+            )
+        };
+        let mut state = UiStateStore::default();
+        let closed = build(&mut state);
+        let body_y = closed
+            .resolved_layout()
+            .find(&UiId::from("root/body"))
+            .unwrap()
+            .allocated
+            .origin
+            .y;
+        closed.handle_event(
+            &mut state,
+            UiEvent::PointerPressed(Point { x: 10.0, y: 10.0 }),
+        );
+        closed.handle_event(
+            &mut state,
+            UiEvent::PointerReleased(Point { x: 10.0, y: 10.0 }),
+        );
+
+        let open = build(&mut state);
+        assert_eq!(
+            open.resolved_layout()
+                .find(&UiId::from("root/body"))
+                .unwrap()
+                .allocated
+                .origin
+                .y,
+            body_y
+        );
+        assert_eq!(
+            open.message_at(Point { x: 10.0, y: 47.0 }),
+            Some(&TestMessage::Named("new"))
+        );
+        assert_eq!(open.message_at(Point { x: 10.0, y: 81.0 }), None);
+        open.handle_event(
+            &mut state,
+            UiEvent::PointerPressed(Point { x: 10.0, y: 47.0 }),
+        );
+        let selected = open.handle_event(
+            &mut state,
+            UiEvent::PointerReleased(Point { x: 10.0, y: 47.0 }),
+        );
+        assert_eq!(selected.messages, vec![TestMessage::Named("new")]);
+        assert!(
+            !state
+                .state(&UiId::from("root/bar/file"))
+                .unwrap()
+                .dropdown_open
+        );
+
+        let reopened = build(&mut state);
+        reopened.handle_event(
+            &mut state,
+            UiEvent::PointerPressed(Point { x: 10.0, y: 10.0 }),
+        );
+        reopened.handle_event(
+            &mut state,
+            UiEvent::PointerReleased(Point { x: 10.0, y: 10.0 }),
+        );
+        build(&mut state).handle_event(&mut state, UiEvent::Dismiss);
+        assert!(
+            !state
+                .state(&UiId::from("root/bar/file"))
+                .unwrap()
+                .dropdown_open
         );
     }
 

@@ -97,6 +97,7 @@ mod tests {
                 id: ThreadId("new-thread".into()),
                 title: Some("Untitled conversation".into()),
                 cwd: None,
+                last_used_at: None,
                 turns: Vec::new(),
             }),
         );
@@ -204,6 +205,7 @@ mod tests {
                 id: thread_id.clone(),
                 title: Some("Persisted".into()),
                 cwd: None,
+                last_used_at: None,
                 turns: vec![nickel_codex::ThreadHistoryTurn {
                     id: TurnId("turn".into()),
                     status: "completed".into(),
@@ -280,6 +282,33 @@ mod tests {
     }
 
     #[test]
+    fn file_menu_exposes_existing_new_and_refresh_actions() {
+        let state = ChatState::default();
+        let mut ui_state = UiStateStore::default();
+        let closed = UiTree::layout_with_state(
+            view::chat_view(&state),
+            Rect::new(0.0, 0.0, 900.0, 640.0),
+            &mut ui_state,
+        );
+        let toggle = closed
+            .message_rect(&ChatMessage::ToggleFileMenu)
+            .expect("File menu");
+        let point = Point {
+            x: toggle.origin.x + 4.0,
+            y: toggle.origin.y + 4.0,
+        };
+        closed.handle_event(&mut ui_state, UiEvent::PointerPressed(point));
+        closed.handle_event(&mut ui_state, UiEvent::PointerReleased(point));
+        let open = UiTree::layout_with_state(
+            view::chat_view(&state),
+            Rect::new(0.0, 0.0, 900.0, 640.0),
+            &mut ui_state,
+        );
+        assert!(open.message_rect(&ChatMessage::NewChat).is_some());
+        assert!(open.message_rect(&ChatMessage::Refresh).is_some());
+    }
+
+    #[test]
     fn grouped_sidebar_scrolls_without_crushing_header_or_actions() {
         let mut state = ChatState::default();
         state.status = ConnectionStatus::Ready;
@@ -295,6 +324,7 @@ mod tests {
                     }
                     .into(),
                 ),
+                last_used_at: Some(index as i64),
                 turns: Vec::new(),
             })
             .collect();
@@ -306,17 +336,21 @@ mod tests {
         );
         let title = tree
             .resolved_layout()
-            .find(&nickel_ui::UiId::from("root/thread-sidebar/sidebar-title"))
+            .find(&nickel_ui::UiId::from(
+                "root/#1/thread-sidebar/sidebar-title",
+            ))
             .expect("sidebar title");
         let actions = tree
             .resolved_layout()
             .find(&nickel_ui::UiId::from(
-                "root/thread-sidebar/sidebar-actions",
+                "root/#1/thread-sidebar/sidebar-actions",
             ))
             .expect("sidebar actions");
         let projects = tree
             .resolved_layout()
-            .find(&nickel_ui::UiId::from("root/thread-sidebar/project-list"))
+            .find(&nickel_ui::UiId::from(
+                "root/#1/thread-sidebar/project-list",
+            ))
             .expect("project list");
         assert!(title.allocated.size.height > 10.0);
         assert!(actions.allocated.size.height > 10.0);
@@ -330,7 +364,7 @@ mod tests {
             .count();
         assert!(visible_tasks < 20, "{visible_tasks} task titles emitted");
 
-        let message = ChatMessage::SelectThread(ThreadId("thread-0".into()));
+        let message = ChatMessage::SelectThread(ThreadId("thread-199".into()));
         let button = tree.message_rect(&message).expect("first task button");
         let point = Point {
             x: button.origin.x + 2.0,
@@ -343,7 +377,7 @@ mod tests {
             vec![message]
         );
 
-        state.expanded_projects.insert("/projects/galen".into());
+        state.expanded_projects.insert("/projects/nickel".into());
         let expanded = UiTree::layout_with_state(
             view::chat_view(&state),
             Rect::new(0.0, 0.0, 1120.0, 600.0),
@@ -364,9 +398,11 @@ mod tests {
             Rect::new(0.0, 0.0, 1120.0, 600.0),
             &mut ui_state,
         );
-        assert!(scrolled.commands().iter().any(
-            |command| matches!(command, PaintCommand::Text { text, .. } if text == "Task 199")
-        ));
+        assert!(
+            scrolled.commands().iter().any(
+                |command| matches!(command, PaintCommand::Text { text, .. } if text == "Task 0")
+            )
+        );
     }
 
     #[test]
@@ -378,6 +414,7 @@ mod tests {
                 id: ThreadId(format!("thread-{index}")),
                 title: Some(format!("Task {index}")),
                 cwd: Some("/projects/nickel".into()),
+                last_used_at: Some(index as i64),
                 turns: Vec::new(),
             })
             .collect();
@@ -423,6 +460,7 @@ mod tests {
                 id: ThreadId(format!("thread-{index}")),
                 title: Some(format!("Conversation number {index}")),
                 cwd: None,
+                last_used_at: Some(index as i64),
                 turns: Vec::new(),
             })
             .collect();
@@ -595,7 +633,7 @@ mod tests {
         );
         let composer_viewport = rebuilt
             .resolved_layout()
-            .find(&nickel_ui::UiId::from("root/#1/composer/#0"))
+            .find(&nickel_ui::UiId::from("root/#1/#1/composer/#0"))
             .expect("composer viewport");
         assert!(composer_viewport.allocated.size.height <= 140.0);
         let extent = composer_viewport.scroll.expect("multiline scroll extent");

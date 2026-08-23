@@ -713,6 +713,10 @@ fn parse_thread(value: &Value) -> Option<Thread> {
             .and_then(Value::as_str)
             .map(Into::into),
         cwd: value.get("cwd").and_then(Value::as_str).map(Into::into),
+        last_used_at: value
+            .get("recencyAt")
+            .and_then(Value::as_i64)
+            .or_else(|| value.get("updatedAt").and_then(Value::as_i64)),
         turns: value
             .get("turns")
             .and_then(Value::as_array)
@@ -844,6 +848,24 @@ mod tests {
         assert_eq!(thread.turns[0].items[0].text, "hello");
         assert_eq!(thread.turns[0].items[1].text, "hi");
         assert_eq!(thread.turns[0].items[2].text, "$ cargo test\nok");
+    }
+
+    #[test]
+    fn thread_recency_prefers_recency_at_and_falls_back_to_updated_at() {
+        let preferred = parse_thread(&serde_json::json!({
+            "id": "preferred", "recencyAt": 30, "updatedAt": 20
+        }))
+        .expect("preferred thread");
+        let fallback = parse_thread(&serde_json::json!({
+            "id": "fallback", "updatedAt": 10
+        }))
+        .expect("fallback thread");
+        let missing =
+            parse_thread(&serde_json::json!({"id": "missing"})).expect("thread without recency");
+
+        assert_eq!(preferred.last_used_at, Some(30));
+        assert_eq!(fallback.last_used_at, Some(10));
+        assert_eq!(missing.last_used_at, None);
     }
 
     proptest! {
