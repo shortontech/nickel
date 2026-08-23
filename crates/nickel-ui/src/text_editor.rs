@@ -262,6 +262,9 @@ fn next_boundary(text: &str, cursor: usize) -> usize {
 }
 
 fn clamp_grapheme_boundary(text: &str, cursor: usize) -> usize {
+    if cursor >= text.len() {
+        return text.len();
+    }
     text.grapheme_indices(true)
         .map(|(index, _)| index)
         .take_while(|index| *index <= cursor.min(text.len()))
@@ -380,5 +383,17 @@ mod tests {
         assert_eq!(editor.text(), "hello brave ");
         editor.backspace_word();
         assert_eq!(editor.text(), "hello ");
+    }
+
+    #[test]
+    fn pointer_cursor_can_reach_the_end_of_the_final_grapheme() {
+        let mut editor = TextEditor::new("abc");
+        editor.place_cursor(0);
+        editor.place_cursor("abc".len());
+        assert_eq!(editor.cursor(), "abc".len());
+
+        let mut unicode = TextEditor::new("a🦀");
+        unicode.place_cursor("a🦀".len());
+        assert_eq!(unicode.cursor(), "a🦀".len());
     }
 }
