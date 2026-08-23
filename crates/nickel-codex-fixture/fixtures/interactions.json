@@ -1,0 +1,12 @@
+{
+  "name": "interactions",
+  "events": [
+    { "sequence": 1, "kind": { "type": "approval_requested", "request_id": "command-approval", "approval_type": "item/commandExecution/requestApproval", "summary": "Run fixture command" } },
+    { "sequence": 2, "kind": { "type": "approval_requested", "request_id": "file-approval", "approval_type": "item/fileChange/requestApproval", "summary": "Apply fixture patch" } },
+    { "sequence": 3, "kind": { "type": "user_input_requested", "request_id": "input-request", "question_ids": ["choice"] } },
+    { "sequence": 4, "kind": { "type": "command_output_delta", "item_id": "command-1", "delta": "bounded output" } },
+    { "sequence": 5, "kind": { "type": "file_change_delta", "item_id": "patch-1", "delta": "fixture patch" } },
+    { "sequence": 6, "kind": { "type": "plan_delta", "item_id": "plan-1", "delta": "fixture plan" } },
+    { "sequence": 7, "kind": { "type": "reasoning_delta", "item_id": "reasoning-1", "delta": "fixture summary" } }
+  ]
+}

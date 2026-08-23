@@ -1,0 +1,8 @@
+{
+  "name": "failure",
+  "events": [
+    { "sequence": 1, "kind": { "type": "unsupported_event", "method": "future/additive" } },
+    { "sequence": 2, "kind": { "type": "error", "message": "fixture protocol failure" } },
+    { "sequence": 3, "kind": { "type": "connection", "state": "failed" } }
+  ]
+}

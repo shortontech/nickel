@@ -1,0 +1,54 @@
+profile = 1
+upstream_version = "0.149.0"
+upstream_repository = "https://github.com/openai/codex"
+upstream_revision = "rust-v0.149.0"
+upstream_license = "Apache-2.0"
+schema_version = "codex-app-server-v2"
+
+[[artifact]]
+target = "x86_64-unknown-linux-musl"
+filename = "codex"
+archive = "openai-codex-0.149.0-linux-x64.tgz"
+archive_sha256 = "e06f3d106fe8bb058a6bfd30075d89ea17deaee7c8425e0c5d23072df0fdd0e7"
+archive_member = "package/vendor/x86_64-unknown-linux-musl/bin/codex"
+sha256 = "bbc3341e44c9ead340ed9570c17be936e37870f570751a941699ffd04d672827"
+
+[[artifact]]
+target = "aarch64-unknown-linux-musl"
+filename = "codex"
+archive = "openai-codex-0.149.0-linux-arm64.tgz"
+archive_sha256 = "2d8e3032f4a058d1597606aba9ed8cc6eff59de678e2f81083ee11b898250e07"
+archive_member = "package/vendor/aarch64-unknown-linux-musl/bin/codex"
+sha256 = "1ee36d2ccaf0c4f3f1d3ce8db894739a07928cfd75ded684e84e9a19b9c436c7"
+
+[[artifact]]
+target = "x86_64-pc-windows-msvc"
+filename = "codex.exe"
+archive = "openai-codex-0.149.0-win32-x64.tgz"
+archive_sha256 = "e767fb3fbd66bd922840a6a6460639a8e280a52bfad7437c1459f693af781fdb"
+archive_member = "package/vendor/x86_64-pc-windows-msvc/bin/codex.exe"
+sha256 = "14b7e6b2356e82d1d9275579eaa588757b4e0a501b65dcc19fccdf77bd83dc00"
+
+[[artifact]]
+target = "aarch64-pc-windows-msvc"
+filename = "codex.exe"
+archive = "openai-codex-0.149.0-win32-arm64.tgz"
+archive_sha256 = "0fb85b2518c1ade721d5f638c0258d6bf35c56aaa5749e687206b8fcc0f677ad"
+archive_member = "package/vendor/aarch64-pc-windows-msvc/bin/codex.exe"
+sha256 = "b47c075be601e5c71c67547d0bc7d5cc66acc4fec78a0bc5f7b96c23d490a796"
+
+[[artifact]]
+target = "x86_64-apple-darwin"
+filename = "codex"
+archive = "openai-codex-0.149.0-darwin-x64.tgz"
+archive_sha256 = "96a8b01113a0f807c2f28190d79c0c91a98e66c7eb03cf12e561285bfe909266"
+archive_member = "package/vendor/x86_64-apple-darwin/bin/codex"
+sha256 = "c646bd178240bb50efd81c2f9919dd9124b126c815911f6c1b6db400786c5ccd"
+
+[[artifact]]
+target = "aarch64-apple-darwin"
+filename = "codex"
+archive = "openai-codex-0.149.0-darwin-arm64.tgz"
+archive_sha256 = "d1ebcae20ffd79f64db3ebc3141a90d269a67540927f4405dd4d1a752197a642"
+archive_member = "package/vendor/aarch64-apple-darwin/bin/codex"
+sha256 = "f4a74117b8142cda581c95ff753abf4508b5636d89682c1ed77e4a9249af8963"

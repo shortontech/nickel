@@ -201,6 +201,8 @@ The Windows shell compatibility checklist lives in
 ```text
 crates/
 |-- nickel-ui/         Declarative UX layer, layout, state, and SDL presentation
+|-- nickel-codex/      Typed Codex CLI selection, app-server RPC, and diagnostics
+|-- nickel-codex-fixture/ Offline protocol fixtures, replay validation, and failure injection
 |-- nickel-core/        Shell state and behavior
 |-- nickel-file/        Nickel File browser and file manager
 |-- nickel-logging/     Native logging
@@ -212,6 +214,21 @@ crates/
 
 Active design work lives in [`specs/`](specs/). Completed specifications live in
 [`specs/done/`](specs/done/).
+
+## Codex Backend Diagnostics
+
+Codex support is deliberately testable without Nickel UI. These commands validate offline replay and
+probe a CLI without starting a model turn:
+
+```bash
+cargo run -p nickel-codex-fixture -- validate crates/nickel-codex-fixture/fixtures
+cargo run -p nickel-codex --bin nickel-codex-test -- replay crates/nickel-codex-fixture/fixtures/basic.json
+cargo run -p nickel-codex --bin nickel-codex-test -- probe --backend installed
+```
+
+`nickel-codex-test` emits versioned JSONL on stdout. Installed Codex is preferred only after generated
+schema and initialization compatibility checks; release builds retain a pinned bundled fallback. Nickel
+does not implement Codex authentication or call OpenAI subscription APIs directly.
 
 ## Contributing
 

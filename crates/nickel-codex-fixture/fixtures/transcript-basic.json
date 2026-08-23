@@ -1,0 +1,6 @@
+[
+  { "sequence": 1, "direction": "client", "message": { "id": 1, "method": "initialize", "params": { "clientInfo": { "name": "fixture", "version": "1" } } } },
+  { "sequence": 2, "direction": "server", "message": { "id": 1, "result": { "userAgent": "fixture/1" } } },
+  { "sequence": 3, "direction": "client", "message": { "method": "initialized", "params": {} } },
+  { "sequence": 4, "direction": "server", "advance_ms": 5, "message": { "method": "thread/started", "params": { "thread": { "id": "thread-symbol" } } } }
+]

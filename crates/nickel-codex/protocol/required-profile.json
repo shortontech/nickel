@@ -1,0 +1,19 @@
+{
+  "profile": 1,
+  "reviewed_codex_version": "0.149.0",
+  "schema_family": "codex-app-server-v2",
+  "client_requests": [
+    "initialize", "account/read", "model/list", "thread/list", "thread/start",
+    "thread/resume", "turn/start", "turn/interrupt"
+  ],
+  "client_notifications": ["initialized"],
+  "server_requests": [
+    "item/commandExecution/requestApproval", "item/fileChange/requestApproval",
+    "item/tool/requestUserInput"
+  ],
+  "server_notifications": [
+    "thread/started", "turn/started", "turn/completed", "item/started", "item/completed",
+    "item/agentMessage/delta", "item/commandExecution/outputDelta", "item/fileChange/outputDelta",
+    "item/plan/delta", "item/reasoning/summaryTextDelta", "account/updated", "error"
+  ]
+}
