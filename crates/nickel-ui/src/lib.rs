@@ -2,7 +2,6 @@
 
 extern crate self as nickel_ui;
 
-mod assets;
 pub mod controller;
 pub mod gpu;
 pub mod layout;

@@ -1,19 +1,16 @@
 use cosmic_text::{
-    Align, Attrs, Buffer, Color as TextColor, Family, FontSystem, Metrics, Shaping, SwashCache,
-    Weight,
+    Align, Attrs, Buffer, CacheKey, Color as TextColor, Family, FontSystem, Metrics, PhysicalGlyph,
+    Shaping, SwashCache, SwashContent, Weight,
 };
 use sdl3::{
     pixels::{Color as SdlColor, PixelFormat},
     rect::Rect as SdlRect,
-    render::{BlendMode, FRect, Texture, WindowCanvas},
+    render::{BlendMode, FRect, ScaleMode, Texture, WindowCanvas},
     surface::{Surface, SurfaceRef},
     video::Window,
 };
 
-use crate::{
-    Color, GradientAxis, PaintCommand, Rect, TextAlign,
-    assets::{TextAssetCache, TextRequest, TextWeight},
-};
+use crate::{Color, GradientAxis, PaintCommand, Rect, TextAlign};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Pixel {
@@ -78,8 +75,9 @@ pub type ComponentGpu = SdlComponentRenderer;
 
 pub struct SdlCanvasPresenter {
     canvas: WindowCanvas,
-    text_assets: TextAssetCache,
-    text_textures: HashMap<DirectTextKey, Texture>,
+    font_system: FontSystem,
+    swash_cache: SwashCache,
+    glyph_atlas: GlyphAtlas,
     image_textures: HashMap<u16, CachedImageTexture>,
 }
 
@@ -88,12 +86,163 @@ struct CachedImageTexture {
     texture: Texture,
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct DirectTextKey {
-    text: String,
-    size: u32,
-    color: Color,
-    bold: bool,
+const GLYPH_ATLAS_SIZE: u32 = 1024;
+
+struct GlyphAtlas {
+    texture: Texture,
+    allocator: ShelfAllocator,
+    entries: HashMap<CacheKey, GlyphAtlasEntry>,
+}
+
+#[derive(Clone, Copy)]
+struct GlyphAtlasEntry {
+    source: SdlRect,
+    left: i32,
+    top: i32,
+    colored: bool,
+}
+
+#[derive(Clone, Debug)]
+struct ShelfAllocator {
+    width: u32,
+    height: u32,
+    x: u32,
+    y: u32,
+    row_height: u32,
+    resets: u64,
+}
+
+impl ShelfAllocator {
+    fn new(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            x: 1,
+            y: 1,
+            row_height: 0,
+            resets: 0,
+        }
+    }
+
+    fn allocate(&mut self, width: u32, height: u32) -> Option<(u32, u32)> {
+        let padded_width = width.checked_add(2)?;
+        let padded_height = height.checked_add(2)?;
+        if padded_width > self.width || padded_height > self.height {
+            return None;
+        }
+        if self.x + padded_width > self.width {
+            self.x = 1;
+            self.y = self.y.saturating_add(self.row_height);
+            self.row_height = 0;
+        }
+        if self.y + padded_height > self.height {
+            return None;
+        }
+        let position = (self.x + 1, self.y + 1);
+        self.x += padded_width;
+        self.row_height = self.row_height.max(padded_height);
+        Some(position)
+    }
+
+    fn reset(&mut self) {
+        self.x = 1;
+        self.y = 1;
+        self.row_height = 0;
+        self.resets = self.resets.saturating_add(1);
+    }
+}
+
+impl GlyphAtlas {
+    fn new(canvas: &WindowCanvas) -> Result<Self, String> {
+        let creator = canvas.texture_creator();
+        let mut texture = creator
+            .create_texture_streaming(PixelFormat::ABGR8888, GLYPH_ATLAS_SIZE, GLYPH_ATLAS_SIZE)
+            .map_err(|error| error.to_string())?;
+        texture.set_blend_mode(BlendMode::Blend);
+        texture.set_scale_mode(ScaleMode::Nearest);
+        texture
+            .update(
+                None,
+                &vec![0; (GLYPH_ATLAS_SIZE * GLYPH_ATLAS_SIZE * 4) as usize],
+                (GLYPH_ATLAS_SIZE * 4) as usize,
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(Self {
+            texture,
+            allocator: ShelfAllocator::new(GLYPH_ATLAS_SIZE, GLYPH_ATLAS_SIZE),
+            entries: HashMap::new(),
+        })
+    }
+
+    fn clear(&mut self) -> Result<(), String> {
+        self.entries.clear();
+        self.allocator.reset();
+        self.texture
+            .update(
+                None,
+                &vec![0; (GLYPH_ATLAS_SIZE * GLYPH_ATLAS_SIZE * 4) as usize],
+                (GLYPH_ATLAS_SIZE * 4) as usize,
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    fn entry(
+        &mut self,
+        font_system: &mut FontSystem,
+        swash_cache: &mut SwashCache,
+        key: CacheKey,
+    ) -> Result<Option<GlyphAtlasEntry>, String> {
+        if let Some(entry) = self.entries.get(&key) {
+            return Ok(Some(*entry));
+        }
+        let Some(image) = swash_cache.get_image(font_system, key).clone() else {
+            return Ok(None);
+        };
+        let width = image.placement.width;
+        let height = image.placement.height;
+        if width == 0 || height == 0 {
+            return Ok(None);
+        }
+        let position = match self.allocator.allocate(width, height) {
+            Some(position) => position,
+            None => {
+                self.clear()?;
+                let Some(position) = self.allocator.allocate(width, height) else {
+                    return Ok(None);
+                };
+                position
+            }
+        };
+        let colored = image.content == SwashContent::Color;
+        let pixels = match image.content {
+            SwashContent::Mask => image
+                .data
+                .iter()
+                .flat_map(|alpha| [255, 255, 255, *alpha])
+                .collect::<Vec<_>>(),
+            SwashContent::Color => image.data,
+            SwashContent::SubpixelMask => image
+                .data
+                .chunks_exact(4)
+                .flat_map(|channels| {
+                    let alpha = channels[0].max(channels[1]).max(channels[2]);
+                    [255, 255, 255, alpha]
+                })
+                .collect(),
+        };
+        let source = SdlRect::new(position.0 as i32, position.1 as i32, width, height);
+        self.texture
+            .update(Some(source), &pixels, (width * 4) as usize)
+            .map_err(|error| error.to_string())?;
+        let entry = GlyphAtlasEntry {
+            source,
+            left: image.placement.left,
+            top: image.placement.top,
+            colored,
+        };
+        self.entries.insert(key, entry);
+        Ok(Some(entry))
+    }
 }
 
 impl SdlCanvasPresenter {
@@ -113,10 +262,12 @@ impl SdlCanvasPresenter {
             renderer = %canvas.renderer_name,
             "SDL accelerated presenter initialized"
         );
+        let glyph_atlas = GlyphAtlas::new(&canvas)?;
         Ok(Self {
             canvas,
-            text_assets: TextAssetCache::new(),
-            text_textures: HashMap::new(),
+            font_system: FontSystem::new(),
+            swash_cache: SwashCache::new(),
+            glyph_atlas,
             image_textures: HashMap::new(),
         })
     }
@@ -351,63 +502,58 @@ impl SdlCanvasPresenter {
         bold: bool,
         parent_clip: Rect,
     ) -> Result<(), String> {
-        let key = DirectTextKey {
-            text: text.to_owned(),
-            size: size.to_bits(),
+        let glyphs = shape_physical_glyphs(
+            &mut self.font_system,
+            text,
+            bounds,
+            size,
             color,
+            align,
             bold,
-        };
-        if !self.text_textures.contains_key(&key) {
-            if self.text_textures.len() >= 512 {
-                for (_, texture) in self.text_textures.drain() {
-                    // SAFETY: every texture was created by `self.canvas`, which
-                    // remains alive for the duration of this presenter.
-                    unsafe { texture.destroy() };
-                }
-                self.text_assets.clear();
-            }
-            let rgba = pixel(color);
-            let asset = self.text_assets.get(TextRequest {
-                text,
-                size,
-                line_height: size * 1.3,
-                max_width: None,
-                color: [rgba.r, rgba.g, rgba.b, rgba.a],
-                weight: if bold {
-                    TextWeight::Bold
-                } else {
-                    TextWeight::Normal
-                },
-            });
-            let creator = self.canvas.texture_creator();
-            let mut texture = creator
-                .create_texture_streaming(PixelFormat::ABGR8888, asset.width(), asset.height())
-                .map_err(|error| error.to_string())?;
-            texture
-                .update(None, asset.pixels(), asset.pitch())
-                .map_err(|error| error.to_string())?;
-            texture.set_blend_mode(BlendMode::Blend);
-            self.text_textures.insert(key.clone(), texture);
-        }
-        let texture = self
-            .text_textures
-            .get(&key)
-            .expect("inserted accelerated text texture");
-        let query = texture.query();
-        let x = match align {
-            TextAlign::Start => bounds.origin.x,
-            TextAlign::Center => bounds.origin.x + (bounds.size.width - query.width as f32) * 0.5,
-            TextAlign::End => bounds.origin.x + bounds.size.width - query.width as f32,
-        };
+        );
         let clip = intersection(parent_clip, bounds).unwrap_or_default();
         self.canvas.set_clip_rect(Some(sdl_rect(clip)));
-        self.canvas
-            .copy(
-                texture,
-                None,
-                FRect::new(x, bounds.origin.y, query.width as f32, query.height as f32),
-            )
-            .map_err(|error| error.to_string())?;
+        for (glyph, glyph_color) in glyphs {
+            let Some(entry) = self.glyph_atlas.entry(
+                &mut self.font_system,
+                &mut self.swash_cache,
+                glyph.cache_key,
+            )?
+            else {
+                continue;
+            };
+            let destination = Rect::new(
+                (glyph.x + entry.left) as f32,
+                (glyph.y - entry.top) as f32,
+                entry.source.width() as f32,
+                entry.source.height() as f32,
+            );
+            if intersection(destination, clip).is_none() {
+                continue;
+            }
+            if entry.colored {
+                self.glyph_atlas.texture.set_color_mod(255, 255, 255);
+            } else {
+                self.glyph_atlas.texture.set_color_mod(
+                    glyph_color.r(),
+                    glyph_color.g(),
+                    glyph_color.b(),
+                );
+            }
+            self.glyph_atlas.texture.set_alpha_mod(pixel(color).a);
+            self.canvas
+                .copy(
+                    &self.glyph_atlas.texture,
+                    entry.source,
+                    FRect::new(
+                        destination.origin.x,
+                        destination.origin.y,
+                        destination.size.width,
+                        destination.size.height,
+                    ),
+                )
+                .map_err(|error| error.to_string())?;
+        }
         self.canvas.set_clip_rect(Some(sdl_rect(parent_clip)));
         Ok(())
     }
@@ -1023,7 +1169,119 @@ fn text_size(scale: f32) -> f32 {
     }
 }
 
+fn shape_physical_glyphs(
+    font_system: &mut FontSystem,
+    text: &str,
+    bounds: Rect,
+    size: f32,
+    color: Color,
+    align: TextAlign,
+    bold: bool,
+) -> Vec<(PhysicalGlyph, TextColor)> {
+    let mut buffer = Buffer::new(font_system, Metrics::new(size, size * 1.3));
+    buffer.set_size(
+        Some(bounds.size.width.max(1.0)),
+        Some(bounds.size.height.max(size * 1.3)),
+    );
+    let mut attrs = Attrs::new().family(Family::SansSerif);
+    if bold {
+        attrs = attrs.weight(Weight::BOLD);
+    }
+    buffer.set_text(text, &attrs, Shaping::Advanced, None);
+    for line in &mut buffer.lines {
+        line.set_align(Some(match align {
+            TextAlign::Start => Align::Left,
+            TextAlign::Center => Align::Center,
+            TextAlign::End => Align::Right,
+        }));
+    }
+    buffer.shape_until_scroll(font_system, false);
+    let base = pixel(color);
+    buffer
+        .layout_runs()
+        .flat_map(|run| {
+            run.glyphs.iter().map(move |glyph| {
+                (
+                    glyph.physical((bounds.origin.x, bounds.origin.y + run.line_y), 1.0),
+                    glyph
+                        .color_opt
+                        .unwrap_or(TextColor::rgb(base.r, base.g, base.b)),
+                )
+            })
+        })
+        .collect()
+}
+
 fn px(value: u32) -> u32 {
     value
 }
 use std::{collections::HashMap, sync::Arc};
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use cosmic_text::FontSystem;
+
+    use super::{Rect, ShelfAllocator, TextAlign, shape_physical_glyphs};
+
+    #[test]
+    fn glyph_shelves_are_bounded_padded_and_deterministic() {
+        let mut allocator = ShelfAllocator::new(16, 16);
+        assert_eq!(allocator.allocate(3, 4), Some((2, 2)));
+        assert_eq!(allocator.allocate(3, 4), Some((7, 2)));
+        assert_eq!(allocator.allocate(6, 4), Some((2, 8)));
+        assert_eq!(allocator.allocate(20, 1), None);
+        assert_eq!(allocator.allocate(6, 6), None);
+    }
+
+    #[test]
+    fn glyph_shelf_reset_restarts_allocation_and_records_eviction() {
+        let mut allocator = ShelfAllocator::new(16, 16);
+        assert_eq!(allocator.allocate(8, 8), Some((2, 2)));
+        assert!(allocator.allocate(8, 8).is_none());
+        allocator.reset();
+        assert_eq!(allocator.allocate(8, 8), Some((2, 2)));
+        assert_eq!(allocator.resets, 1);
+    }
+
+    #[test]
+    fn repeated_text_reuses_physical_glyph_keys() {
+        let mut fonts = FontSystem::new();
+        let glyphs = shape_physical_glyphs(
+            &mut fonts,
+            "reuse reuse",
+            Rect::new(0.0, 0.0, 300.0, 40.0),
+            16.0,
+            0xffffff,
+            TextAlign::Start,
+            false,
+        );
+        let unique = glyphs
+            .iter()
+            .map(|(glyph, _)| glyph.cache_key)
+            .collect::<HashSet<_>>();
+        assert!(unique.len() < glyphs.len());
+    }
+
+    #[test]
+    fn fractional_origins_and_display_scales_produce_integer_glyph_destinations() {
+        let mut fonts = FontSystem::new();
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let glyphs = shape_physical_glyphs(
+                &mut fonts,
+                "Café 👋🏽\nsecond line",
+                Rect::new(13.3 * scale, 7.7 * scale, 360.0 * scale, 80.0 * scale),
+                16.0 * scale,
+                0xffffff,
+                TextAlign::Center,
+                false,
+            );
+            assert!(!glyphs.is_empty());
+            assert!(glyphs.iter().all(|(glyph, _)| {
+                glyph.x as f32 == (glyph.x as f32).round()
+                    && glyph.y as f32 == (glyph.y as f32).round()
+            }));
+        }
+    }
+}
