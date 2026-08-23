@@ -103,7 +103,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         selected_sidebar: usize,
         scrollbar: Option<layout::Scrollbar>,
         controller_connected: bool,
-        navigation_pane: nickel_components::NavigationPane,
+        navigation_pane: nickel_ui::NavigationPane,
         palette: ThemePalette,
     ) {
         let mut vertices = Vec::with_capacity(MAX_VERTICES);
@@ -135,8 +135,8 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             for (index, left) in [14.0, 60.0].into_iter().enumerate() {
                 let selected = matches!(
                     (index, navigation_pane),
-                    (0, nickel_components::NavigationPane::Sidebar)
-                        | (1, nickel_components::NavigationPane::Content)
+                    (0, nickel_ui::NavigationPane::Sidebar)
+                        | (1, nickel_ui::NavigationPane::Content)
                 );
                 add_rectangle(
                     &mut vertices,

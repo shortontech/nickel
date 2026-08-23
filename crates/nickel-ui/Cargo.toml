@@ -1,75 +1,20 @@
 [package]
 name = "nickel-ui"
 version = "0.1.0"
-default-run = "nickel-ui"
-autobins = false
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+description = "Declarative native Rust UI with intrinsic layout and SDL presentation"
+readme = "README.md"
 
 [dependencies]
+cosmic-text.workspace = true
+gilrs.workspace = true
 image.workspace = true
-jiff.workspace = true
-nickel-components = { path = "../nickel-components" }
-nickel-core = { path = "../nickel-core" }
-nickel-i18n = { path = "../nickel-i18n" }
-nickel-logging = { path = "../nickel-logging" }
-nucleo-matcher.workspace = true
-redb.workspace = true
-resvg.workspace = true
+ui-declarative-macros = "0.1.0"
 sdl3.workspace = true
+unicode-segmentation.workspace = true
 tracing.workspace = true
 
-[target.'cfg(target_os = "linux")'.dependencies]
-freedesktop-desktop-entry.workspace = true
-freedesktop-icons.workspace = true
-shlex.workspace = true
-zbus.workspace = true
-
-[target.'cfg(target_os = "windows")'.dependencies]
-nickel-platform = { path = "../nickel-platform" }
-pollster.workspace = true
-windows-core = "0.62.2"
-windows = { workspace = true, features = [
-    "Foundation",
-    "Media_Control",
-    "System",
-    "Win32_Foundation",
-    "Win32_Globalization",
-    "Win32_Graphics_Dwm",
-    "Win32_Graphics_Gdi",
-    "Win32_Devices_FunctionDiscovery",
-    "Win32_Media_Audio",
-    "Win32_Media_Audio_Endpoints",
-    "Win32_NetworkManagement_WiFi",
-    "Win32_Storage_FileSystem",
-    "Win32_System_DataExchange",
-    "Win32_System_Com",
-    "Win32_System_Com_StructuredStorage",
-    "Win32_System_LibraryLoader",
-    "Win32_System_Memory",
-    "Win32_System_Variant",
-    "Win32_System_Threading",
-    "Win32_System_WinRT",
-    "Win32_UI_Input_KeyboardAndMouse",
-    "Win32_UI_HiDpi",
-    "Win32_UI_Shell",
-    "Win32_UI_Shell_PropertiesSystem",
-    "Win32_UI_WindowsAndMessaging",
-] }
-
 [dev-dependencies]
-tempfile = "3.25.0"
-
-[[bin]]
-name = "nickel-ui"
-path = "src/bin/nickel-sdl-shell.rs"
-
-[[bin]]
-name = "nickel-test-notification"
-path = "src/bin/nickel-test-notification.rs"
-
-[target.'cfg(target_os = "windows")'.build-dependencies]
-ico.workspace = true
-image.workspace = true
-winresource.workspace = true
+proptest.workspace = true

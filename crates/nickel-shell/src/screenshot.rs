@@ -6,7 +6,7 @@ use std::{
 };
 
 use image::RgbaImage;
-use nickel_components::{ComponentGpu, PaintCommand, Rect, TextAlign};
+use nickel_ui::{ComponentGpu, PaintCommand, Rect, TextAlign};
 use nickel_core::theme::{Appearance, ThemePalette};
 use winit::{dpi::PhysicalPosition, window::Window};
 

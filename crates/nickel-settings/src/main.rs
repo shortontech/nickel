@@ -14,18 +14,17 @@ use zbus::{
     zvariant::{OwnedObjectPath, OwnedValue},
 };
 
-use nickel_components::{
-    Button as UiButton, Column, Container, ContentPane, ControllerAction, ControllerInput, Insets,
-    LinearGradient, NavigationPane, PaintCommand, PaneNavigation, Point as UiPoint, RadioButton,
-    Rect as UiRect, Row, SdlCanvasPresenter, ShoulderHints, Sidebar, Slider, Text, TextAlign,
-    UiTree, VerticalScroll,
-};
 use nickel_core::{
     shell_settings::{ShellSettings, ThemePreference},
     theme::{ThemeMode, ThemePalette},
     wallpaper_settings::{WallpaperPosition, WallpaperSettings},
 };
 use nickel_i18n::Localizer;
+use nickel_ui::{
+    AnyView, ControllerAction, ControllerInput, Insets, LinearGradient, NavigationPane,
+    PaintCommand, PaneNavigation, Point as UiPoint, Rect as UiRect, SdlCanvasPresenter, TextAlign,
+    UiStateStore, UiTree, ui,
+};
 use sdl3::{
     event::{Event, WindowEvent},
     keyboard::Keycode,
@@ -711,9 +710,6 @@ struct SettingsApp {
     page: SettingsPage,
     shell_settings: ShellSettings,
     wallpaper_settings: WallpaperSettings,
-    desktop_slider_dragging: bool,
-    appearance_slider_dragging: bool,
-    intensity_slider_dragging: bool,
     appearance_save_deadline: Option<Instant>,
     resize_deadline: Option<Instant>,
     frame_interval: Duration,
@@ -727,12 +723,9 @@ struct SettingsApp {
     wifi_refreshes_left: u8,
     bluetooth: BluetoothSnapshot,
     next_bluetooth_refresh: Instant,
-    hovered_bluetooth_device: Option<usize>,
-    hovered_wifi_network: Option<usize>,
-    network_scroll: f32,
-    bluetooth_scroll: f32,
     next_network_refresh: Instant,
     ui: UiTree<SettingsMessage>,
+    ui_state: UiStateStore,
     controller: ControllerInput,
     navigation: PaneNavigation,
     controller_page: SettingsPage,
@@ -785,9 +778,6 @@ impl Default for SettingsApp {
             page: SettingsPage::Display,
             shell_settings: ShellSettings::load_default(),
             wallpaper_settings: WallpaperSettings::load_default(),
-            desktop_slider_dragging: false,
-            appearance_slider_dragging: false,
-            intensity_slider_dragging: false,
             appearance_save_deadline: None,
             resize_deadline: None,
             frame_interval: Duration::from_millis(16),
@@ -801,12 +791,9 @@ impl Default for SettingsApp {
             wifi_refreshes_left: 0,
             bluetooth: BluetoothSnapshot::default(),
             next_bluetooth_refresh: Instant::now(),
-            hovered_bluetooth_device: None,
-            hovered_wifi_network: None,
-            network_scroll: 0.0,
-            bluetooth_scroll: 0.0,
             next_network_refresh: Instant::now(),
             ui: UiTree::default(),
+            ui_state: UiStateStore::default(),
             controller: ControllerInput::new(),
             navigation: PaneNavigation::default(),
             controller_page: SettingsPage::Display,
@@ -815,6 +802,26 @@ impl Default for SettingsApp {
 }
 
 impl SettingsApp {
+    fn transient_scroll(&self, message: &SettingsMessage) -> f32 {
+        self.ui
+            .id_for_message(message)
+            .and_then(|id| self.ui_state.state(id))
+            .map(|state| state.scroll_offset)
+            .unwrap_or(0.0)
+    }
+
+    fn captured_message(&self) -> Option<&SettingsMessage> {
+        self.ui_state
+            .captured()
+            .and_then(|id| self.ui.message_for_id(id))
+    }
+
+    fn hovered_message(&self) -> Option<&SettingsMessage> {
+        self.ui_state
+            .hovered()
+            .and_then(|id| self.ui.message_for_id(id))
+    }
+
     #[cfg(any())]
     fn display_nav() -> Rect {
         Rect {
@@ -893,44 +900,24 @@ impl SettingsApp {
         glyph: &'static str,
         selected: bool,
         palette: ThemePalette,
-    ) -> Container<SettingsMessage> {
+    ) -> impl nickel_ui::Component<SettingsMessage> {
         let label = self.localizer.text(message_key);
         let underline_width = (label.chars().count() as f32 * 8.0).clamp(24.0, 112.0);
-        let mut underline = Container::new().width(underline_width).height(2.0);
-        if selected {
-            underline = underline.background(palette.accent);
+        ui! {
+            <Container width={(SIDEBAR_WIDTH - 24) as f32} height={36.0}
+                padding={Insets { top: 4.0, right: 8.0, bottom: 2.0, left: 8.0 }}
+                on_press={message}>
+                <Row gap={10.0}>
+                    <Text width={22.0} scale={1.6}
+                        color={if selected { palette.accent } else { palette.muted }}>{glyph}</Text>
+                    <Column gap={2.0}>
+                        <Text height={20.0} scale={2.0} bold={selected} color={palette.text}>{label}</Text>
+                        <Container width={underline_width} height={2.0}
+                            background={if selected { palette.accent } else { palette.panel }} />
+                    </Column>
+                </Row>
+            </Container>
         }
-        Container::new()
-            .width((SIDEBAR_WIDTH - 24) as f32)
-            .height(36.0)
-            .padding(Insets {
-                top: 4.0,
-                right: 8.0,
-                bottom: 2.0,
-                left: 8.0,
-            })
-            .message(message)
-            .child(
-                Row::new()
-                    .gap(10.0)
-                    .child(Text::new(glyph).width(22.0).scale(1.6).color(if selected {
-                        palette.accent
-                    } else {
-                        palette.muted
-                    }))
-                    .child(
-                        Column::new()
-                            .gap(2.0)
-                            .child(
-                                Text::new(label)
-                                    .height(20.0)
-                                    .scale(2.0)
-                                    .bold(selected)
-                                    .color(palette.text),
-                            )
-                            .child(underline),
-                    ),
-            )
     }
 
     fn handle_controller_action(&mut self, action: ControllerAction) {
@@ -981,31 +968,19 @@ impl SettingsApp {
                 self.localizer.text("settings-bluetooth-subtitle"),
             ),
         };
-        let header_content = Container::new()
-            .grow(1.0)
-            .height(72.0)
-            .background(palette.panel)
-            .padding(Insets {
-                top: 11.0,
-                right: 40.0,
-                bottom: 8.0,
-                left: 20.0,
-            })
-            .child(
-                Column::new()
-                    .gap(4.0)
-                    .child(Text::new(title).scale(3.0).color(palette.text))
-                    .child(Text::new(subtitle).scale(1.0).color(palette.muted)),
-            );
-        let header = Row::new()
-            .height(72.0)
-            .child(
-                Container::new()
-                    .width(SIDEBAR_WIDTH as f32)
-                    .height(72.0)
-                    .background(palette.panel),
-            )
-            .child(header_content);
+        let header = ui! {
+            <Row height={72.0}>
+                <Container width={SIDEBAR_WIDTH as f32} height={72.0} background={palette.panel} />
+                <Container grow={1.0} height={72.0} background={palette.panel} padding={Insets {
+                    top: 11.0, right: 40.0, bottom: 8.0, left: 20.0,
+                }}>
+                    <Column gap={4.0}>
+                        <Text scale={3.0} color={palette.text}>{title}</Text>
+                        <Text scale={1.0} color={palette.muted}>{subtitle}</Text>
+                    </Column>
+                </Container>
+            </Row>
+        };
         let selected_page = if self.navigation.pane() == NavigationPane::Sidebar {
             self.controller_page
         } else {
@@ -1046,119 +1021,73 @@ impl SettingsApp {
             selected_page == SettingsPage::Bluetooth,
             palette,
         );
-        let mut sidebar = Sidebar::new(SIDEBAR_WIDTH as f32)
-            .background(LinearGradient::vertical(palette.panel, palette.background))
-            .padding(Insets {
-                top: 20.0,
-                right: 12.0,
-                bottom: 12.0,
-                left: 12.0,
-            })
-            .gap(4.0)
-            .child(display_button)
-            .child(bar_button)
-            .child(appearance_button)
-            .child(network_button)
-            .child(bluetooth_button);
-        if self.controller.connected() {
-            sidebar = sidebar.child(
-                Container::new()
-                    .grow(1.0)
-                    .padding(Insets {
-                        top: 12.0,
-                        right: 0.0,
-                        bottom: 0.0,
-                        left: 8.0,
-                    })
-                    .child(ShoulderHints::new(palette.text, palette.muted)),
-            );
-        }
+        let sidebar = ui! {
+            <Sidebar width={SIDEBAR_WIDTH as f32}
+                background={LinearGradient::vertical(palette.panel, palette.background)}
+                padding={Insets { top: 20.0, right: 12.0, bottom: 12.0, left: 12.0 }} gap={4.0}>
+                {display_button}{bar_button}{appearance_button}{network_button}{bluetooth_button}
+                {if self.controller.connected() {
+                    ui! {
+                        <Container grow={1.0} padding={Insets {
+                            top: 12.0, right: 0.0, bottom: 0.0, left: 8.0,
+                        }}>
+                            <ShoulderHints color={palette.text} muted={palette.muted} />
+                        </Container>
+                    }
+                } else {
+                    ui! { <></> }
+                }}
+            </Sidebar>
+        };
 
         let content = match self.page {
-            SettingsPage::Display => self.display_components(),
-            SettingsPage::Bar => self.bar_components(),
-            SettingsPage::Appearance => self.appearance_components(),
-            SettingsPage::Network => self.network_components(),
-            SettingsPage::Bluetooth => self.bluetooth_components(),
+            SettingsPage::Display => AnyView::new(self.display_components()),
+            SettingsPage::Bar => AnyView::new(self.bar_components()),
+            SettingsPage::Appearance => AnyView::new(self.appearance_components()),
+            SettingsPage::Network => AnyView::new(self.network_components()),
+            SettingsPage::Bluetooth => AnyView::new(self.bluetooth_components()),
         };
-        let root = Column::new()
-            .height(height)
-            .background(palette.background)
-            .child(header)
-            .child(
-                Row::new()
-                    .grow(1.0)
-                    .child(sidebar)
-                    .child(ContentPane::new(content)),
-            );
+        let root = ui! {
+            <Column height={height} background={palette.background}>
+                {header}
+                <Row grow={1.0}>
+                    {sidebar}
+                    <Container grow={1.0}>{content}</Container>
+                </Row>
+            </Column>
+        };
         UiTree::layout(root, UiRect::new(0.0, 0.0, width, height))
     }
 
-    fn display_components(&self) -> Column<SettingsMessage> {
+    fn display_components(&self) -> impl nickel_ui::Component<SettingsMessage> {
         let palette = self.palette();
         let selected = &self.displays[self.selected];
-        Column::new()
-            .grow(1.0)
-            .padding(Insets {
-                top: 24.0,
-                right: 40.0,
-                bottom: 20.0,
-                left: 20.0,
-            })
-            .gap(12.0)
-            .child(
-                Container::new()
-                    .height(340.0)
-                    .background(palette.surface)
-                    .border(palette.muted, 2.0),
-            )
-            .child(
-                Row::new()
-                    .height(42.0)
-                    .gap(15.0)
-                    .child(Text::new(&selected.name).color(palette.text).width(183.0))
-                    .child(
-                        UiButton::new(
-                            SettingsMessage::DisplayIdentify,
-                            self.localizer.text("settings-display-identify"),
-                        )
-                        .width(135.0)
-                        .color(palette.text)
-                        .background(palette.surface_hover)
-                        .border(palette.muted, 1.0),
-                    )
-                    .child(
-                        UiButton::new(
-                            SettingsMessage::DisplayPrimary,
-                            self.localizer.text("settings-display-make-primary"),
-                        )
-                        .width(145.0)
-                        .color(palette.text)
-                        .background(palette.surface_hover)
-                        .border(palette.muted, 1.0),
-                    )
-                    .child(
-                        UiButton::new(
-                            SettingsMessage::DisplayApply,
-                            self.localizer.text("settings-display-apply"),
-                        )
-                        .width(105.0)
-                        .color(palette.text)
-                        .background(palette.accent),
-                    ),
-            )
-            .child(
-                Text::new(&self.status)
-                    .color(if self.applied {
-                        palette.complement
-                    } else {
-                        palette.muted
-                    })
-                    .height(18.0),
-            )
+        ui! {
+            <Column grow={1.0} padding={Insets {
+                top: 24.0, right: 40.0, bottom: 20.0, left: 20.0,
+            }} gap={12.0}>
+                <Container height={340.0} background={palette.surface} border={(palette.muted, 2.0)} />
+                <Row height={42.0} gap={15.0}>
+                    <Text color={palette.text} width={183.0}>{&selected.name}</Text>
+                    <Button on_press={SettingsMessage::DisplayIdentify} width={135.0} color={palette.text}
+                        background={palette.surface_hover} border={(palette.muted, 1.0)}>
+                        {self.localizer.text("settings-display-identify")}
+                    </Button>
+                    <Button on_press={SettingsMessage::DisplayPrimary} width={145.0} color={palette.text}
+                        background={palette.surface_hover} border={(palette.muted, 1.0)}>
+                        {self.localizer.text("settings-display-make-primary")}
+                    </Button>
+                    <Button on_press={SettingsMessage::DisplayApply} width={105.0} color={palette.text}
+                        background={palette.accent}>{self.localizer.text("settings-display-apply")}</Button>
+                </Row>
+                <Text color={if self.applied { palette.complement } else { palette.muted }} height={18.0}>
+                    {&self.status}
+                </Text>
+            </Column>
+        }
     }
 
-    fn network_components(&self) -> Column<SettingsMessage> {
+    fn network_components(&self) -> impl nickel_ui::Component<SettingsMessage> {
         let palette = self.palette();
         let wifi_cards = self
             .wifi_networks
@@ -1188,37 +1117,23 @@ impl SettingsApp {
                         i64::from(network.signal),
                     )
                 };
-                Container::new()
-                    .height(44.0)
-                    .background(if self.hovered_wifi_network == Some(index) {
-                        palette.surface_hover
-                    } else {
-                        palette.surface
-                    })
-                    .border(
-                        if network.connected {
-                            palette.accent
-                        } else {
-                            palette.muted
-                        },
-                        if network.connected { 2.0 } else { 1.0 },
-                    )
-                    .padding(Insets {
-                        top: 12.0,
-                        right: 14.0,
-                        bottom: 8.0,
-                        left: 14.0,
-                    })
-                    .message(SettingsMessage::WifiNetwork(index))
-                    .child(
-                        Row::new()
-                            .child(Text::new(&network.profile).color(palette.text).width(316.0))
-                            .child(Text::new(detail).scale(1.0).color(if network.connected {
-                                palette.complement
-                            } else {
-                                palette.muted
-                            })),
-                    )
+                ui! {
+                    <Container height={44.0}
+                        background={if self.hovered_message() == Some(&SettingsMessage::WifiNetwork(index)) {
+                            palette.surface_hover
+                        } else { palette.surface }}
+                        border={(if network.connected { palette.accent } else { palette.muted },
+                            if network.connected { 2.0 } else { 1.0 })}
+                        padding={Insets { top: 12.0, right: 14.0, bottom: 8.0, left: 14.0 }}
+                        on_press={SettingsMessage::WifiNetwork(index)}>
+                        <Row>
+                            <Text color={palette.text} width={316.0}>{&network.profile}</Text>
+                            <Text scale={1.0} color={if network.connected { palette.complement } else { palette.muted }}>
+                                {detail}
+                            </Text>
+                        </Row>
+                    </Container>
+                }
             });
         let adapter_cards = self.network_adapters.iter().map(|adapter| {
             let status = if adapter.connected {
@@ -1234,153 +1149,73 @@ impl SettingsApp {
             } else {
                 self.localizer.text("settings-network-disconnected")
             };
-            Container::new()
-                .height(72.0)
-                .background(palette.surface)
-                .border(palette.muted, 1.0)
-                .padding(Insets {
-                    top: 11.0,
-                    right: 14.0,
-                    bottom: 8.0,
-                    left: 14.0,
-                })
-                .child(
-                    Column::new()
-                        .gap(7.0)
-                        .child(Text::new(&adapter.name).color(palette.text))
-                        .child(
-                            Row::new()
-                                .child(Text::new(status).color(if adapter.connected {
-                                    palette.complement
-                                } else {
-                                    palette.muted
-                                }))
-                                .child(
-                                    Text::new(&adapter.description)
-                                        .scale(1.0)
-                                        .color(palette.muted),
-                                ),
-                        ),
-                )
+            ui! {
+                <Container height={72.0} background={palette.surface} border={(palette.muted, 1.0)}
+                    padding={Insets { top: 11.0, right: 14.0, bottom: 8.0, left: 14.0 }}>
+                    <Column gap={7.0}>
+                        <Text color={palette.text}>{&adapter.name}</Text>
+                        <Row>
+                            <Text color={if adapter.connected { palette.complement } else { palette.muted }}>{status}</Text>
+                            <Text scale={1.0} color={palette.muted}>{&adapter.description}</Text>
+                        </Row>
+                    </Column>
+                </Container>
+            }
         });
-        let wifi_height = if self.wifi_networks.is_empty() {
-            44.0
-        } else {
-            self.wifi_networks.len() as f32 * 52.0 - 8.0
-        };
-        let adapter_height = if self.network_adapters.is_empty() {
-            44.0
-        } else {
-            self.network_adapters.len() as f32 * 84.0 - 12.0
-        };
         let wifi_list = if self.wifi_networks.is_empty() {
-            Column::new()
-                .height(wifi_height)
-                .child(Text::new(&self.wifi_status).scale(1.0).color(palette.muted))
+            ui! { <Column><Text scale={1.0} color={palette.muted}>{&self.wifi_status}</Text></Column> }
         } else {
-            Column::new()
-                .height(wifi_height)
-                .gap(8.0)
-                .children(wifi_cards)
+            ui! { <Column gap={8.0} children={wifi_cards} /> }
         };
         let adapter_list = if self.network_adapters.is_empty() {
-            Column::new().height(adapter_height).child(
-                Text::new(self.localizer.text("settings-network-no-adapters"))
-                    .scale(1.0)
-                    .color(palette.muted),
-            )
+            ui! {
+                <Column><Text scale={1.0} color={palette.muted}>
+                    {self.localizer.text("settings-network-no-adapters")}
+                </Text></Column>
+            }
         } else {
-            Column::new()
-                .height(adapter_height)
-                .gap(12.0)
-                .children(adapter_cards)
+            ui! { <Column gap={12.0} children={adapter_cards} /> }
         };
-        let content_height =
-            58.0 + 12.0 + 26.0 + 12.0 + wifi_height + 12.0 + 18.0 + 12.0 + adapter_height;
-        let content = Column::new()
-            .height(content_height)
-            .gap(12.0)
-            .child(
-                Container::new()
-                    .height(58.0)
-                    .background(palette.surface)
-                    .border(
-                        if self.wifi_enabled {
-                            palette.accent
-                        } else {
-                            palette.muted
-                        },
-                        2.0,
-                    )
-                    .message(SettingsMessage::WifiPower)
-                    .padding(Insets {
-                        top: 10.0,
-                        right: 14.0,
-                        bottom: 10.0,
-                        left: 14.0,
-                    })
-                    .child(
-                        Row::new()
-                            .child(
-                                Text::new(self.localizer.text("settings-network-wifi"))
-                                    .width(500.0)
-                                    .color(palette.text),
-                            )
-                            .child(
-                                Text::new(if self.wifi_enabled {
-                                    self.localizer.text("settings-network-wifi-on")
-                                } else if !self.network_available {
-                                    self.localizer.text("settings-network-wifi-unavailable")
-                                } else {
-                                    self.localizer.text("settings-network-wifi-off")
-                                })
-                                .bold(true)
-                                .color(if self.wifi_enabled {
-                                    palette.accent
-                                } else {
-                                    palette.muted
-                                }),
-                            ),
-                    ),
-            )
-            .child(
-                Row::new()
-                    .height(26.0)
-                    .child(
-                        Text::new(self.localizer.text("settings-network-visible-wifi"))
-                            .color(palette.text)
-                            .width(308.0),
-                    )
-                    .child(Text::new(&self.wifi_status).scale(1.0).color(palette.muted)),
-            )
-            .child(wifi_list)
-            .child(
-                Text::new(self.localizer.text("settings-network-adapters"))
-                    .color(palette.text)
-                    .height(18.0),
-            )
-            .child(adapter_list);
+        let content = ui! {
+            <Column gap={12.0}>
+                <Container height={58.0} background={palette.surface}
+                    border={(if self.wifi_enabled { palette.accent } else { palette.muted }, 2.0)}
+                    on_press={SettingsMessage::WifiPower}
+                    padding={Insets { top: 10.0, right: 14.0, bottom: 10.0, left: 14.0 }}>
+                    <Row>
+                        <Text width={500.0} color={palette.text}>{self.localizer.text("settings-network-wifi")}</Text>
+                        <Text bold={true} color={if self.wifi_enabled { palette.accent } else { palette.muted }}>
+                            {if self.wifi_enabled {
+                                self.localizer.text("settings-network-wifi-on")
+                            } else if !self.network_available {
+                                self.localizer.text("settings-network-wifi-unavailable")
+                            } else {
+                                self.localizer.text("settings-network-wifi-off")
+                            }}
+                        </Text>
+                    </Row>
+                </Container>
+                <Row height={26.0}>
+                    <Text color={palette.text} width={308.0}>{self.localizer.text("settings-network-visible-wifi")}</Text>
+                    <Text scale={1.0} color={palette.muted}>{&self.wifi_status}</Text>
+                </Row>
+                {wifi_list}
+                <Text color={palette.text} height={18.0}>{self.localizer.text("settings-network-adapters")}</Text>
+                {adapter_list}
+            </Column>
+        };
 
-        Column::new()
-            .grow(1.0)
-            .padding(Insets {
-                top: 20.0,
-                right: 40.0,
-                bottom: 20.0,
-                left: 20.0,
-            })
-            .child(
-                VerticalScroll::new(
-                    SettingsMessage::NetworkScroll,
-                    self.network_scroll,
-                    468.0,
-                    content_height,
-                )
-                .child(content),
-            )
+        ui! {
+            <Column grow={1.0} padding={Insets {
+                top: 20.0, right: 40.0, bottom: 20.0, left: 20.0,
+            }}>
+                <VerticalScroll id={"network-list"} on_scroll={SettingsMessage::NetworkScroll}
+                    offset={self.transient_scroll(&SettingsMessage::NetworkScroll)}>{content}</VerticalScroll>
+            </Column>
+        }
     }
 
-    fn bluetooth_components(&self) -> Column<SettingsMessage> {
+    fn bluetooth_components(&self) -> impl nickel_ui::Component<SettingsMessage> {
         let palette = self.palette();
         let device_cards = self
             .bluetooth
@@ -1399,45 +1234,26 @@ impl SettingsApp {
                     .battery_percent
                     .map(|percent| format!("{percent}%"))
                     .unwrap_or_default();
-                Container::new()
-                    .height(68.0)
-                    .background(if self.hovered_bluetooth_device == Some(index) {
-                        palette.surface_hover
-                    } else {
-                        palette.surface
-                    })
-                    .border(
-                        if device.connected {
-                            palette.accent
-                        } else {
-                            palette.muted
-                        },
-                        if device.connected { 2.0 } else { 1.0 },
-                    )
-                    .message(SettingsMessage::BluetoothDevice(index))
-                    .padding(Insets {
-                        top: 12.0,
-                        right: 14.0,
-                        bottom: 10.0,
-                        left: 14.0,
-                    })
-                    .child(
-                        Row::new()
-                            .child(
-                                Column::new()
-                                    .grow(1.0)
-                                    .gap(7.0)
-                                    .child(Text::new(&device.name).color(palette.text))
-                                    .child(Text::new(status).scale(1.0).color(
-                                        if device.connected {
-                                            palette.complement
-                                        } else {
-                                            palette.muted
-                                        },
-                                    )),
-                            )
-                            .child(Text::new(detail).color(palette.muted)),
-                    )
+                ui! {
+                    <Container height={68.0}
+                        background={if self.hovered_message() == Some(&SettingsMessage::BluetoothDevice(index)) {
+                            palette.surface_hover
+                        } else { palette.surface }}
+                        border={(if device.connected { palette.accent } else { palette.muted },
+                            if device.connected { 2.0 } else { 1.0 })}
+                        on_press={SettingsMessage::BluetoothDevice(index)}
+                        padding={Insets { top: 12.0, right: 14.0, bottom: 10.0, left: 14.0 }}>
+                        <Row>
+                            <Column grow={1.0} gap={7.0}>
+                                <Text color={palette.text}>{&device.name}</Text>
+                                <Text scale={1.0} color={if device.connected { palette.complement } else { palette.muted }}>
+                                    {status}
+                                </Text>
+                            </Column>
+                            <Text color={palette.muted}>{detail}</Text>
+                        </Row>
+                    </Container>
+                }
             });
 
         let adapter_status = if !self.bluetooth.available {
@@ -1453,268 +1269,112 @@ impl SettingsApp {
         } else {
             self.localizer.text("settings-bluetooth-discovery-start")
         };
-        let device_height = if self.bluetooth.devices.is_empty() {
-            44.0
-        } else {
-            self.bluetooth.devices.len() as f32 * 78.0 - 10.0
-        };
         let device_list = if self.bluetooth.devices.is_empty() {
-            Column::new().height(device_height).child(
-                Text::new(if self.bluetooth.available {
-                    self.localizer.text("settings-bluetooth-no-devices")
-                } else {
-                    self.localizer
-                        .text("settings-bluetooth-service-unavailable")
-                })
-                .color(palette.muted),
-            )
+            ui! { <Column><Text color={palette.muted}>{if self.bluetooth.available {
+                self.localizer.text("settings-bluetooth-no-devices")
+            } else {
+                self.localizer
+                    .text("settings-bluetooth-service-unavailable")
+            }}</Text></Column> }
         } else {
-            Column::new()
-                .height(device_height)
-                .gap(10.0)
-                .children(device_cards)
+            ui! { <Column gap={10.0} children={device_cards} /> }
         };
-        let content_height = 58.0 + 12.0 + 36.0 + 12.0 + device_height;
-        let content = Column::new()
-            .height(content_height)
-            .gap(12.0)
-            .child(
-                Container::new()
-                    .height(58.0)
-                    .background(palette.surface)
-                    .border(palette.accent, 2.0)
-                    .message(SettingsMessage::BluetoothPower)
-                    .padding(Insets {
-                        top: 10.0,
-                        right: 14.0,
-                        bottom: 10.0,
-                        left: 14.0,
-                    })
-                    .child(
-                        Row::new()
-                            .child(
-                                Column::new()
-                                    .grow(1.0)
-                                    .gap(5.0)
-                                    .child(
-                                        Text::new(
-                                            self.localizer.text("settings-bluetooth-enabled"),
-                                        )
-                                        .color(palette.text),
-                                    )
-                                    .child(
-                                        Text::new(if self.bluetooth.adapter_name.is_empty() {
-                                            self.localizer
-                                                .text("settings-bluetooth-adapter-unnamed")
-                                        } else {
-                                            self.bluetooth.adapter_name.clone()
-                                        })
-                                        .scale(1.0)
-                                        .color(palette.muted),
-                                    ),
-                            )
-                            .child(Text::new(adapter_status).bold(true).color(
-                                if self.bluetooth.powered {
-                                    palette.accent
-                                } else {
-                                    palette.muted
-                                },
-                            )),
-                    ),
-            )
-            .child(
-                Row::new()
-                    .height(36.0)
-                    .child(
-                        Text::new(self.localizer.text("settings-bluetooth-devices"))
-                            .width(390.0)
-                            .color(palette.text),
-                    )
-                    .child(
-                        UiButton::new(SettingsMessage::BluetoothDiscovery, discoverability)
-                            .width(150.0)
-                            .color(palette.text)
-                            .background(palette.surface_hover)
-                            .border(palette.muted, 1.0),
-                    ),
-            )
-            .child(device_list);
+        let content = ui! {
+            <Column gap={12.0}>
+                <Container height={58.0} background={palette.surface} border={(palette.accent, 2.0)}
+                    on_press={SettingsMessage::BluetoothPower}
+                    padding={Insets { top: 10.0, right: 14.0, bottom: 10.0, left: 14.0 }}>
+                    <Row>
+                        <Column grow={1.0} gap={5.0}>
+                            <Text color={palette.text}>{self.localizer.text("settings-bluetooth-enabled")}</Text>
+                            <Text scale={1.0} color={palette.muted}>{if self.bluetooth.adapter_name.is_empty() {
+                                self.localizer.text("settings-bluetooth-adapter-unnamed")
+                            } else {
+                                self.bluetooth.adapter_name.clone()
+                            }}</Text>
+                        </Column>
+                        <Text bold={true} color={if self.bluetooth.powered { palette.accent } else { palette.muted }}>
+                            {adapter_status}
+                        </Text>
+                    </Row>
+                </Container>
+                <Row height={36.0}>
+                    <Text width={390.0} color={palette.text}>{self.localizer.text("settings-bluetooth-devices")}</Text>
+                    <Button on_press={SettingsMessage::BluetoothDiscovery} width={150.0} color={palette.text}
+                        background={palette.surface_hover} border={(palette.muted, 1.0)}>{discoverability}</Button>
+                </Row>
+                {device_list}
+            </Column>
+        };
 
-        Column::new()
-            .grow(1.0)
-            .padding(Insets {
-                top: 20.0,
-                right: 40.0,
-                bottom: 20.0,
-                left: 20.0,
-            })
-            .child(
-                VerticalScroll::new(
-                    SettingsMessage::BluetoothScroll,
-                    self.bluetooth_scroll,
-                    468.0,
-                    content_height,
-                )
-                .child(content),
-            )
+        ui! {
+            <Column grow={1.0} padding={Insets {
+                top: 20.0, right: 40.0, bottom: 20.0, left: 20.0,
+            }}>
+                <VerticalScroll id={"bluetooth-list"} on_scroll={SettingsMessage::BluetoothScroll}
+                    offset={self.transient_scroll(&SettingsMessage::BluetoothScroll)}>{content}</VerticalScroll>
+            </Column>
+        }
     }
 
-    fn bar_components(&self) -> Column<SettingsMessage> {
+    fn bar_components(&self) -> impl nickel_ui::Component<SettingsMessage> {
         let palette = self.palette();
         let display_count = self.displays.len().max(1);
         let desktop_choices = (0..self.shell_settings.desktop_count).map(|index| {
-            Container::new()
-                .width(64.0)
-                .height(46.0)
-                .background(palette.surface)
-                .border(
-                    if index == 0 {
-                        palette.accent
-                    } else {
-                        palette.muted
-                    },
-                    2.0,
-                )
-                .padding(Insets {
-                    top: 9.0,
-                    right: 4.0,
-                    bottom: 4.0,
-                    left: 4.0,
-                })
-                .child(
-                    Text::new(format!("{}", index + 1))
-                        .align(TextAlign::Center)
-                        .scale(1.0)
-                        .color(if index == 0 {
-                            palette.text
-                        } else {
-                            palette.muted
-                        }),
-                )
+            ui! {
+                <Container width={64.0} height={46.0} background={palette.surface}
+                    border={(if index == 0 { palette.accent } else { palette.muted }, 2.0)}
+                    padding={Insets { top: 9.0, right: 4.0, bottom: 4.0, left: 4.0 }}>
+                    <Text align={TextAlign::Center} scale={1.0}
+                        color={if index == 0 { palette.text } else { palette.muted }}>
+                        {format!("{}", index + 1)}
+                    </Text>
+                </Container>
+            }
         });
-        Column::new()
-            .grow(1.0)
-            .padding(Insets {
-                top: 24.0,
-                right: 40.0,
-                bottom: 20.0,
-                left: 20.0,
-            })
-            .gap(14.0)
-            .child(
-                Text::new(self.localizer.text("settings-bar-show-on"))
-                    .color(palette.text)
-                    .height(20.0),
-            )
-            .child(
-                Row::new()
-                    .height(38.0)
-                    .gap(28.0)
-                    .child(
-                        RadioButton::new(
-                            SettingsMessage::BarPrimaryDisplay,
-                            self.localizer.text("settings-bar-primary-display"),
-                            !self.shell_settings.bar_on_all_displays,
-                        )
-                        .colors(
-                            if !self.shell_settings.bar_on_all_displays {
-                                palette.accent
-                            } else {
-                                palette.muted
-                            },
-                            palette.text,
-                        )
-                        .width(210.0),
-                    )
-                    .child(
-                        RadioButton::new(
-                            SettingsMessage::BarAllDisplays,
-                            self.localizer.number(
-                                "settings-bar-all-displays",
-                                "count",
-                                display_count as i64,
-                            ),
-                            self.shell_settings.bar_on_all_displays,
-                        )
-                        .colors(
-                            if self.shell_settings.bar_on_all_displays {
-                                palette.accent
-                            } else {
-                                palette.muted
-                            },
-                            palette.text,
-                        )
-                        .width(210.0),
-                    ),
-            )
-            .child(
-                Text::new(self.localizer.text("settings-bar-window-scope"))
-                    .color(palette.text)
-                    .height(20.0),
-            )
-            .child(
-                Row::new()
-                    .height(38.0)
-                    .gap(28.0)
-                    .child(
-                        RadioButton::new(
-                            SettingsMessage::BarDisplayWindows,
-                            self.localizer.text("settings-bar-this-display"),
-                            !self.shell_settings.all_windows_on_every_bar,
-                        )
-                        .colors(
-                            if !self.shell_settings.all_windows_on_every_bar {
-                                palette.accent
-                            } else {
-                                palette.muted
-                            },
-                            palette.text,
-                        )
-                        .width(210.0),
-                    )
-                    .child(
-                        RadioButton::new(
-                            SettingsMessage::BarAllWindows,
-                            self.localizer.text("settings-bar-all-windows"),
-                            self.shell_settings.all_windows_on_every_bar,
-                        )
-                        .colors(
-                            if self.shell_settings.all_windows_on_every_bar {
-                                palette.accent
-                            } else {
-                                palette.muted
-                            },
-                            palette.text,
-                        )
-                        .width(210.0),
-                    ),
-            )
-            .child(
-                Text::new(self.localizer.text("settings-bar-desktops"))
-                    .color(palette.text)
-                    .height(20.0),
-            )
-            .child(
-                Text::new(self.localizer.number(
-                    "settings-bar-desktop-count",
-                    "count",
-                    i64::from(self.shell_settings.desktop_count),
-                ))
-                .scale(1.0)
-                .color(palette.muted)
-                .height(18.0),
-            )
-            .child(
-                Slider::on_change(
-                    desktop_count_message,
-                    f32::from(self.shell_settings.desktop_count.saturating_sub(1)) / 7.0,
-                )
-                .width(520.0),
-            )
-            .child(Row::new().height(46.0).gap(8.0).children(desktop_choices))
+        ui! {
+            <Column grow={1.0} padding={Insets {
+                top: 24.0, right: 40.0, bottom: 20.0, left: 20.0,
+            }} gap={14.0}>
+                <Text color={palette.text} height={20.0}>{self.localizer.text("settings-bar-show-on")}</Text>
+                <Row height={38.0} gap={28.0}>
+                    <RadioButton on_press={SettingsMessage::BarPrimaryDisplay}
+                        label={self.localizer.text("settings-bar-primary-display")}
+                        selected={!self.shell_settings.bar_on_all_displays}
+                        colors_pair={(if !self.shell_settings.bar_on_all_displays { palette.accent } else { palette.muted }, palette.text)}
+                        width={210.0} />
+                    <RadioButton on_press={SettingsMessage::BarAllDisplays}
+                        label={self.localizer.number("settings-bar-all-displays", "count", display_count as i64)}
+                        selected={self.shell_settings.bar_on_all_displays}
+                        colors_pair={(if self.shell_settings.bar_on_all_displays { palette.accent } else { palette.muted }, palette.text)}
+                        width={210.0} />
+                </Row>
+                <Text color={palette.text} height={20.0}>{self.localizer.text("settings-bar-window-scope")}</Text>
+                <Row height={38.0} gap={28.0}>
+                    <RadioButton on_press={SettingsMessage::BarDisplayWindows}
+                        label={self.localizer.text("settings-bar-this-display")}
+                        selected={!self.shell_settings.all_windows_on_every_bar}
+                        colors_pair={(if !self.shell_settings.all_windows_on_every_bar { palette.accent } else { palette.muted }, palette.text)}
+                        width={210.0} />
+                    <RadioButton on_press={SettingsMessage::BarAllWindows}
+                        label={self.localizer.text("settings-bar-all-windows")}
+                        selected={self.shell_settings.all_windows_on_every_bar}
+                        colors_pair={(if self.shell_settings.all_windows_on_every_bar { palette.accent } else { palette.muted }, palette.text)}
+                        width={210.0} />
+                </Row>
+                <Text color={palette.text} height={20.0}>{self.localizer.text("settings-bar-desktops")}</Text>
+                <Text scale={1.0} color={palette.muted} height={18.0}>
+                    {self.localizer.number("settings-bar-desktop-count", "count", i64::from(self.shell_settings.desktop_count))}
+                </Text>
+                <Slider id={"bar-desktop-count"}
+                    value={f32::from(self.shell_settings.desktop_count.saturating_sub(1)) / 7.0}
+                    on_change={desktop_count_message} width={520.0} />
+                <Row height={46.0} gap={8.0} children={desktop_choices} />
+            </Column>
+        }
     }
 
-    fn appearance_components(&self) -> Column<SettingsMessage> {
+    fn appearance_components(&self) -> impl nickel_ui::Component<SettingsMessage> {
         let system = nickel_platform::appearance();
         let appearance = self.shell_settings.resolve_appearance(system);
         let palette = ThemePalette::from_appearance(appearance);
@@ -1730,182 +1390,81 @@ impl SettingsApp {
         ]
         .into_iter()
         .map(|(label, color)| {
-            Container::new()
-                .width(88.0)
-                .height(76.0)
-                .background(color)
-                .border(palette.muted, 1.0)
-                .padding(Insets {
-                    top: 46.0,
-                    right: 4.0,
-                    bottom: 4.0,
-                    left: 4.0,
-                })
-                .child(
-                    Text::new(self.localizer.text(label))
-                        .align(TextAlign::Center)
-                        .scale(0.72)
-                        .color(palette.text),
-                )
+            ui! {
+                <Container width={88.0} height={76.0} background={color}
+                    border={(palette.muted, 1.0)}
+                    padding={Insets { top: 46.0, right: 4.0, bottom: 4.0, left: 4.0 }}>
+                    <Text align={TextAlign::Center} scale={0.72} color={palette.text}>
+                        {self.localizer.text(label)}
+                    </Text>
+                </Container>
+            }
         });
-        Column::new()
-            .grow(1.0)
-            .padding(Insets {
-                top: 24.0,
-                right: 40.0,
-                bottom: 20.0,
-                left: 20.0,
-            })
-            .gap(14.0)
-            .child(
-                Text::new(self.localizer.text("settings-appearance-mode"))
-                    .color(palette.text)
-                    .height(20.0),
-            )
-            .child(
-                Row::new()
-                    .height(38.0)
-                    .gap(28.0)
-                    .child(
-                        RadioButton::new(
-                            SettingsMessage::AppearanceLight,
-                            self.localizer.text("settings-appearance-light"),
-                            appearance.mode == ThemeMode::Light,
-                        )
-                        .colors(
-                            if appearance.mode == ThemeMode::Light {
-                                palette.accent
-                            } else {
-                                palette.muted
-                            },
-                            palette.text,
-                        )
-                        .width(180.0),
-                    )
-                    .child(
-                        RadioButton::new(
-                            SettingsMessage::AppearanceDark,
-                            self.localizer.text("settings-appearance-dark"),
-                            appearance.mode == ThemeMode::Dark,
-                        )
-                        .colors(
-                            if appearance.mode == ThemeMode::Dark {
-                                palette.accent
-                            } else {
-                                palette.muted
-                            },
-                            palette.text,
-                        )
-                        .width(180.0),
-                    ),
-            )
-            .child(
-                Text::new(self.localizer.text("settings-wallpaper-image"))
-                    .color(palette.text)
-                    .height(20.0),
-            )
-            .child(
-                Row::new()
-                    .height(38.0)
-                    .gap(12.0)
-                    .child(
-                        UiButton::new(
-                            SettingsMessage::WallpaperChoose,
-                            self.localizer.text("settings-wallpaper-choose"),
-                        )
-                        .width(150.0)
-                        .color(palette.text)
-                        .background(palette.surface_hover),
-                    )
-                    .child(
-                        Text::new(
-                            self.wallpaper_settings
-                                .image
-                                .as_deref()
-                                .and_then(|path| path.file_name())
-                                .map(|name| name.to_string_lossy().into_owned())
-                                .unwrap_or_else(|| self.localizer.text("settings-wallpaper-none")),
-                        )
-                        .color(palette.muted)
-                        .width(370.0),
-                    ),
-            )
-            .child(
-                Row::new().height(34.0).gap(10.0).children(
-                    [
-                        ("fill", "settings-wallpaper-fill", WallpaperPosition::Fill),
-                        ("fit", "settings-wallpaper-fit", WallpaperPosition::Fit),
-                        (
-                            "stretch",
-                            "settings-wallpaper-stretch",
-                            WallpaperPosition::Stretch,
-                        ),
-                        (
-                            "center",
-                            "settings-wallpaper-center",
-                            WallpaperPosition::Center,
-                        ),
-                        ("tile", "settings-wallpaper-tile", WallpaperPosition::Tile),
-                        ("span", "settings-wallpaper-span", WallpaperPosition::Span),
-                    ]
-                    .into_iter()
-                    .map(|(_, label, position)| {
-                        RadioButton::new(
-                            SettingsMessage::WallpaperPosition(position),
-                            self.localizer.text(label),
-                            self.wallpaper_settings.position == position,
-                        )
-                        .colors(palette.accent, palette.text)
-                        .width(82.0)
-                    }),
-                ),
-            )
-            .child(
-                Text::new(self.localizer.text("settings-appearance-starting-hue"))
-                    .color(palette.text)
-                    .height(20.0),
-            )
-            .child(
-                Text::new(self.localizer.number(
-                    "settings-appearance-hue-value",
-                    "degrees",
-                    i64::from(hue),
-                ))
-                .scale(1.0)
-                .color(palette.muted)
-                .height(18.0),
-            )
-            .child(
-                Slider::on_change(appearance_hue_message, f32::from(hue) / 359.0)
-                    .colors(palette.surface, palette.accent, palette.text)
-                    .width(520.0),
-            )
-            .child(
-                Text::new(self.localizer.text("settings-appearance-color-intensity"))
-                    .color(palette.text)
-                    .height(20.0),
-            )
-            .child(
-                Text::new(self.localizer.number(
-                    "settings-appearance-intensity-value",
-                    "percent",
-                    i64::from(intensity),
-                ))
-                .scale(1.0)
-                .color(palette.muted)
-                .height(18.0),
-            )
-            .child(
-                Slider::on_change(appearance_intensity_message, f32::from(intensity) / 100.0)
-                    .colors(palette.surface, palette.accent, palette.text)
-                    .width(520.0),
-            )
-            .child(
-                Text::new(self.localizer.text("settings-appearance-color-palette"))
-                    .color(palette.text)
-                    .height(20.0),
-            )
-            .child(Row::new().height(76.0).gap(8.0).children(swatches))
+        let wallpaper_name = self
+            .wallpaper_settings
+            .image
+            .as_deref()
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.localizer.text("settings-wallpaper-none"));
+        let positions = [
+            ("settings-wallpaper-fill", WallpaperPosition::Fill),
+            ("settings-wallpaper-fit", WallpaperPosition::Fit),
+            ("settings-wallpaper-stretch", WallpaperPosition::Stretch),
+            ("settings-wallpaper-center", WallpaperPosition::Center),
+            ("settings-wallpaper-tile", WallpaperPosition::Tile),
+            ("settings-wallpaper-span", WallpaperPosition::Span),
+        ]
+        .into_iter()
+        .map(|(label, position)| ui! {
+            <RadioButton on_press={SettingsMessage::WallpaperPosition(position)}
+                label={self.localizer.text(label)} selected={self.wallpaper_settings.position == position}
+                colors_pair={(palette.accent, palette.text)} width={82.0} />
+        });
+        ui! {
+            <Column grow={1.0} padding={Insets {
+                top: 24.0, right: 40.0, bottom: 20.0, left: 20.0,
+            }} gap={14.0}>
+                <Text color={palette.text} height={20.0}>{self.localizer.text("settings-appearance-mode")}</Text>
+                <Row height={38.0} gap={28.0}>
+                    <RadioButton on_press={SettingsMessage::AppearanceLight}
+                        label={self.localizer.text("settings-appearance-light")}
+                        selected={appearance.mode == ThemeMode::Light}
+                        colors_pair={(if appearance.mode == ThemeMode::Light { palette.accent } else { palette.muted }, palette.text)}
+                        width={180.0} />
+                    <RadioButton on_press={SettingsMessage::AppearanceDark}
+                        label={self.localizer.text("settings-appearance-dark")}
+                        selected={appearance.mode == ThemeMode::Dark}
+                        colors_pair={(if appearance.mode == ThemeMode::Dark { palette.accent } else { palette.muted }, palette.text)}
+                        width={180.0} />
+                </Row>
+                <Text color={palette.text} height={20.0}>{self.localizer.text("settings-wallpaper-image")}</Text>
+                <Row height={38.0} gap={12.0}>
+                    <Button on_press={SettingsMessage::WallpaperChoose} width={150.0}
+                        color={palette.text} background={palette.surface_hover}>
+                        {self.localizer.text("settings-wallpaper-choose")}
+                    </Button>
+                    <Text color={palette.muted} width={370.0}>{wallpaper_name}</Text>
+                </Row>
+                <Row height={34.0} gap={10.0} children={positions} />
+                <Text color={palette.text} height={20.0}>{self.localizer.text("settings-appearance-starting-hue")}</Text>
+                <Text scale={1.0} color={palette.muted} height={18.0}>
+                    {self.localizer.number("settings-appearance-hue-value", "degrees", i64::from(hue))}
+                </Text>
+                <Slider id={"appearance-hue"} value={f32::from(hue) / 359.0}
+                    on_change={appearance_hue_message}
+                    colors_triplet={(palette.surface, palette.accent, palette.text)} width={520.0} />
+                <Text color={palette.text} height={20.0}>{self.localizer.text("settings-appearance-color-intensity")}</Text>
+                <Text scale={1.0} color={palette.muted} height={18.0}>
+                    {self.localizer.number("settings-appearance-intensity-value", "percent", i64::from(intensity))}
+                </Text>
+                <Slider id={"appearance-intensity"} value={f32::from(intensity) / 100.0}
+                    on_change={appearance_intensity_message}
+                    colors_triplet={(palette.surface, palette.accent, palette.text)} width={520.0} />
+                <Text color={palette.text} height={20.0}>{self.localizer.text("settings-appearance-color-palette")}</Text>
+                <Row height={76.0} gap={8.0} children={swatches} />
+            </Column>
+        }
     }
 
     fn pointer_pressed(&mut self) {
@@ -1915,13 +1474,21 @@ impl SettingsApp {
             y: y as f32,
         };
         if let Some(SettingsMessage::SetDesktopCount(count)) = self.ui.message_at_owned(point) {
-            self.desktop_slider_dragging = true;
+            let id = self
+                .ui
+                .id_for_message(&SettingsMessage::SetDesktopCount(count))
+                .cloned();
+            self.ui_state.set_capture(id);
             self.set_desktop_count(count);
             self.request_redraw();
             return;
         }
         if let Some(SettingsMessage::SetAppearanceHue(hue)) = self.ui.message_at_owned(point) {
-            self.appearance_slider_dragging = true;
+            let id = self
+                .ui
+                .id_for_message(&SettingsMessage::SetAppearanceHue(hue))
+                .cloned();
+            self.ui_state.set_capture(id);
             self.set_appearance_hue(hue);
             self.request_redraw();
             return;
@@ -1929,7 +1496,11 @@ impl SettingsApp {
         if let Some(SettingsMessage::SetAppearanceIntensity(intensity)) =
             self.ui.message_at_owned(point)
         {
-            self.intensity_slider_dragging = true;
+            let id = self
+                .ui
+                .id_for_message(&SettingsMessage::SetAppearanceIntensity(intensity))
+                .cloned();
+            self.ui_state.set_capture(id);
             self.set_appearance_intensity(intensity);
             self.request_redraw();
             return;
@@ -2048,7 +1619,10 @@ impl SettingsApp {
 
     fn pointer_moved(&mut self, x: f32, y: f32) {
         self.cursor = (x.round() as i32, y.round() as i32);
-        if self.desktop_slider_dragging {
+        if matches!(
+            self.captured_message(),
+            Some(SettingsMessage::SetDesktopCount(_))
+        ) {
             if let Some(fraction) = self.ui.horizontal_fraction_for_matching(x, |message| {
                 matches!(message, SettingsMessage::SetDesktopCount(_))
             }) {
@@ -2057,7 +1631,10 @@ impl SettingsApp {
             }
             return;
         }
-        if self.appearance_slider_dragging {
+        if matches!(
+            self.captured_message(),
+            Some(SettingsMessage::SetAppearanceHue(_))
+        ) {
             if let Some(fraction) = self.ui.horizontal_fraction_for_matching(x, |message| {
                 matches!(message, SettingsMessage::SetAppearanceHue(_))
             }) {
@@ -2066,7 +1643,10 @@ impl SettingsApp {
             }
             return;
         }
-        if self.intensity_slider_dragging {
+        if matches!(
+            self.captured_message(),
+            Some(SettingsMessage::SetAppearanceIntensity(_))
+        ) {
             if let Some(fraction) = self.ui.horizontal_fraction_for_matching(x, |message| {
                 matches!(message, SettingsMessage::SetAppearanceIntensity(_))
             }) {
@@ -2075,32 +1655,11 @@ impl SettingsApp {
             }
             return;
         }
-        if self.page == SettingsPage::Bluetooth {
-            let hovered = self
-                .ui
-                .message_at(UiPoint { x, y })
-                .and_then(|message| match message {
-                    SettingsMessage::BluetoothDevice(index) => Some(*index),
-                    _ => None,
-                });
-            if hovered != self.hovered_bluetooth_device {
-                self.hovered_bluetooth_device = hovered;
-                self.request_redraw();
-            }
-            return;
+        let hovered = self.ui.id_at(UiPoint { x, y }).cloned();
+        if self.ui_state.set_hovered(hovered) != nickel_ui::Invalidation::None {
+            self.request_redraw();
         }
-        if self.page == SettingsPage::Network {
-            let hovered = self
-                .ui
-                .message_at(UiPoint { x, y })
-                .and_then(|message| match message {
-                    SettingsMessage::WifiNetwork(index) => Some(*index),
-                    _ => None,
-                });
-            if hovered != self.hovered_wifi_network {
-                self.hovered_wifi_network = hovered;
-                self.request_redraw();
-            }
+        if matches!(self.page, SettingsPage::Bluetooth | SettingsPage::Network) {
             return;
         }
         if self.page != SettingsPage::Display {
@@ -2125,9 +1684,8 @@ impl SettingsApp {
     }
 
     fn finish_drag(&mut self) {
-        self.desktop_slider_dragging = false;
-        self.appearance_slider_dragging = false;
-        self.intensity_slider_dragging = false;
+        self.ui_state.set_pressed(None);
+        self.ui_state.set_capture(None);
         if self.page != SettingsPage::Display {
             return;
         }
@@ -2155,40 +1713,41 @@ impl SettingsApp {
         let delta = -wheel_y * 42.0;
         match self.page {
             SettingsPage::Network => {
-                let maximum = (self.network_content_height() - 468.0).max(0.0);
-                self.network_scroll = (self.network_scroll + delta).clamp(0.0, maximum);
-                self.request_redraw();
+                if let Some(id) = self
+                    .ui
+                    .id_for_message(&SettingsMessage::NetworkScroll)
+                    .cloned()
+                {
+                    let maximum = self
+                        .ui
+                        .scroll_extent(&SettingsMessage::NetworkScroll)
+                        .map(|extent| (extent.content.height - extent.viewport.height).max(0.0))
+                        .unwrap_or(0.0);
+                    if self.ui_state.scroll_by(id, delta, maximum) != nickel_ui::Invalidation::None
+                    {
+                        self.request_redraw();
+                    }
+                }
             }
             SettingsPage::Bluetooth => {
-                let maximum = (self.bluetooth_content_height() - 468.0).max(0.0);
-                self.bluetooth_scroll = (self.bluetooth_scroll + delta).clamp(0.0, maximum);
-                self.request_redraw();
+                if let Some(id) = self
+                    .ui
+                    .id_for_message(&SettingsMessage::BluetoothScroll)
+                    .cloned()
+                {
+                    let maximum = self
+                        .ui
+                        .scroll_extent(&SettingsMessage::BluetoothScroll)
+                        .map(|extent| (extent.content.height - extent.viewport.height).max(0.0))
+                        .unwrap_or(0.0);
+                    if self.ui_state.scroll_by(id, delta, maximum) != nickel_ui::Invalidation::None
+                    {
+                        self.request_redraw();
+                    }
+                }
             }
             _ => {}
         }
-    }
-
-    fn network_content_height(&self) -> f32 {
-        let wifi = if self.wifi_networks.is_empty() {
-            44.0
-        } else {
-            self.wifi_networks.len() as f32 * 52.0 - 8.0
-        };
-        let adapters = if self.network_adapters.is_empty() {
-            44.0
-        } else {
-            self.network_adapters.len() as f32 * 84.0 - 12.0
-        };
-        58.0 + 12.0 + 26.0 + 12.0 + wifi + 12.0 + 18.0 + 12.0 + adapters
-    }
-
-    fn bluetooth_content_height(&self) -> f32 {
-        let devices = if self.bluetooth.devices.is_empty() {
-            44.0
-        } else {
-            self.bluetooth.devices.len() as f32 * 78.0 - 10.0
-        };
-        58.0 + 12.0 + 36.0 + 12.0 + devices
     }
 
     fn set_desktop_count_from_fraction(&mut self, fraction: f32) {
@@ -2833,7 +2392,9 @@ impl SettingsApp {
         let (logical_width, logical_height) = presenter.window().size();
         let pixel_width = presenter.window().size_in_pixels().0;
         let scale = pixel_width as f32 / logical_width.max(1) as f32;
-        self.ui = self.build_ui(logical_width as f32, logical_height as f32);
+        let ui = self.build_ui(logical_width as f32, logical_height as f32);
+        ui.reconcile_state(&mut self.ui_state);
+        self.ui = ui;
         let mut commands = self.ui.commands().to_vec();
         if self.page == SettingsPage::Display {
             for (index, display) in self.displays.iter().enumerate() {
@@ -3262,7 +2823,7 @@ impl SettingsApp {
                 win_event: WindowEvent::MouseLeave,
                 ..
             } => {
-                if self.hovered_bluetooth_device.take().is_some() {
+                if self.ui_state.set_hovered(None) != nickel_ui::Invalidation::None {
                     self.request_redraw();
                 }
             }
@@ -3831,7 +3392,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Rect, attach_rect_centered, constrain_center, snap_rect};
+    use super::{
+        NetworkAdapter, Rect, SettingsApp, SettingsMessage, SettingsPage, attach_rect_centered,
+        constrain_center, snap_rect,
+    };
 
     #[test]
     fn display_remains_completely_inside_plane() {
@@ -3911,5 +3475,46 @@ mod tests {
 
         let snapped = snap_rect(moving, fixed, 42);
         assert_eq!((snapped.x, snapped.y), (moving.x, moving.y));
+    }
+
+    #[test]
+    fn settings_lists_derive_scroll_extents_from_intrinsic_children() {
+        let mut app = SettingsApp {
+            page: SettingsPage::Network,
+            network_adapters: (0..12)
+                .map(|index| NetworkAdapter {
+                    name: format!("Adapter {index}"),
+                    description: "Synthetic adapter".into(),
+                    connected: false,
+                    speed: 0,
+                })
+                .collect(),
+            ..SettingsApp::default()
+        };
+        let narrow = app.build_ui(560.0, 360.0);
+        assert!(
+            narrow
+                .scroll_extent(&SettingsMessage::NetworkScroll)
+                .is_some_and(|extent| extent.can_scroll())
+        );
+
+        app.page = SettingsPage::Bluetooth;
+        let compact = app.build_ui(560.0, 360.0);
+        assert!(compact.commands().iter().all(|command| match command {
+            nickel_ui::PaintCommand::Fill { rect, .. }
+            | nickel_ui::PaintCommand::OverlayFill { rect, .. }
+            | nickel_ui::PaintCommand::Stroke { rect, .. }
+            | nickel_ui::PaintCommand::OverlayStroke { rect, .. }
+            | nickel_ui::PaintCommand::TopRoundedFill { rect, .. }
+            | nickel_ui::PaintCommand::Gradient { rect, .. } => {
+                rect.size.width >= 0.0 && rect.size.height >= 0.0
+            }
+            _ => true,
+        }));
+
+        let source = include_str!("main.rs");
+        assert!(!source.contains(&["network_", "content_height"].concat()));
+        assert!(!source.contains(&["bluetooth_", "content_height"].concat()));
+        assert!(!source.contains(&["device_", "height"].concat()));
     }
 }

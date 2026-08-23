@@ -1,226 +1,452 @@
-pub const SIDEBAR_WIDTH: f32 = 220.0;
-pub const CONTENT_LEFT: f32 = 244.0;
-pub const CONTENT_RIGHT_INSET: f32 = 28.0;
-pub const LIST_TOP: f32 = 100.0;
-// Launcher applications use a dense tile grid. Nickel File deliberately has its own FileGrid
-// policy because filenames and browsing affordances need more room than application launchers.
-pub const GRID_COLUMNS: usize = 6;
-const ROW_GAP: f32 = 10.0;
-const COLUMN_GAP: f32 = 10.0;
-const LIST_BOTTOM_INSET: f32 = 80.0;
-const TILE_PADDING: f32 = 10.0;
-const ICON_SIZE: f32 = 44.0;
-const SCROLLBAR_RIGHT_INSET: f32 = 18.0;
-const SCROLLBAR_WIDTH: f32 = 6.0;
-const MIN_THUMB_HEIGHT: f32 = 32.0;
-const SIDEBAR_TOP: f32 = 70.0;
-const SIDEBAR_ITEM_HEIGHT: f32 = 42.0;
-const SIDEBAR_ITEM_COUNT: usize = 4;
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Rect {
-    pub x: f32,
-    pub y: f32,
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Size {
     pub width: f32,
     pub height: f32,
 }
 
+impl Size {
+    pub const fn new(width: f32, height: f32) -> Self {
+        Self { width, height }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Point {
+    pub x: f32,
+    pub y: f32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Rect {
+    pub origin: Point,
+    pub size: Size,
+}
+
 impl Rect {
-    pub fn right(self) -> f32 {
-        self.x + self.width
+    pub const fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
+        Self {
+            origin: Point { x, y },
+            size: Size { width, height },
+        }
     }
 
-    pub fn bottom(self) -> f32 {
-        self.y + self.height
+    pub fn inset(self, insets: Insets) -> Self {
+        Self::new(
+            self.origin.x + insets.left,
+            self.origin.y + insets.top,
+            (self.size.width - insets.left - insets.right).max(0.0),
+            (self.size.height - insets.top - insets.bottom).max(0.0),
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Insets {
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32,
+    pub left: f32,
+}
+
+impl Insets {
+    pub const fn all(value: f32) -> Self {
+        Self {
+            top: value,
+            right: value,
+            bottom: value,
+            left: value,
+        }
     }
 
-    fn contains(self, x: f64, y: f64) -> bool {
-        x >= f64::from(self.x)
-            && x < f64::from(self.right())
-            && y >= f64::from(self.y)
-            && y < f64::from(self.bottom())
+    pub const fn symmetric(horizontal: f32, vertical: f32) -> Self {
+        Self {
+            top: vertical,
+            right: horizontal,
+            bottom: vertical,
+            left: horizontal,
+        }
+    }
+
+    pub const fn horizontal(value: f32) -> Self {
+        Self::symmetric(value, 0.0)
+    }
+
+    pub const fn vertical(value: f32) -> Self {
+        Self::symmetric(0.0, value)
+    }
+
+    pub const fn width(self) -> f32 {
+        self.left + self.right
+    }
+
+    pub const fn height(self) -> f32 {
+        self.top + self.bottom
+    }
+}
+
+impl From<f32> for Insets {
+    fn from(value: f32) -> Self {
+        Self::all(value)
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ResultRow {
-    pub outer: Rect,
-    pub icon: Rect,
-    pub label: Rect,
+pub struct Constraints {
+    pub min: Size,
+    pub max: Size,
 }
 
-impl ResultRow {
-    pub fn allocate(index: usize, available_width: u32) -> Self {
-        let cell_width = grid_cell_size(available_width);
-        let column = index % GRID_COLUMNS;
-        let grid_row = index / GRID_COLUMNS;
-        let outer = Rect {
-            x: CONTENT_LEFT + column as f32 * (cell_width + COLUMN_GAP),
-            y: LIST_TOP + grid_row as f32 * (cell_width + ROW_GAP),
-            width: cell_width,
-            height: cell_width,
-        };
-        let icon = Rect {
-            x: outer.x + (outer.width - ICON_SIZE) / 2.0,
-            y: outer.y + TILE_PADDING,
-            width: ICON_SIZE,
-            height: ICON_SIZE,
-        };
-        let label = Rect {
-            x: outer.x + TILE_PADDING,
-            y: icon.bottom() + 6.0,
-            width: (outer.width - TILE_PADDING * 2.0).max(0.0),
-            height: (outer.bottom() - icon.bottom() - 12.0).max(0.0),
-        };
-        Self { outer, icon, label }
+impl Constraints {
+    pub const fn new(min: Size, max: Size) -> Self {
+        Self { min, max }
     }
+
+    pub fn constrain(self, size: Size) -> Size {
+        let max_width = self.max.width.max(self.min.width);
+        let max_height = self.max.height.max(self.min.height);
+        Size {
+            width: finite_nonnegative(size.width).clamp(self.min.width.max(0.0), max_width),
+            height: finite_nonnegative(size.height).clamp(self.min.height.max(0.0), max_height),
+        }
+    }
+
+    pub const fn tight(size: Size) -> Self {
+        Self {
+            min: size,
+            max: size,
+        }
+    }
+
+    pub const fn loose(max: Size) -> Self {
+        Self {
+            min: Size::new(0.0, 0.0),
+            max,
+        }
+    }
+
+    pub const fn unbounded() -> Self {
+        Self::loose(Size::new(f32::INFINITY, f32::INFINITY))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Length {
+    #[default]
+    Auto,
+    Px(f32),
+    Percent(f32),
+    Fill,
+    Fraction(f32),
+    MinContent,
+    MaxContent,
+}
+
+impl From<f32> for Length {
+    fn from(value: f32) -> Self {
+        Self::Px(value)
+    }
+}
+
+impl Length {
+    pub const fn percent(value: f32) -> Self {
+        Self::Percent(value)
+    }
+
+    pub const fn fr(value: f32) -> Self {
+        Self::Fraction(value)
+    }
+
+    pub fn resolve(self, parent: f32, intrinsic: f32) -> f32 {
+        match self {
+            Self::Auto | Self::MinContent | Self::MaxContent => intrinsic,
+            Self::Px(value) => finite_nonnegative(value),
+            Self::Percent(value) if parent.is_finite() => {
+                finite_nonnegative(parent * value.max(0.0))
+            }
+            Self::Percent(_) => intrinsic,
+            Self::Fill => {
+                if parent.is_finite() {
+                    parent.max(0.0)
+                } else {
+                    intrinsic
+                }
+            }
+            Self::Fraction(_) => intrinsic,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Align {
+    #[default]
+    Start,
+    Center,
+    End,
+    Stretch,
+    Baseline,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Justify {
+    #[default]
+    Start,
+    Center,
+    End,
+    SpaceBetween,
+    SpaceAround,
+    SpaceEvenly,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Overflow {
+    #[default]
+    Visible,
+    Clip,
+    Scroll,
+    Auto,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Track {
+    Px(f32),
+    Auto,
+    Fraction(f32),
+    MinMax(Box<Track>, Box<Track>),
+    Repeat(usize, Box<Track>),
+    AutoFit(Box<Track>),
+}
+
+impl Track {
+    pub fn px(value: f32) -> Self {
+        Self::Px(value)
+    }
+
+    pub fn fr(value: f32) -> Self {
+        Self::Fraction(value)
+    }
+
+    pub fn minmax(min: impl Into<Track>, max: impl Into<Track>) -> Self {
+        Self::MinMax(Box::new(min.into()), Box::new(max.into()))
+    }
+
+    pub fn repeat(count: usize, track: impl Into<Track>) -> Self {
+        Self::Repeat(count, Box::new(track.into()))
+    }
+
+    pub fn repeat_auto_fit(track: impl Into<Track>) -> Self {
+        Self::AutoFit(Box::new(track.into()))
+    }
+}
+
+impl From<f32> for Track {
+    fn from(value: f32) -> Self {
+        Self::Px(value)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Axis {
+    Horizontal,
+    Vertical,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Scrollbar {
-    pub track: Rect,
-    pub thumb: Rect,
+pub struct FlexItem {
+    pub preferred: f32,
+    pub min: f32,
+    pub max: f32,
+    pub grow: f32,
+    pub shrink: f32,
 }
 
-pub fn visible_capacity(available_width: u32, available_height: u32) -> usize {
-    let height = (available_height as f32 - LIST_TOP - LIST_BOTTOM_INSET).max(0.0);
-    let cell_size = grid_cell_size(available_width);
-    ((height + ROW_GAP) / (cell_size + ROW_GAP)).floor() as usize * GRID_COLUMNS
-}
-
-fn grid_cell_size(available_width: u32) -> f32 {
-    let available = (available_width as f32 - CONTENT_LEFT - CONTENT_RIGHT_INSET).max(0.0);
-    (available - COLUMN_GAP * GRID_COLUMNS.saturating_sub(1) as f32) / GRID_COLUMNS as f32
-}
-
-pub fn max_scroll_offset(total: usize, capacity: usize) -> usize {
-    let total_rows = total.div_ceil(GRID_COLUMNS);
-    let visible_rows = capacity / GRID_COLUMNS;
-    total_rows.saturating_sub(visible_rows) * GRID_COLUMNS
-}
-
-pub fn scrollbar(
-    available_width: u32,
-    available_height: u32,
-    total: usize,
-    capacity: usize,
-    offset: usize,
-) -> Option<Scrollbar> {
-    if capacity == 0 || total <= capacity {
-        return None;
+impl FlexItem {
+    pub const fn fixed(size: f32) -> Self {
+        Self {
+            preferred: size,
+            min: size,
+            max: size,
+            grow: 0.0,
+            shrink: 0.0,
+        }
     }
-    let track = Rect {
-        x: available_width as f32 - SCROLLBAR_RIGHT_INSET - SCROLLBAR_WIDTH,
-        y: LIST_TOP,
-        width: SCROLLBAR_WIDTH,
-        height: (available_height as f32 - LIST_TOP - LIST_BOTTOM_INSET).max(0.0),
+
+    pub const fn flexible(preferred: f32, min: f32, max: f32, grow: f32) -> Self {
+        Self {
+            preferred,
+            min,
+            max,
+            grow,
+            shrink: 1.0,
+        }
+    }
+
+    pub const fn flex(preferred: f32, min: f32, max: f32, grow: f32, shrink: f32) -> Self {
+        Self {
+            preferred,
+            min,
+            max,
+            grow,
+            shrink,
+        }
+    }
+}
+
+pub fn layout_flex(bounds: Rect, axis: Axis, gap: f32, items: &[FlexItem]) -> Vec<Rect> {
+    if items.is_empty() {
+        return Vec::new();
+    }
+    let available = match axis {
+        Axis::Horizontal => bounds.size.width,
+        Axis::Vertical => bounds.size.height,
     };
-    let thumb_height = (track.height * capacity as f32 / total as f32)
-        .max(MIN_THUMB_HEIGHT)
-        .min(track.height);
-    let travel = track.height - thumb_height;
-    let max_offset = max_scroll_offset(total, capacity);
-    let thumb_y = track.y + travel * offset.min(max_offset) as f32 / max_offset as f32;
-    Some(Scrollbar {
-        track,
-        thumb: Rect {
-            x: track.x,
-            y: thumb_y,
-            width: track.width,
-            height: thumb_height,
-        },
-    })
-}
-
-pub fn offset_from_thumb_y(
-    thumb_y: f64,
-    scrollbar: Scrollbar,
-    total: usize,
-    capacity: usize,
-) -> usize {
-    let travel = scrollbar.track.height - scrollbar.thumb.height;
-    if travel <= 0.0 {
-        return 0;
+    let gap_total = gap * items.len().saturating_sub(1) as f32;
+    let mut sizes: Vec<_> = items
+        .iter()
+        .map(|item| item.preferred.clamp(item.min, item.max))
+        .collect();
+    let occupied = sizes.iter().sum::<f32>() + gap_total;
+    let extra = (available - occupied).max(0.0);
+    let total_grow = items.iter().map(|item| item.grow.max(0.0)).sum::<f32>();
+    if extra > 0.0 && total_grow > 0.0 {
+        for (size, item) in sizes.iter_mut().zip(items) {
+            *size = (*size + extra * item.grow.max(0.0) / total_grow).min(item.max);
+        }
     }
-    let fraction = ((thumb_y as f32 - scrollbar.track.y) / travel).clamp(0.0, 1.0);
-    (fraction * max_scroll_offset(total, capacity) as f32).round() as usize
+    let mut deficit = (occupied - available).max(0.0);
+    while deficit > f32::EPSILON {
+        let shrink_weight = items
+            .iter()
+            .zip(&sizes)
+            .filter(|(item, size)| item.shrink > 0.0 && **size > item.min)
+            .map(|(item, size)| item.shrink * *size)
+            .sum::<f32>();
+        if shrink_weight <= f32::EPSILON {
+            break;
+        }
+        let mut removed = 0.0;
+        for (item, size) in items.iter().zip(&mut sizes) {
+            if item.shrink <= 0.0 || *size <= item.min {
+                continue;
+            }
+            let share = deficit * item.shrink * *size / shrink_weight;
+            let next = (*size - share).max(item.min);
+            removed += *size - next;
+            *size = next;
+        }
+        if removed <= f32::EPSILON {
+            break;
+        }
+        deficit -= removed;
+    }
+
+    let mut cursor = match axis {
+        Axis::Horizontal => bounds.origin.x,
+        Axis::Vertical => bounds.origin.y,
+    };
+    sizes
+        .into_iter()
+        .map(|main| {
+            let rect = match axis {
+                Axis::Horizontal => Rect::new(cursor, bounds.origin.y, main, bounds.size.height),
+                Axis::Vertical => Rect::new(bounds.origin.x, cursor, bounds.size.width, main),
+            };
+            cursor += main + gap;
+            rect
+        })
+        .collect()
 }
 
-pub fn rect_contains(rect: Rect, x: f64, y: f64) -> bool {
-    rect.contains(x, y)
-}
-
-pub fn hit_test_result(x: f64, y: f64, available_width: u32, count: usize) -> Option<usize> {
-    (0..count).find(|index| {
-        ResultRow::allocate(*index, available_width)
-            .outer
-            .contains(x, y)
-    })
+fn finite_nonnegative(value: f32) -> f32 {
+    if value.is_nan() || value.is_sign_negative() {
+        0.0
+    } else {
+        value
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ResultRow, hit_test_result, hit_test_sidebar};
+    use super::{Axis, FlexItem, Insets, Length, Rect, Size, layout_flex};
+    use proptest::prelude::*;
 
-    #[test]
-    fn row_allocates_centered_icon_and_flexible_label_column() {
-        let row = ResultRow::allocate(0, 960);
-        assert_eq!(row.outer.y, 100.0);
-        assert_eq!(row.icon.y, 110.0);
-        assert!(row.icon.x > row.outer.x);
-        assert_eq!(row.label.x, row.outer.x + 10.0);
-        assert_eq!(row.outer.width, row.outer.height);
-        assert!(row.label.width > row.icon.width);
+    proptest! {
+        #[test]
+        fn valid_flex_inputs_always_produce_finite_nonnegative_geometry(
+            width in 0.0_f32..4096.0,
+            height in 0.0_f32..2160.0,
+            gap in 0.0_f32..64.0,
+            preferred in prop::collection::vec(0.0_f32..1024.0, 0..24),
+        ) {
+            let items = preferred
+                .into_iter()
+                .map(|preferred| FlexItem::flex(preferred, 0.0, 2048.0, 1.0, 1.0))
+                .collect::<Vec<_>>();
+            for rect in layout_flex(
+                Rect::new(0.0, 0.0, width, height),
+                Axis::Horizontal,
+                gap,
+                &items,
+            ) {
+                prop_assert!(rect.origin.x.is_finite());
+                prop_assert!(rect.origin.y.is_finite());
+                prop_assert!(rect.size.width.is_finite() && rect.size.width >= 0.0);
+                prop_assert!(rect.size.height.is_finite() && rect.size.height >= 0.0);
+            }
+        }
     }
 
     #[test]
-    fn hit_testing_excludes_grid_gap_and_unallocated_rows() {
-        assert_eq!(hit_test_result(260.0, 140.0, 960, 3), Some(0));
-        assert_eq!(hit_test_result(355.0, 140.0, 960, 3), None);
-        assert_eq!(hit_test_result(260.0, 300.0, 960, 3), None);
+    fn row_distributes_remaining_space_to_flexible_children() {
+        let layout = layout_flex(
+            Rect::new(0.0, 0.0, 300.0, 40.0),
+            Axis::Horizontal,
+            10.0,
+            &[
+                FlexItem::fixed(50.0),
+                FlexItem::flexible(50.0, 20.0, 500.0, 1.0),
+                FlexItem::flexible(50.0, 20.0, 500.0, 1.0),
+            ],
+        );
+        assert_eq!(layout[0], Rect::new(0.0, 0.0, 50.0, 40.0));
+        assert_eq!(layout[1], Rect::new(60.0, 0.0, 115.0, 40.0));
+        assert_eq!(layout[2], Rect::new(185.0, 0.0, 115.0, 40.0));
     }
 
     #[test]
-    fn sidebar_hit_testing_has_no_recent_history_slot() {
-        assert_eq!(hit_test_sidebar(24.0, 90.0), Some(0));
-        assert_eq!(hit_test_sidebar(24.0, 132.0), Some(1));
-        assert_eq!(hit_test_sidebar(24.0, 174.0), Some(2));
-        assert_eq!(hit_test_sidebar(24.0, 216.0), Some(3));
-        assert_eq!(hit_test_sidebar(24.0, 258.0), None);
-    }
-
-    #[test]
-    fn scrollbar_thumb_tracks_visible_fraction_and_offset() {
-        let top = super::scrollbar(960, 640, 100, 24, 0).expect("overflow scrollbar");
-        let bottom = super::scrollbar(960, 640, 100, 24, 78).expect("overflow scrollbar");
-        assert_eq!(top.thumb.y, top.track.y);
-        assert_eq!(bottom.thumb.bottom(), bottom.track.bottom());
+    fn insets_never_produce_negative_content_size() {
         assert_eq!(
-            super::offset_from_thumb_y(bottom.thumb.y.into(), bottom, 100, 24),
-            78
+            Rect::new(0.0, 0.0, 10.0, 10.0).inset(Insets::all(8.0)),
+            Rect::new(8.0, 8.0, 0.0, 0.0)
         );
     }
 
     #[test]
-    fn scrolling_keeps_the_first_visible_item_on_a_row_boundary() {
-        assert_eq!(super::max_scroll_offset(26, 24), 6);
-        assert_eq!(super::max_scroll_offset(24, 24), 0);
+    fn flex_items_shrink_proportionally_without_crossing_minimums() {
+        let layout = layout_flex(
+            Rect::new(0.0, 0.0, 120.0, 20.0),
+            Axis::Horizontal,
+            0.0,
+            &[
+                FlexItem::flex(100.0, 80.0, 200.0, 0.0, 1.0),
+                FlexItem::flex(100.0, 20.0, 200.0, 0.0, 1.0),
+            ],
+        );
+        assert_eq!(layout[0].size.width, 80.0);
+        assert_eq!(layout[1].size.width, 40.0);
     }
-}
 
-pub fn hit_test_sidebar(x: f64, y: f64) -> Option<usize> {
-    if x < 8.0 || x >= f64::from(SIDEBAR_WIDTH - 8.0) || y < f64::from(SIDEBAR_TOP) {
-        return None;
+    #[test]
+    fn percentage_and_fill_fall_back_to_intrinsic_when_parent_is_unbounded() {
+        assert_eq!(Length::percent(0.5).resolve(200.0, 30.0), 100.0);
+        assert_eq!(Length::percent(0.5).resolve(f32::INFINITY, 30.0), 30.0);
+        assert_eq!(Length::Fill.resolve(f32::INFINITY, 30.0), 30.0);
+        assert_eq!(Length::Fill.resolve(200.0, 30.0), 200.0);
     }
-    let index = ((y as f32 - SIDEBAR_TOP) / SIDEBAR_ITEM_HEIGHT).floor() as usize;
-    (index < SIDEBAR_ITEM_COUNT).then_some(index)
-}
 
-pub fn sidebar_item_bounds(index: usize) -> Rect {
-    Rect {
-        x: 8.0,
-        y: SIDEBAR_TOP + index as f32 * SIDEBAR_ITEM_HEIGHT,
-        width: SIDEBAR_WIDTH - 16.0,
-        height: SIDEBAR_ITEM_HEIGHT,
+    #[test]
+    fn contradictory_constraints_resolve_without_negative_or_nonfinite_geometry() {
+        let constrained = super::Constraints::new(Size::new(80.0, 40.0), Size::new(20.0, 10.0))
+            .constrain(Size::new(f32::NAN, -1.0));
+        assert_eq!(constrained, Size::new(80.0, 40.0));
     }
 }

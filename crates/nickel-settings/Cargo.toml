@@ -6,7 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-nickel-components = { path = "../nickel-components" }
+nickel-ui = { path = "../nickel-ui" }
 nickel-core = { path = "../nickel-core" }
 nickel-i18n = { path = "../nickel-i18n" }
 nickel-logging = { path = "../nickel-logging" }

@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use nickel_components::{
-    Column, ComponentGpu, Container, Dropdown, Header, Insets, LinearGradient, Point, Rect, Row,
-    Slider, Text, UiTree,
+use nickel_ui::{
+    Component, ComponentGpu, Insets, LinearGradient, Point, Rect, UiStateStore, UiTree, component,
+    ui,
 };
 use winit::window::Window;
 
@@ -19,12 +19,12 @@ const PRIMARY: u32 = 0xf4f7ff;
 const SECONDARY: u32 = 0xaebbd1;
 const ACCENT: u32 = 0x65b8ff;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 enum ControlMessage {
     WifiPower,
     WifiDropdown,
     WifiNetwork(usize),
-    AudioVolume,
+    AudioVolume(f32),
     AudioDropdown,
     AudioDevice(usize),
     BluetoothPower,
@@ -40,11 +40,8 @@ pub struct ControlCenterGpu {
     bluetooth: platform::BluetoothStatus,
     audio: platform::AudioStatus,
     ui: UiTree<ControlMessage>,
+    ui_state: UiStateStore,
     cursor: Point,
-    audio_dropdown_open: bool,
-    wifi_dropdown_open: bool,
-    bluetooth_dropdown_open: bool,
-    volume_dragging: bool,
 }
 
 impl ControlCenterGpu {
@@ -64,11 +61,8 @@ impl ControlCenterGpu {
             bluetooth: platform::bluetooth_status(),
             audio: platform::audio_status(),
             ui: UiTree::default(),
+            ui_state: UiStateStore::default(),
             cursor: Point { x: 0.0, y: 0.0 },
-            audio_dropdown_open: false,
-            wifi_dropdown_open: false,
-            bluetooth_dropdown_open: false,
-            volume_dragging: false,
         })
     }
 
@@ -89,11 +83,9 @@ impl ControlCenterGpu {
                 network: &self.network,
                 bluetooth: &self.bluetooth,
                 audio: &self.audio,
-                wifi_dropdown_open: self.wifi_dropdown_open,
-                audio_dropdown_open: self.audio_dropdown_open,
-                bluetooth_dropdown_open: self.bluetooth_dropdown_open,
             },
             (self.size.0 as f32, self.size.1 as f32),
+            &mut self.ui_state,
         );
         if let Err(error) = self.gpu.render(self.ui.commands()) {
             eprintln!("failed to render Control Center: {error}");
@@ -102,26 +94,24 @@ impl ControlCenterGpu {
 
     pub fn cursor_moved(&mut self, x: f32, y: f32) {
         self.cursor = Point { x, y };
-        if self.volume_dragging
+        if self.is_volume_dragging()
             && let Some(fraction) = self
                 .ui
-                .horizontal_fraction_for_message(&ControlMessage::AudioVolume, x)
+                .horizontal_fraction_for_id(&UiId::from("audio-volume"), x)
         {
             self.set_volume_fraction(fraction);
         }
     }
 
     pub fn pointer_pressed(&mut self) -> bool {
-        let Some((message, fraction)) = self
-            .ui
-            .message_at_with_horizontal_fraction(self.cursor)
-            .map(|(message, fraction)| (message.clone(), fraction))
+        let Some(message) = self.ui.message_at_owned(self.cursor)
         else {
-            self.audio_dropdown_open = false;
-            self.wifi_dropdown_open = false;
-            self.bluetooth_dropdown_open = false;
+            self.close_dropdowns(None);
             return true;
         };
+        let target = self.ui.id_at(self.cursor).cloned();
+        self.ui_state.set_pressed(target.clone());
+        self.ui_state.set_capture(target);
         if message == ControlMessage::WifiPower {
             if platform::set_wifi_enabled(!self.network.enabled) {
                 self.network.enabled = !self.network.enabled;
@@ -129,9 +119,7 @@ impl ControlCenterGpu {
             return true;
         }
         if message == ControlMessage::WifiDropdown {
-            self.wifi_dropdown_open = !self.wifi_dropdown_open;
-            self.audio_dropdown_open = false;
-            self.bluetooth_dropdown_open = false;
+            self.toggle_dropdown(&ControlMessage::WifiDropdown);
             return true;
         }
         if let ControlMessage::WifiNetwork(index) = message {
@@ -141,18 +129,15 @@ impl ControlCenterGpu {
             {
                 let _ = platform::activate_wifi_network(&network.id);
             }
-            self.wifi_dropdown_open = false;
+            self.set_dropdown(&ControlMessage::WifiDropdown, false);
             return true;
         }
-        if message == ControlMessage::AudioVolume {
-            self.volume_dragging = true;
+        if let ControlMessage::AudioVolume(fraction) = message {
             self.set_volume_fraction(fraction);
             return true;
         }
         if message == ControlMessage::AudioDropdown {
-            self.audio_dropdown_open = !self.audio_dropdown_open;
-            self.wifi_dropdown_open = false;
-            self.bluetooth_dropdown_open = false;
+            self.toggle_dropdown(&ControlMessage::AudioDropdown);
             return true;
         }
         if let ControlMessage::AudioDevice(index) = message {
@@ -161,7 +146,7 @@ impl ControlCenterGpu {
             {
                 self.audio = platform::audio_status();
             }
-            self.audio_dropdown_open = false;
+            self.set_dropdown(&ControlMessage::AudioDropdown, false);
             return true;
         }
         if message == ControlMessage::BluetoothPower {
@@ -177,9 +162,7 @@ impl ControlCenterGpu {
             return true;
         }
         if message == ControlMessage::BluetoothDropdown {
-            self.bluetooth_dropdown_open = !self.bluetooth_dropdown_open;
-            self.wifi_dropdown_open = false;
-            self.audio_dropdown_open = false;
+            self.toggle_dropdown(&ControlMessage::BluetoothDropdown);
             return true;
         }
         if let ControlMessage::BluetoothDevice(index) = message {
@@ -188,18 +171,52 @@ impl ControlCenterGpu {
             {
                 let _ = platform::toggle_bluetooth_device(&device.id);
             }
-            self.bluetooth_dropdown_open = false;
+            self.set_dropdown(&ControlMessage::BluetoothDropdown, false);
             return true;
         }
         false
     }
 
     pub fn pointer_released(&mut self) -> bool {
-        std::mem::take(&mut self.volume_dragging)
+        let was_dragging = self.is_volume_dragging();
+        self.ui_state.set_pressed(None);
+        self.ui_state.set_capture(None);
+        was_dragging
     }
 
     pub fn is_volume_dragging(&self) -> bool {
-        self.volume_dragging
+        self.ui_state.captured() == Some(&UiId::from("audio-volume"))
+    }
+
+    fn dropdown_open(&self, message: &ControlMessage) -> bool {
+        self.ui
+            .id_for_message(message)
+            .and_then(|id| self.ui_state.state(id))
+            .is_some_and(|state| state.dropdown_open)
+    }
+
+    fn set_dropdown(&mut self, message: &ControlMessage, open: bool) {
+        if let Some(id) = self.ui.id_for_message(message).cloned() {
+            self.ui_state.set_dropdown_open(id, open);
+        }
+    }
+
+    fn close_dropdowns(&mut self, except: Option<&ControlMessage>) {
+        for message in [
+            ControlMessage::WifiDropdown,
+            ControlMessage::AudioDropdown,
+            ControlMessage::BluetoothDropdown,
+        ] {
+            if except != Some(&message) {
+                self.set_dropdown(&message, false);
+            }
+        }
+    }
+
+    fn toggle_dropdown(&mut self, message: &ControlMessage) {
+        let open = !self.dropdown_open(message);
+        self.close_dropdowns(Some(message));
+        self.set_dropdown(message, open);
     }
 
     fn set_volume_fraction(&mut self, fraction: f32) {
@@ -214,19 +231,36 @@ struct ControlCenterView<'a> {
     network: &'a platform::NetworkStatus,
     bluetooth: &'a platform::BluetoothStatus,
     audio: &'a platform::AudioStatus,
-    wifi_dropdown_open: bool,
-    audio_dropdown_open: bool,
-    bluetooth_dropdown_open: bool,
 }
 
-fn build_ui(view: ControlCenterView<'_>, size: (f32, f32)) -> UiTree<ControlMessage> {
+fn audio_volume_message(value: f32) -> ControlMessage {
+    ControlMessage::AudioVolume(value)
+}
+
+#[component]
+fn ActionButton(
+    message: ControlMessage,
+    label: &str,
+    width: f32,
+) -> impl Component<ControlMessage> {
+    ui! {
+        <Container background={0x34445f} border={(CARD_BORDER, 1.0)}
+            padding={Insets { top: 5.0, right: 8.0, bottom: 5.0, left: 8.0 }}
+            width={width} on_press={message}>
+            <Text scale={1.15} color={PRIMARY}>{label}</Text>
+        </Container>
+    }
+}
+
+fn build_ui(
+    view: ControlCenterView<'_>,
+    size: (f32, f32),
+    state: &mut UiStateStore,
+) -> UiTree<ControlMessage> {
     let ControlCenterView {
         network,
         bluetooth,
         audio,
-        wifi_dropdown_open,
-        audio_dropdown_open,
-        bluetooth_dropdown_open,
     } = view;
     let (network_name, network_detail) = if network.connected {
         (
@@ -247,14 +281,16 @@ fn build_ui(view: ControlCenterView<'_>, size: (f32, f32)) -> UiTree<ControlMess
     let selected_audio = audio
         .devices
         .iter()
-        .find(|device| device.is_default)
         .enumerate()
+        .find(|(_, device)| device.is_default)
         .map(|(index, device)| (device.name.clone(), ControlMessage::AudioDevice(index)))
+        .map(|(name, _)| name)
         .unwrap_or_else(|| "No audio output".into());
     let audio_devices: Vec<_> = audio
         .devices
         .iter()
-        .map(|device| device.name.clone())
+        .enumerate()
+        .map(|(index, device)| (device.name.clone(), ControlMessage::AudioDevice(index)))
         .collect();
     let selected_network = network
         .networks
@@ -311,151 +347,54 @@ fn build_ui(view: ControlCenterView<'_>, size: (f32, f32)) -> UiTree<ControlMess
         "READY"
     };
 
-    let root = Column::new()
-        .background(LinearGradient::vertical(BACKGROUND_TOP, BACKGROUND_BOTTOM))
-        .padding(Insets::all(20.0))
-        .gap(14.0)
-        .child(Header::new("Control Center").color(PRIMARY))
-        .child(
-            Container::new()
-                .background(CARD)
-                .border(CARD_BORDER, 1.0)
-                .padding(Insets::all(16.0))
-                .height(if wifi_dropdown_open {
-                    130.0 + wifi_networks.len() as f32 * 36.0
-                } else {
-                    130.0
-                })
-                .child(
-                    Column::new()
-                        .gap(8.0)
-                        .child(
-                            Row::new()
-                                .height(25.0)
-                                .child(Text::new(network_name).scale(2.3).color(PRIMARY))
-                                .child(action_button(
-                                    ControlMessage::WifiPower,
-                                    if network.enabled { "ON" } else { "OFF" },
-                                    54.0,
-                                )),
-                        )
-                        .child(Text::new(network_detail).scale(1.35).color(ACCENT))
-                        .child(
-                            Dropdown::new(
-                                ControlMessage::WifiDropdown,
-                                selected_network,
-                                wifi_networks,
-                            )
-                                .expanded(wifi_dropdown_open)
-                                .colors(0x27344c, 0x34445f, PRIMARY),
-                        ),
-                ),
-        )
-        .child(
-            Container::new()
-                .background(CARD)
-                .border(CARD_BORDER, 1.0)
-                .padding(Insets::all(14.0))
-                .height(if audio_dropdown_open {
-                    116.0 + audio_devices.len() as f32 * 36.0
-                } else {
-                    116.0
-                })
-                .child(
-                    Column::new()
-                        .gap(8.0)
-                        .child(
-                            Row::new()
-                                .height(22.0)
-                                .child(Text::new("Audio").scale(2.0).color(PRIMARY))
-                                .child(
-                                    Text::new(format!("{}%", audio.volume_percent))
-                                        .scale(1.5)
-                                        .color(SECONDARY),
-                                ),
-                        )
-                        .child(
-                            Slider::new(
-                                ControlMessage::AudioVolume,
-                                f32::from(audio.volume_percent) / 100.0,
-                            )
-                                .colors(0x354158, ACCENT, PRIMARY),
-                        )
-                        .child(
-                            Dropdown::new(
-                                ControlMessage::AudioDropdown,
-                                selected_audio,
-                                audio_devices,
-                            )
-                                .expanded(audio_dropdown_open)
-                                .colors(0x27344c, 0x34445f, PRIMARY),
-                        ),
-                ),
-        )
-        .child(
-            Container::new()
-                .background(CARD)
-                .border(CARD_BORDER, 1.0)
-                .padding(Insets::all(14.0))
-                .height(if bluetooth_dropdown_open {
-                    130.0 + bluetooth_devices.len() as f32 * 36.0
-                } else {
-                    130.0
-                })
-                .child(
-                    Column::new()
-                        .gap(8.0)
-                        .child(
-                            Row::new()
-                                .height(25.0)
-                                .child(Text::new("Bluetooth").scale(2.0).color(PRIMARY))
-                                .child(action_button(
-                                    ControlMessage::BluetoothDiscovery,
-                                    if bluetooth.discovering {
-                                        "STOP"
-                                    } else {
-                                        "SCAN"
-                                    },
-                                    64.0,
-                                ))
-                                .child(action_button(
-                                    ControlMessage::BluetoothPower,
-                                    if bluetooth.powered { "ON" } else { "OFF" },
-                                    54.0,
-                                )),
-                        )
-                        .child(Text::new(bluetooth_detail).scale(1.25).color(SECONDARY))
-                        .child(
-                            Dropdown::new(
-                                ControlMessage::BluetoothDropdown,
-                                selected_bluetooth,
-                                bluetooth_devices,
-                            )
-                            .expanded(bluetooth_dropdown_open)
-                            .colors(0x27344c, 0x34445f, PRIMARY),
-                        ),
-                ),
-        );
-    UiTree::layout(root, Rect::new(0.0, 0.0, size.0, size.1))
-}
-
-fn action_button(
-    message: ControlMessage,
-    label: &str,
-    width: f32,
-) -> Container<ControlMessage> {
-    Container::new()
-        .background(0x34445f)
-        .border(CARD_BORDER, 1.0)
-        .padding(Insets {
-            top: 5.0,
-            right: 8.0,
-            bottom: 5.0,
-            left: 8.0,
-        })
-        .width(width)
-        .message(message)
-        .child(Text::new(label).scale(1.15).color(PRIMARY))
+    let root = ui! {
+        <Column background={LinearGradient::vertical(BACKGROUND_TOP, BACKGROUND_BOTTOM)}
+            padding={Insets::all(20.0)} gap={14.0}>
+            <Header color={PRIMARY}>{"Control Center"}</Header>
+            <Container background={CARD} border={(CARD_BORDER, 1.0)} padding={Insets::all(16.0)}>
+                <Column gap={8.0}>
+                    <Row height={25.0}>
+                        <Text scale={2.3} color={PRIMARY}>{network_name}</Text>
+                        <ActionButton message={ControlMessage::WifiPower}
+                            label={if network.enabled { "ON" } else { "OFF" }} width={54.0} />
+                    </Row>
+                    <Text scale={1.35} color={ACCENT}>{network_detail}</Text>
+                    <Dropdown id={"wifi-dropdown"} on_toggle={ControlMessage::WifiDropdown}
+                        selected={selected_network} options={wifi_networks}
+                        colors_triplet={(0x27344c, 0x34445f, PRIMARY)} />
+                </Column>
+            </Container>
+            <Container background={CARD} border={(CARD_BORDER, 1.0)} padding={Insets::all(14.0)}>
+                <Column gap={8.0}>
+                    <Row height={22.0}>
+                        <Text scale={2.0} color={PRIMARY}>{"Audio"}</Text>
+                        <Text scale={1.5} color={SECONDARY}>{format!("{}%", audio.volume_percent)}</Text>
+                    </Row>
+                    <Slider id={"audio-volume"} value={f32::from(audio.volume_percent) / 100.0}
+                        on_change={audio_volume_message} colors_triplet={(0x354158, ACCENT, PRIMARY)} />
+                    <Dropdown id={"audio-dropdown"} on_toggle={ControlMessage::AudioDropdown}
+                        selected={selected_audio} options={audio_devices}
+                        colors_triplet={(0x27344c, 0x34445f, PRIMARY)} />
+                </Column>
+            </Container>
+            <Container background={CARD} border={(CARD_BORDER, 1.0)} padding={Insets::all(14.0)}>
+                <Column gap={8.0}>
+                    <Row height={25.0}>
+                        <Text scale={2.0} color={PRIMARY}>{"Bluetooth"}</Text>
+                        <ActionButton message={ControlMessage::BluetoothDiscovery}
+                            label={if bluetooth.discovering { "STOP" } else { "SCAN" }} width={64.0} />
+                        <ActionButton message={ControlMessage::BluetoothPower}
+                            label={if bluetooth.powered { "ON" } else { "OFF" }} width={54.0} />
+                    </Row>
+                    <Text scale={1.25} color={SECONDARY}>{bluetooth_detail}</Text>
+                    <Dropdown id={"bluetooth-dropdown"} on_toggle={ControlMessage::BluetoothDropdown}
+                        selected={selected_bluetooth} options={bluetooth_devices}
+                        colors_triplet={(0x27344c, 0x34445f, PRIMARY)} />
+                </Column>
+            </Container>
+        </Column>
+    };
+    UiTree::layout_with_state(root, Rect::new(0.0, 0.0, size.0, size.1), state)
 }
 
 #[cfg(test)]
@@ -474,21 +413,20 @@ mod tests {
         };
         let bluetooth = platform::BluetoothStatus::default();
         let audio = platform::AudioStatus::default();
+        let mut state = UiStateStore::default();
         let ui = build_ui(
             ControlCenterView {
                 network: &network,
                 bluetooth: &bluetooth,
                 audio: &audio,
-                wifi_dropdown_open: false,
-                audio_dropdown_open: false,
-                bluetooth_dropdown_open: false,
             },
             (WIDTH as f32, HEIGHT as f32),
+            &mut state,
         );
 
         assert!(ui.commands().iter().any(|command| matches!(
             command,
-            nickel_components::PaintCommand::Text { text, .. } if text == "SukiAlan"
+            nickel_ui::PaintCommand::Text { text, .. } if text == "SukiAlan"
         )));
     }
 }

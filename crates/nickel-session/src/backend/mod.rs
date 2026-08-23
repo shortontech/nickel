@@ -123,12 +123,12 @@ mod tests {
     fn command_consumes_remaining_arguments() {
         let arguments = SessionArguments::parse([
             OsString::from("--command"),
-            OsString::from("nickel-ui"),
+            OsString::from("nickel"),
             OsString::from("--example"),
         ])
         .expect("command should parse");
         let (program, arguments) = arguments.command.expect("command should be present");
-        assert_eq!(program, "nickel-ui");
+        assert_eq!(program, "nickel");
         assert_eq!(arguments, [OsString::from("--example")]);
     }
 }

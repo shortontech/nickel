@@ -474,7 +474,7 @@ fn visible_windows() -> Vec<MacWindow> {
             continue;
         };
         if window.pid == own_pid
-            || window.owner.eq_ignore_ascii_case("nickel-ui")
+            || window.owner.eq_ignore_ascii_case("nickel")
             || window.owner.to_ascii_lowercase().contains("nickel")
             || window.width < 80.0
             || window.height < 40.0

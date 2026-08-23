@@ -1,0 +1,113 @@
+# nickel-ui
+
+`nickel-ui` is a native Rust UX layer with React-style declarative authoring, typed messages,
+intrinsic responsive layout, stable interaction state, and an included SDL presenter. It has no
+dependency on the Nickel desktop shell or any other Nickel product crate.
+
+~~~rust
+use nickel_ui::prelude::*;
+
+#[derive(Clone)]
+enum Message {
+    Save,
+    SetVolume(f32),
+}
+
+fn set_volume(value: f32) -> Message {
+    Message::SetVolume(value)
+}
+
+fn view(title: &str, volume: f32) -> impl View<Message> {
+    ui! {
+        <Column gap={12.0} padding={Insets::all(20.0)} fill_width>
+            <Text>{title}</Text>
+            <Row align_items={Align::Center}>
+                <Button id={id!(save)} on_press={Message::Save}>{"Save"}</Button>
+                <Spacer fill />
+                <Slider value={volume} on_change={set_volume} />
+            </Row>
+        </Column>
+    }
+}
+~~~
+
+The builder API remains public and supported as an alternative. Declarative and builder calls
+produce the same typed component tree and use the same measurement, state, diagnostics, event, and
+rendering paths. Its complete API reference is the rustdoc for the component types, `Element`, and
+`ComponentBuilderExt`; `examples/builder.rs` is a focused optional example. The default learning
+path and application runtime do not require it.
+
+An executable implements `Application` and calls `run(app)`. The runtime owns SDL initialization,
+the native window, event and redraw loops, presentation, and the per-window `UiStateStore`; the
+application owns only domain state, typed messages, `update`, and `view`. See
+`examples/standalone.rs` for the complete counter application.
+
+Reusable components are ordinary typed functions. `#[component]` makes their named properties
+available to `ui!`, rejects unknown, duplicate, and missing properties at the invocation, permits
+property reordering, and treats `Option<T>` parameters as optional properties defaulting to
+`None`.
+
+## Layout and box model
+
+Measurement is headless and side-effect free. A component first resolves its preferred size under
+`Constraints`; placement assigns a finite nonnegative allocated rectangle; painting, hit regions,
+and accessibility geometry are emitted from that placement. Content is surrounded by padding
+inside the allocated box. Borders paint inside the allocated box and do not increase intrinsic
+content size. Backgrounds, radii, clipping, and hit testing use the allocated box, while children
+use its padding-inset content box.
+
+`Length` distinguishes automatic, pixel, percentage, fill, fractional, minimum-content, and
+maximum-content sizing. Percent and fill fall back to intrinsic size under an indefinite parent.
+Rows and columns enforce basis, grow, shrink, minimums, maximums, alignment, justification, gaps,
+and overflow without negative geometry. Grids support fixed, automatic, fractional, min/max,
+repeated, and responsive auto-fit tracks.
+
+`UiTree::layout_with_diagnostics` records bounded, deduplicated structured diagnostics and a
+read-only `ResolvedLayout`. `enable_diagnostic_overlay` appends a separate inspection paint phase
+without altering placement or hit testing. `deterministic_snapshot` provides headless geometry
+snapshots with native handles, pointers, timestamps, and cache identities omitted.
+
+## Source-local compile errors
+
+Unknown properties are rejected at their invocation:
+
+~~~compile_fail
+use nickel_ui::prelude::*;
+let _ = ui! { <Text unknown_property={3}>{"No"}</Text> };
+~~~
+
+Duplicate properties and missing required event properties are rejected by `ui!`:
+
+~~~compile_fail
+use nickel_ui::prelude::*;
+let _ = ui! { <Column gap={2.0} gap={3.0} /> };
+~~~
+
+~~~compile_fail
+use nickel_ui::prelude::*;
+let _ = ui! { <Button>{"Save"}</Button> };
+~~~
+
+Components that do not own children reject them:
+
+~~~compile_fail
+use nickel_ui::prelude::*;
+#[derive(Clone)] enum Message { Set(f32) }
+fn set(value: f32) -> Message { Message::Set(value) }
+let _ = ui! { <Slider value={0.5} on_change={set}><Text>{"No"}</Text></Slider> };
+~~~
+
+Message mapper and identity types remain ordinary checked Rust types:
+
+~~~compile_fail
+use nickel_ui::prelude::*;
+#[derive(Clone)] enum Message { Set(String) }
+fn set(value: String) -> Message { Message::Set(value) }
+let _ = ui! { <Slider value={0.5} on_change={set} /> };
+~~~
+
+~~~compile_fail
+use nickel_ui::prelude::*;
+struct NotAnId;
+let _ = ui! { <Text id={NotAnId}>{"No"}</Text> };
+~~~

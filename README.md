@@ -97,7 +97,7 @@ cargo test --workspace
 Launch the desktop shell:
 
 ```bash
-cargo run -p nickel-ui
+cargo run -p nickel-shell
 ```
 
 On macOS, install SDL3 first:
@@ -126,7 +126,7 @@ cargo run -p nickel-file
 Run Nickel inside an existing Linux desktop:
 
 ```bash
-cargo run -p nickel-session -- --backend winit --command target/debug/nickel-ui
+cargo run -p nickel-session -- --backend winit --command target/debug/nickel
 ```
 
 ### Linux Direct Session
@@ -135,7 +135,7 @@ The direct backend requires DRM, GBM, libinput, udev, libseat, and EGL developme
 it without the nested backend:
 
 ```bash
-cargo build -p nickel-ui
+cargo build -p nickel-shell
 cargo build -p nickel-session --no-default-features --features backend-udev
 ```
 
@@ -143,7 +143,7 @@ Run it from a text VT:
 
 ```bash
 RUST_LOG=info target/debug/nickel-session \
-  --backend udev --command target/debug/nickel-ui
+  --backend udev --command target/debug/nickel
 ```
 
 Set `NICKEL_DRM_DEVICE=/dev/dri/cardN` to select a specific GPU.
@@ -154,7 +154,7 @@ Build the direct compositor, shell, and login launcher:
 
 ```bash
 cargo build --release -p nickel-session --no-default-features --features backend-udev
-cargo build --release -p nickel-ui
+cargo build --release -p nickel-shell
 ```
 
 Install the completed build as an SDDM Wayland session:
@@ -200,14 +200,14 @@ The Windows shell compatibility checklist lives in
 
 ```text
 crates/
-|-- nickel-components/  Shared interface components and text editing
+|-- nickel-ui/         Declarative UX layer, layout, state, and SDL presentation
 |-- nickel-core/        Shell state and behavior
 |-- nickel-file/        Nickel File browser and file manager
 |-- nickel-logging/     Native logging
 |-- nickel-platform/    Shared native platform adapters
 |-- nickel-session/     Linux compositor and session
 |-- nickel-settings/    Nickel Plating settings application
-`-- nickel-ui/          Desktop shell and platform integration
+`-- nickel-shell/      Desktop shell and platform integration
 ```
 
 Active design work lives in [`specs/`](specs/). Completed specifications live in

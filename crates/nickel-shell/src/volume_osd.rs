@@ -1,8 +1,6 @@
 use std::sync::Arc;
 
-use nickel_components::{
-    Column, ComponentGpu, Container, Insets, Rect, Row, Text, TextAlign, UiTree,
-};
+use nickel_ui::{ComponentGpu, Insets, Rect, TextAlign, UiTree, ui};
 use winit::window::Window;
 
 use crate::graphics::SharedGraphics;
@@ -46,29 +44,14 @@ impl VolumeOsdGpu {
         } else {
             format!("{volume_percent}%")
         };
-        let root = Column::new()
-            .background(BACKGROUND)
-            .padding(Insets::all(10.0))
-            .gap(7.0)
-            .child(
-                Text::new(label)
-                    .scale(1.6)
-                    .height(20.0)
-                    .align(TextAlign::Center)
-                    .color(TEXT),
-            )
-            .child(
-                Container::new()
-                    .background(TRACK)
-                    .border(BORDER, 1.0)
-                    .padding(Insets::all(1.0))
-                    .height(8.0)
-                    .child(
-                        Row::new()
-                            .height(6.0)
-                            .child(Container::new().background(FILL).width(fill_width)),
-                    ),
-            );
+        let root = ui! {
+            <Column background={BACKGROUND} padding={Insets::all(10.0)} gap={7.0}>
+                <Text scale={1.6} height={20.0} align={TextAlign::Center} color={TEXT}>{label}</Text>
+                <Container background={TRACK} border={(BORDER, 1.0)} padding={Insets::all(1.0)} height={8.0}>
+                    <Row height={6.0}><Container background={FILL} width={fill_width} /></Row>
+                </Container>
+            </Column>
+        };
         let ui = UiTree::layout(root, Rect::new(0.0, 0.0, WIDTH as f32, HEIGHT as f32));
         if let Err(error) = self.gpu.render(ui.commands()) {
             tracing::warn!(%error, "failed to render volume indicator");

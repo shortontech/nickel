@@ -2,12 +2,12 @@ use std::sync::Arc;
 
 #[cfg(not(target_os = "macos"))]
 use jiff::Zoned;
-use nickel_components::{PaintCommand, Point, Rect, TextAlign};
 use nickel_core::{
     shell_settings::ShellSettings,
     theme::{Appearance, ThemePalette},
     wallpaper_settings::WallpaperSettings,
 };
+use nickel_ui::{PaintCommand, Point, Rect, TextAlign};
 
 use crate::{
     launcher::Launcher,

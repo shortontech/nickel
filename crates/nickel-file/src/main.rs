@@ -10,16 +10,15 @@ use std::{
     time::{Duration, Instant},
 };
 
-use nickel_components::{
-    Button, Column, Component, Container, FileGrid, FileGridItem, HorizontalRule, Image, Insets,
-    LinearGradient, PaintCommand, Point, Rect, Row, SdlCanvasPresenter, Sidebar, SidebarFolder,
-    SidebarSection, Text, TextAlign, UiTree,
-};
 use nickel_core::{
     shell_settings::ShellSettings,
     theme::{ThemeMode, ThemePalette},
 };
 use nickel_file::{DirectoryBrowser, FileEntry};
+use nickel_ui::{
+    AnyView, Component, Insets, LinearGradient, PaintCommand, Point, Rect, SdlCanvasPresenter,
+    TextAlign, UiStateStore, UiTree, ui,
+};
 use sdl3::{
     event::{Event, WindowEvent},
     keyboard::{Keycode, Mod},
@@ -34,7 +33,6 @@ const MIN_SIDEBAR_WIDTH: f32 = 150.0;
 const MAX_SIDEBAR_WIDTH: f32 = 360.0;
 const SIDEBAR_RESIZE_WIDTH: f32 = 5.0;
 const TOOLBAR_HEIGHT: f32 = 78.0;
-const FOOTER_HEIGHT: f32 = 30.0;
 const DEFAULT_TILE_WIDTH: f32 = 150.0;
 const MIN_TILE_WIDTH: f32 = 110.0;
 const MAX_TILE_WIDTH: f32 = 240.0;
@@ -76,6 +74,7 @@ enum FileMessage {
     ToggleFolder(PathBuf),
     OpenFolder(PathBuf),
     Entry(usize),
+    FileScroll,
 }
 
 struct FileApp {
@@ -87,16 +86,16 @@ struct FileApp {
     selected: Option<usize>,
     selected_entries: HashSet<usize>,
     selection_anchor: Option<usize>,
-    scroll_offset: usize,
+    active_tab_id: u64,
+    next_tab_id: u64,
     status: String,
     last_click: Option<(usize, Instant)>,
     icons: HashMap<PathBuf, (u16, Arc<image::RgbaImage>)>,
     icon_rx: Option<Receiver<(PathBuf, Option<image::RgbaImage>)>>,
     next_icon_id: u16,
     sidebar_width: f32,
-    resizing_sidebar: bool,
     expanded_folders: HashSet<PathBuf>,
-    hovered_message: Option<FileMessage>,
+    ui_state: UiStateStore,
     control_down: bool,
     shift_down: bool,
     selection_drag: Option<Point>,
@@ -114,13 +113,43 @@ struct FileTab {
     selected: Option<usize>,
     selected_entries: HashSet<usize>,
     selection_anchor: Option<usize>,
-    scroll_offset: usize,
+    tab_id: u64,
     status: String,
     last_click: Option<(usize, Instant)>,
     tab_icon: Option<(u16, Arc<image::RgbaImage>)>,
 }
 
 impl FileApp {
+    fn scroll_state_id(tab_id: u64) -> nickel_ui::UiId {
+        nickel_ui::UiId::new(format!("file-tab-{tab_id}-scroll"))
+    }
+
+    fn scroll_offset(&self) -> f32 {
+        self.ui_state
+            .state(&Self::scroll_state_id(self.active_tab_id))
+            .map(|state| state.scroll_offset)
+            .unwrap_or(0.0)
+    }
+
+    fn set_scroll_offset(&mut self, offset: f32) {
+        self.ui_state
+            .state_mut(Self::scroll_state_id(self.active_tab_id))
+            .scroll_offset = offset.max(0.0);
+    }
+
+    fn hovered_message(&self) -> Option<&FileMessage> {
+        self.ui_state
+            .hovered()
+            .and_then(|id| self.ui.message_for_id(id))
+    }
+
+    fn is_resizing_sidebar(&self) -> bool {
+        self.ui_state
+            .captured()
+            .and_then(|id| self.ui.message_for_id(id))
+            == Some(&FileMessage::ResizeSidebar)
+    }
+
     fn new(path: PathBuf) -> Self {
         let show_hidden = nickel_platform::show_hidden_files();
         let (browser, status) = match DirectoryBrowser::open_with_hidden(&path, show_hidden) {
@@ -147,16 +176,16 @@ impl FileApp {
             selected: None,
             selected_entries: HashSet::new(),
             selection_anchor: None,
-            scroll_offset: 0,
+            active_tab_id: 0,
+            next_tab_id: 1,
             status,
             last_click: None,
             icons: HashMap::new(),
             icon_rx: None,
             next_icon_id: 1,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
-            resizing_sidebar: false,
             expanded_folders: HashSet::new(),
-            hovered_message: None,
+            ui_state: UiStateStore::default(),
             control_down: false,
             shift_down: false,
             selection_drag: None,
@@ -188,7 +217,7 @@ impl FileApp {
         std::mem::swap(&mut self.selected, &mut target.selected);
         std::mem::swap(&mut self.selected_entries, &mut target.selected_entries);
         std::mem::swap(&mut self.selection_anchor, &mut target.selection_anchor);
-        std::mem::swap(&mut self.scroll_offset, &mut target.scroll_offset);
+        std::mem::swap(&mut self.active_tab_id, &mut target.tab_id);
         std::mem::swap(&mut self.status, &mut target.status);
         std::mem::swap(&mut self.last_click, &mut target.last_click);
         std::mem::swap(&mut self.tab_icon, &mut target.tab_icon);
@@ -208,12 +237,14 @@ impl FileApp {
         let Ok(browser) = DirectoryBrowser::open_with_hidden(path, show_hidden) else {
             return;
         };
+        let tab_id = self.next_tab_id;
+        self.next_tab_id = self.next_tab_id.saturating_add(1);
         self.tabs.push(Some(FileTab {
             browser,
             selected: None,
             selected_entries: HashSet::new(),
             selection_anchor: None,
-            scroll_offset: 0,
+            tab_id,
             status: String::new(),
             last_click: None,
             tab_icon: None,
@@ -275,40 +306,6 @@ impl FileApp {
         self.request_redraw();
     }
 
-    fn tile_height(&self) -> f32 {
-        (self.tile_width * 0.72).clamp(84.0, 150.0)
-    }
-
-    fn grid_columns_for_width(&self, width: f32) -> usize {
-        ((width - self.sidebar_width - SIDEBAR_RESIZE_WIDTH - 32.0) / self.tile_width)
-            .floor()
-            .max(1.0) as usize
-    }
-
-    fn grid_rows_for_height(&self, height: f32) -> usize {
-        ((height - TOOLBAR_HEIGHT - FOOTER_HEIGHT - 30.0) / self.tile_height())
-            .floor()
-            .max(1.0) as usize
-    }
-
-    fn grid_dimensions(&self) -> (usize, usize) {
-        self.presenter
-            .as_ref()
-            .map(|presenter| {
-                let size = presenter.window().size();
-                (
-                    self.grid_columns_for_width(size.0 as f32),
-                    self.grid_rows_for_height(size.1 as f32),
-                )
-            })
-            .unwrap_or((5, 4))
-    }
-
-    fn visible_capacity(&self) -> usize {
-        let (columns, rows) = self.grid_dimensions();
-        columns * rows
-    }
-
     fn build_ui(
         &self,
         width: f32,
@@ -343,163 +340,86 @@ impl FileApp {
             tab.into_element()
         });
         let breadcrumbs = breadcrumb_paths(self.browser.current());
-        let tab_strip = Container::new()
-            .height(32.0)
-            .background(palette.panel)
-            .padding(Insets {
-                top: 5.0,
-                right: 10.0,
-                bottom: 0.0,
-                left: 12.0,
-            })
-            .child(
-                Row::new().gap(3.0).children(tabs).child(
-                    Container::new()
-                        .width(28.0)
-                        .message(FileMessage::NewTab)
-                        .padding(Insets {
-                            top: 1.0,
-                            right: 4.0,
-                            bottom: 0.0,
-                            left: 4.0,
-                        })
-                        .child(Text::new("+").width(20.0).scale(1.25).color(palette.muted)),
-                ),
-            );
-        let breadcrumb_row = Row::new()
-            .gap(7.0)
-            .children(
-                breadcrumbs
-                    .iter()
-                    .enumerate()
-                    .flat_map(|(index, (label, path))| {
-                        let mut elements = Vec::new();
-                        if index > 0 {
-                            elements.push(
-                                Text::new("›")
-                                    .width(10.0)
-                                    .color(palette.muted)
-                                    .into_element(),
-                            );
-                        }
-                        elements.push(
-                            Container::new()
-                                .message(FileMessage::Breadcrumb(path.clone()))
-                                .padding(Insets {
-                                    top: 4.0,
-                                    right: 2.0,
-                                    bottom: 3.0,
-                                    left: 2.0,
-                                })
-                                .child(Text::new(label).scale(1.05).color(palette.text))
-                                .into_element(),
-                        );
-                        elements
-                    }),
-            );
-        let navigation = Container::new()
-            .height(46.0)
-            .background(palette.surface)
-            .padding(Insets {
-                top: 6.0,
-                right: 12.0,
-                bottom: 6.0,
-                left: 10.0,
-            })
-            .child(
-                Row::new()
-                    .gap(4.0)
-                    .child(
-                        Button::new(FileMessage::Back, "←")
-                            .width(34.0)
-                            .height(34.0)
-                            .color(if self.browser.can_go_back() {
-                                palette.text
-                            } else {
-                                palette.muted
-                            }),
-                    )
-                    .child(
-                        Button::new(FileMessage::Forward, "→")
-                            .width(34.0)
-                            .height(34.0)
-                            .color(if self.browser.can_go_forward() {
-                                palette.text
-                            } else {
-                                palette.muted
-                            }),
-                    )
-                    .child(
-                        Button::new(FileMessage::Up, "↑")
-                            .width(34.0)
-                            .height(34.0)
-                            .color(palette.text),
-                    )
-                    .child(
-                        Container::new()
-                            .grow(1.0)
-                            .background(palette.background)
-                            .padding(Insets {
-                                top: 5.0,
-                                right: 12.0,
-                                bottom: 4.0,
-                                left: 10.0,
-                            })
-                            .child(breadcrumb_row),
-                    )
-                    .child(
-                        Button::new(FileMessage::Refresh, "↻")
-                            .width(34.0)
-                            .height(34.0)
-                            .color(palette.text),
-                    ),
-            );
-        let toolbar = Container::new()
-            .height(TOOLBAR_HEIGHT)
-            .background(LinearGradient::vertical(palette.panel, palette.surface))
-            .child(Column::new().child(tab_strip).child(navigation));
+        let tab_strip = ui! {
+            <Container height={32.0} background={palette.panel} padding={Insets {
+                top: 5.0, right: 10.0, bottom: 0.0, left: 12.0,
+            }}>
+                <Row gap={3.0} children={tabs}>
+                    <Container width={28.0} on_press={FileMessage::NewTab} padding={Insets {
+                        top: 1.0, right: 4.0, bottom: 0.0, left: 4.0,
+                    }}>
+                        <Text width={20.0} scale={1.25} color={palette.muted}>{"+"}</Text>
+                    </Container>
+                </Row>
+            </Container>
+        };
+        let breadcrumb_row = ui! {
+            <Row gap={7.0}>
+                {breadcrumbs.iter().enumerate().map(|(index, (label, path))| ui! {
+                    <Row gap={7.0}>
+                        {if index > 0 {
+                            ui! { <Text width={10.0} color={palette.muted}>{"›"}</Text> }
+                        } else {
+                            ui! { <></> }
+                        }}
+                        <Container on_press={FileMessage::Breadcrumb(path.clone())} padding={Insets {
+                            top: 4.0, right: 2.0, bottom: 3.0, left: 2.0,
+                        }}>
+                            <Text scale={1.05} color={palette.text}>{label}</Text>
+                        </Container>
+                    </Row>
+                })}
+            </Row>
+        };
+        let navigation = ui! {
+            <Container height={46.0} background={palette.surface} padding={Insets {
+                top: 6.0, right: 12.0, bottom: 6.0, left: 10.0,
+            }}>
+                <Row gap={4.0}>
+                    <Button on_press={FileMessage::Back} width={34.0} height={34.0}
+                        color={if self.browser.can_go_back() { palette.text } else { palette.muted }}>
+                        {"←"}
+                    </Button>
+                    <Button on_press={FileMessage::Forward} width={34.0} height={34.0}
+                        color={if self.browser.can_go_forward() { palette.text } else { palette.muted }}>
+                        {"→"}
+                    </Button>
+                    <Button on_press={FileMessage::Up} width={34.0} height={34.0} color={palette.text}>{"↑"}</Button>
+                    <Container grow={1.0} background={palette.background} padding={Insets {
+                        top: 5.0, right: 12.0, bottom: 4.0, left: 10.0,
+                    }}>
+                        {breadcrumb_row}
+                    </Container>
+                    <Button on_press={FileMessage::Refresh} width={34.0} height={34.0} color={palette.text}>{"↻"}</Button>
+                </Row>
+            </Container>
+        };
+        let toolbar = ui! {
+            <Container height={TOOLBAR_HEIGHT} background={LinearGradient::vertical(palette.panel, palette.surface)}>
+                <Column>{tab_strip}{navigation}</Column>
+            </Container>
+        };
         let folder_rows = sidebar_folder_elements(
             &places(),
             &self.expanded_folders,
             self.browser.current(),
-            self.hovered_message.as_ref(),
+            self.hovered_message(),
             palette,
         );
-        let sidebar = Sidebar::new(self.sidebar_width)
-            .background(palette.panel)
-            .padding(Insets {
-                top: 14.0,
-                right: 10.0,
-                bottom: 12.0,
-                left: 10.0,
-            })
-            .gap(3.0)
-            .child(
-                Text::new("Nickel File")
-                    .height(34.0)
-                    .scale(1.55)
-                    .color(palette.text),
-            )
-            .child(HorizontalRule::new(palette.muted).spacing(5.0, 8.0))
-            .child(SidebarSection::new("Places", palette.muted).children(folder_rows));
-        let capacity = self.visible_capacity();
-        let (columns, _) = self.grid_dimensions();
-        let visible_count = self
-            .browser
-            .entries()
-            .len()
-            .saturating_sub(self.scroll_offset)
-            .min(capacity);
-        let grid_rows = visible_count.div_ceil(columns);
-        let grid_height =
-            grid_rows as f32 * self.tile_height() + 10.0 * grid_rows.saturating_sub(1) as f32;
+        let sidebar = ui! {
+            <Sidebar width={self.sidebar_width} background={palette.panel} padding={Insets {
+                top: 14.0, right: 10.0, bottom: 12.0, left: 10.0,
+            }} gap={3.0}>
+                <Text height={34.0} scale={1.55} color={palette.text}>{"Nickel File"}</Text>
+                <HorizontalRule color={palette.muted} spacing_pair={(5.0, 8.0)} />
+                <SidebarSection title={"Places"} color={palette.muted}>{folder_rows.into_iter()}</SidebarSection>
+            </Sidebar>
+        };
         let tiles = self
             .browser
             .entries()
             .iter()
             .enumerate()
-            .skip(self.scroll_offset)
-            .take(capacity)
             .map(|(index, entry)| {
                 file_tile(
                     index,
@@ -512,25 +432,21 @@ impl FileApp {
                 )
             });
         let files = if self.browser.entries().is_empty() {
-            Column::new()
-                .grow(1.0)
-                .padding(Insets::all(28.0))
-                .child(Text::new("This folder is empty.").color(palette.muted))
+            ui! {
+                <Column grow={1.0} padding={Insets::all(28.0)}>
+                    <Text color={palette.muted}>{"This folder is empty."}</Text>
+                </Column>
+            }
         } else {
-            Column::new()
-                .grow(1.0)
-                .padding(Insets {
-                    top: 14.0,
-                    right: 16.0,
-                    bottom: 14.0,
-                    left: 16.0,
-                })
-                .child(
-                    FileGrid::columns(columns)
-                        .gap(10.0)
-                        .height(grid_height)
-                        .items(tiles),
-                )
+            ui! {
+                <Column grow={1.0} padding={Insets {
+                    top: 14.0, right: 16.0, bottom: 14.0, left: 16.0,
+                }}>
+                    <VerticalScroll id={"file-list"} on_scroll={FileMessage::FileScroll} offset={self.scroll_offset()}>
+                        <FileGrid min_width={self.tile_width} gap={10.0} items={tiles} />
+                    </VerticalScroll>
+                </Column>
+            }
         };
         let footer_text = if self.status.is_empty() {
             format!(
@@ -545,35 +461,22 @@ impl FileApp {
         } else {
             self.status.clone()
         };
-        let footer = Container::new()
-            .height(30.0)
-            .background(palette.surface)
-            .padding(Insets {
-                top: 7.0,
-                right: 14.0,
-                bottom: 5.0,
-                left: 14.0,
-            })
-            .child(Text::new(footer_text).scale(1.0).color(palette.muted));
-        let resize_handle = Container::new()
-            .width(SIDEBAR_RESIZE_WIDTH)
-            .background(if self.resizing_sidebar {
-                palette.accent
-            } else {
-                palette.surface_hover
-            })
-            .message(FileMessage::ResizeSidebar);
-        let content = Row::new()
-            .grow(1.0)
-            .child(sidebar)
-            .child(resize_handle)
-            .child(files);
-        let root = Column::new()
-            .height(height)
-            .background(palette.background)
-            .child(toolbar)
-            .child(content)
-            .child(footer);
+        let footer = ui! {
+            <Container height={30.0} background={palette.surface} padding={Insets {
+                top: 7.0, right: 14.0, bottom: 5.0, left: 14.0,
+            }}>
+                <Text scale={1.0} color={palette.muted}>{footer_text}</Text>
+            </Container>
+        };
+        let resize_handle = ui! {
+            <Container width={SIDEBAR_RESIZE_WIDTH} shrink={0.0}
+                background={if self.is_resizing_sidebar() { palette.accent } else { palette.surface_hover }}
+                on_press={FileMessage::ResizeSidebar} />
+        };
+        let content = ui! { <Row grow={1.0}>{sidebar}{resize_handle}{files}</Row> };
+        let root = ui! {
+            <Column height={height} background={palette.background}>{toolbar}{content}{footer}</Column>
+        };
         let mut tree = UiTree::layout(root, Rect::new(0.0, 0.0, width, height));
         if let Some(start) = self.selection_drag {
             let rect = rect_between(start, self.cursor);
@@ -648,12 +551,22 @@ impl FileApp {
         let appearance =
             ShellSettings::load_default().resolve_appearance(nickel_platform::appearance());
         let palette = ThemePalette::from_appearance(appearance);
-        self.ui = self.build_ui(
+        let ui = self.build_ui(
             size.0 as f32,
             size.1 as f32,
             palette,
             appearance.mode == ThemeMode::Light,
         );
+        let retained_scrolls = std::iter::once(self.active_tab_id)
+            .chain(
+                self.tabs
+                    .iter()
+                    .filter_map(|tab| tab.as_ref().map(|tab| tab.tab_id)),
+            )
+            .map(Self::scroll_state_id)
+            .collect::<Vec<_>>();
+        ui.reconcile_state_with(&mut self.ui_state, retained_scrolls);
+        self.ui = ui;
         if let Some(presenter) = &mut self.presenter {
             let pixel_width = presenter.window().size_in_pixels().0;
             let scale = pixel_width as f32 / size.0.max(1) as f32;
@@ -734,7 +647,7 @@ impl FileApp {
         self.selected = None;
         self.selected_entries.clear();
         self.selection_anchor = None;
-        self.scroll_offset = 0;
+        self.set_scroll_offset(0.0);
         self.status.clear();
         self.refresh_icons();
         self.refresh_tab_icon();
@@ -834,23 +747,37 @@ impl FileApp {
         let Some(selected) = self.selected else {
             return;
         };
-        let capacity = self.visible_capacity();
-        if selected < self.scroll_offset {
-            self.scroll_offset = selected;
-        } else if selected >= self.scroll_offset + capacity {
-            self.scroll_offset = selected + 1 - capacity;
+        let Some(item) = self.ui.message_layout_rect(&FileMessage::Entry(selected)) else {
+            return;
+        };
+        let Some(viewport) = self.ui.scroll_viewport(&FileMessage::FileScroll) else {
+            return;
+        };
+        if item.origin.y < viewport.origin.y {
+            self.set_scroll_offset(
+                (self.scroll_offset() - (viewport.origin.y - item.origin.y)).max(0.0),
+            );
+        } else {
+            let item_bottom = item.origin.y + item.size.height;
+            let viewport_bottom = viewport.origin.y + viewport.size.height;
+            if item_bottom > viewport_bottom {
+                self.set_scroll_offset(self.scroll_offset() + item_bottom - viewport_bottom);
+            }
         }
     }
 
-    fn scroll(&mut self, rows: isize) {
+    fn scroll(&mut self, delta: f32) {
         let maximum = self
-            .browser
-            .entries()
-            .len()
-            .saturating_sub(self.visible_capacity());
-        self.scroll_offset =
-            (self.scroll_offset as isize + rows).clamp(0, maximum as isize) as usize;
+            .ui
+            .scroll_extent(&FileMessage::FileScroll)
+            .map(|extent| (extent.content.height - extent.viewport.height).max(0.0))
+            .unwrap_or(0.0);
+        self.set_scroll_offset((self.scroll_offset() + delta).clamp(0.0, maximum));
         self.request_redraw();
+    }
+
+    fn resolved_grid_columns(&self) -> usize {
+        self.ui.resolved_grid_columns().unwrap_or(1).max(1)
     }
 
     fn pointer_pressed(&mut self) {
@@ -910,7 +837,9 @@ impl FileApp {
             }
             FileMessage::ResizeSidebar => {
                 self.context_menu = None;
-                self.resizing_sidebar = true;
+                let id = self.ui.id_for_message(&FileMessage::ResizeSidebar).cloned();
+                self.ui_state.set_pressed(id.clone());
+                self.ui_state.set_capture(id);
                 self.request_redraw();
             }
             FileMessage::NewTab => self.new_tab(),
@@ -928,7 +857,7 @@ impl FileApp {
                 self.selected = None;
                 self.selected_entries.clear();
                 self.selection_anchor = None;
-                self.scroll_offset = 0;
+                self.set_scroll_offset(0.0);
                 self.request_redraw();
             }
             FileMessage::CloseTab(index) => self.close_tab(index),
@@ -970,6 +899,15 @@ impl FileApp {
                 } else {
                     self.request_redraw();
                 }
+            }
+            FileMessage::FileScroll => {
+                self.selection_drag = Some(self.cursor);
+                if !self.control_down && !self.shift_down {
+                    self.selected = None;
+                    self.selected_entries.clear();
+                    self.selection_anchor = None;
+                }
+                self.request_redraw();
             }
         }
     }
@@ -1020,14 +958,15 @@ impl FileApp {
                     self.selected = self.selected_entries.iter().copied().min();
                     self.request_redraw();
                 }
-                if self.resizing_sidebar {
+                if self.is_resizing_sidebar() {
                     self.sidebar_width = self.cursor.x.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
                     self.ensure_selection_visible();
                     self.request_redraw();
                 }
-                let hovered = self.ui.message_at(self.cursor).cloned();
-                if hovered != self.hovered_message {
-                    self.hovered_message = hovered;
+                let invalidation = self
+                    .ui_state
+                    .set_hovered(self.ui.id_at(self.cursor).cloned());
+                if invalidation != nickel_ui::Invalidation::None {
                     self.request_redraw();
                 }
             }
@@ -1035,7 +974,7 @@ impl FileApp {
                 win_event: WindowEvent::MouseLeave,
                 ..
             } => {
-                self.hovered_message = None;
+                self.ui_state.set_hovered(None);
                 self.request_redraw();
             }
             Event::MouseButtonDown {
@@ -1074,7 +1013,8 @@ impl FileApp {
                 mouse_btn: MouseButton::Left,
                 ..
             } => {
-                self.resizing_sidebar = false;
+                self.ui_state.set_pressed(None);
+                self.ui_state.set_capture(None);
                 self.selection_drag = None;
                 self.request_redraw();
             }
@@ -1087,8 +1027,7 @@ impl FileApp {
                     self.request_redraw();
                     return true;
                 }
-                let rows = -(y.round() as isize) * self.grid_dimensions().0 as isize;
-                self.scroll(rows);
+                self.scroll(-y * 80.0);
             }
             Event::KeyDown {
                 keycode, keymod, ..
@@ -1096,8 +1035,12 @@ impl FileApp {
                 self.control_down = keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD);
                 self.shift_down = keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD);
                 match keycode {
-                    Some(Keycode::Down) => self.select_relative(self.grid_dimensions().0 as isize),
-                    Some(Keycode::Up) => self.select_relative(-(self.grid_dimensions().0 as isize)),
+                    Some(Keycode::Down) => {
+                        self.select_relative(self.resolved_grid_columns() as isize)
+                    }
+                    Some(Keycode::Up) => {
+                        self.select_relative(-(self.resolved_grid_columns() as isize))
+                    }
                     Some(Keycode::Right) => self.select_relative(1),
                     Some(Keycode::Left) => self.select_relative(-1),
                     Some(Keycode::Return | Keycode::Return2) => self.activate_selected(),
@@ -1145,16 +1088,14 @@ fn file_tab_element(
     active: bool,
     palette: ThemePalette,
     light_mode: bool,
-) -> Container<FileMessage> {
+) -> impl Component<FileMessage> {
     let label = browser
         .current()
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| browser.current().display().to_string());
-    Container::new()
-        .width(170.0)
-        .message(FileMessage::SwitchTab(index))
-        .background(if active {
+    ui! {
+        <Container width={170.0} on_press={FileMessage::SwitchTab(index)} background={if active {
             if light_mode {
                 0xffffff
             } else {
@@ -1164,49 +1105,26 @@ fn file_tab_element(
             mix_rgb(palette.panel, 0xffffff)
         } else {
             palette.panel
-        })
-        .top_corner_radius(5.0)
-        .child(
-            Column::new()
-                .child(
-                    Row::new()
-                        .height(25.0)
-                        .gap(6.0)
-                        .padding(Insets {
-                            top: 4.0,
-                            right: 4.0,
-                            bottom: 3.0,
-                            left: 9.0,
-                        })
-                        .child(
-                            icon.map(|(id, icon)| {
-                                Image::new(*id, icon.clone())
-                                    .width(16.0)
-                                    .height(16.0)
-                                    .into_element()
-                            })
-                            .unwrap_or_else(|| Container::new().width(16.0).into_element()),
-                        )
-                        .child(
-                            Text::new(label)
-                                .width(108.0)
-                                .height(18.0)
-                                .scale(1.05)
-                                .color(if active { palette.text } else { palette.muted }),
-                        )
-                        .child(
-                            Container::new()
-                                .width(20.0)
-                                .message(FileMessage::CloseTab(index))
-                                .child(Text::new("×").width(20.0).color(palette.muted)),
-                        ),
-                )
-                .child(Container::new().height(2.0).background(if active {
-                    palette.accent
-                } else {
-                    palette.panel
-                })),
-        )
+        }} top_corner_radius={5.0}>
+            <Column>
+                <Row height={25.0} gap={6.0} padding={Insets {
+                    top: 4.0, right: 4.0, bottom: 3.0, left: 9.0,
+                }}>
+                    {if let Some((id, image)) = icon {
+                        ui! { <Image asset_id={*id} image={image.clone()} width={16.0} height={16.0} /> }
+                    } else {
+                        ui! { <Container width={16.0} /> }
+                    }}
+                    <Text width={108.0} height={18.0} scale={1.05}
+                        color={if active { palette.text } else { palette.muted }}>{label}</Text>
+                    <Container width={20.0} on_press={FileMessage::CloseTab(index)}>
+                        <Text width={20.0} color={palette.muted}>{"×"}</Text>
+                    </Container>
+                </Row>
+                <Container height={2.0} background={if active { palette.accent } else { palette.panel }} />
+            </Column>
+        </Container>
+    }
 }
 
 fn mix_rgb(left: u32, right: u32) -> u32 {
@@ -1247,10 +1165,10 @@ fn sidebar_folder_elements(
     current: &Path,
     hovered_message: Option<&FileMessage>,
     palette: ThemePalette,
-) -> Vec<nickel_components::ui::Element<FileMessage>> {
+) -> Vec<AnyView<FileMessage>> {
     #[allow(clippy::too_many_arguments)]
     fn append_folder(
-        rows: &mut Vec<nickel_components::ui::Element<FileMessage>>,
+        rows: &mut Vec<AnyView<FileMessage>>,
         label: String,
         path: PathBuf,
         depth: usize,
@@ -1265,28 +1183,17 @@ fn sidebar_folder_elements(
         let open_message = FileMessage::OpenFolder(path.clone());
         let is_hovered =
             hovered_message == Some(&toggle_message) || hovered_message == Some(&open_message);
-        rows.push(
-            SidebarFolder::new(
-                toggle_message,
-                open_message,
-                label,
-                is_expanded,
-                if is_active {
-                    palette.text
+        rows.push(AnyView::new(ui! {
+            <SidebarFolder on_toggle={toggle_message} on_open={open_message} label={label}
+                expanded={is_expanded} foreground={if is_active { palette.text } else { palette.muted }}
+                indent={depth} background={if is_active {
+                    palette.accent_soft
+                } else if is_hovered {
+                    palette.surface_hover
                 } else {
-                    palette.muted
-                },
-            )
-            .indent(depth)
-            .background(if is_active {
-                palette.accent_soft
-            } else if is_hovered {
-                palette.surface_hover
-            } else {
-                palette.panel
-            })
-            .into_element(),
-        );
+                    palette.panel
+                }} />
+        }));
         if !is_expanded || depth >= 6 {
             return;
         }
@@ -1347,7 +1254,7 @@ fn file_tile(
     palette: ThemePalette,
     icon_size: f32,
     light_mode: bool,
-) -> FileGridItem<FileMessage> {
+) -> impl Component<FileMessage> {
     let (icon_id, icon_image) = icon.unwrap_or_else(|| {
         (
             0,
@@ -1358,23 +1265,17 @@ fn file_tile(
             )),
         )
     });
-    FileGridItem::new(
-        FileMessage::Entry(index),
-        entry.display_name(),
-        icon_id,
-        icon_image,
-    )
-    .borderless_colors(
-        if selected {
-            palette.accent_soft
-        } else if light_mode {
-            0xffffff
-        } else {
-            palette.background
-        },
-        palette.text,
-    )
-    .icon_size(icon_size)
+    ui! {
+        <FileGridItem on_press={FileMessage::Entry(index)} label={entry.display_name()}
+            asset_id={icon_id} image={icon_image}
+            borderless_palette={(if selected {
+                palette.accent_soft
+            } else if light_mode {
+                0xffffff
+            } else {
+                palette.background
+            }, palette.text)} icon_size={icon_size} />
+    }
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -1564,4 +1465,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod ui_layout_tests {
+    use super::*;
+
+    #[test]
+    fn file_grid_resolves_responsively_without_application_column_arithmetic() {
+        let directory = tempfile::tempdir().unwrap();
+        for index in 0..18 {
+            std::fs::write(directory.path().join(format!("item-{index}.txt")), b"x").unwrap();
+        }
+        let app = FileApp::new(directory.path().to_path_buf());
+        let palette = ThemePalette::from_appearance(nickel_core::theme::Appearance::default());
+        let narrow = app.build_ui(560.0, 420.0, palette, false);
+        let wide = app.build_ui(1280.0, 720.0, palette, false);
+
+        assert!(
+            narrow.resolved_grid_columns().unwrap() < wide.resolved_grid_columns().unwrap(),
+            "auto-fit should add columns as the resolved content pane widens"
+        );
+        assert!(
+            narrow
+                .scroll_extent(&FileMessage::FileScroll)
+                .is_some_and(|extent| extent.can_scroll()),
+            "all files should be measured and remain reachable through scrolling"
+        );
+
+        let source = include_str!("main.rs");
+        assert!(!source.contains(&["grid_columns", "_for_width"].concat()));
+        assert!(!source.contains(&["visible_", "capacity"].concat()));
+        assert!(!source.contains(&["grid_", "height"].concat()));
+    }
 }

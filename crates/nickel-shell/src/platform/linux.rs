@@ -483,10 +483,7 @@ pub fn secure_storage_state() -> super::SecureStorageState {
     let Some(session) = env::var_os(SESSION_CONTROL_ENV) else {
         return super::SecureStorageState::Unavailable;
     };
-    let path = env::temp_dir().join(format!(
-        "nickel-ui-{}-secure-storage.sock",
-        std::process::id()
-    ));
+    let path = env::temp_dir().join(format!("nickel-{}-secure-storage.sock", std::process::id()));
     let _ = std::fs::remove_file(&path);
     let result = (|| {
         let socket = UnixDatagram::bind(&path).ok()?;
@@ -560,7 +557,7 @@ pub fn show_window_system_menu(_: WindowId) -> bool {
 
 impl WindowFeed {
     pub fn new() -> Self {
-        let path = env::temp_dir().join(format!("nickel-ui-{}-windows.sock", std::process::id()));
+        let path = env::temp_dir().join(format!("nickel-{}-windows.sock", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let socket = std::os::unix::net::UnixDatagram::bind(&path).ok();
         if let Some(socket) = &socket {

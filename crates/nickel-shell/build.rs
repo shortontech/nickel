@@ -1,6 +1,6 @@
 #[cfg(target_os = "windows")]
 fn main() {
-    embed_icon("../../assets/icons/nickel-panel.png", "nickel-ui.ico");
+    embed_icon("../../assets/icons/nickel-panel.png", "nickel.ico");
 }
 
 #[cfg(not(target_os = "windows"))]

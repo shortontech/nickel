@@ -44,7 +44,7 @@ fn home_directory() -> PathBuf {
 }
 
 fn nickel_file_executable() -> PathBuf {
-    let executable = env::current_exe().unwrap_or_else(|_| PathBuf::from("nickel-ui"));
+    let executable = env::current_exe().unwrap_or_else(|_| PathBuf::from("nickel"));
     #[cfg(target_os = "windows")]
     return executable.with_file_name("nickel-file.exe");
     #[cfg(not(target_os = "windows"))]

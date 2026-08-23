@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 use std::time::Instant;
 
-use nickel_components::{DamageRegion, PaintCommand, SdlCanvasPresenter};
+use nickel_ui::{DamageRegion, PaintCommand, SdlCanvasPresenter};
 use sdl3::event::{Event, WindowEvent};
 use sdl3::keyboard::{Keycode, Mod};
 use sdl3::mouse::MouseButton;

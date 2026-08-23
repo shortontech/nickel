@@ -873,7 +873,7 @@ impl NickelSession {
             return;
         }
         let mut outputs = self.space.outputs().cloned().collect::<Vec<_>>();
-        // nickel-ui creates panel surfaces in monitor-name order. Preserve the
+        // nickel creates panel surfaces in monitor-name order. Preserve the
         // same stable order here so differently sized outputs receive their
         // own panel rather than whichever surface happened to commit last.
         outputs.sort_by_key(|output| output.name());

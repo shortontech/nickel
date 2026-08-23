@@ -6,8 +6,8 @@
 use std::{collections::HashMap, sync::Arc};
 
 use image::RgbaImage;
-use nickel_components::{LinearGradient, PaintCommand, Point, Rect, TextAlign};
 use nickel_core::theme::ThemePalette;
+use nickel_ui::{LinearGradient, PaintCommand, Point, Rect, TextAlign};
 
 use crate::{
     icons,

@@ -26,7 +26,7 @@ use glyphon::{
     RasterizeCustomGlyphRequest, RasterizedCustomGlyph, Resolution, Shaping, SwashCache, TextArea,
     TextAtlas, TextBounds, TextRenderer, Viewport, cosmic_text::Align,
 };
-use nickel_components::{
+use nickel_ui::{
     ControllerAction, ControllerInput, NavigationPane, PaneNavigation, TextEditor, TextField,
 };
 use nickel_core::hotkeys::{Hotkey, KeyEdge};
@@ -826,7 +826,7 @@ impl Nickel {
         if items == self.tray_items {
             return;
         }
-        eprintln!("nickel-ui: tray items updated: {}", items.len());
+        eprintln!("nickel: tray items updated: {}", items.len());
         let rendered: Vec<_> = items
             .iter()
             .map(|item| panel::PanelTrayItem {
@@ -3061,7 +3061,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ =
             unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
     }
-    let _log_path = nickel_logging::init("nickel-ui").ok();
+    let _log_path = nickel_logging::init("nickel").ok();
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Wait);
     event_loop.run_app(&mut Nickel::default())?;

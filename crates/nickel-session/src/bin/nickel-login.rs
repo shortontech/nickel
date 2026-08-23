@@ -19,7 +19,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parent()
         .ok_or("Nickel login launcher has no executable directory")?;
     let session = sibling_binary(directory, "nickel-session")?;
-    let shell = sibling_binary(directory, "nickel-ui")?;
+    let shell = sibling_binary(directory, "nickel")?;
 
     prepare_login_environment()?;
 
@@ -88,6 +88,6 @@ mod tests {
     fn rejects_missing_sibling() {
         let directory =
             std::env::temp_dir().join(format!("nickel-login-test-missing-{}", std::process::id()));
-        assert!(sibling_binary(&directory, "nickel-ui").is_err());
+        assert!(sibling_binary(&directory, "nickel").is_err());
     }
 }

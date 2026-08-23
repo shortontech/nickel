@@ -2,7 +2,6 @@ use cosmic_text::{
     Align, Attrs, Buffer, Color as TextColor, Family, FontSystem, Metrics, Shaping, SwashCache,
     Weight,
 };
-use nickel_render_assets::{TextAssetCache, TextRequest, TextWeight};
 use sdl3::{
     pixels::{Color as SdlColor, PixelFormat},
     rect::Rect as SdlRect,
@@ -11,7 +10,10 @@ use sdl3::{
     video::Window,
 };
 
-use crate::{Color, GradientAxis, PaintCommand, Rect, TextAlign};
+use crate::{
+    Color, GradientAxis, PaintCommand, Rect, TextAlign,
+    assets::{TextAssetCache, TextRequest, TextWeight},
+};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Pixel {

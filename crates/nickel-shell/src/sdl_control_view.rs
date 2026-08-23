@@ -1,6 +1,6 @@
 //! Renderer-neutral Control Center scene and interaction model.
 
-use nickel_components::{LinearGradient, PaintCommand, Rect, TextAlign};
+use nickel_ui::{LinearGradient, PaintCommand, Rect, TextAlign};
 
 use crate::platform::{AudioStatus, BluetoothStatus, NetworkStatus};
 

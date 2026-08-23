@@ -1,4 +1,3 @@
-use nickel_components::{PaintCommand, Rect, SdlCanvasPresenter, TextAlign};
 use nickel_gaze::{
     cache::acquire_bundle,
     camera::CameraSource,
@@ -6,6 +5,7 @@ use nickel_gaze::{
     grid::{COLUMNS, GridLayout, GridObservation, GridTracker, ROWS},
     model::GazeModel,
 };
+use nickel_ui::{PaintCommand, Rect, SdlCanvasPresenter, TextAlign};
 use sdl3::{event::Event, keyboard::Keycode};
 use std::{
     error::Error,
