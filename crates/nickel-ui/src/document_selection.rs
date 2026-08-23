@@ -150,6 +150,32 @@ impl SelectionDocument {
         (!output.is_empty()).then_some(output)
     }
 
+    pub fn selected_range_in(
+        &self,
+        selection: &DocumentSelection,
+        run_id: &str,
+    ) -> Option<std::ops::Range<usize>> {
+        let (start, end) = self.normalized(selection)?;
+        let index = *self.indexes.get(run_id)?;
+        let start_index = *self.indexes.get(&start.run_id)?;
+        let end_index = *self.indexes.get(&end.run_id)?;
+        if index < start_index || index > end_index {
+            return None;
+        }
+        let run = &self.runs[index];
+        let from = if index == start_index {
+            start.offset
+        } else {
+            0
+        };
+        let to = if index == end_index {
+            end.offset
+        } else {
+            run.text.len()
+        };
+        (from != to).then_some(from..to)
+    }
+
     pub fn reconcile(&self, selection: &mut DocumentSelection) {
         let anchor = selection
             .anchor
@@ -229,6 +255,18 @@ impl SelectionDocument {
         let run = self.run(&endpoint.run_id)?;
         Some(SelectionEndpoint::new(
             endpoint.run_id,
+            if end { run.text.len() } else { 0 },
+        ))
+    }
+
+    pub fn document_boundary(&self, end: bool) -> Option<SelectionEndpoint> {
+        let run = if end {
+            self.runs.last()?
+        } else {
+            self.runs.first()?
+        };
+        Some(SelectionEndpoint::new(
+            run.id.clone(),
             if end { run.text.len() } else { 0 },
         ))
     }
@@ -387,5 +425,24 @@ mod tests {
         document.reconcile(&mut selection);
         assert_eq!(selection.anchor.unwrap().offset, 0);
         assert_eq!(selection.focus.unwrap().offset, 4);
+    }
+
+    #[test]
+    fn reports_only_the_selected_slice_for_each_visible_run() {
+        let document = document();
+        let selection = DocumentSelection {
+            anchor: document.endpoint("first", 6),
+            focus: document.endpoint("last", 2),
+        };
+        assert_eq!(
+            document.selected_range_in(&selection, "first"),
+            Some(6.."Hello 🦀".len())
+        );
+        assert_eq!(
+            document.selected_range_in(&selection, "inline"),
+            Some(0.." and 世界".len())
+        );
+        assert_eq!(document.selected_range_in(&selection, "last"), Some(0..2));
+        assert_eq!(document.selected_range_in(&selection, "speaker"), None);
     }
 }
