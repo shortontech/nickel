@@ -1,6 +1,6 @@
 use std::{collections::HashMap, time::Duration};
 
-use crate::TextEditor;
+use crate::{DocumentSelection, TextEditor};
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct UiId(String);
@@ -109,6 +109,8 @@ pub struct UiStateStore {
     captured: Option<UiId>,
     controller_selected: Option<UiId>,
     caret_visible: bool,
+    selection_owner: Option<UiId>,
+    document_selections: HashMap<UiId, DocumentSelection>,
 }
 
 impl Default for UiStateStore {
@@ -129,6 +131,8 @@ impl UiStateStore {
             captured: None,
             controller_selected: None,
             caret_visible: true,
+            selection_owner: None,
+            document_selections: HashMap::new(),
         }
     }
 
@@ -213,6 +217,40 @@ impl UiStateStore {
 
     pub fn controller_selected(&self) -> Option<&UiId> {
         self.controller_selected.as_ref()
+    }
+
+    pub fn selection_owner(&self) -> Option<&UiId> {
+        self.selection_owner.as_ref()
+    }
+
+    pub fn document_selection(&self, id: &UiId) -> Option<&DocumentSelection> {
+        self.document_selections.get(id)
+    }
+
+    pub fn document_selection_mut(&mut self, id: impl Into<UiId>) -> &mut DocumentSelection {
+        self.document_selections.entry(id.into()).or_default()
+    }
+
+    pub fn set_selection_owner(&mut self, id: Option<UiId>) -> Invalidation {
+        if self.selection_owner == id {
+            return Invalidation::None;
+        }
+        self.selection_owner = id;
+        Invalidation::Paint
+    }
+
+    pub fn clear_document_selection(&mut self) -> Invalidation {
+        let changed = self.selection_owner.take().is_some()
+            || self
+                .document_selections
+                .values()
+                .any(|selection| selection.anchor.is_some() || selection.focus.is_some());
+        self.document_selections.clear();
+        if changed {
+            Invalidation::Paint
+        } else {
+            Invalidation::None
+        }
     }
 
     pub fn caret_visible(&self) -> bool {
@@ -305,6 +343,8 @@ impl UiStateStore {
         self.captured = None;
         self.controller_selected = None;
         self.caret_visible = true;
+        self.selection_owner = None;
+        self.document_selections.clear();
     }
 
     fn clear_ownership_for_missing_entries(&mut self) {
@@ -315,11 +355,14 @@ impl UiStateStore {
             &mut self.pressed,
             &mut self.captured,
             &mut self.controller_selected,
+            &mut self.selection_owner,
         ] {
             if owner.as_ref().is_some_and(|id| !entries.contains_key(id)) {
                 *owner = None;
             }
         }
+        self.document_selections
+            .retain(|id, _| self.entries.contains_key(id));
     }
 }
 
