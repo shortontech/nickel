@@ -12,8 +12,8 @@ mod tests {
         BackendChoice, CodexEvent, EventKind, ReplayBackend, ServerRequestId, ThreadId, TurnId,
     };
     use nickel_ui::{
-        Application, DocumentSelection, PaintCommand, Rect, SdlComponentRenderer,
-        SelectionEndpoint, Shortcut, UiStateStore, UiTree,
+        Application, DocumentSelection, PaintCommand, Point, Rect, SdlComponentRenderer,
+        SelectionEndpoint, Shortcut, UiEvent, UiStateStore, UiTree,
     };
 
     use super::*;
@@ -400,7 +400,7 @@ mod tests {
     }
 
     #[test]
-    fn composer_shortcuts_insert_newlines_and_submit_nonblank_drafts() {
+    fn composer_submit_shortcut_sends_nonblank_drafts() {
         let backend = ReplayBackend::from_json(r#"{"name":"shortcuts","events":[]}"#).unwrap();
         let directory = tempfile::tempdir().unwrap();
         let mut app = ChatApplication::new(BackendMode::Replay {
@@ -408,12 +408,63 @@ mod tests {
             cwd: directory.path().into(),
         });
         app.state.status = ConnectionStatus::Ready;
-        app.state.draft = "first".into();
-        assert!(app.shortcut(Shortcut::Newline));
-        assert_eq!(app.state.draft, "first\n");
+        app.state.draft = "first\nsecond".into();
         assert!(app.shortcut(Shortcut::Submit));
         assert!(app.state.draft.is_empty());
         assert_eq!(app.state.items.back().unwrap().kind, ChatItemKind::User);
+    }
+
+    #[test]
+    fn multiline_paste_normalizes_newlines_without_submitting() {
+        let mut state = ChatState::default();
+        state.status = ConnectionStatus::Ready;
+        let mut ui_state = UiStateStore::default();
+        let tree = UiTree::layout_with_state(
+            view::chat_view(&state),
+            Rect::new(0.0, 0.0, 1120.0, 760.0),
+            &mut ui_state,
+        );
+        let draft = tree
+            .resolved_layout()
+            .nodes()
+            .iter()
+            .find(|node| node.id.as_str().ends_with("/chat-draft"))
+            .expect("draft field");
+        tree.handle_event(
+            &mut ui_state,
+            UiEvent::PointerPressed(Point {
+                x: draft.allocated.origin.x + 2.0,
+                y: draft.allocated.origin.y + 2.0,
+            }),
+        );
+        let pasted = tree.handle_event(
+            &mut ui_state,
+            UiEvent::TextPaste("one\r\ntwo\rthree\nfour".into()),
+        );
+        let expected = "one\ntwo\nthree\nfour";
+        assert_eq!(
+            pasted.messages,
+            vec![ChatMessage::DraftChanged(expected.into())]
+        );
+        assert!(state.items.is_empty());
+
+        state.draft = (0..30)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let rebuilt = UiTree::layout_with_state(
+            view::chat_view(&state),
+            Rect::new(0.0, 0.0, 1120.0, 760.0),
+            &mut ui_state,
+        );
+        let composer_viewport = rebuilt
+            .resolved_layout()
+            .find(&nickel_ui::UiId::from("root/#1/composer/#0"))
+            .expect("composer viewport");
+        assert!(composer_viewport.allocated.size.height <= 140.0);
+        let extent = composer_viewport.scroll.expect("multiline scroll extent");
+        assert!(extent.content.height > extent.viewport.height);
+        assert!(extent.offset > 0.0);
     }
 
     #[test]

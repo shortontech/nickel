@@ -338,7 +338,7 @@ enum Kind {
         max_lines: Option<usize>,
         ellipsis: bool,
         selection_x: Option<(f32, f32)>,
-        caret_x: Option<f32>,
+        caret_position: Option<Point>,
         input_value: Option<String>,
     },
     Image {
@@ -443,7 +443,7 @@ impl<Message> Element<Message> {
                 max_lines: None,
                 ellipsis: false,
                 selection_x: None,
-                caret_x: None,
+                caret_position: None,
                 input_value: None,
             },
             id: None,
@@ -2650,6 +2650,7 @@ struct TextInputRegion<Message> {
     rect: Rect,
     scale: f32,
     bold: bool,
+    line_height: f32,
     initial: String,
     map: fn(String) -> Message,
 }
@@ -2727,18 +2728,30 @@ struct SelectionRegionBuilder {
     logical_runs: Vec<SelectionRun>,
 }
 
-fn text_offset_at<Message>(input: &TextInputRegion<Message>, pointer_x: f32) -> usize {
-    if pointer_x <= input.rect.origin.x {
-        return 0;
+fn text_offset_at<Message>(input: &TextInputRegion<Message>, point: Point) -> usize {
+    let target_line = ((point.y - input.rect.origin.y) / input.line_height)
+        .floor()
+        .max(0.0) as usize;
+    let mut line_start = 0;
+    let mut line = input.initial.as_str();
+    for (index, part) in input.initial.split_inclusive('\n').enumerate() {
+        if index == target_line {
+            line = part.strip_suffix('\n').unwrap_or(part);
+            break;
+        }
+        line_start += part.len();
     }
-    if pointer_x >= input.rect.origin.x + input.rect.size.width - 1.0 {
+    if target_line >= input.initial.lines().count().max(1) {
         return input.initial.len();
     }
-    let target = (pointer_x - input.rect.origin.x).max(0.0);
+    if point.x <= input.rect.origin.x {
+        return line_start;
+    }
+    let target = (point.x - input.rect.origin.x).max(0.0);
     let mut previous = (0, 0.0);
-    for (index, _) in input.initial.grapheme_indices(true) {
+    for (index, _) in line.grapheme_indices(true) {
         let width = measure_text(
-            &input.initial[..index],
+            &line[..index],
             input.scale,
             input.bold,
             false,
@@ -2748,11 +2761,11 @@ fn text_offset_at<Message>(input: &TextInputRegion<Message>, pointer_x: f32) -> 
         )
         .width;
         if target < (previous.1 + width) * 0.5 {
-            return previous.0;
+            return line_start + previous.0;
         }
         previous = (index, width);
     }
-    input.initial.len()
+    line_start + line.len()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -3328,7 +3341,7 @@ impl<Message: Clone> UiTree<Message> {
                 if let Some(id) = state.captured().cloned()
                     && let Some(input) = self.text_inputs.iter().find(|input| input.id == id)
                 {
-                    let cursor = text_offset_at(input, point.x);
+                    let cursor = text_offset_at(input, point);
                     state.editor(id, &input.initial).extend_selection_to(cursor);
                     invalidation = invalidation
                         .merge(state.show_caret())
@@ -3362,7 +3375,7 @@ impl<Message: Clone> UiTree<Message> {
                 if let Some(id) = id
                     && let Some(input) = self.text_inputs.iter().find(|input| input.id == id)
                 {
-                    let cursor = text_offset_at(input, point.x);
+                    let cursor = text_offset_at(input, point);
                     state.editor(id, &input.initial).place_cursor(cursor);
                     invalidation = invalidation.merge(state.show_caret());
                 }
@@ -3600,7 +3613,10 @@ impl<Message: Clone> UiTree<Message> {
                 }
             }
             UiEvent::TextPaste(text) => self
-                .edit_focused_text(state, |editor| editor.insert(&text))
+                .edit_focused_text(state, |editor| {
+                    let text = text.replace("\r\n", "\n").replace('\r', "\n");
+                    editor.insert(&text);
+                })
                 .map(|message| {
                     outcome.messages.push(message);
                     Invalidation::Layout
@@ -4414,8 +4430,17 @@ fn emit_element<Message: Clone>(
             value, input_value, ..
         } = &element.kind
     {
-        let (scale, bold) = match &element.kind {
-            Kind::Text { scale, bold, .. } => (*scale, *bold),
+        let (scale, bold, line_height) = match &element.kind {
+            Kind::Text {
+                scale,
+                bold,
+                line_height,
+                ..
+            } => (
+                *scale,
+                *bold,
+                line_height.unwrap_or_else(|| text_font_size(*scale) * 1.3),
+            ),
             _ => unreachable!(),
         };
         tree.text_inputs.push(TextInputRegion {
@@ -4423,6 +4448,7 @@ fn emit_element<Message: Clone>(
             rect,
             scale,
             bold,
+            line_height,
             initial: input_value.clone().unwrap_or_else(|| value.clone()),
             map,
         });
@@ -4473,14 +4499,14 @@ fn emit_element<Message: Clone>(
     }
     if let Kind::Text {
         scale,
-        caret_x: Some(caret_x),
+        caret_position: Some(caret_position),
         ..
     } = &element.kind
     {
         tree.commands.push(PaintCommand::Fill {
             rect: Rect::new(
-                rect.origin.x + *caret_x,
-                rect.origin.y,
+                rect.origin.x + caret_position.x,
+                rect.origin.y + caret_position.y,
                 1.5,
                 text_font_size(*scale) * 1.3,
             ),
@@ -5161,8 +5187,9 @@ fn apply_transient_state<Message>(
                 scale,
                 bold,
                 selection_x,
-                caret_x,
+                caret_position,
                 input_value,
+                line_height,
                 ..
             } = &mut element.kind
         {
@@ -5192,17 +5219,24 @@ fn apply_transient_state<Message>(
                     };
                     (width(selection.start), width(selection.end))
                 });
-            *caret_x = (focused && caret_visible).then(|| {
-                measure_text(
-                    &editor.display_caret_prefix(),
-                    *scale,
-                    *bold,
-                    false,
-                    None,
-                    Some(1),
-                    f32::INFINITY,
-                )
-                .width
+            *caret_position = (focused && caret_visible).then(|| {
+                let prefix = editor.display_caret_prefix();
+                let (line_index, line) =
+                    prefix
+                        .rsplit_once('\n')
+                        .map_or((0, prefix.as_str()), |(before, line)| {
+                            (
+                                before.bytes().filter(|byte| *byte == b'\n').count() + 1,
+                                line,
+                            )
+                        });
+                let x =
+                    measure_text(line, *scale, *bold, false, None, Some(1), f32::INFINITY).width;
+                let height = line_height.unwrap_or_else(|| text_font_size(*scale) * 1.3);
+                Point {
+                    x,
+                    y: line_index as f32 * height,
+                }
             });
             *value = editor.display_text_with_caret("");
         }
@@ -6685,6 +6719,44 @@ mod tests {
         let empty_cut = tree.handle_event(&mut state, UiEvent::TextCut);
         assert!(empty_cut.clipboard_text.is_none());
         assert!(empty_cut.messages.is_empty());
+    }
+
+    #[test]
+    fn multiline_text_field_hit_testing_and_caret_follow_explicit_lines() {
+        fn query(value: String) -> TestMessage {
+            TestMessage::Query(value)
+        }
+
+        let mut state = UiStateStore::default();
+        let tree = UiTree::layout_with_state(
+            TextField::on_change("one\ntwo", query)
+                .id("query")
+                .wrap(true),
+            Rect::new(0.0, 0.0, 200.0, 80.0),
+            &mut state,
+        );
+        tree.handle_event(
+            &mut state,
+            UiEvent::PointerPressed(Point { x: 100.0, y: 28.0 }),
+        );
+        let inserted = tree.handle_event(&mut state, UiEvent::TextInput("!".into()));
+        assert_eq!(
+            inserted.messages,
+            vec![TestMessage::Query("one\ntwo!".into())]
+        );
+
+        let rebuilt = UiTree::layout_with_state(
+            TextField::on_change("one\ntwo!", query)
+                .id("query")
+                .wrap(true),
+            Rect::new(0.0, 0.0, 200.0, 80.0),
+            &mut state,
+        );
+        assert!(rebuilt.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::Fill { rect, .. }
+                if (rect.size.width - 1.5).abs() < f32::EPSILON && rect.origin.y > 10.0
+        )));
     }
 
     #[test]

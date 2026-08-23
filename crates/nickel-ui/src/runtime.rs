@@ -11,6 +11,21 @@ use sdl3::{
 
 use crate::{Point, Rect, SdlCanvasPresenter, UiEvent, UiStateStore, UiTree, View};
 
+#[derive(Debug, Default)]
+struct FrameScheduler {
+    dirty: bool,
+}
+
+impl FrameScheduler {
+    fn invalidate(&mut self) {
+        self.dirty = true;
+    }
+
+    fn take_rebuild(&mut self) -> bool {
+        std::mem::take(&mut self.dirty)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Shortcut {
     Submit,
@@ -63,7 +78,16 @@ pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
     let mut state = UiStateStore::default();
     let mut cursor = Point::default();
     let mut running = true;
-    let mut dirty = true;
+    let (logical_width, logical_height) = presenter.window().size();
+    let pixel_width = presenter.window().size_in_pixels().0;
+    let mut scale = pixel_width as f32 / logical_width.max(1) as f32;
+    let mut tree = UiTree::layout_with_state(
+        application.view(),
+        Rect::new(0.0, 0.0, logical_width as f32, logical_height as f32),
+        &mut state,
+    );
+    presenter.present_accelerated(tree.commands(), scale)?;
+    let mut scheduler = FrameScheduler::default();
     let mut next_caret_blink = Instant::now() + Duration::from_millis(500);
 
     while running {
@@ -71,20 +95,21 @@ pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
         if caret_tick {
             next_caret_blink = Instant::now() + Duration::from_millis(500);
             let _ = state.toggle_caret();
-            dirty = true;
+            scheduler.invalidate();
         }
-        dirty |= application.poll();
-        let (logical_width, logical_height) = presenter.window().size();
-        let pixel_width = presenter.window().size_in_pixels().0;
-        let scale = pixel_width as f32 / logical_width.max(1) as f32;
-        let tree = UiTree::layout_with_state(
-            application.view(),
-            Rect::new(0.0, 0.0, logical_width as f32, logical_height as f32),
-            &mut state,
-        );
-        if dirty {
+        if application.poll() {
+            scheduler.invalidate();
+        }
+        if scheduler.take_rebuild() {
+            let (logical_width, logical_height) = presenter.window().size();
+            let pixel_width = presenter.window().size_in_pixels().0;
+            scale = pixel_width as f32 / logical_width.max(1) as f32;
+            tree = UiTree::layout_with_state(
+                application.view(),
+                Rect::new(0.0, 0.0, logical_width as f32, logical_height as f32),
+                &mut state,
+            );
             presenter.present_accelerated(tree.commands(), scale)?;
-            dirty = false;
         }
 
         let Some(event) = events.wait_event_timeout(Duration::from_millis(16)) else {
@@ -106,7 +131,7 @@ pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
                     win_event: WindowEvent::Resized(_, _) | WindowEvent::PixelSizeChanged(_, _),
                     ..
                 } => {
-                    dirty = true;
+                    scheduler.invalidate();
                     continue;
                 }
                 Event::Window {
@@ -148,18 +173,21 @@ pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
                     keymod,
                     ..
                 } if keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD) => {
-                    if application.shortcut(Shortcut::Newline) {
-                        dirty = true;
+                    if state.focused().is_some() {
+                        UiEvent::TextInput("\n".into())
+                    } else if application.shortcut(Shortcut::Newline) {
+                        scheduler.invalidate();
                         continue;
+                    } else {
+                        UiEvent::KeyboardActivate
                     }
-                    UiEvent::KeyboardActivate
                 }
                 Event::KeyDown {
                     keycode: Some(Keycode::Return),
                     ..
                 } => {
                     if application.shortcut(Shortcut::Submit) {
-                        dirty = true;
+                        scheduler.invalidate();
                         continue;
                     }
                     UiEvent::KeyboardActivate
@@ -172,7 +200,7 @@ pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
                         UiEvent::SelectionClear
                     } else {
                         if application.shortcut(Shortcut::Escape) {
-                            dirty = true;
+                            scheduler.invalidate();
                         }
                         continue;
                     }
@@ -335,11 +363,27 @@ pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
                 let _ = clipboard.set_clipboard_text(&text);
             }
             if outcome.invalidation != crate::Invalidation::None {
-                dirty = true;
+                scheduler.invalidate();
             }
         }
     }
     text_input.stop(presenter.window());
     state.destroy();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FrameScheduler;
+
+    #[test]
+    fn idle_frames_do_not_rebuild_and_event_batches_coalesce() {
+        let mut scheduler = FrameScheduler::default();
+        assert!(!scheduler.take_rebuild());
+        scheduler.invalidate();
+        scheduler.invalidate();
+        scheduler.invalidate();
+        assert!(scheduler.take_rebuild());
+        assert!(!scheduler.take_rebuild());
+    }
 }

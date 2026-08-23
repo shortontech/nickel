@@ -232,10 +232,7 @@ impl Application for ChatApplication {
                 self.update(ChatMessage::Send);
                 true
             }
-            Shortcut::Newline if self.state.active_turn.is_none() => {
-                self.state.draft.push('\n');
-                true
-            }
+            Shortcut::Newline => false,
             Shortcut::Escape if self.state.active_turn.is_some() => {
                 self.update(ChatMessage::Interrupt);
                 true
@@ -456,7 +453,8 @@ pub fn chat_view(state: &ChatState) -> impl View<ChatMessage> {
                     })}
                     <Container fill_width min_height={52.0} max_height={140.0} shrink={0.0}
                         padding={Insets::all(12.0)} background={PANEL}
-                        border={Border::new(BORDER, 1.0)} radius={10.0}>
+                        border={Border::new(BORDER, 1.0)} radius={10.0}
+                        overflow_y={Overflow::Auto} follow_scroll_end={true}>
                         <TextField id={id!(chat_draft)} value={&state.draft} on_change={draft_changed}
                             color={TEXT} wrap={true} />
                     </Container>
