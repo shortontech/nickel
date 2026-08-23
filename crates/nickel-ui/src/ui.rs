@@ -2363,6 +2363,25 @@ impl<Message> Button<Message> {
         self
     }
 
+    /// Allows a button label to wrap while keeping the ordinary one-line
+    /// button height as its minimum.
+    pub fn max_lines(mut self, lines: usize) -> Self {
+        self.0 = self.0.height_length(Length::Auto).min_height(42.0);
+        if let Some(label) = self.0.0.children.first_mut()
+            && let Kind::Text {
+                wrap,
+                max_lines,
+                ellipsis,
+                ..
+            } = &mut label.kind
+        {
+            *wrap = true;
+            *max_lines = Some(lines.max(1));
+            *ellipsis = true;
+        }
+        self
+    }
+
     pub fn min_width(mut self, width: f32) -> Self {
         self.0 = self.0.min_width(width);
         self
@@ -2411,6 +2430,11 @@ impl<Message> ButtonLabel<Message> {
 
     pub fn align(mut self, align: TextAlign) -> Self {
         self.0 = self.0.align(align);
+        self
+    }
+
+    pub fn max_lines(mut self, lines: usize) -> Self {
+        self.0 = self.0.wrap(true).max_lines(lines).ellipsis(true);
         self
     }
 }
@@ -5847,6 +5871,30 @@ mod tests {
             empty_grid.measure(Constraints::unbounded()),
             Size::new(6.0, 6.0)
         );
+    }
+
+    #[test]
+    fn multiline_button_grows_from_one_line_and_stops_at_its_line_limit() {
+        let constraints = Constraints::loose(Size::new(180.0, f32::INFINITY));
+        let short = Button::new((), "Short title")
+            .max_lines(2)
+            .into_element()
+            .measure(constraints);
+        let wrapped = Button::new((), "A task title long enough to wrap onto another line")
+            .max_lines(2)
+            .into_element()
+            .measure(constraints);
+        let much_longer = Button::new(
+            (),
+            "A task title long enough to wrap onto many more lines than the component permits",
+        )
+        .max_lines(2)
+        .into_element()
+        .measure(constraints);
+
+        assert_eq!(short.height, 42.0);
+        assert!(wrapped.height > short.height);
+        assert_eq!(much_longer.height, wrapped.height);
     }
 
     #[test]

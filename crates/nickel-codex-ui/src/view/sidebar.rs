@@ -115,7 +115,7 @@ pub(super) fn thread_sidebar(state: &ChatState) -> impl View<ChatMessage> {
                             <Button key={thread.id.0.clone()}
                                 on_press={ChatMessage::SelectThread(thread.id.clone())}
                                 background={if state.selected_thread.as_ref() == Some(&thread.id) { 0x2a4261 } else { PANEL }}
-                                color={TEXT} fill_width>
+                                color={TEXT} max_lines={2} fill_width>
                                 {thread.title.as_deref().unwrap_or("Untitled conversation")}
                             </Button>
                         })}
