@@ -2,7 +2,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use nickel_shapes_test::{Lod, OrganismMeshCache, OrganismRecipe, creature_state, render};
+use nickel_shapes_test::{
+    Lod, Mesh, OrganismMeshCache, OrganismRecipe, creature_state, generate_sculpt_experiment,
+    render,
+};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
@@ -26,6 +29,8 @@ struct Options {
     height: u32,
     lod: Lod,
     seed: Option<String>,
+    rotation_degrees: f32,
+    sculpt_strength: Option<u8>,
 }
 
 impl Default for Options {
@@ -38,6 +43,8 @@ impl Default for Options {
             height: DEFAULT_HEIGHT,
             lod: Lod::Gameplay,
             seed: None,
+            rotation_degrees: 0.0,
+            sculpt_strength: None,
         }
     }
 }
@@ -56,11 +63,19 @@ fn main() -> Result<(), String> {
     }
     if let Some(path) = options.png {
         let mut cache = OrganismMeshCache::default();
+        let sculpt_mesh = options
+            .sculpt_strength
+            .map(|strength| generate_sculpt_experiment(strength, options.lod))
+            .transpose()?
+            .map(|experiment| experiment.mesh);
+        let mesh = sculpt_mesh
+            .as_ref()
+            .unwrap_or_else(|| cache.get(&recipe, options.lod));
         let image = render(
-            cache.get(&recipe, options.lod),
+            mesh,
             options.width,
             options.height,
-            0.35,
+            options.rotation_degrees.to_radians(),
         );
         image
             .save(&path)
@@ -70,7 +85,10 @@ fn main() -> Result<(), String> {
             options.width,
             options.height,
             options.lod.index(),
-            recipe.name,
+            options
+                .sculpt_strength
+                .map(|strength| format!("sculpt strength {strength}"))
+                .unwrap_or_else(|| recipe.name.clone()),
             path.display()
         );
         return Ok(());
@@ -111,10 +129,24 @@ fn parse_options(arguments: impl Iterator<Item = String>) -> Result<Options, Str
             "--seed" => {
                 options.seed = Some(next_value(&mut arguments, "--seed")?);
             }
+            "--rotation" => {
+                options.rotation_degrees =
+                    parse_finite(&next_value(&mut arguments, "--rotation")?, "--rotation")?;
+            }
+            "--sculpt-strength" => {
+                let value = next_value(&mut arguments, "--sculpt-strength")?
+                    .parse::<u8>()
+                    .map_err(|_| "--sculpt-strength must be between 1 and 10".to_owned())?;
+                if !(1..=10).contains(&value) {
+                    return Err("--sculpt-strength must be between 1 and 10".to_owned());
+                }
+                options.sculpt_strength = Some(value);
+            }
             "--help" | "-h" => {
                 println!(
                     "nickel-shapes-test [--shape YAML] [--png PATH] [--save-state YAML] [--width PIXELS] \
-                     [--height PIXELS] [--lod 0|1|2|3] [--seed TEXT]\n\n\
+                     [--height PIXELS] [--lod 0|1|2|3] [--seed TEXT] [--rotation DEGREES] \
+                     [--sculpt-strength 1..10]\n\n\
                      Without --png, opens an interactive window. Press 1-4 to select LOD, \
                      S to save nickel-apple.png, or Escape to exit."
                 );
@@ -166,12 +198,21 @@ fn parse_positive(value: &str) -> Result<u32, String> {
         .ok_or_else(|| format!("expected a positive pixel count, got {value}"))
 }
 
+fn parse_finite(value: &str, option: &str) -> Result<f32, String> {
+    value
+        .parse::<f32>()
+        .ok()
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| format!("{option} expects a finite number, got {value}"))
+}
+
 struct ShapesApp {
     options: Options,
     recipe: OrganismRecipe,
     cache: OrganismMeshCache,
     window: Option<Arc<Window>>,
     preview: Option<GpuPreview>,
+    sculpt_mesh: Option<Mesh>,
     started: Instant,
     last_angle: f32,
 }
@@ -184,6 +225,7 @@ impl ShapesApp {
             cache: OrganismMeshCache::default(),
             window: None,
             preview: None,
+            sculpt_mesh: None,
             started: Instant::now(),
             last_angle: 0.0,
         }
@@ -193,15 +235,25 @@ impl ShapesApp {
         let Some(preview) = &mut self.preview else {
             return;
         };
-        let angle = self.started.elapsed().as_secs_f32() * 0.32;
+        let angle = self.options.rotation_degrees.to_radians()
+            + self.started.elapsed().as_secs_f32() * 0.32;
         preview.render(angle);
         self.last_angle = angle;
     }
 
     fn set_lod(&mut self, lod: Lod) {
         self.options.lod = lod;
+        self.sculpt_mesh = self
+            .options
+            .sculpt_strength
+            .and_then(|strength| generate_sculpt_experiment(strength, lod).ok())
+            .map(|experiment| experiment.mesh);
         if let Some(preview) = &mut self.preview {
-            preview.set_mesh(self.cache.get(&self.recipe, lod));
+            let mesh = self
+                .sculpt_mesh
+                .as_ref()
+                .unwrap_or_else(|| self.cache.get(&self.recipe, lod));
+            preview.set_mesh(mesh);
         }
     }
 
@@ -218,12 +270,11 @@ impl ShapesApp {
             PhysicalKey::Code(KeyCode::KeyS) => {
                 if let Some(window) = &self.window {
                     let size = window.inner_size();
-                    let image = render(
-                        self.cache.get(&self.recipe, self.options.lod),
-                        size.width,
-                        size.height,
-                        self.last_angle,
-                    );
+                    let mesh = self
+                        .sculpt_mesh
+                        .as_ref()
+                        .unwrap_or_else(|| self.cache.get(&self.recipe, self.options.lod));
+                    let image = render(mesh, size.width, size.height, self.last_angle);
                     match image.save("nickel-apple.png") {
                         Ok(()) => println!("wrote nickel-apple.png"),
                         Err(error) => eprintln!("failed to write nickel-apple.png: {error}"),
@@ -254,7 +305,16 @@ impl ApplicationHandler for ShapesApp {
                 return;
             }
         };
-        let mesh = self.cache.get(&self.recipe, self.options.lod).clone();
+        self.sculpt_mesh = self
+            .options
+            .sculpt_strength
+            .and_then(|strength| generate_sculpt_experiment(strength, self.options.lod).ok())
+            .map(|experiment| experiment.mesh);
+        let mesh = self
+            .sculpt_mesh
+            .as_ref()
+            .unwrap_or_else(|| self.cache.get(&self.recipe, self.options.lod))
+            .clone();
         let preview = match pollster::block_on(GpuPreview::new(window.clone(), &mesh)) {
             Ok(preview) => preview,
             Err(error) => {
@@ -317,6 +377,10 @@ mod tests {
             "3",
             "--seed",
             "orchard-row-72",
+            "--rotation",
+            "90",
+            "--sculpt-strength",
+            "5",
         ]
         .into_iter()
         .map(str::to_owned);
@@ -331,5 +395,16 @@ mod tests {
         assert_eq!(options.height, 240);
         assert_eq!(options.lod, Lod::Inspection);
         assert_eq!(options.seed.as_deref(), Some("orchard-row-72"));
+        assert_eq!(options.rotation_degrees, 90.0);
+        assert_eq!(options.sculpt_strength, Some(5));
+    }
+
+    #[test]
+    fn rejects_non_finite_rotation() {
+        let arguments = ["--rotation", "NaN"].into_iter().map(str::to_owned);
+        assert_eq!(
+            parse_options(arguments).expect_err("NaN must be rejected"),
+            "--rotation expects a finite number, got NaN"
+        );
     }
 }

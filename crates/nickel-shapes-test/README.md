@@ -80,6 +80,19 @@ Interactive mode uses a `wgpu` depth-tested material shader with key and fill li
 rim response, and a small subsurface approximation. PNG mode remains a deterministic CPU reference
 render for generator tests.
 
+Resolved creature bones produce capsule fields that blend with generated joint, torso, head, and
+organ volumes. A marching-tetrahedra pass extracts one continuous skin surface at the requested LOD.
+The paw component contributes its palm and resolved digit count directly to that field, so paws join
+the limb rather than intersecting it. Back growths use the same attachment field while retaining
+component-aware color. Eyes and mouths remain surface assemblies with generated anatomical layers.
+
+Creature bind geometry is animation-oriented. Bipeds resolve to a T-pose with horizontal
+manipulators and longer straight support legs; quadrupeds use a reference stance with lengthened
+load-bearing limbs. A generated jaw bone contributes to the facial skin, while continuous mouth
+projection coordinates let the material shader draw a smooth closed aperture without separate lip
+meshes. A later animation pass can rotate the jaw, deform the skin, and use the same projection to
+open the visible aperture.
+
 Open the bundled apple interactively:
 
 ```bash
@@ -92,8 +105,35 @@ Render any recipe to PNG:
 cargo run -p nickel-shapes-test -- \
   --shape crates/nickel-shapes-test/shapes/grapes.yaml \
   --png grapes.png \
+  --rotation 45 \
   --seed another-vineyard
 ```
+
+`--rotation` sets Y-axis rotation in degrees. Use `0` for the front, `45` for a three-quarter
+view, `90` for the side, and `180` for the rear. PNG output uses the angle exactly; interactive
+mode starts at that angle and continues rotating.
+
+## Procedural sculpting experiment
+
+The isolated version 2 experiment compiles a strength requirement into oriented shoulder and hip
+mounts, lofted torso sections, swept limb paths, a separate dorsal construction surface, protected
+negative spaces, and an inspectable deterministic sculpt history. It deliberately does not reuse
+the version 1 implicit skin field.
+
+Render equal-height clay studies at strengths 1, 5, and 10:
+
+```bash
+for strength in 1 5 10; do
+  cargo run -p nickel-shapes-test -- \
+    --sculpt-strength "$strength" \
+    --rotation 45 \
+    --png "sculpt-strength-$strength.png"
+done
+```
+
+The current experiment tests primary form and silhouette only. It has no face, hands, detailed
+muscles, retopology, or animation. Those omissions are intentional: structural strength must read
+before surface detail is allowed to conceal weak morphology.
 
 Serialize the resolved bones, parts, ecological pressures, dependency graph, gait, and component
 state for a specific creature:

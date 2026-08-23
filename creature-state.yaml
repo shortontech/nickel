@@ -1,4 +1,4 @@
-generator_version: 2
+generator_version: 4
 recipe_name: bulb-backed marsh grazer
 seed: mossy-pond
 morphology:
@@ -23,6 +23,7 @@ morphology:
     traction: high
     grasping: moderate
   dependencies:
+    bind_pose: quadruped_reference
     hind_limb_role: support
     fore_limb_role: support
     pelvis_pitch_degrees: 4.0
@@ -31,7 +32,7 @@ morphology:
     spine_curve: 0.26052314
     center_of_mass:
     - 0.0
-    - 0.9
+    - 1.08
     - 0.037015438
     neck_compensation_degrees: 6.0
     head_resting_angle_degrees: 14.0
@@ -48,77 +49,88 @@ morphology:
     parent: null
     start:
     - 0.0
-    - 0.9
+    - 1.08
     - 0.037015438
     end:
     - 0.0
-    - 1.1
+    - 1.2800001
     - 0.0
     load_bearing: true
   - name: spine
     parent: 0
     start:
     - 0.0
-    - 0.9
+    - 1.08
     - 0.037015438
     end:
     - 0.0
-    - 1.1341838
+    - 1.3141837
     - -1.418613
     load_bearing: true
   - name: neck
     parent: 1
     start:
     - 0.0
-    - 1.1341838
+    - 1.3141837
     - -1.418613
     end:
     - 0.0
-    - 1.1341838
+    - 1.3141837
     - -1.2186129
+    load_bearing: false
+  - name: jaw
+    parent: 2
+    start:
+    - 0.0
+    - 1.2141837
+    - -1.498613
+    end:
+    - 0.0
+    - 1.1341836
+    - -1.898613
     load_bearing: false
   - name: left_hind
     parent: 0
     start:
     - -0.48
-    - 0.88
+    - 1.04
     - 0.58
     end:
     - -0.38
-    - -0.05
+    - -0.24
     - 0.53999996
     load_bearing: true
   - name: left_fore
     parent: 1
     start:
     - -0.5
-    - 0.92
+    - 1.08
     - -0.58
     end:
     - -0.42
-    - -0.05
+    - -0.24
     - -0.53999996
     load_bearing: true
   - name: right_hind
     parent: 0
     start:
     - 0.48
-    - 0.88
+    - 1.04
     - 0.58
     end:
     - 0.38
-    - -0.05
+    - -0.24
     - 0.53999996
     load_bearing: true
   - name: right_fore
     parent: 1
     start:
     - 0.5
-    - 0.92
+    - 1.08
     - -0.58
     end:
     - 0.42
-    - -0.05
+    - -0.24
     - -0.53999996
     load_bearing: true
   parts:
@@ -126,7 +138,7 @@ morphology:
     role: fruit_torso
     center:
     - 0.0
-    - 0.9
+    - 1.08
     - 0.037015438
     radii:
     - 0.76
@@ -140,7 +152,7 @@ morphology:
     role: frog_head
     center:
     - 0.0
-    - 1.1341838
+    - 1.3141837
     - -1.418613
     radii:
     - 0.62
@@ -154,7 +166,7 @@ morphology:
     role: back_bulb
     center:
     - 0.0
-    - 1.47
+    - 1.6500001
     - 0.15701544
     radii:
     - 0.48
@@ -168,11 +180,11 @@ morphology:
     role: left_hind
     start:
     - -0.48
-    - 0.88
+    - 1.04
     - 0.58
     end:
     - -0.38
-    - -0.05
+    - -0.24
     - 0.53999996
     radius: 0.16
     color:
@@ -183,7 +195,7 @@ morphology:
     role: left_hind_paw
     center:
     - -0.38
-    - -0.05
+    - -0.24
     - 0.53999996
     radii:
     - 0.24
@@ -197,11 +209,11 @@ morphology:
     role: left_fore
     start:
     - -0.5
-    - 0.92
+    - 1.08
     - -0.58
     end:
     - -0.42
-    - -0.05
+    - -0.24
     - -0.53999996
     radius: 0.16
     color:
@@ -212,7 +224,7 @@ morphology:
     role: left_fore_paw
     center:
     - -0.42
-    - -0.05
+    - -0.24
     - -0.53999996
     radii:
     - 0.24
@@ -226,11 +238,11 @@ morphology:
     role: right_hind
     start:
     - 0.48
-    - 0.88
+    - 1.04
     - 0.58
     end:
     - 0.38
-    - -0.05
+    - -0.24
     - 0.53999996
     radius: 0.16
     color:
@@ -241,7 +253,7 @@ morphology:
     role: right_hind_paw
     center:
     - 0.38
-    - -0.05
+    - -0.24
     - 0.53999996
     radii:
     - 0.24
@@ -255,11 +267,11 @@ morphology:
     role: right_fore
     start:
     - 0.5
-    - 0.92
+    - 1.08
     - -0.58
     end:
     - 0.42
-    - -0.05
+    - -0.24
     - -0.53999996
     radius: 0.16
     color:
@@ -270,7 +282,7 @@ morphology:
     role: right_fore_paw
     center:
     - 0.42
-    - -0.05
+    - -0.24
     - -0.53999996
     radii:
     - 0.24
@@ -284,7 +296,7 @@ morphology:
     role: eye
     center:
     - -0.5573
-    - 1.2951838
+    - 1.4751837
     - -1.7350137
     radii:
     - 0.13
@@ -298,7 +310,7 @@ morphology:
     role: eye
     center:
     - 0.5573
-    - 1.2951838
+    - 1.4751837
     - -1.7350137
     radii:
     - 0.13
@@ -312,7 +324,7 @@ morphology:
     role: cropping_mouth
     center:
     - 0.0
-    - 0.9741838
+    - 1.1541837
     - -1.898613
     radii:
     - 0.34

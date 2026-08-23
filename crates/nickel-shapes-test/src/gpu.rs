@@ -11,6 +11,7 @@ struct GpuVertex {
     position: [f32; 3],
     normal: [f32; 3],
     color: [f32; 3],
+    surface_feature: [f32; 3],
 }
 
 #[repr(C)]
@@ -118,6 +119,7 @@ impl GpuPreview {
                         0 => Float32x3,
                         1 => Float32x3,
                         2 => Float32x3
+                        ,3 => Float32x3
                     ],
                 })],
                 compilation_options: Default::default(),
@@ -253,6 +255,7 @@ fn upload_mesh(device: &wgpu::Device, mesh: &Mesh) -> (wgpu::Buffer, wgpu::Buffe
             ],
             normal: [vertex.normal.x, vertex.normal.y, vertex.normal.z],
             color: vertex.color.map(|channel| channel as f32 / 255.0),
+            surface_feature: vertex.surface_feature,
         })
         .collect();
     let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {

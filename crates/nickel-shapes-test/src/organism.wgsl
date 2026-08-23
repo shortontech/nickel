@@ -10,6 +10,7 @@ struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) color: vec3<f32>,
+    @location(3) surface_feature: vec3<f32>,
 };
 
 struct VertexOutput {
@@ -17,6 +18,7 @@ struct VertexOutput {
     @location(0) normal: vec3<f32>,
     @location(1) color: vec3<f32>,
     @location(2) view_position: vec3<f32>,
+    @location(3) surface_feature: vec3<f32>,
 };
 
 fn rotate_y(value: vec3<f32>, angle: f32) -> vec3<f32> {
@@ -44,6 +46,7 @@ fn vertex_main(input: VertexInput) -> VertexOutput {
     output.normal = normalize(rotate_y(input.normal, scene.angle));
     output.color = input.color;
     output.view_position = view;
+    output.surface_feature = input.surface_feature;
     return output;
 }
 
@@ -59,6 +62,11 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let specular = pow(max(dot(normal, half_vector), 0.0), 38.0) * 0.32;
     let rim = pow(1.0 - max(dot(normal, view_direction), 0.0), 3.0) * 0.22;
     let subsurface = pow(max(dot(-normal, key), 0.0), 2.0) * input.color * 0.12;
-    let lit = input.color * (0.22 + key_light * 0.72 + fill_light) + subsurface;
+    let aperture_shape = dot(input.surface_feature.xy, input.surface_feature.xy);
+    let aperture = smoothstep(1.0, 0.72, aperture_shape)
+        * (1.0 - smoothstep(0.82, 1.0, input.surface_feature.z));
+    let surface_color = mix(input.color, vec3<f32>(0.055, 0.026, 0.022), aperture);
+    let lit = surface_color * (0.22 + key_light * 0.72 + fill_light)
+        + subsurface * (1.0 - aperture);
     return vec4<f32>(lit + vec3<f32>(specular + rim), 1.0);
 }

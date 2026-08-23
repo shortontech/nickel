@@ -8,11 +8,13 @@ use image::{ImageBuffer, Rgba, RgbaImage};
 use serde::Deserialize;
 
 mod morphology;
+mod sculpt;
 
 pub use morphology::{
     Bone, CreatureState, DietKind, LocomotionKind, ResolvedMorphology, ResolvedPart,
     compile_creature,
 };
+pub use sculpt::{AnatomicalFrame, SculptExperiment, SculptOperation, generate_sculpt_experiment};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Vec3 {
@@ -76,14 +78,15 @@ impl std::ops::Mul<f32> for Vec3 {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Vertex {
     pub position: Vec3,
     pub normal: Vec3,
     pub color: [u8; 3],
+    pub surface_feature: [f32; 3],
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Mesh {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
@@ -437,6 +440,7 @@ fn generate_body(
                 position,
                 normal: Vec3::default(),
                 color,
+                surface_feature: [2.0, 2.0, 2.0],
             });
         }
     }
@@ -544,6 +548,7 @@ fn generate_branch(children: &[NodeRecipe], lod: Lod, seed: u64, origin: Vec3) -
                 position: center + Vec3::new(angle.cos() * radius, 0.0, angle.sin() * radius),
                 normal: Vec3::default(),
                 color: [91, 58, 32],
+                surface_feature: [2.0, 2.0, 2.0],
             });
         }
     }
@@ -613,6 +618,7 @@ fn generate_leaf(lod: Lod, seed: u64, origin: Vec3) -> Mesh {
                 position: center + across * (half_width * s) + Vec3::new(0.0, curl, 0.0),
                 normal: Vec3::default(),
                 color,
+                surface_feature: [2.0, 2.0, 2.0],
             });
         }
     }
@@ -669,6 +675,7 @@ fn generate_sphere(lod: Lod, center: Vec3, radius: f32, color: [u8; 3]) -> Mesh 
                 position: center + normal * radius,
                 normal,
                 color,
+                surface_feature: [2.0, 2.0, 2.0],
             });
         }
     }
@@ -686,7 +693,7 @@ fn generate_morphology_mesh(morphology: &ResolvedMorphology, lod: Lod, origin: V
                 radii,
                 color,
                 ..
-            } if is_surface_component(role) => mesh.append(generate_ellipsoid(
+            } if role == "eye" => mesh.append(generate_eye_component(
                 lod,
                 origin + array_vec(*center),
                 array_vec(*radii),
@@ -698,12 +705,22 @@ fn generate_morphology_mesh(morphology: &ResolvedMorphology, lod: Lod, origin: V
     mesh
 }
 
-fn is_surface_component(role: &str) -> bool {
-    role == "eye"
-        || role == "back_bulb"
-        || role == "cropping_mouth"
-        || role == "leveraged_jaw"
-        || role.ends_with("_paw")
+fn generate_eye_component(lod: Lod, center: Vec3, radii: Vec3, iris_color: [u8; 3]) -> Mesh {
+    let mut mesh = generate_ellipsoid(lod, center, radii, [178, 188, 132]);
+    let iris_center = center + Vec3::new(0.0, 0.0, -radii.z * 0.86);
+    mesh.append(generate_ellipsoid(
+        lod,
+        iris_center,
+        Vec3::new(radii.x * 0.62, radii.y * 0.68, radii.z * 0.28),
+        iris_color,
+    ));
+    mesh.append(generate_ellipsoid(
+        lod,
+        iris_center + Vec3::new(0.0, 0.0, -radii.z * 0.18),
+        Vec3::new(radii.x * 0.22, radii.y * 0.48, radii.z * 0.16),
+        [8, 12, 7],
+    ));
+    mesh
 }
 
 struct SkinField<'a> {
@@ -718,6 +735,7 @@ impl SkinField<'_> {
                 "pelvis" => 0.50 + self.morphology.pressures.digestive_volume * 0.18,
                 "spine" => 0.48 + self.morphology.pressures.digestive_volume * 0.22,
                 "neck" => 0.46,
+                "jaw" => 0.30,
                 name if name.ends_with("_hind") => 0.19,
                 name if name.ends_with("_fore") => 0.17,
                 _ => 0.16,
@@ -735,14 +753,17 @@ impl SkinField<'_> {
                 radii,
                 ..
             } = part
-                && (role == "fruit_torso" || role == "frog_head")
+                && is_skin_volume(role)
             {
                 distance = smooth_min(
                     distance,
                     ellipsoid_distance(point, array_vec(*center), array_vec(*radii)),
-                    0.28,
+                    if role == "back_bulb" { 0.14 } else { 0.28 },
                 );
             }
+        }
+        for (start, end, radius) in paw_digit_capsules(self.morphology) {
+            distance = smooth_min(distance, capsule_distance(point, start, end, radius), 0.08);
         }
         distance
     }
@@ -759,6 +780,92 @@ impl SkinField<'_> {
         )
         .normalized()
     }
+
+    fn color(&self, point: Vec3) -> [u8; 3] {
+        let mouth = self.mouth_projection(point);
+        if mouth[2] < 1.0 && mouth[0] * mouth[0] + mouth[1] * mouth[1] < 1.0 {
+            return [31, 20, 18];
+        }
+        for part in &self.morphology.parts {
+            if let ResolvedPart::Ellipsoid {
+                role,
+                center,
+                radii,
+                color,
+            } = part
+                && (role == "back_bulb" || role.ends_with("_paw"))
+                && ellipsoid_distance(point, array_vec(*center), array_vec(*radii)) < 0.08
+            {
+                return *color;
+            }
+        }
+        match self.morphology.diet {
+            DietKind::Herbivore => [91, 174, 82],
+            DietKind::Carnivore => [65, 132, 80],
+        }
+    }
+
+    fn mouth_projection(&self, point: Vec3) -> [f32; 3] {
+        for part in &self.morphology.parts {
+            let ResolvedPart::Ellipsoid {
+                role,
+                center,
+                radii,
+                ..
+            } = part
+            else {
+                continue;
+            };
+            if role != "cropping_mouth" && role != "leveraged_jaw" {
+                continue;
+            }
+            let center = array_vec(*center);
+            let radii = array_vec(*radii);
+            let relative = point - center;
+            let horizontal = relative.x / radii.x.max(1.0e-4);
+            let vertical = relative.y / (radii.y * 0.42).max(1.0e-4);
+            let depth = relative.z.abs() / (radii.z * 1.65).max(1.0e-4);
+            return [horizontal, vertical, depth];
+        }
+        [2.0, 2.0, 2.0]
+    }
+}
+
+fn is_skin_volume(role: &str) -> bool {
+    role == "fruit_torso" || role == "frog_head" || role == "back_bulb" || role.ends_with("_paw")
+}
+
+fn paw_digit_capsules(morphology: &ResolvedMorphology) -> Vec<(Vec3, Vec3, f32)> {
+    let count = usize::from(morphology.terminal_component.digit_count.max(1));
+    let mut digits = Vec::new();
+    for part in &morphology.parts {
+        let ResolvedPart::Ellipsoid {
+            role,
+            center,
+            radii,
+            ..
+        } = part
+        else {
+            continue;
+        };
+        if !role.ends_with("_paw") {
+            continue;
+        }
+        let center = array_vec(*center);
+        let radii = array_vec(*radii);
+        for index in 0..count {
+            let across = if count == 1 {
+                0.0
+            } else {
+                index as f32 / (count - 1) as f32 * 2.0 - 1.0
+            };
+            let start =
+                center + Vec3::new(across * radii.x * 0.66, -radii.y * 0.04, -radii.z * 0.44);
+            let end = start + Vec3::new(across * 0.045, -0.015, -(0.16 + radii.z * 0.42));
+            digits.push((start, end, 0.055 + radii.x * 0.08));
+        }
+    }
+    digits
 }
 
 fn generate_skin_mesh(morphology: &ResolvedMorphology, lod: Lod, origin: Vec3) -> Mesh {
@@ -785,11 +892,6 @@ fn generate_skin_mesh(morphology: &ResolvedMorphology, lod: Lod, origin: Vec3) -
         [0, 7, 4, 6],
         [0, 4, 5, 6],
     ];
-    let skin_color = match morphology.diet {
-        DietKind::Herbivore => [91, 174, 82],
-        DietKind::Carnivore => [65, 132, 80],
-    };
-
     for z in 0..resolution {
         for y in 0..resolution {
             for x in 0..resolution {
@@ -816,7 +918,6 @@ fn generate_skin_mesh(morphology: &ResolvedMorphology, lod: Lod, origin: Vec3) -
                         &mut mesh,
                         &field,
                         origin,
-                        skin_color,
                         tetrahedron.map(|index| points[index]),
                         tetrahedron.map(|index| values[index]),
                     );
@@ -831,7 +932,6 @@ fn polygonize_tetrahedron(
     mesh: &mut Mesh,
     field: &SkinField<'_>,
     origin: Vec3,
-    color: [u8; 3],
     points: [Vec3; 4],
     values: [f32; 4],
 ) {
@@ -843,38 +943,22 @@ fn polygonize_tetrahedron(
             let triangle: [Vec3; 3] = std::array::from_fn(|index| {
                 skin_intersection(points, values, center, outside[index])
             });
-            push_skin_triangle(
-                mesh,
-                field,
-                origin,
-                color,
-                triangle[0],
-                triangle[1],
-                triangle[2],
-            );
+            push_skin_triangle(mesh, field, origin, triangle[0], triangle[1], triangle[2]);
         }
         3 => {
             let center = outside[0];
             let triangle: [Vec3; 3] = std::array::from_fn(|index| {
                 skin_intersection(points, values, center, inside[index])
             });
-            push_skin_triangle(
-                mesh,
-                field,
-                origin,
-                color,
-                triangle[0],
-                triangle[1],
-                triangle[2],
-            );
+            push_skin_triangle(mesh, field, origin, triangle[0], triangle[1], triangle[2]);
         }
         2 => {
             let a = skin_intersection(points, values, inside[0], outside[0]);
             let b = skin_intersection(points, values, inside[1], outside[0]);
             let c = skin_intersection(points, values, inside[0], outside[1]);
             let d = skin_intersection(points, values, inside[1], outside[1]);
-            push_skin_triangle(mesh, field, origin, color, a, b, c);
-            push_skin_triangle(mesh, field, origin, color, c, b, d);
+            push_skin_triangle(mesh, field, origin, a, b, c);
+            push_skin_triangle(mesh, field, origin, c, b, d);
         }
         0 | 4 => {}
         _ => unreachable!("a tetrahedron has four vertices"),
@@ -890,7 +974,6 @@ fn push_skin_triangle(
     mesh: &mut Mesh,
     field: &SkinField<'_>,
     origin: Vec3,
-    color: [u8; 3],
     mut a: Vec3,
     mut b: Vec3,
     c: Vec3,
@@ -905,7 +988,8 @@ fn push_skin_triangle(
         mesh.vertices.push(Vertex {
             position: origin + point,
             normal: field.normal(point),
-            color,
+            color: field.color(point),
+            surface_feature: field.mouth_projection(point),
         });
     }
     mesh.indices
@@ -932,7 +1016,7 @@ fn skeleton_bounds(morphology: &ResolvedMorphology) -> (Vec3, Vec3) {
             radii,
             ..
         } = part
-            && (role == "fruit_torso" || role == "frog_head")
+            && is_skin_volume(role)
         {
             let center = array_vec(*center);
             let radii = array_vec(*radii);
@@ -942,6 +1026,16 @@ fn skeleton_bounds(morphology: &ResolvedMorphology) -> (Vec3, Vec3) {
             maximum.x = maximum.x.max(center.x + radii.x);
             maximum.y = maximum.y.max(center.y + radii.y);
             maximum.z = maximum.z.max(center.z + radii.z);
+        }
+    }
+    for (start, end, radius) in paw_digit_capsules(morphology) {
+        for point in [start, end] {
+            minimum.x = minimum.x.min(point.x - radius);
+            minimum.y = minimum.y.min(point.y - radius);
+            minimum.z = minimum.z.min(point.z - radius);
+            maximum.x = maximum.x.max(point.x + radius);
+            maximum.y = maximum.y.max(point.y + radius);
+            maximum.z = maximum.z.max(point.z + radius);
         }
     }
     let padding = Vec3::new(0.34, 0.34, 0.34);

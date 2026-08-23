@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{BackKind, CapabilityLevel, ComponentUse, HeadKind, TorsoKind, Vec3};
 
-pub const GENERATOR_VERSION: u32 = 2;
+pub const GENERATOR_VERSION: u32 = 4;
 
 #[derive(Clone, Copy, Debug, Deserialize, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -52,6 +52,7 @@ pub enum MouthKind {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct MorphologyDependencies {
+    pub bind_pose: BindPoseKind,
     pub hind_limb_role: LimbRole,
     pub fore_limb_role: LimbRole,
     pub pelvis_pitch_degrees: f32,
@@ -62,6 +63,13 @@ pub struct MorphologyDependencies {
     pub neck_compensation_degrees: f32,
     pub head_resting_angle_degrees: f32,
     pub gait: GaitRig,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BindPoseKind {
+    QuadrupedReference,
+    TPose,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -251,8 +259,8 @@ fn resolve_dependencies(
         LocomotionKind::Biped => 0.30 + pressures.digestive_volume * 0.10,
     };
     let center_of_mass = match locomotion {
-        LocomotionKind::Quadruped => [0.0, 0.90, -0.03 + pressures.digestive_volume * 0.08],
-        LocomotionKind::Biped => [0.0, 1.05, -0.16 + pressures.digestive_volume * 0.10],
+        LocomotionKind::Quadruped => [0.0, 1.08, -0.03 + pressures.digestive_volume * 0.08],
+        LocomotionKind::Biped => [0.0, 1.35, -0.16 + pressures.digestive_volume * 0.10],
     };
     let neck_compensation = match locomotion {
         LocomotionKind::Quadruped => 6.0,
@@ -276,6 +284,10 @@ fn resolve_dependencies(
     };
 
     MorphologyDependencies {
+        bind_pose: match locomotion {
+            LocomotionKind::Quadruped => BindPoseKind::QuadrupedReference,
+            LocomotionKind::Biped => BindPoseKind::TPose,
+        },
         hind_limb_role,
         fore_limb_role,
         pelvis_pitch_degrees: pelvis_pitch,
@@ -314,7 +326,7 @@ fn build_body(
             [0.0, torso_center[1] + 0.70, 0.0],
             0.68,
             [0.60, 0.46, 0.52],
-            [0.0, 0.47, 0.38],
+            [0.0, 0.12, 0.66],
         ),
     };
     let head_angle = dependencies.head_resting_angle_degrees.to_radians();
@@ -345,6 +357,13 @@ fn build_body(
             [head_center[0], head_center[1], head_center[2] + 0.2],
             false,
         ),
+        bone(
+            "jaw",
+            Some(2),
+            [head_center[0], head_center[1] - 0.10, head_center[2] - 0.08],
+            [head_center[0], head_center[1] - 0.18, head_center[2] - 0.48],
+            false,
+        ),
     ];
     let mut parts = vec![
         ResolvedPart::Ellipsoid {
@@ -368,8 +387,8 @@ fn build_body(
     ];
 
     let (fore_top_y, hind_top_y, ground_y, fore_z, hind_z) = match locomotion {
-        LocomotionKind::Quadruped => (0.92, 0.88, -0.05, -0.58, 0.58),
-        LocomotionKind::Biped => (1.48, 1.05, 0.02, -0.12, 0.12),
+        LocomotionKind::Quadruped => (1.08, 1.04, -0.24, -0.58, 0.58),
+        LocomotionKind::Biped => (1.62, 1.20, -0.30, -0.12, 0.12),
     };
     for (side_name, side) in [("left", -1.0_f32), ("right", 1.0_f32)] {
         let hind_start = [side * 0.48, hind_top_y, hind_z];
@@ -388,7 +407,7 @@ fn build_body(
         let fore_start = [side * 0.50, fore_top_y, fore_z];
         let fore_end = match locomotion {
             LocomotionKind::Quadruped => [side * 0.42, ground_y, fore_z + 0.04],
-            LocomotionKind::Biped => [side * 1.02, 1.08, -0.18],
+            LocomotionKind::Biped => [side * 1.42, fore_top_y, -0.18],
         };
         add_limb(
             &mut bones,
