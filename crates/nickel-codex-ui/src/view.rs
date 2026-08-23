@@ -246,8 +246,14 @@ fn ItemCard(item: &ChatItem) -> impl View<ChatMessage> {
         item.text.as_str()
     };
     let blocks = markdown_blocks(text);
+    let (maximum_width, alignment) = if item.kind == ChatItemKind::User {
+        (760.0, Align::End)
+    } else {
+        (920.0, Align::Start)
+    };
     ui! {
-        <Container fill_width padding={Insets::all(14.0)} gap={7.0}
+        <Container fill_width max_width={maximum_width} align_self={alignment}
+            padding={Insets::all(14.0)} gap={7.0}
             background={background} border={Border::new(BORDER, 1.0)} radius={10.0}>
             <Text color={color} scale={0.9}>{label}</Text>
             <Column fill_width gap={5.0}>
@@ -323,10 +329,10 @@ fn inline_text(input: &str) -> String {
 fn render_markdown_block(block: &MarkdownBlock, color: Color) -> AnyView<ChatMessage> {
     match block {
         MarkdownBlock::Heading(text) => AnyView::new(ui! {
-            <Text color={color} scale={1.25}>{text}</Text>
+            <Text color={color} scale={1.25} width_length={Length::Fill} wrap={true}>{text}</Text>
         }),
         MarkdownBlock::ListItem(text) => AnyView::new(ui! {
-            <Text color={color}>{format!("• {text}")}</Text>
+            <Text color={color} width_length={Length::Fill} wrap={true}>{format!("• {text}")}</Text>
         }),
         MarkdownBlock::Code(text) => AnyView::new(ui! {
             <Container fill_width padding={Insets::all(9.0)} background={0x11151b}
@@ -335,7 +341,7 @@ fn render_markdown_block(block: &MarkdownBlock, color: Color) -> AnyView<ChatMes
             </Container>
         }),
         MarkdownBlock::Paragraph(text) => AnyView::new(ui! {
-            <Text color={color}>{text}</Text>
+            <Text color={color} width_length={Length::Fill} wrap={true}>{text}</Text>
         }),
     }
 }
@@ -397,7 +403,8 @@ pub fn chat_view(state: &ChatState) -> impl View<ChatMessage> {
     };
     ui! {
         <Row fill_width fill_height background={BACKGROUND}>
-            <Column width={260.0} fill_height padding={Insets::all(14.0)} gap={10.0}
+            <Column id={id!(thread_sidebar)} width={260.0} min_width={260.0} shrink={0.0} fill_height
+                padding={Insets::all(14.0)} gap={10.0}
                 background={SIDEBAR} border={Border::new(BORDER, 1.0)}>
                 <Text scale={1.6} color={TEXT}>{"Nickel Codex"}</Text>
                 <Text color={ACCENT}>{status}</Text>
@@ -421,7 +428,7 @@ pub fn chat_view(state: &ChatState) -> impl View<ChatMessage> {
                     })}
                 </Column>
             </Column>
-            <Column grow={1.0} fill_height padding={Insets::all(18.0)} gap={12.0}>
+            <Column grow={1.0} min_width={0.0} fill_height padding={Insets::all(18.0)} gap={12.0}>
                 <Column id={id!(conversation)} grow={1.0} fill_width gap={10.0}
                     overflow_y={Overflow::Auto} follow_scroll_end={true}>
                     {if state.items.is_empty() {
@@ -433,13 +440,13 @@ pub fn chat_view(state: &ChatState) -> impl View<ChatMessage> {
                         }
                     } else {
                         ui! {
-                            <Column fill_width gap={10.0}>
+                            <Column fill_width max_width={1000.0} align_self={Align::Center} gap={10.0}>
                                 {state.items.iter().map(|item| ui! { <ItemCard key={item.id.clone()} item={item} /> })}
                             </Column>
                         }
                     }}
                 </Column>
-                <Column fill_width gap={8.0}>
+                <Column id={id!(composer)} fill_width shrink={0.0} gap={8.0}>
                     {state.pending.iter().map(|interaction| ui! {
                         <InteractionCard interaction={interaction} answer={&state.interaction_answer} />
                     })}
@@ -448,12 +455,13 @@ pub fn chat_view(state: &ChatState) -> impl View<ChatMessage> {
                             <Text color={TEXT}>{diagnostic}</Text>
                         </Container>
                     })}
-                    <Container fill_width padding={Insets::all(12.0)} background={PANEL}
+                    <Container fill_width min_height={52.0} max_height={140.0} shrink={0.0}
+                        padding={Insets::all(12.0)} background={PANEL}
                         border={Border::new(BORDER, 1.0)} radius={10.0}>
                         <TextField id={id!(chat_draft)} value={&state.draft} on_change={draft_changed}
-                            color={TEXT} />
+                            color={TEXT} wrap={true} />
                     </Container>
-                    <Row gap={8.0}>
+                    <Row shrink={0.0} gap={8.0}>
                         <Text color={MUTED}>{if state.active_turn.is_some() { "Codex is working…" } else { "Explicit approval is always required" }}</Text>
                         <Spacer fill />
                         {if state.interrupt_requested {

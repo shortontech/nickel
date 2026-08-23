@@ -54,6 +54,8 @@ pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
         .high_pixel_density()
         .build()?;
     let mut presenter = SdlCanvasPresenter::new(window)?;
+    let text_input = video.text_input();
+    text_input.start(presenter.window());
     let mut state = UiStateStore::default();
     let mut cursor = Point::default();
     let mut running = true;
@@ -170,6 +172,47 @@ pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
                     ..
                 } => UiEvent::FocusNext,
                 Event::KeyDown {
+                    keycode: Some(Keycode::A),
+                    keymod,
+                    ..
+                } if keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD) => UiEvent::TextSelectAll,
+                Event::KeyDown {
+                    keycode: Some(Keycode::Backspace),
+                    ..
+                } => UiEvent::TextBackspace,
+                Event::KeyDown {
+                    keycode: Some(Keycode::Delete),
+                    ..
+                } => UiEvent::TextDelete,
+                Event::KeyDown {
+                    keycode: Some(Keycode::Left),
+                    keymod,
+                    ..
+                } => UiEvent::TextMoveLeft {
+                    extend_selection: keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD),
+                },
+                Event::KeyDown {
+                    keycode: Some(Keycode::Right),
+                    keymod,
+                    ..
+                } => UiEvent::TextMoveRight {
+                    extend_selection: keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD),
+                },
+                Event::KeyDown {
+                    keycode: Some(Keycode::Home),
+                    keymod,
+                    ..
+                } => UiEvent::TextMoveHome {
+                    extend_selection: keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD),
+                },
+                Event::KeyDown {
+                    keycode: Some(Keycode::End),
+                    keymod,
+                    ..
+                } => UiEvent::TextMoveEnd {
+                    extend_selection: keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD),
+                },
+                Event::KeyDown {
                     keycode: Some(Keycode::Space),
                     ..
                 } => UiEvent::KeyboardActivate,
@@ -186,6 +229,7 @@ pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
             }
         }
     }
+    text_input.stop(presenter.window());
     state.destroy();
     Ok(())
 }

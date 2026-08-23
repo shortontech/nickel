@@ -69,6 +69,13 @@ pub enum UiEvent {
     AccessibilityActivate(UiId),
     TextInput(String),
     ImePreedit(String),
+    TextBackspace,
+    TextDelete,
+    TextMoveLeft { extend_selection: bool },
+    TextMoveRight { extend_selection: bool },
+    TextMoveHome { extend_selection: bool },
+    TextMoveEnd { extend_selection: bool },
+    TextSelectAll,
     FocusLost,
     Suspended,
     DeviceRemoved,
@@ -992,6 +999,11 @@ macro_rules! flex_component {
                 self
             }
 
+            pub fn align_self(mut self, align: Align) -> Self {
+                self.0 = self.0.align_self(align);
+                self
+            }
+
             pub fn align(self, align: Align) -> Self {
                 self.align_items(align)
             }
@@ -1605,6 +1617,11 @@ impl<Message> TextField<Message> {
 
     pub fn color(mut self, color: Color) -> Self {
         self.text = self.text.color(color);
+        self
+    }
+
+    pub fn wrap(mut self, wrap: bool) -> Self {
+        self.text = self.text.wrap(wrap);
         self
     }
 }
@@ -2954,11 +2971,72 @@ impl<Message: Clone> UiTree<Message> {
                     Invalidation::None
                 }
             }
+            UiEvent::TextBackspace => self
+                .edit_focused_text(state, TextEditor::backspace)
+                .map(|message| {
+                    outcome.messages.push(message);
+                    Invalidation::Layout
+                })
+                .unwrap_or(Invalidation::None),
+            UiEvent::TextDelete => self
+                .edit_focused_text(state, TextEditor::delete)
+                .map(|message| {
+                    outcome.messages.push(message);
+                    Invalidation::Layout
+                })
+                .unwrap_or(Invalidation::None),
+            UiEvent::TextMoveLeft { extend_selection } => self
+                .edit_focused_text(state, |editor| editor.move_left(extend_selection))
+                .map(|message| {
+                    outcome.messages.push(message);
+                    Invalidation::Paint
+                })
+                .unwrap_or(Invalidation::None),
+            UiEvent::TextMoveRight { extend_selection } => self
+                .edit_focused_text(state, |editor| editor.move_right(extend_selection))
+                .map(|message| {
+                    outcome.messages.push(message);
+                    Invalidation::Paint
+                })
+                .unwrap_or(Invalidation::None),
+            UiEvent::TextMoveHome { extend_selection } => self
+                .edit_focused_text(state, |editor| editor.move_home(extend_selection))
+                .map(|message| {
+                    outcome.messages.push(message);
+                    Invalidation::Paint
+                })
+                .unwrap_or(Invalidation::None),
+            UiEvent::TextMoveEnd { extend_selection } => self
+                .edit_focused_text(state, |editor| editor.move_end(extend_selection))
+                .map(|message| {
+                    outcome.messages.push(message);
+                    Invalidation::Paint
+                })
+                .unwrap_or(Invalidation::None),
+            UiEvent::TextSelectAll => self
+                .edit_focused_text(state, TextEditor::select_all)
+                .map(|message| {
+                    outcome.messages.push(message);
+                    Invalidation::Paint
+                })
+                .unwrap_or(Invalidation::None),
             UiEvent::FocusLost => state.focus_lost(),
             UiEvent::Suspended => state.suspended(),
             UiEvent::DeviceRemoved => state.device_removed(),
         };
         outcome
+    }
+
+    fn edit_focused_text(
+        &self,
+        state: &mut UiStateStore,
+        edit: impl FnOnce(&mut TextEditor),
+    ) -> Option<Message> {
+        let id = state.focused()?.clone();
+        let input = self.text_inputs.iter().find(|input| input.id == id)?;
+        let editor = state.editor(id, &input.initial);
+        edit(editor);
+        Some((input.map)(editor.text().to_owned()))
     }
 
     fn move_focus(&self, state: &mut UiStateStore, direction: isize) -> Invalidation {
@@ -4190,9 +4268,11 @@ fn apply_transient_state<Message>(
             && let Kind::Text { value, .. } = &mut element.kind
         {
             let initial = value.clone();
-            *value = state
-                .editor(id.clone(), initial)
-                .display_text_with_caret("▏");
+            let editor = state.editor(id.clone(), &initial);
+            if editor.text() != initial {
+                editor.set_text(initial);
+            }
+            *value = editor.display_text_with_caret("▏");
         }
         if matches!(element.style.overflow_y, Overflow::Scroll | Overflow::Auto) {
             element.style.scroll_offset = if element.style.follow_scroll_end && scroll_at_end {
@@ -5325,15 +5405,15 @@ mod tests {
             TestMessage::Query(value)
         }
 
-        let build = |state: &mut UiStateStore| {
+        let build = |state: &mut UiStateStore, value: &str| {
             UiTree::layout_with_state(
-                TextField::on_change("nickel", query).id("query"),
+                TextField::on_change(value, query).id("query"),
                 Rect::new(0.0, 0.0, 180.0, 32.0),
                 state,
             )
         };
         let mut state = UiStateStore::default();
-        let first = build(&mut state);
+        let first = build(&mut state, "nickel");
         first.handle_event(
             &mut state,
             UiEvent::PointerPressed(Point { x: 10.0, y: 10.0 }),
@@ -5350,14 +5430,12 @@ mod tests {
         let id = UiId::from("root/query");
         assert_eq!(state.focused(), Some(&id));
         state.editor(id.clone(), "nickel").select_all();
-        assert_eq!(
-            first
-                .handle_event(&mut state, UiEvent::TextInput("silver".into()))
-                .messages,
-            vec![TestMessage::Query("silver".into())]
-        );
+        let changed = first
+            .handle_event(&mut state, UiEvent::TextInput("silver".into()))
+            .messages;
+        assert_eq!(changed, vec![TestMessage::Query("silver".into())]);
         first.handle_event(&mut state, UiEvent::ImePreedit("世界".into()));
-        let rebuilt = build(&mut state);
+        let rebuilt = build(&mut state, "silver");
         assert!(rebuilt.commands().iter().any(|command| {
             matches!(command, PaintCommand::Text { text, .. } if text.contains("世界"))
         }));
@@ -5368,6 +5446,71 @@ mod tests {
                 .expect("retained editor")
                 .selection(),
             None
+        );
+
+        let externally_cleared = build(&mut state, "");
+        assert!(
+            externally_cleared
+                .commands()
+                .iter()
+                .any(|command| matches!(command, PaintCommand::Text { text, .. } if text == "▏"))
+        );
+        assert_eq!(
+            state
+                .state(&id)
+                .and_then(|transient| transient.editor.as_ref())
+                .expect("controlled editor")
+                .text(),
+            ""
+        );
+    }
+
+    #[test]
+    fn focused_text_field_supports_navigation_selection_and_deletion_messages() {
+        fn query(value: String) -> TestMessage {
+            TestMessage::Query(value)
+        }
+
+        let mut state = UiStateStore::default();
+        let tree = UiTree::layout_with_state(
+            TextField::on_change("abc", query).id("query"),
+            Rect::new(0.0, 0.0, 180.0, 32.0),
+            &mut state,
+        );
+        tree.handle_event(
+            &mut state,
+            UiEvent::PointerPressed(Point { x: 10.0, y: 10.0 }),
+        );
+        assert_eq!(
+            tree.handle_event(
+                &mut state,
+                UiEvent::TextMoveLeft {
+                    extend_selection: true,
+                },
+            )
+            .messages,
+            vec![TestMessage::Query("abc".into())]
+        );
+        assert_eq!(
+            tree.handle_event(&mut state, UiEvent::TextBackspace)
+                .messages,
+            vec![TestMessage::Query("ab".into())]
+        );
+        tree.handle_event(&mut state, UiEvent::TextSelectAll);
+        assert_eq!(
+            tree.handle_event(&mut state, UiEvent::TextInput("replacement".into()))
+                .messages,
+            vec![TestMessage::Query("replacement".into())]
+        );
+        tree.handle_event(
+            &mut state,
+            UiEvent::TextMoveHome {
+                extend_selection: false,
+            },
+        );
+        assert_eq!(
+            tree.handle_event(&mut state, UiEvent::TextDelete).messages,
+            vec![TestMessage::Query("eplacement".into())]
         );
     }
 

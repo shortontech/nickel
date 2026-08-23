@@ -205,6 +205,54 @@ mod tests {
     }
 
     #[test]
+    fn long_transcript_cannot_crush_sidebar_or_composer() {
+        let mut state = ChatState::default();
+        state.status = ConnectionStatus::Ready;
+        state.threads = (0..12)
+            .map(|index| nickel_codex::Thread {
+                id: ThreadId(format!("thread-{index}")),
+                title: Some(format!("Conversation number {index}")),
+                cwd: None,
+                turns: Vec::new(),
+            })
+            .collect();
+        for index in 0..10 {
+            state.items.push_back(ChatItem {
+                id: format!("message-{index}"),
+                kind: if index % 2 == 0 {
+                    ChatItemKind::User
+                } else {
+                    ChatItemKind::Agent
+                },
+                text: "A deliberately long paragraph that must wrap within the readable conversation column instead of widening its parent or shrinking fixed application controls. ".repeat(5),
+                complete: true,
+            });
+        }
+        for (width, height) in [(640.0, 480.0), (1120.0, 760.0), (2240.0, 1520.0)] {
+            let tree = UiTree::layout(view::chat_view(&state), Rect::new(0.0, 0.0, width, height));
+            let find = |suffix: &str| {
+                tree.resolved_layout()
+                    .nodes()
+                    .iter()
+                    .find(|node| node.id.as_str().ends_with(suffix))
+                    .expect("named chat layout node")
+            };
+            let sidebar = find("thread-sidebar");
+            let conversation = find("conversation");
+            let composer = find("composer");
+            let draft = find("chat-draft");
+            assert!(sidebar.allocated.size.width >= 259.0);
+            assert!(composer.allocated.size.height >= 70.0);
+            assert!(draft.allocated.size.height > 0.0);
+            assert!(
+                conversation.allocated.origin.y + conversation.allocated.size.height
+                    <= composer.allocated.origin.y + 0.01
+            );
+            assert!(composer.allocated.origin.y + composer.allocated.size.height <= height + 0.01);
+        }
+    }
+
+    #[test]
     fn canonical_conversation_rasterizes_at_low_and_high_dpi() {
         let mut state = ChatState::default();
         state.status = ConnectionStatus::Ready;
