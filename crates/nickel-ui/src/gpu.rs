@@ -308,6 +308,9 @@ impl SdlCanvasPresenter {
         clips: &mut Vec<Rect>,
     ) -> Result<(), String> {
         let clip = *clips.last().expect("accelerated clip stack has a root");
+        if !command_intersects_clip(command, scale, clip) {
+            return Ok(());
+        }
         self.canvas.set_clip_rect(Some(sdl_rect(clip)));
         match command {
             PaintCommand::Fill { rect, color } | PaintCommand::OverlayFill { rect, color } => {
@@ -1078,6 +1081,12 @@ fn command_bounds(command: &PaintCommand) -> Option<Rect> {
     }
 }
 
+fn command_intersects_clip(command: &PaintCommand, scale: f32, clip: Rect) -> bool {
+    command_bounds(command)
+        .map(|bounds| physical_rect(bounds, scale))
+        .is_none_or(|bounds| intersection(bounds, clip).is_some())
+}
+
 fn physical_rect(rect: Rect, scale: f32) -> Rect {
     Rect::new(
         rect.origin.x * scale,
@@ -1223,7 +1232,29 @@ mod tests {
 
     use cosmic_text::FontSystem;
 
-    use super::{Rect, ShelfAllocator, TextAlign, shape_physical_glyphs};
+    use super::{
+        PaintCommand, Rect, ShelfAllocator, TextAlign, command_intersects_clip,
+        shape_physical_glyphs,
+    };
+
+    #[test]
+    fn bounded_commands_are_rejected_before_rendering_outside_physical_clip() {
+        let clip = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let text = PaintCommand::Text {
+            bounds: Rect::new(60.0, 60.0, 20.0, 10.0),
+            text: "offscreen".into(),
+            scale: 1.0,
+            color: 0xffffff,
+            align: TextAlign::Start,
+            bold: false,
+        };
+        assert!(!command_intersects_clip(&text, 2.0, clip));
+        assert!(command_intersects_clip(
+            &PaintCommand::PushClip(clip),
+            2.0,
+            clip
+        ));
+    }
 
     #[test]
     fn glyph_shelves_are_bounded_padded_and_deterministic() {

@@ -298,7 +298,12 @@ mod tests {
                 turns: Vec::new(),
             })
             .collect();
-        let tree = UiTree::layout(view::chat_view(&state), Rect::new(0.0, 0.0, 1120.0, 600.0));
+        let mut ui_state = UiStateStore::default();
+        let tree = UiTree::layout_with_state(
+            view::chat_view(&state),
+            Rect::new(0.0, 0.0, 1120.0, 600.0),
+            &mut ui_state,
+        );
         let title = tree
             .resolved_layout()
             .find(&nickel_ui::UiId::from("root/thread-sidebar/sidebar-title"))
@@ -316,6 +321,14 @@ mod tests {
         assert!(title.allocated.size.height > 10.0);
         assert!(actions.allocated.size.height > 10.0);
         assert!(projects.scroll.is_some_and(|extent| extent.can_scroll()));
+        let visible_tasks = tree
+            .commands()
+            .iter()
+            .filter(|command| {
+                matches!(command, PaintCommand::Text { text, .. } if text.starts_with("Task "))
+            })
+            .count();
+        assert!(visible_tasks < 20, "{visible_tasks} task titles emitted");
 
         let message = ChatMessage::SelectThread(ThreadId("thread-0".into()));
         let button = tree.message_rect(&message).expect("first task button");
@@ -323,13 +336,31 @@ mod tests {
             x: button.origin.x + 2.0,
             y: button.origin.y + 2.0,
         };
-        let mut ui_state = UiStateStore::default();
         tree.handle_event(&mut ui_state, UiEvent::PointerPressed(point));
         assert_eq!(
             tree.handle_event(&mut ui_state, UiEvent::PointerReleased(point))
                 .messages,
             vec![message]
         );
+
+        tree.handle_event(
+            &mut ui_state,
+            UiEvent::Scroll {
+                point: Point {
+                    x: projects.allocated.origin.x + 10.0,
+                    y: projects.allocated.origin.y + 10.0,
+                },
+                delta_y: 100_000.0,
+            },
+        );
+        let scrolled = UiTree::layout_with_state(
+            view::chat_view(&state),
+            Rect::new(0.0, 0.0, 1120.0, 600.0),
+            &mut ui_state,
+        );
+        assert!(scrolled.commands().iter().any(
+            |command| matches!(command, PaintCommand::Text { text, .. } if text == "Task 199")
+        ));
     }
 
     #[test]
@@ -579,7 +610,12 @@ mod tests {
             });
         }
 
-        let tree = UiTree::layout(view::chat_view(&state), Rect::new(0.0, 0.0, 1120.0, 760.0));
+        let mut ui_state = UiStateStore::default();
+        let tree = UiTree::layout_with_state(
+            view::chat_view(&state),
+            Rect::new(0.0, 0.0, 1120.0, 760.0),
+            &mut ui_state,
+        );
         assert!(tree.commands().iter().any(
             |command| matches!(command, PaintCommand::Text { text, .. } if text.contains("history message 1999"))
         ));

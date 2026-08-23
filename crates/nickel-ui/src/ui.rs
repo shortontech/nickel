@@ -4378,6 +4378,18 @@ fn emit_element<Message: Clone>(
 ) {
     let node = tree.resolved.nodes[node_index].clone();
     let rect = node.allocated;
+    if node
+        .clip
+        .is_some_and(|clip| intersection(rect, clip).is_none())
+    {
+        let foreground = element.style.foreground.or(inherited_foreground);
+        if matches!(element.kind, Kind::Flex(_) | Kind::Grid { .. }) {
+            for (&child_index, child) in node.children.iter().zip(&element.children) {
+                emit_element(child, child_index, foreground, tree);
+            }
+        }
+        return;
+    }
     if let Some(background) = element.style.background {
         tree.commands.push(match background {
             Background::Solid(color) if element.style.corner_radius > 0.0 => {
