@@ -8,12 +8,30 @@ use sdl3::{
 
 use crate::{Point, Rect, SdlCanvasPresenter, UiEvent, UiStateStore, UiTree, View};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shortcut {
+    Submit,
+    Newline,
+    Escape,
+}
+
 pub trait Application: Sized {
     type Message: Clone;
 
     fn update(&mut self, message: Self::Message);
 
     fn view(&self) -> impl View<Self::Message>;
+
+    /// Poll application-owned background work without introducing another UI runtime.
+    /// Return `true` when new state requires a redraw.
+    fn poll(&mut self) -> bool {
+        false
+    }
+
+    /// Handle application-level keyboard semantics before ordinary component activation.
+    fn shortcut(&mut self, _shortcut: Shortcut) -> bool {
+        false
+    }
 
     fn title(&self) -> &str {
         "Nickel UI"
@@ -42,6 +60,7 @@ pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
     let mut dirty = true;
 
     while running {
+        dirty |= application.poll();
         let (logical_width, logical_height) = presenter.window().size();
         let pixel_width = presenter.window().size_in_pixels().0;
         let scale = pixel_width as f32 / logical_width.max(1) as f32;
@@ -112,6 +131,36 @@ pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
                     delta_y: -y * 42.0,
                 },
                 Event::KeyDown {
+                    keycode: Some(Keycode::Return),
+                    keymod,
+                    ..
+                } if keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD) => {
+                    if application.shortcut(Shortcut::Newline) {
+                        dirty = true;
+                        continue;
+                    }
+                    UiEvent::KeyboardActivate
+                }
+                Event::KeyDown {
+                    keycode: Some(Keycode::Return),
+                    ..
+                } => {
+                    if application.shortcut(Shortcut::Submit) {
+                        dirty = true;
+                        continue;
+                    }
+                    UiEvent::KeyboardActivate
+                }
+                Event::KeyDown {
+                    keycode: Some(Keycode::Escape),
+                    ..
+                } => {
+                    if application.shortcut(Shortcut::Escape) {
+                        dirty = true;
+                    }
+                    continue;
+                }
+                Event::KeyDown {
                     keycode: Some(Keycode::Tab),
                     keymod,
                     ..
@@ -121,7 +170,7 @@ pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
                     ..
                 } => UiEvent::FocusNext,
                 Event::KeyDown {
-                    keycode: Some(Keycode::Return | Keycode::Space),
+                    keycode: Some(Keycode::Space),
                     ..
                 } => UiEvent::KeyboardActivate,
                 Event::TextInput { text, .. } => UiEvent::TextInput(text),

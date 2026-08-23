@@ -203,6 +203,7 @@ crates/
 |-- nickel-ui/         Declarative UX layer, layout, state, and SDL presentation
 |-- nickel-codex/      Typed Codex CLI selection, app-server RPC, and diagnostics
 |-- nickel-codex-fixture/ Offline protocol fixtures, replay validation, and failure injection
+|-- nickel-codex-ui/   Standalone declarative Codex chat application
 |-- nickel-core/        Shell state and behavior
 |-- nickel-file/        Nickel File browser and file manager
 |-- nickel-logging/     Native logging
@@ -224,6 +225,7 @@ probe a CLI without starting a model turn:
 cargo run -p nickel-codex-fixture -- validate crates/nickel-codex-fixture/fixtures
 cargo run -p nickel-codex --bin nickel-codex-test -- replay crates/nickel-codex-fixture/fixtures/basic.json
 cargo run -p nickel-codex --bin nickel-codex-test -- probe --backend installed
+cargo run -p nickel-codex-ui -- --replay crates/nickel-codex-fixture/fixtures/basic.json
 ```
 
 `nickel-codex-test` emits versioned JSONL on stdout. Installed Codex is preferred only after generated
@@ -236,6 +238,12 @@ subsequent one-shot turns resume the persisted thread explicitly:
 ```bash
 cargo run -p nickel-codex --bin nickel-codex-test -- start-thread --cwd "$PWD" --text "Hello"
 cargo run -p nickel-codex --bin nickel-codex-test -- turn THREAD_ID --text "Continue"
+```
+
+The standalone graphical client runs independently of the Nickel shell:
+
+```bash
+cargo run -p nickel-codex-ui -- --backend installed
 ```
 
 ## Contributing

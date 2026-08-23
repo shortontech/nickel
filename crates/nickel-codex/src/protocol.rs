@@ -51,6 +51,22 @@ pub struct Thread {
     pub id: ThreadId,
     pub title: Option<String>,
     pub cwd: Option<PathBuf>,
+    #[serde(default)]
+    pub turns: Vec<ThreadHistoryTurn>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ThreadHistoryTurn {
+    pub id: TurnId,
+    pub status: String,
+    pub items: Vec<ThreadHistoryItem>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ThreadHistoryItem {
+    pub id: String,
+    pub item_type: String,
+    pub text: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

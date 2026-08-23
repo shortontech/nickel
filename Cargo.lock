@@ -2323,6 +2323,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nickel-codex-ui"
+version = "0.1.0"
+dependencies = [
+ "nickel-codex",
+ "nickel-ui",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "nickel-core"
 version = "0.1.0"
 

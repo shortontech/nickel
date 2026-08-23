@@ -240,6 +240,8 @@ pub struct Style {
     pub justify_content: Justify,
     pub overflow_x: Overflow,
     pub overflow_y: Overflow,
+    /// Keep a vertical scroll region pinned while the user remains at its end.
+    pub follow_scroll_end: bool,
     #[doc(hidden)]
     pub scroll_offset_x: f32,
     #[doc(hidden)]
@@ -272,6 +274,7 @@ impl Default for Style {
             justify_content: Justify::Start,
             overflow_x: Overflow::Visible,
             overflow_y: Overflow::Visible,
+            follow_scroll_end: false,
             scroll_offset_x: 0.0,
             scroll_offset: 0.0,
             corner_radius: 0.0,
@@ -542,6 +545,11 @@ impl<Message> Element<Message> {
 
     pub fn overflow_y(mut self, overflow: Overflow) -> Self {
         self.style.overflow_y = overflow;
+        self
+    }
+
+    pub fn follow_scroll_end(mut self, follow: bool) -> Self {
+        self.style.follow_scroll_end = follow;
         self
     }
 
@@ -842,6 +850,10 @@ pub trait ComponentBuilderExt<Message>: Component<Message> + Sized {
     fn overflow_y(self, overflow: Overflow) -> Element<Message> {
         self.into_element().overflow_y(overflow)
     }
+
+    fn follow_scroll_end(self, follow: bool) -> Element<Message> {
+        self.into_element().follow_scroll_end(follow)
+    }
 }
 
 impl<Message, T> ComponentBuilderExt<Message> for T where T: Component<Message> {}
@@ -1001,6 +1013,11 @@ macro_rules! flex_component {
 
             pub fn overflow_y(mut self, overflow: Overflow) -> Self {
                 self.0 = self.0.overflow_y(overflow);
+                self
+            }
+
+            pub fn follow_scroll_end(mut self, follow: bool) -> Self {
+                self.0 = self.0.follow_scroll_end(follow);
                 self
             }
         }
@@ -4146,11 +4163,12 @@ fn apply_transient_state<Message>(
             Kind::VerticalScroll { .. } | Kind::Dropdown { .. }
         );
     if owns_state {
-        let (scroll_offset_x, scroll_offset, dropdown_open) = {
+        let (scroll_offset_x, scroll_offset, scroll_at_end, dropdown_open) = {
             let transient = state.touch(id.clone());
             (
                 transient.scroll_offset_x,
                 transient.scroll_offset,
+                transient.scroll_at_end,
                 transient.dropdown_open,
             )
         };
@@ -4177,7 +4195,11 @@ fn apply_transient_state<Message>(
                 .display_text_with_caret("▏");
         }
         if matches!(element.style.overflow_y, Overflow::Scroll | Overflow::Auto) {
-            element.style.scroll_offset = scroll_offset.max(0.0);
+            element.style.scroll_offset = if element.style.follow_scroll_end && scroll_at_end {
+                f32::MAX
+            } else {
+                scroll_offset.max(0.0)
+            };
         }
         if matches!(element.style.overflow_x, Overflow::Scroll | Overflow::Auto) {
             element.style.scroll_offset_x = scroll_offset_x.max(0.0);
@@ -4590,7 +4612,7 @@ mod tests {
     fn vertical_scroll_clips_painting_and_hit_regions() {
         let tree = UiTree::layout(
             VerticalScroll::new(TestMessage::Named("scroll"), 50.0).child(
-                Column::new()
+                Column::<TestMessage>::new()
                     .gap(10.0)
                     .child(
                         Container::new()
@@ -5424,6 +5446,48 @@ mod tests {
                 .scroll_offset,
             48.0
         );
+    }
+
+    #[test]
+    fn follow_scroll_end_pins_growth_until_the_user_scrolls_up() {
+        let build = |state: &mut UiStateStore, rows: usize| {
+            UiTree::layout_with_state(
+                Column::<TestMessage>::new()
+                    .id("conversation")
+                    .height(60.0)
+                    .overflow_y(Overflow::Auto)
+                    .follow_scroll_end(true)
+                    .children((0..rows).map(|index| {
+                        Container::new()
+                            .id(index)
+                            .height(30.0)
+                            .child(Text::new(format!("row {index}")))
+                    })),
+                Rect::new(0.0, 0.0, 200.0, 60.0),
+                state,
+            )
+        };
+        let id = UiId::from("root").scoped("conversation");
+        let mut state = UiStateStore::default();
+        let initial = build(&mut state, 4);
+        let initial_extent = initial.resolved_layout().nodes()[0]
+            .scroll
+            .expect("scroll extent");
+        assert_eq!(initial_extent.offset, 60.0);
+
+        state.scroll_by(id.clone(), -30.0, 60.0);
+        let anchored = build(&mut state, 5);
+        let anchored_extent = anchored.resolved_layout().nodes()[0]
+            .scroll
+            .expect("scroll extent");
+        assert_eq!(anchored_extent.offset, 30.0);
+
+        state.scroll_by(id, 100.0, 90.0);
+        let followed = build(&mut state, 6);
+        let followed_extent = followed.resolved_layout().nodes()[0]
+            .scroll
+            .expect("scroll extent");
+        assert_eq!(followed_extent.offset, 120.0);
     }
 
     #[test]

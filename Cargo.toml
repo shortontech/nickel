@@ -2,6 +2,7 @@
 members = [
     "crates/nickel-codex",
     "crates/nickel-codex-fixture",
+    "crates/nickel-codex-ui",
     "crates/nickel-ui",
     "crates/ui-declarative-macros",
     "crates/nickel-shell",

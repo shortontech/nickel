@@ -713,12 +713,138 @@ fn parse_thread(value: &Value) -> Option<Thread> {
             .and_then(Value::as_str)
             .map(Into::into),
         cwd: value.get("cwd").and_then(Value::as_str).map(Into::into),
+        turns: value
+            .get("turns")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(parse_history_turn)
+            .collect(),
     })
+}
+
+fn parse_history_turn(value: &Value) -> Option<ThreadHistoryTurn> {
+    Some(ThreadHistoryTurn {
+        id: TurnId(value.get("id")?.as_str()?.into()),
+        status: value
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .into(),
+        items: value
+            .get("items")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(parse_history_item)
+            .collect(),
+    })
+}
+
+fn parse_history_item(value: &Value) -> Option<ThreadHistoryItem> {
+    let item_type = value.get("type")?.as_str()?;
+    Some(ThreadHistoryItem {
+        id: value.get("id")?.as_str()?.into(),
+        item_type: item_type.into(),
+        text: history_item_text(item_type, value),
+    })
+}
+
+fn history_item_text(item_type: &str, value: &Value) -> String {
+    match item_type {
+        "userMessage" => value
+            .get("content")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|input| match input.get("type").and_then(Value::as_str) {
+                Some("text") => input.get("text").and_then(Value::as_str).map(str::to_owned),
+                Some("image") | Some("localImage") => Some("[Image]".into()),
+                Some("audio") | Some("localAudio") => Some("[Audio]".into()),
+                Some("skill") => input
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(|name| format!("[Skill: {name}]")),
+                Some("mention") => input
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(|name| format!("[@{name}]")),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        "agentMessage" | "plan" => value
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .into(),
+        "reasoning" => value
+            .get("summary")
+            .or_else(|| value.get("content"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        "commandExecution" => {
+            let command = value
+                .get("command")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let output = value
+                .get("aggregatedOutput")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            match (command.is_empty(), output.is_empty()) {
+                (false, false) => format!("$ {command}\n{output}"),
+                (false, true) => format!("$ {command}"),
+                (true, false) => output.into(),
+                (true, true) => String::new(),
+            }
+        }
+        "fileChange" => value
+            .get("changes")
+            .and_then(Value::as_array)
+            .map(|changes| format!("{} file change(s)", changes.len()))
+            .unwrap_or_default(),
+        _ => value
+            .get("text")
+            .or_else(|| value.get("result"))
+            .or_else(|| value.get("query"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .into(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
+
+    use super::parse_thread;
+
+    #[test]
+    fn resumed_thread_projects_ordered_history_items() {
+        let thread = parse_thread(&serde_json::json!({
+            "id": "thread-1",
+            "cwd": "/workspace",
+            "turns": [{
+                "id": "turn-1",
+                "status": "completed",
+                "items": [
+                    {"id":"user-1","type":"userMessage","content":[{"type":"text","text":"hello"}]},
+                    {"id":"agent-1","type":"agentMessage","text":"hi"},
+                    {"id":"command-1","type":"commandExecution","command":"cargo test","aggregatedOutput":"ok"}
+                ]
+            }]
+        }))
+        .expect("thread");
+        assert_eq!(thread.turns.len(), 1);
+        assert_eq!(thread.turns[0].items[0].text, "hello");
+        assert_eq!(thread.turns[0].items[1].text, "hi");
+        assert_eq!(thread.turns[0].items[2].text, "$ cargo test\nok");
+    }
 
     proptest! {
         #[test]

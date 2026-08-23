@@ -17,7 +17,7 @@ pub use layout::{
     Align, Axis, Constraints, FlexItem, Insets, Justify, Length, Overflow, Point, Rect, Size,
     Track, layout_flex,
 };
-pub use runtime::{Application, run};
+pub use runtime::{Application, Shortcut, run};
 pub use state::{Invalidation, TransientState, UiId, UiStateStore};
 pub use text_editor::TextEditor;
 pub use ui::{
@@ -41,8 +41,9 @@ pub mod prelude {
     pub use crate::{
         Align, AnyView, Application, Background, Border, Button, Color, Column, Component,
         ComponentBuilderExt, Container, DiagnosticKind, Dropdown, Fragment, Grid, GridColumnSpec,
-        Insets, Justify, Length, Overflow, RadioButton, Row, Slider, Spacer, Text, TextAlign,
-        TextField, Tone, Track, UiEvent, UiId, UiStateStore, View, component, id, run, ui,
+        Insets, Justify, Length, Overflow, RadioButton, Row, Shortcut, Slider, Spacer, Text,
+        TextAlign, TextField, Tone, Track, UiEvent, UiId, UiStateStore, View, component, id, run,
+        ui,
     };
 }
 

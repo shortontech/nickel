@@ -73,6 +73,7 @@ impl CodexBackend for ReplayBackend {
             id: ThreadId("fixture-thread".into()),
             title: Some("Fixture thread".into()),
             cwd: Some(request.cwd),
+            turns: Vec::new(),
         })
     }
     fn resume_thread(&self, id: ThreadId) -> Result<Thread, CodexError> {

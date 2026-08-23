@@ -9,7 +9,8 @@ pub use protocol::{
     AccountState, CodexBackend, CodexError, CodexEvent, CommandDecision, EventKind,
     FileChangeDecision, InteractionResponse, Model, NetworkPolicyAction, NetworkPolicyAmendment,
     ProjectedItem, ProjectedThread, Projection, ServerRequestId, StartThread, StartTurn, Thread,
-    ThreadId, ThreadPage, ThreadPageResult, Turn, TurnId, UserInputAnswer,
+    ThreadHistoryItem, ThreadHistoryTurn, ThreadId, ThreadPage, ThreadPageResult, Turn, TurnId,
+    UserInputAnswer,
 };
 pub use replay::{ReplayBackend, ReplayScenario};
 pub use selection::{

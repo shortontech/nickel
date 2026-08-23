@@ -66,14 +66,30 @@ impl Invalidation {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TransientState {
     pub scroll_offset_x: f32,
     pub scroll_offset: f32,
     pub scroll_velocity: f32,
+    /// Whether content growth should keep this scroll region pinned to its end.
+    pub scroll_at_end: bool,
     pub dropdown_open: bool,
     pub animation_progress: f32,
     pub editor: Option<TextEditor>,
+}
+
+impl Default for TransientState {
+    fn default() -> Self {
+        Self {
+            scroll_offset_x: 0.0,
+            scroll_offset: 0.0,
+            scroll_velocity: 0.0,
+            scroll_at_end: true,
+            dropdown_open: false,
+            animation_progress: 0.0,
+            editor: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -199,6 +215,7 @@ impl UiStateStore {
     pub fn scroll_by(&mut self, id: impl Into<UiId>, delta: f32, maximum: f32) -> Invalidation {
         let state = self.touch(id);
         let next = (state.scroll_offset + delta).clamp(0.0, maximum.max(0.0));
+        state.scroll_at_end = next >= (maximum - 1.0).max(0.0);
         if next == state.scroll_offset {
             Invalidation::None
         } else {
