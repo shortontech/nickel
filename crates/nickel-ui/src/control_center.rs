@@ -19,13 +19,27 @@ const PRIMARY: u32 = 0xf4f7ff;
 const SECONDARY: u32 = 0xaebbd1;
 const ACCENT: u32 = 0x65b8ff;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ControlMessage {
+    WifiPower,
+    WifiDropdown,
+    WifiNetwork(usize),
+    AudioVolume,
+    AudioDropdown,
+    AudioDevice(usize),
+    BluetoothPower,
+    BluetoothDiscovery,
+    BluetoothDropdown,
+    BluetoothDevice(usize),
+}
+
 pub struct ControlCenterGpu {
     gpu: ComponentGpu,
     size: (u32, u32),
     network: platform::NetworkStatus,
     bluetooth: platform::BluetoothStatus,
     audio: platform::AudioStatus,
-    ui: UiTree,
+    ui: UiTree<ControlMessage>,
     cursor: Point,
     audio_dropdown_open: bool,
     wifi_dropdown_open: bool,
@@ -89,39 +103,38 @@ impl ControlCenterGpu {
     pub fn cursor_moved(&mut self, x: f32, y: f32) {
         self.cursor = Point { x, y };
         if self.volume_dragging
-            && let Some(fraction) = self.ui.horizontal_fraction_for_action("audio-volume", x)
+            && let Some(fraction) = self
+                .ui
+                .horizontal_fraction_for_message(&ControlMessage::AudioVolume, x)
         {
             self.set_volume_fraction(fraction);
         }
     }
 
     pub fn pointer_pressed(&mut self) -> bool {
-        let Some((action, fraction)) = self
+        let Some((message, fraction)) = self
             .ui
-            .action_at_with_horizontal_fraction(self.cursor)
-            .map(|(action, fraction)| (action.to_owned(), fraction))
+            .message_at_with_horizontal_fraction(self.cursor)
+            .map(|(message, fraction)| (message.clone(), fraction))
         else {
             self.audio_dropdown_open = false;
             self.wifi_dropdown_open = false;
             self.bluetooth_dropdown_open = false;
             return true;
         };
-        if action == "wifi-power" {
+        if message == ControlMessage::WifiPower {
             if platform::set_wifi_enabled(!self.network.enabled) {
                 self.network.enabled = !self.network.enabled;
             }
             return true;
         }
-        if action == "wifi-network" {
+        if message == ControlMessage::WifiDropdown {
             self.wifi_dropdown_open = !self.wifi_dropdown_open;
             self.audio_dropdown_open = false;
             self.bluetooth_dropdown_open = false;
             return true;
         }
-        if let Some(index) = action
-            .strip_prefix("wifi-network:option:")
-            .and_then(|index| index.parse::<usize>().ok())
-        {
+        if let ControlMessage::WifiNetwork(index) = message {
             if let Some(network) = self.network.networks.get(index)
                 && network.saved
                 && !network.connected
@@ -131,21 +144,18 @@ impl ControlCenterGpu {
             self.wifi_dropdown_open = false;
             return true;
         }
-        if action == "audio-volume" {
+        if message == ControlMessage::AudioVolume {
             self.volume_dragging = true;
             self.set_volume_fraction(fraction);
             return true;
         }
-        if action == "audio-device" {
+        if message == ControlMessage::AudioDropdown {
             self.audio_dropdown_open = !self.audio_dropdown_open;
             self.wifi_dropdown_open = false;
             self.bluetooth_dropdown_open = false;
             return true;
         }
-        if let Some(index) = action
-            .strip_prefix("audio-device:option:")
-            .and_then(|index| index.parse::<usize>().ok())
-        {
+        if let ControlMessage::AudioDevice(index) = message {
             if let Some(device) = self.audio.devices.get(index)
                 && platform::select_audio_device(&device.id)
             {
@@ -154,28 +164,25 @@ impl ControlCenterGpu {
             self.audio_dropdown_open = false;
             return true;
         }
-        if action == "bluetooth-power" {
+        if message == ControlMessage::BluetoothPower {
             if platform::set_bluetooth_powered(!self.bluetooth.powered) {
                 self.bluetooth.powered = !self.bluetooth.powered;
             }
             return true;
         }
-        if action == "bluetooth-discovery" {
+        if message == ControlMessage::BluetoothDiscovery {
             if platform::set_bluetooth_discovery(!self.bluetooth.discovering) {
                 self.bluetooth.discovering = !self.bluetooth.discovering;
             }
             return true;
         }
-        if action == "bluetooth-device" {
+        if message == ControlMessage::BluetoothDropdown {
             self.bluetooth_dropdown_open = !self.bluetooth_dropdown_open;
             self.wifi_dropdown_open = false;
             self.audio_dropdown_open = false;
             return true;
         }
-        if let Some(index) = action
-            .strip_prefix("bluetooth-device:option:")
-            .and_then(|index| index.parse::<usize>().ok())
-        {
+        if let ControlMessage::BluetoothDevice(index) = message {
             if let Some(device) = self.bluetooth.devices.get(index)
                 && device.paired
             {
@@ -212,7 +219,7 @@ struct ControlCenterView<'a> {
     bluetooth_dropdown_open: bool,
 }
 
-fn build_ui(view: ControlCenterView<'_>, size: (f32, f32)) -> UiTree {
+fn build_ui(view: ControlCenterView<'_>, size: (f32, f32)) -> UiTree<ControlMessage> {
     let ControlCenterView {
         network,
         bluetooth,
@@ -241,7 +248,8 @@ fn build_ui(view: ControlCenterView<'_>, size: (f32, f32)) -> UiTree {
         .devices
         .iter()
         .find(|device| device.is_default)
-        .map(|device| device.name.clone())
+        .enumerate()
+        .map(|(index, device)| (device.name.clone(), ControlMessage::AudioDevice(index)))
         .unwrap_or_else(|| "No audio output".into());
     let audio_devices: Vec<_> = audio
         .devices
@@ -257,11 +265,15 @@ fn build_ui(view: ControlCenterView<'_>, size: (f32, f32)) -> UiTree {
     let wifi_networks = network
         .networks
         .iter()
-        .map(|candidate| {
+        .enumerate()
+        .map(|(index, candidate)| {
             let saved = if candidate.saved { "" } else { " · NEW" };
-            format!(
-                "{} · {}%{}",
-                candidate.name, candidate.signal_percent, saved
+            (
+                format!(
+                    "{} · {}%{}",
+                    candidate.name, candidate.signal_percent, saved
+                ),
+                ControlMessage::WifiNetwork(index),
             )
         })
         .collect::<Vec<_>>();
@@ -274,7 +286,8 @@ fn build_ui(view: ControlCenterView<'_>, size: (f32, f32)) -> UiTree {
     let bluetooth_devices = bluetooth
         .devices
         .iter()
-        .map(|device| {
+        .enumerate()
+        .map(|(index, device)| {
             let state = if device.connected {
                 "CONNECTED"
             } else if device.paired {
@@ -282,7 +295,10 @@ fn build_ui(view: ControlCenterView<'_>, size: (f32, f32)) -> UiTree {
             } else {
                 "NEW"
             };
-            format!("{} · {state}", device.name)
+            (
+                format!("{} · {state}", device.name),
+                ControlMessage::BluetoothDevice(index),
+            )
         })
         .collect::<Vec<_>>();
     let bluetooth_detail = if !bluetooth.available {
@@ -318,14 +334,18 @@ fn build_ui(view: ControlCenterView<'_>, size: (f32, f32)) -> UiTree {
                                 .height(25.0)
                                 .child(Text::new(network_name).scale(2.3).color(PRIMARY))
                                 .child(action_button(
-                                    "wifi-power",
+                                    ControlMessage::WifiPower,
                                     if network.enabled { "ON" } else { "OFF" },
                                     54.0,
                                 )),
                         )
                         .child(Text::new(network_detail).scale(1.35).color(ACCENT))
                         .child(
-                            Dropdown::new("wifi-network", selected_network, wifi_networks)
+                            Dropdown::new(
+                                ControlMessage::WifiDropdown,
+                                selected_network,
+                                wifi_networks,
+                            )
                                 .expanded(wifi_dropdown_open)
                                 .colors(0x27344c, 0x34445f, PRIMARY),
                         ),
@@ -355,11 +375,18 @@ fn build_ui(view: ControlCenterView<'_>, size: (f32, f32)) -> UiTree {
                                 ),
                         )
                         .child(
-                            Slider::new("audio-volume", f32::from(audio.volume_percent) / 100.0)
+                            Slider::new(
+                                ControlMessage::AudioVolume,
+                                f32::from(audio.volume_percent) / 100.0,
+                            )
                                 .colors(0x354158, ACCENT, PRIMARY),
                         )
                         .child(
-                            Dropdown::new("audio-device", selected_audio, audio_devices)
+                            Dropdown::new(
+                                ControlMessage::AudioDropdown,
+                                selected_audio,
+                                audio_devices,
+                            )
                                 .expanded(audio_dropdown_open)
                                 .colors(0x27344c, 0x34445f, PRIMARY),
                         ),
@@ -383,7 +410,7 @@ fn build_ui(view: ControlCenterView<'_>, size: (f32, f32)) -> UiTree {
                                 .height(25.0)
                                 .child(Text::new("Bluetooth").scale(2.0).color(PRIMARY))
                                 .child(action_button(
-                                    "bluetooth-discovery",
+                                    ControlMessage::BluetoothDiscovery,
                                     if bluetooth.discovering {
                                         "STOP"
                                     } else {
@@ -392,7 +419,7 @@ fn build_ui(view: ControlCenterView<'_>, size: (f32, f32)) -> UiTree {
                                     64.0,
                                 ))
                                 .child(action_button(
-                                    "bluetooth-power",
+                                    ControlMessage::BluetoothPower,
                                     if bluetooth.powered { "ON" } else { "OFF" },
                                     54.0,
                                 )),
@@ -400,7 +427,7 @@ fn build_ui(view: ControlCenterView<'_>, size: (f32, f32)) -> UiTree {
                         .child(Text::new(bluetooth_detail).scale(1.25).color(SECONDARY))
                         .child(
                             Dropdown::new(
-                                "bluetooth-device",
+                                ControlMessage::BluetoothDropdown,
                                 selected_bluetooth,
                                 bluetooth_devices,
                             )
@@ -412,7 +439,11 @@ fn build_ui(view: ControlCenterView<'_>, size: (f32, f32)) -> UiTree {
     UiTree::layout(root, Rect::new(0.0, 0.0, size.0, size.1))
 }
 
-fn action_button(action: &str, label: &str, width: f32) -> Container {
+fn action_button(
+    message: ControlMessage,
+    label: &str,
+    width: f32,
+) -> Container<ControlMessage> {
     Container::new()
         .background(0x34445f)
         .border(CARD_BORDER, 1.0)
@@ -423,7 +454,7 @@ fn action_button(action: &str, label: &str, width: f32) -> Container {
             left: 8.0,
         })
         .width(width)
-        .action(action)
+        .message(message)
         .child(Text::new(label).scale(1.15).color(PRIMARY))
 }
 

@@ -58,11 +58,31 @@ fn set_nickel_file_icon(window: &mut Window) {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum FileMessage {
+    ContextOpen,
+    ContextOpenNewTab,
+    ContextRefresh,
+    ContextSelectAll,
+    ResizeSidebar,
+    NewTab,
+    SwitchTab(usize),
+    CloseTab(usize),
+    Back,
+    Forward,
+    Up,
+    Refresh,
+    Breadcrumb(PathBuf),
+    ToggleFolder(PathBuf),
+    OpenFolder(PathBuf),
+    Entry(usize),
+}
+
 struct FileApp {
     presenter: Option<SdlCanvasPresenter>,
     dirty: bool,
     browser: DirectoryBrowser,
-    ui: UiTree,
+    ui: UiTree<FileMessage>,
     cursor: Point,
     selected: Option<usize>,
     selected_entries: HashSet<usize>,
@@ -76,7 +96,7 @@ struct FileApp {
     sidebar_width: f32,
     resizing_sidebar: bool,
     expanded_folders: HashSet<PathBuf>,
-    hovered_action: Option<String>,
+    hovered_message: Option<FileMessage>,
     control_down: bool,
     shift_down: bool,
     selection_drag: Option<Point>,
@@ -136,7 +156,7 @@ impl FileApp {
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             resizing_sidebar: false,
             expanded_folders: HashSet::new(),
-            hovered_action: None,
+            hovered_message: None,
             control_down: false,
             shift_down: false,
             selection_drag: None,
@@ -289,7 +309,13 @@ impl FileApp {
         columns * rows
     }
 
-    fn build_ui(&self, width: f32, height: f32, palette: ThemePalette, light_mode: bool) -> UiTree {
+    fn build_ui(
+        &self,
+        width: f32,
+        height: f32,
+        palette: ThemePalette,
+        light_mode: bool,
+    ) -> UiTree<FileMessage> {
         let tabs = (0..self.tabs.len()).map(|index| {
             let active = index == self.active_tab;
             let tab = if active {
@@ -330,7 +356,7 @@ impl FileApp {
                 Row::new().gap(3.0).children(tabs).child(
                     Container::new()
                         .width(28.0)
-                        .action("tab:new")
+                        .message(FileMessage::NewTab)
                         .padding(Insets {
                             top: 1.0,
                             right: 4.0,
@@ -346,7 +372,7 @@ impl FileApp {
                 breadcrumbs
                     .iter()
                     .enumerate()
-                    .flat_map(|(index, (label, _))| {
+                    .flat_map(|(index, (label, path))| {
                         let mut elements = Vec::new();
                         if index > 0 {
                             elements.push(
@@ -358,7 +384,7 @@ impl FileApp {
                         }
                         elements.push(
                             Container::new()
-                                .action(format!("breadcrumb:{index}"))
+                                .message(FileMessage::Breadcrumb(path.clone()))
                                 .padding(Insets {
                                     top: 4.0,
                                     right: 2.0,
@@ -383,15 +409,18 @@ impl FileApp {
             .child(
                 Row::new()
                     .gap(4.0)
-                    .child(Button::new("nav:back", "←").width(34.0).height(34.0).color(
-                        if self.browser.can_go_back() {
-                            palette.text
-                        } else {
-                            palette.muted
-                        },
-                    ))
                     .child(
-                        Button::new("nav:forward", "→")
+                        Button::new(FileMessage::Back, "←")
+                            .width(34.0)
+                            .height(34.0)
+                            .color(if self.browser.can_go_back() {
+                                palette.text
+                            } else {
+                                palette.muted
+                            }),
+                    )
+                    .child(
+                        Button::new(FileMessage::Forward, "→")
                             .width(34.0)
                             .height(34.0)
                             .color(if self.browser.can_go_forward() {
@@ -399,6 +428,12 @@ impl FileApp {
                             } else {
                                 palette.muted
                             }),
+                    )
+                    .child(
+                        Button::new(FileMessage::Up, "↑")
+                            .width(34.0)
+                            .height(34.0)
+                            .color(palette.text),
                     )
                     .child(
                         Container::new()
@@ -413,7 +448,7 @@ impl FileApp {
                             .child(breadcrumb_row),
                     )
                     .child(
-                        Button::new("nav:refresh", "↻")
+                        Button::new(FileMessage::Refresh, "↻")
                             .width(34.0)
                             .height(34.0)
                             .color(palette.text),
@@ -427,7 +462,7 @@ impl FileApp {
             &places(),
             &self.expanded_folders,
             self.browser.current(),
-            self.hovered_action.as_deref(),
+            self.hovered_message.as_ref(),
             palette,
         );
         let sidebar = Sidebar::new(self.sidebar_width)
@@ -527,7 +562,7 @@ impl FileApp {
             } else {
                 palette.surface_hover
             })
-            .action("sidebar:resize");
+            .message(FileMessage::ResizeSidebar);
         let content = Row::new()
             .grow(1.0)
             .child(sidebar)
@@ -553,15 +588,15 @@ impl FileApp {
             });
         }
         if let Some((point, entry)) = self.context_menu {
-            let labels: [(&str, &str); 2] = if entry.is_some() {
+            let labels: [(FileMessage, &str); 2] = if entry.is_some() {
                 [
-                    ("context:open", "Open"),
-                    ("context:open-new-tab", "Open in New Tab"),
+                    (FileMessage::ContextOpen, "Open"),
+                    (FileMessage::ContextOpenNewTab, "Open in New Tab"),
                 ]
             } else {
                 [
-                    ("context:refresh", "Refresh"),
-                    ("context:select-all", "Select All"),
+                    (FileMessage::ContextRefresh, "Refresh"),
+                    (FileMessage::ContextSelectAll, "Select All"),
                 ]
             };
             let menu_width = 170.0;
@@ -581,7 +616,7 @@ impl FileApp {
                 color: palette.muted,
                 width: 1.0,
             });
-            for (row, (action, label)) in labels.into_iter().enumerate() {
+            for (row, (message, label)) in labels.into_iter().enumerate() {
                 let bounds = Rect::new(
                     origin.x + 8.0,
                     origin.y + 4.0 + row as f32 * row_height,
@@ -596,7 +631,7 @@ impl FileApp {
                     align: TextAlign::Start,
                     bold: false,
                 });
-                tree.push_overlay_action(bounds, action);
+                tree.push_overlay_message(bounds, message);
             }
         }
         tree
@@ -819,7 +854,7 @@ impl FileApp {
     }
 
     fn pointer_pressed(&mut self) {
-        let Some(action) = self.ui.action_at(self.cursor).map(str::to_owned) else {
+        let Some(message) = self.ui.message_at(self.cursor).cloned() else {
             self.context_menu = None;
             self.selection_drag = Some(self.cursor);
             if !self.control_down && !self.shift_down {
@@ -830,15 +865,21 @@ impl FileApp {
             self.request_redraw();
             return;
         };
-        if !action.starts_with("context:") {
+        if !matches!(
+            message,
+            FileMessage::ContextOpen
+                | FileMessage::ContextOpenNewTab
+                | FileMessage::ContextRefresh
+                | FileMessage::ContextSelectAll
+        ) {
             self.context_menu = None;
         }
-        match action.as_str() {
-            "context:open" => {
+        match message {
+            FileMessage::ContextOpen => {
                 self.context_menu = None;
                 self.activate_selected();
             }
-            "context:open-new-tab" => {
+            FileMessage::ContextOpenNewTab => {
                 let entry = self
                     .selected
                     .and_then(|index| self.browser.entries().get(index))
@@ -852,7 +893,7 @@ impl FileApp {
                     }
                 }
             }
-            "context:refresh" => {
+            FileMessage::ContextRefresh => {
                 self.context_menu = None;
                 if let Err(error) = self.browser.refresh() {
                     self.status = format!("Could not refresh: {error}");
@@ -860,23 +901,23 @@ impl FileApp {
                 self.refresh_icons();
                 self.request_redraw();
             }
-            "context:select-all" => {
+            FileMessage::ContextSelectAll => {
                 self.context_menu = None;
                 self.selected_entries = (0..self.browser.entries().len()).collect();
                 self.selected = (!self.browser.entries().is_empty()).then_some(0);
                 self.selection_anchor = self.selected;
                 self.request_redraw();
             }
-            "sidebar:resize" => {
+            FileMessage::ResizeSidebar => {
                 self.context_menu = None;
                 self.resizing_sidebar = true;
                 self.request_redraw();
             }
-            "tab:new" => self.new_tab(),
-            "nav:back" => self.go_back(),
-            "nav:forward" => self.go_forward(),
-            "nav:up" => self.go_up(),
-            "nav:refresh" => {
+            FileMessage::NewTab => self.new_tab(),
+            FileMessage::Back => self.go_back(),
+            FileMessage::Forward => self.go_forward(),
+            FileMessage::Up => self.go_up(),
+            FileMessage::Refresh => {
                 if let Err(error) = self
                     .browser
                     .set_show_hidden(nickel_platform::show_hidden_files())
@@ -890,57 +931,18 @@ impl FileApp {
                 self.scroll_offset = 0;
                 self.request_redraw();
             }
-            _ => {
-                if let Some(index) = action
-                    .strip_prefix("tab:close:")
-                    .and_then(|index| index.parse::<usize>().ok())
-                {
-                    self.close_tab(index);
-                    return;
+            FileMessage::CloseTab(index) => self.close_tab(index),
+            FileMessage::SwitchTab(index) => self.switch_tab(index),
+            FileMessage::ToggleFolder(path) => {
+                if !self.expanded_folders.remove(&path) {
+                    self.expanded_folders.insert(path);
                 }
-                if let Some(index) = action
-                    .strip_prefix("tab:switch:")
-                    .and_then(|index| index.parse::<usize>().ok())
-                {
-                    self.switch_tab(index);
-                    return;
-                }
-                if let Some(path) = action.strip_prefix("folder-toggle:") {
-                    let path = PathBuf::from(path);
-                    if !self.expanded_folders.remove(&path) {
-                        self.expanded_folders.insert(path);
-                    }
-                    self.request_redraw();
-                    return;
-                }
-                if let Some(path) = action.strip_prefix("folder-open:") {
-                    self.navigate_to(PathBuf::from(path));
-                    return;
-                }
-                if let Some(index) = action
-                    .strip_prefix("breadcrumb:")
-                    .and_then(|index| index.parse::<usize>().ok())
-                {
-                    if let Some((_, path)) = breadcrumb_paths(self.browser.current()).get(index) {
-                        self.navigate_to(path.clone());
-                    }
-                    return;
-                }
-                if let Some(index) = action
-                    .strip_prefix("place:")
-                    .and_then(|index| index.parse::<usize>().ok())
-                {
-                    if let Some((_, path)) = places().get(index) {
-                        self.navigate_to(path.clone());
-                    }
-                    return;
-                }
-                let Some(index) = action
-                    .strip_prefix("entry:")
-                    .and_then(|index| index.parse::<usize>().ok())
-                else {
-                    return;
-                };
+                self.request_redraw();
+            }
+            FileMessage::OpenFolder(path) | FileMessage::Breadcrumb(path) => {
+                self.navigate_to(path);
+            }
+            FileMessage::Entry(index) => {
                 let now = Instant::now();
                 let activate = self.last_click.is_some_and(|(previous, when)| {
                     previous == index && now.duration_since(when) <= Duration::from_millis(450)
@@ -1007,10 +1009,12 @@ impl FileApp {
                     let selection = rect_between(start, self.cursor);
                     let entries = self
                         .ui
-                        .actions_intersecting(selection)
+                        .messages_intersecting(selection)
                         .into_iter()
-                        .filter_map(|action| action.strip_prefix("entry:"))
-                        .filter_map(|index| index.parse::<usize>().ok())
+                        .filter_map(|message| match message {
+                            FileMessage::Entry(index) => Some(*index),
+                            _ => None,
+                        })
                         .collect::<HashSet<_>>();
                     self.selected_entries = entries;
                     self.selected = self.selected_entries.iter().copied().min();
@@ -1021,9 +1025,9 @@ impl FileApp {
                     self.ensure_selection_visible();
                     self.request_redraw();
                 }
-                let hovered = self.ui.action_at(self.cursor).map(str::to_owned);
-                if hovered != self.hovered_action {
-                    self.hovered_action = hovered;
+                let hovered = self.ui.message_at(self.cursor).cloned();
+                if hovered != self.hovered_message {
+                    self.hovered_message = hovered;
                     self.request_redraw();
                 }
             }
@@ -1031,7 +1035,7 @@ impl FileApp {
                 win_event: WindowEvent::MouseLeave,
                 ..
             } => {
-                self.hovered_action = None;
+                self.hovered_message = None;
                 self.request_redraw();
             }
             Event::MouseButtonDown {
@@ -1049,9 +1053,11 @@ impl FileApp {
             } => {
                 let entry = self
                     .ui
-                    .action_at(self.cursor)
-                    .and_then(|action| action.strip_prefix("entry:"))
-                    .and_then(|index| index.parse::<usize>().ok());
+                    .message_at(self.cursor)
+                    .and_then(|message| match message {
+                        FileMessage::Entry(index) => Some(*index),
+                        _ => None,
+                    });
                 if let Some(index) = entry
                     && !self.selected_entries.contains(&index)
                 {
@@ -1139,7 +1145,7 @@ fn file_tab_element(
     active: bool,
     palette: ThemePalette,
     light_mode: bool,
-) -> Container {
+) -> Container<FileMessage> {
     let label = browser
         .current()
         .file_name()
@@ -1147,7 +1153,7 @@ fn file_tab_element(
         .unwrap_or_else(|| browser.current().display().to_string());
     Container::new()
         .width(170.0)
-        .action(format!("tab:switch:{index}"))
+        .message(FileMessage::SwitchTab(index))
         .background(if active {
             if light_mode {
                 0xffffff
@@ -1191,7 +1197,7 @@ fn file_tab_element(
                         .child(
                             Container::new()
                                 .width(20.0)
-                                .action(format!("tab:close:{index}"))
+                                .message(FileMessage::CloseTab(index))
                                 .child(Text::new("×").width(20.0).color(palette.muted)),
                         ),
                 )
@@ -1239,30 +1245,30 @@ fn sidebar_folder_elements(
     roots: &[(String, PathBuf)],
     expanded: &HashSet<PathBuf>,
     current: &Path,
-    hovered_action: Option<&str>,
+    hovered_message: Option<&FileMessage>,
     palette: ThemePalette,
-) -> Vec<nickel_components::ui::Element> {
+) -> Vec<nickel_components::ui::Element<FileMessage>> {
     #[allow(clippy::too_many_arguments)]
     fn append_folder(
-        rows: &mut Vec<nickel_components::ui::Element>,
+        rows: &mut Vec<nickel_components::ui::Element<FileMessage>>,
         label: String,
         path: PathBuf,
         depth: usize,
         expanded: &HashSet<PathBuf>,
         current: &Path,
-        hovered_action: Option<&str>,
+        hovered_message: Option<&FileMessage>,
         palette: ThemePalette,
     ) {
         let is_expanded = expanded.contains(&path);
         let is_active = current == path;
-        let toggle_action = format!("folder-toggle:{}", path.display());
-        let open_action = format!("folder-open:{}", path.display());
-        let is_hovered = hovered_action == Some(toggle_action.as_str())
-            || hovered_action == Some(open_action.as_str());
+        let toggle_message = FileMessage::ToggleFolder(path.clone());
+        let open_message = FileMessage::OpenFolder(path.clone());
+        let is_hovered =
+            hovered_message == Some(&toggle_message) || hovered_message == Some(&open_message);
         rows.push(
             SidebarFolder::new(
-                toggle_action,
-                open_action,
+                toggle_message,
+                open_message,
                 label,
                 is_expanded,
                 if is_active {
@@ -1311,7 +1317,7 @@ fn sidebar_folder_elements(
                 depth + 1,
                 expanded,
                 current,
-                hovered_action,
+                hovered_message,
                 palette,
             );
         }
@@ -1326,7 +1332,7 @@ fn sidebar_folder_elements(
             0,
             expanded,
             current,
-            hovered_action,
+            hovered_message,
             palette,
         );
     }
@@ -1341,7 +1347,7 @@ fn file_tile(
     palette: ThemePalette,
     icon_size: f32,
     light_mode: bool,
-) -> FileGridItem {
+) -> FileGridItem<FileMessage> {
     let (icon_id, icon_image) = icon.unwrap_or_else(|| {
         (
             0,
@@ -1353,7 +1359,7 @@ fn file_tile(
         )
     });
     FileGridItem::new(
-        format!("entry:{index}"),
+        FileMessage::Entry(index),
         entry.display_name(),
         icon_id,
         icon_image,

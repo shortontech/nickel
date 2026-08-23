@@ -659,6 +659,44 @@ struct WifiNetwork {
     interface: u128,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SettingsMessage {
+    Navigate(SettingsPage),
+    BluetoothPower,
+    BluetoothDiscovery,
+    BluetoothDevice(usize),
+    BluetoothScroll,
+    WifiPower,
+    WifiNetwork(usize),
+    NetworkScroll,
+    AppearanceLight,
+    AppearanceDark,
+    SetAppearanceHue(u16),
+    SetAppearanceIntensity(u8),
+    WallpaperChoose,
+    WallpaperPosition(WallpaperPosition),
+    BarPrimaryDisplay,
+    BarAllDisplays,
+    BarDisplayWindows,
+    BarAllWindows,
+    SetDesktopCount(u8),
+    DisplayIdentify,
+    DisplayPrimary,
+    DisplayApply,
+}
+
+fn desktop_count_message(fraction: f32) -> SettingsMessage {
+    SettingsMessage::SetDesktopCount(1 + (fraction.clamp(0.0, 1.0) * 7.0).round() as u8)
+}
+
+fn appearance_hue_message(fraction: f32) -> SettingsMessage {
+    SettingsMessage::SetAppearanceHue((fraction.clamp(0.0, 1.0) * 359.0).round() as u16)
+}
+
+fn appearance_intensity_message(fraction: f32) -> SettingsMessage {
+    SettingsMessage::SetAppearanceIntensity((fraction.clamp(0.0, 1.0) * 100.0).round() as u8)
+}
+
 struct SettingsApp {
     localizer: Localizer,
     redraw_requested: Cell<bool>,
@@ -694,7 +732,7 @@ struct SettingsApp {
     network_scroll: f32,
     bluetooth_scroll: f32,
     next_network_refresh: Instant,
-    ui: UiTree,
+    ui: UiTree<SettingsMessage>,
     controller: ControllerInput,
     navigation: PaneNavigation,
     controller_page: SettingsPage,
@@ -850,13 +888,13 @@ impl SettingsApp {
 
     fn navigation_item(
         &self,
-        action: &'static str,
-        message: &'static str,
+        message: SettingsMessage,
+        message_key: &'static str,
         glyph: &'static str,
         selected: bool,
         palette: ThemePalette,
-    ) -> Container {
-        let label = self.localizer.text(message);
+    ) -> Container<SettingsMessage> {
+        let label = self.localizer.text(message_key);
         let underline_width = (label.chars().count() as f32 * 8.0).clamp(24.0, 112.0);
         let mut underline = Container::new().width(underline_width).height(2.0);
         if selected {
@@ -871,7 +909,7 @@ impl SettingsApp {
                 bottom: 2.0,
                 left: 8.0,
             })
-            .action(action)
+            .message(message)
             .child(
                 Row::new()
                     .gap(10.0)
@@ -919,7 +957,7 @@ impl SettingsApp {
         }
     }
 
-    fn build_ui(&self, width: f32, height: f32) -> UiTree {
+    fn build_ui(&self, width: f32, height: f32) -> UiTree<SettingsMessage> {
         let palette = self.palette();
         let (title, subtitle) = match self.page {
             SettingsPage::Display => (
@@ -974,35 +1012,35 @@ impl SettingsApp {
             self.page
         };
         let display_button = self.navigation_item(
-            "nav:display",
+            SettingsMessage::Navigate(SettingsPage::Display),
             "settings-nav-display",
             "▣",
             selected_page == SettingsPage::Display,
             palette,
         );
         let bar_button = self.navigation_item(
-            "nav:bar",
+            SettingsMessage::Navigate(SettingsPage::Bar),
             "settings-nav-bar",
             "▤",
             selected_page == SettingsPage::Bar,
             palette,
         );
         let appearance_button = self.navigation_item(
-            "nav:appearance",
+            SettingsMessage::Navigate(SettingsPage::Appearance),
             "settings-nav-appearance",
             "◐",
             selected_page == SettingsPage::Appearance,
             palette,
         );
         let network_button = self.navigation_item(
-            "nav:network",
+            SettingsMessage::Navigate(SettingsPage::Network),
             "settings-nav-network",
             "⌁",
             selected_page == SettingsPage::Network,
             palette,
         );
         let bluetooth_button = self.navigation_item(
-            "nav:bluetooth",
+            SettingsMessage::Navigate(SettingsPage::Bluetooth),
             "settings-nav-bluetooth",
             "ᛒ",
             selected_page == SettingsPage::Bluetooth,
@@ -1056,7 +1094,7 @@ impl SettingsApp {
         UiTree::layout(root, UiRect::new(0.0, 0.0, width, height))
     }
 
-    fn display_components(&self) -> Column {
+    fn display_components(&self) -> Column<SettingsMessage> {
         let palette = self.palette();
         let selected = &self.displays[self.selected];
         Column::new()
@@ -1081,7 +1119,7 @@ impl SettingsApp {
                     .child(Text::new(&selected.name).color(palette.text).width(183.0))
                     .child(
                         UiButton::new(
-                            "display:identify",
+                            SettingsMessage::DisplayIdentify,
                             self.localizer.text("settings-display-identify"),
                         )
                         .width(135.0)
@@ -1091,7 +1129,7 @@ impl SettingsApp {
                     )
                     .child(
                         UiButton::new(
-                            "display:primary",
+                            SettingsMessage::DisplayPrimary,
                             self.localizer.text("settings-display-make-primary"),
                         )
                         .width(145.0)
@@ -1101,7 +1139,7 @@ impl SettingsApp {
                     )
                     .child(
                         UiButton::new(
-                            "display:apply",
+                            SettingsMessage::DisplayApply,
                             self.localizer.text("settings-display-apply"),
                         )
                         .width(105.0)
@@ -1120,7 +1158,7 @@ impl SettingsApp {
             )
     }
 
-    fn network_components(&self) -> Column {
+    fn network_components(&self) -> Column<SettingsMessage> {
         let palette = self.palette();
         let wifi_cards = self
             .wifi_networks
@@ -1171,7 +1209,7 @@ impl SettingsApp {
                         bottom: 8.0,
                         left: 14.0,
                     })
-                    .action(format!("wifi:{index}"))
+                    .message(SettingsMessage::WifiNetwork(index))
                     .child(
                         Row::new()
                             .child(Text::new(&network.profile).color(palette.text).width(316.0))
@@ -1274,7 +1312,7 @@ impl SettingsApp {
                         },
                         2.0,
                     )
-                    .action("network:wifi-power")
+                    .message(SettingsMessage::WifiPower)
                     .padding(Insets {
                         top: 10.0,
                         right: 14.0,
@@ -1332,12 +1370,17 @@ impl SettingsApp {
                 left: 20.0,
             })
             .child(
-                VerticalScroll::new("network:scroll", self.network_scroll, 468.0, content_height)
-                    .child(content),
+                VerticalScroll::new(
+                    SettingsMessage::NetworkScroll,
+                    self.network_scroll,
+                    468.0,
+                    content_height,
+                )
+                .child(content),
             )
     }
 
-    fn bluetooth_components(&self) -> Column {
+    fn bluetooth_components(&self) -> Column<SettingsMessage> {
         let palette = self.palette();
         let device_cards = self
             .bluetooth
@@ -1371,7 +1414,7 @@ impl SettingsApp {
                         },
                         if device.connected { 2.0 } else { 1.0 },
                     )
-                    .action(format!("bluetooth:device:{index}"))
+                    .message(SettingsMessage::BluetoothDevice(index))
                     .padding(Insets {
                         top: 12.0,
                         right: 14.0,
@@ -1440,7 +1483,7 @@ impl SettingsApp {
                     .height(58.0)
                     .background(palette.surface)
                     .border(palette.accent, 2.0)
-                    .action("bluetooth:power")
+                    .message(SettingsMessage::BluetoothPower)
                     .padding(Insets {
                         top: 10.0,
                         right: 14.0,
@@ -1488,7 +1531,7 @@ impl SettingsApp {
                             .color(palette.text),
                     )
                     .child(
-                        UiButton::new("bluetooth:discovery", discoverability)
+                        UiButton::new(SettingsMessage::BluetoothDiscovery, discoverability)
                             .width(150.0)
                             .color(palette.text)
                             .background(palette.surface_hover)
@@ -1507,7 +1550,7 @@ impl SettingsApp {
             })
             .child(
                 VerticalScroll::new(
-                    "bluetooth:scroll",
+                    SettingsMessage::BluetoothScroll,
                     self.bluetooth_scroll,
                     468.0,
                     content_height,
@@ -1516,7 +1559,7 @@ impl SettingsApp {
             )
     }
 
-    fn bar_components(&self) -> Column {
+    fn bar_components(&self) -> Column<SettingsMessage> {
         let palette = self.palette();
         let display_count = self.displays.len().max(1);
         let desktop_choices = (0..self.shell_settings.desktop_count).map(|index| {
@@ -1569,7 +1612,7 @@ impl SettingsApp {
                     .gap(28.0)
                     .child(
                         RadioButton::new(
-                            "bar:displays:primary",
+                            SettingsMessage::BarPrimaryDisplay,
                             self.localizer.text("settings-bar-primary-display"),
                             !self.shell_settings.bar_on_all_displays,
                         )
@@ -1585,7 +1628,7 @@ impl SettingsApp {
                     )
                     .child(
                         RadioButton::new(
-                            "bar:displays:all",
+                            SettingsMessage::BarAllDisplays,
                             self.localizer.number(
                                 "settings-bar-all-displays",
                                 "count",
@@ -1615,7 +1658,7 @@ impl SettingsApp {
                     .gap(28.0)
                     .child(
                         RadioButton::new(
-                            "bar:windows:display",
+                            SettingsMessage::BarDisplayWindows,
                             self.localizer.text("settings-bar-this-display"),
                             !self.shell_settings.all_windows_on_every_bar,
                         )
@@ -1631,7 +1674,7 @@ impl SettingsApp {
                     )
                     .child(
                         RadioButton::new(
-                            "bar:windows:all",
+                            SettingsMessage::BarAllWindows,
                             self.localizer.text("settings-bar-all-windows"),
                             self.shell_settings.all_windows_on_every_bar,
                         )
@@ -1662,8 +1705,8 @@ impl SettingsApp {
                 .height(18.0),
             )
             .child(
-                Slider::new(
-                    "bar:desktop-count",
+                Slider::on_change(
+                    desktop_count_message,
                     f32::from(self.shell_settings.desktop_count.saturating_sub(1)) / 7.0,
                 )
                 .width(520.0),
@@ -1671,7 +1714,7 @@ impl SettingsApp {
             .child(Row::new().height(46.0).gap(8.0).children(desktop_choices))
     }
 
-    fn appearance_components(&self) -> Column {
+    fn appearance_components(&self) -> Column<SettingsMessage> {
         let system = nickel_platform::appearance();
         let appearance = self.shell_settings.resolve_appearance(system);
         let palette = ThemePalette::from_appearance(appearance);
@@ -1725,7 +1768,7 @@ impl SettingsApp {
                     .gap(28.0)
                     .child(
                         RadioButton::new(
-                            "appearance:light",
+                            SettingsMessage::AppearanceLight,
                             self.localizer.text("settings-appearance-light"),
                             appearance.mode == ThemeMode::Light,
                         )
@@ -1741,7 +1784,7 @@ impl SettingsApp {
                     )
                     .child(
                         RadioButton::new(
-                            "appearance:dark",
+                            SettingsMessage::AppearanceDark,
                             self.localizer.text("settings-appearance-dark"),
                             appearance.mode == ThemeMode::Dark,
                         )
@@ -1767,7 +1810,7 @@ impl SettingsApp {
                     .gap(12.0)
                     .child(
                         UiButton::new(
-                            "wallpaper:choose",
+                            SettingsMessage::WallpaperChoose,
                             self.localizer.text("settings-wallpaper-choose"),
                         )
                         .width(150.0)
@@ -1806,9 +1849,9 @@ impl SettingsApp {
                         ("span", "settings-wallpaper-span", WallpaperPosition::Span),
                     ]
                     .into_iter()
-                    .map(|(action, label, position)| {
+                    .map(|(_, label, position)| {
                         RadioButton::new(
-                            format!("wallpaper:{action}"),
+                            SettingsMessage::WallpaperPosition(position),
                             self.localizer.text(label),
                             self.wallpaper_settings.position == position,
                         )
@@ -1833,7 +1876,7 @@ impl SettingsApp {
                 .height(18.0),
             )
             .child(
-                Slider::new("appearance:hue", f32::from(hue) / 359.0)
+                Slider::on_change(appearance_hue_message, f32::from(hue) / 359.0)
                     .colors(palette.surface, palette.accent, palette.text)
                     .width(520.0),
             )
@@ -1853,7 +1896,7 @@ impl SettingsApp {
                 .height(18.0),
             )
             .child(
-                Slider::new("appearance:intensity", f32::from(intensity) / 100.0)
+                Slider::on_change(appearance_intensity_message, f32::from(intensity) / 100.0)
                     .colors(palette.surface, palette.accent, palette.text)
                     .width(520.0),
             )
@@ -1871,54 +1914,47 @@ impl SettingsApp {
             x: x as f32,
             y: y as f32,
         };
-        if let Some(("bar:desktop-count", fraction)) =
-            self.ui.action_at_with_horizontal_fraction(point)
-        {
+        if let Some(SettingsMessage::SetDesktopCount(count)) = self.ui.message_at_owned(point) {
             self.desktop_slider_dragging = true;
-            self.set_desktop_count_from_fraction(fraction);
+            self.set_desktop_count(count);
             self.request_redraw();
             return;
         }
-        if let Some(("appearance:hue", fraction)) =
-            self.ui.action_at_with_horizontal_fraction(point)
-        {
+        if let Some(SettingsMessage::SetAppearanceHue(hue)) = self.ui.message_at_owned(point) {
             self.appearance_slider_dragging = true;
-            self.set_appearance_hue_from_fraction(fraction);
+            self.set_appearance_hue(hue);
             self.request_redraw();
             return;
         }
-        if let Some(("appearance:intensity", fraction)) =
-            self.ui.action_at_with_horizontal_fraction(point)
+        if let Some(SettingsMessage::SetAppearanceIntensity(intensity)) =
+            self.ui.message_at_owned(point)
         {
             self.intensity_slider_dragging = true;
-            self.set_appearance_intensity_from_fraction(fraction);
+            self.set_appearance_intensity(intensity);
             self.request_redraw();
             return;
         }
-        let action = self.ui.action_at(point).map(str::to_owned);
-        if let Some(action) = action {
-            match action.as_str() {
-                "nav:display" => self.page = SettingsPage::Display,
-                "nav:bar" => self.page = SettingsPage::Bar,
-                "nav:appearance" => self.page = SettingsPage::Appearance,
-                "nav:network" => {
-                    self.page = SettingsPage::Network;
-                    self.load_linux_network();
+        let message = self.ui.message_at(point).cloned();
+        if let Some(message) = message {
+            match message {
+                SettingsMessage::Navigate(page) => {
+                    self.page = page;
+                    match page {
+                        SettingsPage::Network => self.load_linux_network(),
+                        SettingsPage::Bluetooth => self.load_bluetooth(),
+                        _ => {}
+                    }
                 }
-                "nav:bluetooth" => {
-                    self.page = SettingsPage::Bluetooth;
-                    self.load_bluetooth();
-                }
-                "bluetooth:power" => {
+                SettingsMessage::BluetoothPower => {
                     let _ = set_bluetooth_adapter_property("Powered", !self.bluetooth.powered);
                     self.next_bluetooth_refresh = Instant::now();
                 }
-                "bluetooth:discovery" => {
+                SettingsMessage::BluetoothDiscovery => {
                     let _ =
                         set_bluetooth_adapter_property("Discovering", !self.bluetooth.discovering);
                     self.next_bluetooth_refresh = Instant::now();
                 }
-                "network:wifi-power" => {
+                SettingsMessage::WifiPower => {
                     #[cfg(target_os = "linux")]
                     if let Err(error) = set_linux_wifi_enabled(!self.wifi_enabled) {
                         self.wifi_status = self.localizer.value(
@@ -1929,75 +1965,66 @@ impl SettingsApp {
                     }
                     self.next_network_refresh = Instant::now();
                 }
-                _ if action.starts_with("bluetooth:device:") => {
-                    if let Ok(index) = action["bluetooth:device:".len()..].parse::<usize>()
-                        && let Some(device) = self.bluetooth.devices.get(index)
-                    {
+                SettingsMessage::BluetoothDevice(index) => {
+                    if let Some(device) = self.bluetooth.devices.get(index) {
                         let _ = toggle_bluetooth_device(device);
                         self.next_bluetooth_refresh = Instant::now();
                     }
                 }
-                "appearance:light" => {
+                SettingsMessage::AppearanceLight => {
                     self.shell_settings.theme = ThemePreference::Light;
                     let _ = self.shell_settings.save_default();
                 }
-                "appearance:dark" => {
+                SettingsMessage::AppearanceDark => {
                     self.shell_settings.theme = ThemePreference::Dark;
                     let _ = self.shell_settings.save_default();
                 }
-                "wallpaper:choose" => {
+                SettingsMessage::WallpaperChoose => {
                     if let Some(path) = choose_wallpaper() {
                         self.wallpaper_settings.image = Some(path);
                         let _ = self.wallpaper_settings.save_default();
                     }
                 }
-                _ if action.starts_with("wallpaper:") => {
-                    self.wallpaper_settings.position = match &action["wallpaper:".len()..] {
-                        "center" => WallpaperPosition::Center,
-                        "tile" => WallpaperPosition::Tile,
-                        "stretch" => WallpaperPosition::Stretch,
-                        "fit" => WallpaperPosition::Fit,
-                        "span" => WallpaperPosition::Span,
-                        _ => WallpaperPosition::Fill,
-                    };
+                SettingsMessage::WallpaperPosition(position) => {
+                    self.wallpaper_settings.position = position;
                     let _ = self.wallpaper_settings.save_default();
                 }
-                "bar:displays:primary" => {
+                SettingsMessage::BarPrimaryDisplay => {
                     self.shell_settings.bar_on_all_displays = false;
                     let _ = self.shell_settings.save_default();
                 }
-                "bar:displays:all" => {
+                SettingsMessage::BarAllDisplays => {
                     self.shell_settings.bar_on_all_displays = true;
                     let _ = self.shell_settings.save_default();
                 }
-                "bar:windows:display" => {
+                SettingsMessage::BarDisplayWindows => {
                     self.shell_settings.all_windows_on_every_bar = false;
                     let _ = self.shell_settings.save_default();
                 }
-                "bar:windows:all" => {
+                SettingsMessage::BarAllWindows => {
                     self.shell_settings.all_windows_on_every_bar = true;
                     let _ = self.shell_settings.save_default();
                 }
-                "display:identify" => match session_request("identify-outputs") {
+                SettingsMessage::DisplayIdentify => match session_request("identify-outputs") {
                     Ok(response) if response == "ok" => {
                         self.status = self.localizer.text("settings-status-identifying")
                     }
                     _ => self.status = self.localizer.text("settings-status-identify-failed"),
                 },
-                "display:primary" => {
+                SettingsMessage::DisplayPrimary => {
                     for (index, display) in self.displays.iter_mut().enumerate() {
                         display.primary = index == self.selected;
                     }
                     self.applied = false;
                     self.status = self.localizer.text("settings-status-changes-not-applied");
                 }
-                "display:apply" => self.apply_layout(),
-                _ if action.starts_with("wifi:") => {
-                    if let Ok(index) = action["wifi:".len()..].parse() {
-                        self.connect_windows_wifi(index);
-                    }
-                }
-                _ => {}
+                SettingsMessage::DisplayApply => self.apply_layout(),
+                SettingsMessage::WifiNetwork(index) => self.connect_windows_wifi(index),
+                SettingsMessage::SetDesktopCount(_)
+                | SettingsMessage::SetAppearanceHue(_)
+                | SettingsMessage::SetAppearanceIntensity(_)
+                | SettingsMessage::BluetoothScroll
+                | SettingsMessage::NetworkScroll => {}
             }
             self.request_redraw();
             return;
@@ -2022,27 +2049,27 @@ impl SettingsApp {
     fn pointer_moved(&mut self, x: f32, y: f32) {
         self.cursor = (x.round() as i32, y.round() as i32);
         if self.desktop_slider_dragging {
-            if let Some(fraction) = self
-                .ui
-                .horizontal_fraction_for_action("bar:desktop-count", x)
-            {
+            if let Some(fraction) = self.ui.horizontal_fraction_for_matching(x, |message| {
+                matches!(message, SettingsMessage::SetDesktopCount(_))
+            }) {
                 self.set_desktop_count_from_fraction(fraction);
                 self.request_redraw();
             }
             return;
         }
         if self.appearance_slider_dragging {
-            if let Some(fraction) = self.ui.horizontal_fraction_for_action("appearance:hue", x) {
+            if let Some(fraction) = self.ui.horizontal_fraction_for_matching(x, |message| {
+                matches!(message, SettingsMessage::SetAppearanceHue(_))
+            }) {
                 self.set_appearance_hue_from_fraction(fraction);
                 self.request_redraw();
             }
             return;
         }
         if self.intensity_slider_dragging {
-            if let Some(fraction) = self
-                .ui
-                .horizontal_fraction_for_action("appearance:intensity", x)
-            {
+            if let Some(fraction) = self.ui.horizontal_fraction_for_matching(x, |message| {
+                matches!(message, SettingsMessage::SetAppearanceIntensity(_))
+            }) {
                 self.set_appearance_intensity_from_fraction(fraction);
                 self.request_redraw();
             }
@@ -2051,9 +2078,11 @@ impl SettingsApp {
         if self.page == SettingsPage::Bluetooth {
             let hovered = self
                 .ui
-                .action_at(UiPoint { x, y })
-                .and_then(|action| action.strip_prefix("bluetooth:device:"))
-                .and_then(|index| index.parse().ok());
+                .message_at(UiPoint { x, y })
+                .and_then(|message| match message {
+                    SettingsMessage::BluetoothDevice(index) => Some(*index),
+                    _ => None,
+                });
             if hovered != self.hovered_bluetooth_device {
                 self.hovered_bluetooth_device = hovered;
                 self.request_redraw();
@@ -2063,9 +2092,11 @@ impl SettingsApp {
         if self.page == SettingsPage::Network {
             let hovered = self
                 .ui
-                .action_at(UiPoint { x, y })
-                .and_then(|action| action.strip_prefix("wifi:"))
-                .and_then(|index| index.parse().ok());
+                .message_at(UiPoint { x, y })
+                .and_then(|message| match message {
+                    SettingsMessage::WifiNetwork(index) => Some(*index),
+                    _ => None,
+                });
             if hovered != self.hovered_wifi_network {
                 self.hovered_wifi_network = hovered;
                 self.request_redraw();
@@ -2161,7 +2192,13 @@ impl SettingsApp {
     }
 
     fn set_desktop_count_from_fraction(&mut self, fraction: f32) {
-        let count = 1 + (fraction.clamp(0.0, 1.0) * 7.0).round() as u8;
+        let SettingsMessage::SetDesktopCount(count) = desktop_count_message(fraction) else {
+            unreachable!()
+        };
+        self.set_desktop_count(count);
+    }
+
+    fn set_desktop_count(&mut self, count: u8) {
         if count == self.shell_settings.desktop_count {
             return;
         }
@@ -2174,7 +2211,13 @@ impl SettingsApp {
     }
 
     fn set_appearance_hue_from_fraction(&mut self, fraction: f32) {
-        let hue = (fraction.clamp(0.0, 1.0) * 359.0).round() as u16;
+        let SettingsMessage::SetAppearanceHue(hue) = appearance_hue_message(fraction) else {
+            unreachable!()
+        };
+        self.set_appearance_hue(hue);
+    }
+
+    fn set_appearance_hue(&mut self, hue: u16) {
         if self.shell_settings.accent_hue == Some(hue) {
             return;
         }
@@ -2183,7 +2226,15 @@ impl SettingsApp {
     }
 
     fn set_appearance_intensity_from_fraction(&mut self, fraction: f32) {
-        let intensity = (fraction.clamp(0.0, 1.0) * 100.0).round() as u8;
+        let SettingsMessage::SetAppearanceIntensity(intensity) =
+            appearance_intensity_message(fraction)
+        else {
+            unreachable!()
+        };
+        self.set_appearance_intensity(intensity);
+    }
+
+    fn set_appearance_intensity(&mut self, intensity: u8) {
         if self.shell_settings.accent_intensity == Some(intensity) {
             return;
         }

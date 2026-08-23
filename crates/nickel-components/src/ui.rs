@@ -164,20 +164,24 @@ enum Kind {
     },
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct Element {
+#[derive(Clone, Debug)]
+pub struct Element<Message = String> {
     kind: Kind,
     style: Style,
-    action: Option<String>,
-    children: Vec<Element>,
+    message: Option<Message>,
+    message_mapper: Option<fn(f32) -> Message>,
+    option_messages: Vec<Message>,
+    children: Vec<Element<Message>>,
 }
 
-impl Element {
+impl<Message> Element<Message> {
     fn flex(axis: Axis) -> Self {
         Self {
             kind: Kind::Flex(axis),
             style: Style::default(),
-            action: None,
+            message: None,
+            message_mapper: None,
+            option_messages: Vec::new(),
             children: Vec::new(),
         }
     }
@@ -190,17 +194,19 @@ impl Element {
                 bold: false,
             },
             style: Style::default(),
-            action: None,
+            message: None,
+            message_mapper: None,
+            option_messages: Vec::new(),
             children: Vec::new(),
         }
     }
 
-    pub fn child(mut self, child: impl Component) -> Self {
+    pub fn child(mut self, child: impl Component<Message>) -> Self {
         self.children.push(child.into_element());
         self
     }
 
-    pub fn children(mut self, children: impl IntoIterator<Item = impl Component>) -> Self {
+    pub fn children(mut self, children: impl IntoIterator<Item = impl Component<Message>>) -> Self {
         self.children
             .extend(children.into_iter().map(Component::into_element));
         self
@@ -257,43 +263,75 @@ impl Element {
         self
     }
 
-    pub fn action(mut self, action: impl Into<String>) -> Self {
-        self.action = Some(action.into());
+    pub fn message(mut self, message: Message) -> Self {
+        self.message = Some(message);
         self
+    }
+
+    pub fn map_message<ParentMessage, Map>(self, mut map: Map) -> Element<ParentMessage>
+    where
+        Map: FnMut(Message) -> ParentMessage,
+    {
+        self.map_message_with(&mut map)
+    }
+
+    fn map_message_with<ParentMessage, Map>(self, map: &mut Map) -> Element<ParentMessage>
+    where
+        Map: FnMut(Message) -> ParentMessage,
+    {
+        assert!(
+            self.message_mapper.is_none(),
+            "map value-producing messages at the control constructor"
+        );
+        Element {
+            kind: self.kind,
+            style: self.style,
+            message: self.message.map(&mut *map),
+            message_mapper: None,
+            option_messages: self.option_messages.into_iter().map(&mut *map).collect(),
+            children: self
+                .children
+                .into_iter()
+                .map(|child| child.map_message_with(map))
+                .collect(),
+        }
     }
 }
 
-pub trait Component {
-    fn into_element(self) -> Element;
+pub trait Component<Message = String> {
+    fn into_element(self) -> Element<Message>;
 }
 
-impl Component for Element {
-    fn into_element(self) -> Element {
+impl<Message> Component<Message> for Element<Message> {
+    fn into_element(self) -> Element<Message> {
         self
     }
 }
 
 macro_rules! flex_component {
     ($name:ident, $axis:expr) => {
-        pub struct $name(Element);
+        pub struct $name<Message = String>(Element<Message>);
 
-        impl Default for $name {
+        impl<Message> Default for $name<Message> {
             fn default() -> Self {
                 Self::new()
             }
         }
 
-        impl $name {
+        impl<Message> $name<Message> {
             pub fn new() -> Self {
                 Self(Element::flex($axis))
             }
 
-            pub fn child(mut self, child: impl Component) -> Self {
+            pub fn child(mut self, child: impl Component<Message>) -> Self {
                 self.0 = self.0.child(child);
                 self
             }
 
-            pub fn children(mut self, children: impl IntoIterator<Item = impl Component>) -> Self {
+            pub fn children(
+                mut self,
+                children: impl IntoIterator<Item = impl Component<Message>>,
+            ) -> Self {
                 self.0 = self.0.children(children);
                 self
             }
@@ -329,8 +367,8 @@ macro_rules! flex_component {
             }
         }
 
-        impl Component for $name {
-            fn into_element(self) -> Element {
+        impl<Message> Component<Message> for $name<Message> {
+            fn into_element(self) -> Element<Message> {
                 self.0
             }
         }
@@ -340,29 +378,26 @@ macro_rules! flex_component {
 flex_component!(Column, Axis::Vertical);
 flex_component!(Row, Axis::Horizontal);
 
-pub struct VerticalScroll(Element);
+pub struct VerticalScroll<Message = String>(Element<Message>);
 
-impl VerticalScroll {
-    pub fn new(
-        action: impl Into<String>,
-        offset: f32,
-        viewport_height: f32,
-        content_height: f32,
-    ) -> Self {
+impl<Message> VerticalScroll<Message> {
+    pub fn new(message: Message, offset: f32, viewport_height: f32, content_height: f32) -> Self {
         let mut element = Element {
             kind: Kind::VerticalScroll {
                 offset: offset.clamp(0.0, (content_height - viewport_height).max(0.0)),
                 content_height: content_height.max(viewport_height),
             },
             style: Style::default(),
-            action: Some(action.into()),
+            message: Some(message),
+            message_mapper: None,
+            option_messages: Vec::new(),
             children: Vec::new(),
         };
         element.style.height = Some(viewport_height.max(0.0));
         Self(element)
     }
 
-    pub fn child(mut self, child: impl Component) -> Self {
+    pub fn child(mut self, child: impl Component<Message>) -> Self {
         self.0 = self.0.child(child);
         self
     }
@@ -373,15 +408,15 @@ impl VerticalScroll {
     }
 }
 
-impl Component for VerticalScroll {
-    fn into_element(self) -> Element {
+impl<Message> Component<Message> for VerticalScroll<Message> {
+    fn into_element(self) -> Element<Message> {
         self.0
     }
 }
 
-pub struct Grid(Element);
+pub struct Grid<Message = String>(Element<Message>);
 
-impl Grid {
+impl<Message> Grid<Message> {
     pub fn new() -> Self {
         Self::columns(2)
     }
@@ -392,12 +427,14 @@ impl Grid {
                 columns: columns.max(1),
             },
             style: Style::default(),
-            action: None,
+            message: None,
+            message_mapper: None,
+            option_messages: Vec::new(),
             children: Vec::new(),
         })
     }
 
-    pub fn children(mut self, children: impl IntoIterator<Item = impl Component>) -> Self {
+    pub fn children(mut self, children: impl IntoIterator<Item = impl Component<Message>>) -> Self {
         self.0 = self.0.children(children);
         self
     }
@@ -418,30 +455,30 @@ impl Grid {
     }
 }
 
-impl Default for Grid {
+impl<Message> Default for Grid<Message> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Component for Grid {
-    fn into_element(self) -> Element {
+impl<Message> Component<Message> for Grid<Message> {
+    fn into_element(self) -> Element<Message> {
         self.0
     }
 }
 
-pub struct FileGrid {
-    grid: Grid,
+pub struct FileGrid<Message = String> {
+    grid: Grid<Message>,
 }
 
-impl FileGrid {
+impl<Message> FileGrid<Message> {
     pub fn columns(columns: usize) -> Self {
         Self {
             grid: Grid::columns(columns),
         }
     }
 
-    pub fn items(mut self, items: impl IntoIterator<Item = FileGridItem>) -> Self {
+    pub fn items(mut self, items: impl IntoIterator<Item = FileGridItem<Message>>) -> Self {
         self.grid = self.grid.children(items);
         self
     }
@@ -462,17 +499,17 @@ impl FileGrid {
     }
 }
 
-impl Component for FileGrid {
-    fn into_element(self) -> Element {
+impl<Message> Component<Message> for FileGrid<Message> {
+    fn into_element(self) -> Element<Message> {
         self.grid.into_element()
     }
 }
 
-pub struct FileGridItem(Container);
+pub struct FileGridItem<Message = String>(Container<Message>);
 
-impl FileGridItem {
+impl<Message> FileGridItem<Message> {
     pub fn new(
-        action: impl Into<String>,
+        message: Message,
         label: impl Into<String>,
         icon_id: u16,
         icon: Arc<RgbaImage>,
@@ -485,7 +522,7 @@ impl FileGridItem {
                     bottom: 8.0,
                     left: 8.0,
                 })
-                .action(action)
+                .message(message)
                 .child(
                     Column::new()
                         .gap(7.0)
@@ -530,15 +567,15 @@ impl FileGridItem {
     }
 }
 
-impl Component for FileGridItem {
-    fn into_element(self) -> Element {
+impl<Message> Component<Message> for FileGridItem<Message> {
+    fn into_element(self) -> Element<Message> {
         self.0.into_element()
     }
 }
 
-pub struct Text(Element);
+pub struct Text<Message = String>(Element<Message>);
 
-impl Text {
+impl<Message> Text<Message> {
     pub fn new(value: impl Into<String>) -> Self {
         Self(Element::text(value, 2.0))
     }
@@ -584,20 +621,22 @@ impl Text {
     }
 }
 
-impl Component for Text {
-    fn into_element(self) -> Element {
+impl<Message> Component<Message> for Text<Message> {
+    fn into_element(self) -> Element<Message> {
         self.0
     }
 }
 
-pub struct Image(Element);
+pub struct Image<Message = String>(Element<Message>);
 
-impl Image {
+impl<Message> Image<Message> {
     pub fn new(id: u16, image: Arc<RgbaImage>) -> Self {
         Self(Element {
             kind: Kind::Image { id, image },
             style: Style::default(),
-            action: None,
+            message: None,
+            message_mapper: None,
+            option_messages: Vec::new(),
             children: Vec::new(),
         })
     }
@@ -613,15 +652,15 @@ impl Image {
     }
 }
 
-impl Component for Image {
-    fn into_element(self) -> Element {
+impl<Message> Component<Message> for Image<Message> {
+    fn into_element(self) -> Element<Message> {
         self.0
     }
 }
 
-pub struct Header(Text);
+pub struct Header<Message = String>(Text<Message>);
 
-impl Header {
+impl<Message> Header<Message> {
     pub fn new(value: impl Into<String>) -> Self {
         Self(Text::new(value).scale(4.0))
     }
@@ -632,12 +671,12 @@ impl Header {
     }
 }
 
-pub struct TextField {
-    text: Text,
+pub struct TextField<Message = String> {
+    text: Text<Message>,
     displayed: String,
 }
 
-impl TextField {
+impl<Message> TextField<Message> {
     pub fn new(editor: &TextEditor) -> Self {
         let displayed = editor.display_text_with_caret("▏");
         Self {
@@ -673,26 +712,26 @@ impl TextField {
     }
 }
 
-impl Component for TextField {
-    fn into_element(self) -> Element {
+impl<Message> Component<Message> for TextField<Message> {
+    fn into_element(self) -> Element<Message> {
         self.text.into_element()
     }
 }
 
-impl Component for Header {
-    fn into_element(self) -> Element {
+impl<Message> Component<Message> for Header<Message> {
+    fn into_element(self) -> Element<Message> {
         self.0.into_element()
     }
 }
 
-pub struct Container(Element);
+pub struct Container<Message = String>(Element<Message>);
 
-impl Container {
+impl<Message> Container<Message> {
     pub fn new() -> Self {
         Self(Element::flex(Axis::Vertical))
     }
 
-    pub fn child(mut self, child: impl Component) -> Self {
+    pub fn child(mut self, child: impl Component<Message>) -> Self {
         self.0 = self.0.child(child);
         self
     }
@@ -732,27 +771,27 @@ impl Container {
         self
     }
 
-    pub fn action(mut self, action: impl Into<String>) -> Self {
-        self.0 = self.0.action(action);
+    pub fn message(mut self, message: Message) -> Self {
+        self.0 = self.0.message(message);
         self
     }
 }
 
-impl Default for Container {
+impl<Message> Default for Container<Message> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Component for Container {
-    fn into_element(self) -> Element {
+impl<Message> Component<Message> for Container<Message> {
+    fn into_element(self) -> Element<Message> {
         self.0
     }
 }
 
-pub struct Sidebar(Column);
+pub struct Sidebar<Message = String>(Column<Message>);
 
-impl Sidebar {
+impl<Message> Sidebar<Message> {
     pub fn new(width: f32) -> Self {
         Self(Column::new().width(width))
     }
@@ -772,22 +811,22 @@ impl Sidebar {
         self
     }
 
-    pub fn child(mut self, child: impl Component) -> Self {
+    pub fn child(mut self, child: impl Component<Message>) -> Self {
         self.0 = self.0.child(child);
         self
     }
 }
 
-impl Component for Sidebar {
-    fn into_element(self) -> Element {
+impl<Message> Component<Message> for Sidebar<Message> {
+    fn into_element(self) -> Element<Message> {
         self.0.into_element()
     }
 }
 
 /// A thematic break with configurable space above and below its one-pixel line.
-pub struct HorizontalRule(Container);
+pub struct HorizontalRule<Message = String>(Container<Message>);
 
-impl HorizontalRule {
+impl<Message> HorizontalRule<Message> {
     pub fn new(color: Color) -> Self {
         Self(
             Container::new()
@@ -813,15 +852,15 @@ impl HorizontalRule {
     }
 }
 
-impl Component for HorizontalRule {
-    fn into_element(self) -> Element {
+impl<Message> Component<Message> for HorizontalRule<Message> {
+    fn into_element(self) -> Element<Message> {
         self.0.into_element()
     }
 }
 
-pub struct SidebarSection(Column);
+pub struct SidebarSection<Message = String>(Column<Message>);
 
-impl SidebarSection {
+impl<Message> SidebarSection<Message> {
     pub fn new(label: impl Into<String>, color: Color) -> Self {
         Self(
             Column::new()
@@ -830,31 +869,31 @@ impl SidebarSection {
         )
     }
 
-    pub fn child(mut self, child: impl Component) -> Self {
+    pub fn child(mut self, child: impl Component<Message>) -> Self {
         self.0 = self.0.child(child);
         self
     }
 
-    pub fn children(mut self, children: impl IntoIterator<Item = impl Component>) -> Self {
+    pub fn children(mut self, children: impl IntoIterator<Item = impl Component<Message>>) -> Self {
         self.0 = self.0.children(children);
         self
     }
 }
 
-impl Component for SidebarSection {
-    fn into_element(self) -> Element {
+impl<Message> Component<Message> for SidebarSection<Message> {
+    fn into_element(self) -> Element<Message> {
         self.0.into_element()
     }
 }
 
-pub struct SidebarItem(Container);
+pub struct SidebarItem<Message = String>(Container<Message>);
 
-impl SidebarItem {
-    pub fn new(action: impl Into<String>, label: impl Into<String>, foreground: Color) -> Self {
+impl<Message> SidebarItem<Message> {
+    pub fn new(message: Message, label: impl Into<String>, foreground: Color) -> Self {
         Self(
             Container::new()
                 .height(36.0)
-                .action(action)
+                .message(message)
                 .padding(Insets {
                     top: 8.0,
                     right: 8.0,
@@ -876,18 +915,18 @@ impl SidebarItem {
     }
 }
 
-impl Component for SidebarItem {
-    fn into_element(self) -> Element {
+impl<Message> Component<Message> for SidebarItem<Message> {
+    fn into_element(self) -> Element<Message> {
         self.0.into_element()
     }
 }
 
-pub struct SidebarFolder(Container);
+pub struct SidebarFolder<Message = String>(Container<Message>);
 
-impl SidebarFolder {
+impl<Message> SidebarFolder<Message> {
     pub fn new(
-        toggle_action: impl Into<String>,
-        open_action: impl Into<String>,
+        toggle_message: Message,
+        open_message: Message,
         label: impl Into<String>,
         expanded: bool,
         foreground: Color,
@@ -899,7 +938,7 @@ impl SidebarFolder {
                         Container::new()
                             .width(28.0)
                             .height(36.0)
-                            .action(toggle_action)
+                            .message(toggle_message)
                             .padding(Insets {
                                 top: 8.0,
                                 right: 3.0,
@@ -916,7 +955,7 @@ impl SidebarFolder {
                         Container::new()
                             .grow(1.0)
                             .height(36.0)
-                            .action(open_action)
+                            .message(open_message)
                             .padding(Insets {
                                 top: 8.0,
                                 right: 8.0,
@@ -940,16 +979,16 @@ impl SidebarFolder {
     }
 }
 
-impl Component for SidebarFolder {
-    fn into_element(self) -> Element {
+impl<Message> Component<Message> for SidebarFolder<Message> {
+    fn into_element(self) -> Element<Message> {
         self.0.into_element()
     }
 }
 
-pub struct ContentPane(Container);
+pub struct ContentPane<Message = String>(Container<Message>);
 
-impl ContentPane {
-    pub fn new(content: impl Component) -> Self {
+impl<Message> ContentPane<Message> {
+    pub fn new(content: impl Component<Message>) -> Self {
         Self(Container::new().grow(1.0).child(content))
     }
 
@@ -959,17 +998,17 @@ impl ContentPane {
     }
 }
 
-impl Component for ContentPane {
-    fn into_element(self) -> Element {
+impl<Message> Component<Message> for ContentPane<Message> {
+    fn into_element(self) -> Element<Message> {
         self.0.into_element()
     }
 }
 
-pub struct ShoulderHints(Row);
+pub struct ShoulderHints<Message = String>(Row<Message>);
 
-impl ShoulderHints {
+impl<Message> ShoulderHints<Message> {
     pub fn new(color: Color, muted: Color) -> Self {
-        fn keycap(label: &str, color: Color, muted: Color) -> Container {
+        fn keycap<Message>(label: &str, color: Color, muted: Color) -> Container<Message> {
             Container::new()
                 .width(34.0)
                 .height(24.0)
@@ -996,20 +1035,20 @@ impl ShoulderHints {
     }
 }
 
-impl Component for ShoulderHints {
-    fn into_element(self) -> Element {
+impl<Message> Component<Message> for ShoulderHints<Message> {
+    fn into_element(self) -> Element<Message> {
         self.0.into_element()
     }
 }
 
-pub struct Button(Container);
+pub struct Button<Message = String>(Container<Message>);
 
-impl Button {
-    pub fn new(action: impl Into<String>, label: impl Into<String>) -> Self {
-        Self::with_label(action, ButtonLabel::new(label))
+impl<Message> Button<Message> {
+    pub fn new(message: Message, label: impl Into<String>) -> Self {
+        Self::with_label(message, ButtonLabel::new(label))
     }
 
-    pub fn with_label(action: impl Into<String>, label: ButtonLabel) -> Self {
+    pub fn with_label(message: Message, label: ButtonLabel<Message>) -> Self {
         Self(
             Container::new()
                 .padding(Insets {
@@ -1019,7 +1058,7 @@ impl Button {
                     left: 12.0,
                 })
                 .height(42.0)
-                .action(action)
+                .message(message)
                 .child(label),
         )
     }
@@ -1052,15 +1091,15 @@ impl Button {
     }
 }
 
-impl Component for Button {
-    fn into_element(self) -> Element {
+impl<Message> Component<Message> for Button<Message> {
+    fn into_element(self) -> Element<Message> {
         self.0.into_element()
     }
 }
 
-pub struct ButtonLabel(Text);
+pub struct ButtonLabel<Message = String>(Text<Message>);
 
-impl ButtonLabel {
+impl<Message> ButtonLabel<Message> {
     pub fn new(value: impl Into<String>) -> Self {
         Self(Text::new(value).align(TextAlign::Center))
     }
@@ -1081,19 +1120,19 @@ impl ButtonLabel {
     }
 }
 
-impl Component for ButtonLabel {
-    fn into_element(self) -> Element {
+impl<Message> Component<Message> for ButtonLabel<Message> {
+    fn into_element(self) -> Element<Message> {
         self.0.into_element()
     }
 }
 
-pub struct RadioButton(Container);
+pub struct RadioButton<Message = String>(Container<Message>);
 
-impl RadioButton {
-    pub fn new(action: impl Into<String>, label: impl Into<String>, selected: bool) -> Self {
+impl<Message> RadioButton<Message> {
+    pub fn new(message: Message, label: impl Into<String>, selected: bool) -> Self {
         let indicator = if selected { "●" } else { "○" };
         Self(
-            Container::new().height(34.0).action(action).child(
+            Container::new().height(34.0).message(message).child(
                 Row::new()
                     .gap(10.0)
                     .child(
@@ -1125,16 +1164,16 @@ impl RadioButton {
     }
 }
 
-impl Component for RadioButton {
-    fn into_element(self) -> Element {
+impl<Message> Component<Message> for RadioButton<Message> {
+    fn into_element(self) -> Element<Message> {
         self.0.into_element()
     }
 }
 
-pub struct Slider(Element);
+pub struct Slider<Message = String>(Element<Message>);
 
-impl Slider {
-    pub fn new(action: impl Into<String>, value: f32) -> Self {
+impl<Message> Slider<Message> {
+    pub fn new(message: Message, value: f32) -> Self {
         let mut element = Element {
             kind: Kind::Slider {
                 value: value.clamp(0.0, 1.0),
@@ -1143,11 +1182,19 @@ impl Slider {
                 thumb: 0xf4f7ff,
             },
             style: Style::default(),
-            action: Some(action.into()),
+            message: Some(message),
+            message_mapper: None,
+            option_messages: Vec::new(),
             children: Vec::new(),
         };
         element.style.height = Some(24.0);
         Self(element)
+    }
+
+    pub fn on_change(map: fn(f32) -> Message, value: f32) -> Self {
+        let mut slider = Self::new(map(value.clamp(0.0, 1.0)), value);
+        slider.0.message_mapper = Some(map);
+        slider
     }
 
     pub fn colors(mut self, track: Color, fill: Color, thumb: Color) -> Self {
@@ -1171,21 +1218,24 @@ impl Slider {
     }
 }
 
-impl Component for Slider {
-    fn into_element(self) -> Element {
+impl<Message> Component<Message> for Slider<Message> {
+    fn into_element(self) -> Element<Message> {
         self.0
     }
 }
 
-pub struct Dropdown(Element);
+pub struct Dropdown<Message = String>(Element<Message>);
 
-impl Dropdown {
+impl<Message> Dropdown<Message> {
     pub fn new(
-        action: impl Into<String>,
+        toggle_message: Message,
         selected: impl Into<String>,
-        options: impl IntoIterator<Item = impl Into<String>>,
+        options: impl IntoIterator<Item = (impl Into<String>, Message)>,
     ) -> Self {
-        let options: Vec<_> = options.into_iter().map(Into::into).collect();
+        let (options, option_messages): (Vec<_>, Vec<_>) = options
+            .into_iter()
+            .map(|(label, message)| (label.into(), message))
+            .unzip();
         let mut element = Element {
             kind: Kind::Dropdown {
                 selected: selected.into(),
@@ -1196,7 +1246,9 @@ impl Dropdown {
                 foreground: 0xf4f7ff,
             },
             style: Style::default(),
-            action: Some(action.into()),
+            message: Some(toggle_message),
+            message_mapper: None,
+            option_messages,
             children: Vec::new(),
         };
         element.style.height = Some(42.0);
@@ -1243,26 +1295,36 @@ impl Dropdown {
     }
 }
 
-impl Component for Dropdown {
-    fn into_element(self) -> Element {
+impl<Message> Component<Message> for Dropdown<Message> {
+    fn into_element(self) -> Element<Message> {
         self.0
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
-struct HitRegion {
+#[derive(Clone, Debug)]
+struct HitRegion<Message> {
     rect: Rect,
-    action: String,
+    message: Message,
+    message_mapper: Option<fn(f32) -> Message>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct UiTree {
+#[derive(Clone, Debug)]
+pub struct UiTree<Message = String> {
     commands: Vec<PaintCommand>,
-    hits: Vec<HitRegion>,
+    hits: Vec<HitRegion<Message>>,
 }
 
-impl UiTree {
-    pub fn layout(root: impl Component, bounds: Rect) -> Self {
+impl<Message> Default for UiTree<Message> {
+    fn default() -> Self {
+        Self {
+            commands: Vec::new(),
+            hits: Vec::new(),
+        }
+    }
+}
+
+impl<Message: Clone> UiTree<Message> {
+    pub fn layout(root: impl Component<Message>, bounds: Rect) -> Self {
         let mut tree = Self::default();
         layout_element(&root.into_element(), bounds, None, None, &mut tree);
         tree
@@ -1272,15 +1334,15 @@ impl UiTree {
         &self.commands
     }
 
-    pub fn action_at(&self, point: Point) -> Option<&str> {
+    pub fn message_at(&self, point: Point) -> Option<&Message> {
         self.hits
             .iter()
             .rev()
             .find(|hit| contains(hit.rect, point))
-            .map(|hit| hit.action.as_str())
+            .map(|hit| &hit.message)
     }
 
-    pub fn action_at_with_horizontal_fraction(&self, point: Point) -> Option<(&str, f32)> {
+    pub fn message_at_with_horizontal_fraction(&self, point: Point) -> Option<(&Message, f32)> {
         self.hits
             .iter()
             .rev()
@@ -1288,23 +1350,52 @@ impl UiTree {
             .map(|hit| {
                 let fraction =
                     ((point.x - hit.rect.origin.x) / hit.rect.size.width.max(1.0)).clamp(0.0, 1.0);
-                (hit.action.as_str(), fraction)
+                (&hit.message, fraction)
             })
     }
 
-    pub fn horizontal_fraction_for_action(&self, action: &str, x: f32) -> Option<f32> {
+    pub fn message_at_owned(&self, point: Point) -> Option<Message> {
         self.hits
             .iter()
             .rev()
-            .find(|hit| hit.action == action)
+            .find(|hit| contains(hit.rect, point))
+            .map(|hit| {
+                let fraction =
+                    ((point.x - hit.rect.origin.x) / hit.rect.size.width.max(1.0)).clamp(0.0, 1.0);
+                hit.message_mapper
+                    .map(|map| map(fraction))
+                    .unwrap_or_else(|| hit.message.clone())
+            })
+    }
+
+    pub fn horizontal_fraction_for_message(&self, message: &Message, x: f32) -> Option<f32>
+    where
+        Message: PartialEq,
+    {
+        self.hits
+            .iter()
+            .rev()
+            .find(|hit| &hit.message == message)
             .map(|hit| ((x - hit.rect.origin.x) / hit.rect.size.width.max(1.0)).clamp(0.0, 1.0))
     }
 
-    pub fn actions_intersecting(&self, rect: Rect) -> Vec<&str> {
+    pub fn horizontal_fraction_for_matching(
+        &self,
+        x: f32,
+        predicate: impl Fn(&Message) -> bool,
+    ) -> Option<f32> {
+        self.hits
+            .iter()
+            .rev()
+            .find(|hit| predicate(&hit.message))
+            .map(|hit| ((x - hit.rect.origin.x) / hit.rect.size.width.max(1.0)).clamp(0.0, 1.0))
+    }
+
+    pub fn messages_intersecting(&self, rect: Rect) -> Vec<&Message> {
         self.hits
             .iter()
             .filter(|hit| rects_intersect(hit.rect, rect))
-            .map(|hit| hit.action.as_str())
+            .map(|hit| &hit.message)
             .collect()
     }
 
@@ -1312,10 +1403,11 @@ impl UiTree {
         self.commands.push(command);
     }
 
-    pub fn push_overlay_action(&mut self, rect: Rect, action: impl Into<String>) {
+    pub fn push_overlay_message(&mut self, rect: Rect, message: Message) {
         self.hits.push(HitRegion {
             rect,
-            action: action.into(),
+            message,
+            message_mapper: None,
         });
     }
 }
@@ -1335,12 +1427,12 @@ fn intersection(left: Rect, right: Rect) -> Option<Rect> {
     (right_edge > x && bottom_edge > y).then(|| Rect::new(x, y, right_edge - x, bottom_edge - y))
 }
 
-fn layout_element(
-    element: &Element,
+fn layout_element<Message: Clone>(
+    element: &Element<Message>,
     bounds: Rect,
     inherited_foreground: Option<Color>,
     inherited_clip: Option<Rect>,
-    tree: &mut UiTree,
+    tree: &mut UiTree<Message>,
 ) {
     let width = element
         .style
@@ -1373,14 +1465,15 @@ fn layout_element(
             width: element.style.border_width,
         });
     }
-    if let Some(action) = &element.action
+    if let Some(message) = &element.message
         && let Some(rect) = inherited_clip
             .map(|clip| intersection(rect, clip))
             .unwrap_or(Some(rect))
     {
         tree.hits.push(HitRegion {
             rect,
-            action: action.clone(),
+            message: message.clone(),
+            message_mapper: element.message_mapper,
         });
     }
 
@@ -1475,7 +1568,6 @@ fn layout_element(
                 bold: false,
             });
             if *expanded {
-                let action = element.action.as_deref().unwrap_or("dropdown");
                 for (index, option) in options.iter().enumerate() {
                     let option_rect = Rect::new(
                         rect.origin.x,
@@ -1500,10 +1592,13 @@ fn layout_element(
                         align: TextAlign::Start,
                         bold: false,
                     });
-                    tree.hits.push(HitRegion {
-                        rect: option_rect,
-                        action: format!("{action}:option:{index}"),
-                    });
+                    if let Some(message) = element.option_messages.get(index) {
+                        tree.hits.push(HitRegion {
+                            rect: option_rect,
+                            message: message.clone(),
+                            message_mapper: None,
+                        });
+                    }
                 }
             }
         }
@@ -1571,7 +1666,12 @@ fn layout_element(
     }
 }
 
-fn flex_bounds(content: Rect, axis: Axis, gap: f32, children: &[Element]) -> Vec<Rect> {
+fn flex_bounds<Message>(
+    content: Rect,
+    axis: Axis,
+    gap: f32,
+    children: &[Element<Message>],
+) -> Vec<Rect> {
     let available = match axis {
         Axis::Horizontal => content.size.width,
         Axis::Vertical => content.size.height,
@@ -1620,7 +1720,7 @@ fn flex_bounds(content: Rect, axis: Axis, gap: f32, children: &[Element]) -> Vec
         .collect()
 }
 
-fn child_main_size(child: &Element, axis: Axis) -> Option<f32> {
+fn child_main_size<Message>(child: &Element<Message>, axis: Axis) -> Option<f32> {
     match axis {
         Axis::Horizontal => child.style.width,
         Axis::Vertical => child.style.height.or(match &child.kind {
@@ -1660,16 +1760,26 @@ fn contains(rect: Rect, point: Point) -> bool {
 mod tests {
     use super::*;
 
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    enum TestMessage {
+        Named(&'static str),
+        Option(usize),
+        Volume(u8),
+    }
+
     #[test]
     fn nested_button_is_laid_out_and_hit_tested() {
         let tree = UiTree::layout(
             Column::new()
                 .height(100.0)
                 .child(Header::new("Steam"))
-                .child(Button::new("launch", "Launch").width(100.0)),
+                .child(Button::new(TestMessage::Named("launch"), "Launch").width(100.0)),
             Rect::new(0.0, 0.0, 300.0, 100.0),
         );
-        assert_eq!(tree.action_at(Point { x: 10.0, y: 40.0 }), Some("launch"));
+        assert_eq!(
+            tree.message_at(Point { x: 10.0, y: 40.0 }),
+            Some(&TestMessage::Named("launch"))
+        );
         assert!(
             tree.commands().iter().any(
                 |command| matches!(command, PaintCommand::Text { text, .. } if text == "Steam")
@@ -1681,9 +1791,9 @@ mod tests {
     fn grid_places_all_children() {
         let tree = UiTree::layout(
             Grid::columns(2).children([
-                Button::new("one", "One"),
-                Button::new("two", "Two"),
-                Button::new("three", "Three"),
+                Button::new(TestMessage::Named("one"), "One"),
+                Button::new(TestMessage::Named("two"), "Two"),
+                Button::new(TestMessage::Named("three"), "Three"),
             ]),
             Rect::new(0.0, 0.0, 200.0, 100.0),
         );
@@ -1695,17 +1805,21 @@ mod tests {
         let icon = Arc::new(RgbaImage::new(16, 16));
         let tree = UiTree::layout(
             FileGrid::columns(2).gap(8.0).height(120.0).items([
-                FileGridItem::new("file:one", "One", 1, icon.clone())
+                FileGridItem::new(TestMessage::Named("file:one"), "One", 1, icon.clone())
                     .colors(0x101010, 0x202020, 0xffffff)
                     .icon_size(48.0),
-                FileGridItem::new("file:two", "Two", 2, icon).colors(0x101010, 0x202020, 0xffffff),
+                FileGridItem::new(TestMessage::Named("file:two"), "Two", 2, icon)
+                    .colors(0x101010, 0x202020, 0xffffff),
             ]),
             Rect::new(0.0, 0.0, 240.0, 120.0),
         );
-        assert_eq!(tree.action_at(Point { x: 20.0, y: 20.0 }), Some("file:one"));
         assert_eq!(
-            tree.action_at(Point { x: 180.0, y: 20.0 }),
-            Some("file:two")
+            tree.message_at(Point { x: 20.0, y: 20.0 }),
+            Some(&TestMessage::Named("file:one"))
+        );
+        assert_eq!(
+            tree.message_at(Point { x: 180.0, y: 20.0 }),
+            Some(&TestMessage::Named("file:two"))
         );
         assert!(tree.commands.iter().any(|command| {
             matches!(
@@ -1725,29 +1839,67 @@ mod tests {
     #[test]
     fn slider_reports_horizontal_fraction() {
         let tree = UiTree::layout(
-            Slider::new("volume", 0.5).width(200.0),
+            Slider::new(TestMessage::Named("volume"), 0.5).width(200.0),
             Rect::new(0.0, 0.0, 200.0, 24.0),
         );
-        let (action, fraction) = tree
-            .action_at_with_horizontal_fraction(Point { x: 150.0, y: 12.0 })
+        let (message, fraction) = tree
+            .message_at_with_horizontal_fraction(Point { x: 150.0, y: 12.0 })
             .expect("slider hit");
-        assert_eq!(action, "volume");
+        assert_eq!(message, &TestMessage::Named("volume"));
         assert!((fraction - 0.75).abs() < 0.001);
         assert_eq!(
-            tree.horizontal_fraction_for_action("volume", 250.0),
+            tree.horizontal_fraction_for_message(&TestMessage::Named("volume"), 250.0),
             Some(1.0)
+        );
+    }
+
+    #[test]
+    fn value_control_emits_typed_payload_and_component_messages_map() {
+        fn volume_message(fraction: f32) -> TestMessage {
+            TestMessage::Volume((fraction * 100.0).round() as u8)
+        }
+
+        let mapped = Button::new(2_usize, "Second")
+            .into_element()
+            .map_message(TestMessage::Option);
+        let tree = UiTree::layout(
+            Column::new()
+                .child(mapped)
+                .child(Slider::on_change(volume_message, 0.5).width(200.0)),
+            Rect::new(0.0, 0.0, 200.0, 66.0),
+        );
+
+        assert_eq!(
+            tree.message_at_owned(Point { x: 20.0, y: 10.0 }),
+            Some(TestMessage::Option(2))
+        );
+        assert_eq!(
+            tree.message_at_owned(Point { x: 150.0, y: 54.0 }),
+            Some(TestMessage::Volume(75))
         );
     }
 
     #[test]
     fn vertical_scroll_clips_painting_and_hit_regions() {
         let tree = UiTree::layout(
-            VerticalScroll::new("scroll", 50.0, 100.0, 200.0).child(
+            VerticalScroll::new(TestMessage::Named("scroll"), 50.0, 100.0, 200.0).child(
                 Column::new()
                     .gap(10.0)
-                    .child(Container::new().height(60.0).action("one"))
-                    .child(Container::new().height(60.0).action("two"))
-                    .child(Container::new().height(60.0).action("three")),
+                    .child(
+                        Container::new()
+                            .height(60.0)
+                            .message(TestMessage::Named("one")),
+                    )
+                    .child(
+                        Container::new()
+                            .height(60.0)
+                            .message(TestMessage::Named("two")),
+                    )
+                    .child(
+                        Container::new()
+                            .height(60.0)
+                            .message(TestMessage::Named("three")),
+                    ),
             ),
             Rect::new(0.0, 0.0, 200.0, 100.0),
         );
@@ -1757,36 +1909,64 @@ mod tests {
             Some(PaintCommand::PushClip(rect)) if *rect == Rect::new(0.0, 0.0, 200.0, 100.0)
         ));
         assert!(matches!(tree.commands.last(), Some(PaintCommand::PopClip)));
-        assert_eq!(tree.action_at(Point { x: 20.0, y: 5.0 }), Some("one"));
-        assert_eq!(tree.action_at(Point { x: 20.0, y: 40.0 }), Some("two"));
-        assert_eq!(tree.action_at(Point { x: 20.0, y: 95.0 }), Some("three"));
-        assert_eq!(tree.action_at(Point { x: 20.0, y: 105.0 }), None);
+        assert_eq!(
+            tree.message_at(Point { x: 20.0, y: 5.0 }),
+            Some(&TestMessage::Named("one"))
+        );
+        assert_eq!(
+            tree.message_at(Point { x: 20.0, y: 40.0 }),
+            Some(&TestMessage::Named("two"))
+        );
+        assert_eq!(
+            tree.message_at(Point { x: 20.0, y: 95.0 }),
+            Some(&TestMessage::Named("three"))
+        );
+        assert_eq!(tree.message_at(Point { x: 20.0, y: 105.0 }), None);
     }
 
     #[test]
     fn vertical_scroll_clamps_offset_to_content_end() {
         let tree = UiTree::layout(
-            VerticalScroll::new("scroll", 500.0, 100.0, 200.0).child(
+            VerticalScroll::new(TestMessage::Named("scroll"), 500.0, 100.0, 200.0).child(
                 Column::new()
                     .gap(10.0)
-                    .child(Container::new().height(60.0).action("one"))
-                    .child(Container::new().height(60.0).action("two")),
+                    .child(
+                        Container::new()
+                            .height(60.0)
+                            .message(TestMessage::Named("one")),
+                    )
+                    .child(
+                        Container::new()
+                            .height(60.0)
+                            .message(TestMessage::Named("two")),
+                    ),
             ),
             Rect::new(0.0, 0.0, 200.0, 100.0),
         );
 
-        assert_eq!(tree.action_at(Point { x: 20.0, y: 10.0 }), Some("two"));
+        assert_eq!(
+            tree.message_at(Point { x: 20.0, y: 10.0 }),
+            Some(&TestMessage::Named("two"))
+        );
     }
 
     #[test]
     fn expanded_dropdown_exposes_option_actions() {
         let tree = UiTree::layout(
-            Dropdown::new("audio", "Speakers", ["Speakers", "Headphones"]).expanded(true),
+            Dropdown::new(
+                TestMessage::Named("audio"),
+                "Speakers",
+                [
+                    ("Speakers", TestMessage::Option(0)),
+                    ("Headphones", TestMessage::Option(1)),
+                ],
+            )
+            .expanded(true),
             Rect::new(0.0, 0.0, 240.0, 114.0),
         );
         assert_eq!(
-            tree.action_at(Point { x: 20.0, y: 96.0 }),
-            Some("audio:option:1")
+            tree.message_at(Point { x: 20.0, y: 96.0 }),
+            Some(&TestMessage::Option(1))
         );
     }
 
@@ -1796,12 +1976,22 @@ mod tests {
             Sidebar::new(220.0)
                 .child(HorizontalRule::new(0x808080))
                 .child(SidebarFolder::new(
-                    "toggle", "open", "Desktop", false, 0xffffff,
+                    TestMessage::Named("toggle"),
+                    TestMessage::Named("open"),
+                    "Desktop",
+                    false,
+                    0xffffff,
                 )),
             Rect::new(0.0, 0.0, 220.0, 100.0),
         );
-        assert_eq!(tree.action_at(Point { x: 10.0, y: 32.0 }), Some("toggle"));
-        assert_eq!(tree.action_at(Point { x: 80.0, y: 32.0 }), Some("open"));
+        assert_eq!(
+            tree.message_at(Point { x: 10.0, y: 32.0 }),
+            Some(&TestMessage::Named("toggle"))
+        );
+        assert_eq!(
+            tree.message_at(Point { x: 80.0, y: 32.0 }),
+            Some(&TestMessage::Named("open"))
+        );
         assert!(tree.commands().iter().any(
             |command| matches!(command, PaintCommand::Fill { rect, .. } if rect.size.height == 1.0)
         ));
@@ -1809,7 +1999,7 @@ mod tests {
 
     #[test]
     fn top_corner_radius_emits_rounded_fill() {
-        let tree = UiTree::layout(
+        let tree = UiTree::<()>::layout(
             Container::new()
                 .width(120.0)
                 .height(32.0)
