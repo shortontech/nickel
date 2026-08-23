@@ -247,12 +247,12 @@ fn main() -> Result<(), String> {
             // an overlay here races its first frame and leaves a brief blank
             // window. Explicit dismissal and Escape remain authoritative.
             Some(ShellEvent::FocusChanged {
-                surface,
+                surface: _surface,
                 focused: false,
             }) => {
                 #[cfg(target_os = "macos")]
                 if let Some(role @ (SurfaceRole::Launcher | SurfaceRole::ControlCenter)) =
-                    shell.surface(surface).map(|entry| entry.role())
+                    shell.surface(_surface).map(|entry| entry.role())
                     && state.hide_overlay(role)
                 {
                     sync_visibility(&mut shell, &state);
@@ -350,10 +350,10 @@ fn main() -> Result<(), String> {
             Some(event) => tracing::debug!(?event, "SDL shell event"),
             None => {}
         }
-        if hover_repaint.is_some_and(|(_, deadline)| Instant::now() >= deadline) {
-            if let Some((role, _)) = hover_repaint.take() {
-                render_role(&mut shell, &mut state, role)?;
-            }
+        if hover_repaint.is_some_and(|(_, deadline)| Instant::now() >= deadline)
+            && let Some((role, _)) = hover_repaint.take()
+        {
+            render_role(&mut shell, &mut state, role)?;
         }
         if Instant::now() >= refresh_deadline {
             if state.refresh() {

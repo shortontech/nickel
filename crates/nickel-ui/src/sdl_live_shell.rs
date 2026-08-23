@@ -57,6 +57,9 @@ pub struct LiveShell {
     launcher_view: LauncherViewState,
     launcher_icons: LauncherIconCache,
     launcher_frame: Option<LauncherFrame>,
+    launcher_status: Option<String>,
+    secure_storage_override: Option<String>,
+    secure_storage_state: platform::SecureStorageState,
 }
 
 impl LiveShell {
@@ -88,6 +91,10 @@ impl LiveShell {
         let network = platform::network_status();
         let bluetooth = platform::bluetooth_status();
         let audio = platform::audio_status();
+        #[cfg(target_os = "linux")]
+        let secure_storage_state = platform::secure_storage_state();
+        #[cfg(not(target_os = "linux"))]
+        let secure_storage_state = platform::SecureStorageState::Ready;
         Ok(Self {
             launcher,
             window_feed,
@@ -109,11 +116,29 @@ impl LiveShell {
             launcher_view: LauncherViewState::default(),
             launcher_icons: LauncherIconCache::new(),
             launcher_frame: None,
+            launcher_status: None,
+            secure_storage_override: None,
+            secure_storage_state,
         })
     }
 
     pub fn refresh(&mut self) -> bool {
         let mut changed = false;
+        #[cfg(target_os = "linux")]
+        {
+            let secure_storage_state = platform::secure_storage_state();
+            if secure_storage_state != self.secure_storage_state {
+                self.secure_storage_state = secure_storage_state;
+                changed = true;
+            }
+            if self.launcher_status.is_some()
+                && secure_storage_state == platform::SecureStorageState::Ready
+            {
+                self.launcher_status = None;
+                self.secure_storage_override = None;
+                changed = true;
+            }
+        }
         #[cfg(target_os = "macos")]
         if self.launcher_visible || self.control_visible {
             return false;
@@ -435,12 +460,28 @@ impl LiveShell {
     }
 
     fn launch_result(&mut self, index: usize) {
-        if let Some(application) = self.launcher.result_at(index) {
-            let _ = platform::launch_application(application);
-            self.launcher_visible = false;
-            let _ = platform::send_shell_command(ShellCommand::Hide);
-            self.launcher.clear();
+        let Some(application) = self.launcher.result_at(index).cloned() else {
+            return;
+        };
+        #[cfg(target_os = "linux")]
+        if platform::application_requires_secure_storage(&application)
+            && platform::secure_storage_state() != platform::SecureStorageState::Ready
+            && self.secure_storage_override.as_deref() != Some(application.id())
+        {
+            let _ = platform::request_secure_storage_retry();
+            self.secure_storage_override = Some(application.id().to_owned());
+            self.launcher_status = Some(format!(
+                "Secure storage is not ready. Activate {} again to launch without credentials.",
+                application.name()
+            ));
+            return;
         }
+        self.secure_storage_override = None;
+        self.launcher_status = None;
+        let _ = platform::launch_application(&application);
+        self.launcher_visible = false;
+        let _ = platform::send_shell_command(ShellCommand::Hide);
+        self.launcher.clear();
     }
 
     fn desktop_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
@@ -507,7 +548,21 @@ impl LiveShell {
             height,
             self.palette,
         );
-        let commands = frame.commands.clone();
+        let mut commands = frame.commands.clone();
+        let storage_status = self
+            .launcher_status
+            .as_deref()
+            .or_else(|| secure_storage_status_label(self.secure_storage_state));
+        if let Some(status) = storage_status {
+            commands.push(text(
+                Rect::new(250.0, 72.0, width.saturating_sub(280) as f32, 28.0),
+                status,
+                14.0,
+                0xd98a32,
+                TextAlign::Start,
+                false,
+            ));
+        }
         self.launcher_frame = Some(frame);
         commands
     }
@@ -732,6 +787,18 @@ impl LiveShell {
     }
 }
 
+fn secure_storage_status_label(state: platform::SecureStorageState) -> Option<&'static str> {
+    match state {
+        platform::SecureStorageState::Starting => Some("Secure storage is starting…"),
+        platform::SecureStorageState::Locked => Some("Secure storage is locked."),
+        platform::SecureStorageState::PromptRequired => {
+            Some("Secure storage is waiting for its unlock prompt.")
+        }
+        platform::SecureStorageState::Unavailable => Some("Secure storage is unavailable."),
+        platform::SecureStorageState::Ready => None,
+    }
+}
+
 fn panel_control_start(width: u32) -> f32 {
     #[cfg(target_os = "macos")]
     {
@@ -772,5 +839,23 @@ fn text(
         color,
         align,
         bold,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{platform::SecureStorageState, secure_storage_status_label};
+
+    #[test]
+    fn launcher_exposes_every_non_ready_secure_storage_state() {
+        for state in [
+            SecureStorageState::Starting,
+            SecureStorageState::Locked,
+            SecureStorageState::PromptRequired,
+            SecureStorageState::Unavailable,
+        ] {
+            assert!(secure_storage_status_label(state).is_some());
+        }
+        assert_eq!(secure_storage_status_label(SecureStorageState::Ready), None);
     }
 }

@@ -5,8 +5,7 @@ use std::{
     process::Command,
 };
 
-const CURRENT_DESKTOP: &str = "Nickel:KDE";
-const KDE_SESSION_VERSION: &str = "6";
+const CURRENT_DESKTOP: &str = "Nickel";
 const XDG_HOME_DEFAULTS: [(&str, &str); 4] = [
     ("XDG_CONFIG_HOME", ".config"),
     ("XDG_DATA_HOME", ".local/share"),
@@ -40,8 +39,6 @@ fn prepare_login_environment() -> Result<(), Box<dyn std::error::Error>> {
         env::set_var("XDG_SESSION_TYPE", "wayland");
         env::set_var("XDG_CURRENT_DESKTOP", CURRENT_DESKTOP);
         env::set_var("XDG_SESSION_DESKTOP", "Nickel");
-        env::set_var("KDE_FULL_SESSION", "true");
-        env::set_var("KDE_SESSION_VERSION", KDE_SESSION_VERSION);
         for (variable, relative) in XDG_HOME_DEFAULTS {
             if env::var_os(variable).is_none() {
                 let directory = home
@@ -53,15 +50,6 @@ fn prepare_login_environment() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let pam_socket = env::var_os("PAM_KWALLET5_LOGIN")
-        .ok_or("SDDM did not provide the KWallet PAM login socket")?;
-    if !Path::new(&pam_socket).exists() {
-        return Err(format!(
-            "KWallet PAM login socket does not exist: {}",
-            Path::new(&pam_socket).display()
-        )
-        .into());
-    }
     Ok(())
 }
 
@@ -76,15 +64,11 @@ fn sibling_binary(directory: &Path, name: &str) -> Result<PathBuf, Box<dyn std::
 
 #[cfg(test)]
 mod tests {
-    use super::{CURRENT_DESKTOP, KDE_SESSION_VERSION, XDG_HOME_DEFAULTS, sibling_binary};
+    use super::{CURRENT_DESKTOP, XDG_HOME_DEFAULTS, sibling_binary};
 
     #[test]
-    fn advertises_kde_compatibility() {
-        assert_eq!(
-            CURRENT_DESKTOP.split(':').collect::<Vec<_>>(),
-            ["Nickel", "KDE"]
-        );
-        assert_eq!(KDE_SESSION_VERSION, "6");
+    fn advertises_provider_neutral_desktop_identity() {
+        assert_eq!(CURRENT_DESKTOP, "Nickel");
     }
 
     #[test]

@@ -13,7 +13,16 @@ mod window_registry;
 #[cfg(feature = "backend-winit")]
 mod winit;
 
-use std::{ffi::OsString, process::Command, thread, time::Duration};
+use std::{
+    ffi::OsString,
+    process::Command,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU8, Ordering},
+    },
+    thread,
+    time::Duration,
+};
 
 use smithay::reexports::{
     calloop::EventLoop,
@@ -77,9 +86,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         import_runtime_environment();
     }
 
-    let prepare_login_services = arguments.backend == backend::BackendKind::Udev;
     if let Some((program, command_arguments)) = arguments.command {
-        spawn_supervised(program, command_arguments, prepare_login_services)?;
+        spawn_supervised(
+            program,
+            command_arguments,
+            data.state.secure_storage_state_handle(),
+            data.state.secure_storage_retry_handle(),
+        )?;
     }
 
     event_loop.run(None, &mut data, move |_| {
@@ -95,8 +108,6 @@ fn import_runtime_environment() {
             "--systemd",
             "DISPLAY",
             "WAYLAND_DISPLAY",
-            "KDE_FULL_SESSION",
-            "KDE_SESSION_VERSION",
             "XDG_CACHE_HOME",
             "XDG_CONFIG_HOME",
             "XDG_CURRENT_DESKTOP",
@@ -136,26 +147,40 @@ fn shell_failure_action(attempt: usize) -> ShellFailureAction {
 fn spawn_supervised(
     program: OsString,
     arguments: Vec<OsString>,
-    prepare_login_services: bool,
+    secure_storage_state: Arc<AtomicU8>,
+    secure_storage_retry: Arc<AtomicBool>,
 ) -> std::io::Result<()> {
     thread::Builder::new()
         .name("nickel-shell-supervisor".into())
-        .spawn(move || supervise_shell(program, arguments, prepare_login_services))
+        .spawn(move || {
+            supervise_shell(
+                program,
+                arguments,
+                secure_storage_state,
+                secure_storage_retry,
+            )
+        })
         .map(|_| ())
 }
 
-fn supervise_shell(program: OsString, arguments: Vec<OsString>, prepare_login_services: bool) {
-    if prepare_login_services
-        && let Err(error) = thread::Builder::new()
-            .name("nickel-login-services".into())
-            .spawn(|| {
-                if let Err(error) = login_services::prepare_secure_storage() {
-                    tracing::error!(
-                        %error,
-                        "secure storage unavailable; applications requiring credentials may fail"
-                    );
+fn supervise_shell(
+    program: OsString,
+    arguments: Vec<OsString>,
+    secure_storage_state: Arc<AtomicU8>,
+    secure_storage_retry: Arc<AtomicBool>,
+) {
+    if let Err(error) = thread::Builder::new()
+        .name("nickel-login-services".into())
+        .spawn(move || {
+            let mut previous = None;
+            login_services::monitor_secure_storage(secure_storage_retry, |state| {
+                secure_storage_state.store(state as u8, Ordering::Release);
+                if previous != Some(state) {
+                    tracing::info!(state = state.as_str(), "secure storage state changed");
+                    previous = Some(state);
                 }
-            })
+            });
+        })
     {
         tracing::error!(%error, "failed to start secure-storage preparation");
     }

@@ -163,10 +163,19 @@ Install the completed build as an SDDM Wayland session:
 sudo packaging/install-nickel-session.sh
 ```
 
-SDDM's PAM session must start the user's established wallet provider. Nickel imports its Wayland
-environment into D-Bus and systemd and verifies that `org.freedesktop.secrets` exposes an existing
-default collection. Wallet verification does not block the desktop shell from starting, and Nickel
-never creates a replacement collection.
+Nickel asks the user D-Bus session for its configured `org.freedesktop.secrets` provider; it does not
+select or start a KWallet-, GNOME Keyring-, or KeePassXC-specific service. The operating system may
+use a provider-specific PAM module to unlock the wallet at login. Providers without PAM integration
+remain supported through the standard Secret Service unlock prompt, but automatic login-password
+unlock is not universal. Nickel verifies the existing default collection, exposes readiness to the
+shell, warns before launching known credential-dependent applications while storage is unavailable,
+and never creates a replacement collection.
+
+To pin reconnections to a specific provider, place its absolute executable path in
+`$XDG_CONFIG_HOME/nickel/secret-service-provider` (or
+`~/.config/nickel/secret-service-provider`). Nickel rejects a different process taking ownership of
+`org.freedesktop.secrets`; without this optional pin it reports the current owner for diagnosis but
+does not persist an automatic selection.
 
 ## Project Status
 

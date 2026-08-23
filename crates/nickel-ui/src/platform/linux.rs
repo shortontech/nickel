@@ -477,6 +477,46 @@ pub fn applications() -> Vec<Application> {
     desktop_entries::load_applications()
 }
 
+pub fn secure_storage_state() -> super::SecureStorageState {
+    use std::os::unix::net::UnixDatagram;
+
+    let Some(session) = env::var_os(SESSION_CONTROL_ENV) else {
+        return super::SecureStorageState::Unavailable;
+    };
+    let path = env::temp_dir().join(format!(
+        "nickel-ui-{}-secure-storage.sock",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let result = (|| {
+        let socket = UnixDatagram::bind(&path).ok()?;
+        socket
+            .set_read_timeout(Some(Duration::from_millis(25)))
+            .ok()?;
+        socket.send_to(b"secure-storage-state", session).ok()?;
+        let mut response = [0_u8; 32];
+        let length = socket.recv(&mut response).ok()?;
+        Some(match &response[..length] {
+            b"starting" => super::SecureStorageState::Starting,
+            b"locked" => super::SecureStorageState::Locked,
+            b"prompt-required" => super::SecureStorageState::PromptRequired,
+            b"ready" => super::SecureStorageState::Ready,
+            _ => super::SecureStorageState::Unavailable,
+        })
+    })();
+    let _ = std::fs::remove_file(path);
+    result.unwrap_or(super::SecureStorageState::Unavailable)
+}
+
+pub fn request_secure_storage_retry() -> bool {
+    let Some(session) = env::var_os(SESSION_CONTROL_ENV) else {
+        return false;
+    };
+    std::os::unix::net::UnixDatagram::unbound()
+        .and_then(|socket| socket.send_to(b"retry-secure-storage", session))
+        .is_ok()
+}
+
 pub fn send_shell_command(command: ShellCommand) -> bool {
     use std::os::unix::net::UnixDatagram;
 

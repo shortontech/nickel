@@ -81,6 +81,22 @@ pub enum LaunchError {
     Platform(String),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SecureStorageState {
+    Starting,
+    Locked,
+    PromptRequired,
+    Ready,
+    Unavailable,
+}
+
+pub fn application_requires_secure_storage(application: &crate::model::Application) -> bool {
+    let identity = format!("{} {}", application.id(), application.name()).to_ascii_lowercase();
+    ["chrome", "chromium", "signal"]
+        .iter()
+        .any(|marker| identity.contains(marker))
+}
+
 pub trait TraySource {
     fn snapshot(&self) -> Vec<TrayItem>;
     fn activate(&self, id: &str);
@@ -141,6 +157,30 @@ pub enum ShellCommand {
     },
 }
 
+#[cfg(test)]
+mod tests {
+    use crate::model::Application;
+
+    #[test]
+    fn credential_dependent_applications_are_identified_for_launch_gating() {
+        let application = |id: &str, name: &str| {
+            Application::new(id.into(), name.into(), None, None, Some(vec![id.into()]))
+        };
+        assert!(super::application_requires_secure_storage(&application(
+            "google-chrome.desktop",
+            "Google Chrome"
+        )));
+        assert!(super::application_requires_secure_storage(&application(
+            "org.signal.Signal.desktop",
+            "Signal"
+        )));
+        assert!(!super::application_requires_secure_storage(&application(
+            "org.kde.konsole.desktop",
+            "Konsole"
+        )));
+    }
+}
+
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
@@ -150,10 +190,10 @@ pub use linux::{
     capture_desktop, capture_pointer, copy_image_to_clipboard, copy_temp_image_path,
     execute_run_command, handle_focused_shortcut, launch_application,
     launcher_has_foreground_focus, launcher_hotkey_receiver, launcher_visibility_applied,
-    network_status, paste_text_if_requested, release_pointer, select_audio_device,
-    send_shell_command, set_audio_volume, set_bluetooth_discovery, set_bluetooth_powered,
-    set_wifi_enabled, show_window_system_menu, toggle_bluetooth_device,
-    update_panel_fullscreen_state, wallpaper,
+    network_status, paste_text_if_requested, release_pointer, request_secure_storage_retry,
+    secure_storage_state, select_audio_device, send_shell_command, set_audio_volume,
+    set_bluetooth_discovery, set_bluetooth_powered, set_wifi_enabled, show_window_system_menu,
+    toggle_bluetooth_device, update_panel_fullscreen_state, wallpaper,
 };
 
 #[cfg(target_os = "windows")]

@@ -3,7 +3,10 @@ use std::{
     ffi::OsString,
     os::unix::net::UnixDatagram,
     path::PathBuf,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU8, Ordering},
+    },
 };
 
 use nickel_core::{hotkeys::HotkeyController, launcher::LauncherVisibility};
@@ -139,6 +142,8 @@ pub struct NickelSession {
     pub output_capture_path: Option<PathBuf>,
     pub output_capture_reply_path: Option<PathBuf>,
     control_socket_path: PathBuf,
+    secure_storage_state: Arc<AtomicU8>,
+    secure_storage_retry: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -183,6 +188,10 @@ impl NickelSession {
         let space = Space::default();
 
         let control_socket_path = Self::init_control_socket(event_loop);
+        let secure_storage_state = Arc::new(AtomicU8::new(
+            crate::login_services::SecureStorageState::Starting as u8,
+        ));
+        let secure_storage_retry = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
         let socket_name = Self::init_wayland_listener(display, event_loop);
 
@@ -233,6 +242,30 @@ impl NickelSession {
             output_capture_path: None,
             output_capture_reply_path: None,
             control_socket_path,
+            secure_storage_state,
+            secure_storage_retry,
+        }
+    }
+
+    pub fn secure_storage_state_handle(&self) -> Arc<AtomicU8> {
+        Arc::clone(&self.secure_storage_state)
+    }
+
+    pub fn secure_storage_retry_handle(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        Arc::clone(&self.secure_storage_retry)
+    }
+
+    fn secure_storage_state_payload(&self) -> &'static [u8] {
+        match self.secure_storage_state.load(Ordering::Acquire) {
+            value if value == crate::login_services::SecureStorageState::Starting as u8 => {
+                b"starting"
+            }
+            value if value == crate::login_services::SecureStorageState::Locked as u8 => b"locked",
+            value if value == crate::login_services::SecureStorageState::PromptRequired as u8 => {
+                b"prompt-required"
+            }
+            value if value == crate::login_services::SecureStorageState::Ready as u8 => b"ready",
+            _ => b"unavailable",
         }
     }
 
@@ -274,6 +307,16 @@ impl NickelSession {
                                     let _ = socket.as_ref().send_to(visible, path);
                                 }
                             }
+                            b"secure-storage-state" => {
+                                if let Some(path) = source.as_pathname() {
+                                    let state = data.state.secure_storage_state_payload();
+                                    let _ = socket.as_ref().send_to(state, path);
+                                }
+                            }
+                            b"retry-secure-storage" => data
+                                .state
+                                .secure_storage_retry
+                                .store(true, std::sync::atomic::Ordering::Release),
                             b"hide-context-menu" => data.state.hide_context_menu(),
                             b"list-windows" => {
                                 if let Some(path) = source.as_pathname() {
