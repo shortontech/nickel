@@ -48,6 +48,7 @@ pub trait Application: Sized {
 pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
     let sdl = sdl3::init()?;
     let video = sdl.video()?;
+    let clipboard = video.clipboard();
     let mut events = sdl.event_pump()?;
     let (width, height) = application.initial_size();
     let window = video
@@ -187,6 +188,34 @@ pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
                     ..
                 } if keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD) => UiEvent::TextSelectAll,
                 Event::KeyDown {
+                    keycode: Some(Keycode::C),
+                    keymod,
+                    ..
+                } if keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD) => UiEvent::TextCopy,
+                Event::KeyDown {
+                    keycode: Some(Keycode::X),
+                    keymod,
+                    ..
+                } if keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD) => {
+                    let Some(selected) = tree.selected_text(&state) else {
+                        continue;
+                    };
+                    if clipboard.set_clipboard_text(&selected).is_err() {
+                        continue;
+                    }
+                    UiEvent::TextCut
+                }
+                Event::KeyDown {
+                    keycode: Some(Keycode::V),
+                    keymod,
+                    ..
+                } if keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD) => {
+                    let Ok(text) = clipboard.clipboard_text() else {
+                        continue;
+                    };
+                    UiEvent::TextPaste(text)
+                }
+                Event::KeyDown {
                     keycode: Some(Keycode::Backspace),
                     keymod,
                     ..
@@ -268,6 +297,8 @@ pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
                     | UiEvent::TextMoveHome { .. }
                     | UiEvent::TextMoveEnd { .. }
                     | UiEvent::TextSelectAll
+                    | UiEvent::TextCut
+                    | UiEvent::TextPaste(_)
             );
             let outcome = tree.handle_event(&mut state, event);
             if resets_caret {
@@ -275,6 +306,9 @@ pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
             }
             for message in outcome.messages {
                 application.update(message);
+            }
+            if let Some(text) = outcome.clipboard_text {
+                let _ = clipboard.set_clipboard_text(&text);
             }
             if outcome.invalidation != crate::Invalidation::None {
                 dirty = true;

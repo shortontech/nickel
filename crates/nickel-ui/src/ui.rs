@@ -80,6 +80,9 @@ pub enum UiEvent {
     TextMoveHome { extend_selection: bool },
     TextMoveEnd { extend_selection: bool },
     TextSelectAll,
+    TextCopy,
+    TextCut,
+    TextPaste(String),
     CaretBlink,
     FocusLost,
     Suspended,
@@ -89,6 +92,7 @@ pub enum UiEvent {
 #[derive(Clone, Debug, PartialEq)]
 pub struct EventOutcome<Message> {
     pub messages: Vec<Message>,
+    pub clipboard_text: Option<String>,
     pub invalidation: Invalidation,
 }
 
@@ -96,6 +100,7 @@ impl<Message> Default for EventOutcome<Message> {
     fn default() -> Self {
         Self {
             messages: Vec::new(),
+            clipboard_text: None,
             invalidation: Invalidation::None,
         }
     }
@@ -2648,6 +2653,12 @@ impl<Message> Default for UiTree<Message> {
 }
 
 impl<Message: Clone> UiTree<Message> {
+    pub fn selected_text(&self, state: &UiStateStore) -> Option<String> {
+        self.focused_editor(state)
+            .and_then(TextEditor::selected_text)
+            .map(ToOwned::to_owned)
+    }
+
     pub fn layout(root: impl Component<Message>, bounds: Rect) -> Self {
         Self::layout_internal(root, bounds, false)
     }
@@ -3104,6 +3115,34 @@ impl<Message: Clone> UiTree<Message> {
                     Invalidation::Paint
                 })
                 .unwrap_or(Invalidation::None),
+            UiEvent::TextCopy => {
+                outcome.clipboard_text = self.selected_text(state);
+                Invalidation::None
+            }
+            UiEvent::TextCut => {
+                let Some(id) = state.focused().cloned() else {
+                    return outcome;
+                };
+                let Some(input) = self.text_inputs.iter().find(|input| input.id == id) else {
+                    return outcome;
+                };
+                let editor = state.editor(id, &input.initial);
+                outcome.clipboard_text = editor.cut_selection();
+                if outcome.clipboard_text.is_some() {
+                    outcome.messages.push((input.map)(editor.text().to_owned()));
+                    state.show_caret();
+                    Invalidation::Layout
+                } else {
+                    Invalidation::None
+                }
+            }
+            UiEvent::TextPaste(text) => self
+                .edit_focused_text(state, |editor| editor.insert(&text))
+                .map(|message| {
+                    outcome.messages.push(message);
+                    Invalidation::Layout
+                })
+                .unwrap_or(Invalidation::None),
             UiEvent::CaretBlink => state.toggle_caret(),
             UiEvent::FocusLost => state.focus_lost(),
             UiEvent::Suspended => state.suspended(),
@@ -3124,6 +3163,11 @@ impl<Message: Clone> UiTree<Message> {
         let message = (input.map)(editor.text().to_owned());
         state.show_caret();
         Some(message)
+    }
+
+    fn focused_editor<'a>(&self, state: &'a UiStateStore) -> Option<&'a TextEditor> {
+        let id = state.focused()?;
+        state.state(id)?.editor.as_ref()
     }
 
     fn move_focus(&self, state: &mut UiStateStore, direction: isize) -> Invalidation {
@@ -5724,6 +5768,36 @@ mod tests {
     }
 
     #[test]
+    fn focused_text_field_copies_cuts_and_pastes_selection() {
+        fn query(value: String) -> TestMessage {
+            TestMessage::Query(value)
+        }
+
+        let mut state = UiStateStore::default();
+        let tree = UiTree::layout_with_state(
+            TextField::on_change("copy me", query).id("query"),
+            Rect::new(0.0, 0.0, 180.0, 32.0),
+            &mut state,
+        );
+        tree.handle_event(&mut state, UiEvent::FocusNext);
+        tree.handle_event(&mut state, UiEvent::TextSelectAll);
+
+        let copied = tree.handle_event(&mut state, UiEvent::TextCopy);
+        assert_eq!(copied.clipboard_text.as_deref(), Some("copy me"));
+        assert!(copied.messages.is_empty());
+
+        let cut = tree.handle_event(&mut state, UiEvent::TextCut);
+        assert_eq!(cut.clipboard_text.as_deref(), Some("copy me"));
+        assert_eq!(cut.messages, vec![TestMessage::Query(String::new())]);
+
+        let pasted = tree.handle_event(&mut state, UiEvent::TextPaste("世界".into()));
+        assert_eq!(pasted.messages, vec![TestMessage::Query("世界".into())]);
+        let empty_cut = tree.handle_event(&mut state, UiEvent::TextCut);
+        assert!(empty_cut.clipboard_text.is_none());
+        assert!(empty_cut.messages.is_empty());
+    }
+
+    #[test]
     fn ordinary_auto_overflow_owns_scroll_state_and_clips_descendants() {
         let build = |state: &mut UiStateStore| {
             UiTree::layout_with_state(
@@ -5878,6 +5952,7 @@ mod tests {
             ),
             EventOutcome {
                 messages: Vec::new(),
+                clipboard_text: None,
                 invalidation: Invalidation::Layout,
             }
         );

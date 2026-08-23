@@ -40,6 +40,12 @@ impl TextEditor {
         self.selection().map(|range| &self.text[range])
     }
 
+    pub fn cut_selection(&mut self) -> Option<String> {
+        let selected = self.selected_text()?.to_owned();
+        self.delete_selection();
+        Some(selected)
+    }
+
     pub fn set_text(&mut self, text: impl Into<String>) {
         self.text = text.into();
         self.cursor = self.text.len();
@@ -395,5 +401,21 @@ mod tests {
         let mut unicode = TextEditor::new("a🦀");
         unicode.place_cursor("a🦀".len());
         assert_eq!(unicode.cursor(), "a🦀".len());
+    }
+
+    #[test]
+    fn copy_cut_and_paste_preserve_unicode_selection_boundaries() {
+        let mut editor = TextEditor::new("copy 🦀 here");
+        editor.move_home(false);
+        for _ in 0..5 {
+            editor.move_right(false);
+        }
+        editor.move_right(true);
+        assert_eq!(editor.selected_text(), Some("🦀"));
+        assert_eq!(editor.cut_selection().as_deref(), Some("🦀"));
+        assert_eq!(editor.text(), "copy  here");
+        editor.insert("世界");
+        assert_eq!(editor.text(), "copy 世界 here");
+        assert_eq!(editor.cut_selection(), None);
     }
 }
