@@ -108,6 +108,7 @@ pub struct UiStateStore {
     pressed: Option<UiId>,
     captured: Option<UiId>,
     controller_selected: Option<UiId>,
+    caret_visible: bool,
 }
 
 impl Default for UiStateStore {
@@ -127,6 +128,7 @@ impl UiStateStore {
             pressed: None,
             captured: None,
             controller_selected: None,
+            caret_visible: true,
         }
     }
 
@@ -173,6 +175,7 @@ impl UiStateStore {
     }
 
     pub fn set_focus(&mut self, id: Option<UiId>) -> Invalidation {
+        self.caret_visible = true;
         replace_if_changed(&mut self.focused, id, Invalidation::Paint)
     }
 
@@ -210,6 +213,27 @@ impl UiStateStore {
 
     pub fn controller_selected(&self) -> Option<&UiId> {
         self.controller_selected.as_ref()
+    }
+
+    pub fn caret_visible(&self) -> bool {
+        self.caret_visible
+    }
+
+    pub fn show_caret(&mut self) -> Invalidation {
+        if self.caret_visible {
+            Invalidation::None
+        } else {
+            self.caret_visible = true;
+            Invalidation::Paint
+        }
+    }
+
+    pub fn toggle_caret(&mut self) -> Invalidation {
+        if self.focused.is_none() {
+            return Invalidation::None;
+        }
+        self.caret_visible = !self.caret_visible;
+        Invalidation::Paint
     }
 
     pub fn scroll_by(&mut self, id: impl Into<UiId>, delta: f32, maximum: f32) -> Invalidation {
@@ -280,6 +304,7 @@ impl UiStateStore {
         self.pressed = None;
         self.captured = None;
         self.controller_selected = None;
+        self.caret_visible = true;
     }
 
     fn clear_ownership_for_missing_entries(&mut self) {

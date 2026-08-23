@@ -7,6 +7,7 @@ use std::{
 
 use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping, Weight, Wrap};
 use image::RgbaImage;
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
     Align, Axis, Constraints, FlexItem, Insets, Invalidation, Justify, Length, Overflow, Point,
@@ -70,12 +71,16 @@ pub enum UiEvent {
     TextInput(String),
     ImePreedit(String),
     TextBackspace,
+    TextBackspaceWord,
     TextDelete,
     TextMoveLeft { extend_selection: bool },
     TextMoveRight { extend_selection: bool },
+    TextMoveWordLeft { extend_selection: bool },
+    TextMoveWordRight { extend_selection: bool },
     TextMoveHome { extend_selection: bool },
     TextMoveEnd { extend_selection: bool },
     TextSelectAll,
+    CaretBlink,
     FocusLost,
     Suspended,
     DeviceRemoved,
@@ -307,6 +312,9 @@ enum Kind {
         line_height: Option<f32>,
         max_lines: Option<usize>,
         ellipsis: bool,
+        selection_x: Option<(f32, f32)>,
+        caret_x: Option<f32>,
+        input_value: Option<String>,
     },
     Image {
         id: u16,
@@ -409,6 +417,9 @@ impl<Message> Element<Message> {
                 line_height: None,
                 max_lines: None,
                 ellipsis: false,
+                selection_x: None,
+                caret_x: None,
+                input_value: None,
             },
             id: None,
             source: None,
@@ -2415,8 +2426,39 @@ struct MessageRegion<Message> {
 #[derive(Clone, Debug)]
 struct TextInputRegion<Message> {
     id: UiId,
+    rect: Rect,
+    scale: f32,
+    bold: bool,
     initial: String,
     map: fn(String) -> Message,
+}
+
+fn text_offset_at<Message>(input: &TextInputRegion<Message>, pointer_x: f32) -> usize {
+    if pointer_x <= input.rect.origin.x {
+        return 0;
+    }
+    if pointer_x >= input.rect.origin.x + input.rect.size.width - 1.0 {
+        return input.initial.len();
+    }
+    let target = (pointer_x - input.rect.origin.x).max(0.0);
+    let mut previous = (0, 0.0);
+    for (index, _) in input.initial.grapheme_indices(true) {
+        let width = measure_text(
+            &input.initial[..index],
+            input.scale,
+            input.bold,
+            false,
+            None,
+            Some(1),
+            f32::INFINITY,
+        )
+        .width;
+        if target < (previous.1 + width) * 0.5 {
+            return previous.0;
+        }
+        previous = (index, width);
+    }
+    input.initial.len()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -2863,13 +2905,33 @@ impl<Message: Clone> UiTree<Message> {
     pub fn handle_event(&self, state: &mut UiStateStore, event: UiEvent) -> EventOutcome<Message> {
         let mut outcome = EventOutcome::default();
         outcome.invalidation = match event {
-            UiEvent::PointerMoved(point) => state.set_hovered(self.id_at(point).cloned()),
+            UiEvent::PointerMoved(point) => {
+                let mut invalidation = state.set_hovered(self.id_at(point).cloned());
+                if let Some(id) = state.captured().cloned()
+                    && let Some(input) = self.text_inputs.iter().find(|input| input.id == id)
+                {
+                    let cursor = text_offset_at(input, point.x);
+                    state.editor(id, &input.initial).extend_selection_to(cursor);
+                    invalidation = invalidation
+                        .merge(state.show_caret())
+                        .merge(Invalidation::Paint);
+                }
+                invalidation
+            }
             UiEvent::PointerPressed(point) => {
                 let id = self.id_at(point).cloned();
-                state
+                let mut invalidation = state
                     .set_focus(id.clone())
                     .merge(state.set_pressed(id.clone()))
-                    .merge(state.set_capture(id))
+                    .merge(state.set_capture(id.clone()));
+                if let Some(id) = id
+                    && let Some(input) = self.text_inputs.iter().find(|input| input.id == id)
+                {
+                    let cursor = text_offset_at(input, point.x);
+                    state.editor(id, &input.initial).place_cursor(cursor);
+                    invalidation = invalidation.merge(state.show_caret());
+                }
+                invalidation
             }
             UiEvent::PointerReleased(point) => {
                 let released = self.id_at(point);
@@ -2957,6 +3019,7 @@ impl<Message: Clone> UiTree<Message> {
                         let editor = state.editor(id, &input.initial);
                         editor.insert(&text);
                         outcome.messages.push((input.map)(editor.text().to_owned()));
+                        state.show_caret();
                     }
                     Invalidation::Layout
                 } else {
@@ -2973,6 +3036,13 @@ impl<Message: Clone> UiTree<Message> {
             }
             UiEvent::TextBackspace => self
                 .edit_focused_text(state, TextEditor::backspace)
+                .map(|message| {
+                    outcome.messages.push(message);
+                    Invalidation::Layout
+                })
+                .unwrap_or(Invalidation::None),
+            UiEvent::TextBackspaceWord => self
+                .edit_focused_text(state, TextEditor::backspace_word)
                 .map(|message| {
                     outcome.messages.push(message);
                     Invalidation::Layout
@@ -2999,6 +3069,20 @@ impl<Message: Clone> UiTree<Message> {
                     Invalidation::Paint
                 })
                 .unwrap_or(Invalidation::None),
+            UiEvent::TextMoveWordLeft { extend_selection } => self
+                .edit_focused_text(state, |editor| editor.move_word_left(extend_selection))
+                .map(|message| {
+                    outcome.messages.push(message);
+                    Invalidation::Paint
+                })
+                .unwrap_or(Invalidation::None),
+            UiEvent::TextMoveWordRight { extend_selection } => self
+                .edit_focused_text(state, |editor| editor.move_word_right(extend_selection))
+                .map(|message| {
+                    outcome.messages.push(message);
+                    Invalidation::Paint
+                })
+                .unwrap_or(Invalidation::None),
             UiEvent::TextMoveHome { extend_selection } => self
                 .edit_focused_text(state, |editor| editor.move_home(extend_selection))
                 .map(|message| {
@@ -3020,6 +3104,7 @@ impl<Message: Clone> UiTree<Message> {
                     Invalidation::Paint
                 })
                 .unwrap_or(Invalidation::None),
+            UiEvent::CaretBlink => state.toggle_caret(),
             UiEvent::FocusLost => state.focus_lost(),
             UiEvent::Suspended => state.suspended(),
             UiEvent::DeviceRemoved => state.device_removed(),
@@ -3036,7 +3121,9 @@ impl<Message: Clone> UiTree<Message> {
         let input = self.text_inputs.iter().find(|input| input.id == id)?;
         let editor = state.editor(id, &input.initial);
         edit(editor);
-        Some((input.map)(editor.text().to_owned()))
+        let message = (input.map)(editor.text().to_owned());
+        state.show_caret();
+        Some(message)
     }
 
     fn move_focus(&self, state: &mut UiStateStore, direction: isize) -> Invalidation {
@@ -3571,11 +3658,20 @@ fn emit_element<Message: Clone>(
         }
     }
     if let Some(map) = element.text_mapper
-        && let Kind::Text { value, .. } = &element.kind
+        && let Kind::Text {
+            value, input_value, ..
+        } = &element.kind
     {
+        let (scale, bold) = match &element.kind {
+            Kind::Text { scale, bold, .. } => (*scale, *bold),
+            _ => unreachable!(),
+        };
         tree.text_inputs.push(TextInputRegion {
             id: node.id.clone(),
-            initial: value.clone(),
+            rect,
+            scale,
+            bold,
+            initial: input_value.clone().unwrap_or_else(|| value.clone()),
             map,
         });
         if element.message.is_none()
@@ -3599,6 +3695,38 @@ fn emit_element<Message: Clone>(
         || element.style.overflow_y != Overflow::Visible;
     if clips_descendants {
         tree.commands.push(PaintCommand::PushClip(rect));
+    }
+    if let Kind::Text {
+        scale,
+        selection_x: Some((start, end)),
+        ..
+    } = &element.kind
+    {
+        tree.commands.push(PaintCommand::Fill {
+            rect: Rect::new(
+                rect.origin.x + *start,
+                rect.origin.y,
+                (*end - *start).max(1.0),
+                text_font_size(*scale) * 1.3,
+            ),
+            color: 0x315a8f,
+        });
+    }
+    if let Kind::Text {
+        scale,
+        caret_x: Some(caret_x),
+        ..
+    } = &element.kind
+    {
+        tree.commands.push(PaintCommand::Fill {
+            rect: Rect::new(
+                rect.origin.x + *caret_x,
+                rect.origin.y,
+                1.5,
+                text_font_size(*scale) * 1.3,
+            ),
+            color: foreground.unwrap_or(0x00ff_ffff),
+        });
     }
     match &element.kind {
         Kind::Text {
@@ -4265,14 +4393,55 @@ fn apply_transient_state<Message>(
             _ => {}
         }
         if element.text_mapper.is_some()
-            && let Kind::Text { value, .. } = &mut element.kind
+            && let Kind::Text {
+                value,
+                scale,
+                bold,
+                selection_x,
+                caret_x,
+                input_value,
+                ..
+            } = &mut element.kind
         {
             let initial = value.clone();
+            let focused = state.focused() == Some(id);
+            let caret_visible = state.caret_visible();
             let editor = state.editor(id.clone(), &initial);
             if editor.text() != initial {
                 editor.set_text(initial);
             }
-            *value = editor.display_text_with_caret("▏");
+            *input_value = Some(editor.text().to_owned());
+            *selection_x = focused
+                .then(|| editor.selection())
+                .flatten()
+                .map(|selection| {
+                    let width = |end| {
+                        measure_text(
+                            &editor.text()[..end],
+                            *scale,
+                            *bold,
+                            false,
+                            None,
+                            Some(1),
+                            f32::INFINITY,
+                        )
+                        .width
+                    };
+                    (width(selection.start), width(selection.end))
+                });
+            *caret_x = (focused && caret_visible).then(|| {
+                measure_text(
+                    &editor.display_caret_prefix(),
+                    *scale,
+                    *bold,
+                    false,
+                    None,
+                    Some(1),
+                    f32::INFINITY,
+                )
+                .width
+            });
+            *value = editor.display_text_with_caret("");
         }
         if matches!(element.style.overflow_y, Overflow::Scroll | Overflow::Auto) {
             element.style.scroll_offset = if element.style.follow_scroll_end && scroll_at_end {
@@ -5160,6 +5329,52 @@ mod tests {
     }
 
     #[test]
+    fn pointer_drag_selects_visible_text_and_caret_blink_only_changes_paint() {
+        fn query(value: String) -> TestMessage {
+            TestMessage::Query(value)
+        }
+
+        let mut state = UiStateStore::default();
+        let first = UiTree::layout_with_state(
+            TextField::on_change("select this", query).id("query"),
+            Rect::new(0.0, 0.0, 200.0, 32.0),
+            &mut state,
+        );
+        first.handle_event(
+            &mut state,
+            UiEvent::PointerPressed(Point { x: 2.0, y: 10.0 }),
+        );
+        first.handle_event(
+            &mut state,
+            UiEvent::PointerMoved(Point { x: 70.0, y: 10.0 }),
+        );
+        let selected = state
+            .state(&UiId::from("root/query"))
+            .and_then(|entry| entry.editor.as_ref())
+            .and_then(TextEditor::selection);
+        assert!(selected.is_some_and(|range| !range.is_empty()));
+
+        let selected_tree = UiTree::layout_with_state(
+            TextField::on_change("select this", query).id("query"),
+            Rect::new(0.0, 0.0, 200.0, 32.0),
+            &mut state,
+        );
+        assert!(selected_tree.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::Fill {
+                color: 0x315a8f,
+                ..
+            }
+        )));
+        assert_eq!(
+            selected_tree
+                .handle_event(&mut state, UiEvent::CaretBlink)
+                .invalidation,
+            Invalidation::Paint
+        );
+    }
+
+    #[test]
     fn structured_diagnostics_are_bounded_deduplicated_and_attributed() {
         let tree = UiTree::layout_with_diagnostics(
             Column::new()
@@ -5449,12 +5664,9 @@ mod tests {
         );
 
         let externally_cleared = build(&mut state, "");
-        assert!(
-            externally_cleared
-                .commands()
-                .iter()
-                .any(|command| matches!(command, PaintCommand::Text { text, .. } if text == "▏"))
-        );
+        assert!(externally_cleared.commands().iter().any(
+            |command| matches!(command, PaintCommand::Fill { rect, .. } if rect.size.width == 1.5)
+        ));
         assert_eq!(
             state
                 .state(&id)
@@ -5477,10 +5689,7 @@ mod tests {
             Rect::new(0.0, 0.0, 180.0, 32.0),
             &mut state,
         );
-        tree.handle_event(
-            &mut state,
-            UiEvent::PointerPressed(Point { x: 10.0, y: 10.0 }),
-        );
+        tree.handle_event(&mut state, UiEvent::FocusNext);
         assert_eq!(
             tree.handle_event(
                 &mut state,

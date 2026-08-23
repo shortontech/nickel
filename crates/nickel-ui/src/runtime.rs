@@ -1,4 +1,7 @@
-use std::{error::Error, time::Duration};
+use std::{
+    error::Error,
+    time::{Duration, Instant},
+};
 
 use sdl3::{
     event::{Event, WindowEvent},
@@ -60,8 +63,15 @@ pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
     let mut cursor = Point::default();
     let mut running = true;
     let mut dirty = true;
+    let mut next_caret_blink = Instant::now() + Duration::from_millis(500);
 
     while running {
+        let caret_tick = Instant::now() >= next_caret_blink;
+        if caret_tick {
+            next_caret_blink = Instant::now() + Duration::from_millis(500);
+            let _ = state.toggle_caret();
+            dirty = true;
+        }
         dirty |= application.poll();
         let (logical_width, logical_height) = presenter.window().size();
         let pixel_width = presenter.window().size_in_pixels().0;
@@ -178,6 +188,11 @@ pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
                 } if keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD) => UiEvent::TextSelectAll,
                 Event::KeyDown {
                     keycode: Some(Keycode::Backspace),
+                    keymod,
+                    ..
+                } if keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD) => UiEvent::TextBackspaceWord,
+                Event::KeyDown {
+                    keycode: Some(Keycode::Backspace),
                     ..
                 } => UiEvent::TextBackspace,
                 Event::KeyDown {
@@ -188,9 +203,27 @@ pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
                     keycode: Some(Keycode::Left),
                     keymod,
                     ..
+                } if keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD) => {
+                    UiEvent::TextMoveWordLeft {
+                        extend_selection: keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD),
+                    }
+                }
+                Event::KeyDown {
+                    keycode: Some(Keycode::Left),
+                    keymod,
+                    ..
                 } => UiEvent::TextMoveLeft {
                     extend_selection: keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD),
                 },
+                Event::KeyDown {
+                    keycode: Some(Keycode::Right),
+                    keymod,
+                    ..
+                } if keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD) => {
+                    UiEvent::TextMoveWordRight {
+                        extend_selection: keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD),
+                    }
+                }
                 Event::KeyDown {
                     keycode: Some(Keycode::Right),
                     keymod,
@@ -220,7 +253,26 @@ pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
                 Event::TextEditing { text, .. } => UiEvent::ImePreedit(text),
                 _ => continue,
             };
+            let resets_caret = matches!(
+                &event,
+                UiEvent::PointerPressed(_)
+                    | UiEvent::PointerMoved(_)
+                    | UiEvent::TextInput(_)
+                    | UiEvent::TextBackspace
+                    | UiEvent::TextBackspaceWord
+                    | UiEvent::TextDelete
+                    | UiEvent::TextMoveLeft { .. }
+                    | UiEvent::TextMoveRight { .. }
+                    | UiEvent::TextMoveWordLeft { .. }
+                    | UiEvent::TextMoveWordRight { .. }
+                    | UiEvent::TextMoveHome { .. }
+                    | UiEvent::TextMoveEnd { .. }
+                    | UiEvent::TextSelectAll
+            );
             let outcome = tree.handle_event(&mut state, event);
+            if resets_caret {
+                next_caret_blink = Instant::now() + Duration::from_millis(500);
+            }
             for message in outcome.messages {
                 application.update(message);
             }
