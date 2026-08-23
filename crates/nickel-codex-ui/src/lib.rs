@@ -81,6 +81,77 @@ mod tests {
     }
 
     #[test]
+    fn new_thread_and_server_user_item_preserve_the_optimistic_message() {
+        let mut state = ChatState::default();
+        state.status = ConnectionStatus::Ready;
+        state.draft = "hello".into();
+        assert_eq!(state.begin_send().as_deref(), Some("hello"));
+
+        state.apply(
+            1,
+            ControllerEvent::ThreadCreated(nickel_codex::Thread {
+                id: ThreadId("new-thread".into()),
+                title: Some("Untitled conversation".into()),
+                cwd: None,
+                turns: Vec::new(),
+            }),
+        );
+        state.apply(
+            1,
+            event(
+                1,
+                EventKind::ItemStarted {
+                    thread_id: Some(ThreadId("new-thread".into())),
+                    turn_id: Some(TurnId("turn".into())),
+                    item_id: "server-user".into(),
+                    item_type: "userMessage".into(),
+                },
+            ),
+        );
+        state.apply(
+            1,
+            event(
+                2,
+                EventKind::ItemCompleted {
+                    item_id: "server-user".into(),
+                },
+            ),
+        );
+
+        assert_eq!(state.items.len(), 1);
+        assert_eq!(state.items[0].id, "server-user");
+        assert_eq!(state.items[0].text, "hello");
+        assert!(state.items[0].complete);
+    }
+
+    #[test]
+    fn completed_protocol_items_without_content_are_not_rendered() {
+        let mut state = ChatState::default();
+        state.apply(
+            1,
+            event(
+                1,
+                EventKind::ItemStarted {
+                    thread_id: None,
+                    turn_id: None,
+                    item_id: "empty-reasoning".into(),
+                    item_type: "reasoning".into(),
+                },
+            ),
+        );
+        state.apply(
+            1,
+            event(
+                2,
+                EventKind::ItemCompleted {
+                    item_id: "empty-reasoning".into(),
+                },
+            ),
+        );
+        assert!(state.items.is_empty());
+    }
+
+    #[test]
     fn terminal_and_recoverable_failures_have_distinct_connection_states() {
         let mut state = ChatState::default();
         state.status = ConnectionStatus::Ready;

@@ -53,6 +53,7 @@ pub enum ControllerEvent {
         models: Vec<Model>,
         threads: Vec<Thread>,
     },
+    ThreadCreated(Thread),
     ThreadSelected(Thread),
     Protocol(CodexEvent),
     Incompatible(String),
@@ -203,7 +204,7 @@ fn run_worker(
                         })
                         .map(|thread| {
                             selected_thread = Some(thread.id.clone());
-                            let _ = send(ControllerEvent::ThreadSelected(thread.clone()));
+                            let _ = send(ControllerEvent::ThreadCreated(thread.clone()));
                             thread.id
                         }),
                 };

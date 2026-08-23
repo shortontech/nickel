@@ -134,13 +134,12 @@ impl ChatState {
                 self.models = models.into_iter().take(100).collect();
                 self.threads = threads.into_iter().take(MAX_THREADS).collect();
             }
+            ControllerEvent::ThreadCreated(thread) => {
+                self.record_selected_thread(thread);
+            }
             ControllerEvent::ThreadSelected(thread) => {
                 self.hydrate_thread(&thread);
-                self.selected_thread = Some(thread.id.clone());
-                if !self.threads.iter().any(|known| known.id == thread.id) {
-                    self.threads.insert(0, thread);
-                    self.threads.truncate(MAX_THREADS);
-                }
+                self.record_selected_thread(thread);
             }
             ControllerEvent::Protocol(event) => self.apply_protocol(event),
             ControllerEvent::Incompatible(message) => {
@@ -209,23 +208,23 @@ impl ChatState {
                 item_id, item_type, ..
             } => {
                 let kind = chat_item_kind(&item_type);
-                self.push_item(ChatItem {
-                    id: item_id,
-                    kind,
-                    text: String::new(),
-                    complete: false,
-                });
-            }
-            EventKind::ItemCompleted { item_id } => {
-                if let Some(item) = self.item_mut(&item_id) {
-                    item.complete = true;
-                } else {
+                if kind != ChatItemKind::User || !self.reconcile_optimistic_user(&item_id) {
                     self.push_item(ChatItem {
                         id: item_id,
-                        kind: ChatItemKind::Unknown("completed item".into()),
+                        kind,
                         text: String::new(),
-                        complete: true,
+                        complete: false,
                     });
+                }
+            }
+            EventKind::ItemCompleted { item_id } => {
+                if let Some(index) = self.item_indexes.get(&item_id).copied() {
+                    if self.items[index].text.is_empty() {
+                        self.items.remove(index);
+                        self.reindex();
+                    } else {
+                        self.items[index].complete = true;
+                    }
                 }
             }
             EventKind::AgentMessageDelta { item_id, delta } => {
@@ -277,6 +276,26 @@ impl ChatState {
         }
         self.items.push_back(item);
         self.reindex();
+    }
+
+    fn record_selected_thread(&mut self, thread: Thread) {
+        self.selected_thread = Some(thread.id.clone());
+        if !self.threads.iter().any(|known| known.id == thread.id) {
+            self.threads.insert(0, thread);
+            self.threads.truncate(MAX_THREADS);
+        }
+    }
+
+    fn reconcile_optimistic_user(&mut self, item_id: &str) -> bool {
+        let Some(index) = self.items.iter().rposition(|item| {
+            item.kind == ChatItemKind::User && item.id.starts_with("local-user-")
+        }) else {
+            return false;
+        };
+        self.items[index].id = item_id.to_owned();
+        self.items[index].complete = false;
+        self.reindex();
+        true
     }
 
     fn push_pending(&mut self, interaction: PendingInteraction) {
