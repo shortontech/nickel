@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, collections::HashMap};
+use std::{cmp::Ordering, collections::HashMap, sync::Arc};
 
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -19,7 +19,7 @@ pub enum SelectionAffinity {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SelectionRun {
     pub id: String,
-    pub text: String,
+    pub text: Arc<str>,
     pub boundary_before: TextBoundary,
 }
 
@@ -27,7 +27,7 @@ impl SelectionRun {
     pub fn inline(id: impl Into<String>, text: impl Into<String>) -> Self {
         Self {
             id: id.into(),
-            text: text.into(),
+            text: Arc::from(text.into()),
             boundary_before: TextBoundary::Inline,
         }
     }
@@ -35,7 +35,7 @@ impl SelectionRun {
     pub fn block(id: impl Into<String>, text: impl Into<String>) -> Self {
         Self {
             id: id.into(),
-            text: text.into(),
+            text: Arc::from(text.into()),
             boundary_before: TextBoundary::Block,
         }
     }
@@ -177,14 +177,18 @@ impl SelectionDocument {
     }
 
     pub fn reconcile(&self, selection: &mut DocumentSelection) {
+        self.reconcile_from(self, selection);
+    }
+
+    pub fn reconcile_from(&self, previous: &SelectionDocument, selection: &mut DocumentSelection) {
         let anchor = selection
             .anchor
             .as_ref()
-            .and_then(|endpoint| self.reconcile_endpoint(endpoint));
+            .and_then(|endpoint| self.reconcile_endpoint(previous, endpoint));
         let focus = selection
             .focus
             .as_ref()
-            .and_then(|endpoint| self.reconcile_endpoint(endpoint));
+            .and_then(|endpoint| self.reconcile_endpoint(previous, endpoint));
         selection.anchor = anchor;
         selection.focus = focus;
         if selection.anchor.is_none() || selection.focus.is_none() {
@@ -284,17 +288,33 @@ impl SelectionDocument {
         })
     }
 
-    fn reconcile_endpoint(&self, endpoint: &SelectionEndpoint) -> Option<SelectionEndpoint> {
-        if let Some(endpoint) = self.clamp_endpoint(endpoint) {
-            return Some(endpoint);
+    fn reconcile_endpoint(
+        &self,
+        previous: &SelectionDocument,
+        endpoint: &SelectionEndpoint,
+    ) -> Option<SelectionEndpoint> {
+        if let Some(mut reconciled) = self.clamp_endpoint(endpoint) {
+            if endpoint.affinity == SelectionAffinity::After
+                && previous
+                    .run(&endpoint.run_id)
+                    .is_some_and(|run| endpoint.offset == run.text.len())
+                && let Some(run) = self.run(&endpoint.run_id)
+            {
+                reconciled.offset = run.text.len();
+            }
+            return Some(reconciled);
         }
-        let fallback = match endpoint.affinity {
-            SelectionAffinity::Before => self.runs.first().map(|run| (run, 0)),
-            SelectionAffinity::After => self.runs.last().map(|run| (run, run.text.len())),
-        }?;
+        let old_index = previous.indexes.get(&endpoint.run_id).copied().unwrap_or(0);
+        let fallback = self
+            .runs
+            .get(old_index.min(self.runs.len().saturating_sub(1)))?;
+        let offset = match endpoint.affinity {
+            SelectionAffinity::Before => 0,
+            SelectionAffinity::After => fallback.text.len(),
+        };
         Some(SelectionEndpoint {
-            run_id: fallback.0.id.clone(),
-            offset: fallback.1,
+            run_id: fallback.id.clone(),
+            offset,
             affinity: endpoint.affinity,
         })
     }
@@ -425,6 +445,51 @@ mod tests {
         document.reconcile(&mut selection);
         assert_eq!(selection.anchor.unwrap().offset, 0);
         assert_eq!(selection.focus.unwrap().offset, 4);
+    }
+
+    #[test]
+    fn mutation_reconciliation_uses_nearest_order_and_explicit_end_affinity() {
+        let previous = SelectionDocument::new([
+            SelectionRun::block("a", "A"),
+            SelectionRun::block("removed", "old"),
+            SelectionRun::block("c", "C"),
+        ]);
+        let mut removed = DocumentSelection {
+            anchor: previous.endpoint("a", 0),
+            focus: previous.endpoint("removed", 2),
+        };
+        let current =
+            SelectionDocument::new([SelectionRun::block("a", "A"), SelectionRun::block("c", "C")]);
+        current.reconcile_from(&previous, &mut removed);
+        assert_eq!(removed.focus.unwrap().run_id, "c");
+
+        let previous = SelectionDocument::new([SelectionRun::block("stream", "old")]);
+        let mut fixed = DocumentSelection {
+            anchor: previous.endpoint("stream", 0),
+            focus: previous.endpoint("stream", 3),
+        };
+        let mut following_end = previous.select_all();
+        let current = SelectionDocument::new([SelectionRun::block("stream", "old appended")]);
+        current.reconcile_from(&previous, &mut fixed);
+        current.reconcile_from(&previous, &mut following_end);
+        assert_eq!(fixed.focus.unwrap().offset, 3);
+        assert_eq!(following_end.focus.unwrap().offset, "old appended".len());
+    }
+
+    #[test]
+    fn unicode_and_newline_serialization_never_splits_graphemes() {
+        let document = SelectionDocument::new([
+            SelectionRun::block("combining", "e\u{301}"),
+            SelectionRun::inline("emoji", "👩‍💻"),
+            SelectionRun::block("bidi", "שלום\nالعربية"),
+        ]);
+        let selection = document.select_all();
+        assert_eq!(
+            document.selected_text(&selection).as_deref(),
+            Some("e\u{301}👩‍💻\nשלום\nالعربية")
+        );
+        let emoji_end = document.endpoint("emoji", "👩‍💻".len()).unwrap();
+        assert_eq!(document.move_grapheme(&emoji_end, -1).unwrap().offset, 0);
     }
 
     #[test]

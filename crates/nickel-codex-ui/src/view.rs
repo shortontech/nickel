@@ -1,6 +1,7 @@
 use nickel_codex::{CommandDecision, FileChangeDecision, ServerRequestId};
 use nickel_ui::prelude::*;
 
+use crate::model::{TranscriptBlock, item_label, transcript_blocks};
 use crate::{
     BackendMode, ChatController, ChatItem, ChatItemKind, ChatState, ConnectionStatus,
     ControllerCommand, PendingInteraction,
@@ -258,22 +259,19 @@ impl Application for ChatApplication {
 
 #[component]
 fn ItemCard(item: &ChatItem) -> impl View<ChatMessage> {
-    let (label, background, color) = match &item.kind {
-        ChatItemKind::User => ("You", USER, TEXT),
-        ChatItemKind::Agent => ("Codex", PANEL, TEXT),
-        ChatItemKind::Reasoning => ("Reasoning summary", 0x252331, MUTED),
-        ChatItemKind::Command => ("Command", 0x242a24, TEXT),
-        ChatItemKind::FileChange => ("File change", 0x2c2920, TEXT),
-        ChatItemKind::Plan => ("Plan", 0x202a35, TEXT),
-        ChatItemKind::Error => ("Error", ERROR, TEXT),
-        ChatItemKind::Unknown(_) => ("Additional event", PANEL, MUTED),
+    let (background, color) = match &item.kind {
+        ChatItemKind::User => (USER, TEXT),
+        ChatItemKind::Agent => (PANEL, TEXT),
+        ChatItemKind::Reasoning => (0x252331, MUTED),
+        ChatItemKind::Command => (0x242a24, TEXT),
+        ChatItemKind::FileChange => (0x2c2920, TEXT),
+        ChatItemKind::Plan => (0x202a35, TEXT),
+        ChatItemKind::Error => (ERROR, TEXT),
+        ChatItemKind::Unknown(_) => (PANEL, MUTED),
     };
-    let text = if item.text.is_empty() {
-        if item.complete { "—" } else { "…" }
-    } else {
-        item.text.as_str()
-    };
-    let blocks = markdown_blocks(text);
+    let label = item_label(&item.kind);
+    let blocks = transcript_blocks(item);
+    let label_run_id = format!("{}/label", item.id);
     let (maximum_width, alignment) = if item.kind == ChatItemKind::User {
         (760.0, Align::End)
     } else {
@@ -283,93 +281,41 @@ fn ItemCard(item: &ChatItem) -> impl View<ChatMessage> {
         <Container fill_width max_width={maximum_width} align_self={alignment}
             padding={Insets::all(14.0)} gap={7.0}
             background={background} border={Border::new(BORDER, 1.0)} radius={10.0}>
-            <Text color={color} scale={0.9}>{label}</Text>
+            <Text color={color} scale={0.9} selection_run_id={label_run_id}
+                selection_boundary={TextBoundary::Block}>{label}</Text>
             <Column fill_width gap={5.0}>
-                {blocks.iter().map(|block| render_markdown_block(block, color))}
+                {blocks.iter().enumerate().map(|(index, block)| render_markdown_block(block, color, &item.id, index))}
             </Column>
         </Container>
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum MarkdownBlock {
-    Heading(String),
-    Paragraph(String),
-    ListItem(String),
-    Code(String),
-}
-
-fn markdown_blocks(input: &str) -> Vec<MarkdownBlock> {
-    let mut blocks = Vec::new();
-    let mut code = Vec::new();
-    let mut in_code = false;
-    for line in input.lines() {
-        if line.trim_start().starts_with("```") {
-            if in_code {
-                blocks.push(MarkdownBlock::Code(code.join("\n")));
-                code.clear();
-            }
-            in_code = !in_code;
-            continue;
-        }
-        if in_code {
-            code.push(line);
-        } else if let Some(heading) = line.trim_start().strip_prefix("### ") {
-            blocks.push(MarkdownBlock::Heading(inline_text(heading)));
-        } else if let Some(heading) = line.trim_start().strip_prefix("## ") {
-            blocks.push(MarkdownBlock::Heading(inline_text(heading)));
-        } else if let Some(heading) = line.trim_start().strip_prefix("# ") {
-            blocks.push(MarkdownBlock::Heading(inline_text(heading)));
-        } else if let Some(item) = line
-            .trim_start()
-            .strip_prefix("- ")
-            .or_else(|| line.trim_start().strip_prefix("* "))
-        {
-            blocks.push(MarkdownBlock::ListItem(inline_text(item)));
-        } else if !line.trim().is_empty() {
-            blocks.push(MarkdownBlock::Paragraph(inline_text(line)));
-        }
-    }
-    if in_code || !code.is_empty() {
-        blocks.push(MarkdownBlock::Code(code.join("\n")));
-    }
-    if blocks.is_empty() {
-        blocks.push(MarkdownBlock::Paragraph(String::new()));
-    }
-    blocks
-}
-
-fn inline_text(input: &str) -> String {
-    let mut code_open = false;
-    input
-        .chars()
-        .map(|character| {
-            if character == '`' {
-                code_open = !code_open;
-                if code_open { '‹' } else { '›' }
-            } else {
-                character
-            }
-        })
-        .collect()
-}
-
-fn render_markdown_block(block: &MarkdownBlock, color: Color) -> AnyView<ChatMessage> {
+fn render_markdown_block(
+    block: &TranscriptBlock,
+    color: Color,
+    item_id: &str,
+    index: usize,
+) -> AnyView<ChatMessage> {
+    let run_id = format!("{item_id}/body/{index}");
     match block {
-        MarkdownBlock::Heading(text) => AnyView::new(ui! {
-            <Text color={color} scale={1.25} width_length={Length::Fill} wrap={true}>{text}</Text>
+        TranscriptBlock::Heading(text) => AnyView::new(ui! {
+            <Text color={color} scale={1.25} width_length={Length::Fill} wrap={true}
+                selection_run_id={run_id} selection_boundary={TextBoundary::Block}>{text}</Text>
         }),
-        MarkdownBlock::ListItem(text) => AnyView::new(ui! {
-            <Text color={color} width_length={Length::Fill} wrap={true}>{format!("• {text}")}</Text>
+        TranscriptBlock::ListItem(text) => AnyView::new(ui! {
+            <Text color={color} width_length={Length::Fill} wrap={true}
+                selection_run_id={run_id} selection_boundary={TextBoundary::Block}>{text}</Text>
         }),
-        MarkdownBlock::Code(text) => AnyView::new(ui! {
+        TranscriptBlock::Code(text) => AnyView::new(ui! {
             <Container fill_width padding={Insets::all(9.0)} background={0x11151b}
                 border={Border::new(BORDER, 1.0)} radius={6.0} overflow_x={Overflow::Auto}>
-                <Text color={0xc8d6e5}>{text}</Text>
+                <Text color={0xc8d6e5} selection_run_id={run_id}
+                    selection_boundary={TextBoundary::Block}>{text}</Text>
             </Container>
         }),
-        MarkdownBlock::Paragraph(text) => AnyView::new(ui! {
-            <Text color={color} width_length={Length::Fill} wrap={true}>{text}</Text>
+        TranscriptBlock::Paragraph(text) => AnyView::new(ui! {
+            <Text color={color} width_length={Length::Fill} wrap={true}
+                selection_run_id={run_id} selection_boundary={TextBoundary::Block}>{text}</Text>
         }),
     }
 }
@@ -432,6 +378,7 @@ pub fn chat_view(state: &ChatState) -> impl View<ChatMessage> {
         TRANSCRIPT_OVERSCAN,
     );
     let transcript_range = transcript_window.range.clone();
+    let transcript_document = state.transcript_selection_document();
     let account = if state.account.authenticated {
         "Authenticated"
     } else {
@@ -483,15 +430,18 @@ pub fn chat_view(state: &ChatState) -> impl View<ChatMessage> {
                         }
                     } else {
                         ui! {
-                            {VirtualColumn::new()
-                                .window(transcript_window)
-                                .gap(TRANSCRIPT_GAP)
-                                .max_width(1000.0)
-                                .align_self(Align::Center)
-                                .children(state.items.iter().enumerate()
-                                    .skip(transcript_range.start)
-                                    .take(transcript_range.len())
-                                    .map(|(_, item)| ui! { <ItemCard key={item.id.clone()} item={item} /> }))}
+                            {SelectionRegion::new(transcript_document)
+                                .id(id!(transcript_selection))
+                                .fill_width()
+                                .child(VirtualColumn::new()
+                                    .window(transcript_window)
+                                    .gap(TRANSCRIPT_GAP)
+                                    .max_width(1000.0)
+                                    .align_self(Align::Center)
+                                    .children(state.items.iter().enumerate()
+                                        .skip(transcript_range.start)
+                                        .take(transcript_range.len())
+                                        .map(|(_, item)| ui! { <ItemCard key={item.id.clone()} item={item} /> })))}
                         }
                     }}
                 </Column>
@@ -535,15 +485,19 @@ mod tests {
 
     #[test]
     fn markdown_subset_is_safe_and_keeps_unsupported_html_as_text() {
+        let item = ChatItem {
+            id: "markdown".into(),
+            kind: ChatItemKind::Agent,
+            text: "# Heading\n- item with `code`\n```rust\nfn main() {}\n```\n<b>plain</b>".into(),
+            complete: true,
+        };
         assert_eq!(
-            markdown_blocks(
-                "# Heading\n- item with `code`\n```rust\nfn main() {}\n```\n<b>plain</b>"
-            ),
+            transcript_blocks(&item),
             vec![
-                MarkdownBlock::Heading("Heading".into()),
-                MarkdownBlock::ListItem("item with ‹code›".into()),
-                MarkdownBlock::Code("fn main() {}".into()),
-                MarkdownBlock::Paragraph("<b>plain</b>".into()),
+                TranscriptBlock::Heading("Heading".into()),
+                TranscriptBlock::ListItem("• item with ‹code›".into()),
+                TranscriptBlock::Code("fn main() {}".into()),
+                TranscriptBlock::Paragraph("<b>plain</b>".into()),
             ]
         );
     }

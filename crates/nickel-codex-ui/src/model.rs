@@ -1,8 +1,13 @@
-use std::collections::{HashMap, VecDeque};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, VecDeque},
+    sync::Arc,
+};
 
 use nickel_codex::{
     AccountState, CodexEvent, EventKind, Model, ServerRequestId, Thread, ThreadId, TurnId,
 };
+use nickel_ui::{SelectionDocument, SelectionRun};
 
 use crate::ControllerEvent;
 
@@ -39,6 +44,25 @@ pub struct ChatItem {
     pub complete: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum TranscriptBlock {
+    Heading(String),
+    Paragraph(String),
+    ListItem(String),
+    Code(String),
+}
+
+impl TranscriptBlock {
+    pub(crate) fn text(&self) -> &str {
+        match self {
+            Self::Heading(text)
+            | Self::Paragraph(text)
+            | Self::ListItem(text)
+            | Self::Code(text) => text,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PendingInteraction {
     Approval {
@@ -73,6 +97,9 @@ pub struct ChatState {
     local_sequence: u64,
     item_indexes: HashMap<String, usize>,
     item_height_estimates: VecDeque<f32>,
+    item_selection_runs: VecDeque<Vec<SelectionRun>>,
+    selection_revision: u64,
+    selection_document_cache: RefCell<(u64, usize, Arc<SelectionDocument>)>,
 }
 
 impl Default for ChatState {
@@ -97,6 +124,9 @@ impl Default for ChatState {
             local_sequence: 0,
             item_indexes: HashMap::new(),
             item_height_estimates: VecDeque::new(),
+            item_selection_runs: VecDeque::new(),
+            selection_revision: 0,
+            selection_document_cache: RefCell::new((0, 0, Arc::new(SelectionDocument::default()))),
         }
     }
 }
@@ -171,6 +201,8 @@ impl ChatState {
         self.interrupt_requested = false;
         self.items.clear();
         self.item_height_estimates.clear();
+        self.item_selection_runs.clear();
+        self.selection_revision = self.selection_revision.wrapping_add(1);
         self.item_indexes.clear();
         self.pending.clear();
         self.conversation_scroll = 0.0;
@@ -180,6 +212,8 @@ impl ChatState {
     fn hydrate_thread(&mut self, thread: &Thread) {
         self.items.clear();
         self.item_height_estimates.clear();
+        self.item_selection_runs.clear();
+        self.selection_revision = self.selection_revision.wrapping_add(1);
         self.item_indexes.clear();
         self.pending.clear();
         self.active_turn = None;
@@ -235,6 +269,8 @@ impl ChatState {
                         self.reconcile_height_estimates();
                         self.items.remove(index);
                         self.item_height_estimates.remove(index);
+                        self.item_selection_runs.remove(index);
+                        self.selection_revision = self.selection_revision.wrapping_add(1);
                         self.reindex();
                     } else {
                         self.items[index].complete = true;
@@ -289,9 +325,13 @@ impl ChatState {
         if self.items.len() == MAX_ITEMS {
             self.items.pop_front();
             self.item_height_estimates.pop_front();
+            self.item_selection_runs.pop_front();
         }
         self.item_height_estimates
             .push_back(estimate_item_height(&item));
+        self.item_selection_runs
+            .push_back(selection_runs_for_item(&item));
+        self.selection_revision = self.selection_revision.wrapping_add(1);
         self.items.push_back(item);
         self.reindex();
     }
@@ -312,6 +352,9 @@ impl ChatState {
         };
         self.items[index].id = item_id.to_owned();
         self.items[index].complete = false;
+        self.reconcile_height_estimates();
+        self.item_selection_runs[index] = selection_runs_for_item(&self.items[index]);
+        self.selection_revision = self.selection_revision.wrapping_add(1);
         self.reindex();
         true
     }
@@ -329,6 +372,8 @@ impl ChatState {
             self.reconcile_height_estimates();
             self.items[index].text.push_str(&delta);
             self.item_height_estimates[index] = estimate_item_height(&self.items[index]);
+            self.item_selection_runs[index] = selection_runs_for_item(&self.items[index]);
+            self.selection_revision = self.selection_revision.wrapping_add(1);
         } else {
             self.push_item(ChatItem {
                 id: item_id,
@@ -359,6 +404,10 @@ impl ChatState {
         if self.item_height_estimates.len() != self.items.len() {
             self.item_height_estimates = self.items.iter().map(estimate_item_height).collect();
         }
+        if self.item_selection_runs.len() != self.items.len() {
+            self.item_selection_runs = self.items.iter().map(selection_runs_for_item).collect();
+            self.selection_revision = self.selection_revision.wrapping_add(1);
+        }
     }
 
     pub fn estimated_item_heights(&self) -> Vec<f32> {
@@ -368,6 +417,124 @@ impl ChatState {
             self.items.iter().map(estimate_item_height).collect()
         }
     }
+
+    pub fn transcript_selection_document(&self) -> Arc<SelectionDocument> {
+        {
+            let cache = self.selection_document_cache.borrow();
+            if cache.0 == self.selection_revision && cache.1 == self.items.len() {
+                return cache.2.clone();
+            }
+        }
+        let runs = if self.item_selection_runs.len() == self.items.len() {
+            self.item_selection_runs
+                .iter()
+                .flatten()
+                .cloned()
+                .collect::<Vec<_>>()
+        } else {
+            self.items
+                .iter()
+                .flat_map(selection_runs_for_item)
+                .collect()
+        };
+        let document = Arc::new(SelectionDocument::new(runs));
+        *self.selection_document_cache.borrow_mut() =
+            (self.selection_revision, self.items.len(), document.clone());
+        document
+    }
+}
+
+pub(crate) fn transcript_blocks(item: &ChatItem) -> Vec<TranscriptBlock> {
+    let input = if item.text.is_empty() {
+        if item.complete { "—" } else { "…" }
+    } else {
+        item.text.as_str()
+    };
+    let mut blocks = Vec::new();
+    let mut code = Vec::new();
+    let mut in_code = false;
+    for line in input.lines() {
+        if line.trim_start().starts_with("```") {
+            if in_code {
+                blocks.push(TranscriptBlock::Code(code.join("\n")));
+                code.clear();
+            }
+            in_code = !in_code;
+            continue;
+        }
+        if in_code {
+            code.push(line);
+        } else if let Some(heading) = line
+            .trim_start()
+            .strip_prefix("### ")
+            .or_else(|| line.trim_start().strip_prefix("## "))
+            .or_else(|| line.trim_start().strip_prefix("# "))
+        {
+            blocks.push(TranscriptBlock::Heading(inline_text(heading)));
+        } else if let Some(item) = line
+            .trim_start()
+            .strip_prefix("- ")
+            .or_else(|| line.trim_start().strip_prefix("* "))
+        {
+            blocks.push(TranscriptBlock::ListItem(format!(
+                "• {}",
+                inline_text(item)
+            )));
+        } else if !line.trim().is_empty() {
+            blocks.push(TranscriptBlock::Paragraph(inline_text(line)));
+        }
+    }
+    if in_code || !code.is_empty() {
+        blocks.push(TranscriptBlock::Code(code.join("\n")));
+    }
+    if blocks.is_empty() {
+        blocks.push(TranscriptBlock::Paragraph(String::new()));
+    }
+    blocks
+}
+
+fn selection_runs_for_item(item: &ChatItem) -> Vec<SelectionRun> {
+    let mut runs = vec![SelectionRun::block(
+        format!("{}/label", item.id),
+        item_label(&item.kind),
+    )];
+    runs.extend(
+        transcript_blocks(item)
+            .into_iter()
+            .enumerate()
+            .map(|(index, block)| {
+                SelectionRun::block(format!("{}/body/{index}", item.id), block.text())
+            }),
+    );
+    runs
+}
+
+pub(crate) fn item_label(kind: &ChatItemKind) -> &'static str {
+    match kind {
+        ChatItemKind::User => "You",
+        ChatItemKind::Agent => "Codex",
+        ChatItemKind::Reasoning => "Reasoning summary",
+        ChatItemKind::Command => "Command",
+        ChatItemKind::FileChange => "File change",
+        ChatItemKind::Plan => "Plan",
+        ChatItemKind::Error => "Error",
+        ChatItemKind::Unknown(_) => "Additional event",
+    }
+}
+
+fn inline_text(input: &str) -> String {
+    let mut code_open = false;
+    input
+        .chars()
+        .map(|character| {
+            if character == '`' {
+                code_open = !code_open;
+                if code_open { '‹' } else { '›' }
+            } else {
+                character
+            }
+        })
+        .collect()
 }
 
 fn estimate_item_height(item: &ChatItem) -> f32 {

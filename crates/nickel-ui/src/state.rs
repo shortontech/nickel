@@ -1,6 +1,6 @@
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use crate::{DocumentSelection, TextEditor};
+use crate::{DocumentSelection, SelectionDocument, TextEditor};
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct UiId(String);
@@ -111,6 +111,7 @@ pub struct UiStateStore {
     caret_visible: bool,
     selection_owner: Option<UiId>,
     document_selections: HashMap<UiId, DocumentSelection>,
+    selection_documents: HashMap<UiId, Arc<SelectionDocument>>,
 }
 
 impl Default for UiStateStore {
@@ -133,6 +134,7 @@ impl UiStateStore {
             caret_visible: true,
             selection_owner: None,
             document_selections: HashMap::new(),
+            selection_documents: HashMap::new(),
         }
     }
 
@@ -231,6 +233,20 @@ impl UiStateStore {
         self.document_selections.entry(id.into()).or_default()
     }
 
+    pub(crate) fn reconcile_document_selection(
+        &mut self,
+        id: UiId,
+        document: Arc<SelectionDocument>,
+    ) {
+        let selection = self.document_selections.entry(id.clone()).or_default();
+        if let Some(previous) = self.selection_documents.get(&id) {
+            document.reconcile_from(previous, selection);
+        } else {
+            document.reconcile(selection);
+        }
+        self.selection_documents.insert(id, document);
+    }
+
     pub fn set_selection_owner(&mut self, id: Option<UiId>) -> Invalidation {
         if self.selection_owner == id {
             return Invalidation::None;
@@ -246,6 +262,7 @@ impl UiStateStore {
                 .values()
                 .any(|selection| selection.anchor.is_some() || selection.focus.is_some());
         self.document_selections.clear();
+        self.selection_documents.clear();
         if changed {
             Invalidation::Paint
         } else {
@@ -345,6 +362,7 @@ impl UiStateStore {
         self.caret_visible = true;
         self.selection_owner = None;
         self.document_selections.clear();
+        self.selection_documents.clear();
     }
 
     fn clear_ownership_for_missing_entries(&mut self) {
@@ -362,6 +380,8 @@ impl UiStateStore {
             }
         }
         self.document_selections
+            .retain(|id, _| self.entries.contains_key(id));
+        self.selection_documents
             .retain(|id, _| self.entries.contains_key(id));
     }
 }

@@ -11,7 +11,10 @@ mod tests {
     use nickel_codex::{
         BackendChoice, CodexEvent, EventKind, ReplayBackend, ServerRequestId, ThreadId, TurnId,
     };
-    use nickel_ui::{Application, PaintCommand, Rect, SdlComponentRenderer, Shortcut, UiTree};
+    use nickel_ui::{
+        Application, DocumentSelection, PaintCommand, Rect, SdlComponentRenderer,
+        SelectionEndpoint, Shortcut, UiStateStore, UiTree,
+    };
 
     use super::*;
 
@@ -491,6 +494,62 @@ mod tests {
             .and_then(|node| node.scroll)
             .expect("virtual transcript scroll extent");
         assert!(conversation.content.height > 100_000.0);
+    }
+
+    #[test]
+    fn virtual_transcript_copies_logical_text_across_offscreen_messages() {
+        let mut state = ChatState::default();
+        state.status = ConnectionStatus::Ready;
+        for index in 0..2_000 {
+            state.items.push_back(ChatItem {
+                id: format!("message-{index}"),
+                kind: ChatItemKind::Agent,
+                text: format!("history message {index}"),
+                complete: true,
+            });
+        }
+        let mut ui_state = UiStateStore::default();
+        let tree = UiTree::layout_with_state(
+            view::chat_view(&state),
+            Rect::new(0.0, 0.0, 1120.0, 760.0),
+            &mut ui_state,
+        );
+        let region_id = tree
+            .selection_region_ids()
+            .next()
+            .expect("transcript selection region")
+            .clone();
+        ui_state.set_selection_owner(Some(region_id.clone()));
+        *ui_state.document_selection_mut(region_id) = DocumentSelection {
+            anchor: Some(SelectionEndpoint::new("message-0/label", 0)),
+            focus: Some(SelectionEndpoint::new(
+                "message-1999/body/0",
+                "history message 1999".len(),
+            )),
+        };
+
+        let copied = tree
+            .selected_text(&ui_state)
+            .expect("logical transcript selection");
+        assert!(copied.starts_with("Codex\nhistory message 0\nCodex"));
+        assert!(copied.contains("history message 1000"));
+        assert!(copied.ends_with("Codex\nhistory message 1999"));
+        assert!(!tree.commands().iter().any(
+            |command| matches!(command, PaintCommand::Text { text, .. } if text.contains("history message 0"))
+        ));
+
+        let selected = UiTree::layout_with_state(
+            view::chat_view(&state),
+            Rect::new(0.0, 0.0, 1120.0, 760.0),
+            &mut ui_state,
+        );
+        assert!(selected.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::Fill {
+                color: 0x315a8f,
+                ..
+            }
+        )));
     }
 
     #[test]

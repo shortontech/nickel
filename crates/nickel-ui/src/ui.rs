@@ -2986,6 +2986,10 @@ impl<Message: Clone> UiTree<Message> {
             .selected_text(state.document_selection(owner)?)
     }
 
+    pub fn selection_region_ids(&self) -> impl Iterator<Item = &UiId> {
+        self.selection_regions.iter().map(|region| &region.id)
+    }
+
     fn prepare_selection_paints(&mut self, state: &UiStateStore) {
         self.selection_paints.clear();
         for region in &self.selection_regions {
@@ -3045,8 +3049,7 @@ impl<Message: Clone> UiTree<Message> {
         tree.selection_regions = collect_selection_regions(&root, &tree.resolved);
         for region in &tree.selection_regions {
             state.touch(region.id.clone());
-            let selection = state.document_selection_mut(region.id.clone());
-            region.document.reconcile(selection);
+            state.reconcile_document_selection(region.id.clone(), region.document.clone());
         }
         tree.prepare_selection_paints(state);
         tree.reset_emission();
@@ -3280,10 +3283,46 @@ impl<Message: Clone> UiTree<Message> {
                     && let Some(endpoint) = region.endpoint_at(point, true)
                 {
                     state.document_selection_mut(region_id).focus = Some(endpoint);
+                    let autoscroll = self
+                        .scrolls
+                        .iter()
+                        .rev()
+                        .find(|scroll| {
+                            point.x >= scroll.rect.origin.x
+                                && point.x <= scroll.rect.origin.x + scroll.rect.size.width
+                                && rectangles_overlap(scroll.rect, region.rect)
+                        })
+                        .and_then(|scroll| {
+                            let edge = 28.0_f32.min(scroll.rect.size.height * 0.25);
+                            let top = scroll.rect.origin.y + edge;
+                            let bottom = scroll.rect.origin.y + scroll.rect.size.height - edge;
+                            let delta = if point.y < top {
+                                -((top - point.y) / edge).clamp(0.25, 1.0) * 18.0
+                            } else if point.y > bottom {
+                                ((point.y - bottom) / edge).clamp(0.25, 1.0) * 18.0
+                            } else {
+                                return None;
+                            };
+                            let changed = state.scroll_by(
+                                scroll.id.clone(),
+                                delta,
+                                (scroll.extent.content.height - scroll.extent.viewport.height)
+                                    .max(0.0),
+                            );
+                            if changed != Invalidation::None
+                                && let Some(map) = scroll.offset_mapper
+                                && let Some(offset) =
+                                    state.state(&scroll.id).map(|entry| entry.scroll_offset)
+                            {
+                                outcome.messages.push(map(offset));
+                            }
+                            Some(changed)
+                        })
+                        .unwrap_or(Invalidation::None);
                     return EventOutcome {
                         messages: outcome.messages,
                         clipboard_text: outcome.clipboard_text,
-                        invalidation: invalidation.merge(Invalidation::Paint),
+                        invalidation: invalidation.merge(autoscroll).merge(Invalidation::Paint),
                     };
                 }
                 if let Some(id) = state.captured().cloned()
@@ -3957,6 +3996,13 @@ impl<Message: Clone> UiTree<Message> {
     }
 }
 
+fn rectangles_overlap(left: Rect, right: Rect) -> bool {
+    left.origin.x < right.origin.x + right.size.width
+        && left.origin.x + left.size.width > right.origin.x
+        && left.origin.y < right.origin.y + right.size.height
+        && left.origin.y + left.size.height > right.origin.y
+}
+
 fn rects_intersect(left: Rect, right: Rect) -> bool {
     left.origin.x < right.origin.x + right.size.width
         && left.origin.x + left.size.width > right.origin.x
@@ -4212,7 +4258,7 @@ fn collect_selection_regions<Message>(
             );
             builders[region_index].logical_runs.push(SelectionRun {
                 id: run_id.clone(),
-                text: text.clone(),
+                text: Arc::from(text.clone()),
                 boundary_before: element.style.selection_boundary,
             });
             builders[region_index].runs.push(SelectionRunGeometry {
@@ -6153,6 +6199,27 @@ mod tests {
         tree.handle_event(&mut state, UiEvent::TextSelectAll);
         let copied = tree.handle_event(&mut state, UiEvent::TextCopy);
         assert_eq!(copied.clipboard_text.as_deref(), Some("First\nSecond"));
+        tree.handle_event(
+            &mut state,
+            UiEvent::TextMoveLeft {
+                extend_selection: true,
+            },
+        );
+        assert_eq!(tree.selected_text(&state).as_deref(), Some("First\nSecon"));
+        tree.handle_event(&mut state, UiEvent::SelectionClear);
+        assert!(
+            tree.handle_event(&mut state, UiEvent::TextCopy)
+                .clipboard_text
+                .is_none()
+        );
+        tree.handle_event(
+            &mut state,
+            UiEvent::PointerPressed(Point {
+                x: first.origin.x + 1.0,
+                y: first.origin.y + first.size.height * 0.5,
+            }),
+        );
+        tree.handle_event(&mut state, UiEvent::TextSelectAll);
         let cut = tree.handle_event(&mut state, UiEvent::TextCut);
         assert!(cut.clipboard_text.is_none());
         assert!(cut.messages.is_empty());
@@ -6192,6 +6259,53 @@ mod tests {
         );
         assert_eq!(activated.messages, vec![TestMessage::Named("button")]);
         assert!(state.selection_owner().is_none());
+    }
+
+    #[test]
+    fn document_drag_edge_autoscrolls_at_a_bounded_rate() {
+        let mut state = UiStateStore::default();
+        let tree =
+            UiTree::layout_with_state(
+                Column::<TestMessage>::new()
+                    .id("scroll")
+                    .height(90.0)
+                    .overflow_y(Overflow::Auto)
+                    .child(SelectionRegion::automatic().id("document").child(
+                        Column::new().children((0..30).map(|index| {
+                            Text::new(format!("Line {index}"))
+                                .selection_boundary(TextBoundary::Block)
+                        })),
+                    )),
+                Rect::new(0.0, 0.0, 240.0, 90.0),
+                &mut state,
+            );
+        let first = tree
+            .selection_regions
+            .first()
+            .and_then(|region| region.runs.first())
+            .and_then(|run| run.glyphs.first())
+            .expect("visible selectable glyph")
+            .rect;
+        tree.handle_event(
+            &mut state,
+            UiEvent::PointerPressed(Point {
+                x: first.origin.x + 1.0,
+                y: first.origin.y + 1.0,
+            }),
+        );
+        for _ in 0..4 {
+            let outcome = tree.handle_event(
+                &mut state,
+                UiEvent::PointerMoved(Point { x: 20.0, y: 89.0 }),
+            );
+            assert!(matches!(outcome.invalidation, Invalidation::Layout));
+        }
+        let offset = state
+            .state(&UiId::from("root/scroll"))
+            .expect("scroll state")
+            .scroll_offset;
+        assert!(offset > 0.0);
+        assert!(offset <= 72.0);
     }
 
     #[test]

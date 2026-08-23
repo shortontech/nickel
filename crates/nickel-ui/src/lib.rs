@@ -46,8 +46,8 @@ pub mod prelude {
         Align, AnyView, Application, Background, Border, Button, Color, Column, Component,
         ComponentBuilderExt, Container, DiagnosticKind, Dropdown, Fragment, Grid, GridColumnSpec,
         Insets, Justify, Length, Overflow, RadioButton, Row, SelectionRegion, Shortcut, Slider,
-        Spacer, Text, TextAlign, TextField, Tone, Track, UiEvent, UiId, UiStateStore, View,
-        VirtualColumn, VirtualWindow, component, id, run, ui,
+        Spacer, Text, TextAlign, TextBoundary, TextField, Tone, Track, UiEvent, UiId, UiStateStore,
+        View, VirtualColumn, VirtualWindow, component, id, run, ui,
     };
 }
 
