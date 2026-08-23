@@ -252,6 +252,32 @@ mod tests {
     }
 
     #[test]
+    fn canonical_replay_fixture_projects_its_agent_bubble() {
+        let backend = ReplayBackend::from_json(include_str!(
+            "../../nickel-codex-fixture/fixtures/basic.json"
+        ))
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = ChatApplication::new(BackendMode::Replay {
+            backend,
+            cwd: directory.path().into(),
+        });
+        wait_until(&mut app, |state| {
+            state
+                .items
+                .iter()
+                .any(|item| item.kind == ChatItemKind::Agent && item.text == "fixture response")
+        });
+        let tree = UiTree::layout(
+            view::chat_view(&app.state),
+            Rect::new(0.0, 0.0, 1120.0, 760.0),
+        );
+        assert!(tree.commands().iter().any(
+            |command| matches!(command, PaintCommand::Text { text, .. } if text == "fixture response")
+        ));
+    }
+
+    #[test]
     fn composer_shortcuts_insert_newlines_and_submit_nonblank_drafts() {
         let backend = ReplayBackend::from_json(r#"{"name":"shortcuts","events":[]}"#).unwrap();
         let directory = tempfile::tempdir().unwrap();
