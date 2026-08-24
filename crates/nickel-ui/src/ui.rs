@@ -2397,6 +2397,23 @@ impl<Message> Button<Message> {
         self
     }
 
+    /// Keeps a button label on one line and truncates it to the available width.
+    pub fn ellipsis(mut self, ellipsis: bool) -> Self {
+        if let Some(label) = self.0.0.children.first_mut()
+            && let Kind::Text {
+                wrap,
+                max_lines,
+                ellipsis: value,
+                ..
+            } = &mut label.kind
+        {
+            *wrap = !ellipsis;
+            *max_lines = ellipsis.then_some(1);
+            *value = ellipsis;
+        }
+        self
+    }
+
     pub fn radius(mut self, radius: f32) -> Self {
         self.0 = self.0.radius(radius);
         self

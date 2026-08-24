@@ -144,7 +144,7 @@ pub(super) fn thread_sidebar(state: &ChatState) -> impl View<ChatMessage> {
                             on_press={ChatMessage::ToggleProjectCollapsed(project.key.clone())}
                             background={SIDEBAR} color={TEXT} height={34.0}
                             padding={Insets { top: 6.0, right: 8.0, bottom: 5.0, left: 8.0 }}
-                            label_align={TextAlign::Start} fill_width>
+                            label_align={TextAlign::Start} ellipsis={true} fill_width>
                             {format!("{}  📁  {}", if collapsed { "▸" } else { "▾" }, project.name)}
                         </Button>
                         {if collapsed { ui! { <Spacer height={0.0} /> } } else { ui! {

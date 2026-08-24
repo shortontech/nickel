@@ -553,6 +553,38 @@ mod tests {
     }
 
     #[test]
+    fn long_project_names_stay_inside_a_single_header_line() {
+        let mut state = ChatState::default();
+        state.threads = vec![Thread {
+            id: ThreadId("thread".into()),
+            title: Some("Hidden task".into()),
+            cwd: Some("/projects/llama.cpp-turboquant-post20260629".into()),
+            last_used_at: Some(1),
+            turns: Vec::new(),
+        }];
+        state
+            .collapsed_projects
+            .insert("/projects/llama.cpp-turboquant-post20260629".into());
+
+        let tree = UiTree::layout(view::chat_view(&state), Rect::new(0.0, 0.0, 900.0, 640.0));
+        let header = tree
+            .commands()
+            .iter()
+            .find_map(|command| match command {
+                PaintCommand::Text { bounds, text, .. } if text.starts_with("▸  📁  Llama") => {
+                    Some((bounds, text))
+                }
+                _ => None,
+            })
+            .expect("long project header");
+        assert!(header.1.ends_with('…'));
+        assert!(header.0.size.height < 24.0);
+        assert!(!tree.commands().iter().any(
+            |command| matches!(command, PaintCommand::Text { text, .. } if text == "Hidden task")
+        ));
+    }
+
+    #[test]
     fn long_transcript_cannot_crush_sidebar_or_composer() {
         let mut state = ChatState::default();
         state.status = ConnectionStatus::Ready;
