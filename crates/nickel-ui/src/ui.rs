@@ -4831,9 +4831,9 @@ fn emit_element<Message: Clone>(
             });
             tree.commands.push(PaintCommand::Text {
                 bounds: header.inset(Insets {
-                    top: 10.0,
+                    top: if *overlay { 5.0 } else { 10.0 },
                     right: 36.0,
-                    bottom: 8.0,
+                    bottom: if *overlay { 4.0 } else { 8.0 },
                     left: 12.0,
                 }),
                 text: selected.clone(),
@@ -6906,6 +6906,16 @@ mod tests {
         };
         let mut state = UiStateStore::default();
         let closed = build(&mut state);
+        let file_label = closed
+            .commands()
+            .iter()
+            .find_map(|command| match command {
+                PaintCommand::Text { bounds, text, .. } if text == "File" => Some(*bounds),
+                _ => None,
+            })
+            .expect("menu header label");
+        assert!(file_label.size.height >= 20.0);
+        assert!(file_label.origin.y + file_label.size.height <= 30.0);
         let body_y = closed
             .resolved_layout()
             .find(&UiId::from("root/body"))
