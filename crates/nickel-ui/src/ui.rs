@@ -3113,6 +3113,7 @@ pub struct UiTree<Message = String> {
     commands: Vec<PaintCommand>,
     overlay_commands: Vec<PaintCommand>,
     hits: Vec<HitRegion<Message>>,
+    overlay_hits: Vec<HitRegion<Message>>,
     messages: Vec<MessageRegion<Message>>,
     text_inputs: Vec<TextInputRegion<Message>>,
     selection_regions: Vec<SelectionRegionLayout>,
@@ -3133,6 +3134,7 @@ impl<Message> Default for UiTree<Message> {
             commands: Vec::new(),
             overlay_commands: Vec::new(),
             hits: Vec::new(),
+            overlay_hits: Vec::new(),
             messages: Vec::new(),
             text_inputs: Vec::new(),
             selection_regions: Vec::new(),
@@ -3258,6 +3260,7 @@ impl<Message: Clone> UiTree<Message> {
         tree.reset_emission();
         emit_element(&root, 0, None, &mut tree);
         tree.commands.append(&mut tree.overlay_commands);
+        tree.hits.append(&mut tree.overlay_hits);
         tree.emit_accessibility_geometry();
         tree.validate_clip_commands();
         for scroll in &tree.scrolls {
@@ -3285,6 +3288,7 @@ impl<Message: Clone> UiTree<Message> {
         tree.reset_emission();
         emit_element(&root, 0, None, &mut tree);
         tree.commands.append(&mut tree.overlay_commands);
+        tree.hits.append(&mut tree.overlay_hits);
         tree.emit_accessibility_geometry();
         tree.validate_clip_commands();
         tree
@@ -4208,6 +4212,7 @@ impl<Message: Clone> UiTree<Message> {
         self.commands.clear();
         self.overlay_commands.clear();
         self.hits.clear();
+        self.overlay_hits.clear();
         self.messages.clear();
         self.text_inputs.clear();
         for node in &mut self.resolved.nodes {
@@ -4885,25 +4890,31 @@ fn emit_element<Message: Clone>(
                         align: TextAlign::Start,
                         bold: false,
                     });
-                    if let Some(Some(message)) = element.option_messages.get(index) {
-                        let option_id = node.id.scoped(format!("option-{index}"));
+                    let option_id = node.id.scoped(format!("option-{index}"));
+                    let message = element.option_messages.get(index).cloned().flatten();
+                    if let Some(message) = &message {
                         tree.messages.push(MessageRegion {
                             id: option_id.clone(),
                             rect: option_rect,
                             message: message.clone(),
                         });
-                        if let Some(hit_rect) = node
-                            .clip
-                            .map(|clip| intersection(option_rect, clip))
-                            .unwrap_or(Some(option_rect))
-                        {
-                            tree.hits.push(HitRegion {
-                                id: option_id,
-                                rect: hit_rect,
-                                message: Some(message.clone()),
-                                message_mapper: None,
-                            });
-                        }
+                    }
+                    if let Some(hit_rect) = node
+                        .clip
+                        .map(|clip| intersection(option_rect, clip))
+                        .unwrap_or(Some(option_rect))
+                    {
+                        let hits = if *overlay {
+                            &mut tree.overlay_hits
+                        } else {
+                            &mut tree.hits
+                        };
+                        hits.push(HitRegion {
+                            id: option_id,
+                            rect: hit_rect,
+                            message,
+                            message_mapper: None,
+                        });
                     }
                 }
             }
@@ -6899,7 +6910,12 @@ mod tests {
                             .id("file"),
                         ),
                     )
-                    .child(Container::new().id("body").height(1000.0)),
+                    .child(
+                        Container::new()
+                            .id("body")
+                            .height(1000.0)
+                            .message(TestMessage::Named("body")),
+                    ),
                 Rect::new(0.0, 0.0, 240.0, 160.0),
                 state,
             )
