@@ -2383,7 +2383,7 @@ impl<Message> Button<Message> {
         {
             *wrap = true;
             *max_lines = Some(lines.max(1));
-            *ellipsis = true;
+            *ellipsis = false;
         }
         self
     }
@@ -2399,6 +2399,11 @@ impl<Message> Button<Message> {
 
     pub fn radius(mut self, radius: f32) -> Self {
         self.0 = self.0.radius(radius);
+        self
+    }
+
+    pub fn padding(mut self, padding: impl Into<Insets>) -> Self {
+        self.0 = self.0.padding(padding);
         self
     }
 
@@ -2454,7 +2459,7 @@ impl<Message> ButtonLabel<Message> {
     }
 
     pub fn max_lines(mut self, lines: usize) -> Self {
-        self.0 = self.0.wrap(true).max_lines(lines).ellipsis(true);
+        self.0 = self.0.wrap(true).max_lines(lines);
         self
     }
 }
@@ -6094,6 +6099,24 @@ mod tests {
         assert_eq!(short.height, 42.0);
         assert!(wrapped.height > short.height);
         assert_eq!(much_longer.height, wrapped.height);
+
+        let label = "A task title that wraps onto its visible second line";
+        let tree = UiTree::layout(
+            Button::new((), label)
+                .max_lines(2)
+                .label_align(TextAlign::Start)
+                .background(0x202630)
+                .radius(10.0),
+            Rect::new(0.0, 0.0, 180.0, 80.0),
+        );
+        assert!(tree.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::Text { text, align: TextAlign::Start, .. } if text == label
+        )));
+        assert!(tree.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::RoundedFill { radius, .. } if *radius == 10.0
+        )));
     }
 
     #[test]

@@ -513,18 +513,39 @@ mod tests {
         }];
         let expanded = UiTree::layout(view::chat_view(&state), Rect::new(0.0, 0.0, 900.0, 640.0));
         assert!(expanded.commands().iter().any(
-            |command| matches!(command, PaintCommand::Text { text, .. } if text == "▾  Nickel UI")
+            |command| matches!(command, PaintCommand::Text { text, .. } if text == "▾  📁  Nickel UI")
         ));
         assert!(expanded.commands().iter().any(
             |command| matches!(command, PaintCommand::Text { text, .. } if text == "Visible task")
         ));
+        let header_x = expanded
+            .commands()
+            .iter()
+            .find_map(|command| match command {
+                PaintCommand::Text { bounds, text, .. } if text == "▾  📁  Nickel UI" => {
+                    Some(bounds.origin.x)
+                }
+                _ => None,
+            })
+            .expect("project header text");
+        let task_x = expanded
+            .commands()
+            .iter()
+            .find_map(|command| match command {
+                PaintCommand::Text { bounds, text, .. } if text == "Visible task" => {
+                    Some(bounds.origin.x)
+                }
+                _ => None,
+            })
+            .expect("task text");
+        assert!(task_x >= header_x + 20.0);
 
         state
             .collapsed_projects
             .insert("/projects/nickel-ui".into());
         let collapsed = UiTree::layout(view::chat_view(&state), Rect::new(0.0, 0.0, 900.0, 640.0));
         assert!(collapsed.commands().iter().any(
-            |command| matches!(command, PaintCommand::Text { text, .. } if text == "▸  Nickel UI")
+            |command| matches!(command, PaintCommand::Text { text, .. } if text == "▸  📁  Nickel UI")
         ));
         assert!(!collapsed.commands().iter().any(
             |command| matches!(command, PaintCommand::Text { text, .. } if text == "Visible task")

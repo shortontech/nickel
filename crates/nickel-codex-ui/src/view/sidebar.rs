@@ -143,8 +143,9 @@ pub(super) fn thread_sidebar(state: &ChatState) -> impl View<ChatMessage> {
                         <Button key={format!("{}-header", project.key)}
                             on_press={ChatMessage::ToggleProjectCollapsed(project.key.clone())}
                             background={SIDEBAR} color={TEXT} height={34.0}
+                            padding={Insets { top: 6.0, right: 8.0, bottom: 5.0, left: 8.0 }}
                             label_align={TextAlign::Start} fill_width>
-                            {format!("{}  {}", if collapsed { "▸" } else { "▾" }, project.name)}
+                            {format!("{}  📁  {}", if collapsed { "▸" } else { "▾" }, project.name)}
                         </Button>
                         {if collapsed { ui! { <Spacer height={0.0} /> } } else { ui! {
                           <Column fill_width gap={2.0}>
@@ -152,7 +153,9 @@ pub(super) fn thread_sidebar(state: &ChatState) -> impl View<ChatMessage> {
                             <Button key={thread.id.0.clone()}
                                 on_press={ChatMessage::SelectThread(thread.id.clone())}
                                 background={if state.selected_thread.as_ref() == Some(&thread.id) { PANEL } else { SIDEBAR }}
-                                color={TEXT} max_lines={2} radius={10.0} label_align={TextAlign::Start} fill_width>
+                                color={TEXT} max_lines={2} radius={10.0}
+                                padding={Insets { top: 10.0, right: 8.0, bottom: 7.0, left: 30.0 }}
+                                label_align={TextAlign::Start} fill_width>
                                 {thread.title.as_deref().unwrap_or("Untitled conversation")}
                             </Button>
                         })}
@@ -165,7 +168,9 @@ pub(super) fn thread_sidebar(state: &ChatState) -> impl View<ChatMessage> {
                             ui! {
                                 <Button key={format!("{}-disclosure", project.key)}
                                     on_press={ChatMessage::ToggleProject(project.key.clone())}
-                                    background={SIDEBAR} color={MUTED} label_align={TextAlign::Start} fill_width>{label}</Button>
+                                    background={SIDEBAR} color={MUTED}
+                                    padding={Insets { top: 8.0, right: 8.0, bottom: 6.0, left: 30.0 }}
+                                    label_align={TextAlign::Start} fill_width>{label}</Button>
                             }
                         } else {
                             ui! { <Spacer height={0.0} /> }
