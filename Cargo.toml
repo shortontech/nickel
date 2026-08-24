@@ -33,6 +33,7 @@ rust-version = "1.94"
 bytemuck = { version = "1.25.0", features = ["derive"] }
 bitflags = "2.11.0"
 ctrlc = "3.5.2"
+dirs = "5.0.1"
 cosmic-text = "0.19.0"
 freedesktop-desktop-entry = { version = "0.8.1", default-features = false }
 freedesktop-icons = "0.4.0"

@@ -2326,6 +2326,8 @@ dependencies = [
 name = "nickel-codex-ui"
 version = "0.1.0"
 dependencies = [
+ "dirs",
+ "jiff",
  "nickel-codex",
  "nickel-ui",
  "serde_json",

@@ -2,7 +2,9 @@ mod controller;
 mod model;
 mod view;
 
-pub use controller::{BackendMode, ChatController, ControllerCommand, ControllerEvent};
+pub use controller::{
+    BackendMode, ChatController, ControllerCommand, ControllerEvent, create_managed_workspace,
+};
 pub use model::{ChatItem, ChatItemKind, ChatState, ConnectionStatus, PendingInteraction};
 pub use view::{ChatApplication, ChatMessage};
 

@@ -3,7 +3,7 @@
 use std::{env, path::PathBuf, process::ExitCode};
 
 use nickel_codex::{BackendChoice, ReplayBackend};
-use nickel_codex_ui::{BackendMode, ChatApplication};
+use nickel_codex_ui::{BackendMode, ChatApplication, create_managed_workspace};
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -16,7 +16,15 @@ fn main() -> ExitCode {
     }
     let cwd = option(&args, "--cwd")
         .map(PathBuf::from)
-        .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        .map(Ok)
+        .unwrap_or_else(create_managed_workspace);
+    let cwd = match cwd {
+        Ok(cwd) => cwd,
+        Err(error) => {
+            eprintln!("cannot create managed Codex workspace: {error}");
+            return ExitCode::from(2);
+        }
+    };
     let mode = if let Some(path) = option(&args, "--replay") {
         let input = match std::fs::read_to_string(path) {
             Ok(input) => input,

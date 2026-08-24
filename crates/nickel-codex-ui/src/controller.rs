@@ -1,9 +1,40 @@
 use std::{
+    fs,
+    io::ErrorKind,
+    path::Path,
     path::PathBuf,
     sync::mpsc::{self, Receiver, Sender},
     thread,
     time::Duration,
 };
+
+pub fn create_managed_workspace() -> Result<PathBuf, String> {
+    let documents = dirs::document_dir()
+        .or_else(|| dirs::home_dir().map(|home| home.join("Documents")))
+        .ok_or_else(|| "the user Documents directory is unavailable".to_owned())?;
+    create_managed_workspace_at(&documents, &jiff::Zoned::now())
+}
+
+fn create_managed_workspace_at(documents: &Path, now: &jiff::Zoned) -> Result<PathBuf, String> {
+    let date = now.strftime("%Y-%m-%d").to_string();
+    let time = now.strftime("%H%M%S").to_string();
+    let parent = documents.join("codex").join(date);
+    fs::create_dir_all(&parent).map_err(|error| error.to_string())?;
+    for suffix in 0..1000 {
+        let name = if suffix == 0 {
+            format!("session-{time}")
+        } else {
+            format!("session-{time}-{suffix}")
+        };
+        let candidate = parent.join(name);
+        match fs::create_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Err("could not allocate a unique managed workspace name".into())
+}
 
 use nickel_codex::{
     AccountState, BackendChoice, CodexBackend, CodexClient, CodexEvent, CommandDecision,
@@ -159,6 +190,7 @@ fn run_worker(
     }
     let mut selected_thread = None;
     let mut active_turn = None;
+    let mut new_thread_cwd = cwd;
 
     loop {
         while let Ok(event) = protocol_events.try_recv() {
@@ -182,11 +214,11 @@ fn run_worker(
             ControllerCommand::Refresh => send(snapshot(&*backend, provenance.clone()))
                 .then_some(())
                 .ok_or_else(|| "UI disconnected".to_owned()),
-            ControllerCommand::NewChat => {
+            ControllerCommand::NewChat => create_managed_workspace().map(|workspace| {
+                new_thread_cwd = workspace;
                 selected_thread = None;
                 active_turn = None;
-                Ok(())
-            }
+            }),
             ControllerCommand::SelectThread(id) => backend
                 .resume_thread(id)
                 .map(|thread| {
@@ -199,7 +231,7 @@ fn run_worker(
                     Some(id) => Ok(id),
                     None => backend
                         .start_thread(StartThread {
-                            cwd: cwd.clone(),
+                            cwd: new_thread_cwd.clone(),
                             model: None,
                         })
                         .map(|thread| {
@@ -280,5 +312,33 @@ fn snapshot(backend: &dyn CodexBackend, provenance: String) -> ControllerEvent {
             threads: page.threads,
         },
         Err(error) => ControllerEvent::Failure(error.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::create_managed_workspace_at;
+
+    #[test]
+    fn managed_workspaces_are_dated_unique_children_of_documents() {
+        let documents = tempfile::tempdir().unwrap();
+        let now: jiff::Zoned = "2026-08-23T14:05:06-07:00[America/Los_Angeles]"
+            .parse()
+            .unwrap();
+
+        let first = create_managed_workspace_at(documents.path(), &now).unwrap();
+        let second = create_managed_workspace_at(documents.path(), &now).unwrap();
+
+        assert_eq!(
+            first.strip_prefix(documents.path()).unwrap(),
+            std::path::Path::new("codex/2026-08-23/session-140506")
+        );
+        assert_eq!(
+            second.strip_prefix(documents.path()).unwrap(),
+            std::path::Path::new("codex/2026-08-23/session-140506-1")
+        );
+        assert!(first.is_dir());
+        assert!(second.is_dir());
+        assert_ne!(first, documents.path());
     }
 }
