@@ -3261,6 +3261,9 @@ impl<Message: Clone> UiTree<Message> {
         emit_element(&root, 0, None, &mut tree);
         tree.commands.append(&mut tree.overlay_commands);
         tree.hits.append(&mut tree.overlay_hits);
+        for hit in &tree.hits {
+            state.touch(hit.id.clone());
+        }
         tree.emit_accessibility_geometry();
         tree.validate_clip_commands();
         for scroll in &tree.scrolls {

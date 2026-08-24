@@ -838,9 +838,63 @@ fn configured_chat_view(
 #[cfg(test)]
 mod tests {
     use nickel_codex::{ReplayBackend, Thread, ThreadId};
-    use nickel_ui::{PaintCommand, Rect, UiTree};
+    use nickel_ui::{PaintCommand, Point, Rect, UiEvent, UiStateStore, UiTree};
 
     use super::*;
+
+    #[test]
+    fn connection_menu_manage_hosts_action_wins_over_loaded_content() {
+        let mut state = ChatState::default();
+        state.threads.extend((0..40).map(|index| Thread {
+            id: ThreadId(format!("thread-{index}")),
+            title: Some(format!("Thread {index}")),
+            cwd: Some("/projects/nickel".into()),
+            last_used_at: Some(index),
+            turns: Vec::new(),
+        }));
+        let settings = CodexSettings::default();
+        let mut ui_state = UiStateStore::default();
+        let bounds = Rect::new(0.0, 0.0, 900.0, 640.0);
+        let closed = UiTree::layout_with_state(
+            configured_chat_view(&state, &settings, false, None, None),
+            bounds,
+            &mut ui_state,
+        );
+        let menu = closed
+            .resolved_layout()
+            .nodes()
+            .iter()
+            .find(|node| node.id.as_str().ends_with("/connection-menu"))
+            .expect("connection menu")
+            .allocated;
+        let header = Point {
+            x: menu.origin.x + 8.0,
+            y: menu.origin.y + 8.0,
+        };
+        closed.handle_event(&mut ui_state, UiEvent::PointerPressed(header));
+        closed.handle_event(&mut ui_state, UiEvent::PointerReleased(header));
+
+        let open = UiTree::layout_with_state(
+            configured_chat_view(&state, &settings, false, None, None),
+            bounds,
+            &mut ui_state,
+        );
+        let manage = open
+            .message_rect(&ChatMessage::ManageRemoteHosts)
+            .expect("manage hosts option");
+        let point = Point {
+            x: manage.origin.x + 8.0,
+            y: manage.origin.y + 8.0,
+        };
+        open.handle_event(&mut ui_state, UiEvent::PointerPressed(point));
+        let rebuilt = UiTree::layout_with_state(
+            configured_chat_view(&state, &settings, false, None, None),
+            bounds,
+            &mut ui_state,
+        );
+        let selected = rebuilt.handle_event(&mut ui_state, UiEvent::PointerReleased(point));
+        assert_eq!(selected.messages, vec![ChatMessage::ManageRemoteHosts]);
+    }
 
     #[test]
     fn markdown_subset_is_safe_and_keeps_unsupported_html_as_text() {
