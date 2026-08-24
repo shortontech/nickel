@@ -199,6 +199,15 @@ impl ChatState {
 
     pub fn new_chat(&mut self) {
         self.selected_thread = None;
+        self.clear_conversation();
+    }
+
+    pub fn begin_thread_selection(&mut self, id: ThreadId) {
+        self.selected_thread = Some(id);
+        self.clear_conversation();
+    }
+
+    fn clear_conversation(&mut self) {
         self.active_turn = None;
         self.interrupt_requested = false;
         self.items.clear();
@@ -207,6 +216,8 @@ impl ChatState {
         self.selection_revision = self.selection_revision.wrapping_add(1);
         self.item_indexes.clear();
         self.pending.clear();
+        self.diagnostics.clear();
+        self.interaction_answer.clear();
         self.conversation_scroll = 0.0;
         self.conversation_pinned = true;
     }

@@ -108,9 +108,7 @@ impl Application for ChatApplication {
                     ChatController::spawn_generation(self.mode.clone(), self.state.generation);
             }
             ChatMessage::SelectThread(id) => {
-                self.state.items.clear();
-                self.state.conversation_scroll = 0.0;
-                self.state.conversation_pinned = true;
+                self.state.begin_thread_selection(id.clone());
                 self.controller.send(ControllerCommand::SelectThread(id));
             }
             ChatMessage::Interrupt => {

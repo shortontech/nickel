@@ -169,6 +169,32 @@ mod tests {
     }
 
     #[test]
+    fn selecting_another_thread_clears_the_previous_thread_error() {
+        let mut state = ChatState::default();
+        state.status = ConnectionStatus::Ready;
+        state.interaction_answer = "stale answer".into();
+        state.apply(
+            1,
+            ControllerEvent::OperationFailed("thread already has an active writer".into()),
+        );
+        assert_eq!(
+            state.diagnostics.back().map(String::as_str),
+            Some("thread already has an active writer")
+        );
+
+        let selected = ThreadId("different-thread".into());
+        state.begin_thread_selection(selected.clone());
+
+        assert_eq!(state.selected_thread, Some(selected));
+        assert!(state.items.is_empty());
+        assert!(state.pending.is_empty());
+        assert!(state.diagnostics.is_empty());
+        assert!(state.interaction_answer.is_empty());
+        assert_eq!(state.conversation_scroll, 0.0);
+        assert!(state.conversation_pinned);
+    }
+
+    #[test]
     fn resumed_delta_materializes_an_item_without_a_visible_inconsistency() {
         let mut state = ChatState::default();
         state.apply(
