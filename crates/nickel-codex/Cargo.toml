@@ -12,9 +12,12 @@ sha2.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 toml.workspace = true
+tungstenite.workspace = true
+url.workspace = true
 flate2.workspace = true
 tar.workspace = true
 ctrlc.workspace = true
+dirs.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

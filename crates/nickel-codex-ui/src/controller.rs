@@ -38,8 +38,8 @@ fn create_managed_workspace_at(documents: &Path, now: &jiff::Zoned) -> Result<Pa
 
 use nickel_codex::{
     AccountState, BackendChoice, CodexBackend, CodexClient, CodexEvent, CommandDecision,
-    FileChangeDecision, InteractionResponse, Model, ReplayBackend, Selector, ServerRequestId,
-    StartThread, StartTurn, Thread, ThreadId, ThreadPage, UserInputAnswer,
+    FileChangeDecision, InteractionResponse, Model, RemoteHost, ReplayBackend, Selector,
+    ServerRequestId, StartThread, StartTurn, Thread, ThreadId, ThreadPage, UserInputAnswer,
 };
 
 #[derive(Clone)]
@@ -47,6 +47,9 @@ pub enum BackendMode {
     Live {
         choice: BackendChoice,
         cwd: PathBuf,
+    },
+    Remote {
+        host: RemoteHost,
     },
     Replay {
         backend: ReplayBackend,
@@ -150,47 +153,85 @@ fn run_worker(
     events: Sender<(u64, ControllerEvent)>,
 ) {
     let send = |event| events.send((generation, event)).is_ok();
-    let (backend, cwd, provenance): (Box<dyn CodexBackend>, PathBuf, String) = match mode {
-        BackendMode::Replay { backend, cwd } => (Box::new(backend), cwd, "Replay fixture".into()),
-        BackendMode::Live { choice, cwd } => {
-            let selection = Selector::platform_default().select(choice);
-            let Some(candidate) = selection.selected else {
-                let reason = selection
-                    .probes
-                    .last()
-                    .map(|probe| probe.reason.clone())
-                    .unwrap_or_else(|| "no Codex candidate was found".into());
-                let event = if selection.probes.is_empty() {
-                    ControllerEvent::Failure(reason)
-                } else {
-                    ControllerEvent::Incompatible(reason)
-                };
-                let _ = send(event);
-                return;
-            };
-            let version = selection
-                .probes
-                .iter()
-                .find(|probe| probe.candidate == candidate)
-                .and_then(|probe| probe.version.clone())
-                .unwrap_or_else(|| "compatible version".into());
-            let provenance = codex_attribution(&version);
-            match CodexClient::spawn(&candidate.path, &cwd) {
-                Ok(client) => (Box::new(client), cwd, provenance),
-                Err(error) => {
-                    let _ = send(ControllerEvent::Failure(error.to_string()));
+    let (backend, cwd, provenance, remote): (Box<dyn CodexBackend>, PathBuf, String, bool) =
+        match mode {
+            BackendMode::Replay { backend, cwd } => {
+                (Box::new(backend), cwd, "Replay fixture".into(), false)
+            }
+            BackendMode::Live { choice, cwd } => {
+                let selection = Selector::platform_default().select(choice);
+                let Some(candidate) = selection.selected else {
+                    let reason = selection
+                        .probes
+                        .last()
+                        .map(|probe| probe.reason.clone())
+                        .unwrap_or_else(|| "no Codex candidate was found".into());
+                    let event = if selection.probes.is_empty() {
+                        ControllerEvent::Failure(reason)
+                    } else {
+                        ControllerEvent::Incompatible(reason)
+                    };
+                    let _ = send(event);
                     return;
+                };
+                let version = selection
+                    .probes
+                    .iter()
+                    .find(|probe| probe.candidate == candidate)
+                    .and_then(|probe| probe.version.clone())
+                    .unwrap_or_else(|| "compatible version".into());
+                let provenance = codex_attribution(&version);
+                match CodexClient::spawn(&candidate.path, &cwd) {
+                    Ok(client) => (Box::new(client), cwd, provenance, false),
+                    Err(error) => {
+                        let _ = send(ControllerEvent::Failure(error.to_string()));
+                        return;
+                    }
                 }
             }
-        }
-    };
+            BackendMode::Remote { host } => {
+                let token = match host.token_env.as_deref() {
+                    Some(variable) => match std::env::var(variable) {
+                        Ok(token) if !token.is_empty() => Some(token),
+                        Ok(_) => {
+                            let _ = send(ControllerEvent::Failure(format!(
+                                "remote token environment variable {variable} is empty"
+                            )));
+                            return;
+                        }
+                        Err(_) => {
+                            let _ = send(ControllerEvent::Failure(format!(
+                                "remote token environment variable {variable} is not set"
+                            )));
+                            return;
+                        }
+                    },
+                    None => None,
+                };
+                match CodexClient::connect_remote(&host.endpoint, token.as_deref()) {
+                    Ok(client) => (
+                        Box::new(client),
+                        PathBuf::from(&host.default_cwd),
+                        format!(
+                            "Remote: {} · {}\npowered by OpenAI Codex CLI.",
+                            host.name, host.endpoint
+                        ),
+                        true,
+                    ),
+                    Err(error) => {
+                        let _ = send(ControllerEvent::Failure(error.to_string()));
+                        return;
+                    }
+                }
+            }
+        };
     let protocol_events = backend.subscribe();
     if !send(snapshot(&*backend, provenance.clone())) {
         return;
     }
     let mut selected_thread = None;
     let mut active_turn = None;
-    let mut new_thread_cwd = cwd;
+    let mut new_thread_cwd = cwd.clone();
 
     loop {
         while let Ok(event) = protocol_events.try_recv() {
@@ -214,7 +255,7 @@ fn run_worker(
             ControllerCommand::Refresh => send(snapshot(&*backend, provenance.clone()))
                 .then_some(())
                 .ok_or_else(|| "UI disconnected".to_owned()),
-            ControllerCommand::NewChat => create_managed_workspace().map(|workspace| {
+            ControllerCommand::NewChat => next_new_thread_cwd(remote, &cwd).map(|workspace| {
                 new_thread_cwd = workspace;
                 selected_thread = None;
                 active_turn = None;
@@ -285,6 +326,14 @@ fn run_worker(
     }
 }
 
+fn next_new_thread_cwd(remote: bool, configured_cwd: &Path) -> Result<PathBuf, String> {
+    if remote {
+        Ok(configured_cwd.to_owned())
+    } else {
+        create_managed_workspace()
+    }
+}
+
 pub(crate) fn codex_attribution(version: &str) -> String {
     let version = version
         .trim()
@@ -317,7 +366,7 @@ fn snapshot(backend: &dyn CodexBackend, provenance: String) -> ControllerEvent {
 
 #[cfg(test)]
 mod tests {
-    use super::create_managed_workspace_at;
+    use super::{create_managed_workspace_at, next_new_thread_cwd};
 
     #[test]
     fn managed_workspaces_are_dated_unique_children_of_documents() {
@@ -340,5 +389,16 @@ mod tests {
         assert!(first.is_dir());
         assert!(second.is_dir());
         assert_ne!(first, documents.path());
+    }
+
+    #[test]
+    fn remote_new_chat_reuses_remote_path_without_local_creation() {
+        let directory = tempfile::tempdir().unwrap();
+        let nonexistent = directory.path().join("must-not-be-created");
+        assert_eq!(
+            next_new_thread_cwd(true, &nonexistent).unwrap(),
+            nonexistent
+        );
+        assert!(!nonexistent.exists());
     }
 }

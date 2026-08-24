@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufRead, BufReader, ErrorKind, Read, Write},
     path::Path,
     process::{Child, ChildStdin, Command, Stdio},
     sync::atomic::{AtomicU64, Ordering},
@@ -10,11 +10,20 @@ use std::{
 };
 
 use serde_json::{Value, json};
+use tungstenite::{
+    Message,
+    client::IntoClientRequest,
+    connect,
+    http::{HeaderValue, header::AUTHORIZATION},
+    stream::MaybeTlsStream,
+};
+use url::Url;
 
 use crate::protocol::*;
 
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const EVENT_BACKLOG: usize = 1024;
+const OUTBOUND_BACKLOG: usize = 256;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConnectionState {
@@ -26,8 +35,8 @@ pub enum ConnectionState {
 }
 
 struct Inner {
-    child: Mutex<Child>,
-    stdin: Mutex<ChildStdin>,
+    child: Mutex<Option<Child>>,
+    writer: RpcWriter,
     next_id: Mutex<u64>,
     pending: Mutex<HashMap<String, mpsc::Sender<Result<Value, CodexError>>>>,
     subscribers: Mutex<Vec<mpsc::SyncSender<CodexEvent>>>,
@@ -40,6 +49,16 @@ struct Inner {
     stderr: Mutex<Vec<u8>>,
 }
 
+enum RpcWriter {
+    Stdio(Mutex<ChildStdin>),
+    WebSocket(mpsc::SyncSender<RemoteWrite>),
+}
+
+enum RemoteWrite {
+    Text(String),
+    Close,
+}
+
 struct PendingInteraction {
     method: String,
     raw_id: Value,
@@ -48,7 +67,10 @@ struct PendingInteraction {
 
 impl Drop for Inner {
     fn drop(&mut self) {
-        if let Ok(child) = self.child.get_mut() {
+        if let RpcWriter::WebSocket(writer) = &self.writer {
+            let _ = writer.try_send(RemoteWrite::Close);
+        }
+        if let Ok(Some(child)) = self.child.get_mut().map(Option::as_mut) {
             let _ = child.kill();
             let _ = child.wait();
         }
@@ -90,8 +112,8 @@ impl CodexClient {
             .take()
             .ok_or_else(|| CodexError::Protocol("missing child stderr".into()))?;
         let inner = Arc::new(Inner {
-            child: Mutex::new(child),
-            stdin: Mutex::new(stdin),
+            child: Mutex::new(Some(child)),
+            writer: RpcWriter::Stdio(Mutex::new(stdin)),
             next_id: Mutex::new(1),
             pending: Mutex::new(HashMap::new()),
             subscribers: Mutex::new(Vec::new()),
@@ -106,16 +128,68 @@ impl CodexClient {
         let client = Self { inner };
         client.start_reader(stdout);
         client.start_stderr_drain(stderr);
-        client.request("initialize", json!({
+        client.initialize()?;
+        Ok(client)
+    }
+
+    pub fn connect_remote(endpoint: &str, bearer_token: Option<&str>) -> Result<Self, CodexError> {
+        Self::connect_remote_with_timeout(endpoint, bearer_token, Duration::from_secs(15))
+    }
+
+    pub fn connect_remote_with_timeout(
+        endpoint: &str,
+        bearer_token: Option<&str>,
+        request_timeout: Duration,
+    ) -> Result<Self, CodexError> {
+        validate_remote_endpoint(endpoint)?;
+        let mut request = endpoint.into_client_request().map_err(|error| {
+            CodexError::Unavailable(format!("invalid remote endpoint: {error}"))
+        })?;
+        if let Some(token) = bearer_token {
+            if token.is_empty() {
+                return Err(CodexError::Unavailable(
+                    "configured remote bearer token is empty".into(),
+                ));
+            }
+            let value = HeaderValue::from_str(&format!("Bearer {token}"))
+                .map_err(|_| CodexError::Unavailable("remote bearer token is invalid".into()))?;
+            request.headers_mut().insert(AUTHORIZATION, value);
+        }
+        let (socket, _) = connect(request).map_err(|error| {
+            CodexError::Unavailable(format!("remote app-server connection failed: {error}"))
+        })?;
+        let (writer, outbound) = mpsc::sync_channel(OUTBOUND_BACKLOG);
+        let inner = Arc::new(Inner {
+            child: Mutex::new(None),
+            writer: RpcWriter::WebSocket(writer),
+            next_id: Mutex::new(1),
+            pending: Mutex::new(HashMap::new()),
+            subscribers: Mutex::new(Vec::new()),
+            outstanding: Mutex::new(HashMap::new()),
+            projection: Mutex::new(Projection::default()),
+            sequence: Mutex::new(0),
+            state: Mutex::new(ConnectionState::Starting),
+            request_timeout,
+            dropped_events: AtomicU64::new(0),
+            stderr: Mutex::new(Vec::new()),
+        });
+        let client = Self { inner };
+        client.start_websocket(socket, outbound);
+        client.initialize()?;
+        Ok(client)
+    }
+
+    fn initialize(&self) -> Result<(), CodexError> {
+        self.request("initialize", json!({
             "clientInfo": {"name": "nickel", "title": "Nickel", "version": env!("CARGO_PKG_VERSION")},
             "capabilities": {"experimentalApi": false}
         }))?;
-        client.notify("initialized", json!({}))?;
-        *client.inner.state.lock().unwrap() = ConnectionState::Ready;
-        client.publish(EventKind::Connection {
+        self.notify("initialized", json!({}))?;
+        *self.inner.state.lock().unwrap() = ConnectionState::Ready;
+        self.publish(EventKind::Connection {
             state: "ready".into(),
         });
-        Ok(client)
+        Ok(())
     }
 
     pub fn state(&self) -> ConnectionState {
@@ -193,6 +267,79 @@ impl CodexClient {
         });
     }
 
+    fn start_websocket(
+        &self,
+        mut socket: tungstenite::WebSocket<MaybeTlsStream<std::net::TcpStream>>,
+        outbound: mpsc::Receiver<RemoteWrite>,
+    ) {
+        set_socket_timeout(socket.get_mut(), Duration::from_millis(50));
+        let inner = Arc::downgrade(&self.inner);
+        thread::spawn(move || {
+            loop {
+                while let Ok(write) = outbound.try_recv() {
+                    let result = match write {
+                        RemoteWrite::Text(text) => socket.send(Message::Text(text.into())),
+                        RemoteWrite::Close => {
+                            let _ = socket.close(None);
+                            return;
+                        }
+                    };
+                    if let Err(error) = result {
+                        if let Some(inner) = inner.upgrade() {
+                            Self { inner }
+                                .fail(&format!("remote app-server write failed: {error}"));
+                        }
+                        return;
+                    }
+                }
+                match socket.read() {
+                    Ok(Message::Text(text)) if text.len() > MAX_FRAME_BYTES => {
+                        if let Some(inner) = inner.upgrade() {
+                            Self { inner }.fail("remote app-server frame exceeded limit");
+                        }
+                        return;
+                    }
+                    Ok(Message::Text(text)) => match serde_json::from_str::<Value>(text.as_ref()) {
+                        Ok(value) => {
+                            let Some(inner) = inner.upgrade() else {
+                                return;
+                            };
+                            Self { inner }.handle(value);
+                        }
+                        Err(error) => {
+                            if let Some(inner) = inner.upgrade() {
+                                Self { inner }
+                                    .fail(&format!("malformed remote app-server JSON: {error}"));
+                            }
+                            return;
+                        }
+                    },
+                    Ok(Message::Binary(_)) => {
+                        if let Some(inner) = inner.upgrade() {
+                            Self { inner }.fail("remote app-server sent a binary protocol message");
+                        }
+                        return;
+                    }
+                    Ok(Message::Close(_)) => {
+                        if let Some(inner) = inner.upgrade() {
+                            Self { inner }.fail("remote app-server closed the connection");
+                        }
+                        return;
+                    }
+                    Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_)) => {}
+                    Err(tungstenite::Error::Io(error))
+                        if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+                    Err(error) => {
+                        if let Some(inner) = inner.upgrade() {
+                            Self { inner }.fail(&format!("remote app-server read failed: {error}"));
+                        }
+                        return;
+                    }
+                }
+            }
+        });
+    }
+
     fn request(&self, method: &str, params: Value) -> Result<Value, CodexError> {
         if matches!(
             self.state(),
@@ -222,11 +369,33 @@ impl CodexClient {
     }
 
     fn write(&self, value: &Value) -> Result<(), CodexError> {
-        let mut stdin = self.inner.stdin.lock().unwrap();
-        serde_json::to_writer(&mut *stdin, value)?;
-        stdin.write_all(b"\n")?;
-        stdin.flush()?;
-        Ok(())
+        let text = serde_json::to_string(value)?;
+        if text.len() > MAX_FRAME_BYTES {
+            return Err(CodexError::Protocol(
+                "outbound app-server frame exceeded limit".into(),
+            ));
+        }
+        match &self.inner.writer {
+            RpcWriter::Stdio(stdin) => {
+                let mut stdin = stdin.lock().unwrap();
+                stdin.write_all(text.as_bytes())?;
+                stdin.write_all(b"\n")?;
+                stdin.flush()?;
+                Ok(())
+            }
+            RpcWriter::WebSocket(writer) => {
+                writer
+                    .try_send(RemoteWrite::Text(text))
+                    .map_err(|error| match error {
+                        mpsc::TrySendError::Full(_) => {
+                            CodexError::Unavailable("remote app-server write queue is full".into())
+                        }
+                        mpsc::TrySendError::Disconnected(_) => {
+                            CodexError::Stopped("remote app-server connection is closed".into())
+                        }
+                    })
+            }
+        }
     }
 
     fn handle(&self, value: Value) {
@@ -538,9 +707,13 @@ impl CodexClient {
         }
         *state = ConnectionState::Stopping;
         drop(state);
-        let mut child = self.inner.child.lock().unwrap();
-        let _ = child.kill();
-        let _ = child.wait();
+        if let RpcWriter::WebSocket(writer) = &self.inner.writer {
+            let _ = writer.try_send(RemoteWrite::Close);
+        }
+        if let Some(child) = self.inner.child.lock().unwrap().as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
         *self.inner.state.lock().unwrap() = ConnectionState::Stopped;
         self.publish(EventKind::Connection {
             state: "stopped".into(),
@@ -554,6 +727,36 @@ impl Drop for CodexClient {
             self.shutdown();
         }
     }
+}
+
+fn validate_remote_endpoint(endpoint: &str) -> Result<(), CodexError> {
+    let endpoint = Url::parse(endpoint)
+        .map_err(|error| CodexError::Unavailable(format!("invalid remote endpoint: {error}")))?;
+    if !matches!(endpoint.scheme(), "ws" | "wss") {
+        return Err(CodexError::Unavailable(
+            "remote endpoint must use ws or wss".into(),
+        ));
+    }
+    if endpoint.host_str().is_none()
+        || !endpoint.username().is_empty()
+        || endpoint.password().is_some()
+        || endpoint.fragment().is_some()
+    {
+        return Err(CodexError::Unavailable(
+            "remote endpoint must include a host and must not contain credentials or a fragment"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+fn set_socket_timeout(stream: &mut MaybeTlsStream<std::net::TcpStream>, timeout: Duration) {
+    let result = match stream {
+        MaybeTlsStream::Plain(stream) => stream.set_read_timeout(Some(timeout)),
+        MaybeTlsStream::Rustls(stream) => stream.sock.set_read_timeout(Some(timeout)),
+        _ => return,
+    };
+    let _ = result;
 }
 
 impl CodexBackend for CodexClient {
@@ -824,9 +1027,196 @@ fn history_item_text(item_type: &str, value: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use proptest::prelude::*;
+    use std::{net::TcpListener, sync::Arc};
 
-    use super::parse_thread;
+    use proptest::prelude::*;
+    use tungstenite::{Message, accept_hdr};
+
+    use super::*;
+
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn remote_websocket_runs_typed_requests_with_bearer_auth_and_remote_cwd() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("ws://{}/app-server", listener.local_addr().unwrap());
+        let authenticated = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed_auth = authenticated.clone();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = accept_hdr(
+                stream,
+                move |request: &tungstenite::handshake::server::Request,
+                      response: tungstenite::handshake::server::Response| {
+                    observed_auth.store(
+                        request
+                            .headers()
+                            .get(AUTHORIZATION)
+                            .is_some_and(|value| value == "Bearer fixture-secret"),
+                        Ordering::Relaxed,
+                    );
+                    Ok(response)
+                },
+            )
+            .unwrap();
+            let mut saw_remote_cwd = false;
+            let mut saw_approval = false;
+            let mut saw_interrupt = false;
+            while !saw_interrupt {
+                let Message::Text(text) = socket.read().unwrap() else {
+                    continue;
+                };
+                let value: Value = serde_json::from_str(text.as_ref()).unwrap();
+                let Some(id) = value.get("id").cloned() else {
+                    continue;
+                };
+                let Some(method) = value.get("method").and_then(Value::as_str) else {
+                    saw_approval |= id == "approval-1" && value.get("result").is_some();
+                    continue;
+                };
+                let result = match method {
+                    "initialize" => json!({}),
+                    "account/read" => json!({"account":{"type":"chatgpt"}}),
+                    "model/list" => json!({"data":[],"nextCursor":null}),
+                    "thread/list" => json!({"data":[],"nextCursor":null}),
+                    "thread/start" => {
+                        saw_remote_cwd = value["params"]["cwd"] == "/srv/code/nickel";
+                        json!({"thread":{"id":"remote-thread","cwd":"/srv/code/nickel"}})
+                    }
+                    "turn/start" => json!({"turn":{"id":"remote-turn","status":"inProgress"}}),
+                    "turn/interrupt" => {
+                        saw_interrupt = value["params"]["threadId"] == "remote-thread"
+                            && value["params"]["turnId"] == "remote-turn";
+                        json!({})
+                    }
+                    method => panic!("unexpected method {method}"),
+                };
+                socket
+                    .send(Message::Text(
+                        json!({"id":id,"result":result}).to_string().into(),
+                    ))
+                    .unwrap();
+                if method == "turn/start" {
+                    socket
+                        .send(Message::Text(
+                            json!({
+                                "method":"item/started",
+                                "params":{"threadId":"remote-thread","turnId":"remote-turn","item":{"id":"agent-1","type":"agentMessage"}}
+                            })
+                            .to_string()
+                            .into(),
+                        ))
+                        .unwrap();
+                    socket
+                        .send(Message::Text(
+                            json!({
+                                "method":"item/agentMessage/delta",
+                                "params":{"itemId":"agent-1","delta":"remote response"}
+                            })
+                            .to_string()
+                            .into(),
+                        ))
+                        .unwrap();
+                    socket
+                        .send(Message::Text(
+                            json!({
+                                "id":"approval-1",
+                                "method":"item/commandExecution/requestApproval",
+                                "params":{"reason":"fixture approval"}
+                            })
+                            .to_string()
+                            .into(),
+                        ))
+                        .unwrap();
+                }
+            }
+            (saw_remote_cwd, saw_approval, saw_interrupt)
+        });
+
+        let client = CodexClient::connect_remote_with_timeout(
+            &endpoint,
+            Some("fixture-secret"),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        assert!(client.account().unwrap().authenticated);
+        assert!(client.models().unwrap().is_empty());
+        assert!(
+            client
+                .list_threads(ThreadPage::default())
+                .unwrap()
+                .threads
+                .is_empty()
+        );
+        let events = client.subscribe();
+        let thread = client
+            .start_thread(StartThread {
+                cwd: "/srv/code/nickel".into(),
+                model: None,
+            })
+            .unwrap();
+        let turn = client
+            .start_turn(StartTurn {
+                thread_id: thread.id,
+                text: "hello remotely".into(),
+            })
+            .unwrap();
+        assert_eq!(turn.id.0, "remote-turn");
+        let request_id = loop {
+            let event = events.recv_timeout(Duration::from_secs(2)).unwrap();
+            if let EventKind::ApprovalRequested { request_id, .. } = event.kind {
+                break request_id;
+            }
+        };
+        assert_eq!(client.projection().items["agent-1"].text, "remote response");
+        client
+            .respond(
+                request_id,
+                InteractionResponse::CommandApproval {
+                    decision: CommandDecision::Accept,
+                },
+            )
+            .unwrap();
+        client
+            .interrupt_turn(ThreadId("remote-thread".into()), turn.id)
+            .unwrap();
+        client.shutdown();
+        assert_eq!(server.join().unwrap(), (true, true, true));
+        assert!(authenticated.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn remote_websocket_rejects_binary_malformed_oversized_and_abrupt_sessions() {
+        fn rejected(message: Option<Message>) -> String {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let endpoint = format!("ws://{}/app-server", listener.local_addr().unwrap());
+            let server = thread::spawn(move || {
+                let (stream, _) = listener.accept().unwrap();
+                let mut socket = tungstenite::accept(stream).unwrap();
+                let _ = socket.read().unwrap();
+                if let Some(message) = message {
+                    socket.send(message).unwrap();
+                }
+            });
+            let error = CodexClient::connect_remote_with_timeout(
+                &endpoint,
+                None,
+                Duration::from_millis(500),
+            )
+            .err()
+            .expect("remote connection must fail")
+            .to_string();
+            server.join().unwrap();
+            error
+        }
+
+        assert!(rejected(Some(Message::Binary(vec![1, 2, 3].into()))).contains("stopped"));
+        assert!(rejected(Some(Message::Text("not json".into()))).contains("stopped"));
+        assert!(
+            rejected(Some(Message::Text("x".repeat(MAX_FRAME_BYTES + 1).into())))
+                .contains("stopped")
+        );
+        assert!(rejected(None).contains("stopped"));
+    }
 
     #[test]
     fn resumed_thread_projects_ordered_history_items() {

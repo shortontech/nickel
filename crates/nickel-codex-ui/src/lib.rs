@@ -11,8 +11,8 @@ pub use view::{ChatApplication, ChatMessage};
 #[cfg(test)]
 mod tests {
     use nickel_codex::{
-        BackendChoice, CodexEvent, EventKind, ReplayBackend, ServerRequestId, Thread, ThreadId,
-        TurnId,
+        BackendChoice, CodexEvent, CodexSettings, EventKind, ReplayBackend, ServerRequestId,
+        Thread, ThreadId, TurnId,
     };
     use nickel_ui::{
         Application, DocumentSelection, PaintCommand, Point, Rect, SdlComponentRenderer,
@@ -356,6 +356,54 @@ mod tests {
         );
         assert!(open.message_rect(&ChatMessage::NewChat).is_some());
         assert!(open.message_rect(&ChatMessage::Refresh).is_some());
+    }
+
+    #[test]
+    fn remote_host_editor_validates_and_persists_nickel_owned_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        let settings_path = directory.path().join("nickel").join("codex-hosts.toml");
+        let backend = ReplayBackend::from_json(r#"{"name":"hosts","events":[]}"#).unwrap();
+        let mut app = ChatApplication::with_settings(
+            BackendMode::Replay {
+                backend,
+                cwd: directory.path().into(),
+            },
+            CodexSettings::default(),
+            Some(settings_path.clone()),
+        );
+
+        app.update(ChatMessage::ManageRemoteHosts);
+        app.update(ChatMessage::AddRemoteHost);
+        app.update(ChatMessage::RemoteHostIdChanged("workstation".into()));
+        app.update(ChatMessage::RemoteHostNameChanged("Workstation".into()));
+        app.update(ChatMessage::RemoteHostEndpointChanged(
+            "wss://codex.example.test/app-server".into(),
+        ));
+        app.update(ChatMessage::RemoteHostTokenEnvChanged(
+            "NICKEL_CODEX_TOKEN".into(),
+        ));
+        app.update(ChatMessage::RemoteHostCwdChanged("/projects/nickel".into()));
+        app.update(ChatMessage::SaveRemoteHost);
+
+        let persisted = CodexSettings::load(&settings_path).unwrap();
+        assert_eq!(persisted.hosts.len(), 1);
+        assert_eq!(persisted.hosts[0].name, "Workstation");
+        let stored = std::fs::read_to_string(settings_path).unwrap();
+        assert!(stored.contains("NICKEL_CODEX_TOKEN"));
+        assert!(!stored.contains("fixture-secret"));
+
+        let tree = UiTree::layout(app.view(), Rect::new(0.0, 0.0, 900.0, 640.0));
+        assert!(tree.commands().iter().any(
+            |command| matches!(command, PaintCommand::Text { text, .. } if text == "Workstation")
+        ));
+        assert!(
+            tree.message_rect(&ChatMessage::EditRemoteHost("workstation".into()))
+                .is_some()
+        );
+        assert!(
+            tree.message_rect(&ChatMessage::RemoveRemoteHost("workstation".into()))
+                .is_some()
+        );
     }
 
     #[test]
