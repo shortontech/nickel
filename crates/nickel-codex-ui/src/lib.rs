@@ -432,6 +432,11 @@ mod tests {
             Rect::new(0.0, 0.0, 1120.0, 600.0),
             &mut ui_state,
         );
+        let menu_bar = tree
+            .resolved_layout()
+            .find(&nickel_ui::UiId::from("root/menu-bar"))
+            .expect("menu bar");
+        assert_eq!(menu_bar.allocated.size.height, 30.0);
         let title = tree
             .resolved_layout()
             .find(&nickel_ui::UiId::from(

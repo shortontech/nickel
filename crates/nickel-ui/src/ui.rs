@@ -2790,7 +2790,7 @@ pub struct MenuBar<Message = String>(Row<Message>);
 
 impl<Message> MenuBar<Message> {
     pub fn new() -> Self {
-        Self(Row::new().height(30.0).background(0x171b22))
+        Self(Row::new().height(30.0).shrink(0.0).background(0x171b22))
     }
     pub fn child(mut self, child: impl Component<Message>) -> Self {
         self.0 = self.0.child(child);
@@ -6899,13 +6899,18 @@ mod tests {
                             .id("file"),
                         ),
                     )
-                    .child(Container::new().id("body").height(100.0)),
+                    .child(Container::new().id("body").height(1000.0)),
                 Rect::new(0.0, 0.0, 240.0, 160.0),
                 state,
             )
         };
         let mut state = UiStateStore::default();
         let closed = build(&mut state);
+        let bar = closed
+            .resolved_layout()
+            .find(&UiId::from("root/bar"))
+            .expect("menu bar");
+        assert_eq!(bar.allocated.size.height, 30.0);
         let file_label = closed
             .commands()
             .iter()
