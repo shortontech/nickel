@@ -12,7 +12,6 @@ const DEFAULT_TASK_LIMIT: usize = 10;
 struct ProjectSection<'a> {
     key: String,
     name: String,
-    path: Option<String>,
     threads: Vec<&'a Thread>,
 }
 
@@ -43,7 +42,21 @@ fn project_name(path: &Path) -> String {
     path.file_name()
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty())
-        .map(str::to_owned)
+        .map(|name| {
+            name.split(['-', '_'])
+                .map(|part| {
+                    if part.eq_ignore_ascii_case("ui") {
+                        "UI".to_owned()
+                    } else {
+                        let mut characters = part.chars();
+                        characters.next().map_or_else(String::new, |first| {
+                            first.to_uppercase().chain(characters).collect()
+                        })
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
         .unwrap_or_else(|| path.display().to_string())
 }
 
@@ -69,7 +82,6 @@ fn project_sections(threads: &[Thread]) -> Vec<ProjectSection<'_>> {
                 .cwd
                 .as_deref()
                 .map_or_else(|| "Other tasks".to_owned(), project_name),
-            path: thread.cwd.as_ref().map(|path| path.display().to_string()),
             threads: vec![thread],
         });
     }
@@ -126,16 +138,21 @@ pub(super) fn thread_sidebar(state: &ChatState) -> impl View<ChatMessage> {
                 {projects.iter().map(|project| {
                     let visible_threads = project.visible_threads(state);
                     let expanded = state.expanded_projects.contains(&project.key);
-                    ui! { <Column key={project.key.clone()} fill_width shrink={0.0} gap={5.0}>
-                        <Text color={TEXT} scale={0.92} shrink={0.0}>{&project.name}</Text>
-                        {project.path.as_ref().map(|path| ui! {
-                            <Text color={MUTED} scale={0.72} ellipsis={true} shrink={0.0}>{path}</Text>
-                        })}
-                        {visible_threads.iter().map(|thread| ui! {
+                    let collapsed = state.collapsed_projects.contains(&project.key);
+                    ui! { <Column key={project.key.clone()} fill_width shrink={0.0} gap={2.0}>
+                        <Button key={format!("{}-header", project.key)}
+                            on_press={ChatMessage::ToggleProjectCollapsed(project.key.clone())}
+                            background={SIDEBAR} color={TEXT} height={34.0}
+                            label_align={TextAlign::Start} fill_width>
+                            {format!("{}  {}", if collapsed { "▸" } else { "▾" }, project.name)}
+                        </Button>
+                        {if collapsed { ui! { <Spacer height={0.0} /> } } else { ui! {
+                          <Column fill_width gap={2.0}>
+                          {visible_threads.iter().map(|thread| ui! {
                             <Button key={thread.id.0.clone()}
                                 on_press={ChatMessage::SelectThread(thread.id.clone())}
-                                background={if state.selected_thread.as_ref() == Some(&thread.id) { 0x2a4261 } else { PANEL }}
-                                color={TEXT} max_lines={2} fill_width>
+                                background={if state.selected_thread.as_ref() == Some(&thread.id) { PANEL } else { SIDEBAR }}
+                                color={TEXT} max_lines={2} radius={10.0} label_align={TextAlign::Start} fill_width>
                                 {thread.title.as_deref().unwrap_or("Untitled conversation")}
                             </Button>
                         })}
@@ -148,11 +165,13 @@ pub(super) fn thread_sidebar(state: &ChatState) -> impl View<ChatMessage> {
                             ui! {
                                 <Button key={format!("{}-disclosure", project.key)}
                                     on_press={ChatMessage::ToggleProject(project.key.clone())}
-                                    background={SIDEBAR} color={MUTED} fill_width>{label}</Button>
+                                    background={SIDEBAR} color={MUTED} label_align={TextAlign::Start} fill_width>{label}</Button>
                             }
                         } else {
                             ui! { <Spacer height={0.0} /> }
                         }}
+                          </Column>
+                        }}}
                     </Column> }
                 })}
             </Column>
@@ -199,7 +218,7 @@ mod tests {
                 .iter()
                 .map(|section| section.name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["nickel", "galen", "Other tasks"]
+            vec!["Nickel", "Galen", "Other tasks"]
         );
         assert_eq!(
             sections[0]
@@ -264,7 +283,7 @@ mod tests {
                 .iter()
                 .map(|section| section.name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["tmp-project", "galen", "nickel", "stable"]
+            vec!["Tmp Project", "Galen", "Nickel", "Stable"]
         );
         assert_eq!(
             sections[2]
@@ -285,7 +304,7 @@ mod tests {
         assert!(
             sections
                 .iter()
-                .all(|section| section.name != "codex-worktree")
+                .all(|section| section.name != "Codex Worktree")
         );
     }
 }

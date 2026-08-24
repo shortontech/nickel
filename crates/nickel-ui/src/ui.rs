@@ -2388,6 +2388,20 @@ impl<Message> Button<Message> {
         self
     }
 
+    pub fn label_align(mut self, align: TextAlign) -> Self {
+        if let Some(label) = self.0.0.children.first_mut()
+            && let Kind::Text { .. } = label.kind
+        {
+            label.style.text_align = align;
+        }
+        self
+    }
+
+    pub fn radius(mut self, radius: f32) -> Self {
+        self.0 = self.0.radius(radius);
+        self
+    }
+
     pub fn min_width(mut self, width: f32) -> Self {
         self.0 = self.0.min_width(width);
         self

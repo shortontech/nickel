@@ -38,6 +38,7 @@ pub enum ChatMessage {
     DismissInput(ServerRequestId),
     ConversationScrolled(f32),
     ToggleProject(String),
+    ToggleProjectCollapsed(String),
     ToggleFileMenu,
 }
 
@@ -224,6 +225,11 @@ impl Application for ChatApplication {
             ChatMessage::ToggleProject(project) => {
                 if !self.state.expanded_projects.remove(&project) {
                     self.state.expanded_projects.insert(project);
+                }
+            }
+            ChatMessage::ToggleProjectCollapsed(project) => {
+                if !self.state.collapsed_projects.remove(&project) {
+                    self.state.collapsed_projects.insert(project);
                 }
             }
             ChatMessage::ToggleFileMenu => {}

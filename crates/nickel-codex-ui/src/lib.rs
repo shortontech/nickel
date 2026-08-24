@@ -502,6 +502,36 @@ mod tests {
     }
 
     #[test]
+    fn collapsed_project_keeps_its_header_and_hides_its_tasks() {
+        let mut state = ChatState::default();
+        state.threads = vec![Thread {
+            id: ThreadId("thread".into()),
+            title: Some("Visible task".into()),
+            cwd: Some("/projects/nickel-ui".into()),
+            last_used_at: Some(1),
+            turns: Vec::new(),
+        }];
+        let expanded = UiTree::layout(view::chat_view(&state), Rect::new(0.0, 0.0, 900.0, 640.0));
+        assert!(expanded.commands().iter().any(
+            |command| matches!(command, PaintCommand::Text { text, .. } if text == "▾  Nickel UI")
+        ));
+        assert!(expanded.commands().iter().any(
+            |command| matches!(command, PaintCommand::Text { text, .. } if text == "Visible task")
+        ));
+
+        state
+            .collapsed_projects
+            .insert("/projects/nickel-ui".into());
+        let collapsed = UiTree::layout(view::chat_view(&state), Rect::new(0.0, 0.0, 900.0, 640.0));
+        assert!(collapsed.commands().iter().any(
+            |command| matches!(command, PaintCommand::Text { text, .. } if text == "▸  Nickel UI")
+        ));
+        assert!(!collapsed.commands().iter().any(
+            |command| matches!(command, PaintCommand::Text { text, .. } if text == "Visible task")
+        ));
+    }
+
+    #[test]
     fn long_transcript_cannot_crush_sidebar_or_composer() {
         let mut state = ChatState::default();
         state.status = ConnectionStatus::Ready;
