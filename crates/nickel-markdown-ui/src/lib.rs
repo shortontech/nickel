@@ -1180,6 +1180,83 @@ mod tests {
 
     #[test]
     #[cfg(feature = "application")]
+    fn readme_intrinsic_scroll_extent_stays_bounded() {
+        use nickel_ui::{Rect, UiTree};
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../README.md");
+        let request = LoadRequest {
+            generation: 1,
+            path,
+        };
+        let document = load_document(&request).result.unwrap();
+        let application = ViewerApplication::loaded(document);
+        let tree = UiTree::layout(
+            viewer_view(application.model(), None),
+            Rect::new(0.0, 0.0, 960.0, 720.0),
+        );
+        let extent = tree
+            .resolved_layout()
+            .nodes()
+            .iter()
+            .find(|node| node.id.as_str().contains("markdown-scroll/"))
+            .and_then(|node| node.scroll)
+            .expect("README scroll extent");
+        assert!(
+            extent.content.height < 10_000.0,
+            "README intrinsic height was {}",
+            extent.content.height
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "application")]
+    fn viewer_scroll_extent_measures_wrapped_prose_at_the_resolved_document_width() {
+        use nickel_ui::{PaintCommand, Rect, UiTree};
+
+        let paragraph = "Lorem ipsum dolor sit amet consectetur adipiscing elit deserunt fugiat. \
+            Et omnis cillum fugiat sint illum esse fugiat. Minus fuga aut dolor quos cupidatat atque.";
+        let source = std::iter::repeat_n(paragraph, 40)
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let document = LoadedDocument {
+            path: PathBuf::from("/tmp/wrapped-prose"),
+            title: "wrapped-prose".into(),
+            document: MarkdownDocument::parse(source.clone()),
+            source,
+        };
+        let application = ViewerApplication::loaded(document);
+        let tree = UiTree::layout(
+            viewer_view(application.model(), None),
+            Rect::new(0.0, 0.0, 960.0, 720.0),
+        );
+        let extent = tree
+            .resolved_layout()
+            .nodes()
+            .iter()
+            .find(|node| node.id.as_str().contains("markdown-scroll/"))
+            .and_then(|node| node.scroll)
+            .expect("wrapped prose scroll extent");
+        assert!(extent.content.height > extent.viewport.height);
+        let prose_bounds = tree
+            .commands()
+            .iter()
+            .filter_map(|command| match command {
+                PaintCommand::StyledText { bounds, text, .. }
+                    if text.starts_with("Lorem ipsum") =>
+                {
+                    Some(*bounds)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(!prose_bounds.is_empty());
+        assert!(
+            prose_bounds.iter().all(|bounds| bounds.size.height >= 41.5),
+            "wrapped paragraphs were undersized: {prose_bounds:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "application")]
     fn toolbar_activation_survives_reconstruction_between_press_and_release() {
         use nickel_ui::{Point, Rect, UiEvent, UiStateStore, UiTree};
 

@@ -1356,6 +1356,80 @@ mod tests {
 
     #[test]
     #[cfg(feature = "view")]
+    fn apache_license_continuations_stay_inside_their_list_rows() {
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../LICENSE-APACHE"),
+        )
+        .expect("Apache license fixture");
+        let document = MarkdownDocument::parse(source);
+        let tree = UiTree::layout(
+            markdown_view(&document, MarkdownPalette::default(), |destination| {
+                Message::Link(destination.to_owned())
+            }),
+            Rect::new(0.0, 0.0, 844.0, 20_000.0),
+        );
+        let nodes = tree.resolved_layout().nodes();
+        let styled = tree
+            .commands()
+            .iter()
+            .filter_map(|command| match command {
+                PaintCommand::StyledText { bounds, text, .. } => Some((*bounds, text.as_str())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for (index, (left, left_text)) in styled.iter().enumerate() {
+            for (right, right_text) in &styled[index + 1..] {
+                let overlaps = left.origin.x < right.origin.x + right.size.width
+                    && right.origin.x < left.origin.x + left.size.width
+                    && left.origin.y < right.origin.y + right.size.height
+                    && right.origin.y < left.origin.y + left.size.height;
+                assert!(
+                    !overlaps,
+                    "Apache text rectangles overlap: {left:?} {left_text:?}; {right:?} {right_text:?}"
+                );
+            }
+        }
+        for row in nodes
+            .iter()
+            .filter(|node| node.id.as_str().contains("markdown-list-row-"))
+        {
+            let prefix = format!("{}/", row.id.as_str());
+            let descendant_bottom = nodes
+                .iter()
+                .filter(|node| node.id.as_str().starts_with(&prefix))
+                .map(|node| node.allocated.origin.y + node.allocated.size.height)
+                .fold(row.allocated.origin.y, f32::max);
+            let row_bottom = row.allocated.origin.y + row.allocated.size.height;
+            assert!(
+                descendant_bottom <= row_bottom + 0.01,
+                "Apache list content escaped its row: {:?}, bottom={descendant_bottom}",
+                row.allocated
+            );
+            let body_prefix = format!("{}/#1/", row.id.as_str());
+            let mut blocks = nodes
+                .iter()
+                .filter(|node| {
+                    node.id
+                        .as_str()
+                        .strip_prefix(&body_prefix)
+                        .is_some_and(|tail| !tail.contains('/'))
+                })
+                .map(|node| node.allocated)
+                .collect::<Vec<_>>();
+            blocks.sort_by(|left, right| left.origin.y.total_cmp(&right.origin.y));
+            for pair in blocks.windows(2) {
+                assert!(
+                    pair[0].origin.y + pair[0].size.height <= pair[1].origin.y + 0.01,
+                    "Apache continuation blocks overlap: {:?}, {:?}",
+                    pair[0],
+                    pair[1]
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "view")]
     fn representative_rasters_have_visible_hierarchy_at_three_sizes() {
         let document = MarkdownDocument::parse(
             "# Raster hierarchy\n\n**Bold**, *italic*, ~~strike~~, `code`, and [link](guide.md).\n\n> Quote\n\n```rust\nfn main() {}\n```",

@@ -3241,6 +3241,7 @@ struct ScrollRegion<Message> {
     message: Option<Message>,
     offset_mapper: Option<fn(f32) -> Message>,
     rect: Rect,
+    clip: Rect,
     extent: ScrollExtent,
 }
 
@@ -3856,6 +3857,10 @@ impl<Message: Clone> UiTree<Message> {
                 let Some((track, thumb)) = scrollbar_geometry(scroll, axis) else {
                     continue;
                 };
+                if intersection(track, scroll.clip).is_none() {
+                    continue;
+                }
+                self.commands.push(PaintCommand::PushClip(scroll.clip));
                 self.commands.push(PaintCommand::RoundedFill {
                     rect: track,
                     color: 0x40343b48,
@@ -3866,6 +3871,7 @@ impl<Message: Clone> UiTree<Message> {
                     color: 0xc08a96a8,
                     radius: SCROLLBAR_THICKNESS / 2.0,
                 });
+                self.commands.push(PaintCommand::PopClip);
             }
         }
     }
@@ -3875,8 +3881,9 @@ impl<Message: Clone> UiTree<Message> {
             [ScrollbarAxis::Vertical, ScrollbarAxis::Horizontal]
                 .into_iter()
                 .find(|axis| {
-                    scrollbar_geometry(scroll, *axis)
-                        .is_some_and(|(track, _)| contains(track, point))
+                    scrollbar_geometry(scroll, *axis).is_some_and(|(track, _)| {
+                        contains(track, point) && contains(scroll.clip, point)
+                    })
                 })
                 .map(|axis| (scroll, axis))
         })
@@ -4898,6 +4905,48 @@ fn measure_element<Message>(element: &Element<Message>, constraints: Constraints
                 .collect::<Vec<_>>();
             let gap = element.style.gap.max(0.0) * element.children.len().saturating_sub(1) as f32;
             match axis {
+                Axis::Horizontal if child_max.width.is_finite() => {
+                    let items = element
+                        .children
+                        .iter()
+                        .zip(&sizes)
+                        .map(|(child, measured)| {
+                            let preferred = child.style.basis.resolve(
+                                child_max.width,
+                                child.style.width.resolve(child_max.width, measured.width),
+                            );
+                            FlexItem::flex(
+                                preferred,
+                                child.style.min_width.max(0.0),
+                                child.style.max_width.max(child.style.min_width.max(0.0)),
+                                child.style.grow,
+                                child.style.shrink,
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let rects = layout_flex(
+                        Rect::new(0.0, 0.0, child_max.width, 0.0),
+                        Axis::Horizontal,
+                        element.style.gap.max(0.0),
+                        &items,
+                    );
+                    let height = element
+                        .children
+                        .iter()
+                        .zip(&rects)
+                        .map(|(child, rect)| {
+                            measure_element(
+                                child,
+                                Constraints::loose(Size::new(rect.size.width, f32::INFINITY)),
+                            )
+                            .height
+                        })
+                        .fold(0.0, f32::max);
+                    Size::new(
+                        rects.iter().map(|rect| rect.size.width).sum::<f32>() + gap,
+                        height,
+                    )
+                }
                 Axis::Horizontal => Size::new(
                     sizes.iter().map(|size| size.width).sum::<f32>() + gap,
                     sizes.iter().map(|size| size.height).fold(0.0, f32::max),
@@ -4909,7 +4958,7 @@ fn measure_element<Message>(element: &Element<Message>, constraints: Constraints
             }
         }
         Kind::Grid { columns } => {
-            let sizes = element
+            let contributions = element
                 .children
                 .iter()
                 .map(|child| measure_element(child, child_constraints))
@@ -4918,10 +4967,21 @@ fn measure_element<Message>(element: &Element<Message>, constraints: Constraints
                 columns,
                 child_max.width,
                 element.style.gap,
-                &sizes,
+                &contributions,
                 element.children.len(),
             );
             let columns = widths.len().max(1);
+            let sizes = element
+                .children
+                .iter()
+                .enumerate()
+                .map(|(index, child)| {
+                    measure_element(
+                        child,
+                        Constraints::loose(Size::new(widths[index % columns], child_max.height)),
+                    )
+                })
+                .collect::<Vec<_>>();
             let rows = sizes.len().div_ceil(columns);
             let row_heights = (0..rows)
                 .map(|row| {
@@ -5723,11 +5783,16 @@ fn layout_element<Message: Clone>(
     let clips_descendants = element.style.overflow_x != Overflow::Visible
         || element.style.overflow_y != Overflow::Visible;
     let descendant_clip = if clips_descendants {
-        Some(
-            inherited_clip
-                .and_then(|parent| intersection(parent, rect))
-                .unwrap_or(rect),
-        )
+        Some(inherited_clip.map_or(rect, |parent| {
+            intersection(parent, rect).unwrap_or_else(|| {
+                Rect::new(
+                    rect.origin.x.max(parent.origin.x),
+                    rect.origin.y.max(parent.origin.y),
+                    0.0,
+                    0.0,
+                )
+            })
+        }))
     } else {
         inherited_clip
     };
@@ -5856,6 +5921,7 @@ fn layout_element<Message: Clone>(
                     message: element.message.clone(),
                     offset_mapper: element.message_mapper,
                     rect: scroll_rect,
+                    clip: descendant_clip.unwrap_or(scroll_rect),
                     extent,
                 });
                 clamped
@@ -5875,6 +5941,7 @@ fn layout_element<Message: Clone>(
                     message: element.message.clone(),
                     offset_mapper: element.message_mapper,
                     rect: scroll_rect,
+                    clip: descendant_clip.unwrap_or(scroll_rect),
                     extent,
                 });
             }
@@ -5893,11 +5960,10 @@ fn layout_element<Message: Clone>(
                 &element.children,
             );
             let child_clip = if scrollable_x || scrollable_y {
-                Some(
-                    descendant_clip
-                        .and_then(|parent| intersection(parent, content))
-                        .unwrap_or(content),
-                )
+                Some(descendant_clip.map_or(content, |parent| {
+                    intersection(parent, content)
+                        .unwrap_or_else(|| Rect::new(content.origin.x, content.origin.y, 0.0, 0.0))
+                }))
             } else {
                 descendant_clip
             };
@@ -5911,9 +5977,10 @@ fn layout_element<Message: Clone>(
         Kind::VerticalScroll { offset, .. } => {
             let requested_offset = *offset;
             let viewport = rect.inset(element.style.padding);
-            let clip = descendant_clip
-                .and_then(|parent| intersection(parent, viewport))
-                .unwrap_or(viewport);
+            let clip = descendant_clip.map_or(viewport, |parent| {
+                intersection(parent, viewport)
+                    .unwrap_or_else(|| Rect::new(viewport.origin.x, viewport.origin.y, 0.0, 0.0))
+            });
             if let Some(child) = element.children.first() {
                 let content_size = measure_element(
                     child,
@@ -5942,6 +6009,7 @@ fn layout_element<Message: Clone>(
                         message: Some(message.clone()),
                         offset_mapper: element.message_mapper,
                         rect: viewport,
+                        clip,
                         extent,
                     });
                 }
@@ -5974,7 +6042,7 @@ fn layout_element<Message: Clone>(
                 scroll_rect.size.width,
                 (scroll_rect.size.height - horizontal_scrollbar_gutter).max(0.0),
             );
-            let measured = element
+            let contributions = element
                 .children
                 .iter()
                 .map(|child| measure_element(child, Constraints::loose(content.size)))
@@ -5983,10 +6051,24 @@ fn layout_element<Message: Clone>(
                 columns,
                 content.size.width,
                 element.style.gap,
-                &measured,
+                &contributions,
                 element.children.len(),
             );
             let column_count = widths.len().max(1);
+            let measured = element
+                .children
+                .iter()
+                .enumerate()
+                .map(|(index, child)| {
+                    measure_element(
+                        child,
+                        Constraints::loose(Size::new(
+                            widths[index % column_count],
+                            content.size.height,
+                        )),
+                    )
+                })
+                .collect::<Vec<_>>();
             tree.resolved.nodes[node_index]
                 .grid_tracks
                 .clone_from(&widths);
@@ -6056,6 +6138,7 @@ fn layout_element<Message: Clone>(
                     message: element.message.clone(),
                     offset_mapper: element.message_mapper,
                     rect: scroll_rect,
+                    clip: descendant_clip.unwrap_or(scroll_rect),
                     extent,
                 });
             }
@@ -6273,7 +6356,11 @@ fn resolve_grid_columns(
             .map(|size| size.width)
             .fold(0.0, f32::max);
         let (base, fraction) = resolve_track(track, contribution);
-        widths[index] = base;
+        widths[index] = if available.is_finite() || fraction == 0.0 {
+            base
+        } else {
+            base.max(contribution)
+        };
         fractions[index] = fraction;
     }
     if available.is_finite() {
@@ -6396,6 +6483,20 @@ fn flex_bounds<Message>(
         })
         .collect::<Vec<_>>();
     let mut rects = layout_flex(content, axis, gap.max(0.0), &items);
+    let resolved_measured = children
+        .iter()
+        .zip(&rects)
+        .map(|(child, rect)| match axis {
+            Axis::Horizontal => measure_element(
+                child,
+                Constraints::loose(Size::new(rect.size.width, f32::INFINITY)),
+            ),
+            Axis::Vertical => measure_element(
+                child,
+                Constraints::loose(Size::new(content.size.width, rect.size.height)),
+            ),
+        })
+        .collect::<Vec<_>>();
     let occupied = rects
         .iter()
         .map(|rect| match axis {
@@ -6427,15 +6528,18 @@ fn flex_bounds<Message>(
     let shared_baseline = if axis == Axis::Horizontal {
         children
             .iter()
-            .zip(&measured)
+            .zip(&resolved_measured)
             .filter(|(child, _)| child.style.align_self.unwrap_or(align_items) == Align::Baseline)
             .map(|(_, size)| size.height * 0.8)
             .fold(0.0, f32::max)
     } else {
         0.0
     };
-    for (index, ((rect, child), measured)) in
-        rects.iter_mut().zip(children).zip(&measured).enumerate()
+    for (index, ((rect, child), measured)) in rects
+        .iter_mut()
+        .zip(children)
+        .zip(&resolved_measured)
+        .enumerate()
     {
         let main_offset = leading + index as f32 * extra_gap;
         let alignment = child.style.align_self.unwrap_or(align_items);
@@ -6527,6 +6631,38 @@ mod tests {
             Rect::new(0.0, 0.0, 200.0, 100.0),
         );
         assert_eq!(tree.hits.len(), 3);
+    }
+
+    #[test]
+    fn horizontal_flex_remeasures_wrapped_child_at_its_resolved_width() {
+        let prose = "Lorem ipsum dolor sit amet consectetur adipiscing elit deserunt fugiat. \
+            Et omnis cillum fugiat sint illum esse fugiat. Minus fuga aut dolor quos cupidatat atque.";
+        let tree = UiTree::<()>::layout(
+            Row::new()
+                .fill_width()
+                .justify_content(Justify::Center)
+                .child(
+                    Container::new()
+                        .fill_width()
+                        .max_width(900.0)
+                        .padding(Insets::all(28.0))
+                        .child(StyledText::new(prose, Vec::new()).scale(2.0).wrap(true)),
+                ),
+            Rect::new(0.0, 0.0, 960.0, 720.0),
+        );
+        let bounds = tree
+            .commands()
+            .iter()
+            .find_map(|command| match command {
+                PaintCommand::StyledText { bounds, .. } => Some(*bounds),
+                _ => None,
+            })
+            .expect("wrapped prose command");
+        assert!(
+            bounds.size.height >= 41.5,
+            "wrapped prose was allocated only {:?}",
+            bounds.size
+        );
     }
 
     #[test]
@@ -8314,6 +8450,28 @@ mod tests {
             element.measure(Constraints::loose(Size::new(80.0, 100.0))),
             Size::new(80.0, 20.0)
         );
+    }
+
+    #[test]
+    fn nested_scrollbar_chrome_is_clipped_by_the_outer_viewport() {
+        let tree = UiTree::layout(
+            VerticalScroll::new(TestMessage::Named("document"), 0.0)
+                .height(80.0)
+                .child(
+                    Column::new().child(Spacer::vertical(80.0)).child(
+                        Row::new()
+                            .id("offscreen-horizontal")
+                            .width(120.0)
+                            .overflow_x(Overflow::Auto)
+                            .child(Spacer::new().width(240.0).height(20.0)),
+                    ),
+                ),
+            Rect::new(0.0, 0.0, 120.0, 80.0),
+        );
+        assert!(tree.commands().iter().all(|command| {
+            !matches!(command, PaintCommand::RoundedFill { rect, .. } if rect.origin.y >= 80.0)
+        }));
+        assert!(tree.scrollbar_at(Point { x: 20.0, y: 90.0 }).is_none());
     }
 
     #[test]

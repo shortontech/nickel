@@ -1,6 +1,6 @@
 use cosmic_text::{
     Align, Attrs, Buffer, CacheKey, Color as TextColor, Family, FontSystem, Metrics, PhysicalGlyph,
-    Shaping, Style as FontStyle, SwashCache, SwashContent, Weight,
+    Shaping, Style as FontStyle, SwashCache, SwashContent, Weight, Wrap,
 };
 use sdl3::{
     pixels::{Color as SdlColor, PixelFormat},
@@ -1176,6 +1176,7 @@ impl SdlComponentRenderer {
             &mut self.font_system,
             Metrics::new(font_size, font_size * 1.3),
         );
+        buffer.set_wrap(Wrap::WordOrGlyph);
         buffer.set_size(
             Some(physical.size.width.max(1.0)),
             Some(physical.size.height.max(font_size * 1.4)),
@@ -1451,6 +1452,7 @@ fn shape_physical_glyphs(
     bold: bool,
 ) -> Vec<(PhysicalGlyph, TextColor)> {
     let mut buffer = Buffer::new(font_system, Metrics::new(size, size * 1.3));
+    buffer.set_wrap(Wrap::WordOrGlyph);
     buffer.set_size(
         Some(bounds.size.width.max(1.0)),
         Some(bounds.size.height.max(size * 1.3)),
@@ -1618,6 +1620,7 @@ fn shape_styled_physical_glyphs(
     align: TextAlign,
 ) -> (PhysicalGlyphs, StrikeLines, SpanBackgrounds) {
     let mut buffer = Buffer::new(font_system, Metrics::new(size, size * 1.3));
+    buffer.set_wrap(Wrap::WordOrGlyph);
     buffer.set_size(
         Some(bounds.size.width.max(1.0)),
         Some(bounds.size.height.max(size * 1.3)),
