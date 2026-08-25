@@ -71,6 +71,7 @@ struct TextCacheKey {
 type CachedGlyphPixel = (i32, i32, u32, u32, TextColor);
 type PhysicalGlyphs = Vec<(PhysicalGlyph, TextColor)>;
 type StrikeLines = Vec<(Rect, Color)>;
+type SpanBackgrounds = Vec<(Rect, Color)>;
 
 /// Transitional name retained while callers move from the old wgpu backend.
 pub type ComponentGpu = SdlComponentRenderer;
@@ -99,6 +100,7 @@ struct PhysicalTextKey {
 struct CachedPhysicalText {
     glyphs: PhysicalGlyphs,
     strikes: StrikeLines,
+    backgrounds: SpanBackgrounds,
 }
 
 struct CachedImageTexture {
@@ -559,6 +561,7 @@ impl SdlCanvasPresenter {
                     bold,
                 ),
                 strikes: Vec::new(),
+                backgrounds: Vec::new(),
             });
             insert_bounded_text_layout(&mut self.text_layouts, key, Arc::clone(&layout));
             layout
@@ -625,7 +628,7 @@ impl SdlCanvasPresenter {
             Arc::clone(layout)
         } else {
             let relative_bounds = Rect::new(0.0, 0.0, bounds.size.width, bounds.size.height);
-            let (glyphs, strikes) = shape_styled_physical_glyphs(
+            let (glyphs, strikes, backgrounds) = shape_styled_physical_glyphs(
                 &mut self.font_system,
                 text,
                 spans,
@@ -634,11 +637,26 @@ impl SdlCanvasPresenter {
                 color,
                 align,
             );
-            let layout = Arc::new(CachedPhysicalText { glyphs, strikes });
+            let layout = Arc::new(CachedPhysicalText {
+                glyphs,
+                strikes,
+                backgrounds,
+            });
             insert_bounded_text_layout(&mut self.text_layouts, key, Arc::clone(&layout));
             layout
         };
         self.canvas.set_clip_rect(Some(sdl_rect(parent_clip)));
+        for (rect, background) in &layout.backgrounds {
+            self.direct_fill(
+                Rect::new(
+                    bounds.origin.x + rect.origin.x,
+                    bounds.origin.y + rect.origin.y,
+                    rect.size.width,
+                    rect.size.height,
+                ),
+                *background,
+            )?;
+        }
         for (glyph, glyph_color) in &layout.glyphs {
             let Some(entry) = self.glyph_atlas.entry(
                 &mut self.font_system,
@@ -1558,6 +1576,38 @@ fn styled_strikes(
     strikes
 }
 
+fn styled_backgrounds(
+    buffer: &Buffer,
+    spans: &[StyledTextSpan],
+    bounds: Rect,
+    font_size: f32,
+) -> SpanBackgrounds {
+    let mut backgrounds = Vec::new();
+    let padding = (font_size * 0.12).max(1.0);
+    for run in buffer.layout_runs() {
+        for glyph in run.glyphs {
+            let Some(background) = glyph
+                .metadata
+                .checked_sub(1)
+                .and_then(|index| spans.get(index))
+                .and_then(|span| span.background)
+            else {
+                continue;
+            };
+            backgrounds.push((
+                Rect::new(
+                    bounds.origin.x + glyph.x - padding,
+                    bounds.origin.y + run.line_top,
+                    glyph.w + padding * 2.0,
+                    run.line_height,
+                ),
+                background,
+            ));
+        }
+    }
+    backgrounds
+}
+
 fn shape_styled_physical_glyphs(
     font_system: &mut FontSystem,
     text: &str,
@@ -1566,7 +1616,7 @@ fn shape_styled_physical_glyphs(
     size: f32,
     color: Color,
     align: TextAlign,
-) -> (PhysicalGlyphs, StrikeLines) {
+) -> (PhysicalGlyphs, StrikeLines, SpanBackgrounds) {
     let mut buffer = Buffer::new(font_system, Metrics::new(size, size * 1.3));
     buffer.set_size(
         Some(bounds.size.width.max(1.0)),
@@ -1592,7 +1642,8 @@ fn shape_styled_physical_glyphs(
         })
         .collect();
     let strikes = styled_strikes(&buffer, spans, bounds, color, size);
-    (glyphs, strikes)
+    let backgrounds = styled_backgrounds(&buffer, spans, bounds, size);
+    (glyphs, strikes, backgrounds)
 }
 
 fn px(value: u32) -> u32 {

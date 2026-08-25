@@ -349,7 +349,7 @@ fn read_document(path: &Path) -> Result<LoadedDocument, ViewerError> {
         return Err(error(
             ViewerErrorKind::UnsupportedExtension,
             &canonical,
-            "expected a .md or .markdown file",
+            "expected a .md, .markdown, or extensionless text file",
         ));
     }
     if metadata.len() > MAX_DOCUMENT_BYTES {
@@ -383,11 +383,12 @@ fn read_document(path: &Path) -> Result<LoadedDocument, ViewerError> {
 }
 
 fn is_markdown_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            matches!(extension.to_ascii_lowercase().as_str(), "md" | "markdown")
-        })
+    let Some(extension) = path.extension() else {
+        return true;
+    };
+    extension.to_str().is_some_and(|extension| {
+        matches!(extension.to_ascii_lowercase().as_str(), "md" | "markdown")
+    })
 }
 
 fn file_error(path: &Path, error_value: std::io::Error) -> ViewerError {
@@ -533,8 +534,16 @@ impl ViewerApplication {
                 }
             }
             Destination::Local { path, fragment } => {
-                let request = self.model.begin_open_at(path, fragment);
-                self.queue(request);
+                if path.is_dir() {
+                    if let Err(error) = nickel_platform::open_directory(&path) {
+                        self.runtime_error = Some(error);
+                    } else {
+                        self.runtime_error = None;
+                    }
+                } else {
+                    let request = self.model.begin_open_at(path, fragment);
+                    self.queue(request);
+                }
             }
             Destination::External(url) => {
                 if let Err(error) = nickel_platform::open_external_url(url.as_str()) {
@@ -696,7 +705,9 @@ pub fn viewer_view_with_palette(
         |document| UiId::new(format!("markdown-scroll/{}", document.path.display())),
     );
     let toolbar = Row::new()
+        .id("markdown-viewer-toolbar")
         .fill_width()
+        .shrink(0.0)
         .padding(Insets::all(12.0))
         .gap(8.0)
         .align_items(Align::Center)
@@ -773,11 +784,20 @@ fn status_view(
         _ => None,
     });
     message.map_or_else(
-        || AnyView::new(Container::new().height(0.0)),
+        || {
+            AnyView::new(
+                Container::new()
+                    .id("markdown-viewer-status")
+                    .height(0.0)
+                    .shrink(0.0),
+            )
+        },
         |message| {
             AnyView::new(
                 Row::new()
+                    .id("markdown-viewer-status")
                     .fill_width()
+                    .shrink(0.0)
                     .padding(Insets::all(10.0))
                     .gap(8.0)
                     .background(palette.error)
@@ -825,6 +845,12 @@ mod tests {
         let loaded = load_document(&request).result.unwrap();
         assert_eq!(loaded.source, "# Guide");
         assert!(loaded.path.is_absolute());
+
+        let extensionless = directory.path().join("LICENSE-MIT");
+        write(&extensionless, b"# MIT License");
+        let loaded = read_document(&extensionless).unwrap();
+        assert_eq!(loaded.source, "# MIT License");
+        assert_eq!(loaded.title, "LICENSE-MIT");
 
         let invalid = directory.path().join("invalid.md");
         write(&invalid, &[0xff, 0xfe]);
@@ -1109,6 +1135,47 @@ mod tests {
             Rect::new(0.0, 0.0, 960.0, 720.0),
         );
         assert!(tree.message_rect(&ViewerMessage::Reload).is_none());
+    }
+
+    #[test]
+    #[cfg(feature = "application")]
+    fn long_documents_cannot_collapse_viewer_chrome() {
+        use nickel_ui::{Rect, UiTree};
+
+        let source = (0..200)
+            .map(|index| format!("Paragraph {index} with enough text to make the document tall."))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let document = LoadedDocument {
+            path: PathBuf::from("/tmp/guide.md"),
+            title: "guide.md".into(),
+            document: MarkdownDocument::parse(source.clone()),
+            source,
+        };
+        let mut application = ViewerApplication::loaded(document);
+        application.model.status = ViewerStatus::Error(ViewerError {
+            kind: ViewerErrorKind::UnsupportedExtension,
+            path: PathBuf::from("/tmp/LICENSE-MIT"),
+            detail: "expected a supported text document".into(),
+        });
+
+        let tree = UiTree::layout(
+            viewer_view(application.model(), None),
+            Rect::new(0.0, 0.0, 960.0, 720.0),
+        );
+        let chrome_height = |suffix: &str| {
+            tree.resolved_layout()
+                .nodes()
+                .iter()
+                .find(|node| node.id.as_str().ends_with(suffix))
+                .expect("viewer chrome node")
+                .allocated
+                .size
+                .height
+        };
+        assert!(chrome_height("markdown-viewer-toolbar") >= 42.0);
+        assert!(chrome_height("markdown-viewer-status") >= 42.0);
+        assert!(tree.message_rect(&ViewerMessage::DismissStatus).is_some());
     }
 
     #[test]

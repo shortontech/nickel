@@ -5,7 +5,8 @@ use std::iter::Peekable;
 #[cfg(feature = "view")]
 use nickel_ui::{
     Align, AnyView, Button, Color, Column, ComponentBuilderExt, Container, Grid, Insets, Length,
-    Overflow, Row, SelectionRegion, StyledText, StyledTextSpan, Text, TextBoundary, UiId, ui,
+    Overflow, Row, SelectionRegion, StyledText, StyledTextSpan, Text, TextBoundary, Track, UiId,
+    ui,
 };
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use serde::{Deserialize, Serialize};
@@ -158,6 +159,9 @@ where
             Event::Start(Tag::Table(alignments)) => {
                 blocks.push(parse_table(events, alignments, diagnostics));
             }
+            event if is_inline_event(&event) => blocks.push(Block::Paragraph {
+                inlines: parse_unwrapped_inlines(event, events, until.as_ref(), diagnostics),
+            }),
             Event::Start(Tag::HtmlBlock) => {
                 let text = collect_literal(events, TagEnd::HtmlBlock);
                 diagnostics.push(unsupported("raw HTML block"));
@@ -191,6 +195,56 @@ where
         }
     }
     blocks
+}
+
+fn is_inline_event(event: &Event<'_>) -> bool {
+    matches!(
+        event,
+        Event::Text(_)
+            | Event::Code(_)
+            | Event::SoftBreak
+            | Event::HardBreak
+            | Event::Html(_)
+            | Event::InlineHtml(_)
+            | Event::InlineMath(_)
+            | Event::DisplayMath(_)
+            | Event::FootnoteReference(_)
+            | Event::TaskListMarker(_)
+            | Event::Start(
+                Tag::Emphasis
+                    | Tag::Strong
+                    | Tag::Strikethrough
+                    | Tag::Link { .. }
+                    | Tag::Image { .. }
+            )
+    )
+}
+
+fn parse_unwrapped_inlines<'a, I>(
+    first: Event<'a>,
+    events: &mut Peekable<I>,
+    boundary: Option<&TagEnd>,
+    diagnostics: &mut Vec<MarkdownDiagnostic>,
+) -> Vec<Inline>
+where
+    I: Iterator<Item = Event<'a>>,
+{
+    let mut depth = usize::from(matches!(&first, Event::Start(_)));
+    let mut buffered = vec![first];
+    while let Some(event) = events.peek() {
+        if depth == 0 && matches!(event, Event::End(end) if boundary == Some(end)) {
+            break;
+        }
+        match event {
+            Event::Start(_) if is_inline_event(event) => depth += 1,
+            Event::End(_) if depth > 0 => depth -= 1,
+            _ if depth == 0 && !is_inline_event(event) => break,
+            _ => {}
+        }
+        buffered.push(events.next().expect("peeked inline event"));
+    }
+    let mut buffered = buffered.into_iter().peekable();
+    parse_inlines(&mut buffered, TagEnd::Paragraph, diagnostics)
 }
 
 fn parse_table<'a, I>(
@@ -618,12 +672,14 @@ where
                     render_block(block, format!("{id}-{index}-{child}"), palette, map_link)
                 });
                 AnyView::new(
-                    Row::new()
+                    Grid::tracks([Track::Auto, Track::Fraction(1.0)])
+                        .id(UiId::new(format!("markdown-list-row-{id}-{index}")))
                         .fill_width()
                         .gap(9.0)
-                        .align_items(Align::Start)
-                        .child(Text::new(marker).color(palette.muted).selectable(false))
-                        .child(Column::new().fill_width().gap(6.0).children(children)),
+                        .children([
+                            AnyView::new(Text::new(marker).color(palette.muted).selectable(false)),
+                            AnyView::new(Column::new().fill_width().gap(6.0).children(children)),
+                        ]),
                 )
             });
             AnyView::new(Column::new().fill_width().gap(7.0).children(rows))
@@ -705,6 +761,7 @@ where
     Map: Fn(&str) -> Message + Copy,
 {
     let (text, spans) = styled_inline_text(inlines, palette, bold);
+    let inline_link_ranges = inline_link_ranges(inlines);
     let links = inline_links(inlines);
     let controls = links
         .into_iter()
@@ -718,21 +775,58 @@ where
                     .align_self(Align::Start),
             )
         });
+    let styled = inline_link_ranges.into_iter().fold(
+        StyledText::new(text, spans)
+            .color(palette.foreground)
+            .scale(scale)
+            .width_length(Length::Fill)
+            .wrap(true)
+            .selection_run_id(format!("markdown-{id}"))
+            .selection_boundary(TextBoundary::Block),
+        |styled, (range, destination)| styled.inline_message(range, map_link(&destination)),
+    );
     AnyView::new(
         Column::new()
             .fill_width()
             .gap(6.0)
-            .child(
-                StyledText::new(text, spans)
-                    .color(palette.foreground)
-                    .scale(scale)
-                    .width_length(Length::Fill)
-                    .wrap(true)
-                    .selection_run_id(format!("markdown-{id}"))
-                    .selection_boundary(TextBoundary::Block),
-            )
+            .child(styled)
             .children(controls),
     )
+}
+
+#[cfg(feature = "view")]
+fn inline_link_ranges(inlines: &[Inline]) -> Vec<(std::ops::Range<usize>, String)> {
+    fn collect(
+        inlines: &[Inline],
+        cursor: &mut usize,
+        links: &mut Vec<(std::ops::Range<usize>, String)>,
+    ) {
+        for inline in inlines {
+            match inline {
+                Inline::Text { text } | Inline::Code { text } | Inline::Unsupported { text } => {
+                    *cursor += text.len();
+                }
+                Inline::Emphasis { children }
+                | Inline::Strong { children }
+                | Inline::Strikethrough { children } => collect(children, cursor, links),
+                Inline::Link {
+                    destination,
+                    children,
+                    ..
+                } => {
+                    let start = *cursor;
+                    collect(children, cursor, links);
+                    links.push((start..*cursor, destination.clone()));
+                }
+                Inline::Break { .. } => *cursor += 1,
+            }
+        }
+    }
+
+    let mut cursor = 0;
+    let mut links = Vec::new();
+    collect(inlines, &mut cursor, &mut links);
+    links
 }
 
 #[cfg(feature = "view")]
@@ -743,6 +837,7 @@ struct InlineStyle {
     monospace: bool,
     strikethrough: bool,
     color: Option<Color>,
+    background: Option<Color>,
 }
 
 #[cfg(feature = "view")]
@@ -785,6 +880,7 @@ fn append_styled_inlines(
                     InlineStyle {
                         monospace: true,
                         color: Some(palette.code),
+                        background: Some(palette.surface),
                         ..style
                     },
                     text,
@@ -860,6 +956,7 @@ fn push_styled_text(
             monospace: style.monospace,
             strikethrough: style.strikethrough,
             color: style.color,
+            background: style.background,
         });
     }
 }
@@ -938,7 +1035,7 @@ mod tests {
     use super::*;
     #[cfg(feature = "view")]
     use nickel_ui::{
-        PaintCommand, Point, Rect, SdlComponentRenderer, UiEvent, UiStateStore, UiTree,
+        PaintCommand, Point, PointerIcon, Rect, SdlComponentRenderer, UiEvent, UiStateStore, UiTree,
     };
 
     #[cfg(feature = "view")]
@@ -1081,6 +1178,11 @@ mod tests {
         assert!(spans.iter().any(|span| span.italic));
         assert!(spans.iter().any(|span| span.strikethrough));
         assert!(spans.iter().any(|span| span.monospace));
+        assert!(
+            spans
+                .iter()
+                .any(|span| span.monospace && span.background.is_some())
+        );
         assert!(spans.iter().any(|span| span.color.is_some()));
     }
 
@@ -1088,22 +1190,29 @@ mod tests {
     #[cfg(feature = "view")]
     fn link_activation_emits_one_unmodified_typed_destination() {
         let document = MarkdownDocument::parse("Read [the guide](../guide.md#start).");
-        let tree = UiTree::layout(
-            markdown_view(&document, MarkdownPalette::default(), |destination| {
-                Message::Link(destination.to_owned())
-            }),
-            Rect::new(0.0, 0.0, 640.0, 480.0),
-        );
+        let mut state = UiStateStore::default();
+        let build = |state: &mut UiStateStore| {
+            UiTree::layout_with_state(
+                markdown_view(&document, MarkdownPalette::default(), |destination| {
+                    Message::Link(destination.to_owned())
+                }),
+                Rect::new(0.0, 0.0, 640.0, 480.0),
+                state,
+            )
+        };
+        let tree = build(&mut state);
         let message = Message::Link("../guide.md#start".into());
         let rect = tree.message_rect(&message).expect("link control");
         let point = Point {
             x: rect.origin.x + 2.0,
             y: rect.origin.y + 2.0,
         };
-        let mut state = UiStateStore::default();
+        assert_eq!(tree.pointer_icon_at(point), PointerIcon::Hand);
         tree.handle_event(&mut state, UiEvent::PointerPressed(point));
+        let rebuilt = build(&mut state);
         assert_eq!(
-            tree.handle_event(&mut state, UiEvent::PointerReleased(point))
+            rebuilt
+                .handle_event(&mut state, UiEvent::PointerReleased(point))
                 .messages,
             vec![message]
         );
@@ -1174,6 +1283,75 @@ mod tests {
                     && rect.size.height >= 0.0
             }));
         }
+    }
+
+    #[test]
+    #[cfg(feature = "view")]
+    fn styled_list_prefix_stays_bold_and_inline_when_it_fits() {
+        let document = MarkdownDocument::parse(
+            "- **Nickel UI** — the desktop shell, taskbar, launcher, task switcher, and system controls",
+        );
+        let tree = UiTree::layout(
+            markdown_view(&document, MarkdownPalette::default(), |destination| {
+                Message::Link(destination.to_owned())
+            }),
+            Rect::new(0.0, 0.0, 900.0, 200.0),
+        );
+        let (bounds, text, spans) = tree
+            .commands()
+            .iter()
+            .find_map(|command| match command {
+                PaintCommand::StyledText {
+                    bounds,
+                    text,
+                    spans,
+                    ..
+                } if text.starts_with("Nickel UI") => Some((bounds, text, spans)),
+                _ => None,
+            })
+            .expect("styled list text");
+        assert_eq!(
+            text,
+            "Nickel UI — the desktop shell, taskbar, launcher, task switcher, and system controls"
+        );
+        assert!(spans.iter().any(|span| span.range == (0..9) && span.bold));
+        assert!(
+            bounds.size.width > 800.0,
+            "list body was narrow: {bounds:?}"
+        );
+        assert!(bounds.size.height < 30.0, "list body wrapped: {bounds:?}");
+    }
+
+    #[test]
+    #[cfg(feature = "view")]
+    fn wrapped_ordered_list_items_allocate_their_full_height() {
+        let document = MarkdownDocument::parse(
+            "1. Definitions. License shall mean the terms and conditions for use, reproduction, and distribution as defined by this document and all following sections.\n2. Grant. Each contributor hereby grants a perpetual worldwide license under these terms.\n",
+        );
+        let tree = UiTree::layout(
+            markdown_view(&document, MarkdownPalette::default(), |destination| {
+                Message::Link(destination.to_owned())
+            }),
+            Rect::new(0.0, 0.0, 420.0, 600.0),
+        );
+        let row = |suffix: &str| {
+            tree.resolved_layout()
+                .nodes()
+                .iter()
+                .find(|node| node.id.as_str().ends_with(suffix))
+                .expect("ordered list row")
+                .allocated
+        };
+        let first = row("markdown-list-row-0-0");
+        let second = row("markdown-list-row-0-1");
+        assert!(
+            first.size.height > 40.0,
+            "first item did not wrap: {first:?}"
+        );
+        assert!(
+            second.origin.y >= first.origin.y + first.size.height,
+            "ordered list rows overlap: {first:?}, {second:?}"
+        );
     }
 
     #[test]

@@ -34,6 +34,25 @@ pub fn apply_window_appearance(
 ) {
 }
 
+/// Open a directory in the Nickel file browser installed beside the current application.
+pub fn open_directory(path: &std::path::Path) -> Result<(), String> {
+    nickel_file_command(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("could not start Nickel File: {error}"))
+}
+
+fn nickel_file_command(path: &std::path::Path) -> std::process::Command {
+    let executable = std::env::current_exe().unwrap_or_else(|_| "nickel".into());
+    #[cfg(target_os = "windows")]
+    let executable = executable.with_file_name("nickel-file.exe");
+    #[cfg(not(target_os = "windows"))]
+    let executable = executable.with_file_name("nickel-file");
+    let mut command = std::process::Command::new(executable);
+    command.arg(path);
+    command
+}
+
 #[cfg(target_os = "windows")]
 pub fn open_external_url(url: &str) -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
@@ -103,7 +122,9 @@ pub fn open_external_url(_url: &str) -> Result<(), String> {
 
 #[cfg(all(test, target_os = "linux"))]
 mod external_url_tests {
-    use super::external_url_command;
+    use std::path::Path;
+
+    use super::{external_url_command, nickel_file_command};
 
     #[test]
     fn delegates_the_exact_url_to_the_desktop_default_handler() {
@@ -112,6 +133,21 @@ mod external_url_tests {
         assert_eq!(
             command.get_args().collect::<Vec<_>>(),
             ["https://example.com/a?b=c#d"]
+        );
+    }
+
+    #[test]
+    fn directories_delegate_to_the_sibling_nickel_file() {
+        let command = nickel_file_command(Path::new("/tmp/example folder"));
+        assert_eq!(
+            Path::new(command.get_program())
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("nickel-file")
+        );
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            [Path::new("/tmp/example folder").as_os_str()]
         );
     }
 }

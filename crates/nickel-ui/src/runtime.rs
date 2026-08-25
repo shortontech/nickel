@@ -6,10 +6,10 @@ use std::{
 use sdl3::{
     event::{Event, WindowEvent},
     keyboard::{Keycode, Mod},
-    mouse::MouseButton,
+    mouse::{Cursor as MouseCursor, MouseButton, SystemCursor},
 };
 
-use crate::{Point, Rect, SdlCanvasPresenter, UiEvent, UiStateStore, UiTree, View};
+use crate::{Point, PointerIcon, Rect, SdlCanvasPresenter, UiEvent, UiStateStore, UiTree, View};
 
 #[derive(Debug, Default)]
 struct FrameScheduler {
@@ -82,6 +82,10 @@ pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
     text_input.start(presenter.window());
     let mut state = UiStateStore::default();
     let mut cursor = Point::default();
+    let default_cursor = MouseCursor::from_system(SystemCursor::Arrow).ok();
+    let hand_cursor = MouseCursor::from_system(SystemCursor::Hand).ok();
+    let text_cursor = MouseCursor::from_system(SystemCursor::IBeam).ok();
+    let mut pointer_icon = PointerIcon::Default;
     let mut running = true;
     let (logical_width, logical_height) = presenter.window().size();
     let pixel_width = presenter.window().size_in_pixels().0;
@@ -146,6 +150,17 @@ pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
                 } => UiEvent::FocusLost,
                 Event::MouseMotion { x, y, .. } => {
                     cursor = Point { x, y };
+                    let next_icon = tree.pointer_icon_at(cursor);
+                    if next_icon != pointer_icon {
+                        if let Some(cursor) = match next_icon {
+                            PointerIcon::Default => default_cursor.as_ref(),
+                            PointerIcon::Hand => hand_cursor.as_ref(),
+                            PointerIcon::Text => text_cursor.as_ref(),
+                        } {
+                            cursor.set();
+                        }
+                        pointer_icon = next_icon;
+                    }
                     UiEvent::PointerMoved(cursor)
                 }
                 Event::MouseButtonDown {

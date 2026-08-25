@@ -29,6 +29,7 @@ pub struct StyledTextSpan {
     pub monospace: bool,
     pub strikethrough: bool,
     pub color: Option<Color>,
+    pub background: Option<Color>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -106,6 +107,14 @@ pub enum UiEvent {
     FocusLost,
     Suspended,
     DeviceRemoved,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PointerIcon {
+    #[default]
+    Default,
+    Hand,
+    Text,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -446,6 +455,7 @@ pub struct Element<Message = String> {
     message_mapper: Option<fn(f32) -> Message>,
     text_mapper: Option<fn(String) -> Message>,
     option_messages: Vec<Option<Message>>,
+    inline_messages: Vec<(Range<usize>, Message)>,
     children: Vec<Element<Message>>,
 }
 
@@ -460,6 +470,7 @@ impl<Message> Element<Message> {
             message_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
+            inline_messages: Vec::new(),
             children: Vec::new(),
         }
     }
@@ -485,6 +496,7 @@ impl<Message> Element<Message> {
             message_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
+            inline_messages: Vec::new(),
             children: Vec::new(),
         }
     }
@@ -699,6 +711,11 @@ impl<Message> Element<Message> {
                 .option_messages
                 .into_iter()
                 .map(|message| message.map(&mut *map))
+                .collect(),
+            inline_messages: self
+                .inline_messages
+                .into_iter()
+                .map(|(range, message)| (range, map(message)))
                 .collect(),
             children: self
                 .children
@@ -1415,6 +1432,7 @@ impl<Message> VerticalScroll<Message> {
             message_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
+            inline_messages: Vec::new(),
             children: Vec::new(),
         })
     }
@@ -1487,6 +1505,7 @@ impl<Message> Grid<Message> {
             message_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
+            inline_messages: Vec::new(),
             children: Vec::new(),
         })
     }
@@ -1518,6 +1537,7 @@ impl<Message> Grid<Message> {
             message_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
+            inline_messages: Vec::new(),
             children: Vec::new(),
         })
     }
@@ -1534,6 +1554,7 @@ impl<Message> Grid<Message> {
             message_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
+            inline_messages: Vec::new(),
             children: Vec::new(),
         })
     }
@@ -1774,8 +1795,14 @@ impl<Message> StyledText<Message> {
             message_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
+            inline_messages: Vec::new(),
             children: Vec::new(),
         })
+    }
+
+    pub fn inline_message(mut self, range: Range<usize>, message: Message) -> Self {
+        self.0.inline_messages.push((range, message));
+        self
     }
 
     pub fn scale(mut self, value: f32) -> Self {
@@ -2002,6 +2029,7 @@ impl<Message> Image<Message> {
             message_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
+            inline_messages: Vec::new(),
             children: Vec::new(),
         })
     }
@@ -2790,6 +2818,7 @@ impl<Message> Slider<Message> {
             message_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
+            inline_messages: Vec::new(),
             children: Vec::new(),
         };
         element.style.height = Length::Px(24.0);
@@ -2867,6 +2896,7 @@ impl<Message> Dropdown<Message> {
             message_mapper: None,
             text_mapper: None,
             option_messages,
+            inline_messages: Vec::new(),
             children: Vec::new(),
         };
         element.style.height = Length::Px(42.0);
@@ -2975,6 +3005,7 @@ impl<Message> Menu<Message> {
             message_mapper: None,
             text_mapper: None,
             option_messages: items.into_iter().map(|item| item.message).collect(),
+            inline_messages: Vec::new(),
             children: Vec::new(),
         };
         element.style.height = Length::Px(30.0);
@@ -3104,7 +3135,9 @@ impl SelectionRegionLayout {
         for run in &self.runs {
             for glyph in &run.glyphs {
                 let inside = contains(glyph.rect, point);
-                if !inside && !nearest {
+                let on_line = point.y >= glyph.rect.origin.y
+                    && point.y <= glyph.rect.origin.y + glyph.rect.size.height;
+                if !inside && !nearest && !on_line {
                     continue;
                 }
                 let midpoint = glyph.rect.origin.x + glyph.rect.size.width * 0.5;
@@ -3220,6 +3253,7 @@ enum ScrollbarAxis {
 const SCROLLBAR_THICKNESS: f32 = 8.0;
 const SCROLLBAR_INSET: f32 = 3.0;
 const SCROLLBAR_MIN_THUMB: f32 = 24.0;
+const SCROLLBAR_GUTTER: f32 = SCROLLBAR_THICKNESS + SCROLLBAR_INSET * 2.0;
 
 fn scrollbar_id(id: &UiId, axis: ScrollbarAxis) -> UiId {
     id.scoped(match axis {
@@ -3650,6 +3684,16 @@ impl<Message: Clone> UiTree<Message> {
             .map(|hit| &hit.id)
     }
 
+    pub fn pointer_icon_at(&self, point: Point) -> PointerIcon {
+        if self.scrollbar_at(point).is_some() || self.id_at(point).is_some() {
+            PointerIcon::Hand
+        } else if self.selection_hit_at(point).is_some() {
+            PointerIcon::Text
+        } else {
+            PointerIcon::Default
+        }
+    }
+
     pub fn message_for_id(&self, id: &UiId) -> Option<&Message> {
         self.messages
             .iter()
@@ -3891,7 +3935,7 @@ impl<Message: Clone> UiTree<Message> {
                 ScrollbarAxis::Horizontal => entry.scroll_offset_x,
                 ScrollbarAxis::Vertical => entry.scroll_offset,
             });
-        let invalidation = match axis {
+        match axis {
             ScrollbarAxis::Horizontal => {
                 state.scroll_by_x(scroll.id.clone(), target - current, maximum)
             }
@@ -3905,8 +3949,7 @@ impl<Message: Clone> UiTree<Message> {
                 }
                 invalidation
             }
-        };
-        invalidation
+        }
     }
 
     pub fn handle_event(&self, state: &mut UiStateStore, event: UiEvent) -> EventOutcome<Message> {
@@ -4021,7 +4064,9 @@ impl<Message: Clone> UiTree<Message> {
                             dismissed.merge(state.set_dropdown_open(node.id.clone(), false));
                     }
                 }
-                if let Some((region, endpoint)) = self.selection_hit_at(point) {
+                if clicked.is_none()
+                    && let Some((region, endpoint)) = self.selection_hit_at(point)
+                {
                     let region_id = region.id.clone();
                     let selection = state.document_selection_mut(region_id.clone());
                     selection.anchor = Some(endpoint.clone());
@@ -4929,7 +4974,15 @@ fn measure_element<Message>(element: &Element<Message>, constraints: Constraints
         }
         _ => content.width + horizontal_padding,
     };
-    let intrinsic = Size::new(intrinsic_width, content.height + vertical_padding);
+    let horizontal_scrollbar_gutter = match element.style.overflow_x {
+        Overflow::Scroll => SCROLLBAR_GUTTER,
+        Overflow::Auto if content.width > child_max.width + 0.01 => SCROLLBAR_GUTTER,
+        _ => 0.0,
+    };
+    let intrinsic = Size::new(
+        intrinsic_width,
+        content.height + vertical_padding + horizontal_scrollbar_gutter,
+    );
     let min_width = element.style.min_width.max(0.0);
     let min_height = element.style.min_height.max(0.0);
     let max_width = element.style.max_width.max(min_width);
@@ -5327,15 +5380,50 @@ fn emit_element<Message: Clone>(
             value,
             spans,
             scale,
-            ..
-        } => tree.commands.push(PaintCommand::StyledText {
-            bounds: rect,
-            text: value.clone(),
-            spans: spans.clone(),
-            scale: *scale,
-            color: foreground.unwrap_or(0x00ff_ffff),
-            align: element.style.text_align,
-        }),
+            wrap,
+            line_height,
+        } => {
+            tree.commands.push(PaintCommand::StyledText {
+                bounds: rect,
+                text: value.clone(),
+                spans: spans.clone(),
+                scale: *scale,
+                color: foreground.unwrap_or(0x00ff_ffff),
+                align: element.style.text_align,
+            });
+            if !element.inline_messages.is_empty() {
+                let glyphs = shape_selection_glyphs(
+                    value,
+                    rect,
+                    node.clip,
+                    *scale,
+                    false,
+                    *wrap,
+                    *line_height,
+                    None,
+                    element.style.text_align,
+                );
+                for (index, (range, message)) in element.inline_messages.iter().enumerate() {
+                    let link_id = node.id.scoped(format!("$inline-{index}"));
+                    for glyph in &glyphs {
+                        if glyph.end <= range.start || glyph.start >= range.end {
+                            continue;
+                        }
+                        tree.messages.push(MessageRegion {
+                            id: link_id.clone(),
+                            rect: glyph.rect,
+                            message: message.clone(),
+                        });
+                        tree.hits.push(HitRegion {
+                            id: link_id.clone(),
+                            rect: glyph.rect,
+                            message: Some(message.clone()),
+                            message_mapper: None,
+                        });
+                    }
+                }
+            }
+        }
         Kind::Image { id, image } => tree.commands.push(PaintCommand::Image {
             bounds: rect,
             id: *id,
@@ -5650,7 +5738,41 @@ fn layout_element<Message: Clone>(
         | Kind::Slider { .. }
         | Kind::Dropdown { .. } => {}
         Kind::Flex(axis) => {
-            let content = rect.inset(element.style.padding);
+            let scroll_rect = rect.inset(element.style.padding);
+            let scrollable_y = *axis == Axis::Vertical
+                && matches!(element.style.overflow_y, Overflow::Scroll | Overflow::Auto);
+            let scrollable_x = *axis == Axis::Horizontal
+                && matches!(element.style.overflow_x, Overflow::Scroll | Overflow::Auto);
+            let intrinsic_content_width = if scrollable_x {
+                element
+                    .children
+                    .iter()
+                    .map(|child| {
+                        measure_element(
+                            child,
+                            Constraints::loose(Size::new(f32::INFINITY, scroll_rect.size.height)),
+                        )
+                        .width
+                    })
+                    .sum::<f32>()
+                    + element.style.gap * element.children.len().saturating_sub(1) as f32
+            } else {
+                scroll_rect.size.width
+            };
+            let horizontal_scrollbar_gutter = match element.style.overflow_x {
+                Overflow::Scroll => SCROLLBAR_GUTTER,
+                Overflow::Auto if intrinsic_content_width > scroll_rect.size.width + 0.01 => {
+                    SCROLLBAR_GUTTER
+                }
+                _ => 0.0,
+            }
+            .min(scroll_rect.size.height);
+            let content = Rect::new(
+                scroll_rect.origin.x,
+                scroll_rect.origin.y,
+                scroll_rect.size.width,
+                (scroll_rect.size.height - horizontal_scrollbar_gutter).max(0.0),
+            );
             let minimum_total = element
                 .children
                 .iter()
@@ -5671,26 +5793,6 @@ fn layout_element<Message: Clone>(
                     format!("minimum total {minimum_total:.2} exceeds {available:.2}"),
                 );
             }
-            let scrollable_y = *axis == Axis::Vertical
-                && matches!(element.style.overflow_y, Overflow::Scroll | Overflow::Auto);
-            let scrollable_x = *axis == Axis::Horizontal
-                && matches!(element.style.overflow_x, Overflow::Scroll | Overflow::Auto);
-            let intrinsic_content_width = if scrollable_x {
-                element
-                    .children
-                    .iter()
-                    .map(|child| {
-                        measure_element(
-                            child,
-                            Constraints::loose(Size::new(f32::INFINITY, content.size.height)),
-                        )
-                        .width
-                    })
-                    .sum::<f32>()
-                    + element.style.gap * element.children.len().saturating_sub(1) as f32
-            } else {
-                content.size.width
-            };
             let intrinsic_content_height = if scrollable_y {
                 element
                     .children
@@ -5753,7 +5855,7 @@ fn layout_element<Message: Clone>(
                     id: id.clone(),
                     message: element.message.clone(),
                     offset_mapper: element.message_mapper,
-                    rect: content,
+                    rect: scroll_rect,
                     extent,
                 });
                 clamped
@@ -5772,7 +5874,7 @@ fn layout_element<Message: Clone>(
                     id: id.clone(),
                     message: element.message.clone(),
                     offset_mapper: element.message_mapper,
-                    rect: content,
+                    rect: scroll_rect,
                     extent,
                 });
             }
@@ -5790,15 +5892,19 @@ fn layout_element<Message: Clone>(
                 element.style.justify_content,
                 &element.children,
             );
+            let child_clip = if scrollable_x || scrollable_y {
+                Some(
+                    descendant_clip
+                        .and_then(|parent| intersection(parent, content))
+                        .unwrap_or(content),
+                )
+            } else {
+                descendant_clip
+            };
             for (index, (child, bounds)) in element.children.iter().zip(child_bounds).enumerate() {
                 let child_id = resolved_child_id(id, child, index);
                 child_indices.push(layout_element(
-                    child,
-                    &child_id,
-                    bounds,
-                    foreground,
-                    descendant_clip,
-                    tree,
+                    child, &child_id, bounds, foreground, child_clip, tree,
                 ));
             }
         }
@@ -5855,7 +5961,19 @@ fn layout_element<Message: Clone>(
             }
         }
         Kind::Grid { columns } => {
-            let content = rect.inset(element.style.padding);
+            let scroll_rect = rect.inset(element.style.padding);
+            let horizontal_scrollbar_gutter =
+                if matches!(element.style.overflow_x, Overflow::Scroll | Overflow::Auto) {
+                    SCROLLBAR_GUTTER.min(scroll_rect.size.height)
+                } else {
+                    0.0
+                };
+            let content = Rect::new(
+                scroll_rect.origin.x,
+                scroll_rect.origin.y,
+                scroll_rect.size.width,
+                (scroll_rect.size.height - horizontal_scrollbar_gutter).max(0.0),
+            );
             let measured = element
                 .children
                 .iter()
@@ -5937,7 +6055,7 @@ fn layout_element<Message: Clone>(
                     id: id.clone(),
                     message: element.message.clone(),
                     offset_mapper: element.message_mapper,
-                    rect: content,
+                    rect: scroll_rect,
                     extent,
                 });
             }
@@ -6861,6 +6979,7 @@ mod tests {
             monospace: false,
             strikethrough: false,
             color: None,
+            background: None,
         }];
 
         let first = measure_styled_text("Cached text", &spans, 1.0, true, None, 240.0);
@@ -7298,6 +7417,55 @@ mod tests {
         );
         assert_eq!(activated.messages, vec![TestMessage::Named("button")]);
         assert!(state.selection_owner().is_none());
+    }
+
+    #[test]
+    fn inline_message_ranges_are_clickable_and_use_the_hand_cursor() {
+        let build = |state: &mut UiStateStore| {
+            UiTree::layout_with_state(
+                StyledText::new("open docs", Vec::new())
+                    .inline_message(5..9, TestMessage::Named("docs")),
+                Rect::new(0.0, 0.0, 200.0, 40.0),
+                state,
+            )
+        };
+        let mut state = UiStateStore::default();
+        let tree = build(&mut state);
+        let glyph = tree
+            .message_rect(&TestMessage::Named("docs"))
+            .expect("inline message glyph");
+        let point = Point {
+            x: glyph.origin.x + glyph.size.width / 2.0,
+            y: glyph.origin.y + glyph.size.height / 2.0,
+        };
+
+        assert_eq!(tree.pointer_icon_at(point), PointerIcon::Hand);
+        tree.handle_event(&mut state, UiEvent::PointerPressed(point));
+        let rebuilt = build(&mut state);
+        assert_eq!(
+            rebuilt
+                .handle_event(&mut state, UiEvent::PointerReleased(point))
+                .messages,
+            vec![TestMessage::Named("docs")]
+        );
+    }
+
+    #[test]
+    fn selectable_line_trailing_space_resolves_to_the_line_end() {
+        let tree = UiTree::<TestMessage>::layout(
+            SelectionRegion::automatic().child(
+                StyledText::new("select me", Vec::new())
+                    .width_length(Length::Fill)
+                    .selection_run_id("line"),
+            ),
+            Rect::new(0.0, 0.0, 300.0, 40.0),
+        );
+        let (_, endpoint) = tree
+            .selection_hit_at(Point { x: 280.0, y: 8.0 })
+            .expect("trailing line whitespace remains selectable");
+
+        assert_eq!(endpoint.run_id, "line");
+        assert_eq!(endpoint.offset, "select me".len());
     }
 
     #[test]
@@ -8100,6 +8268,52 @@ mod tests {
         assert!(scrolled.accessibility_nodes().iter().all(|node| {
             node.rect.origin.x >= 0.0 && node.rect.origin.x + node.rect.size.width <= 80.0
         }));
+    }
+
+    #[test]
+    fn horizontal_scrollbar_has_a_gutter_below_content() {
+        let tree = UiTree::<()>::layout(
+            Row::new()
+                .id("horizontal")
+                .width(80.0)
+                .overflow(Overflow::Auto, Overflow::Clip)
+                .child(
+                    Container::new()
+                        .id("wide-content")
+                        .width(160.0)
+                        .height(20.0),
+                ),
+            Rect::new(0.0, 0.0, 80.0, 34.0),
+        );
+        let content = tree
+            .resolved_layout()
+            .find(&UiId::from("root/horizontal/wide-content"))
+            .expect("overflow content")
+            .allocated;
+        let scroll = tree
+            .scrolls
+            .iter()
+            .find(|scroll| scroll.id == UiId::from("root/horizontal"))
+            .expect("horizontal scroll region");
+        let (track, _) = scrollbar_geometry(scroll, ScrollbarAxis::Horizontal)
+            .expect("horizontal scrollbar geometry");
+        assert!(
+            content.origin.y + content.size.height <= track.origin.y,
+            "content overlaps scrollbar: {content:?}, {track:?}"
+        );
+    }
+
+    #[test]
+    fn auto_horizontal_overflow_has_no_gutter_when_content_fits() {
+        let element = Row::<()>::new()
+            .width(80.0)
+            .overflow(Overflow::Auto, Overflow::Clip)
+            .child(Container::new().width(40.0).height(20.0))
+            .into_element();
+        assert_eq!(
+            element.measure(Constraints::loose(Size::new(80.0, 100.0))),
+            Size::new(80.0, 20.0)
+        );
     }
 
     #[test]
