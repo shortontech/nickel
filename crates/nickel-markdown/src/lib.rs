@@ -5,8 +5,8 @@ use std::iter::Peekable;
 #[cfg(feature = "view")]
 use nickel_ui::{
     Align, AnyView, Button, Color, Column, ComponentBuilderExt, Container, Grid, Insets, Length,
-    Overflow, Row, SelectionRegion, StyledText, StyledTextSpan, Text, TextBoundary, Track, UiId,
-    ui,
+    Overflow, Row, SelectionRegion, SelectionRun, StyledText, StyledTextSpan, Text, TextBoundary,
+    Track, UiId, ui,
 };
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use serde::{Deserialize, Serialize};
@@ -590,15 +590,87 @@ where
     Message: Clone + 'static,
     Map: Fn(&str) -> Message + Copy,
 {
-    let blocks = document
-        .blocks
-        .iter()
-        .enumerate()
-        .map(|(index, block)| render_block(block, index.to_string(), palette, map_link));
     let document = SelectionRegion::automatic()
         .id(UiId::new("markdown-document"))
-        .child(Column::new().fill_width().gap(12.0).children(blocks));
+        .child(markdown_content_view(document, palette, "", map_link));
     AnyView::new(ui! { {document} })
+}
+
+/// Render Markdown content inside a selection region owned by the caller.
+///
+/// `scope` makes every rendered text and control identity unique when several
+/// documents share one UI tree, such as virtualized chat messages.
+#[cfg(feature = "view")]
+pub fn markdown_content_view<Message, Map>(
+    document: &MarkdownDocument,
+    palette: MarkdownPalette,
+    scope: &str,
+    map_link: Map,
+) -> AnyView<Message>
+where
+    Message: Clone + 'static,
+    Map: Fn(&str) -> Message + Copy,
+{
+    let blocks = document.blocks.iter().enumerate().map(|(index, block)| {
+        let id = if scope.is_empty() {
+            index.to_string()
+        } else {
+            format!("{scope}/{index}")
+        };
+        render_block(block, id, palette, map_link)
+    });
+    AnyView::new(Column::new().fill_width().gap(12.0).children(blocks))
+}
+
+/// Build the logical text runs used by an outer, potentially virtualized,
+/// selection document. The identifiers exactly match `markdown_content_view`.
+#[cfg(feature = "view")]
+pub fn markdown_selection_runs(document: &MarkdownDocument, scope: &str) -> Vec<SelectionRun> {
+    let mut runs = Vec::new();
+    for (index, block) in document.blocks.iter().enumerate() {
+        let id = if scope.is_empty() {
+            index.to_string()
+        } else {
+            format!("{scope}/{index}")
+        };
+        append_selection_runs(block, id, &mut runs);
+    }
+    runs
+}
+
+#[cfg(feature = "view")]
+fn append_selection_runs(block: &Block, id: String, runs: &mut Vec<SelectionRun>) {
+    match block {
+        Block::Paragraph { inlines } | Block::Heading { inlines, .. } => runs.push(
+            SelectionRun::block(format!("markdown-{id}"), inline_text(inlines)),
+        ),
+        Block::Code { text, .. } | Block::Unsupported { text } => {
+            runs.push(SelectionRun::block(format!("markdown-{id}"), text))
+        }
+        Block::Quote { blocks } => {
+            for (index, block) in blocks.iter().enumerate() {
+                append_selection_runs(block, format!("{id}-{index}"), runs);
+            }
+        }
+        Block::List { items, .. } => {
+            for (item_index, blocks) in items.iter().enumerate() {
+                for (block_index, block) in blocks.iter().enumerate() {
+                    append_selection_runs(block, format!("{id}-{item_index}-{block_index}"), runs);
+                }
+            }
+        }
+        Block::Table { header, rows, .. } => {
+            for (row_index, row) in std::iter::once(header).chain(rows.iter()).enumerate() {
+                for (column, inlines) in row.iter().enumerate() {
+                    runs.push(SelectionRun::block(
+                        format!("markdown-{id}-table-{row_index}-{column}"),
+                        inline_text(inlines),
+                    ));
+                }
+            }
+        }
+        Block::ThematicBreak => {}
+    }
 }
 
 #[cfg(feature = "view")]
@@ -1254,6 +1326,52 @@ mod tests {
                 .as_deref(),
             Some("Heading\nFirst paragraph.\nOne\nTwo\nQuoted\ncode();\n")
         );
+    }
+
+    #[test]
+    #[cfg(feature = "view")]
+    fn caller_owned_selection_runs_match_scoped_render_ids() {
+        let document = MarkdownDocument::parse(
+            "# Heading\n\nParagraph\n\n- First\n- Second\n\n| A | B |\n| - | - |\n| 1 | 2 |",
+        );
+        let scope = "message-7/body";
+        let runs = markdown_selection_runs(&document, scope);
+        assert!(
+            runs.iter()
+                .all(|run| run.id.starts_with("markdown-message-7/body/"))
+        );
+        let selection_document = std::sync::Arc::new(nickel_ui::SelectionDocument::new(runs));
+        let mut state = UiStateStore::default();
+        let build = |state: &mut UiStateStore| {
+            UiTree::layout_with_state(
+                SelectionRegion::new(selection_document.clone())
+                    .id("test-markdown-region")
+                    .child(markdown_content_view(
+                        &document,
+                        MarkdownPalette::default(),
+                        scope,
+                        |destination| Message::Link(destination.to_owned()),
+                    )),
+                Rect::new(0.0, 0.0, 640.0, 480.0),
+                state,
+            )
+        };
+        let initial = build(&mut state);
+        let region_id = initial
+            .selection_region_ids()
+            .next()
+            .expect("scoped selection region")
+            .clone();
+        state.set_selection_owner(Some(region_id.clone()));
+        *state.document_selection_mut(region_id) = selection_document.select_all();
+        let tree = build(&mut state);
+        assert!(tree.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::Fill {
+                color: 0x315a8f,
+                ..
+            }
+        )));
     }
 
     #[test]

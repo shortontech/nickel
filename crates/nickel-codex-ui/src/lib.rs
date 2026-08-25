@@ -304,7 +304,7 @@ mod tests {
                     && node.allocated.size.height >= 0.0
             }));
             assert!(tree.commands().iter().any(
-                |command| matches!(command, PaintCommand::Text { text, .. } if text.contains("Hello"))
+                |command| matches!(command, PaintCommand::StyledText { text, .. } if text.contains("Hello"))
             ));
         }
     }
@@ -693,7 +693,8 @@ mod tests {
         state.items.push_back(ChatItem {
             id: "agent".into(),
             kind: ChatItemKind::Agent,
-            text: "Visible response".into(),
+            text: "# Shared Markdown\n\nThis is **bold**, *emphasized*, and `inline code`.\n\n- Lists use the shared renderer\n- [Links stay typed](https://example.com)\n\n| Feature | State |\n| --- | --- |\n| Tables | Working |\n\n```rust\nfn integrated() -> bool { true }\n```"
+                .into(),
             complete: true,
         });
         for scale in [1.0, 2.0] {
@@ -702,6 +703,17 @@ mod tests {
                 SdlComponentRenderer::new((800.0 * scale) as u32, (600.0 * scale) as u32, scale);
             assert!(!renderer.render(tree.commands()).is_empty());
             assert!(renderer.pixels().iter().any(|pixel| pixel.a > 0));
+            if scale == 1.0 {
+                let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../target/nickel-codex-snapshots/shared-markdown.png");
+                std::fs::create_dir_all(output.parent().unwrap()).unwrap();
+                let image =
+                    image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_fn(800, 600, |x, y| {
+                        let pixel = renderer.pixels()[(y * 800 + x) as usize];
+                        image::Rgba([pixel.r, pixel.g, pixel.b, pixel.a])
+                    });
+                image.save(output).unwrap();
+            }
         }
     }
 
@@ -755,7 +767,7 @@ mod tests {
             Rect::new(0.0, 0.0, 1120.0, 760.0),
         );
         assert!(tree.commands().iter().any(
-            |command| matches!(command, PaintCommand::Text { text, .. } if text == "fixture response")
+            |command| matches!(command, PaintCommand::StyledText { text, .. } if text == "fixture response")
         ));
     }
 
@@ -892,10 +904,10 @@ mod tests {
             &mut ui_state,
         );
         assert!(tree.commands().iter().any(
-            |command| matches!(command, PaintCommand::Text { text, .. } if text.contains("history message 1999"))
+            |command| matches!(command, PaintCommand::StyledText { text, .. } if text.contains("history message 1999"))
         ));
         assert!(!tree.commands().iter().any(
-            |command| matches!(command, PaintCommand::Text { text, .. } if text.contains("history message 0"))
+            |command| matches!(command, PaintCommand::StyledText { text, .. } if text.contains("history message 0"))
         ));
         assert!(
             tree.commands().len() < 500,
@@ -939,7 +951,7 @@ mod tests {
         *ui_state.document_selection_mut(region_id) = DocumentSelection {
             anchor: Some(SelectionEndpoint::new("message-0/label", 0)),
             focus: Some(SelectionEndpoint::new(
-                "message-1999/body/0",
+                "markdown-message-1999/body/0",
                 "history message 1999".len(),
             )),
         };
@@ -951,7 +963,7 @@ mod tests {
         assert!(copied.contains("history message 1000"));
         assert!(copied.ends_with("Codex\nhistory message 1999"));
         assert!(!tree.commands().iter().any(
-            |command| matches!(command, PaintCommand::Text { text, .. } if text.contains("history message 0"))
+            |command| matches!(command, PaintCommand::StyledText { text, .. } if text.contains("history message 0"))
         ));
 
         let selected = UiTree::layout_with_state(
@@ -1002,11 +1014,10 @@ mod tests {
     }
 
     #[test]
-    fn crate_manifest_has_no_shell_or_platform_dependency() {
+    fn crate_manifest_has_no_shell_or_session_dependency() {
         let manifest = include_str!("../Cargo.toml");
         assert!(!manifest.contains("nickel-shell"));
         assert!(!manifest.contains("nickel-session"));
-        assert!(!manifest.contains("nickel-platform"));
     }
 
     #[test]

@@ -7,6 +7,7 @@ use std::{
 use nickel_codex::{
     AccountState, CodexEvent, EventKind, Model, ServerRequestId, Thread, ThreadId, TurnId,
 };
+use nickel_markdown::{MarkdownDocument, markdown_selection_runs};
 use nickel_ui::{SelectionDocument, SelectionRun};
 
 use crate::ControllerEvent;
@@ -42,25 +43,6 @@ pub struct ChatItem {
     pub kind: ChatItemKind,
     pub text: String,
     pub complete: bool,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum TranscriptBlock {
-    Heading(String),
-    Paragraph(String),
-    ListItem(String),
-    Code(String),
-}
-
-impl TranscriptBlock {
-    pub(crate) fn text(&self) -> &str {
-        match self {
-            Self::Heading(text)
-            | Self::Paragraph(text)
-            | Self::ListItem(text)
-            | Self::Code(text) => text,
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -415,6 +397,10 @@ impl ChatState {
         self.diagnostics.push_back(sanitize_diagnostic(&message));
     }
 
+    pub(crate) fn report_diagnostic(&mut self, message: impl Into<String>) {
+        self.push_diagnostic(message.into());
+    }
+
     fn reconcile_height_estimates(&mut self) {
         if self.item_height_estimates.len() != self.items.len() {
             self.item_height_estimates = self.items.iter().map(estimate_item_height).collect();
@@ -459,53 +445,16 @@ impl ChatState {
     }
 }
 
-pub(crate) fn transcript_blocks(item: &ChatItem) -> Vec<TranscriptBlock> {
-    let input = if item.text.is_empty() {
+pub(crate) fn item_markdown_source(item: &ChatItem) -> &str {
+    if item.text.is_empty() {
         if item.complete { "—" } else { "…" }
     } else {
         item.text.as_str()
-    };
-    let mut blocks = Vec::new();
-    let mut code = Vec::new();
-    let mut in_code = false;
-    for line in input.lines() {
-        if line.trim_start().starts_with("```") {
-            if in_code {
-                blocks.push(TranscriptBlock::Code(code.join("\n")));
-                code.clear();
-            }
-            in_code = !in_code;
-            continue;
-        }
-        if in_code {
-            code.push(line);
-        } else if let Some(heading) = line
-            .trim_start()
-            .strip_prefix("### ")
-            .or_else(|| line.trim_start().strip_prefix("## "))
-            .or_else(|| line.trim_start().strip_prefix("# "))
-        {
-            blocks.push(TranscriptBlock::Heading(inline_text(heading)));
-        } else if let Some(item) = line
-            .trim_start()
-            .strip_prefix("- ")
-            .or_else(|| line.trim_start().strip_prefix("* "))
-        {
-            blocks.push(TranscriptBlock::ListItem(format!(
-                "• {}",
-                inline_text(item)
-            )));
-        } else if !line.trim().is_empty() {
-            blocks.push(TranscriptBlock::Paragraph(inline_text(line)));
-        }
     }
-    if in_code || !code.is_empty() {
-        blocks.push(TranscriptBlock::Code(code.join("\n")));
-    }
-    if blocks.is_empty() {
-        blocks.push(TranscriptBlock::Paragraph(String::new()));
-    }
-    blocks
+}
+
+pub(crate) fn item_markdown_document(item: &ChatItem) -> MarkdownDocument {
+    MarkdownDocument::parse(item_markdown_source(item))
 }
 
 fn selection_runs_for_item(item: &ChatItem) -> Vec<SelectionRun> {
@@ -513,14 +462,11 @@ fn selection_runs_for_item(item: &ChatItem) -> Vec<SelectionRun> {
         format!("{}/label", item.id),
         item_label(&item.kind),
     )];
-    runs.extend(
-        transcript_blocks(item)
-            .into_iter()
-            .enumerate()
-            .map(|(index, block)| {
-                SelectionRun::block(format!("{}/body/{index}", item.id), block.text())
-            }),
-    );
+    let document = item_markdown_document(item);
+    runs.extend(markdown_selection_runs(
+        &document,
+        &format!("{}/body", item.id),
+    ));
     runs
 }
 
@@ -535,21 +481,6 @@ pub(crate) fn item_label(kind: &ChatItemKind) -> &'static str {
         ChatItemKind::Error => "Error",
         ChatItemKind::Unknown(_) => "Additional event",
     }
-}
-
-fn inline_text(input: &str) -> String {
-    let mut code_open = false;
-    input
-        .chars()
-        .map(|character| {
-            if character == '`' {
-                code_open = !code_open;
-                if code_open { '‹' } else { '›' }
-            } else {
-                character
-            }
-        })
-        .collect()
 }
 
 fn estimate_item_height(item: &ChatItem) -> f32 {

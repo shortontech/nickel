@@ -3,9 +3,10 @@ use std::path::PathBuf;
 use nickel_codex::{
     BackendChoice, CodexSettings, CommandDecision, FileChangeDecision, RemoteHost, ServerRequestId,
 };
+use nickel_markdown::{MarkdownPalette, markdown_content_view};
 use nickel_ui::prelude::*;
 
-use crate::model::{TranscriptBlock, item_label, transcript_blocks};
+use crate::model::{item_label, item_markdown_document};
 use crate::{
     BackendMode, ChatController, ChatItem, ChatItemKind, ChatState, ConnectionStatus,
     ControllerCommand, PendingInteraction, create_managed_workspace,
@@ -59,6 +60,7 @@ pub enum ChatMessage {
     RemoteHostTokenEnvChanged(String),
     RemoteHostCwdChanged(String),
     SaveRemoteHost,
+    OpenMarkdownLink(String),
 }
 
 fn draft_changed(value: String) -> ChatMessage {
@@ -478,6 +480,19 @@ impl Application for ChatApplication {
                     }
                 }
             }
+            ChatMessage::OpenMarkdownLink(destination) => {
+                let result = if destination.starts_with("https://")
+                    || destination.starts_with("http://")
+                    || destination.starts_with("mailto:")
+                {
+                    nickel_platform::open_external_url(&destination)
+                } else {
+                    Err(format!("Cannot open relative chat link: {destination}"))
+                };
+                if let Err(error) = result {
+                    self.state.report_diagnostic(error);
+                }
+            }
         }
     }
 
@@ -532,7 +547,7 @@ fn ItemCard(item: &ChatItem) -> impl View<ChatMessage> {
         ChatItemKind::Unknown(_) => (PANEL, MUTED),
     };
     let label = item_label(&item.kind);
-    let blocks = transcript_blocks(item);
+    let document = item_markdown_document(item);
     let label_run_id = format!("{}/label", item.id);
     let (maximum_width, alignment) = if item.kind == ChatItemKind::User {
         (760.0, Align::End)
@@ -545,40 +560,20 @@ fn ItemCard(item: &ChatItem) -> impl View<ChatMessage> {
             background={background} border={Border::new(BORDER, 1.0)} radius={10.0}>
             <Text color={color} scale={0.9} selection_run_id={label_run_id}
                 selection_boundary={TextBoundary::Block}>{label}</Text>
-            <Column fill_width gap={5.0}>
-                {blocks.iter().enumerate().map(|(index, block)| render_markdown_block(block, color, &item.id, index))}
-            </Column>
+            {markdown_content_view(
+                &document,
+                MarkdownPalette {
+                    foreground: color,
+                    muted: MUTED,
+                    accent: ACCENT,
+                    surface: 0x11151b,
+                    border: BORDER,
+                    code: 0xc8d6e5,
+                },
+                &format!("{}/body", item.id),
+                |destination| ChatMessage::OpenMarkdownLink(destination.to_owned()),
+            )}
         </Container>
-    }
-}
-
-fn render_markdown_block(
-    block: &TranscriptBlock,
-    color: Color,
-    item_id: &str,
-    index: usize,
-) -> AnyView<ChatMessage> {
-    let run_id = format!("{item_id}/body/{index}");
-    match block {
-        TranscriptBlock::Heading(text) => AnyView::new(ui! {
-            <Text color={color} scale={1.25} width_length={Length::Fill} wrap={true}
-                selection_run_id={run_id} selection_boundary={TextBoundary::Block}>{text}</Text>
-        }),
-        TranscriptBlock::ListItem(text) => AnyView::new(ui! {
-            <Text color={color} width_length={Length::Fill} wrap={true}
-                selection_run_id={run_id} selection_boundary={TextBoundary::Block}>{text}</Text>
-        }),
-        TranscriptBlock::Code(text) => AnyView::new(ui! {
-            <Container fill_width padding={Insets::all(9.0)} background={0x11151b}
-                border={Border::new(BORDER, 1.0)} radius={6.0} overflow_x={Overflow::Auto}>
-                <Text color={0xc8d6e5} selection_run_id={run_id}
-                    selection_boundary={TextBoundary::Block}>{text}</Text>
-            </Container>
-        }),
-        TranscriptBlock::Paragraph(text) => AnyView::new(ui! {
-            <Text color={color} width_length={Length::Fill} wrap={true}
-                selection_run_id={run_id} selection_boundary={TextBoundary::Block}>{text}</Text>
-        }),
     }
 }
 
@@ -897,22 +892,32 @@ mod tests {
     }
 
     #[test]
-    fn markdown_subset_is_safe_and_keeps_unsupported_html_as_text() {
+    fn chat_uses_shared_markdown_and_keeps_unsupported_html_inert() {
         let item = ChatItem {
             id: "markdown".into(),
             kind: ChatItemKind::Agent,
             text: "# Heading\n- item with `code`\n```rust\nfn main() {}\n```\n<b>plain</b>".into(),
             complete: true,
         };
+        let document = item_markdown_document(&item);
         assert_eq!(
-            transcript_blocks(&item),
-            vec![
-                TranscriptBlock::Heading("Heading".into()),
-                TranscriptBlock::ListItem("• item with ‹code›".into()),
-                TranscriptBlock::Code("fn main() {}".into()),
-                TranscriptBlock::Paragraph("<b>plain</b>".into()),
-            ]
+            document.logical_text(),
+            "Heading\n• item with code\nfn main() {}\n\n<b>plain</b>"
         );
+        assert!(!document.diagnostics.is_empty());
+
+        let tree = UiTree::layout(
+            ui! { <ItemCard item={&item} /> },
+            Rect::new(0.0, 0.0, 600.0, 400.0),
+        );
+        assert!(tree.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::StyledText { text, .. } if text == "Heading"
+        )));
+        assert!(tree.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::StyledText { text, .. } if text == "<b>plain</b>"
+        )));
     }
 
     #[test]

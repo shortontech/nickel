@@ -2464,8 +2464,11 @@ name = "nickel-codex-ui"
 version = "0.1.0"
 dependencies = [
  "dirs",
+ "image",
  "jiff",
  "nickel-codex",
+ "nickel-markdown",
+ "nickel-platform",
  "nickel-ui",
  "serde",
  "serde_json",
