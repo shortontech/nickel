@@ -6,7 +6,9 @@ use std::{
     sync::Arc,
 };
 
-use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping, Weight, Wrap};
+use cosmic_text::{
+    Attrs, Buffer, Family, FontSystem, Metrics, Shaping, Style as FontStyle, Weight, Wrap,
+};
 use image::RgbaImage;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -17,6 +19,17 @@ use crate::{
 };
 
 pub type Color = u32;
+
+/// One non-overlapping byte range in a styled text stream.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct StyledTextSpan {
+    pub range: Range<usize>,
+    pub bold: bool,
+    pub italic: bool,
+    pub monospace: bool,
+    pub strikethrough: bool,
+    pub color: Option<Color>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Border {
@@ -231,6 +244,14 @@ pub enum PaintCommand {
         align: TextAlign,
         bold: bool,
     },
+    StyledText {
+        bounds: Rect,
+        text: String,
+        spans: Vec<StyledTextSpan>,
+        scale: f32,
+        color: Color,
+        align: TextAlign,
+    },
     Image {
         bounds: Rect,
         id: u16,
@@ -342,6 +363,13 @@ enum Kind {
         caret_position: Option<Point>,
         input_value: Option<String>,
     },
+    StyledText {
+        value: String,
+        spans: Vec<StyledTextSpan>,
+        scale: f32,
+        wrap: bool,
+        line_height: Option<f32>,
+    },
     Image {
         id: u16,
         image: Arc<RgbaImage>,
@@ -371,6 +399,7 @@ impl Kind {
             Self::VerticalScroll { .. } => "VerticalScroll",
             Self::Grid { .. } => "Grid",
             Self::Text { .. } => "Text",
+            Self::StyledText { .. } => "StyledText",
             Self::Image { .. } => "Image",
             Self::Slider { .. } => "Slider",
             Self::Dropdown { .. } => "Dropdown",
@@ -749,6 +778,83 @@ fn measure_text(
             cache.clear();
         }
         cache.insert(key, measured);
+        measured
+    })
+}
+
+fn styled_attrs(span: Option<&StyledTextSpan>) -> Attrs<'static> {
+    let mut attrs = Attrs::new().family(if span.is_some_and(|span| span.monospace) {
+        Family::Monospace
+    } else {
+        Family::SansSerif
+    });
+    if span.is_some_and(|span| span.bold) {
+        attrs = attrs.weight(Weight::BOLD);
+    }
+    if span.is_some_and(|span| span.italic) {
+        attrs = attrs.style(FontStyle::Italic);
+    }
+    attrs
+}
+
+fn styled_segments<'a>(text: &'a str, spans: &[StyledTextSpan]) -> Vec<(&'a str, Attrs<'static>)> {
+    let mut segments = Vec::new();
+    let mut cursor = 0;
+    for span in spans {
+        let start = span.range.start.min(text.len());
+        let end = span.range.end.min(text.len());
+        if start > cursor && text.is_char_boundary(cursor) && text.is_char_boundary(start) {
+            segments.push((&text[cursor..start], styled_attrs(None)));
+        }
+        if end > start && text.is_char_boundary(start) && text.is_char_boundary(end) {
+            segments.push((&text[start..end], styled_attrs(Some(span))));
+            cursor = end;
+        }
+    }
+    if cursor < text.len() && text.is_char_boundary(cursor) {
+        segments.push((&text[cursor..], styled_attrs(None)));
+    }
+    if segments.is_empty() {
+        segments.push((text, styled_attrs(None)));
+    }
+    segments
+}
+
+fn measure_styled_text(
+    text: &str,
+    spans: &[StyledTextSpan],
+    scale: f32,
+    wrap: bool,
+    line_height: Option<f32>,
+    max_width: f32,
+) -> Size {
+    let font_size = text_font_size(scale);
+    let line_height = line_height.unwrap_or(font_size * 1.3).max(1.0);
+    TEXT_MEASURER.with(|measurer| {
+        let mut measurer = measurer.borrow_mut();
+        let font_system = &mut measurer.0;
+        let mut buffer = Buffer::new(font_system, Metrics::new(font_size, line_height));
+        buffer.set_wrap(if wrap { Wrap::WordOrGlyph } else { Wrap::None });
+        buffer.set_size(
+            (wrap && max_width.is_finite()).then_some(max_width.max(1.0)),
+            None,
+        );
+        let defaults = styled_attrs(None);
+        buffer.set_rich_text(
+            styled_segments(text, spans),
+            &defaults,
+            Shaping::Advanced,
+            None,
+        );
+        buffer.shape_until_scroll(font_system, false);
+        let mut measured = Size::new(0.0, 0.0);
+        for run in buffer.layout_runs() {
+            measured.width = measured.width.max(run.line_w);
+            measured.height += run.line_height;
+        }
+        if measured.height == 0.0 {
+            measured.height = line_height;
+        }
         measured
     })
 }
@@ -1584,6 +1690,70 @@ impl<Message> FileGridItem<Message> {
 impl<Message> Component<Message> for FileGridItem<Message> {
     fn into_element(self) -> Element<Message> {
         self.0.into_element()
+    }
+}
+
+pub struct StyledText<Message = String>(Element<Message>);
+
+impl<Message> StyledText<Message> {
+    pub fn new(value: impl Into<String>, spans: Vec<StyledTextSpan>) -> Self {
+        Self(Element {
+            kind: Kind::StyledText {
+                value: value.into(),
+                spans,
+                scale: 2.0,
+                wrap: false,
+                line_height: None,
+            },
+            id: None,
+            source: None,
+            style: Style::default(),
+            message: None,
+            message_mapper: None,
+            text_mapper: None,
+            option_messages: Vec::new(),
+            children: Vec::new(),
+        })
+    }
+
+    pub fn scale(mut self, value: f32) -> Self {
+        if let Kind::StyledText { scale, .. } = &mut self.0.kind {
+            *scale = value;
+        }
+        self
+    }
+
+    pub fn color(mut self, color: Color) -> Self {
+        self.0 = self.0.foreground(color);
+        self
+    }
+
+    pub fn wrap(mut self, enabled: bool) -> Self {
+        if let Kind::StyledText { wrap, .. } = &mut self.0.kind {
+            *wrap = enabled;
+        }
+        self
+    }
+
+    pub fn width_length(mut self, width: Length) -> Self {
+        self.0 = self.0.width_length(width);
+        self
+    }
+
+    pub fn selection_run_id(mut self, id: impl Into<String>) -> Self {
+        self.0.style.selection_run_id = Some(id.into());
+        self
+    }
+
+    pub fn selection_boundary(mut self, boundary: TextBoundary) -> Self {
+        self.0.style.selection_boundary = boundary;
+        self
+    }
+}
+
+impl<Message> Component<Message> for StyledText<Message> {
+    fn into_element(self) -> Element<Message> {
+        self.0
     }
 }
 
@@ -4295,6 +4465,13 @@ fn measure_element<Message>(element: &Element<Message>, constraints: Constraints
             *max_lines,
             child_max.width,
         ),
+        Kind::StyledText {
+            value,
+            spans,
+            scale,
+            wrap,
+            line_height,
+        } => measure_styled_text(value, spans, *scale, *wrap, *line_height, child_max.width),
         Kind::Image { image, .. } => {
             let intrinsic = if image.width() == 0 || image.height() == 0 {
                 Size::new(16.0, 16.0)
@@ -4515,6 +4692,45 @@ fn collect_selection_regions<Message>(
             builders[region_index].logical_runs.push(SelectionRun {
                 id: run_id.clone(),
                 text: Arc::from(text.clone()),
+                boundary_before: element.style.selection_boundary,
+            });
+            builders[region_index].runs.push(SelectionRunGeometry {
+                node_index,
+                run_id,
+                glyphs,
+            });
+        }
+        if let Some(region_index) = active
+            && !excluded
+            && element.style.selectable != Some(false)
+            && let Kind::StyledText {
+                value,
+                scale,
+                wrap,
+                line_height,
+                ..
+            } = &element.kind
+        {
+            let run_id = element
+                .style
+                .selection_run_id
+                .clone()
+                .unwrap_or_else(|| node.id.as_str().to_owned());
+            let text = value.clone();
+            let glyphs = shape_selection_glyphs(
+                &text,
+                node.content,
+                node.clip,
+                *scale,
+                false,
+                *wrap,
+                *line_height,
+                None,
+                element.style.text_align,
+            );
+            builders[region_index].logical_runs.push(SelectionRun {
+                id: run_id.clone(),
+                text: Arc::from(text),
                 boundary_before: element.style.selection_boundary,
             });
             builders[region_index].runs.push(SelectionRunGeometry {
@@ -4779,6 +4995,19 @@ fn emit_element<Message: Clone>(
             color: foreground.unwrap_or(0x00ff_ffff),
             align: element.style.text_align,
             bold: *bold,
+        }),
+        Kind::StyledText {
+            value,
+            spans,
+            scale,
+            ..
+        } => tree.commands.push(PaintCommand::StyledText {
+            bounds: rect,
+            text: value.clone(),
+            spans: spans.clone(),
+            scale: *scale,
+            color: foreground.unwrap_or(0x00ff_ffff),
+            align: element.style.text_align,
         }),
         Kind::Image { id, image } => tree.commands.push(PaintCommand::Image {
             bounds: rect,
@@ -5086,7 +5315,11 @@ fn layout_element<Message: Clone>(
         inherited_clip
     };
     match &element.kind {
-        Kind::Text { .. } | Kind::Image { .. } | Kind::Slider { .. } | Kind::Dropdown { .. } => {}
+        Kind::Text { .. }
+        | Kind::StyledText { .. }
+        | Kind::Image { .. }
+        | Kind::Slider { .. }
+        | Kind::Dropdown { .. } => {}
         Kind::Flex(axis) => {
             let content = rect.inset(element.style.padding);
             let minimum_total = element
@@ -5240,7 +5473,7 @@ fn layout_element<Message: Clone>(
                 ));
             }
         }
-        Kind::VerticalScroll { offset } => {
+        Kind::VerticalScroll { offset, .. } => {
             let requested_offset = *offset;
             let viewport = rect.inset(element.style.padding);
             let clip = descendant_clip

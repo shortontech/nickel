@@ -31,8 +31,8 @@ pub use ui::{
     InteractionState, LayoutDiagnostic, LinearGradient, Menu, MenuBar, MenuItem, PaintCommand,
     RadioButton, ResolvedGrid, ResolvedLayout, ResolvedNode, Row, ScrollExtent, SelectionRegion,
     ShoulderHints, Sidebar, SidebarFolder, SidebarItem, SidebarSection, Slider, SourceLocation,
-    Spacer, Text, TextAlign, TextField, Tone, UiEvent, UiTree, VerticalScroll, VirtualColumn,
-    VirtualWindow,
+    Spacer, StyledText, StyledTextSpan, Text, TextAlign, TextField, Tone, UiEvent, UiTree,
+    VerticalScroll, VirtualColumn, VirtualWindow,
 };
 pub use ui_declarative_macros::{component, id, ui};
 

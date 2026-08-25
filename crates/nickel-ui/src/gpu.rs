@@ -1,6 +1,6 @@
 use cosmic_text::{
     Align, Attrs, Buffer, CacheKey, Color as TextColor, Family, FontSystem, Metrics, PhysicalGlyph,
-    Shaping, SwashCache, SwashContent, Weight,
+    Shaping, Style as FontStyle, SwashCache, SwashContent, Weight,
 };
 use sdl3::{
     pixels::{Color as SdlColor, PixelFormat},
@@ -10,7 +10,7 @@ use sdl3::{
     video::Window,
 };
 
-use crate::{Color, GradientAxis, PaintCommand, Rect, TextAlign};
+use crate::{Color, GradientAxis, PaintCommand, Rect, StyledTextSpan, TextAlign};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Pixel {
@@ -69,6 +69,8 @@ struct TextCacheKey {
 }
 
 type CachedGlyphPixel = (i32, i32, u32, u32, TextColor);
+type PhysicalGlyphs = Vec<(PhysicalGlyph, TextColor)>;
+type StrikeLines = Vec<(Rect, Color)>;
 
 /// Transitional name retained while callers move from the old wgpu backend.
 pub type ComponentGpu = SdlComponentRenderer;
@@ -359,6 +361,22 @@ impl SdlCanvasPresenter {
                 *bold,
                 clip,
             )?,
+            PaintCommand::StyledText {
+                bounds,
+                text,
+                spans,
+                scale: text_scale,
+                color,
+                align,
+            } => self.direct_styled_text(
+                physical_rect(*bounds, scale),
+                text,
+                spans,
+                text_size(*text_scale) * scale,
+                *color,
+                *align,
+                clip,
+            )?,
             PaintCommand::Image {
                 bounds, id, image, ..
             } => self.direct_image(
@@ -555,6 +573,75 @@ impl SdlCanvasPresenter {
                     ),
                 )
                 .map_err(|error| error.to_string())?;
+        }
+        self.canvas.set_clip_rect(Some(sdl_rect(parent_clip)));
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn direct_styled_text(
+        &mut self,
+        bounds: Rect,
+        text: &str,
+        spans: &[StyledTextSpan],
+        size: f32,
+        color: Color,
+        align: TextAlign,
+        parent_clip: Rect,
+    ) -> Result<(), String> {
+        let (glyphs, strikes) = shape_styled_physical_glyphs(
+            &mut self.font_system,
+            text,
+            spans,
+            bounds,
+            size,
+            color,
+            align,
+        );
+        self.canvas.set_clip_rect(Some(sdl_rect(parent_clip)));
+        for (glyph, glyph_color) in glyphs {
+            let Some(entry) = self.glyph_atlas.entry(
+                &mut self.font_system,
+                &mut self.swash_cache,
+                glyph.cache_key,
+            )?
+            else {
+                continue;
+            };
+            let destination = Rect::new(
+                (glyph.x + entry.left) as f32,
+                (glyph.y - entry.top) as f32,
+                entry.source.width() as f32,
+                entry.source.height() as f32,
+            );
+            if intersection(destination, parent_clip).is_none() {
+                continue;
+            }
+            if entry.colored {
+                self.glyph_atlas.texture.set_color_mod(255, 255, 255);
+            } else {
+                self.glyph_atlas.texture.set_color_mod(
+                    glyph_color.r(),
+                    glyph_color.g(),
+                    glyph_color.b(),
+                );
+            }
+            self.glyph_atlas.texture.set_alpha_mod(glyph_color.a());
+            self.canvas
+                .copy(
+                    &self.glyph_atlas.texture,
+                    entry.source,
+                    FRect::new(
+                        destination.origin.x,
+                        destination.origin.y,
+                        destination.size.width,
+                        destination.size.height,
+                    ),
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        for (rect, strike_color) in strikes {
+            self.direct_fill(rect, strike_color)?;
         }
         self.canvas.set_clip_rect(Some(sdl_rect(parent_clip)));
         Ok(())
@@ -820,6 +907,7 @@ impl SdlComponentRenderer {
                 );
             }
             PaintCommand::Text { .. } => self.text(command, clip),
+            PaintCommand::StyledText { .. } => self.styled_text(command, clip),
             PaintCommand::Image { bounds, image, .. } => {
                 self.image(physical_rect(*bounds, self.scale), image, clip);
             }
@@ -1004,6 +1092,78 @@ impl SdlComponentRenderer {
         }
     }
 
+    fn styled_text(&mut self, command: &PaintCommand, clip: Rect) {
+        let PaintCommand::StyledText {
+            bounds,
+            text,
+            spans,
+            scale,
+            color,
+            align,
+        } = command
+        else {
+            return;
+        };
+        let font_size = text_size(*scale) * self.scale;
+        let physical = physical_rect(*bounds, self.scale);
+        let mut buffer = Buffer::new(
+            &mut self.font_system,
+            Metrics::new(font_size, font_size * 1.3),
+        );
+        buffer.set_size(
+            Some(physical.size.width.max(1.0)),
+            Some(physical.size.height.max(font_size * 1.4)),
+        );
+        let defaults = rich_attrs(*color, None, 0);
+        buffer.set_rich_text(
+            rich_segments(text, spans, *color),
+            &defaults,
+            Shaping::Advanced,
+            Some(cosmic_align(*align)),
+        );
+        buffer.shape_until_scroll(&mut self.font_system, false);
+        let mut pixels = Vec::new();
+        buffer.draw(
+            &mut self.font_system,
+            &mut self.swash_cache,
+            text_color(*color),
+            |x, y, width, height, glyph_color| {
+                pixels.push((x, y, width, height, glyph_color));
+            },
+        );
+        let strikes = styled_strikes(&buffer, spans, physical, *color, font_size);
+        let origin = crate::Point {
+            x: physical.origin.x.round(),
+            y: physical.origin.y.round(),
+        };
+        for (x, y, width, height, glyph_color) in pixels {
+            let glyph = Rect::new(
+                origin.x + x as f32,
+                origin.y + y as f32,
+                width as f32,
+                height as f32,
+            );
+            let Some(glyph) = intersection(glyph, clip) else {
+                continue;
+            };
+            self.for_pixels(glyph, |renderer, px, py| {
+                renderer.blend(
+                    px,
+                    py,
+                    Pixel::rgba(
+                        glyph_color.r(),
+                        glyph_color.g(),
+                        glyph_color.b(),
+                        glyph_color.a(),
+                    ),
+                );
+            });
+        }
+        for (rect, strike_color) in strikes {
+            self.fill_round(rect, 0.0, 0, strike_color, clip);
+        }
+    }
+
     fn image(&mut self, rect: Rect, image: &image::RgbaImage, clip: Rect) {
         if image.width() == 0 || image.height() == 0 {
             return;
@@ -1075,7 +1235,9 @@ fn command_bounds(command: &PaintCommand) -> Option<Rect> {
         | PaintCommand::Stroke { rect, .. }
         | PaintCommand::OverlayFill { rect, .. }
         | PaintCommand::OverlayStroke { rect, .. } => Some(*rect),
-        PaintCommand::Text { bounds, .. } | PaintCommand::Image { bounds, .. } => Some(*bounds),
+        PaintCommand::Text { bounds, .. }
+        | PaintCommand::StyledText { bounds, .. }
+        | PaintCommand::Image { bounds, .. } => Some(*bounds),
         PaintCommand::PushClip(_) | PaintCommand::PopClip => None,
     }
 }
@@ -1218,6 +1380,135 @@ fn shape_physical_glyphs(
             })
         })
         .collect()
+}
+
+fn text_color(color: Color) -> TextColor {
+    let pixel = pixel(color);
+    TextColor::rgba(pixel.r, pixel.g, pixel.b, pixel.a)
+}
+
+fn cosmic_align(align: TextAlign) -> Align {
+    match align {
+        TextAlign::Start => Align::Left,
+        TextAlign::Center => Align::Center,
+        TextAlign::End => Align::Right,
+    }
+}
+
+fn rich_attrs(color: Color, span: Option<&StyledTextSpan>, metadata: usize) -> Attrs<'static> {
+    let mut attrs = Attrs::new()
+        .family(if span.is_some_and(|span| span.monospace) {
+            Family::Monospace
+        } else {
+            Family::SansSerif
+        })
+        .color(text_color(
+            span.and_then(|span| span.color).unwrap_or(color),
+        ))
+        .metadata(metadata);
+    if span.is_some_and(|span| span.bold) {
+        attrs = attrs.weight(Weight::BOLD);
+    }
+    if span.is_some_and(|span| span.italic) {
+        attrs = attrs.style(FontStyle::Italic);
+    }
+    attrs
+}
+
+fn rich_segments<'a>(
+    text: &'a str,
+    spans: &[StyledTextSpan],
+    color: Color,
+) -> Vec<(&'a str, Attrs<'static>)> {
+    let mut segments = Vec::new();
+    let mut cursor = 0;
+    for (index, span) in spans.iter().enumerate() {
+        let start = span.range.start.min(text.len());
+        let end = span.range.end.min(text.len());
+        if start > cursor && text.is_char_boundary(cursor) && text.is_char_boundary(start) {
+            segments.push((&text[cursor..start], rich_attrs(color, None, 0)));
+        }
+        if end > start && text.is_char_boundary(start) && text.is_char_boundary(end) {
+            segments.push((&text[start..end], rich_attrs(color, Some(span), index + 1)));
+            cursor = end;
+        }
+    }
+    if cursor < text.len() && text.is_char_boundary(cursor) {
+        segments.push((&text[cursor..], rich_attrs(color, None, 0)));
+    }
+    if segments.is_empty() {
+        segments.push((text, rich_attrs(color, None, 0)));
+    }
+    segments
+}
+
+fn styled_strikes(
+    buffer: &Buffer,
+    spans: &[StyledTextSpan],
+    bounds: Rect,
+    default_color: Color,
+    font_size: f32,
+) -> Vec<(Rect, Color)> {
+    let mut strikes = Vec::new();
+    for run in buffer.layout_runs() {
+        for glyph in run.glyphs {
+            let Some(span) = glyph
+                .metadata
+                .checked_sub(1)
+                .and_then(|index| spans.get(index))
+            else {
+                continue;
+            };
+            if !span.strikethrough {
+                continue;
+            }
+            let rect = Rect::new(
+                bounds.origin.x + glyph.x,
+                bounds.origin.y + run.line_top + run.line_height * 0.52,
+                glyph.w.max(1.0),
+                (font_size / 14.0).max(1.0),
+            );
+            strikes.push((rect, span.color.unwrap_or(default_color)));
+        }
+    }
+    strikes
+}
+
+fn shape_styled_physical_glyphs(
+    font_system: &mut FontSystem,
+    text: &str,
+    spans: &[StyledTextSpan],
+    bounds: Rect,
+    size: f32,
+    color: Color,
+    align: TextAlign,
+) -> (PhysicalGlyphs, StrikeLines) {
+    let mut buffer = Buffer::new(font_system, Metrics::new(size, size * 1.3));
+    buffer.set_size(
+        Some(bounds.size.width.max(1.0)),
+        Some(bounds.size.height.max(size * 1.3)),
+    );
+    let defaults = rich_attrs(color, None, 0);
+    buffer.set_rich_text(
+        rich_segments(text, spans, color),
+        &defaults,
+        Shaping::Advanced,
+        Some(cosmic_align(align)),
+    );
+    buffer.shape_until_scroll(font_system, false);
+    let glyphs = buffer
+        .layout_runs()
+        .flat_map(|run| {
+            run.glyphs.iter().map(move |glyph| {
+                (
+                    glyph.physical((bounds.origin.x, bounds.origin.y + run.line_y), 1.0),
+                    glyph.color_opt.unwrap_or(text_color(color)),
+                )
+            })
+        })
+        .collect();
+    let strikes = styled_strikes(&buffer, spans, bounds, color, size);
+    (glyphs, strikes)
 }
 
 fn px(value: u32) -> u32 {
