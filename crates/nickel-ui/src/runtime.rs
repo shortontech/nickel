@@ -99,8 +99,9 @@ pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
         let caret_tick = Instant::now() >= next_caret_blink;
         if caret_tick {
             next_caret_blink = Instant::now() + Duration::from_millis(500);
-            let _ = state.toggle_caret();
-            scheduler.invalidate();
+            if state.toggle_caret() != crate::Invalidation::None {
+                scheduler.invalidate();
+            }
         }
         if application.poll() {
             scheduler.invalidate();
@@ -427,6 +428,7 @@ fn command_modifier(keymod: Mod) -> bool {
 #[cfg(test)]
 mod tests {
     use super::FrameScheduler;
+    use crate::{Invalidation, UiStateStore};
 
     #[test]
     fn idle_frames_do_not_rebuild_and_event_batches_coalesce() {
@@ -437,5 +439,12 @@ mod tests {
         scheduler.invalidate();
         assert!(scheduler.take_rebuild());
         assert!(!scheduler.take_rebuild());
+    }
+
+    #[test]
+    fn an_unfocused_caret_tick_does_not_invalidate_the_window() {
+        let mut state = UiStateStore::default();
+
+        assert_eq!(state.toggle_caret(), Invalidation::None);
     }
 }

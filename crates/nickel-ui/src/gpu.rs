@@ -81,6 +81,24 @@ pub struct SdlCanvasPresenter {
     swash_cache: SwashCache,
     glyph_atlas: GlyphAtlas,
     image_textures: HashMap<u16, CachedImageTexture>,
+    text_layouts: HashMap<PhysicalTextKey, Arc<CachedPhysicalText>>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct PhysicalTextKey {
+    text: String,
+    spans: Vec<StyledTextSpan>,
+    width: u32,
+    height: u32,
+    size: u32,
+    color: Color,
+    align: u8,
+    bold: bool,
+}
+
+struct CachedPhysicalText {
+    glyphs: PhysicalGlyphs,
+    strikes: StrikeLines,
 }
 
 struct CachedImageTexture {
@@ -89,6 +107,7 @@ struct CachedImageTexture {
 }
 
 const GLYPH_ATLAS_SIZE: u32 = 1024;
+const TEXT_LAYOUT_CACHE_CAPACITY: usize = 2048;
 
 struct GlyphAtlas {
     texture: Texture,
@@ -271,6 +290,7 @@ impl SdlCanvasPresenter {
             swash_cache: SwashCache::new(),
             glyph_atlas,
             image_textures: HashMap::new(),
+            text_layouts: HashMap::new(),
         })
     }
 
@@ -523,17 +543,28 @@ impl SdlCanvasPresenter {
         bold: bool,
         parent_clip: Rect,
     ) -> Result<(), String> {
-        let glyphs = shape_physical_glyphs(
-            &mut self.font_system,
-            text,
-            bounds,
-            size,
-            color,
-            align,
-            bold,
-        );
+        let key = physical_text_key(text, &[], bounds, size, color, align, bold);
+        let layout = if let Some(layout) = self.text_layouts.get(&key) {
+            Arc::clone(layout)
+        } else {
+            let relative_bounds = Rect::new(0.0, 0.0, bounds.size.width, bounds.size.height);
+            let layout = Arc::new(CachedPhysicalText {
+                glyphs: shape_physical_glyphs(
+                    &mut self.font_system,
+                    text,
+                    relative_bounds,
+                    size,
+                    color,
+                    align,
+                    bold,
+                ),
+                strikes: Vec::new(),
+            });
+            insert_bounded_text_layout(&mut self.text_layouts, key, Arc::clone(&layout));
+            layout
+        };
         self.canvas.set_clip_rect(Some(sdl_rect(parent_clip)));
-        for (glyph, glyph_color) in glyphs {
+        for (glyph, glyph_color) in &layout.glyphs {
             let Some(entry) = self.glyph_atlas.entry(
                 &mut self.font_system,
                 &mut self.swash_cache,
@@ -543,8 +574,8 @@ impl SdlCanvasPresenter {
                 continue;
             };
             let destination = Rect::new(
-                (glyph.x + entry.left) as f32,
-                (glyph.y - entry.top) as f32,
+                bounds.origin.x + (glyph.x + entry.left) as f32,
+                bounds.origin.y + (glyph.y - entry.top) as f32,
                 entry.source.width() as f32,
                 entry.source.height() as f32,
             );
@@ -589,17 +620,26 @@ impl SdlCanvasPresenter {
         align: TextAlign,
         parent_clip: Rect,
     ) -> Result<(), String> {
-        let (glyphs, strikes) = shape_styled_physical_glyphs(
-            &mut self.font_system,
-            text,
-            spans,
-            bounds,
-            size,
-            color,
-            align,
-        );
+        let key = physical_text_key(text, spans, bounds, size, color, align, false);
+        let layout = if let Some(layout) = self.text_layouts.get(&key) {
+            Arc::clone(layout)
+        } else {
+            let relative_bounds = Rect::new(0.0, 0.0, bounds.size.width, bounds.size.height);
+            let (glyphs, strikes) = shape_styled_physical_glyphs(
+                &mut self.font_system,
+                text,
+                spans,
+                relative_bounds,
+                size,
+                color,
+                align,
+            );
+            let layout = Arc::new(CachedPhysicalText { glyphs, strikes });
+            insert_bounded_text_layout(&mut self.text_layouts, key, Arc::clone(&layout));
+            layout
+        };
         self.canvas.set_clip_rect(Some(sdl_rect(parent_clip)));
-        for (glyph, glyph_color) in glyphs {
+        for (glyph, glyph_color) in &layout.glyphs {
             let Some(entry) = self.glyph_atlas.entry(
                 &mut self.font_system,
                 &mut self.swash_cache,
@@ -609,8 +649,8 @@ impl SdlCanvasPresenter {
                 continue;
             };
             let destination = Rect::new(
-                (glyph.x + entry.left) as f32,
-                (glyph.y - entry.top) as f32,
+                bounds.origin.x + (glyph.x + entry.left) as f32,
+                bounds.origin.y + (glyph.y - entry.top) as f32,
                 entry.source.width() as f32,
                 entry.source.height() as f32,
             );
@@ -640,8 +680,16 @@ impl SdlCanvasPresenter {
                 )
                 .map_err(|error| error.to_string())?;
         }
-        for (rect, strike_color) in strikes {
-            self.direct_fill(rect, strike_color)?;
+        for (rect, strike_color) in &layout.strikes {
+            self.direct_fill(
+                Rect::new(
+                    bounds.origin.x + rect.origin.x,
+                    bounds.origin.y + rect.origin.y,
+                    rect.size.width,
+                    rect.size.height,
+                ),
+                *strike_color,
+            )?;
         }
         self.canvas.set_clip_rect(Some(sdl_rect(parent_clip)));
         Ok(())
@@ -1339,6 +1387,42 @@ fn text_size(scale: f32) -> f32 {
     }
 }
 
+fn physical_text_key(
+    text: &str,
+    spans: &[StyledTextSpan],
+    bounds: Rect,
+    size: f32,
+    color: Color,
+    align: TextAlign,
+    bold: bool,
+) -> PhysicalTextKey {
+    PhysicalTextKey {
+        text: text.to_owned(),
+        spans: spans.to_vec(),
+        width: bounds.size.width.to_bits(),
+        height: bounds.size.height.to_bits(),
+        size: size.to_bits(),
+        color,
+        align: match align {
+            TextAlign::Start => 0,
+            TextAlign::Center => 1,
+            TextAlign::End => 2,
+        },
+        bold,
+    }
+}
+
+fn insert_bounded_text_layout(
+    cache: &mut HashMap<PhysicalTextKey, Arc<CachedPhysicalText>>,
+    key: PhysicalTextKey,
+    layout: Arc<CachedPhysicalText>,
+) {
+    if cache.len() >= TEXT_LAYOUT_CACHE_CAPACITY {
+        cache.clear();
+    }
+    cache.insert(key, layout);
+}
+
 fn shape_physical_glyphs(
     font_system: &mut FontSystem,
     text: &str,
@@ -1523,9 +1607,33 @@ mod tests {
     use cosmic_text::FontSystem;
 
     use super::{
-        PaintCommand, Rect, ShelfAllocator, TextAlign, command_intersects_clip,
+        PaintCommand, Rect, ShelfAllocator, TextAlign, command_intersects_clip, physical_text_key,
         shape_physical_glyphs,
     };
+
+    #[test]
+    fn physical_text_layout_identity_ignores_scroll_translation() {
+        let first = physical_text_key(
+            "Retained text",
+            &[],
+            Rect::new(0.0, 10.0, 240.0, 40.0),
+            16.0,
+            0xffffff,
+            TextAlign::Start,
+            false,
+        );
+        let scrolled = physical_text_key(
+            "Retained text",
+            &[],
+            Rect::new(0.0, -74.0, 240.0, 40.0),
+            16.0,
+            0xffffff,
+            TextAlign::Start,
+            false,
+        );
+
+        assert_eq!(first, scrolled);
+    }
 
     #[test]
     fn bounded_commands_are_rejected_before_rendering_outside_physical_clip() {

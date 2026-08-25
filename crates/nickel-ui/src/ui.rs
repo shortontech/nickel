@@ -721,9 +721,35 @@ struct TextMeasureKey {
     max_lines: Option<usize>,
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct StyledTextMeasureKey {
+    text: String,
+    spans: Vec<StyledTextSpan>,
+    locale: String,
+    scale: u32,
+    width: u32,
+    wrap: bool,
+    line_height: u32,
+}
+
+struct TextMeasurer {
+    font_system: FontSystem,
+    plain: HashMap<TextMeasureKey, Size>,
+    styled: HashMap<StyledTextMeasureKey, Size>,
+}
+
+impl Default for TextMeasurer {
+    fn default() -> Self {
+        Self {
+            font_system: FontSystem::new(),
+            plain: HashMap::new(),
+            styled: HashMap::new(),
+        }
+    }
+}
+
 thread_local! {
-    static TEXT_MEASURER: RefCell<(FontSystem, HashMap<TextMeasureKey, Size>)> =
-        RefCell::new((FontSystem::new(), HashMap::new()));
+    static TEXT_MEASURER: RefCell<TextMeasurer> = RefCell::new(TextMeasurer::default());
 }
 
 fn measure_text(
@@ -746,7 +772,7 @@ fn measure_text(
         let mut measurer = measurer.borrow_mut();
         let key = TextMeasureKey {
             text: text.to_owned(),
-            locale: measurer.0.locale().to_owned(),
+            locale: measurer.font_system.locale().to_owned(),
             scale: scale.to_bits(),
             width: width.to_bits(),
             bold,
@@ -754,10 +780,10 @@ fn measure_text(
             line_height: line_height.to_bits(),
             max_lines,
         };
-        if let Some(size) = measurer.1.get(&key).copied() {
+        if let Some(size) = measurer.plain.get(&key).copied() {
             return size;
         }
-        let (font_system, cache) = &mut *measurer;
+        let font_system = &mut measurer.font_system;
         let mut buffer = Buffer::new(font_system, Metrics::new(font_size, line_height));
         buffer.set_wrap(if wrap { Wrap::WordOrGlyph } else { Wrap::None });
         buffer.set_size(width.is_finite().then_some(width), None);
@@ -775,10 +801,10 @@ fn measure_text(
         if measured.height == 0.0 {
             measured.height = line_height;
         }
-        if cache.len() >= 2048 {
-            cache.clear();
+        if measurer.plain.len() >= 2048 {
+            measurer.plain.clear();
         }
-        cache.insert(key, measured);
+        measurer.plain.insert(key, measured);
         measured
     })
 }
@@ -833,13 +859,27 @@ fn measure_styled_text(
     let line_height = line_height.unwrap_or(font_size * 1.3).max(1.0);
     TEXT_MEASURER.with(|measurer| {
         let mut measurer = measurer.borrow_mut();
-        let font_system = &mut measurer.0;
+        let width = if wrap && max_width.is_finite() {
+            max_width.max(1.0)
+        } else {
+            f32::INFINITY
+        };
+        let key = StyledTextMeasureKey {
+            text: text.to_owned(),
+            spans: spans.to_vec(),
+            locale: measurer.font_system.locale().to_owned(),
+            scale: scale.to_bits(),
+            width: width.to_bits(),
+            wrap,
+            line_height: line_height.to_bits(),
+        };
+        if let Some(size) = measurer.styled.get(&key).copied() {
+            return size;
+        }
+        let font_system = &mut measurer.font_system;
         let mut buffer = Buffer::new(font_system, Metrics::new(font_size, line_height));
         buffer.set_wrap(if wrap { Wrap::WordOrGlyph } else { Wrap::None });
-        buffer.set_size(
-            (wrap && max_width.is_finite()).then_some(max_width.max(1.0)),
-            None,
-        );
+        buffer.set_size(width.is_finite().then_some(width), None);
         let defaults = styled_attrs(None);
         buffer.set_rich_text(
             styled_segments(text, spans),
@@ -856,6 +896,10 @@ fn measure_styled_text(
         if measured.height == 0.0 {
             measured.height = line_height;
         }
+        if measurer.styled.len() >= 2048 {
+            measurer.styled.clear();
+        }
+        measurer.styled.insert(key, measured);
         measured
     })
 }
@@ -3818,12 +3862,21 @@ impl<Message: Clone> UiTree<Message> {
                     .merge(option_invalidation)
             }
             UiEvent::Scroll { point, delta_y } => {
-                let Some(scroll) = self
-                    .scrolls
-                    .iter()
-                    .rev()
-                    .find(|scroll| contains(scroll.rect, point))
-                else {
+                let Some(scroll) = self.scrolls.iter().rev().find(|scroll| {
+                    if !contains(scroll.rect, point) {
+                        return false;
+                    }
+                    let maximum =
+                        (scroll.extent.content.height - scroll.extent.viewport.height).max(0.0);
+                    maximum > 0.0
+                        && if delta_y > 0.0 {
+                            scroll.extent.offset < maximum
+                        } else if delta_y < 0.0 {
+                            scroll.extent.offset > 0.0
+                        } else {
+                            false
+                        }
+                }) else {
                     return outcome;
                 };
                 let invalidation = state.scroll_by(
@@ -3843,7 +3896,21 @@ impl<Message: Clone> UiTree<Message> {
                 .scrolls
                 .iter()
                 .rev()
-                .find(|scroll| contains(scroll.rect, point))
+                .find(|scroll| {
+                    if !contains(scroll.rect, point) {
+                        return false;
+                    }
+                    let maximum =
+                        (scroll.extent.content.width - scroll.extent.viewport.width).max(0.0);
+                    maximum > 0.0
+                        && if delta_x > 0.0 {
+                            scroll.extent.offset_x < maximum
+                        } else if delta_x < 0.0 {
+                            scroll.extent.offset_x > 0.0
+                        } else {
+                            false
+                        }
+                })
                 .map(|scroll| {
                     state.scroll_by_x(
                         scroll.id.clone(),
@@ -4802,7 +4869,7 @@ fn shape_selection_glyphs(
     }
     TEXT_MEASURER.with(|measurer| {
         let mut measurer = measurer.borrow_mut();
-        let font_system = &mut measurer.0;
+        let font_system = &mut measurer.font_system;
         let mut buffer = Buffer::new(font_system, Metrics::new(font_size, line_height));
         buffer.set_wrap(if wrap { Wrap::WordOrGlyph } else { Wrap::None });
         buffer.set_size(wrap.then_some(rect.size.width.max(1.0)), None);
@@ -6454,6 +6521,25 @@ mod tests {
     }
 
     #[test]
+    fn repeated_styled_text_measurement_reuses_a_bounded_cache_entry() {
+        TEXT_MEASURER.with(|measurer| measurer.borrow_mut().styled.clear());
+        let spans = vec![StyledTextSpan {
+            range: 0..6,
+            bold: true,
+            italic: false,
+            monospace: false,
+            strikethrough: false,
+            color: None,
+        }];
+
+        let first = measure_styled_text("Cached text", &spans, 1.0, true, None, 240.0);
+        let second = measure_styled_text("Cached text", &spans, 1.0, true, None, 240.0);
+
+        assert_eq!(first, second);
+        TEXT_MEASURER.with(|measurer| assert_eq!(measurer.borrow().styled.len(), 1));
+    }
+
+    #[test]
     fn constrained_image_preserves_intrinsic_aspect_ratio() {
         let image = Arc::new(RgbaImage::new(200, 100));
         let measured = Image::<()>::new(1, image)
@@ -7683,5 +7769,61 @@ mod tests {
         assert!(scrolled.accessibility_nodes().iter().all(|node| {
             node.rect.origin.x >= 0.0 && node.rect.origin.x + node.rect.size.width <= 80.0
         }));
+    }
+
+    #[test]
+    fn vertical_wheel_over_horizontal_overflow_chains_to_the_document() {
+        let build = |state: &mut UiStateStore| {
+            UiTree::layout_with_state(
+                Column::<TestMessage>::new()
+                    .id("document")
+                    .width(120.0)
+                    .height(80.0)
+                    .overflow_y(Overflow::Auto)
+                    .child(Spacer::vertical(10.0))
+                    .child(
+                        Row::new()
+                            .id("code")
+                            .height(30.0)
+                            .overflow(Overflow::Auto, Overflow::Clip)
+                            .child(Spacer::new().width(240.0).height(30.0).shrink(0.0)),
+                    )
+                    .child(Spacer::vertical(200.0)),
+                Rect::new(0.0, 0.0, 120.0, 80.0),
+                state,
+            )
+        };
+        let mut state = UiStateStore::default();
+        let tree = build(&mut state);
+        let code = tree
+            .resolved_layout()
+            .find(&UiId::from("root/document/code"))
+            .expect("nested horizontal code region");
+        let point = Point {
+            x: code.content.origin.x + 5.0,
+            y: code.content.origin.y + 5.0,
+        };
+
+        assert_eq!(
+            tree.handle_event(
+                &mut state,
+                UiEvent::Scroll {
+                    point,
+                    delta_y: 30.0,
+                },
+            )
+            .invalidation,
+            Invalidation::Layout
+        );
+        let rebuilt = build(&mut state);
+        assert_eq!(
+            rebuilt
+                .resolved_layout()
+                .find(&UiId::from("root/document"))
+                .and_then(|node| node.scroll)
+                .expect("outer document scroll")
+                .offset,
+            30.0
+        );
     }
 }

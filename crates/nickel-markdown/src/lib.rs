@@ -483,7 +483,7 @@ where
     Map: Fn(&str) -> Message + Copy,
 {
     match block {
-        Block::Paragraph { inlines } => render_prose(inlines, id, 1.0, false, palette, map_link),
+        Block::Paragraph { inlines } => render_prose(inlines, id, 2.0, false, palette, map_link),
         Block::Heading { level, inlines, .. } => {
             render_prose(inlines, id, heading_scale(*level), true, palette, map_link)
         }
@@ -500,7 +500,7 @@ where
                     .child(
                         Text::new(language)
                             .color(palette.muted)
-                            .scale(0.8)
+                            .scale(1.0)
                             .selectable(false),
                     )
                     .child(
@@ -805,12 +805,9 @@ fn collect_inline_links(inlines: &[Inline], links: &mut Vec<(String, String)>) {
 #[cfg(feature = "view")]
 fn heading_scale(level: u8) -> f32 {
     match level {
-        1 => 1.8,
-        2 => 1.55,
-        3 => 1.35,
-        4 => 1.2,
-        5 => 1.08,
-        _ => 1.0,
+        1 => 4.0,
+        2 => 3.0,
+        _ => 2.0,
     }
 }
 
