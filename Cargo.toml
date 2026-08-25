@@ -9,6 +9,7 @@ members = [
     "crates/nickel-core",
     "crates/nickel-logging",
     "crates/nickel-markdown",
+    "crates/nickel-markdown-ui",
     "crates/nickel-file",
     "crates/nickel-gaze",
     "crates/nickel-i18n",

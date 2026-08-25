@@ -1,0 +1,27 @@
+[package]
+name = "nickel-markdown-ui"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Standalone read-only Nickel Markdown viewer"
+
+[features]
+default = ["application"]
+application = ["dep:nickel-core", "dep:nickel-platform", "dep:nickel-ui", "nickel-markdown/view"]
+
+[[bin]]
+name = "nickel-markdown-ui"
+path = "src/main.rs"
+required-features = ["application"]
+
+[dependencies]
+nickel-markdown = { path = "../nickel-markdown", default-features = false }
+nickel-core = { path = "../nickel-core", optional = true }
+nickel-platform = { path = "../nickel-platform", optional = true }
+nickel-ui = { path = "../nickel-ui", optional = true }
+url.workspace = true
+
+[dev-dependencies]
+image.workspace = true
+tempfile.workspace = true

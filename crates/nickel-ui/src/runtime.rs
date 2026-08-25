@@ -31,6 +31,11 @@ pub enum Shortcut {
     Submit,
     Newline,
     Escape,
+    Reload,
+    Back,
+    Forward,
+    DocumentStart,
+    DocumentEnd,
 }
 
 pub trait Application: Sized {
@@ -169,6 +174,48 @@ pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
                     delta_y: -y * 42.0,
                 },
                 Event::KeyDown {
+                    keycode: Some(Keycode::R),
+                    keymod,
+                    ..
+                } if command_modifier(keymod) && application.shortcut(Shortcut::Reload) => {
+                    scheduler.invalidate();
+                    continue;
+                }
+                Event::KeyDown {
+                    keycode: Some(Keycode::Left),
+                    keymod,
+                    ..
+                } if keymod.intersects(Mod::LALTMOD | Mod::RALTMOD)
+                    && application.shortcut(Shortcut::Back) =>
+                {
+                    scheduler.invalidate();
+                    continue;
+                }
+                Event::KeyDown {
+                    keycode: Some(Keycode::Right),
+                    keymod,
+                    ..
+                } if keymod.intersects(Mod::LALTMOD | Mod::RALTMOD)
+                    && application.shortcut(Shortcut::Forward) =>
+                {
+                    scheduler.invalidate();
+                    continue;
+                }
+                Event::KeyDown {
+                    keycode: Some(Keycode::Home),
+                    ..
+                } if application.shortcut(Shortcut::DocumentStart) => {
+                    scheduler.invalidate();
+                    continue;
+                }
+                Event::KeyDown {
+                    keycode: Some(Keycode::End),
+                    ..
+                } if application.shortcut(Shortcut::DocumentEnd) => {
+                    scheduler.invalidate();
+                    continue;
+                }
+                Event::KeyDown {
                     keycode: Some(Keycode::Return),
                     keymod,
                     ..
@@ -219,17 +266,17 @@ pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
                     keycode: Some(Keycode::A),
                     keymod,
                     ..
-                } if keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD) => UiEvent::TextSelectAll,
+                } if command_modifier(keymod) => UiEvent::TextSelectAll,
                 Event::KeyDown {
                     keycode: Some(Keycode::C),
                     keymod,
                     ..
-                } if keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD) => UiEvent::TextCopy,
+                } if command_modifier(keymod) => UiEvent::TextCopy,
                 Event::KeyDown {
                     keycode: Some(Keycode::X),
                     keymod,
                     ..
-                } if keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD) => {
+                } if command_modifier(keymod) => {
                     let Some(selected) = tree.selected_text(&state) else {
                         continue;
                     };
@@ -242,7 +289,7 @@ pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
                     keycode: Some(Keycode::V),
                     keymod,
                     ..
-                } if keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD) => {
+                } if command_modifier(keymod) => {
                     let Ok(text) = clipboard.clipboard_text() else {
                         continue;
                     };
@@ -371,6 +418,10 @@ pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
     text_input.stop(presenter.window());
     state.destroy();
     Ok(())
+}
+
+fn command_modifier(keymod: Mod) -> bool {
+    keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD | Mod::LGUIMOD | Mod::RGUIMOD)
 }
 
 #[cfg(test)]

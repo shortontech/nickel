@@ -347,6 +347,7 @@ enum Kind {
     Flex(Axis),
     VerticalScroll {
         offset: f32,
+        controlled: bool,
     },
     Grid {
         columns: GridColumnSpec,
@@ -1363,6 +1364,7 @@ impl<Message> VerticalScroll<Message> {
             source: None,
             kind: Kind::VerticalScroll {
                 offset: offset.max(0.0),
+                controlled: false,
             },
             style: Style::default(),
             message: Some(message),
@@ -1385,6 +1387,22 @@ impl<Message> VerticalScroll<Message> {
 
     pub fn id(mut self, id: impl Into<UiId>) -> Self {
         self.0 = self.0.id(id);
+        self
+    }
+
+    pub fn on_scroll(mut self, map: fn(f32) -> Message) -> Self {
+        self.0 = self.0.on_scroll(map);
+        self
+    }
+
+    /// Keep the supplied offset authoritative across reconstruction.
+    pub fn controlled(mut self, controlled: bool) -> Self {
+        if let Kind::VerticalScroll {
+            controlled: value, ..
+        } = &mut self.0.kind
+        {
+            *value = controlled;
+        }
         self
     }
 
@@ -5667,7 +5685,10 @@ fn apply_transient_state<Message>(
             )
         };
         match &mut element.kind {
-            Kind::VerticalScroll { offset } => *offset = scroll_offset.max(0.0),
+            Kind::VerticalScroll {
+                offset,
+                controlled: false,
+            } => *offset = scroll_offset.max(0.0),
             Kind::Dropdown {
                 expanded,
                 options,
@@ -6240,6 +6261,27 @@ mod tests {
                 .expect("scroll extent")
                 .offset,
             30.0
+        );
+    }
+
+    #[test]
+    fn controlled_vertical_scroll_keeps_the_supplied_offset() {
+        let mut state = UiStateStore::default();
+        state.touch(UiId::from("root/reader")).scroll_offset = 17.0;
+        let tree = UiTree::layout_with_state(
+            VerticalScroll::new(TestMessage::Named("scroll"), 80.0)
+                .id("reader")
+                .controlled(true)
+                .height(50.0)
+                .child(Container::new().height(200.0)),
+            Rect::new(0.0, 0.0, 100.0, 50.0),
+            &mut state,
+        );
+        assert_eq!(
+            tree.scroll_extent(&TestMessage::Named("scroll"))
+                .expect("scroll extent")
+                .offset,
+            80.0
         );
     }
 

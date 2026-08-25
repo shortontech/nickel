@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Nickel Markdown
+Comment=Read Markdown documents
+Exec=nickel-markdown-ui %f
+TryExec=nickel-markdown-ui
+Icon=text-x-markdown
+Terminal=false
+Type=Application
+Categories=Office;Viewer;
+MimeType=text/markdown;text/x-markdown;
+NoDisplay=false

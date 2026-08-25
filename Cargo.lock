@@ -2550,6 +2550,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "nickel-markdown-ui"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "nickel-core",
+ "nickel-markdown",
+ "nickel-platform",
+ "nickel-ui",
+ "tempfile",
+ "url",
+]
+
+[[package]]
 name = "nickel-platform"
 version = "0.1.0"
 dependencies = [

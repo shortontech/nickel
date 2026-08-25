@@ -2,6 +2,7 @@
 
 use std::iter::Peekable;
 
+#[cfg(feature = "view")]
 use nickel_ui::{
     Align, AnyView, Button, Color, Column, ComponentBuilderExt, Container, Insets, Length,
     Overflow, Row, SelectionRegion, StyledText, StyledTextSpan, Text, TextBoundary, UiId, ui,
@@ -420,6 +421,7 @@ fn unsupported(name: &str) -> MarkdownDiagnostic {
     }
 }
 
+#[cfg(feature = "view")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MarkdownPalette {
     pub foreground: Color,
@@ -430,6 +432,7 @@ pub struct MarkdownPalette {
     pub code: Color,
 }
 
+#[cfg(feature = "view")]
 impl Default for MarkdownPalette {
     fn default() -> Self {
         Self {
@@ -447,6 +450,7 @@ impl Default for MarkdownPalette {
 ///
 /// Link labels remain part of selectable prose. Each destination is also exposed
 /// as an explicit typed activation control immediately after its containing block.
+#[cfg(feature = "view")]
 pub fn markdown_view<Message, Map>(
     document: &MarkdownDocument,
     palette: MarkdownPalette,
@@ -467,6 +471,7 @@ where
     AnyView::new(ui! { {document} })
 }
 
+#[cfg(feature = "view")]
 fn render_block<Message, Map>(
     block: &Block,
     id: String,
@@ -564,6 +569,7 @@ where
     }
 }
 
+#[cfg(feature = "view")]
 fn render_prose<Message, Map>(
     inlines: &[Inline],
     id: String,
@@ -607,6 +613,7 @@ where
     )
 }
 
+#[cfg(feature = "view")]
 #[derive(Clone, Copy, Default)]
 struct InlineStyle {
     bold: bool,
@@ -616,6 +623,7 @@ struct InlineStyle {
     color: Option<Color>,
 }
 
+#[cfg(feature = "view")]
 fn styled_inline_text(
     inlines: &[Inline],
     palette: MarkdownPalette,
@@ -636,6 +644,7 @@ fn styled_inline_text(
     (text, spans)
 }
 
+#[cfg(feature = "view")]
 fn append_styled_inlines(
     inlines: &[Inline],
     style: InlineStyle,
@@ -705,6 +714,7 @@ fn append_styled_inlines(
     }
 }
 
+#[cfg(feature = "view")]
 fn push_styled_text(
     value: &str,
     style: InlineStyle,
@@ -732,6 +742,7 @@ fn push_styled_text(
     }
 }
 
+#[cfg(feature = "view")]
 fn display_inline_text(inlines: &[Inline]) -> String {
     let mut output = String::new();
     for inline in inlines {
@@ -764,12 +775,14 @@ fn display_inline_text(inlines: &[Inline]) -> String {
     output
 }
 
+#[cfg(feature = "view")]
 fn inline_links(inlines: &[Inline]) -> Vec<(String, String)> {
     let mut links = Vec::new();
     collect_inline_links(inlines, &mut links);
     links
 }
 
+#[cfg(feature = "view")]
 fn collect_inline_links(inlines: &[Inline], links: &mut Vec<(String, String)>) {
     for inline in inlines {
         match inline {
@@ -789,6 +802,7 @@ fn collect_inline_links(inlines: &[Inline], links: &mut Vec<(String, String)>) {
     }
 }
 
+#[cfg(feature = "view")]
 fn heading_scale(level: u8) -> f32 {
     match level {
         1 => 1.8,
@@ -803,10 +817,12 @@ fn heading_scale(level: u8) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "view")]
     use nickel_ui::{
         PaintCommand, Point, Rect, SdlComponentRenderer, UiEvent, UiStateStore, UiTree,
     };
 
+    #[cfg(feature = "view")]
     #[derive(Clone, Debug, PartialEq)]
     enum Message {
         Link(String),
@@ -883,6 +899,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "view")]
     fn repeated_rendering_has_identical_typed_paint_commands() {
         let document = MarkdownDocument::parse(
             "# Stable\n\n**bold** *italic* ~~strike~~ `code` [link](guide.md)",
@@ -901,6 +918,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "view")]
     fn inline_styles_are_real_spans_without_source_markers() {
         let document = MarkdownDocument::parse(
             "**bold** *italic* ~~strike~~ `code` [link](https://example.com)",
@@ -928,6 +946,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "view")]
     fn link_activation_emits_one_unmodified_typed_destination() {
         let document = MarkdownDocument::parse("Read [the guide](../guide.md#start).");
         let tree = UiTree::layout(
@@ -952,8 +971,11 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "view")]
     fn document_is_selectable_in_logical_block_order() {
-        let document = MarkdownDocument::parse("# Heading\n\nFirst *paragraph*.\n\n- One\n- Two");
+        let document = MarkdownDocument::parse(
+            "# Heading\n\nFirst *paragraph*.\n\n- One\n- Two\n\n> Quoted\n\n```text\ncode();\n```",
+        );
         let mut state = UiStateStore::default();
         let tree = UiTree::layout_with_state(
             markdown_view(&document, MarkdownPalette::default(), |destination| {
@@ -982,11 +1004,12 @@ mod tests {
             tree.handle_event(&mut state, UiEvent::TextCopy)
                 .clipboard_text
                 .as_deref(),
-            Some("Heading\nFirst paragraph.\nOne\nTwo")
+            Some("Heading\nFirst paragraph.\nOne\nTwo\nQuoted\ncode();\n")
         );
     }
 
     #[test]
+    #[cfg(feature = "view")]
     fn representative_layouts_have_finite_nonnegative_geometry() {
         let document = MarkdownDocument::parse(
             "# Long heading 世界\n\nA long paragraph with **strong**, *emphasized*, and `inline` content that wraps on a narrow window.\n\n```rust\nfn main() {}\n```",
@@ -1015,6 +1038,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "view")]
     fn representative_rasters_have_visible_hierarchy_at_three_sizes() {
         let document = MarkdownDocument::parse(
             "# Raster hierarchy\n\n**Bold**, *italic*, ~~strike~~, `code`, and [link](guide.md).\n\n> Quote\n\n```rust\nfn main() {}\n```",
@@ -1034,6 +1058,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "view")]
     fn narrow_prose_wraps_and_long_code_owns_horizontal_overflow() {
         let document = MarkdownDocument::parse(format!(
             "{}\n\n```text\n{}\n```",

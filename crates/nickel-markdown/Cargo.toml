@@ -6,8 +6,12 @@ license.workspace = true
 rust-version.workspace = true
 description = "Safe typed Markdown documents and declarative Nickel UI presentation"
 
+[features]
+default = ["view"]
+view = ["dep:nickel-ui"]
+
 [dependencies]
-nickel-ui = { path = "../nickel-ui" }
+nickel-ui = { path = "../nickel-ui", optional = true }
 pulldown-cmark.workspace = true
 serde.workspace = true
 

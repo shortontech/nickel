@@ -13,6 +13,7 @@ Nickel Bar, launcher, native app icons, and visible-window control.
 - **Nickel UI** — the desktop shell, taskbar, launcher, task switcher, and system controls
 - **Nickel Settings** — display and system settings
 - **Nickel File** — directory browsing and file launching
+- **Nickel Markdown** — safe, selectable local Markdown viewing
 - **Nickel Session** — the Linux compositor and session host
 
 ## What Nickel Does
@@ -121,6 +122,12 @@ Launch Nickel File:
 cargo run -p nickel-file
 ```
 
+Open a local Markdown document:
+
+```bash
+cargo run -p nickel-markdown-ui -- README.md
+```
+
 ### Linux Nested Session
 
 Run Nickel inside an existing Linux desktop:
@@ -207,6 +214,8 @@ crates/
 |-- nickel-core/        Shell state and behavior
 |-- nickel-file/        Nickel File browser and file manager
 |-- nickel-logging/     Native logging
+|-- nickel-markdown/    Safe typed Markdown parsing and presentation
+|-- nickel-markdown-ui/ Standalone read-only Markdown viewer
 |-- nickel-platform/    Shared native platform adapters
 |-- nickel-session/     Linux compositor and session
 |-- nickel-settings/    Nickel Plating settings application
