@@ -4,10 +4,10 @@ use std::iter::Peekable;
 
 #[cfg(feature = "view")]
 use nickel_ui::{
-    Align, AnyView, Button, Color, Column, ComponentBuilderExt, Container, Insets, Length,
+    Align, AnyView, Button, Color, Column, ComponentBuilderExt, Container, Grid, Insets, Length,
     Overflow, Row, SelectionRegion, StyledText, StyledTextSpan, Text, TextBoundary, UiId, ui,
 };
-use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -21,7 +21,7 @@ impl MarkdownDocument {
     #[must_use]
     pub fn parse(source: impl Into<String>) -> Self {
         let source = source.into();
-        let options = Options::ENABLE_STRIKETHROUGH;
+        let options = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES;
         let mut events = Parser::new_ext(&source, options).peekable();
         let mut diagnostics = Vec::new();
         let blocks = parse_blocks(&mut events, None, &mut diagnostics);
@@ -60,10 +60,24 @@ pub enum Block {
         start: Option<u64>,
         items: Vec<Vec<Block>>,
     },
+    Table {
+        alignments: Vec<TableAlignment>,
+        header: Vec<Vec<Inline>>,
+        rows: Vec<Vec<Vec<Inline>>>,
+    },
     ThematicBreak,
     Unsupported {
         text: String,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TableAlignment {
+    None,
+    Left,
+    Center,
+    Right,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -141,6 +155,9 @@ where
             Event::Start(Tag::List(start)) => {
                 blocks.push(parse_list(events, start, diagnostics));
             }
+            Event::Start(Tag::Table(alignments)) => {
+                blocks.push(parse_table(events, alignments, diagnostics));
+            }
             Event::Start(Tag::HtmlBlock) => {
                 let text = collect_literal(events, TagEnd::HtmlBlock);
                 diagnostics.push(unsupported("raw HTML block"));
@@ -174,6 +191,52 @@ where
         }
     }
     blocks
+}
+
+fn parse_table<'a, I>(
+    events: &mut Peekable<I>,
+    alignments: Vec<Alignment>,
+    diagnostics: &mut Vec<MarkdownDiagnostic>,
+) -> Block
+where
+    I: Iterator<Item = Event<'a>>,
+{
+    let mut header = Vec::new();
+    let mut rows = Vec::new();
+    let mut in_header = false;
+    let mut current_row = Vec::new();
+    while let Some(event) = events.next() {
+        match event {
+            Event::Start(Tag::TableHead) => in_header = true,
+            Event::End(TagEnd::TableHead) => {
+                header = std::mem::take(&mut current_row);
+                in_header = false;
+            }
+            Event::Start(Tag::TableRow) => current_row.clear(),
+            Event::End(TagEnd::TableRow) => rows.push(std::mem::take(&mut current_row)),
+            Event::Start(Tag::TableCell) => {
+                current_row.push(parse_inlines(events, TagEnd::TableCell, diagnostics));
+            }
+            Event::End(TagEnd::Table) => break,
+            _ => {}
+        }
+    }
+    if in_header && header.is_empty() {
+        header = current_row;
+    }
+    Block::Table {
+        alignments: alignments
+            .into_iter()
+            .map(|alignment| match alignment {
+                Alignment::None => TableAlignment::None,
+                Alignment::Left => TableAlignment::Left,
+                Alignment::Center => TableAlignment::Center,
+                Alignment::Right => TableAlignment::Right,
+            })
+            .collect(),
+        header,
+        rows,
+    }
 }
 
 fn parse_list<'a, I>(
@@ -400,6 +463,19 @@ fn blocks_text(blocks: &[Block]) -> String {
                     output.push_str(&blocks_text(item));
                 }
             }
+            Block::Table { header, rows, .. } => {
+                for (row_index, row) in std::iter::once(header).chain(rows.iter()).enumerate() {
+                    if row_index > 0 {
+                        output.push('\n');
+                    }
+                    for (cell_index, cell) in row.iter().enumerate() {
+                        if cell_index > 0 {
+                            output.push('\t');
+                        }
+                        output.push_str(&inline_text(cell));
+                    }
+                }
+            }
             Block::ThematicBreak => output.push_str("---"),
         }
     }
@@ -551,6 +627,52 @@ where
                 )
             });
             AnyView::new(Column::new().fill_width().gap(7.0).children(rows))
+        }
+        Block::Table {
+            alignments,
+            header,
+            rows,
+        } => {
+            let columns = alignments
+                .len()
+                .max(header.len())
+                .max(rows.iter().map(Vec::len).max().unwrap_or(0))
+                .max(1);
+            let cells = std::iter::once((true, header))
+                .chain(rows.iter().map(|row| (false, row)))
+                .enumerate()
+                .flat_map(|(row_index, (heading, row))| {
+                    let row_id = id.clone();
+                    (0..columns).map(move |column| {
+                        let inlines = row.get(column).map_or(&[][..], Vec::as_slice);
+                        AnyView::new(
+                            Container::new()
+                                .padding(Insets::all(9.0))
+                                .background(palette.surface)
+                                .border(palette.border, 1.0)
+                                .child(render_prose(
+                                    inlines,
+                                    format!("{row_id}-table-{row_index}-{column}"),
+                                    2.0,
+                                    heading,
+                                    palette,
+                                    map_link,
+                                )),
+                        )
+                    })
+                });
+            AnyView::new(
+                Row::new()
+                    .id(UiId::new(format!("markdown-table-{id}")))
+                    .fill_width()
+                    .overflow_x(Overflow::Auto)
+                    .child(
+                        Grid::fixed(columns)
+                            .min_width(columns as f32 * 140.0)
+                            .fill_width()
+                            .children(cells),
+                    ),
+            )
         }
         Block::ThematicBreak => AnyView::new(
             Container::new()
@@ -864,6 +986,26 @@ mod tests {
             serde_json::to_vec_pretty(&left).unwrap(),
             serde_json::to_vec_pretty(&right).unwrap()
         );
+    }
+
+    #[test]
+    fn tables_preserve_alignment_inline_content_and_logical_copy_order() {
+        let document = MarkdownDocument::parse(
+            "| Name | Result |\n| :--- | ---: |\n| **Eileen** | [20/25](results.md) |\n",
+        );
+
+        assert!(document.diagnostics.is_empty());
+        assert!(matches!(
+            document.blocks.as_slice(),
+            [Block::Table {
+                alignments,
+                header,
+                rows,
+            }] if alignments == &[TableAlignment::Left, TableAlignment::Right]
+                && header.len() == 2
+                && rows.len() == 1
+        ));
+        assert_eq!(document.logical_text(), "Name\tResult\nEileen\t20/25");
     }
 
     #[test]

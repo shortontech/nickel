@@ -3211,6 +3211,88 @@ struct ScrollRegion<Message> {
     extent: ScrollExtent,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScrollbarAxis {
+    Horizontal,
+    Vertical,
+}
+
+const SCROLLBAR_THICKNESS: f32 = 8.0;
+const SCROLLBAR_INSET: f32 = 3.0;
+const SCROLLBAR_MIN_THUMB: f32 = 24.0;
+
+fn scrollbar_id(id: &UiId, axis: ScrollbarAxis) -> UiId {
+    id.scoped(match axis {
+        ScrollbarAxis::Horizontal => "$scrollbar-x",
+        ScrollbarAxis::Vertical => "$scrollbar-y",
+    })
+}
+
+fn scrollbar_geometry<Message>(
+    scroll: &ScrollRegion<Message>,
+    axis: ScrollbarAxis,
+) -> Option<(Rect, Rect)> {
+    let (viewport, content, offset, track) = match axis {
+        ScrollbarAxis::Horizontal => (
+            scroll.extent.viewport.width,
+            scroll.extent.content.width,
+            scroll.extent.offset_x,
+            Rect::new(
+                scroll.rect.origin.x + SCROLLBAR_INSET,
+                scroll.rect.origin.y + scroll.rect.size.height
+                    - SCROLLBAR_THICKNESS
+                    - SCROLLBAR_INSET,
+                (scroll.rect.size.width - SCROLLBAR_INSET * 2.0).max(0.0),
+                SCROLLBAR_THICKNESS,
+            ),
+        ),
+        ScrollbarAxis::Vertical => (
+            scroll.extent.viewport.height,
+            scroll.extent.content.height,
+            scroll.extent.offset,
+            Rect::new(
+                scroll.rect.origin.x + scroll.rect.size.width
+                    - SCROLLBAR_THICKNESS
+                    - SCROLLBAR_INSET,
+                scroll.rect.origin.y + SCROLLBAR_INSET,
+                SCROLLBAR_THICKNESS,
+                (scroll.rect.size.height - SCROLLBAR_INSET * 2.0).max(0.0),
+            ),
+        ),
+    };
+    if content <= viewport || viewport <= 0.0 {
+        return None;
+    }
+    let track_length = match axis {
+        ScrollbarAxis::Horizontal => track.size.width,
+        ScrollbarAxis::Vertical => track.size.height,
+    };
+    let thumb_length = (track_length * viewport / content)
+        .clamp(SCROLLBAR_MIN_THUMB.min(track_length), track_length);
+    let travel = (track_length - thumb_length).max(0.0);
+    let maximum = content - viewport;
+    let position = if maximum > 0.0 {
+        travel * (offset / maximum).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let thumb = match axis {
+        ScrollbarAxis::Horizontal => Rect::new(
+            track.origin.x + position,
+            track.origin.y,
+            thumb_length,
+            track.size.height,
+        ),
+        ScrollbarAxis::Vertical => Rect::new(
+            track.origin.x,
+            track.origin.y + position,
+            track.size.width,
+            thumb_length,
+        ),
+    };
+    Some((track, thumb))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ResolvedGrid {
     pub rect: Rect,
@@ -3491,6 +3573,7 @@ impl<Message: Clone> UiTree<Message> {
         tree.prepare_selection_paints(state);
         tree.reset_emission();
         emit_element(&root, 0, None, &mut tree);
+        tree.append_scrollbars();
         tree.commands.append(&mut tree.overlay_commands);
         tree.hits.append(&mut tree.overlay_hits);
         for hit in &tree.hits {
@@ -3502,6 +3585,11 @@ impl<Message: Clone> UiTree<Message> {
             let transient = state.touch(scroll.id.clone());
             transient.scroll_offset_x = scroll.extent.offset_x;
             transient.scroll_offset = scroll.extent.offset;
+            for axis in [ScrollbarAxis::Horizontal, ScrollbarAxis::Vertical] {
+                if scrollbar_geometry(scroll, axis).is_some() {
+                    state.touch(scrollbar_id(&scroll.id, axis));
+                }
+            }
         }
         state.end_frame();
         tree.apply_interaction_state(state);
@@ -3522,6 +3610,7 @@ impl<Message: Clone> UiTree<Message> {
         tree.selection_regions = collect_selection_regions(&root, &tree.resolved);
         tree.reset_emission();
         emit_element(&root, 0, None, &mut tree);
+        tree.append_scrollbars();
         tree.commands.append(&mut tree.overlay_commands);
         tree.hits.append(&mut tree.overlay_hits);
         tree.emit_accessibility_geometry();
@@ -3717,10 +3806,127 @@ impl<Message: Clone> UiTree<Message> {
         state.end_frame();
     }
 
+    fn append_scrollbars(&mut self) {
+        for scroll in &self.scrolls {
+            for axis in [ScrollbarAxis::Horizontal, ScrollbarAxis::Vertical] {
+                let Some((track, thumb)) = scrollbar_geometry(scroll, axis) else {
+                    continue;
+                };
+                self.commands.push(PaintCommand::RoundedFill {
+                    rect: track,
+                    color: 0x40343b48,
+                    radius: SCROLLBAR_THICKNESS / 2.0,
+                });
+                self.commands.push(PaintCommand::RoundedFill {
+                    rect: thumb,
+                    color: 0xc08a96a8,
+                    radius: SCROLLBAR_THICKNESS / 2.0,
+                });
+            }
+        }
+    }
+
+    fn scrollbar_at(&self, point: Point) -> Option<(&ScrollRegion<Message>, ScrollbarAxis)> {
+        self.scrolls.iter().rev().find_map(|scroll| {
+            [ScrollbarAxis::Vertical, ScrollbarAxis::Horizontal]
+                .into_iter()
+                .find(|axis| {
+                    scrollbar_geometry(scroll, *axis)
+                        .is_some_and(|(track, _)| contains(track, point))
+                })
+                .map(|axis| (scroll, axis))
+        })
+    }
+
+    fn captured_scrollbar(
+        &self,
+        captured: &UiId,
+    ) -> Option<(&ScrollRegion<Message>, ScrollbarAxis)> {
+        self.scrolls.iter().rev().find_map(|scroll| {
+            [ScrollbarAxis::Vertical, ScrollbarAxis::Horizontal]
+                .into_iter()
+                .find(|axis| scrollbar_id(&scroll.id, *axis) == *captured)
+                .map(|axis| (scroll, axis))
+        })
+    }
+
+    fn move_scrollbar(
+        scroll: &ScrollRegion<Message>,
+        axis: ScrollbarAxis,
+        point: Point,
+        state: &mut UiStateStore,
+        messages: &mut Vec<Message>,
+    ) -> Invalidation {
+        let Some((track, thumb)) = scrollbar_geometry(scroll, axis) else {
+            return Invalidation::None;
+        };
+        let (pointer, track_start, track_length, thumb_length, maximum, fallback_current) =
+            match axis {
+                ScrollbarAxis::Horizontal => (
+                    point.x,
+                    track.origin.x,
+                    track.size.width,
+                    thumb.size.width,
+                    (scroll.extent.content.width - scroll.extent.viewport.width).max(0.0),
+                    scroll.extent.offset_x,
+                ),
+                ScrollbarAxis::Vertical => (
+                    point.y,
+                    track.origin.y,
+                    track.size.height,
+                    thumb.size.height,
+                    (scroll.extent.content.height - scroll.extent.viewport.height).max(0.0),
+                    scroll.extent.offset,
+                ),
+            };
+        let travel = (track_length - thumb_length).max(0.0);
+        let target = if travel > 0.0 {
+            ((pointer - track_start - thumb_length / 2.0) / travel).clamp(0.0, 1.0) * maximum
+        } else {
+            0.0
+        };
+        let current = state
+            .state(&scroll.id)
+            .map_or(fallback_current, |entry| match axis {
+                ScrollbarAxis::Horizontal => entry.scroll_offset_x,
+                ScrollbarAxis::Vertical => entry.scroll_offset,
+            });
+        let invalidation = match axis {
+            ScrollbarAxis::Horizontal => {
+                state.scroll_by_x(scroll.id.clone(), target - current, maximum)
+            }
+            ScrollbarAxis::Vertical => {
+                let invalidation = state.scroll_by(scroll.id.clone(), target - current, maximum);
+                if invalidation != Invalidation::None
+                    && let Some(map) = scroll.offset_mapper
+                    && let Some(offset) = state.state(&scroll.id).map(|entry| entry.scroll_offset)
+                {
+                    messages.push(map(offset));
+                }
+                invalidation
+            }
+        };
+        invalidation
+    }
+
     pub fn handle_event(&self, state: &mut UiStateStore, event: UiEvent) -> EventOutcome<Message> {
         let mut outcome = EventOutcome::default();
         outcome.invalidation = match event {
             UiEvent::PointerMoved(point) => {
+                if let Some(captured) = state.captured().cloned()
+                    && let Some((scroll, axis)) = self.captured_scrollbar(&captured)
+                {
+                    return EventOutcome {
+                        invalidation: Self::move_scrollbar(
+                            scroll,
+                            axis,
+                            point,
+                            state,
+                            &mut outcome.messages,
+                        ),
+                        ..outcome
+                    };
+                }
                 let mut invalidation = state.set_hovered(self.id_at(point).cloned());
                 if let Some(region_id) = state.captured().cloned()
                     && let Some(region) = self.selection_region(&region_id)
@@ -3781,6 +3987,23 @@ impl<Message: Clone> UiTree<Message> {
                 invalidation
             }
             UiEvent::PointerPressed(point) => {
+                if let Some((scroll, axis)) = self.scrollbar_at(point) {
+                    let invalidation = state
+                        .set_focus(None)
+                        .merge(state.set_pressed(Some(scrollbar_id(&scroll.id, axis))))
+                        .merge(state.set_capture(Some(scrollbar_id(&scroll.id, axis))))
+                        .merge(Self::move_scrollbar(
+                            scroll,
+                            axis,
+                            point,
+                            state,
+                            &mut outcome.messages,
+                        ));
+                    return EventOutcome {
+                        invalidation,
+                        ..outcome
+                    };
+                }
                 let clicked = self.id_at(point).map(UiId::as_str);
                 let mut dismissed = Invalidation::None;
                 for node in self
@@ -3830,6 +4053,18 @@ impl<Message: Clone> UiTree<Message> {
                 invalidation.merge(dismissed)
             }
             UiEvent::PointerReleased(point) => {
+                if state
+                    .captured()
+                    .is_some_and(|captured| self.captured_scrollbar(captured).is_some())
+                {
+                    return EventOutcome {
+                        invalidation: state
+                            .set_pressed(None)
+                            .merge(state.set_capture(None))
+                            .merge(Invalidation::Paint),
+                        ..outcome
+                    };
+                }
                 let released = self.id_at(point);
                 let activates = state
                     .captured()
@@ -4715,6 +4950,12 @@ fn measure_element<Message>(element: &Element<Message>, constraints: Constraints
     ))
 }
 
+fn is_scroll_container<Message>(element: &Element<Message>) -> bool {
+    matches!(element.kind, Kind::VerticalScroll { .. })
+        || matches!(element.style.overflow_x, Overflow::Scroll | Overflow::Auto)
+        || matches!(element.style.overflow_y, Overflow::Scroll | Overflow::Auto)
+}
+
 fn collect_selection_regions<Message>(
     root: &Element<Message>,
     resolved: &ResolvedLayout,
@@ -4741,7 +4982,7 @@ fn collect_selection_regions<Message>(
             active
         };
         let excluded = excluded
-            || element.message.is_some()
+            || element.message.is_some() && !is_scroll_container(element)
             || element.text_mapper.is_some()
             || matches!(element.kind, Kind::Slider { .. } | Kind::Dropdown { .. });
         if let Some(region_index) = active
@@ -4964,10 +5205,11 @@ fn emit_element<Message: Clone>(
             rect,
             message: message.clone(),
         });
-        if let Some(hit_rect) = node
-            .clip
-            .map(|clip| intersection(rect, clip))
-            .unwrap_or(Some(rect))
+        if !is_scroll_container(element)
+            && let Some(hit_rect) = node
+                .clip
+                .map(|clip| intersection(rect, clip))
+                .unwrap_or(Some(rect))
         {
             tree.resolved.nodes[node_index].hit_stack = Some(tree.hits.len());
             tree.hits.push(HitRegion {
@@ -5266,7 +5508,8 @@ fn layout_element<Message: Clone>(
     let preferred = measure_element(element, Constraints::loose(bounds.size));
     let node_index = tree.resolved.nodes.len();
     let interaction = InteractionState {
-        interactive: element.message.is_some() || element.text_mapper.is_some(),
+        interactive: element.message.is_some() && !is_scroll_container(element)
+            || element.text_mapper.is_some(),
         ..InteractionState::default()
     };
     tree.resolved.nodes.push(ResolvedNode {
@@ -5337,6 +5580,7 @@ fn layout_element<Message: Clone>(
         );
     }
     if element.message.is_some()
+        && !is_scroll_container(element)
         && inherited_clip.is_some_and(|clip| intersection(rect, clip) != Some(rect))
     {
         tree.diagnostic(
@@ -6275,7 +6519,16 @@ mod tests {
             tree.commands.first(),
             Some(PaintCommand::PushClip(rect)) if *rect == Rect::new(0.0, 0.0, 200.0, 100.0)
         ));
-        assert!(matches!(tree.commands.last(), Some(PaintCommand::PopClip)));
+        assert!(
+            tree.commands
+                .iter()
+                .any(|command| matches!(command, PaintCommand::PopClip))
+        );
+        assert!(tree.commands.iter().any(|command| matches!(
+            command,
+            PaintCommand::RoundedFill { rect, .. }
+                if rect.origin.x >= 189.0 && rect.size.width == SCROLLBAR_THICKNESS
+        )));
         assert_eq!(
             tree.scroll_extent(&TestMessage::Named("scroll")),
             Some(ScrollExtent {
@@ -6329,6 +6582,84 @@ mod tests {
                 .offset,
             30.0
         );
+    }
+
+    #[test]
+    fn visible_scrollbar_track_drags_and_releases_shared_scroll_state() {
+        let mut state = UiStateStore::default();
+        let build = |state: &mut UiStateStore| {
+            UiTree::layout_with_state(
+                VerticalScroll::new(TestMessage::Named("scroll"), 0.0)
+                    .on_scroll(|_| TestMessage::Named("dragged"))
+                    .child(Spacer::vertical(240.0)),
+                Rect::new(0.0, 0.0, 200.0, 100.0),
+                state,
+            )
+        };
+        let tree = build(&mut state);
+        let pressed_at = Point { x: 194.0, y: 50.0 };
+
+        tree.handle_event(
+            &mut state,
+            UiEvent::PointerPressed(Point { x: 20.0, y: 20.0 }),
+        );
+        let ordinary_release = tree.handle_event(
+            &mut state,
+            UiEvent::PointerReleased(Point { x: 20.0, y: 20.0 }),
+        );
+        assert!(ordinary_release.messages.is_empty());
+
+        let pressed = tree.handle_event(&mut state, UiEvent::PointerPressed(pressed_at));
+        assert_eq!(pressed.messages, vec![TestMessage::Named("dragged")]);
+        let pressed_offset = state
+            .state(&UiId::from("root"))
+            .expect("scroll state after press")
+            .scroll_offset;
+        assert!(state.captured().is_some());
+
+        let rebuilt = build(&mut state);
+        assert!(state.captured().is_some());
+        let dragged = rebuilt.handle_event(
+            &mut state,
+            UiEvent::PointerMoved(Point { x: 194.0, y: 90.0 }),
+        );
+        assert_eq!(dragged.messages, vec![TestMessage::Named("dragged")]);
+        assert!(
+            state
+                .state(&UiId::from("root"))
+                .expect("scroll state after drag")
+                .scroll_offset
+                > pressed_offset
+        );
+
+        rebuilt.handle_event(
+            &mut state,
+            UiEvent::PointerMoved(Point { x: 194.0, y: 20.0 }),
+        );
+        assert_eq!(
+            state
+                .state(&UiId::from("root"))
+                .expect("same-frame reverse drag")
+                .scroll_offset,
+            0.0
+        );
+        rebuilt.handle_event(
+            &mut state,
+            UiEvent::PointerMoved(Point { x: 194.0, y: 90.0 }),
+        );
+        assert!(
+            state
+                .state(&UiId::from("root"))
+                .expect("same-frame forward drag")
+                .scroll_offset
+                > 100.0
+        );
+
+        rebuilt.handle_event(
+            &mut state,
+            UiEvent::PointerReleased(Point { x: 194.0, y: 90.0 }),
+        );
+        assert!(state.captured().is_none());
     }
 
     #[test]
