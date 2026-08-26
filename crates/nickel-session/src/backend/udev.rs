@@ -71,6 +71,7 @@ use crate::{
 
 const FORMATS: &[Fourcc] = &[Fourcc::Abgr8888, Fourcc::Argb8888];
 const BOOTSTRAP_RENDER_TIMEOUT: Duration = Duration::from_secs(30);
+const SWITCHER_MAX_CARDS: usize = 5;
 
 fn output_model(connector_name: &str) -> String {
     let Ok(entries) = std::fs::read_dir("/sys/class/drm") else {
@@ -1065,6 +1066,33 @@ impl CalloopData {
                 ))
                 .into(),
             );
+            let is_primary = self
+                .state
+                .primary_output_name
+                .as_deref()
+                .is_none_or(|name| name == output.name());
+            if is_primary
+                && let Some(mode) = output.current_mode()
+                && let Some((switcher, switcher_size)) =
+                    task_switcher_buffer(&self.state, mode.size)
+            {
+                let location = (
+                    (mode.size.w - switcher_size.w).max(0) / 2,
+                    (mode.size.h - switcher_size.h).max(0) / 2,
+                );
+                match MemoryRenderBufferRenderElement::from_buffer(
+                    &mut renderer,
+                    (f64::from(location.0), f64::from(location.1)),
+                    &switcher,
+                    None,
+                    None,
+                    None,
+                    Kind::Unspecified,
+                ) {
+                    Ok(element) => elements.insert(0, NativeCustomElement::from(element).into()),
+                    Err(error) => tracing::warn!(?error, "failed to upload task switcher"),
+                }
+            }
             if let Some(badge) = identify_badge
                 && let Some(mode) = output.current_mode()
             {
@@ -1106,11 +1134,6 @@ impl CalloopData {
                     }
                 }
             }
-            let is_primary = self
-                .state
-                .primary_output_name
-                .as_deref()
-                .is_none_or(|name| name == output.name());
             if is_primary && let Some(path) = self.state.output_capture_path.take() {
                 let result = output
                     .current_mode()
@@ -1437,6 +1460,110 @@ fn identify_badge(number: usize) -> MemoryRenderBuffer {
     )
 }
 
+fn switcher_visible_range(count: usize, selected: usize) -> std::ops::Range<usize> {
+    let visible = count.min(SWITCHER_MAX_CARDS);
+    let start = selected
+        .saturating_sub(visible / 2)
+        .min(count.saturating_sub(visible));
+    start..start + visible
+}
+
+fn task_switcher_buffer(
+    state: &NickelSession,
+    output_size: smithay::utils::Size<i32, Physical>,
+) -> Option<(MemoryRenderBuffer, smithay::utils::Size<i32, Physical>)> {
+    if state.alt_tab_order.len() < 2 {
+        return None;
+    }
+    let range = switcher_visible_range(state.alt_tab_order.len(), state.alt_tab_index);
+    let count = range.len();
+    let gap = 14_u32;
+    let padding = 20_u32;
+    let available_width = u32::try_from(output_size.w.saturating_sub(80))
+        .unwrap_or_default()
+        .min(1160);
+    let card_width = ((available_width
+        .saturating_sub(padding * 2 + gap * count.saturating_sub(1) as u32))
+        / count as u32)
+        .clamp(140, 220);
+    let card_height = 180_u32;
+    let width = padding * 2 + card_width * count as u32 + gap * count.saturating_sub(1) as u32;
+    let height = card_height + padding * 2;
+    let mut image = image::RgbaImage::from_pixel(width, height, image::Rgba([17, 24, 39, 244]));
+
+    for (slot, index) in range.enumerate() {
+        let x = padding + slot as u32 * (card_width + gap);
+        let selected = index == state.alt_tab_index;
+        let border = if selected {
+            image::Rgba([101, 184, 255, 255])
+        } else {
+            image::Rgba([66, 81, 108, 255])
+        };
+        fill_rgba_rect(&mut image, x, padding, card_width, card_height, border);
+        fill_rgba_rect(
+            &mut image,
+            x + 4,
+            padding + 4,
+            card_width - 8,
+            card_height - 8,
+            image::Rgba([43, 56, 82, 255]),
+        );
+        let id = state.alt_tab_order[index];
+        let Some(frame) = state.preview_frames.get(&id) else {
+            continue;
+        };
+        let Some(source) = image::RgbaImage::from_raw(
+            u32::from(frame.width),
+            u32::from(frame.height),
+            frame.rgba.clone(),
+        ) else {
+            continue;
+        };
+        let target_width = card_width - 16;
+        let target_height = card_height - 16;
+        let thumbnail = image::imageops::resize(
+            &source,
+            target_width,
+            target_height,
+            image::imageops::FilterType::Triangle,
+        );
+        image::imageops::overlay(
+            &mut image,
+            &thumbnail,
+            i64::from(x + 8),
+            i64::from(padding + 8),
+        );
+    }
+
+    let size = (width as i32, height as i32);
+    Some((
+        MemoryRenderBuffer::from_slice(
+            image.as_raw(),
+            Fourcc::Abgr8888,
+            size,
+            1,
+            Transform::Normal,
+            None,
+        ),
+        size.into(),
+    ))
+}
+
+fn fill_rgba_rect(
+    image: &mut image::RgbaImage,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    color: image::Rgba<u8>,
+) {
+    for row in y..y.saturating_add(height).min(image.height()) {
+        for column in x..x.saturating_add(width).min(image.width()) {
+            image.put_pixel(column, row, color);
+        }
+    }
+}
+
 fn capture_preview(
     renderer: &mut NativeRenderer<'_>,
     window: &smithay::desktop::Window,
@@ -1586,7 +1713,15 @@ fn normalize_capture_rows(
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_capture_rows, parse_kde_cursor_settings};
+    use super::{normalize_capture_rows, parse_kde_cursor_settings, switcher_visible_range};
+
+    #[test]
+    fn task_switcher_keeps_the_selection_in_a_centered_bounded_window() {
+        assert_eq!(switcher_visible_range(3, 1), 0..3);
+        assert_eq!(switcher_visible_range(9, 0), 0..5);
+        assert_eq!(switcher_visible_range(9, 4), 2..7);
+        assert_eq!(switcher_visible_range(9, 8), 4..9);
+    }
 
     #[test]
     fn reads_cursor_preferences_from_kde_mouse_group() {

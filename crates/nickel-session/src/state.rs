@@ -818,6 +818,8 @@ impl NickelSession {
                 .map(|window| window.id)
                 .filter(|id| !shell_ids.contains(id))
                 .collect();
+            self.preview_requests
+                .extend(self.alt_tab_order.iter().copied());
             self.alt_tab_index = if forward {
                 usize::from(self.alt_tab_order.len() > 1)
             } else {
@@ -832,7 +834,13 @@ impl NickelSession {
                     .unwrap_or(self.alt_tab_order.len() - 1)
             };
         }
-        if let Some(id) = self.alt_tab_order.get(self.alt_tab_index).copied() {
+    }
+
+    pub fn commit_window_cycle(&mut self) {
+        let target = self.alt_tab_order.get(self.alt_tab_index).copied();
+        self.alt_tab_order.clear();
+        self.alt_tab_index = 0;
+        if let Some(id) = target {
             self.activate_window(id);
         }
     }

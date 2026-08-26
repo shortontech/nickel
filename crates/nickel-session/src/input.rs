@@ -94,8 +94,7 @@ impl NickelSession {
                                     session.cycle_windows(false)
                                 }
                                 Some(HotkeyAction::CommitSwitch) => {
-                                    session.alt_tab_order.clear();
-                                    session.alt_tab_index = 0;
+                                    session.commit_window_cycle();
                                 }
                                 Some(
                                     HotkeyAction::ShowRun
