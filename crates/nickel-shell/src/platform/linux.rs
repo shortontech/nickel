@@ -676,14 +676,33 @@ fn parse_window(line: &str, launcher: &Launcher) -> Option<OpenWindow> {
     let title = fields.next().unwrap_or_default().to_owned();
     Some(OpenWindow {
         id,
-        application_id: resolve_application_id(native_app_id, launcher),
+        application_id: codex_window_application_id(&title)
+            .or_else(|| resolve_application_id(native_app_id, launcher)),
         active,
         title,
     })
 }
 
+fn codex_window_application_id(title: &str) -> Option<ApplicationId> {
+    if title == "Codex" {
+        return Some(ApplicationId::new("io.nickel.codex.hub"));
+    }
+    let project = title.strip_prefix("Codex — ")?;
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in project.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    Some(ApplicationId::new(format!(
+        "io.nickel.codex.project.{hash:016x}"
+    )))
+}
+
 fn resolve_application_id(native_app_id: &str, launcher: &Launcher) -> Option<ApplicationId> {
     let native_app_id = native_app_id.trim_end_matches(".desktop");
+    if native_app_id.starts_with("io.nickel.codex.") {
+        return Some(ApplicationId::new(native_app_id));
+    }
     launcher
         .applications()
         .find(|application| {
@@ -702,8 +721,8 @@ mod tests {
     use crate::{launcher::Launcher, model::Application, platform::ShellCommand};
 
     use super::{
-        parse_window, pixmap_to_rgba, resolve_application_id, shell_command_payload,
-        tray_retry_delay,
+        codex_window_application_id, parse_window, pixmap_to_rgba, resolve_application_id,
+        shell_command_payload, tray_retry_delay,
     };
 
     #[test]
@@ -723,6 +742,34 @@ mod tests {
         assert_eq!(
             resolve_application_id("org.kde.konsole", &launcher).map(|id| id.as_str().to_owned()),
             Some("org.kde.konsole.desktop".into())
+        );
+    }
+
+    #[test]
+    fn dynamic_codex_project_identity_needs_no_desktop_entry() {
+        let launcher = Launcher::new(Vec::new());
+        assert_eq!(
+            resolve_application_id("io.nickel.codex.project.0123", &launcher)
+                .map(|id| id.as_str().to_owned()),
+            Some("io.nickel.codex.project.0123".into())
+        );
+    }
+
+    #[test]
+    fn codex_windows_group_by_full_project_directory() {
+        let first = codex_window_application_id("Codex — /work/one/sample")
+            .expect("project window identity");
+        let same = codex_window_application_id("Codex — /work/one/sample")
+            .expect("stable project window identity");
+        let other = codex_window_application_id("Codex — /work/two/sample")
+            .expect("different project window identity");
+        assert_eq!(first, same);
+        assert_ne!(first, other);
+        assert_eq!(
+            codex_window_application_id("Codex")
+                .expect("hub window identity")
+                .as_str(),
+            "io.nickel.codex.hub"
         );
     }
 

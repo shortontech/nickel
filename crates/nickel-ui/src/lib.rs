@@ -21,7 +21,7 @@ pub use layout::{
     Align, Axis, Constraints, FlexItem, Insets, Justify, Length, Overflow, Point, Rect, Size,
     Track, layout_flex,
 };
-pub use runtime::{Application, Shortcut, run};
+pub use runtime::{Application, ApplicationHost, HostEventOutcome, Shortcut, run};
 pub use state::{Invalidation, TransientState, UiId, UiStateStore};
 pub use text_editor::TextEditor;
 pub use ui::{

@@ -5,7 +5,7 @@ use std::{
 };
 
 use nickel_codex::{
-    AccountState, CodexEvent, EventKind, Model, ServerRequestId, Thread, ThreadId, TurnId,
+    AccountState, CodexEvent, EventKind, Model, Project, ServerRequestId, Thread, ThreadId, TurnId,
 };
 use nickel_markdown::{MarkdownDocument, markdown_selection_runs};
 use nickel_ui::{SelectionDocument, SelectionRun};
@@ -65,7 +65,9 @@ pub struct ChatState {
     pub provenance: String,
     pub account: AccountState,
     pub models: Vec<Model>,
+    pub projects: Vec<Project>,
     pub threads: Vec<Thread>,
+    pub thread_runtime: HashMap<ThreadId, nickel_codex::ThreadRuntime>,
     pub selected_thread: Option<ThreadId>,
     pub active_turn: Option<TurnId>,
     pub interrupt_requested: bool,
@@ -94,7 +96,9 @@ impl Default for ChatState {
             provenance: "Locating OpenAI Codex CLI…".into(),
             account: AccountState::default(),
             models: Vec::new(),
+            projects: Vec::new(),
             threads: Vec::new(),
+            thread_runtime: HashMap::new(),
             selected_thread: None,
             active_turn: None,
             interrupt_requested: false,
@@ -148,13 +152,17 @@ impl ChatState {
                 provenance,
                 account,
                 models,
+                projects,
                 threads,
+                runtime,
             } => {
                 self.status = ConnectionStatus::Ready;
                 self.provenance = provenance;
                 self.account = account;
                 self.models = models.into_iter().take(100).collect();
+                self.projects = projects.into_iter().take(100).collect();
                 self.threads = threads.into_iter().take(MAX_THREADS).collect();
+                self.thread_runtime = runtime;
             }
             ControllerEvent::ThreadCreated(thread) => {
                 self.record_selected_thread(thread);

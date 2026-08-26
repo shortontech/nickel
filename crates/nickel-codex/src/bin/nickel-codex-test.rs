@@ -11,8 +11,8 @@ use std::{
 };
 
 use nickel_codex::{
-    BackendChoice, CodexBackend, CodexClient, EventKind, InteractionResponse, ReplayBackend,
-    Selector, StartThread, StartTurn, ThreadId, ThreadPage, TurnId,
+    BackendChoice, CodexBackend, CodexClient, EventKind, InteractionResponse, ProjectPage,
+    ReplayBackend, Selector, StartThread, StartTurn, ThreadId, ThreadPage, TurnId,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -47,8 +47,8 @@ fn main() -> ExitCode {
     match command {
         "probe" => probe(&args[1..]),
         "replay" => replay(&args[1..]),
-        "account" | "models" | "threads" | "start-thread" | "resume-thread" | "turn"
-        | "interrupt" => live(command, &args[1..]),
+        "account" | "models" | "projects" | "threads" | "start-thread" | "resume-thread"
+        | "turn" | "interrupt" => live(command, &args[1..]),
         _ => failure(2, "invalid_usage", usage()),
     }
 }
@@ -56,7 +56,7 @@ fn main() -> ExitCode {
 fn usage() -> &'static str {
     "nickel-codex-test probe [--backend auto|installed|bundled|PATH]\n\
      nickel-codex-test replay SCENARIO.json\n\
-     nickel-codex-test account|models|threads [--backend ...]\n\
+     nickel-codex-test account|models|projects|threads [--backend ...]\n\
      nickel-codex-test start-thread --cwd PATH [--model MODEL] [--text TEXT]\n\
      nickel-codex-test resume-thread THREAD_ID\n\
      nickel-codex-test turn THREAD_ID --text TEXT\n\
@@ -197,6 +197,12 @@ fn backend_operation(
     match command {
         "account" => backend.account().and_then(json_value),
         "models" => backend.models().and_then(json_value),
+        "projects" => backend
+            .list_projects(ProjectPage {
+                cursor: option(args, "--cursor").map(Into::into),
+                limit: Some(100),
+            })
+            .and_then(|page| json_value(page.projects)),
         "threads" => backend
             .list_threads(ThreadPage {
                 cursor: option(args, "--cursor").map(Into::into),
@@ -207,6 +213,7 @@ fn backend_operation(
             let thread = backend.start_thread(StartThread {
                 cwd,
                 model: option(args, "--model").map(Into::into),
+                project_id: None,
             })?;
             if option(args, "--text").is_some() {
                 let text = turn_text(args)?;
@@ -433,6 +440,7 @@ mod tests {
         for (command, args) in [
             ("account", vec![]),
             ("models", vec![]),
+            ("projects", vec![]),
             ("threads", vec![]),
             ("start-thread", vec!["--cwd".into(), "/fixture".into()]),
             (

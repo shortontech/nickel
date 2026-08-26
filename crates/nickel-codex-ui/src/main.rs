@@ -61,7 +61,7 @@ fn main() -> ExitCode {
             }
         }
     } else {
-        let cwd = match local_cwd(explicit_cwd) {
+        let cwd = match local_cwd(explicit_cwd.clone()) {
             Ok(cwd) => cwd,
             Err(error) => {
                 eprintln!("cannot create managed Codex workspace: {error}");

@@ -1,4 +1,5 @@
 use std::{
+    collections::{BTreeMap, HashMap, HashSet},
     fs,
     io::ErrorKind,
     path::Path,
@@ -38,8 +39,9 @@ fn create_managed_workspace_at(documents: &Path, now: &jiff::Zoned) -> Result<Pa
 
 use nickel_codex::{
     AccountState, BackendChoice, CodexBackend, CodexClient, CodexEvent, CommandDecision,
-    FileChangeDecision, InteractionResponse, Model, RemoteHost, ReplayBackend, Selector,
-    ServerRequestId, StartThread, StartTurn, Thread, ThreadId, ThreadPage, UserInputAnswer,
+    FileChangeDecision, ImportProject, InteractionResponse, Model, Project, ProjectPage,
+    RemoteHost, ReplayBackend, Selector, ServerRequestId, StartThread, StartTurn, Thread, ThreadId,
+    ThreadPage, ThreadPageResult, UserInputAnswer,
 };
 
 #[derive(Clone)]
@@ -61,6 +63,7 @@ pub enum BackendMode {
 pub enum ControllerCommand {
     Refresh,
     NewChat,
+    NewChatIn(PathBuf, Option<String>),
     SelectThread(ThreadId),
     Send(String),
     Interrupt,
@@ -85,7 +88,9 @@ pub enum ControllerEvent {
         provenance: String,
         account: AccountState,
         models: Vec<Model>,
+        projects: Vec<Project>,
         threads: Vec<Thread>,
+        runtime: std::collections::HashMap<ThreadId, nickel_codex::ThreadRuntime>,
     },
     ThreadCreated(Thread),
     ThreadSelected(Thread),
@@ -232,6 +237,7 @@ fn run_worker(
     let mut selected_thread = None;
     let mut active_turn = None;
     let mut new_thread_cwd = cwd.clone();
+    let mut new_thread_project_id = None;
 
     loop {
         while let Ok(event) = protocol_events.try_recv() {
@@ -260,6 +266,13 @@ fn run_worker(
                 selected_thread = None;
                 active_turn = None;
             }),
+            ControllerCommand::NewChatIn(workspace, project_id) => {
+                new_thread_cwd = workspace;
+                new_thread_project_id = project_id;
+                selected_thread = None;
+                active_turn = None;
+                Ok(())
+            }
             ControllerCommand::SelectThread(id) => backend
                 .resume_thread(id)
                 .map(|thread| {
@@ -274,6 +287,7 @@ fn run_worker(
                         .start_thread(StartThread {
                             cwd: new_thread_cwd.clone(),
                             model: None,
+                            project_id: new_thread_project_id.clone(),
                         })
                         .map(|thread| {
                             selected_thread = Some(thread.id.clone());
@@ -344,23 +358,114 @@ pub(crate) fn codex_attribution(version: &str) -> String {
 
 fn snapshot(backend: &dyn CodexBackend, provenance: String) -> ControllerEvent {
     let result = (|| {
-        Ok::<_, nickel_codex::CodexError>((
-            backend.account()?,
-            backend.models()?,
-            backend.list_threads(ThreadPage {
-                cursor: None,
-                limit: Some(100),
-            })?,
-        ))
+        let mut page = list_threads(backend)?;
+        let mut projects = list_projects(backend)?;
+        if import_missing_thread_projects(backend, &projects, &page.threads, &page.runtime)? {
+            projects = list_projects(backend)?;
+            page = list_threads(backend)?;
+        }
+        Ok::<_, nickel_codex::CodexError>((backend.account()?, backend.models()?, projects, page))
     })();
     match result {
-        Ok((account, models, page)) => ControllerEvent::Ready {
+        Ok((account, models, projects, page)) => ControllerEvent::Ready {
             provenance,
             account,
             models,
+            projects,
             threads: page.threads,
+            runtime: page.runtime,
         },
         Err(error) => ControllerEvent::Failure(error.to_string()),
+    }
+}
+
+fn list_threads(backend: &dyn CodexBackend) -> Result<ThreadPageResult, nickel_codex::CodexError> {
+    let mut result = ThreadPageResult {
+        threads: Vec::new(),
+        next_cursor: None,
+        runtime: std::collections::HashMap::new(),
+    };
+    let mut cursor = None;
+    loop {
+        let page = backend.list_threads(ThreadPage {
+            cursor: cursor.clone(),
+            limit: Some(100),
+        })?;
+        result.threads.extend(page.threads);
+        result.runtime.extend(page.runtime);
+        if page.next_cursor.is_none() || page.next_cursor == cursor {
+            return Ok(result);
+        }
+        cursor = page.next_cursor;
+    }
+}
+
+fn import_missing_thread_projects(
+    backend: &dyn CodexBackend,
+    projects: &[Project],
+    threads: &[Thread],
+    runtime: &HashMap<ThreadId, nickel_codex::ThreadRuntime>,
+) -> Result<bool, nickel_codex::CodexError> {
+    let registered_roots = projects
+        .iter()
+        .flat_map(|project| project.roots.iter().cloned())
+        .collect::<HashSet<_>>();
+    let mut directories: BTreeMap<PathBuf, Vec<ThreadId>> = BTreeMap::new();
+    for thread in threads {
+        if runtime
+            .get(&thread.id)
+            .and_then(|runtime| runtime.project_id.as_ref())
+            .is_some()
+        {
+            continue;
+        }
+        let Some(cwd) = thread.cwd.as_ref().filter(|cwd| cwd.is_absolute()) else {
+            continue;
+        };
+        if cwd.starts_with(std::env::temp_dir()) || registered_roots.contains(cwd) {
+            continue;
+        }
+        directories
+            .entry(cwd.clone())
+            .or_default()
+            .push(thread.id.clone());
+    }
+    let imported = !directories.is_empty();
+    for (root, threads) in directories {
+        let name = root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or("Project")
+            .to_owned();
+        let mut hash = 0xcbf29ce484222325_u64;
+        for byte in root.to_string_lossy().as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        backend.import_project(ImportProject {
+            idempotency_key: format!("nickel-import-{hash:016x}"),
+            name,
+            roots: vec![root],
+            threads,
+        })?;
+    }
+    Ok(imported)
+}
+
+fn list_projects(backend: &dyn CodexBackend) -> Result<Vec<Project>, nickel_codex::CodexError> {
+    let mut projects = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = backend.list_projects(ProjectPage {
+            cursor: cursor.clone(),
+            limit: Some(100),
+        })?;
+        projects.extend(page.projects);
+        if page.next_cursor.is_none() || page.next_cursor == cursor {
+            return Ok(projects);
+        }
+        cursor = page.next_cursor;
     }
 }
 

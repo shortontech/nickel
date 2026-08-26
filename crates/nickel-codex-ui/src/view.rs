@@ -35,6 +35,8 @@ pub enum ChatMessage {
     DraftChanged(String),
     Send,
     NewChat,
+    NewChatIn(PathBuf, String),
+    ShowHub,
     Refresh,
     Reconnect,
     SelectThread(nickel_codex::ThreadId),
@@ -61,6 +63,19 @@ pub enum ChatMessage {
     RemoteHostCwdChanged(String),
     SaveRemoteHost,
     OpenMarkdownLink(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ShellRequest {
+    OpenProject {
+        cwd: PathBuf,
+        project_id: String,
+    },
+    OpenThread {
+        cwd: PathBuf,
+        project_id: String,
+        thread: nickel_codex::ThreadId,
+    },
 }
 
 fn draft_changed(value: String) -> ChatMessage {
@@ -99,6 +114,15 @@ fn transcript_heights(state: &ChatState) -> Vec<f32> {
     state.estimated_item_heights()
 }
 
+fn project_window_title(path: &std::path::Path) -> String {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("Project");
+    format!("Codex — {name}")
+}
+
 pub struct ChatApplication {
     pub state: ChatState,
     controller: ChatController,
@@ -108,6 +132,13 @@ pub struct ChatApplication {
     managing_hosts: bool,
     host_editor: Option<RemoteHostEditor>,
     settings_error: Option<String>,
+    shell_host: bool,
+    sidebar_visible: bool,
+    window_title: String,
+    hub_mode: bool,
+    thread_lease: Option<crate::ThreadLease>,
+    shell_requests: Vec<ShellRequest>,
+    shell_project: Option<(PathBuf, String)>,
 }
 
 #[derive(Clone, Debug)]
@@ -173,12 +204,59 @@ impl ChatApplication {
             managing_hosts: false,
             host_editor: None,
             settings_error: None,
+            shell_host: false,
+            sidebar_visible: true,
+            window_title: "Nickel".into(),
+            hub_mode: false,
+            thread_lease: None,
+            shell_requests: Vec::new(),
+            shell_project: None,
         }
+    }
+
+    pub fn as_shell_hub(mut self) -> Self {
+        self.shell_host = true;
+        self.sidebar_visible = true;
+        self.window_title = "Codex".into();
+        self.hub_mode = true;
+        self
+    }
+
+    pub fn as_shell_chat(mut self, cwd: &std::path::Path) -> Self {
+        self.shell_host = true;
+        self.sidebar_visible = false;
+        self.window_title = project_window_title(cwd);
+        self
+    }
+
+    pub fn resume_thread(&mut self, id: nickel_codex::ThreadId) -> Result<(), String> {
+        self.thread_lease = Some(crate::ThreadLease::acquire(&id.0)?);
+        self.state.begin_thread_selection(id.clone());
+        self.controller.send(ControllerCommand::SelectThread(id));
+        Ok(())
+    }
+
+    pub fn take_shell_requests(&mut self) -> Vec<ShellRequest> {
+        std::mem::take(&mut self.shell_requests)
+    }
+
+    pub fn use_project(&mut self, cwd: PathBuf, project_id: String) {
+        self.shell_project = Some((cwd.clone(), project_id.clone()));
+        self.controller
+            .send(ControllerCommand::NewChatIn(cwd, Some(project_id)));
     }
 
     pub fn poll_controller(&mut self) -> bool {
         let mut changed = false;
         while let Some((generation, event)) = self.controller.try_recv() {
+            if self.shell_host
+                && let crate::ControllerEvent::ThreadCreated(thread) = &event
+            {
+                match crate::ThreadLease::acquire(&thread.id.0) {
+                    Ok(lease) => self.thread_lease = Some(lease),
+                    Err(error) => self.settings_error = Some(error),
+                }
+            }
             changed |= self.state.apply(generation, event);
         }
         changed
@@ -247,8 +325,40 @@ impl Application for ChatApplication {
                 }
             }
             ChatMessage::NewChat => {
+                if self.hub_mode {
+                    self.settings_error =
+                        Some("Choose + beside a project for a new conversation".into());
+                    return;
+                }
                 self.state.new_chat();
-                self.controller.send(ControllerCommand::NewChat);
+                self.thread_lease = None;
+                if let Some((cwd, project_id)) = &self.shell_project {
+                    self.controller.send(ControllerCommand::NewChatIn(
+                        cwd.clone(),
+                        Some(project_id.clone()),
+                    ));
+                } else {
+                    self.controller.send(ControllerCommand::NewChat);
+                }
+                if self.shell_host {
+                    self.sidebar_visible = false;
+                }
+            }
+            ChatMessage::NewChatIn(cwd, project_id) => {
+                if self.hub_mode {
+                    self.shell_requests
+                        .push(ShellRequest::OpenProject { cwd, project_id });
+                    return;
+                }
+                self.state.new_chat();
+                self.thread_lease = None;
+                self.controller
+                    .send(ControllerCommand::NewChatIn(cwd.clone(), Some(project_id)));
+                self.sidebar_visible = false;
+                self.window_title = project_window_title(&cwd);
+            }
+            ChatMessage::ShowHub => {
+                self.sidebar_visible = true;
             }
             ChatMessage::Refresh => {
                 self.controller.send(ControllerCommand::Refresh);
@@ -262,6 +372,65 @@ impl Application for ChatApplication {
                     ChatController::spawn_generation(self.mode.clone(), self.state.generation);
             }
             ChatMessage::SelectThread(id) => {
+                if self.shell_host
+                    && self.state.thread_runtime.get(&id).is_some_and(|runtime| {
+                        runtime.status == nickel_codex::ThreadRuntimeStatus::Active
+                    })
+                {
+                    return;
+                }
+                if self.hub_mode {
+                    let result = self
+                        .state
+                        .thread_runtime
+                        .get(&id)
+                        .and_then(|runtime| runtime.project_id.as_deref())
+                        .and_then(|project_id| {
+                            self.state
+                                .projects
+                                .iter()
+                                .find(|project| project.id == project_id)
+                                .and_then(|project| {
+                                    project
+                                        .roots
+                                        .first()
+                                        .map(|root| (root.clone(), project.id.clone()))
+                                })
+                        })
+                        .ok_or_else(|| "conversation is not assigned to a project".to_owned());
+                    match result {
+                        Ok((cwd, project_id)) => {
+                            self.shell_requests.push(ShellRequest::OpenThread {
+                                cwd,
+                                project_id,
+                                thread: id,
+                            })
+                        }
+                        Err(error) => self.settings_error = Some(error),
+                    }
+                    return;
+                }
+                if self.shell_host {
+                    match crate::ThreadLease::acquire(&id.0) {
+                        Ok(lease) => self.thread_lease = Some(lease),
+                        Err(error) => {
+                            self.settings_error = Some(error);
+                            return;
+                        }
+                    }
+                }
+                if self.shell_host {
+                    if let Some(cwd) = self
+                        .state
+                        .threads
+                        .iter()
+                        .find(|thread| thread.id == id)
+                        .and_then(|thread| thread.cwd.as_deref())
+                    {
+                        self.window_title = project_window_title(cwd);
+                    }
+                    self.sidebar_visible = false;
+                }
                 self.state.begin_thread_selection(id.clone());
                 self.controller.send(ControllerCommand::SelectThread(id));
             }
@@ -522,11 +691,13 @@ impl Application for ChatApplication {
             self.managing_hosts,
             self.host_editor.as_ref(),
             self.settings_error.as_deref(),
+            self.sidebar_visible,
+            self.shell_host,
         )
     }
 
     fn title(&self) -> &str {
-        "Nickel"
+        &self.window_title
     }
 
     fn initial_size(&self) -> (u32, u32) {
@@ -700,7 +871,28 @@ fn remote_hosts_panel(
 
 #[cfg(test)]
 pub fn chat_view(state: &ChatState) -> impl View<ChatMessage> {
-    configured_chat_view(state, &DEFAULT_CODEX_SETTINGS, false, None, None)
+    configured_chat_view(
+        state,
+        &DEFAULT_CODEX_SETTINGS,
+        false,
+        None,
+        None,
+        true,
+        false,
+    )
+}
+
+#[cfg(test)]
+pub fn shell_hub_view(state: &ChatState) -> impl View<ChatMessage> {
+    configured_chat_view(
+        state,
+        &DEFAULT_CODEX_SETTINGS,
+        false,
+        None,
+        None,
+        true,
+        true,
+    )
 }
 
 fn connection_menu(settings: &CodexSettings) -> Menu<ChatMessage> {
@@ -735,6 +927,8 @@ fn configured_chat_view(
     managing_hosts: bool,
     editor: Option<&RemoteHostEditor>,
     settings_error: Option<&str>,
+    sidebar_visible: bool,
+    shell_host: bool,
 ) -> impl View<ChatMessage> {
     let transcript_heights = transcript_heights(state);
     let transcript_offset = if state.conversation_pinned {
@@ -756,6 +950,7 @@ fn configured_chat_view(
             <MenuBar id={id!(menu_bar)}>
                 <Menu id={id!(file_menu)} on_toggle={ChatMessage::ToggleFileMenu} label={"File"}>
                     <MenuItem label={"New conversation"} on_press={ChatMessage::NewChat} />
+                    <MenuItem label={"Projects and conversations"} on_press={ChatMessage::ShowHub} />
                     <MenuItem label={"Refresh"} on_press={ChatMessage::Refresh} />
                 </Menu>
                 {connection_menu(settings)}
@@ -764,7 +959,7 @@ fn configured_chat_view(
                 remote_hosts_panel(settings, editor, settings_error)
             } else { AnyView::new(ui! {
             <Row fill_width grow={1.0} min_height={0.0}>
-                {sidebar::thread_sidebar(state)}
+                {if sidebar_visible { AnyView::new(sidebar::thread_sidebar(state, shell_host)) } else { AnyView::new(Spacer::new().width(0.0)) }}
                 <Column grow={1.0} min_width={0.0} fill_height padding={Insets::all(18.0)} gap={12.0}>
                 <Column id={id!(conversation)} grow={1.0} fill_width gap={10.0}
                     overflow_y={Overflow::Auto} follow_scroll_end={state.conversation_pinned}
@@ -851,7 +1046,7 @@ mod tests {
         let mut ui_state = UiStateStore::default();
         let bounds = Rect::new(0.0, 0.0, 900.0, 640.0);
         let closed = UiTree::layout_with_state(
-            configured_chat_view(&state, &settings, false, None, None),
+            configured_chat_view(&state, &settings, false, None, None, true, false),
             bounds,
             &mut ui_state,
         );
@@ -870,7 +1065,7 @@ mod tests {
         closed.handle_event(&mut ui_state, UiEvent::PointerReleased(header));
 
         let open = UiTree::layout_with_state(
-            configured_chat_view(&state, &settings, false, None, None),
+            configured_chat_view(&state, &settings, false, None, None, true, false),
             bounds,
             &mut ui_state,
         );
@@ -883,7 +1078,7 @@ mod tests {
         };
         open.handle_event(&mut ui_state, UiEvent::PointerPressed(point));
         let rebuilt = UiTree::layout_with_state(
-            configured_chat_view(&state, &settings, false, None, None),
+            configured_chat_view(&state, &settings, false, None, None, true, false),
             bounds,
             &mut ui_state,
         );

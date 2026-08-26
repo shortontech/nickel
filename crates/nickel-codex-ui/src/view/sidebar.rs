@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use nickel_codex::Thread;
+use nickel_codex::{Thread, ThreadRuntimeStatus};
 use nickel_ui::prelude::*;
 
 use super::{ACCENT, BORDER, ChatMessage, MUTED, PANEL, SIDEBAR, TEXT};
@@ -10,6 +10,7 @@ const DEFAULT_TASK_LIMIT: usize = 10;
 
 #[derive(Debug)]
 struct ProjectSection<'a> {
+    project_id: Option<String>,
     key: String,
     name: String,
     threads: Vec<&'a Thread>,
@@ -60,15 +61,49 @@ fn project_name(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-fn project_sections(threads: &[Thread]) -> Vec<ProjectSection<'_>> {
-    let mut sections: Vec<ProjectSection<'_>> = Vec::new();
+fn project_sections<'a>(
+    threads: &'a [Thread],
+    state: &ChatState,
+    available_only: bool,
+) -> Vec<ProjectSection<'a>> {
+    let mut sections: Vec<ProjectSection<'_>> = if available_only {
+        state
+            .projects
+            .iter()
+            .filter_map(|project| {
+                let root = project.roots.first()?;
+                Some(ProjectSection {
+                    project_id: Some(project.id.clone()),
+                    key: root.display().to_string(),
+                    name: project.name.clone(),
+                    threads: Vec::new(),
+                })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     for thread in threads.iter().filter(|thread| {
-        thread
-            .cwd
-            .as_deref()
-            .is_none_or(|path| !path.starts_with("/tmp"))
+        (!available_only
+            || state
+                .thread_runtime
+                .get(&thread.id)
+                .is_none_or(|runtime| runtime.status != ThreadRuntimeStatus::Active))
+            && thread
+                .cwd
+                .as_deref()
+                .is_none_or(|path| !path.starts_with("/tmp"))
     }) {
-        let key = thread.cwd.as_ref().map_or_else(
+        let protocol_project = state
+            .thread_runtime
+            .get(&thread.id)
+            .and_then(|runtime| runtime.project_id.as_deref())
+            .and_then(|id| state.projects.iter().find(|project| project.id == id));
+        if available_only && protocol_project.is_none() {
+            continue;
+        }
+        let project_root = protocol_project.and_then(|project| project.roots.first());
+        let key = project_root.or(thread.cwd.as_ref()).map_or_else(
             || "other-tasks".to_owned(),
             |path| path.display().to_string(),
         );
@@ -77,11 +112,12 @@ fn project_sections(threads: &[Thread]) -> Vec<ProjectSection<'_>> {
             continue;
         }
         sections.push(ProjectSection {
+            project_id: protocol_project.map(|project| project.id.clone()),
             key,
-            name: thread
-                .cwd
-                .as_deref()
-                .map_or_else(|| "Other tasks".to_owned(), project_name),
+            name: protocol_project
+                .map(|project| project.name.clone())
+                .or_else(|| thread.cwd.as_deref().map(project_name))
+                .unwrap_or_else(|| "Other tasks".to_owned()),
             threads: vec![thread],
         });
     }
@@ -91,20 +127,23 @@ fn project_sections(threads: &[Thread]) -> Vec<ProjectSection<'_>> {
             .sort_by_key(|thread| std::cmp::Reverse(thread.last_used_at.unwrap_or(i64::MIN)));
     }
     sections.sort_by_key(|section| {
-        std::cmp::Reverse(
-            section
-                .threads
-                .iter()
-                .filter_map(|thread| thread.last_used_at)
-                .max()
-                .unwrap_or(i64::MIN),
+        (
+            section.threads.is_empty(),
+            std::cmp::Reverse(
+                section
+                    .threads
+                    .iter()
+                    .filter_map(|thread| thread.last_used_at)
+                    .max()
+                    .unwrap_or(i64::MIN),
+            ),
         )
     });
     sections
 }
 
-pub(super) fn thread_sidebar(state: &ChatState) -> impl View<ChatMessage> {
-    let projects = project_sections(&state.threads);
+pub(super) fn thread_sidebar(state: &ChatState, shell_hub: bool) -> impl View<ChatMessage> {
+    let projects = project_sections(&state.threads, state, shell_hub);
     let account = if state.account.authenticated {
         "Authenticated"
     } else {
@@ -126,7 +165,11 @@ pub(super) fn thread_sidebar(state: &ChatState) -> impl View<ChatMessage> {
             <Text color={MUTED} scale={0.85} shrink={0.0}>{&state.provenance}</Text>
             <Text color={MUTED} scale={0.85} shrink={0.0}>{account}</Text>
             <Row id={id!(sidebar_actions)} shrink={0.0} gap={6.0}>
-                <Button id={id!(new_chat)} on_press={ChatMessage::NewChat} background={0x244a73} color={TEXT}>{"New"}</Button>
+                {if shell_hub {
+                    ui! { <Text color={MUTED} scale={0.8}>{"Use + beside a project"}</Text> }
+                } else {
+                    ui! { <Button id={id!(new_chat)} on_press={ChatMessage::NewChat} background={0x244a73} color={TEXT}>{"New"}</Button> }
+                }}
                 {if matches!(state.status, ConnectionStatus::Disconnected | ConnectionStatus::Incompatible) {
                     ui! { <Button on_press={ChatMessage::Reconnect} background={0x4a3030} color={TEXT}>{"Reconnect"}</Button> }
                 } else {
@@ -140,13 +183,19 @@ pub(super) fn thread_sidebar(state: &ChatState) -> impl View<ChatMessage> {
                     let expanded = state.expanded_projects.contains(&project.key);
                     let collapsed = state.collapsed_projects.contains(&project.key);
                     ui! { <Column key={project.key.clone()} fill_width shrink={0.0} gap={2.0}>
-                        <Button key={format!("{}-header", project.key)}
+                        <Row fill_width gap={3.0}>
+                        <Button key={format!("{}-header", project.key)} width={190.0}
                             on_press={ChatMessage::ToggleProjectCollapsed(project.key.clone())}
                             background={SIDEBAR} color={TEXT} height={34.0}
                             padding={Insets { top: 6.0, right: 8.0, bottom: 5.0, left: 8.0 }}
                             label_align={TextAlign::Start} ellipsis={true} fill_width>
                             {format!("{}  📁  {}", if collapsed { "▸" } else { "▾" }, project.name)}
                         </Button>
+                        {if shell_hub && project.key != "other-tasks" && project.project_id.is_some() {
+                            ui! { <Button on_press={ChatMessage::NewChatIn(project.key.clone().into(), project.project_id.clone().unwrap_or_default())}
+                                background={0x244a73} color={TEXT} width={36.0}>{"+"}</Button> }
+                        } else { ui! { <Spacer width={0.0} /> } }}
+                        </Row>
                         {if collapsed { ui! { <Spacer height={0.0} /> } } else { ui! {
                           <Column fill_width gap={2.0}>
                           {visible_threads.iter().map(|thread| ui! {
@@ -188,7 +237,7 @@ pub(super) fn thread_sidebar(state: &ChatState) -> impl View<ChatMessage> {
 mod tests {
     use std::path::PathBuf;
 
-    use nickel_codex::{Thread, ThreadId};
+    use nickel_codex::{Project, Thread, ThreadId, ThreadRuntime, ThreadRuntimeStatus};
 
     use super::*;
 
@@ -213,17 +262,17 @@ mod tests {
     fn projects_preserve_first_seen_section_and_task_order() {
         let threads = vec![
             thread("a", Some("/projects/nickel")),
-            thread("b", Some("/projects/galen")),
+            thread("b", Some("/projects/sample-project")),
             thread("c", Some("/projects/nickel")),
             thread("d", None),
         ];
-        let sections = project_sections(&threads);
+        let sections = project_sections(&threads, &ChatState::default(), false);
         assert_eq!(
             sections
                 .iter()
                 .map(|section| section.name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["Nickel", "Galen", "Other tasks"]
+            vec!["Nickel", "Sample Project", "Other tasks"]
         );
         assert_eq!(
             sections[0]
@@ -237,11 +286,14 @@ mod tests {
 
     #[test]
     fn project_disclosure_is_bounded_independent_and_keeps_selection_visible() {
-        let threads = (0..11)
-            .map(|index| thread(&format!("task-{index}"), Some("/projects/nickel")))
-            .chain((0..11).map(|index| thread(&format!("other-{index}"), Some("/projects/galen"))))
-            .collect::<Vec<_>>();
-        let sections = project_sections(&threads);
+        let threads =
+            (0..11)
+                .map(|index| thread(&format!("task-{index}"), Some("/projects/nickel")))
+                .chain((0..11).map(|index| {
+                    thread(&format!("other-{index}"), Some("/projects/sample-project"))
+                }))
+                .collect::<Vec<_>>();
+        let sections = project_sections(&threads, &ChatState::default(), false);
         let mut state = ChatState::default();
         assert_eq!(
             sections[0].visible_threads(&state).len(),
@@ -262,7 +314,9 @@ mod tests {
             "task-10"
         );
 
-        state.expanded_projects.insert("/projects/galen".into());
+        state
+            .expanded_projects
+            .insert("/projects/sample-project".into());
         assert_eq!(
             sections[0].visible_threads(&state).len(),
             DEFAULT_TASK_LIMIT + 1
@@ -274,7 +328,7 @@ mod tests {
     fn projects_and_tasks_sort_by_recency_and_temporary_work_is_hidden() {
         let threads = vec![
             recent_thread("nickel-old", Some("/projects/nickel"), 10),
-            recent_thread("galen", Some("/projects/galen"), 30),
+            recent_thread("sample", Some("/projects/sample-project"), 30),
             recent_thread("nickel-new", Some("/projects/nickel"), 20),
             recent_thread("temporary", Some("/tmp/codex-worktree"), 100),
             recent_thread("not-temporary", Some("/tmp-project"), 40),
@@ -282,13 +336,13 @@ mod tests {
             thread("stable-b", Some("/projects/stable")),
         ];
 
-        let sections = project_sections(&threads);
+        let sections = project_sections(&threads, &ChatState::default(), false);
         assert_eq!(
             sections
                 .iter()
                 .map(|section| section.name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["Tmp Project", "Galen", "Nickel", "Stable"]
+            vec!["Tmp Project", "Sample Project", "Nickel", "Stable"]
         );
         assert_eq!(
             sections[2]
@@ -310,6 +364,56 @@ mod tests {
             sections
                 .iter()
                 .all(|section| section.name != "Codex Worktree")
+        );
+    }
+
+    #[test]
+    fn shell_hub_includes_empty_projects_and_excludes_active_threads() {
+        let threads = vec![
+            thread("idle", None),
+            thread("active", Some("/projects/nickel")),
+        ];
+        let mut state = ChatState::default();
+        state.projects.extend([
+            Project {
+                id: "nickel".into(),
+                name: "Nickel".into(),
+                roots: vec!["/projects/nickel".into()],
+            },
+            Project {
+                id: "empty-project".into(),
+                name: "Empty Project".into(),
+                roots: vec!["/projects/empty-project".into()],
+            },
+        ]);
+        state.thread_runtime.insert(
+            ThreadId("idle".into()),
+            ThreadRuntime {
+                project_id: Some("nickel".into()),
+                status: ThreadRuntimeStatus::Idle,
+                ..ThreadRuntime::default()
+            },
+        );
+        state.thread_runtime.insert(
+            ThreadId("active".into()),
+            ThreadRuntime {
+                status: ThreadRuntimeStatus::Active,
+                ..ThreadRuntime::default()
+            },
+        );
+        let sections = project_sections(&threads, &state, true);
+        assert!(
+            sections
+                .iter()
+                .any(|section| section.name == "Empty Project")
+        );
+        assert_eq!(
+            sections
+                .iter()
+                .flat_map(|section| section.threads.iter())
+                .map(|thread| thread.id.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["idle"]
         );
     }
 }

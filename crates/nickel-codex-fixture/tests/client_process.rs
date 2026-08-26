@@ -38,6 +38,7 @@ fn real_stdio_process_supports_typed_lifecycle_and_streaming() {
         .start_thread(StartThread {
             cwd: directory.path().into(),
             model: None,
+            project_id: None,
         })
         .unwrap();
     assert_eq!(

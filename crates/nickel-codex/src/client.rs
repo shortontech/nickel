@@ -182,7 +182,7 @@ impl CodexClient {
     fn initialize(&self) -> Result<(), CodexError> {
         self.request("initialize", json!({
             "clientInfo": {"name": "nickel", "title": "Nickel", "version": env!("CARGO_PKG_VERSION")},
-            "capabilities": {"experimentalApi": false}
+            "capabilities": {"experimentalApi": true}
         }))?;
         self.notify("initialized", json!({}))?;
         *self.inner.state.lock().unwrap() = ConnectionState::Ready;
@@ -801,30 +801,70 @@ impl CodexBackend for CodexClient {
         }
         Ok(models)
     }
-    fn list_threads(&self, page: ThreadPage) -> Result<ThreadPageResult, CodexError> {
+    fn list_projects(&self, page: ProjectPage) -> Result<ProjectPageResult, CodexError> {
         let value = self.request(
-            "thread/list",
+            "project/list",
             json!({"cursor": page.cursor, "limit": page.limit}),
         )?;
-        let threads = value
-            .get("data")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(parse_thread)
-            .collect();
-        Ok(ThreadPageResult {
-            threads,
+        Ok(ProjectPageResult {
+            projects: value
+                .get("data")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(parse_project)
+                .collect(),
             next_cursor: value
                 .get("nextCursor")
                 .and_then(Value::as_str)
                 .map(Into::into),
         })
     }
+    fn import_project(&self, project: ImportProject) -> Result<Project, CodexError> {
+        let value = self.request(
+            "project/import",
+            json!({
+                "idempotencyKey": project.idempotency_key,
+                "name": project.name,
+                "roots": project.roots.into_iter().map(|path| json!({"path": path})).collect::<Vec<_>>(),
+                "threads": project.threads.into_iter().map(|thread| thread.0).collect::<Vec<_>>(),
+                "metadata": null
+            }),
+        )?;
+        parse_project(value.get("project").unwrap_or(&value))
+            .ok_or_else(|| CodexError::Protocol("project/import omitted project".into()))
+    }
+    fn list_threads(&self, page: ThreadPage) -> Result<ThreadPageResult, CodexError> {
+        let value = self.request(
+            "thread/list",
+            json!({"cursor": page.cursor, "limit": page.limit}),
+        )?;
+        let mut threads = Vec::new();
+        let mut runtime = HashMap::new();
+        for value in value
+            .get("data")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(thread) = parse_thread(value) {
+                runtime.insert(thread.id.clone(), parse_thread_runtime(value));
+                threads.push(thread);
+            }
+        }
+        Ok(ThreadPageResult {
+            threads,
+            next_cursor: value
+                .get("nextCursor")
+                .and_then(Value::as_str)
+                .map(Into::into),
+            runtime,
+        })
+    }
     fn start_thread(&self, request: StartThread) -> Result<Thread, CodexError> {
         let value = self.request(
             "thread/start",
-            json!({"cwd": request.cwd, "model": request.model}),
+            json!({"cwd": request.cwd, "model": request.model, "projectId": request.project_id}),
         )?;
         parse_thread(value.get("thread").unwrap_or(&value))
             .ok_or_else(|| CodexError::Protocol("thread/start omitted thread".into()))
@@ -904,6 +944,49 @@ impl CodexBackend for CodexClient {
         let (tx, rx) = mpsc::sync_channel(EVENT_BACKLOG);
         self.inner.subscribers.lock().unwrap().push(tx);
         rx
+    }
+}
+
+fn parse_project(value: &Value) -> Option<Project> {
+    Some(Project {
+        id: value.get("id")?.as_str()?.into(),
+        name: value.get("name")?.as_str()?.into(),
+        roots: value
+            .get("roots")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|root| root.get("path").and_then(Value::as_str).map(Into::into))
+            .collect(),
+    })
+}
+
+fn parse_thread_runtime(value: &Value) -> ThreadRuntime {
+    let status = value.get("status");
+    let status_type = status
+        .and_then(|value| value.get("type"))
+        .and_then(Value::as_str);
+    ThreadRuntime {
+        project_id: value
+            .get("projectId")
+            .and_then(Value::as_str)
+            .map(Into::into),
+        status: match status_type {
+            Some("notLoaded") => ThreadRuntimeStatus::NotLoaded,
+            Some("idle") => ThreadRuntimeStatus::Idle,
+            Some("active") => ThreadRuntimeStatus::Active,
+            Some("systemError") => ThreadRuntimeStatus::SystemError,
+            _ => ThreadRuntimeStatus::Unknown,
+        },
+        active_flags: status
+            .and_then(|value| value.get("activeFlags"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(Into::into)
+            .collect(),
+        can_accept_direct_input: value.get("canAcceptDirectInput").and_then(Value::as_bool),
     }
 }
 
@@ -1035,6 +1118,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn project_and_thread_runtime_use_v2_app_server_fields() {
+        let project = parse_project(&json!({
+            "id": "project-1",
+            "name": "Nickel",
+            "roots": [{"path": "/projects/nickel"}]
+        }))
+        .unwrap();
+        assert_eq!(
+            project.roots,
+            vec![std::path::PathBuf::from("/projects/nickel")]
+        );
+
+        let runtime = parse_thread_runtime(&json!({
+            "projectId": "project-1",
+            "status": {"type": "active", "activeFlags": ["waitingOnUserInput"]},
+            "canAcceptDirectInput": false
+        }));
+        assert_eq!(runtime.project_id.as_deref(), Some("project-1"));
+        assert_eq!(runtime.status, ThreadRuntimeStatus::Active);
+        assert_eq!(runtime.active_flags, ["waitingOnUserInput"]);
+        assert_eq!(runtime.can_accept_direct_input, Some(false));
+    }
+
+    #[test]
     #[allow(clippy::result_large_err)]
     fn remote_websocket_runs_typed_requests_with_bearer_auth_and_remote_cwd() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1079,7 +1186,8 @@ mod tests {
                     "model/list" => json!({"data":[],"nextCursor":null}),
                     "thread/list" => json!({"data":[],"nextCursor":null}),
                     "thread/start" => {
-                        saw_remote_cwd = value["params"]["cwd"] == "/srv/code/nickel";
+                        saw_remote_cwd = value["params"]["cwd"] == "/srv/code/nickel"
+                            && value["params"]["projectId"] == "remote-project";
                         json!({"thread":{"id":"remote-thread","cwd":"/srv/code/nickel"}})
                     }
                     "turn/start" => json!({"turn":{"id":"remote-turn","status":"inProgress"}}),
@@ -1152,6 +1260,7 @@ mod tests {
             .start_thread(StartThread {
                 cwd: "/srv/code/nickel".into(),
                 model: None,
+                project_id: Some("remote-project".into()),
             })
             .unwrap();
         let turn = client

@@ -31,6 +31,8 @@ pub enum SurfaceRole {
     Launcher,
     ControlCenter,
     Notification,
+    CodexHub,
+    CodexChat,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -81,6 +83,10 @@ pub enum ShellEvent {
         repeat: bool,
     },
     Text {
+        surface: SurfaceId,
+        value: String,
+    },
+    Ime {
         surface: SurfaceId,
         value: String,
     },
@@ -198,6 +204,7 @@ impl SdlShell {
         self.create_surface(SurfaceRole::Launcher, 0, primary)?;
         self.create_surface(SurfaceRole::ControlCenter, 0, primary)?;
         self.create_surface(SurfaceRole::Notification, 0, primary)?;
+        self.create_surface(SurfaceRole::CodexHub, 0, primary)?;
         tracing::info!(
             elapsed_ms = self.started.elapsed().as_secs_f64() * 1_000.0,
             surface_count = self.surfaces.len(),
@@ -219,6 +226,45 @@ impl SdlShell {
     pub fn surface_mut(&mut self, id: SurfaceId) -> Option<&mut ShellSurface> {
         let index = *self.surface_indices.get(&id.0)?;
         self.surfaces.get_mut(index)
+    }
+
+    pub fn create_codex_chat_surface(&mut self, title: &str) -> Result<SurfaceId, String> {
+        let geometry = require_displays(self.display_geometries()?)?[0];
+        let mut builder =
+            self.video
+                .window(title, 1120.min(geometry.width), 760.min(geometry.height));
+        builder.position_centered().resizable().high_pixel_density();
+        let window = builder.build().map_err(|error| error.to_string())?;
+        self.video.text_input().start(&window);
+        let id = SurfaceId(window.id());
+        let index = self.surfaces.len();
+        self.surface_indices.insert(id.0, index);
+        self.surfaces.push(ShellSurface {
+            id,
+            role: SurfaceRole::CodexChat,
+            display_index: 0,
+            window: Some(window),
+            presenter: None,
+        });
+        Ok(id)
+    }
+
+    pub fn destroy_surface(&mut self, id: SurfaceId) {
+        let Some(index) = self.surface_indices.remove(&id.0) else {
+            return;
+        };
+        self.surfaces.remove(index);
+        for (index, surface) in self.surfaces.iter().enumerate() {
+            self.surface_indices.insert(surface.id().0, index);
+        }
+    }
+
+    pub fn clipboard_text(&self) -> Option<String> {
+        self.video.clipboard().clipboard_text().ok()
+    }
+
+    pub fn set_clipboard_text(&self, text: &str) {
+        let _ = self.video.clipboard().set_clipboard_text(text);
     }
 
     pub fn present(
@@ -352,13 +398,30 @@ impl SdlShell {
                 140.min(geometry.height),
                 true,
             ),
+            SurfaceRole::CodexHub => (
+                "Codex",
+                geometry.x + (geometry.width.saturating_sub(900) / 2) as i32,
+                geometry.y + (geometry.height.saturating_sub(640) / 2) as i32,
+                900.min(geometry.width),
+                640.min(geometry.height),
+                true,
+            ),
+            SurfaceRole::CodexChat => unreachable!("chat surfaces are created dynamically"),
         };
         let mut builder = self.video.window(title, width, height);
-        builder.position(x, y).borderless().high_pixel_density();
+        builder.position(x, y).high_pixel_density();
+        if role == SurfaceRole::CodexHub {
+            builder.resizable();
+        } else {
+            builder.borderless();
+        }
         if hidden {
             builder.hidden();
         }
         let window = builder.build().map_err(|error| error.to_string())?;
+        if role == SurfaceRole::CodexHub {
+            self.video.text_input().start(&window);
+        }
         if role == SurfaceRole::Launcher {
             self.video.text_input().start(&window);
         }
@@ -444,7 +507,10 @@ impl SdlShell {
                 surface: surface?,
                 value: text,
             }),
-            Event::TextEditing { .. } => None,
+            Event::TextEditing { text, .. } => Some(ShellEvent::Ime {
+                surface: surface?,
+                value: text,
+            }),
             _ => None,
         }
     }

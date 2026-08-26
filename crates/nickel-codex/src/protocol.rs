@@ -46,6 +46,31 @@ pub struct Model {
     pub display_name: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Project {
+    pub id: String,
+    pub name: String,
+    pub roots: Vec<PathBuf>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ThreadRuntimeStatus {
+    NotLoaded,
+    Idle,
+    Active,
+    SystemError,
+    #[default]
+    Unknown,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadRuntime {
+    pub project_id: Option<String>,
+    pub status: ThreadRuntimeStatus,
+    pub active_flags: Vec<String>,
+    pub can_accept_direct_input: Option<bool>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Thread {
     pub id: ThreadId,
@@ -111,12 +136,34 @@ pub struct ThreadPage {
 pub struct ThreadPageResult {
     pub threads: Vec<Thread>,
     pub next_cursor: Option<String>,
+    pub runtime: HashMap<ThreadId, ThreadRuntime>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ProjectPage {
+    pub cursor: Option<String>,
+    pub limit: Option<u32>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProjectPageResult {
+    pub projects: Vec<Project>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ImportProject {
+    pub idempotency_key: String,
+    pub name: String,
+    pub roots: Vec<PathBuf>,
+    pub threads: Vec<ThreadId>,
 }
 
 #[derive(Clone, Debug)]
 pub struct StartThread {
     pub cwd: PathBuf,
     pub model: Option<String>,
+    pub project_id: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -253,6 +300,8 @@ pub enum EventKind {
 pub trait CodexBackend {
     fn account(&self) -> Result<AccountState, CodexError>;
     fn models(&self) -> Result<Vec<Model>, CodexError>;
+    fn list_projects(&self, page: ProjectPage) -> Result<ProjectPageResult, CodexError>;
+    fn import_project(&self, project: ImportProject) -> Result<Project, CodexError>;
     fn list_threads(&self, page: ThreadPage) -> Result<ThreadPageResult, CodexError>;
     fn start_thread(&self, request: StartThread) -> Result<Thread, CodexError>;
     fn resume_thread(&self, id: ThreadId) -> Result<Thread, CodexError>;

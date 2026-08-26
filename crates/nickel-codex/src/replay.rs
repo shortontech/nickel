@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AccountState, CodexBackend, CodexError, CodexEvent, EventKind, InteractionResponse, Model,
-    ServerRequestId, StartThread, StartTurn, Thread, ThreadId, ThreadPage, ThreadPageResult, Turn,
-    TurnId,
+    Project, ProjectPage, ProjectPageResult, ServerRequestId, StartThread, StartTurn, Thread,
+    ThreadId, ThreadPage, ThreadPageResult, ThreadRuntime, Turn, TurnId,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -19,7 +19,11 @@ pub struct ReplayScenario {
     #[serde(default)]
     pub models: Vec<Model>,
     #[serde(default)]
+    pub projects: Vec<Project>,
+    #[serde(default)]
     pub threads: Vec<Thread>,
+    #[serde(default)]
+    pub thread_runtime: HashMap<ThreadId, ThreadRuntime>,
     #[serde(default)]
     pub events: Vec<CodexEvent>,
 }
@@ -62,10 +66,24 @@ impl CodexBackend for ReplayBackend {
     fn models(&self) -> Result<Vec<Model>, CodexError> {
         Ok(self.scenario.models.clone())
     }
+    fn list_projects(&self, _: ProjectPage) -> Result<ProjectPageResult, CodexError> {
+        Ok(ProjectPageResult {
+            projects: self.scenario.projects.clone(),
+            next_cursor: None,
+        })
+    }
+    fn import_project(&self, project: crate::ImportProject) -> Result<Project, CodexError> {
+        Ok(Project {
+            id: project.idempotency_key,
+            name: project.name,
+            roots: project.roots,
+        })
+    }
     fn list_threads(&self, _: ThreadPage) -> Result<ThreadPageResult, CodexError> {
         Ok(ThreadPageResult {
             threads: self.scenario.threads.clone(),
             next_cursor: None,
+            runtime: self.scenario.thread_runtime.clone(),
         })
     }
     fn start_thread(&self, request: StartThread) -> Result<Thread, CodexError> {

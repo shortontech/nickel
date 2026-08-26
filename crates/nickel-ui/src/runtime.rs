@@ -65,6 +65,83 @@ pub trait Application: Sized {
     }
 }
 
+pub struct ApplicationHost<A: Application> {
+    application: A,
+    state: UiStateStore,
+    tree: UiTree<A::Message>,
+    bounds: Rect,
+}
+
+pub struct HostEventOutcome {
+    pub changed: bool,
+    pub clipboard_text: Option<String>,
+}
+
+impl<A: Application> ApplicationHost<A> {
+    pub fn new(application: A, width: u32, height: u32) -> Self {
+        let bounds = Rect::new(0.0, 0.0, width as f32, height as f32);
+        let mut state = UiStateStore::default();
+        let tree = UiTree::layout_with_state(application.view(), bounds, &mut state);
+        Self {
+            application,
+            state,
+            tree,
+            bounds,
+        }
+    }
+
+    pub fn application_mut(&mut self) -> &mut A {
+        &mut self.application
+    }
+
+    pub fn commands(&self) -> &[crate::PaintCommand] {
+        self.tree.commands()
+    }
+
+    pub fn resize(&mut self, width: u32, height: u32) {
+        self.bounds = Rect::new(0.0, 0.0, width as f32, height as f32);
+        self.rebuild();
+    }
+
+    pub fn poll(&mut self) -> bool {
+        if !self.application.poll() {
+            return false;
+        }
+        self.rebuild();
+        true
+    }
+
+    pub fn handle_event(&mut self, event: UiEvent) -> HostEventOutcome {
+        let outcome = self.tree.handle_event(&mut self.state, event);
+        let changed =
+            outcome.invalidation != crate::Invalidation::None || !outcome.messages.is_empty();
+        for message in outcome.messages {
+            self.application.update(message);
+        }
+        let clipboard_text = outcome.clipboard_text;
+        if changed {
+            self.rebuild();
+        }
+        HostEventOutcome {
+            changed,
+            clipboard_text,
+        }
+    }
+
+    pub fn shortcut(&mut self, shortcut: Shortcut) -> bool {
+        if !self.application.shortcut(shortcut) {
+            return false;
+        }
+        self.rebuild();
+        true
+    }
+
+    fn rebuild(&mut self) {
+        self.tree =
+            UiTree::layout_with_state(self.application.view(), self.bounds, &mut self.state);
+    }
+}
+
 pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
     let sdl = sdl3::init()?;
     let video = sdl.video()?;

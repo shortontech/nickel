@@ -2643,6 +2643,7 @@ dependencies = [
  "ico",
  "image",
  "jiff",
+ "nickel-codex-ui",
  "nickel-core",
  "nickel-i18n",
  "nickel-logging",

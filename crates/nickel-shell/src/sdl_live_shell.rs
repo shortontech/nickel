@@ -31,6 +31,7 @@ const PANEL_ITEM_WIDTH: f32 = 52.0;
 enum PanelHover {
     Launcher,
     Task(usize),
+    Codex,
     Tray(usize),
     #[cfg(not(target_os = "macos"))]
     Control,
@@ -52,6 +53,7 @@ pub struct LiveShell {
     audio: AudioStatus,
     launcher_visible: bool,
     control_visible: bool,
+    codex_hub_visible: bool,
     panel_hover: Option<PanelHover>,
     control_state: ControlViewState,
     launcher_view: LauncherViewState,
@@ -111,6 +113,7 @@ impl LiveShell {
             audio,
             launcher_visible: false,
             control_visible: false,
+            codex_hub_visible: false,
             panel_hover: None,
             control_state: ControlViewState::default(),
             launcher_view: LauncherViewState::default(),
@@ -205,6 +208,7 @@ impl LiveShell {
             SurfaceRole::Launcher => self.launcher_scene(width, height),
             SurfaceRole::ControlCenter => self.control_frame(width, height).commands,
             SurfaceRole::Notification => self.notification_scene(width, height),
+            SurfaceRole::CodexHub | SurfaceRole::CodexChat => Vec::new(),
         }
     }
 
@@ -214,6 +218,8 @@ impl LiveShell {
             SurfaceRole::Launcher => self.launcher_visible,
             SurfaceRole::ControlCenter => self.control_visible,
             SurfaceRole::Notification => self.notification.is_some(),
+            SurfaceRole::CodexHub => self.codex_hub_visible,
+            SurfaceRole::CodexChat => true,
         }
     }
 
@@ -249,7 +255,12 @@ impl LiveShell {
             self.launcher_visible = false;
             return true;
         }
-        let tray_start = control_start - self.tray.len() as f32 * 34.0;
+        let tray_start = control_start - self.tray.len().min(4) as f32 * 34.0;
+        let codex_start = tray_start - 44.0;
+        if x >= codex_start && x < tray_start {
+            self.codex_hub_visible = !self.codex_hub_visible;
+            return true;
+        }
         if x >= tray_start {
             let index = ((x - tray_start) / 34.0) as usize;
             if let Some(item) = self.tray.get(index) {
@@ -337,6 +348,10 @@ impl LiveShell {
             }
             SurfaceRole::ControlCenter if self.control_visible => {
                 self.control_visible = false;
+                true
+            }
+            SurfaceRole::CodexHub if self.codex_hub_visible => {
+                self.codex_hub_visible = false;
                 true
             }
             _ => false,
@@ -696,6 +711,19 @@ impl LiveShell {
                 false,
             ));
         }
+        let codex_x = panel_control_start(width) - self.tray.len().min(4) as f32 * 34.0 - 44.0;
+        if self.panel_hover == Some(PanelHover::Codex) {
+            commands.push(PaintCommand::RoundedFill {
+                rect: Rect::new(codex_x + 2.0, 7.0, 40.0, 42.0),
+                color: self.palette.surface_hover,
+                radius: 8.0,
+            });
+        }
+        commands.push(PaintCommand::RoundedFill {
+            rect: Rect::new(codex_x + 10.0, 15.0, 24.0, 24.0),
+            color: 0xf5cf3d,
+            radius: 3.0,
+        });
         commands
     }
 
@@ -720,6 +748,9 @@ impl LiveShell {
         let tray_start = control_start - tray_count as f32 * 34.0;
         if x >= tray_start {
             return Some(PanelHover::Tray(((x - tray_start) / 34.0) as usize));
+        }
+        if x >= tray_start - 44.0 {
+            return Some(PanelHover::Codex);
         }
         None
     }

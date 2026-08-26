@@ -1,12 +1,46 @@
 mod controller;
+mod lease;
 mod model;
 mod view;
 
 pub use controller::{
     BackendMode, ChatController, ControllerCommand, ControllerEvent, create_managed_workspace,
 };
+pub use lease::ThreadLease;
 pub use model::{ChatItem, ChatItemKind, ChatState, ConnectionStatus, PendingInteraction};
-pub use view::{ChatApplication, ChatMessage};
+pub use view::{ChatApplication, ChatMessage, ShellRequest};
+
+pub fn shell_application(
+    cwd: std::path::PathBuf,
+    hub: bool,
+    thread: Option<nickel_codex::ThreadId>,
+    project_id: Option<String>,
+) -> Result<ChatApplication, String> {
+    let settings_path =
+        nickel_codex::CodexSettings::default_path().map_err(|error| error.to_string())?;
+    let settings =
+        nickel_codex::CodexSettings::load(&settings_path).map_err(|error| error.to_string())?;
+    let mode = settings.selected_host().map_or_else(
+        || BackendMode::Live {
+            choice: nickel_codex::BackendChoice::Automatic,
+            cwd: cwd.clone(),
+        },
+        |host| BackendMode::Remote { host: host.clone() },
+    );
+    let mut application = ChatApplication::with_settings(mode, settings, Some(settings_path));
+    application = if hub {
+        application.as_shell_hub()
+    } else {
+        application.as_shell_chat(&cwd)
+    };
+    if let Some(project_id) = project_id {
+        application.use_project(cwd, project_id);
+    }
+    if let Some(thread) = thread {
+        application.resume_thread(thread)?;
+    }
+    Ok(application)
+}
 
 #[cfg(test)]
 mod tests {
@@ -310,6 +344,59 @@ mod tests {
     }
 
     #[test]
+    fn shell_hub_raster_shows_projects_new_actions_and_available_conversations() {
+        let mut state = ChatState::default();
+        state.status = ConnectionStatus::Ready;
+        state.projects = vec![nickel_codex::Project {
+            id: "nickel".into(),
+            name: "Nickel".into(),
+            roots: vec!["/projects/nickel".into()],
+        }];
+        state.threads = vec![Thread {
+            id: ThreadId("available".into()),
+            title: Some("Integrate Codex with the shell".into()),
+            cwd: Some("/projects/nickel".into()),
+            last_used_at: Some(1),
+            turns: Vec::new(),
+        }];
+        state.thread_runtime.insert(
+            ThreadId("available".into()),
+            nickel_codex::ThreadRuntime {
+                project_id: Some("nickel".into()),
+                status: nickel_codex::ThreadRuntimeStatus::Idle,
+                ..nickel_codex::ThreadRuntime::default()
+            },
+        );
+        let tree = UiTree::layout(
+            view::shell_hub_view(&state),
+            Rect::new(0.0, 0.0, 900.0, 640.0),
+        );
+        assert!(
+            tree.message_rect(&ChatMessage::NewChatIn(
+                "/projects/nickel".into(),
+                "nickel".into(),
+            ))
+            .is_some()
+        );
+        assert!(
+            tree.message_rect(&ChatMessage::SelectThread(ThreadId("available".into())))
+                .is_some()
+        );
+
+        let mut renderer = SdlComponentRenderer::new(900, 640, 1.0);
+        renderer.render(tree.commands());
+        let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/nickel-codex-snapshots/shell-hub.png");
+        std::fs::create_dir_all(output.parent().unwrap()).unwrap();
+        image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_fn(900, 640, |x, y| {
+            let pixel = renderer.pixels()[(y * 900 + x) as usize];
+            image::Rgba([pixel.r, pixel.g, pixel.b, pixel.a])
+        })
+        .save(output)
+        .unwrap();
+    }
+
+    #[test]
     fn sidebar_attributes_the_codex_cli_without_branding_nickel_as_codex() {
         assert_eq!(
             controller::codex_attribution("codex-cli 0.149.0"),
@@ -418,7 +505,7 @@ mod tests {
                     if index % 2 == 0 {
                         "/projects/nickel"
                     } else {
-                        "/projects/galen"
+                        "/projects/sample-project"
                     }
                     .into(),
                 ),
@@ -882,6 +969,25 @@ mod tests {
         assert_eq!(first.state.items.len(), 1);
         assert!(second.state.items.is_empty());
         assert!(second.state.draft.is_empty());
+    }
+
+    #[test]
+    fn embedded_hub_emits_shell_requests_without_starting_a_process() {
+        let backend = ReplayBackend::from_json(r#"{"name":"embedded","events":[]}"#).unwrap();
+        let cwd = std::path::PathBuf::from("/projects/nickel");
+        let mut app = ChatApplication::new(BackendMode::Replay {
+            backend,
+            cwd: cwd.clone(),
+        })
+        .as_shell_hub();
+        app.update(ChatMessage::NewChatIn(cwd.clone(), "project-1".into()));
+        assert_eq!(
+            app.take_shell_requests(),
+            vec![ShellRequest::OpenProject {
+                cwd,
+                project_id: "project-1".into()
+            }]
+        );
     }
 
     #[test]
