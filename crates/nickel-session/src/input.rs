@@ -406,7 +406,8 @@ impl NickelSession {
                         .element_under(pointer.current_location())
                         .map(|(window, location)| (window.clone(), location))
                         .filter(|(window, _)| {
-                            !self.is_panel_window(window)
+                            !self.desktop_windows.contains(window)
+                                && !self.is_panel_window(window)
                                 && self.launcher_window.as_ref() != Some(window)
                                 && self.context_menu_window.as_ref() != Some(window)
                         })
@@ -440,7 +441,8 @@ impl NickelSession {
                         .element_under(pointer.current_location())
                         .map(|(window, location)| (window.clone(), location))
                         .filter(|(window, _)| {
-                            !self.is_panel_window(window)
+                            !self.desktop_windows.contains(window)
+                                && !self.is_panel_window(window)
                                 && self.launcher_window.as_ref() != Some(window)
                                 && self.context_menu_window.as_ref() != Some(window)
                         })
