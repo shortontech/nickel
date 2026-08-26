@@ -210,9 +210,21 @@ pub fn init_udev(
     event_loop
         .handle()
         .insert_source(buffer_commit_rx, |event, _, data| {
-            let channel::Event::Msg(surface) = event else {
+            let channel::Event::Msg(commit) = event else {
                 return;
             };
+            let surface = commit.surface;
+            if let Some(native) = data.native.as_mut()
+                && let Err(error) = native.gpus.early_import(native.primary_gpu, &surface)
+            {
+                tracing::warn!(?error, "failed to import client buffer on the primary GPU");
+            }
+            // Synchronized subsurface state is latched by a later ancestor
+            // commit. Import its buffer now, but do not present the partial
+            // surface-tree transaction.
+            if !commit.render_visible {
+                return;
+            }
             if let Some(native) = data.native.as_mut()
                 && !native.client_bootstrap_started
             {
@@ -244,11 +256,6 @@ pub fn init_udev(
             let client_bootstrapping = data.native.as_ref().is_some_and(|native| {
                 native.client_bootstrap_started && Instant::now() < native.bootstrap_render_until
             });
-            if let Some(native) = data.native.as_mut()
-                && let Err(error) = native.gpus.early_import(native.primary_gpu, &surface)
-            {
-                tracing::warn!(?error, "failed to import client buffer on the primary GPU");
-            }
             if let Some(native) = data.native.as_mut() {
                 native
                     .devices

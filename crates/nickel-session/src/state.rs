@@ -137,7 +137,7 @@ pub struct NickelSession {
     pub last_titlebar_click: Option<(ObjectId, u32, Point<f64, Logical>)>,
     pub suppress_left_button_release: bool,
     pub frame_cursor: crate::window_frame::FrameCursor,
-    pub buffer_commit_tx: Option<smithay::reexports::calloop::channel::Sender<WlSurface>>,
+    pub buffer_commit_tx: Option<smithay::reexports::calloop::channel::Sender<SurfaceBufferCommit>>,
     pub identify_outputs_until: Option<std::time::Instant>,
     pub output_capture_path: Option<PathBuf>,
     pub output_capture_reply_path: Option<PathBuf>,
@@ -151,6 +151,11 @@ pub struct PreviewFrame {
     pub width: u16,
     pub height: u16,
     pub rgba: Vec<u8>,
+}
+
+pub struct SurfaceBufferCommit {
+    pub surface: WlSurface,
+    pub render_visible: bool,
 }
 
 impl NickelSession {

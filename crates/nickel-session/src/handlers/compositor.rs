@@ -1,4 +1,8 @@
-use crate::{NickelSession, grabs::resize_grab, state::ClientState};
+use crate::{
+    NickelSession,
+    grabs::resize_grab,
+    state::{ClientState, SurfaceBufferCommit},
+};
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
     delegate_compositor, delegate_shm,
@@ -18,6 +22,10 @@ use smithay::{
 
 use super::xdg_shell;
 
+fn commit_is_render_visible(synchronized_subsurface: bool) -> bool {
+    !synchronized_subsurface
+}
+
 impl CompositorHandler for NickelSession {
     fn compositor_state(&mut self) -> &mut CompositorState {
         &mut self.compositor_state
@@ -29,10 +37,8 @@ impl CompositorHandler for NickelSession {
 
     fn commit(&mut self, surface: &WlSurface) {
         on_commit_buffer_handler::<Self>(surface);
-        if let Some(sender) = &self.buffer_commit_tx {
-            let _ = sender.send(surface.clone());
-        }
-        if !is_sync_subsurface(surface) {
+        let render_visible = commit_is_render_visible(is_sync_subsurface(surface));
+        if render_visible {
             let mut root = surface.clone();
             while let Some(parent) = get_parent(&root) {
                 root = parent;
@@ -48,6 +54,12 @@ impl CompositorHandler for NickelSession {
 
         xdg_shell::handle_commit(&mut self.popups, &self.space, surface);
         resize_grab::handle_commit(&mut self.space, surface);
+        if let Some(sender) = &self.buffer_commit_tx {
+            let _ = sender.send(SurfaceBufferCommit {
+                surface: surface.clone(),
+                render_visible,
+            });
+        }
     }
 }
 
@@ -63,3 +75,18 @@ impl ShmHandler for NickelSession {
 
 delegate_compositor!(NickelSession);
 delegate_shm!(NickelSession);
+
+#[cfg(test)]
+mod tests {
+    use super::commit_is_render_visible;
+
+    #[test]
+    fn synchronized_subsurface_commit_waits_for_ancestor_commit() {
+        assert!(!commit_is_render_visible(true));
+    }
+
+    #[test]
+    fn root_or_desynchronized_commit_can_schedule_presentation() {
+        assert!(commit_is_render_visible(false));
+    }
+}
