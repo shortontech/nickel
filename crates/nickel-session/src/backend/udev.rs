@@ -397,7 +397,18 @@ pub fn init_udev(
             }
             UdevEvent::Changed { device_id } => {
                 if let Ok(node) = DrmNode::from_dev_id(device_id) {
-                    data.scan_connectors(node);
+                    let known = data
+                        .native
+                        .as_ref()
+                        .is_some_and(|native| native.devices.contains_key(&node));
+                    if known {
+                        data.scan_connectors(node);
+                    } else if let Some(path) = node.dev_path() {
+                        let handle = data.event_loop_handle.clone();
+                        if let Err(error) = data.add_drm_device_with_handle(&handle, node, &path) {
+                            tracing::warn!(%node, %error, "failed to add changed DRM device");
+                        }
+                    }
                 }
             }
             UdevEvent::Removed { device_id } => {
@@ -468,6 +479,16 @@ impl CalloopData {
         if native.devices.contains_key(&node) {
             return Ok(());
         }
+        let is_evdi = is_evdi_device(path);
+        if is_evdi
+            && matches!(
+                has_connected_drm_connector(Path::new("/sys/class/drm"), path),
+                Some(false)
+            )
+        {
+            tracing::debug!(%node, path = %path.display(), "deferring disconnected EVDI device");
+            return Ok(());
+        }
         let fd = native.session.open(
             path,
             OFlags::RDWR | OFlags::CLOEXEC | OFlags::NOCTTY | OFlags::NONBLOCK,
@@ -475,7 +496,6 @@ impl CalloopData {
         let fd = DrmDeviceFd::new(DeviceFd::from(fd));
         let (drm, notifier) = DrmDevice::new(fd.clone(), true)?;
         let gbm = GbmDevice::new(fd)?;
-        let is_evdi = is_evdi_device(path);
         native.gpus.as_mut().add_node(node, gbm.clone())?;
         let render_node = node;
         let renderer = native
@@ -1231,6 +1251,55 @@ fn is_evdi_device(path: &Path) -> bool {
         .ok()
         .and_then(|driver| driver.file_name().map(|name| name == "evdi"))
         .unwrap_or(false)
+}
+
+fn has_connected_drm_connector(sysfs_drm: &Path, path: &Path) -> Option<bool> {
+    let card = path.file_name()?.to_string_lossy();
+    let connector_prefix = format!("{card}-");
+    let entries = std::fs::read_dir(sysfs_drm).ok()?;
+    let mut found_connector = false;
+    for entry in entries.flatten() {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(&connector_prefix)
+        {
+            continue;
+        }
+        found_connector = true;
+        if std::fs::read_to_string(entry.path().join("status"))
+            .ok()
+            .is_some_and(|status| status.trim() == "connected")
+        {
+            return Some(true);
+        }
+    }
+    found_connector.then_some(false)
+}
+
+#[cfg(test)]
+mod evdi_tests {
+    use super::has_connected_drm_connector;
+    use std::{fs, path::Path};
+
+    #[test]
+    fn disconnected_virtual_cards_do_not_require_renderers_until_connected() {
+        let root =
+            std::env::temp_dir().join(format!("nickel-evdi-connectors-{}", std::process::id()));
+        let connector = root.join("card4-DVI-I-4");
+        fs::create_dir_all(&connector).unwrap();
+        fs::write(connector.join("status"), "disconnected\n").unwrap();
+        assert_eq!(
+            has_connected_drm_connector(&root, Path::new("/dev/dri/card4")),
+            Some(false)
+        );
+        fs::write(connector.join("status"), "connected\n").unwrap();
+        assert_eq!(
+            has_connected_drm_connector(&root, Path::new("/dev/dri/card4")),
+            Some(true)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 
 fn themed_arrow_cursor() -> CursorBuffer {
