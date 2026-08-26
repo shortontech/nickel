@@ -83,6 +83,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     if arguments.backend == backend::BackendKind::Udev {
+        login_services::hand_off_login_credentials();
         import_runtime_environment();
     }
 

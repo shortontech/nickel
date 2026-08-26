@@ -1,14 +1,11 @@
 use std::{
     env,
-    ffi::OsStr,
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
-    process::{Command, ExitStatus},
+    process::Command,
 };
 
 const CURRENT_DESKTOP: &str = "Nickel";
-const KWALLET_PAM_SOCKET: &str = "PAM_KWALLET5_LOGIN";
-const KWALLET_PAM_HELPER: &str = "/usr/share/libpam-kwallet-common/pam_kwallet_init";
 const XDG_HOME_DEFAULTS: [(&str, &str); 4] = [
     ("XDG_CONFIG_HOME", ".config"),
     ("XDG_DATA_HOME", ".local/share"),
@@ -25,16 +22,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let shell = sibling_binary(directory, "nickel")?;
 
     prepare_login_environment()?;
-    match hand_off_kwallet_pam_credentials(
-        Path::new(KWALLET_PAM_HELPER),
-        env::var_os(KWALLET_PAM_SOCKET).as_deref(),
-    ) {
-        Ok(Some(status)) if !status.success() => {
-            eprintln!("nickel-login: KWallet PAM handoff exited with {status}");
-        }
-        Err(error) => eprintln!("nickel-login: KWallet PAM handoff failed: {error}"),
-        Ok(_) => {}
-    }
 
     let error = Command::new(session)
         .arg("--backend")
@@ -43,23 +30,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .arg(shell)
         .exec();
     Err(error.into())
-}
-
-fn hand_off_kwallet_pam_credentials(
-    helper: &Path,
-    socket: Option<&OsStr>,
-) -> Result<Option<ExitStatus>, std::io::Error> {
-    let Some(socket) = socket else {
-        return Ok(None);
-    };
-    if !helper.is_file() {
-        return Ok(None);
-    }
-
-    Command::new(helper)
-        .env(KWALLET_PAM_SOCKET, socket)
-        .status()
-        .map(Some)
 }
 
 fn prepare_login_environment() -> Result<(), Box<dyn std::error::Error>> {
@@ -94,9 +64,7 @@ fn sibling_binary(directory: &Path, name: &str) -> Result<PathBuf, Box<dyn std::
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        CURRENT_DESKTOP, XDG_HOME_DEFAULTS, hand_off_kwallet_pam_credentials, sibling_binary,
-    };
+    use super::{CURRENT_DESKTOP, XDG_HOME_DEFAULTS, sibling_binary};
 
     #[test]
     fn advertises_provider_neutral_desktop_identity() {
@@ -121,25 +89,5 @@ mod tests {
         let directory =
             std::env::temp_dir().join(format!("nickel-login-test-missing-{}", std::process::id()));
         assert!(sibling_binary(&directory, "nickel").is_err());
-    }
-
-    #[test]
-    fn skips_kwallet_handoff_without_pam_socket() {
-        assert!(
-            hand_off_kwallet_pam_credentials(std::path::Path::new("/missing"), None)
-                .unwrap()
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn invokes_available_kwallet_handoff_for_pam_socket() {
-        let status = hand_off_kwallet_pam_credentials(
-            std::path::Path::new("/bin/true"),
-            Some(std::ffi::OsStr::new("/tmp/test-kwallet.socket")),
-        )
-        .unwrap()
-        .expect("helper should run");
-        assert!(status.success());
     }
 }

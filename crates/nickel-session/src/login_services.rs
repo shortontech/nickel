@@ -1,5 +1,7 @@
 use std::{
+    ffi::OsStr,
     path::{Path, PathBuf},
+    process::{Command, ExitStatus},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -24,6 +26,38 @@ const METHOD_TIMEOUT: Duration = Duration::from_secs(5);
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
 const RETRY_DELAY: Duration = Duration::from_secs(2);
 const READY_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+const KWALLET_PAM_SOCKET: &str = "PAM_KWALLET5_LOGIN";
+const KWALLET_PAM_HELPER: &str = "/usr/share/libpam-kwallet-common/pam_kwallet_init";
+
+pub fn hand_off_login_credentials() {
+    match hand_off_kwallet_pam_credentials(
+        Path::new(KWALLET_PAM_HELPER),
+        std::env::var_os(KWALLET_PAM_SOCKET).as_deref(),
+    ) {
+        Ok(Some(status)) if !status.success() => {
+            tracing::warn!(?status, "KWallet PAM handoff failed");
+        }
+        Err(error) => tracing::warn!(%error, "KWallet PAM handoff failed"),
+        Ok(_) => {}
+    }
+}
+
+fn hand_off_kwallet_pam_credentials(
+    helper: &Path,
+    socket: Option<&OsStr>,
+) -> Result<Option<ExitStatus>, std::io::Error> {
+    let Some(socket) = socket else {
+        return Ok(None);
+    };
+    if !helper.is_file() {
+        return Ok(None);
+    }
+
+    Command::new(helper)
+        .env(KWALLET_PAM_SOCKET, socket)
+        .status()
+        .map(Some)
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -342,7 +376,10 @@ mod tests {
         zvariant::{ObjectPath, OwnedObjectPath, OwnedValue},
     };
 
-    use super::{SecureStorageError, SecureStorageState, prepare_secure_storage};
+    use super::{
+        SecureStorageError, SecureStorageState, hand_off_kwallet_pam_credentials,
+        prepare_secure_storage,
+    };
 
     const COLLECTION_PATH: &str = "/org/freedesktop/secrets/collection/login";
     const PROMPT_PATH: &str = "/org/freedesktop/secrets/prompt/unlock";
@@ -352,6 +389,26 @@ mod tests {
         Immediate,
         PromptSuccess,
         PromptDismissed,
+    }
+
+    #[test]
+    fn skips_kwallet_handoff_without_pam_socket() {
+        assert!(
+            hand_off_kwallet_pam_credentials(std::path::Path::new("/missing"), None)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn invokes_available_kwallet_handoff_for_pam_socket() {
+        let status = hand_off_kwallet_pam_credentials(
+            std::path::Path::new("/bin/true"),
+            Some(std::ffi::OsStr::new("/tmp/test-kwallet.socket")),
+        )
+        .unwrap()
+        .expect("helper should run");
+        assert!(status.success());
     }
 
     struct MockService {
