@@ -653,6 +653,18 @@ fn vt_from_keysym(sym: Keysym) -> Option<i32> {
         keysyms::KEY_F10 => Some(10),
         keysyms::KEY_F11 => Some(11),
         keysyms::KEY_F12 => Some(12),
+        keysyms::KEY_XF86Switch_VT_1 => Some(1),
+        keysyms::KEY_XF86Switch_VT_2 => Some(2),
+        keysyms::KEY_XF86Switch_VT_3 => Some(3),
+        keysyms::KEY_XF86Switch_VT_4 => Some(4),
+        keysyms::KEY_XF86Switch_VT_5 => Some(5),
+        keysyms::KEY_XF86Switch_VT_6 => Some(6),
+        keysyms::KEY_XF86Switch_VT_7 => Some(7),
+        keysyms::KEY_XF86Switch_VT_8 => Some(8),
+        keysyms::KEY_XF86Switch_VT_9 => Some(9),
+        keysyms::KEY_XF86Switch_VT_10 => Some(10),
+        keysyms::KEY_XF86Switch_VT_11 => Some(11),
+        keysyms::KEY_XF86Switch_VT_12 => Some(12),
         _ => None,
     }
 }
@@ -690,5 +702,21 @@ mod tests {
         assert_eq!(vt_from_keysym(Keysym::new(keysyms::KEY_F11)), Some(11));
         assert_eq!(vt_from_keysym(Keysym::new(keysyms::KEY_F12)), Some(12));
         assert_eq!(vt_from_keysym(Keysym::new(keysyms::KEY_Escape)), None);
+    }
+
+    #[test]
+    fn xkb_server_control_keysyms_map_to_linux_virtual_terminals() {
+        assert_eq!(
+            vt_from_keysym(Keysym::new(keysyms::KEY_XF86Switch_VT_1)),
+            Some(1)
+        );
+        assert_eq!(
+            vt_from_keysym(Keysym::new(keysyms::KEY_XF86Switch_VT_10)),
+            Some(10)
+        );
+        assert_eq!(
+            vt_from_keysym(Keysym::new(keysyms::KEY_XF86Switch_VT_12)),
+            Some(12)
+        );
     }
 }
