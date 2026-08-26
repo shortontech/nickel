@@ -137,6 +137,7 @@ pub enum GlobalShortcut {
 pub enum ShellCommand {
     Show,
     Hide,
+    LogOut,
     ShowContextMenu {
         x: i32,
         width: i32,

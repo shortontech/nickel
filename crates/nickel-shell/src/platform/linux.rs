@@ -520,9 +520,17 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
     let Some(path) = env::var_os(SESSION_CONTROL_ENV) else {
         return false;
     };
-    let command = match command {
+    let command = shell_command_payload(command);
+    UnixDatagram::unbound()
+        .and_then(|socket| socket.send_to(command.as_bytes(), path))
+        .is_ok()
+}
+
+fn shell_command_payload(command: ShellCommand) -> String {
+    match command {
         ShellCommand::Show => "show-launcher".to_owned(),
         ShellCommand::Hide => "hide-launcher".to_owned(),
+        ShellCommand::LogOut => "logout".to_owned(),
         ShellCommand::ShowContextMenu { x, width, height } => {
             format!("show-context-menu\t{x}\t{width}\t{height}")
         }
@@ -540,10 +548,7 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
             WindowAction::Maximize => format!("maximize-window\t{}", window.0),
             WindowAction::Minimize => format!("minimize-window\t{}", window.0),
         },
-    };
-    UnixDatagram::unbound()
-        .and_then(|socket| socket.send_to(command.as_bytes(), path))
-        .is_ok()
+    }
 }
 
 pub struct WindowFeed {
@@ -694,9 +699,17 @@ fn resolve_application_id(native_app_id: &str, launcher: &Launcher) -> Option<Ap
 mod tests {
     use std::time::Duration;
 
-    use crate::{launcher::Launcher, model::Application};
+    use crate::{launcher::Launcher, model::Application, platform::ShellCommand};
 
-    use super::{parse_window, pixmap_to_rgba, resolve_application_id, tray_retry_delay};
+    use super::{
+        parse_window, pixmap_to_rgba, resolve_application_id, shell_command_payload,
+        tray_retry_delay,
+    };
+
+    #[test]
+    fn logout_uses_the_session_control_protocol() {
+        assert_eq!(shell_command_payload(ShellCommand::LogOut), "logout");
+    }
 
     #[test]
     fn wayland_app_id_resolution_stays_in_linux_adapter() {

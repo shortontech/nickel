@@ -782,6 +782,12 @@ impl LiveShell {
             ControlAction::SelectAudioDevice { id } => {
                 let _ = platform::select_audio_device(&id);
             }
+            ControlAction::ToggleLogoutConfirmation => {
+                self.control_state.logout_confirmation = !self.control_state.logout_confirmation;
+            }
+            ControlAction::LogOut => {
+                let _ = platform::send_shell_command(ShellCommand::LogOut);
+            }
         }
         let _ = self.refresh();
     }

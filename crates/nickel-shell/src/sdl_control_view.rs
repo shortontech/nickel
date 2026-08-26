@@ -31,6 +31,8 @@ pub enum ControlAction {
     ToggleAudioSection,
     SetAudioVolume(u8),
     SelectAudioDevice { id: String },
+    ToggleLogoutConfirmation,
+    LogOut,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -44,6 +46,7 @@ pub struct ControlViewState {
     pub wifi_expanded: bool,
     pub bluetooth_expanded: bool,
     pub audio_expanded: bool,
+    pub logout_confirmation: bool,
     /// Positive logical pixels scrolled below the fixed header.
     pub scroll_offset: f32,
 }
@@ -116,6 +119,7 @@ pub fn build_control_center(
     builder.wifi(network, state.wifi_expanded);
     builder.bluetooth(bluetooth, state.bluetooth_expanded);
     builder.audio(audio, state.audio_expanded);
+    builder.session(state.logout_confirmation);
 
     let content_bottom = builder.y + state.scroll_offset.max(0.0);
     builder.commands.push(PaintCommand::PopClip);
@@ -138,6 +142,59 @@ struct ViewBuilder {
 }
 
 impl ViewBuilder {
+    fn session(&mut self, confirming_logout: bool) {
+        let card = self.card(if confirming_logout { 92.0 } else { 68.0 });
+        self.commands.push(text(
+            Rect::new(
+                card.origin.x + 14.0,
+                card.origin.y + 11.0,
+                card.size.width - 28.0,
+                22.0,
+            ),
+            if confirming_logout {
+                "Log out of Nickel?"
+            } else {
+                "Session"
+            },
+            1.5,
+            PRIMARY,
+            true,
+        ));
+
+        if confirming_logout {
+            self.action_button(
+                Rect::new(card.origin.x + 14.0, card.origin.y + 47.0, 104.0, 30.0),
+                "Cancel",
+                ControlAction::ToggleLogoutConfirmation,
+                false,
+            );
+            self.action_button(
+                Rect::new(
+                    card.origin.x + card.size.width - 132.0,
+                    card.origin.y + 47.0,
+                    118.0,
+                    30.0,
+                ),
+                "Log out",
+                ControlAction::LogOut,
+                true,
+            );
+        } else {
+            self.action_button(
+                Rect::new(
+                    card.origin.x + card.size.width - 132.0,
+                    card.origin.y + 19.0,
+                    118.0,
+                    30.0,
+                ),
+                "Log out",
+                ControlAction::ToggleLogoutConfirmation,
+                false,
+            );
+        }
+        self.finish_card(card);
+    }
+
     fn wifi(&mut self, status: &NetworkStatus, expanded: bool) {
         let rows = usize::from(expanded) * status.networks.len().min(8);
         let height = 78.0 + rows as f32 * ROW_HEIGHT;
@@ -512,6 +569,27 @@ impl ViewBuilder {
         ));
     }
 
+    fn action_button(&mut self, rect: Rect, label: &str, action: ControlAction, warning: bool) {
+        self.commands.push(PaintCommand::RoundedFill {
+            rect,
+            color: if warning { 0x9f3f4a } else { 0x34445f },
+            radius: 7.0,
+        });
+        self.commands.push(text(
+            Rect::new(
+                rect.origin.x + 10.0,
+                rect.origin.y + 6.0,
+                rect.size.width - 20.0,
+                18.0,
+            ),
+            label,
+            1.0,
+            PRIMARY,
+            true,
+        ));
+        self.hit(rect, action);
+    }
+
     fn chevron_hit(&mut self, rect: Rect, expanded: bool, action: ControlAction) {
         self.commands.push(text(
             Rect::new(
@@ -571,4 +649,66 @@ fn intersection(left: Rect, right: Rect) -> Option<Rect> {
     let right_edge = (left.origin.x + left.size.width).min(right.origin.x + right.size.width);
     let bottom_edge = (left.origin.y + left.size.height).min(right.origin.y + right.size.height);
     (right_edge > x && bottom_edge > y).then(|| Rect::new(x, y, right_edge - x, bottom_edge - y))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::platform::{AudioStatus, BluetoothStatus, NetworkStatus};
+
+    use super::{ControlAction, ControlViewState, build_control_center};
+
+    fn logout_action(state: ControlViewState) -> Option<ControlAction> {
+        let frame = build_control_center(
+            &NetworkStatus::default(),
+            &BluetoothStatus::default(),
+            &AudioStatus::default(),
+            state,
+            (380.0, 650.0),
+        );
+        let target = frame.hit_targets.iter().find(|target| {
+            matches!(
+                target.action,
+                ControlAction::ToggleLogoutConfirmation | ControlAction::LogOut
+            )
+        })?;
+        frame.action_at(
+            target.bounds.origin.x + target.bounds.size.width / 2.0,
+            target.bounds.origin.y + target.bounds.size.height / 2.0,
+        )
+    }
+
+    #[test]
+    fn logout_requires_confirmation() {
+        assert_eq!(
+            logout_action(ControlViewState::default()),
+            Some(ControlAction::ToggleLogoutConfirmation)
+        );
+        assert_eq!(
+            logout_action(ControlViewState {
+                logout_confirmation: true,
+                ..ControlViewState::default()
+            }),
+            Some(ControlAction::ToggleLogoutConfirmation)
+        );
+    }
+
+    #[test]
+    fn confirmed_logout_is_available_as_a_distinct_action() {
+        let frame = build_control_center(
+            &NetworkStatus::default(),
+            &BluetoothStatus::default(),
+            &AudioStatus::default(),
+            ControlViewState {
+                logout_confirmation: true,
+                ..ControlViewState::default()
+            },
+            (380.0, 650.0),
+        );
+        assert!(
+            frame
+                .hit_targets
+                .iter()
+                .any(|target| target.action == ControlAction::LogOut)
+        );
+    }
 }

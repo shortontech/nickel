@@ -297,6 +297,7 @@ impl NickelSession {
                             b"toggle-launcher" => data.state.toggle_launcher(),
                             b"hide-launcher" => data.state.set_launcher_visible(false),
                             b"show-launcher" => data.state.set_launcher_visible(true),
+                            b"logout" => data.state.loop_signal.stop(),
                             b"launcher-visible" => {
                                 if let Some(path) = source.as_pathname() {
                                     let visible = if data.state.launcher_visibility.is_visible() {
