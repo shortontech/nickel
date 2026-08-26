@@ -8,11 +8,13 @@ use std::collections::HashMap;
 use std::time::Duration;
 use std::time::Instant;
 
-use nickel_ui::{DamageRegion, PaintCommand, SdlCanvasPresenter};
+use nickel_ui::{DamageRegion, PaintCommand};
 use sdl3::event::{Event, WindowEvent};
 use sdl3::keyboard::{Keycode, Mod};
 use sdl3::mouse::MouseButton;
 use sdl3::video::Window;
+
+use crate::sdl_gpu::{SdlGpuPresenter, SharedSdlGraphics};
 
 pub const DESKTOP_TITLE: &str = "Nickel Desktop";
 pub const PANEL_TITLE: &str = "Nickel Panel";
@@ -109,8 +111,9 @@ pub struct ShellSurface {
     id: SurfaceId,
     role: SurfaceRole,
     display_index: usize,
-    window: Option<Window>,
-    presenter: Option<SdlCanvasPresenter>,
+    // Drop the GPU surface before the native window whose handles it borrows.
+    presenter: Option<SdlGpuPresenter>,
+    window: Window,
 }
 
 impl ShellSurface {
@@ -127,39 +130,23 @@ impl ShellSurface {
     }
 
     pub fn window(&self) -> &Window {
-        if let Some(presenter) = &self.presenter {
-            presenter.window()
-        } else {
-            self.window.as_ref().expect("shell surface owns a window")
-        }
+        &self.window
     }
 
     pub fn window_mut(&mut self) -> &mut Window {
-        if let Some(presenter) = &mut self.presenter {
-            presenter.window_mut()
-        } else {
-            self.window.as_mut().expect("shell surface owns a window")
-        }
-    }
-
-    fn ensure_presenter(&mut self) -> Result<&mut SdlCanvasPresenter, String> {
-        if self.presenter.is_none() {
-            let window = self.window.take().expect("pending shell window exists");
-            self.presenter = Some(SdlCanvasPresenter::new(window)?);
-        }
-        Ok(self
-            .presenter
-            .as_mut()
-            .expect("shell presenter initialized"))
+        &mut self.window
     }
 }
 
 pub struct SdlShell {
-    _sdl: sdl3::Sdl,
-    video: sdl3::VideoSubsystem,
-    events: sdl3::EventPump,
+    // Surface presenters must drop before their shared device, and all native
+    // windows must drop before SDL's video subsystem.
     surfaces: Vec<ShellSurface>,
+    graphics: Option<std::sync::Arc<SharedSdlGraphics>>,
     surface_indices: HashMap<u32, usize>,
+    events: sdl3::EventPump,
+    video: sdl3::VideoSubsystem,
+    _sdl: sdl3::Sdl,
     started: Instant,
 }
 
@@ -181,11 +168,12 @@ impl SdlShell {
             );
         }
         Ok(Self {
-            _sdl: sdl,
-            video,
-            events,
             surfaces: Vec::new(),
+            graphics: None,
             surface_indices: HashMap::new(),
+            events,
+            video,
+            _sdl: sdl,
             started,
         })
     }
@@ -243,8 +231,8 @@ impl SdlShell {
             id,
             role: SurfaceRole::CodexChat,
             display_index: 0,
-            window: Some(window),
             presenter: None,
+            window,
         });
         Ok(id)
     }
@@ -276,13 +264,23 @@ impl SdlShell {
             .surface_indices
             .get(&id.0)
             .ok_or_else(|| "unknown SDL shell surface".to_owned())?;
-        let window = self.surfaces[index].window();
-        let logical_width = window.size().0.max(1);
-        let pixel_width = window.size_in_pixels().0;
-        let scale = pixel_width as f32 / logical_width as f32;
-        self.surfaces[index]
-            .ensure_presenter()?
-            .present_accelerated(commands, scale)
+        if self.graphics.is_none() {
+            self.graphics = Some(SharedSdlGraphics::new(self.surfaces[index].window())?);
+        }
+        let graphics = self
+            .graphics
+            .as_ref()
+            .expect("shared GPU initialized")
+            .clone();
+        let entry = &mut self.surfaces[index];
+        if entry.presenter.is_none() {
+            entry.presenter = Some(SdlGpuPresenter::new(&entry.window, graphics)?);
+        }
+        entry
+            .presenter
+            .as_mut()
+            .expect("shell presenter initialized")
+            .present(&entry.window, commands)
     }
 
     pub fn show(&mut self, id: SurfaceId) -> bool {
@@ -432,8 +430,8 @@ impl SdlShell {
             id,
             role,
             display_index,
-            window: Some(window),
             presenter: None,
+            window,
         });
         Ok(())
     }

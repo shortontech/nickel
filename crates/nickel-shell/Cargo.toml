@@ -16,9 +16,11 @@ nickel-codex-ui = { path = "../nickel-codex-ui" }
 nickel-i18n = { path = "../nickel-i18n" }
 nickel-logging = { path = "../nickel-logging" }
 nucleo-matcher.workspace = true
+raw-window-handle.workspace = true
 redb.workspace = true
 resvg.workspace = true
 sdl3.workspace = true
+softbuffer.workspace = true
 tracing.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]

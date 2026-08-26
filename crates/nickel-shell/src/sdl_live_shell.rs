@@ -45,7 +45,9 @@ pub struct LiveShell {
     windows: Vec<OpenWindow>,
     tray: Vec<TrayItem>,
     notification: Option<DesktopNotification>,
+    wallpaper_path: Option<std::path::PathBuf>,
     wallpaper: Option<Arc<image::RgbaImage>>,
+    wallpaper_size: (u32, u32),
     panel_icon: Arc<image::RgbaImage>,
     palette: ThemePalette,
     network: NetworkStatus,
@@ -69,12 +71,7 @@ impl LiveShell {
         let mut launcher = Launcher::new(platform::applications());
         launcher.set_places(crate::places::applications());
         let wallpaper_settings = WallpaperSettings::load_default();
-        let wallpaper = wallpaper_settings
-            .image
-            .as_deref()
-            .and_then(|path| image::open(path).ok())
-            .map(image::DynamicImage::into_rgba8)
-            .map(Arc::new);
+        let wallpaper_path = wallpaper_settings.image;
         let shell_settings = ShellSettings::load_default();
         let palette =
             ThemePalette::from_appearance(shell_settings.resolve_appearance(Appearance::default()));
@@ -105,7 +102,9 @@ impl LiveShell {
             windows,
             tray,
             notification: None,
-            wallpaper,
+            wallpaper_path,
+            wallpaper: None,
+            wallpaper_size: (0, 0),
             panel_icon,
             palette,
             network,
@@ -500,6 +499,7 @@ impl LiveShell {
     }
 
     fn desktop_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
+        self.load_wallpaper_for(width, height);
         let bounds = Rect::new(0.0, 0.0, width as f32, height as f32);
         let mut commands = vec![PaintCommand::Fill {
             rect: bounds,
@@ -513,6 +513,28 @@ impl LiveShell {
             });
         }
         commands
+    }
+
+    fn load_wallpaper_for(&mut self, width: u32, height: u32) {
+        let requested = (width.max(1), height.max(1));
+        if self.wallpaper.is_some()
+            && requested.0 <= self.wallpaper_size.0
+            && requested.1 <= self.wallpaper_size.1
+        {
+            return;
+        }
+        let Some(path) = self.wallpaper_path.as_deref() else {
+            return;
+        };
+        let Ok(image) = image::open(path) else {
+            return;
+        };
+        let target = (
+            self.wallpaper_size.0.max(requested.0),
+            self.wallpaper_size.1.max(requested.1),
+        );
+        self.wallpaper = Some(Arc::new(image.thumbnail(target.0, target.1).into_rgba8()));
+        self.wallpaper_size = target;
     }
 
     fn notification_scene(&self, width: u32, height: u32) -> Vec<PaintCommand> {

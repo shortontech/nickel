@@ -50,7 +50,7 @@ pub struct SdlComponentRenderer {
     height: u32,
     scale: f32,
     pixels: Vec<Pixel>,
-    upload: Surface<'static>,
+    upload: Option<Surface<'static>>,
     previous_commands: Vec<PaintCommand>,
     font_system: FontSystem,
     swash_cache: SwashCache,
@@ -786,13 +786,19 @@ impl SdlCanvasPresenter {
 
 impl SdlComponentRenderer {
     pub fn new(width: u32, height: u32, scale: f32) -> Self {
+        Self::with_sdl_upload(width, height, scale, true)
+    }
+
+    /// Create a rasterizer for a presenter that reads [`Self::pixels`]
+    /// directly and therefore does not need an SDL upload surface.
+    pub fn new_pixel_buffer(width: u32, height: u32, scale: f32) -> Self {
+        Self::with_sdl_upload(width, height, scale, false)
+    }
+
+    fn with_sdl_upload(width: u32, height: u32, scale: f32, upload: bool) -> Self {
         let width = width.max(1);
         let height = height.max(1);
-        let mut upload =
-            Surface::new(width, height, PixelFormat::ABGR8888).expect("create SDL upload surface");
-        upload
-            .set_blend_mode(BlendMode::None)
-            .expect("disable SDL upload blending");
+        let upload = upload.then(|| Self::create_upload_surface(width, height));
         Self {
             width,
             height,
@@ -806,6 +812,15 @@ impl SdlComponentRenderer {
         }
     }
 
+    fn create_upload_surface(width: u32, height: u32) -> Surface<'static> {
+        let mut upload =
+            Surface::new(width, height, PixelFormat::ABGR8888).expect("create SDL upload surface");
+        upload
+            .set_blend_mode(BlendMode::None)
+            .expect("disable SDL upload blending");
+        upload
+    }
+
     pub fn resize(&mut self, width: u32, height: u32, scale: f32) {
         let width = width.max(1);
         let height = height.max(1);
@@ -815,11 +830,9 @@ impl SdlComponentRenderer {
             self.height = height;
             self.pixels
                 .resize((self.width * self.height) as usize, Pixel::TRANSPARENT);
-            self.upload = Surface::new(self.width, self.height, PixelFormat::ABGR8888)
-                .expect("resize SDL upload surface");
-            self.upload
-                .set_blend_mode(BlendMode::None)
-                .expect("disable SDL upload blending");
+            if self.upload.is_some() {
+                self.upload = Some(Self::create_upload_surface(self.width, self.height));
+            }
             self.previous_commands.clear();
         }
     }
@@ -890,12 +903,15 @@ impl SdlComponentRenderer {
         if damage.is_empty() {
             return Ok(damage);
         }
-        self.upload.with_lock_mut(|bytes| {
+        let upload = self
+            .upload
+            .get_or_insert_with(|| Self::create_upload_surface(self.width, self.height));
+        upload.with_lock_mut(|bytes| {
             for (color, pixel) in self.pixels.iter().zip(bytes.chunks_exact_mut(4)) {
                 pixel.copy_from_slice(&[color.r, color.g, color.b, color.a]);
             }
         });
-        self.upload
+        upload
             .blit(None, surface, SdlRect::new(0, 0, self.width, self.height))
             .map_err(|error| error.to_string())?;
         Ok(damage)

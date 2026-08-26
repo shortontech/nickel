@@ -48,6 +48,8 @@ mod places;
 mod platform;
 #[path = "../sdl_control_view.rs"]
 mod sdl_control_view;
+#[path = "../sdl_gpu.rs"]
+mod sdl_gpu;
 #[path = "../sdl_launcher_view.rs"]
 mod sdl_launcher_view;
 #[path = "../sdl_live_shell.rs"]
@@ -61,7 +63,8 @@ use sdl_shell::{SdlShell, ShellEvent, SurfaceId, SurfaceRole};
 
 struct CodexSurfaces {
     hub: SurfaceId,
-    hub_host: ApplicationHost<ChatApplication>,
+    hub_cwd: std::path::PathBuf,
+    hub_host: Option<ApplicationHost<ChatApplication>>,
     chats: Vec<(SurfaceId, ApplicationHost<ChatApplication>)>,
     cursors: HashMap<SurfaceId, Point>,
 }
@@ -72,24 +75,38 @@ impl CodexSurfaces {
             .surfaces()
             .find(|surface| surface.role() == SurfaceRole::CodexHub)
             .ok_or_else(|| "Codex hub surface is missing".to_owned())?;
-        let (width, height) = hub.window().size();
-        let application = shell_application(
-            std::env::current_dir().map_err(|error| error.to_string())?,
-            true,
-            None,
-            None,
-        )?;
         Ok(Self {
             hub: hub.id(),
-            hub_host: ApplicationHost::new(application, width, height),
+            hub_cwd: std::env::current_dir().map_err(|error| error.to_string())?,
+            hub_host: None,
             chats: Vec::new(),
             cursors: HashMap::new(),
         })
     }
 
-    fn present(&self, shell: &mut SdlShell, surface: SurfaceId) -> Result<(), String> {
+    fn ensure_hub(&mut self, shell: &SdlShell) -> Result<(), String> {
+        if self.hub_host.is_some() {
+            return Ok(());
+        }
+        let (width, height) = shell
+            .surface(self.hub)
+            .map(|surface| surface.window().size())
+            .ok_or_else(|| "Codex hub surface is missing".to_owned())?;
+        let application = shell_application(self.hub_cwd.clone(), true, None, None)?;
+        self.hub_host = Some(ApplicationHost::new(application, width, height));
+        Ok(())
+    }
+
+    fn present(&mut self, shell: &mut SdlShell, surface: SurfaceId) -> Result<(), String> {
         if surface == self.hub {
-            shell.present(surface, self.hub_host.commands())?;
+            self.ensure_hub(shell)?;
+            shell.present(
+                surface,
+                self.hub_host
+                    .as_ref()
+                    .expect("Codex hub initialized")
+                    .commands(),
+            )?;
         } else if let Some((_, host)) = self.chats.iter().find(|(id, _)| *id == surface) {
             shell.present(surface, host.commands())?;
         }
@@ -98,7 +115,7 @@ impl CodexSurfaces {
 
     fn host_mut(&mut self, surface: SurfaceId) -> Option<&mut ApplicationHost<ChatApplication>> {
         if surface == self.hub {
-            Some(&mut self.hub_host)
+            self.hub_host.as_mut()
         } else {
             self.chats
                 .iter_mut()
@@ -116,7 +133,10 @@ impl CodexSurfaces {
     }
 
     fn open_requests(&mut self, shell: &mut SdlShell) -> Result<(), String> {
-        for request in self.hub_host.application_mut().take_shell_requests() {
+        let Some(hub_host) = self.hub_host.as_mut() else {
+            return Ok(());
+        };
+        for request in hub_host.application_mut().take_shell_requests() {
             let (cwd, project_id, thread) = match request {
                 ShellRequest::OpenProject { cwd, project_id } => (cwd, project_id, None),
                 ShellRequest::OpenThread {
@@ -261,6 +281,9 @@ fn handle_codex_event(
         .is_some_and(|entry| matches!(entry.role(), SurfaceRole::CodexHub | SurfaceRole::CodexChat))
     {
         return Ok(false);
+    }
+    if surface == codex.hub {
+        codex.ensure_hub(shell)?;
     }
     if matches!(event, ShellEvent::CloseRequested(_)) {
         if surface == codex.hub {
@@ -444,7 +467,6 @@ fn main() -> Result<(), String> {
     let hotkey_rx = platform::launcher_hotkey_receiver();
     sync_visibility(&mut shell, &state);
     render_all(&mut shell, &mut state)?;
-    codex.present(&mut shell, codex.hub)?;
     println!(
         "time_to_first_shell_ms={:.3}",
         started.elapsed().as_secs_f64() * 1_000.0
@@ -503,6 +525,9 @@ fn main() -> Result<(), String> {
                     // pre-rendered buffer. Showing it must not synchronously
                     // rebuild and submit the whole scene on the click path.
                     render_role(&mut shell, &mut state, SurfaceRole::ControlCenter)?;
+                    if state.surface_visible(SurfaceRole::CodexHub) {
+                        codex.present(&mut shell, codex.hub)?;
+                    }
                 }
             }
             Some(ShellEvent::PointerButton {
@@ -664,7 +689,7 @@ fn main() -> Result<(), String> {
         }
         if Instant::now() >= refresh_deadline {
             let mut codex_redraw = Vec::new();
-            if codex.hub_host.poll() {
+            if codex.hub_host.as_mut().is_some_and(|host| host.poll()) {
                 codex_redraw.push(codex.hub);
             }
             for (surface, host) in &mut codex.chats {
