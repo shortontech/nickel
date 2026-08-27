@@ -13,6 +13,7 @@ use platform::*;
 
 use std::{
     cell::Cell,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -27,14 +28,14 @@ use zbus::{
 
 use nickel_core::{
     shell_settings::{AnimationLevel, ShellSettings, ThemePreference},
-    theme::{ThemePalette, accent_from_hue},
+    theme::{Appearance, ThemeMode, ThemePalette, accent_from_hue},
     wallpaper_settings::{WallpaperPosition, WallpaperSettings},
 };
 use nickel_i18n::Localizer;
 use nickel_ui::{
     AnyView, Button, ButtonPresentation, ChoiceCard, ChoiceCardGroup, ColorSwatch,
-    ControllerAction, ControllerInput, Insets, NavigationItem, NavigationPane, PageHeader,
-    PaintCommand, PaneNavigation, Point as UiPoint, PreviewTile, Rect as UiRect,
+    ControllerAction, ControllerInput, Image, ImageFit, Insets, NavigationItem, NavigationPane,
+    PageHeader, PaintCommand, PaneNavigation, Point as UiPoint, PreviewTile, Rect as UiRect,
     SdlCanvasPresenter, SelectField, SemanticColors, SemanticTheme, SettingsCard,
     SettingsNavigation, SettingsRow, SettingsShell, SliderField, Surface, SurfaceRole, Switch,
     TabList, TextAlign, UiStateStore, UiTree, ui,
@@ -74,6 +75,14 @@ fn semantic_theme(palette: ThemePalette) -> SemanticTheme {
         accent_soft: palette.accent_soft,
         positive: palette.complement,
     })
+}
+
+fn load_wallpaper_preview(settings: &WallpaperSettings) -> Option<Arc<image::RgbaImage>> {
+    settings
+        .image
+        .as_ref()
+        .and_then(|path| image::open(path).ok())
+        .map(|image| Arc::new(image.to_rgba8()))
 }
 
 struct OutputSnapshot {
@@ -363,11 +372,13 @@ impl SettingsApp {
                 SettingsMessage::WallpaperChoose => {
                     if let Some(path) = choose_wallpaper() {
                         self.wallpaper_settings.image = Some(path);
+                        self.wallpaper_preview = load_wallpaper_preview(&self.wallpaper_settings);
                         save_wallpaper_settings(&self.wallpaper_settings);
                     }
                 }
                 SettingsMessage::WallpaperRemove => {
                     self.wallpaper_settings.image = None;
+                    self.wallpaper_preview = None;
                     save_wallpaper_settings(&self.wallpaper_settings);
                 }
                 SettingsMessage::ToggleWallpaperPositionSelect => {

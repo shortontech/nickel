@@ -342,42 +342,61 @@ impl SettingsApp {
         let theme = self.ui_theme();
         let hue = self.shell_settings.displayed_hue(system);
         let intensity = self.shell_settings.displayed_intensity(system);
-        let preview = || {
+        let preview = |preview_palette: ThemePalette| {
             Surface::new(theme, SurfaceRole::Raised)
                 .height(82.0)
                 .radius(theme.radii.control)
                 .padding(Insets::all(8.0))
                 .child(ui! {
                     <Row gap={6.0}>
-                        <Container width={22.0} background={palette.panel} radius={3.0} />
+                        <Container width={22.0} background={preview_palette.panel} radius={3.0} />
                         <Column grow={1.0} gap={6.0}>
-                            <Container height={12.0} background={palette.surface_hover} radius={3.0} />
-                            <Container height={28.0} background={palette.background} radius={3.0} />
+                            <Container height={12.0} background={preview_palette.surface_hover} radius={3.0} />
+                            <Container height={28.0} background={preview_palette.background} radius={3.0} />
                         </Column>
                     </Row>
                 })
         };
+        let light_preview = ThemePalette::from_appearance(Appearance {
+            mode: ThemeMode::Light,
+            accent: appearance.accent,
+            intensity: appearance.intensity,
+        });
+        let dark_preview = ThemePalette::from_appearance(Appearance {
+            mode: ThemeMode::Dark,
+            accent: appearance.accent,
+            intensity: appearance.intensity,
+        });
         let mode_choices = [
             ChoiceCard::new(
                 theme,
                 SettingsMessage::AppearanceLight,
                 self.localizer.text("settings-appearance-light"),
                 self.shell_settings.theme == ThemePreference::Light,
-                preview(),
+                preview(light_preview),
             ),
             ChoiceCard::new(
                 theme,
                 SettingsMessage::AppearanceDark,
                 self.localizer.text("settings-appearance-dark"),
                 self.shell_settings.theme == ThemePreference::Dark,
-                preview(),
+                preview(dark_preview),
             ),
             ChoiceCard::new(
                 theme,
                 SettingsMessage::AppearanceSystem,
                 self.localizer.text("settings-appearance-automatic"),
                 self.shell_settings.theme == ThemePreference::System,
-                preview(),
+                Surface::new(theme, SurfaceRole::Raised)
+                    .height(82.0)
+                    .radius(theme.radii.control)
+                    .padding(Insets::all(8.0))
+                    .child(ui! {
+                        <Row height={66.0} gap={3.0}>
+                            <Container grow={1.0} background={light_preview.background} radius={3.0} />
+                            <Container grow={1.0} background={dark_preview.background} radius={3.0} />
+                        </Row>
+                    }),
             ),
         ];
         let preset_hues = [224_u16, 188, 154, 78, 38, 16, 340, 305];
@@ -420,18 +439,23 @@ impl SettingsApp {
             WallpaperPosition::Tile => "settings-wallpaper-tile",
             WallpaperPosition::Span => "settings-wallpaper-span",
         });
-        let wallpaper_preview = if self.wallpaper_settings.image.is_some() {
-            PreviewTile::new(
-                theme,
-                Surface::new(theme, SurfaceRole::Raised)
-                    .fill_width()
-                    .height(70.0),
-            )
-        } else {
-            PreviewTile::unavailable(theme, self.localizer.text("settings-wallpaper-none"))
-        }
-        .width(124.0)
-        .height(70.0);
+        let wallpaper_preview = self
+            .wallpaper_preview
+            .as_ref()
+            .map(|image| {
+                PreviewTile::new(
+                    theme,
+                    Image::new(1, image.clone())
+                        .fit(ImageFit::Cover)
+                        .width(124.0)
+                        .height(70.0),
+                )
+            })
+            .unwrap_or_else(|| {
+                PreviewTile::unavailable(theme, self.localizer.text("settings-wallpaper-none"))
+            })
+            .width(124.0)
+            .height(70.0);
         let mode_group = ChoiceCardGroup::new(mode_choices);
         let swatch_row = ui! {
             <Row height={44.0} gap={10.0} children={swatches}>
@@ -463,7 +487,7 @@ impl SettingsApp {
                 self.localizer.text("settings-wallpaper-choose"),
                 ButtonPresentation::Primary,
             )
-            .width(140.0);
+            .width(168.0);
             let remove = Button::semantic(
                 theme,
                 SettingsMessage::WallpaperRemove,

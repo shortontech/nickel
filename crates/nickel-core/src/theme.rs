@@ -41,26 +41,26 @@ impl ThemePalette {
         let accent = Oklch::new(seed.l, seed.c * intensity, seed.h).to_rgb();
         let dark = appearance.mode == ThemeMode::Dark;
         Self {
-            background: Oklch::new(if dark { 0.115 } else { 0.965 }, 0.018 * intensity, seed.h)
+            background: Oklch::new(if dark { 0.115 } else { 0.965 }, 0.006 * intensity, seed.h)
                 .to_rgb(),
             panel: Oklch::new(
                 if dark { 0.220 } else { 0.820 },
                 if dark {
-                    0.055 * intensity
+                    0.018 * intensity
                 } else {
-                    0.090 * intensity
+                    0.032 * intensity
                 },
                 seed.h,
             )
             .to_rgb(),
-            surface: Oklch::new(if dark { 0.205 } else { 0.875 }, 0.027 * intensity, seed.h)
+            surface: Oklch::new(if dark { 0.205 } else { 0.875 }, 0.010 * intensity, seed.h)
                 .to_rgb(),
-            surface_hover: Oklch::new(if dark { 0.275 } else { 0.815 }, 0.040 * intensity, seed.h)
+            surface_hover: Oklch::new(if dark { 0.275 } else { 0.815 }, 0.016 * intensity, seed.h)
                 .to_rgb(),
             text: Oklch::new(if dark { 0.955 } else { 0.185 }, 0.008, seed.h).to_rgb(),
             muted: Oklch::new(if dark { 0.710 } else { 0.455 }, 0.018, seed.h).to_rgb(),
             accent,
-            accent_soft: Oklch::new(if dark { 0.315 } else { 0.865 }, 0.075 * intensity, seed.h)
+            accent_soft: Oklch::new(if dark { 0.315 } else { 0.865 }, 0.040 * intensity, seed.h)
                 .to_rgb(),
             complement: Oklch::new(
                 if dark { 0.720 } else { 0.525 },

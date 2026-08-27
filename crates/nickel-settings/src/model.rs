@@ -18,6 +18,7 @@ pub(super) struct SettingsApp {
     pub(super) animation_select_expanded: bool,
     pub(super) shell_settings: ShellSettings,
     pub(super) wallpaper_settings: WallpaperSettings,
+    pub(super) wallpaper_preview: Option<Arc<image::RgbaImage>>,
     pub(super) appearance_save_deadline: Option<Instant>,
     pub(super) resize_deadline: Option<Instant>,
     pub(super) frame_interval: Duration,
@@ -43,6 +44,8 @@ impl Default for SettingsApp {
     fn default() -> Self {
         let localizer = Localizer::system();
         let status = localizer.text("settings-status-changes-not-applied");
+        let wallpaper_settings = load_wallpaper_settings();
+        let wallpaper_preview = load_wallpaper_preview(&wallpaper_settings);
         Self {
             localizer,
             redraw_requested: Cell::new(true),
@@ -88,7 +91,8 @@ impl Default for SettingsApp {
             wallpaper_position_select_expanded: false,
             animation_select_expanded: false,
             shell_settings: load_shell_settings(),
-            wallpaper_settings: load_wallpaper_settings(),
+            wallpaper_settings,
+            wallpaper_preview,
             appearance_save_deadline: None,
             resize_deadline: None,
             frame_interval: Duration::from_millis(16),
