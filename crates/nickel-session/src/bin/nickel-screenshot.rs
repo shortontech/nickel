@@ -92,7 +92,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         image::open(&output)?.flipv().save(&output)?;
         println!("{}", output.display());
         Ok(())
-    } else if response == "ok\tnative" {
+    } else if matches!(response, "ok\tnative" | "ok\tnested") {
         println!("{}", output.display());
         Ok(())
     } else {

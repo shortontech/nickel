@@ -356,12 +356,6 @@ impl NickelSession {
                                         source.as_pathname().map(PathBuf::from);
                                     #[cfg(feature = "backend-udev")]
                                     data.render_all_outputs();
-                                    #[cfg(not(feature = "backend-udev"))]
-                                    if let Some(source) = source.as_pathname() {
-                                        let _ = socket
-                                            .as_ref()
-                                            .send_to(b"error\tcapture unsupported", source);
-                                    }
                                 } else if let Ok(message) = std::str::from_utf8(message)
                                     && message.starts_with("apply-outputs\n")
                                 {

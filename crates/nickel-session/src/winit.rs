@@ -1,13 +1,17 @@
-use std::time::{Duration, Instant};
+use std::{
+    path::Path,
+    time::{Duration, Instant},
+};
 
 use smithay::{
     backend::{
         allocator::Fourcc,
         renderer::{
-            Bind, Color32F, ExportMem, Frame, Offscreen, Renderer,
+            Bind, Color32F, ExportMem, Frame, ImportAll, ImportMem, Offscreen, Renderer,
             damage::OutputDamageTracker,
             element::{
                 Kind,
+                memory::MemoryRenderBufferRenderElement,
                 solid::{SolidColorBuffer, SolidColorRenderElement},
                 surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
                 utils::{ConstrainAlign, ConstrainScaleBehavior, constrain_render_elements},
@@ -23,7 +27,18 @@ use smithay::{
     utils::{Buffer, Rectangle, Transform},
 };
 
+use nickel_core::{
+    shell_settings::ShellSettings,
+    theme::{Appearance, ThemePalette},
+};
+
 use crate::{CalloopData, NickelSession, state::PreviewFrame};
+
+smithay::backend::renderer::element::render_elements! {
+    WinitFrameElement<R> where R: ImportAll + ImportMem;
+    Memory=MemoryRenderBufferRenderElement<R>,
+    Solid=SolidColorRenderElement,
+}
 
 pub fn init_winit(
     event_loop: &mut EventLoop<CalloopData>,
@@ -62,6 +77,7 @@ pub fn init_winit(
     let mut damage_tracker = OutputDamageTracker::from_output(&output);
     let mut last_preview_capture = Instant::now() - Duration::from_secs(1);
     let mut last_preview_highlight = None;
+    let frame_icons = crate::window_frame::FrameIcons::load();
 
     // SAFETY: startup is single-threaded and no child process is spawned until
     // after this function returns.
@@ -123,6 +139,25 @@ pub fn init_winit(
                             [0.1, 0.1, 0.1, 1.0],
                         )
                         .unwrap();
+
+                        let frame_palette = ThemePalette::from_appearance(
+                            ShellSettings::load_default().resolve_appearance(Appearance::default()),
+                        );
+                        let frame_elements = frame_elements(
+                            state,
+                            renderer,
+                            &output,
+                            frame_icons.as_ref(),
+                            &frame_palette,
+                        );
+                        if !frame_elements.is_empty() {
+                            let mut frame = renderer
+                                .render(&mut framebuffer, size, output.current_transform())
+                                .unwrap();
+                            draw_render_elements(&mut frame, 1.0, &frame_elements, &[damage])
+                                .unwrap();
+                            let _ = frame.finish().unwrap();
+                        }
 
                         if let Some(highlight) = state.preview_highlight
                             && let Some(window) = state.space.elements().find(|window| {
@@ -204,6 +239,18 @@ pub fn init_winit(
                     }
                     backend.submit(Some(&[damage])).unwrap();
 
+                    let capture_response = state
+                        .output_capture_path
+                        .take()
+                        .map(|path| capture_output(&mut backend, size, &path));
+
+                    if let Some(response) = capture_response
+                        && let Some(reply_path) = state.output_capture_reply_path.take()
+                        && let Ok(socket) = std::os::unix::net::UnixDatagram::unbound()
+                    {
+                        let _ = socket.send_to(response.as_bytes(), reply_path);
+                    }
+
                     if last_preview_capture.elapsed() >= Duration::from_millis(200) {
                         let windows: Vec<_> = state
                             .space
@@ -271,6 +318,130 @@ fn frame_cursor_icon(cursor: crate::window_frame::FrameCursor) -> ::winit::windo
     }
 }
 
+fn frame_elements(
+    state: &NickelSession,
+    renderer: &mut GlesRenderer,
+    output: &Output,
+    icons: Option<&crate::window_frame::FrameIcons>,
+    palette: &ThemePalette,
+) -> Vec<WinitFrameElement<GlesRenderer>> {
+    let Some(output_geometry) = state.space.output_geometry(output) else {
+        return Vec::new();
+    };
+    let shell_surfaces = state
+        .shell_windows()
+        .filter_map(|window| window.toplevel().map(|surface| surface.wl_surface().id()))
+        .collect::<Vec<_>>();
+    let mut elements = Vec::new();
+    for window in state.space.elements().rev() {
+        let Some(bounds) = state.space.element_bbox(window) else {
+            continue;
+        };
+        if !output_geometry.overlaps(bounds) {
+            continue;
+        }
+        let Some(surface) = window.toplevel().map(|top| top.wl_surface()) else {
+            continue;
+        };
+        if shell_surfaces.contains(&surface.id())
+            || state.is_fullscreen_window(window)
+            || !state.is_server_decorated(window)
+        {
+            continue;
+        }
+        let registry_id = state.surface_windows.get(&surface.id()).copied();
+        let active = registry_id.is_some_and(|id| state.windows.is_active(id));
+        let title = registry_id
+            .and_then(|id| state.windows.title(id))
+            .unwrap_or_default();
+        let foreground = if active { palette.text } else { palette.muted };
+        let frame_index = elements.len();
+        if let Some(titlebar) =
+            crate::window_frame::render_titlebar(bounds.size.w, title, palette.panel, foreground)
+            && let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
+                renderer,
+                (
+                    f64::from(bounds.loc.x - output_geometry.loc.x),
+                    f64::from(
+                        bounds.loc.y - output_geometry.loc.y - crate::window_frame::TITLEBAR_HEIGHT,
+                    ),
+                ),
+                &titlebar,
+                None,
+                None,
+                Some((bounds.size.w, crate::window_frame::TITLEBAR_HEIGHT).into()),
+                Kind::Unspecified,
+            )
+        {
+            elements.push(WinitFrameElement::from(element));
+        }
+        if let Some(icons) = icons {
+            let icon_y =
+                bounds.loc.y - output_geometry.loc.y - crate::window_frame::TITLEBAR_HEIGHT + 8;
+            let icon_x = bounds.loc.x - output_geometry.loc.x + bounds.size.w;
+            let maximized = state.is_maximized_window(window);
+            for (buffer, offset) in [
+                (&icons.close, 35),
+                (
+                    if maximized {
+                        &icons.restore
+                    } else {
+                        &icons.maximize
+                    },
+                    81,
+                ),
+                (&icons.minimize, 127),
+            ] {
+                if let Ok(icon) = MemoryRenderBufferRenderElement::from_buffer(
+                    renderer,
+                    ((icon_x - offset) as f64, icon_y as f64),
+                    buffer,
+                    None,
+                    None,
+                    None,
+                    Kind::Unspecified,
+                ) {
+                    elements.insert(frame_index, WinitFrameElement::from(icon));
+                }
+            }
+        }
+    }
+    elements
+}
+
+fn capture_output(
+    backend: &mut winit::WinitGraphicsBackend<GlesRenderer>,
+    size: smithay::utils::Size<i32, smithay::utils::Physical>,
+    path: &Path,
+) -> String {
+    let result = (|| -> Result<(), String> {
+        let (renderer, framebuffer) = backend.bind().map_err(|error| error.to_string())?;
+        let buffer_size = smithay::utils::Size::<i32, Buffer>::from((size.w, size.h));
+        let region = Rectangle::<i32, Buffer>::from_size(buffer_size);
+        let mapping = renderer
+            .copy_framebuffer(&framebuffer, region, Fourcc::Abgr8888)
+            .map_err(|error| error.to_string())?;
+        let mapped = renderer
+            .map_texture(&mapping)
+            .map_err(|error| error.to_string())?;
+        // The nested output uses `Flipped180` for presentation, so restore its
+        // mapped framebuffer rows to top-down image order unconditionally.
+        let rgba = normalize_capture_rows(mapped, size.w as usize, size.h as usize, false)?;
+        image::save_buffer(
+            path,
+            &rgba,
+            size.w as u32,
+            size.h as u32,
+            image::ColorType::Rgba8,
+        )
+        .map_err(|error| error.to_string())
+    })();
+    match result {
+        Ok(()) => "ok\tnested".to_owned(),
+        Err(error) => format!("error\t{error}"),
+    }
+}
+
 fn capture_preview(renderer: &mut GlesRenderer, window: &Window) -> Option<PreviewFrame> {
     const WIDTH: i32 = 240;
     const HEIGHT: i32 = 135;
@@ -323,4 +494,36 @@ fn capture_preview(renderer: &mut GlesRenderer, window: &Window) -> Option<Previ
         height: HEIGHT as u16,
         rgba,
     })
+}
+
+fn normalize_capture_rows(
+    mapped: &[u8],
+    width: usize,
+    height: usize,
+    flipped: bool,
+) -> Result<Vec<u8>, String> {
+    let row_bytes = width
+        .checked_mul(4)
+        .ok_or_else(|| "capture row size overflowed".to_owned())?;
+    let expected = row_bytes
+        .checked_mul(height)
+        .ok_or_else(|| "capture buffer size overflowed".to_owned())?;
+    if mapped.len() < expected {
+        return Err(format!(
+            "renderer returned {} bytes for a {} byte output",
+            mapped.len(),
+            expected
+        ));
+    }
+    let mut rgba = vec![0; expected];
+    for destination_y in 0..height {
+        let source_y = if flipped {
+            destination_y
+        } else {
+            height - 1 - destination_y
+        };
+        rgba[destination_y * row_bytes..(destination_y + 1) * row_bytes]
+            .copy_from_slice(&mapped[source_y * row_bytes..(source_y + 1) * row_bytes]);
+    }
+    Ok(rgba)
 }

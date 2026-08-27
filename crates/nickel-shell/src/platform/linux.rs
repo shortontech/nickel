@@ -160,18 +160,39 @@ impl NotificationFeed {
                 },
             )
             .map_err(|error| error.to_string())?
-            .name(NOTIFICATION_SERVICE)
-            .map_err(|error| error.to_string())?
             .build()
-            .map_err(|error| format!("could not own {NOTIFICATION_SERVICE}: {error}"))?;
-        let worker_store = store.clone();
-        let worker_connection = connection.clone();
-        thread::Builder::new()
-            .name("nickel-notification-expiry".into())
-            .spawn(move || notification_expiry_worker(worker_store, worker_connection))
             .map_err(|error| error.to_string())?;
-        tracing::info!("Nickel notification daemon owns org.freedesktop.Notifications");
+        let owns_name = notification_name_owned(connection.request_name_with_flags(
+            NOTIFICATION_SERVICE,
+            zbus::fdo::RequestNameFlags::DoNotQueue.into(),
+        ))?;
+        if owns_name {
+            let worker_store = store.clone();
+            let worker_connection = connection.clone();
+            thread::Builder::new()
+                .name("nickel-notification-expiry".into())
+                .spawn(move || notification_expiry_worker(worker_store, worker_connection))
+                .map_err(|error| error.to_string())?;
+            tracing::info!("Nickel notification daemon owns org.freedesktop.Notifications");
+        } else {
+            tracing::warn!(
+                "another notification daemon is active; continuing without the Nickel notification feed"
+            );
+        }
         Ok(Self { store, connection })
+    }
+}
+
+fn notification_name_owned(
+    result: Result<zbus::fdo::RequestNameReply, zbus::Error>,
+) -> Result<bool, String> {
+    match result {
+        Ok(
+            zbus::fdo::RequestNameReply::PrimaryOwner | zbus::fdo::RequestNameReply::AlreadyOwner,
+        ) => Ok(true),
+        Ok(zbus::fdo::RequestNameReply::Exists | zbus::fdo::RequestNameReply::InQueue)
+        | Err(zbus::Error::NameTaken) => Ok(false),
+        Err(error) => Err(error.to_string()),
     }
 }
 
@@ -721,9 +742,15 @@ mod tests {
     use crate::{launcher::Launcher, model::Application, platform::ShellCommand};
 
     use super::{
-        codex_window_application_id, parse_window, pixmap_to_rgba, resolve_application_id,
-        shell_command_payload, tray_retry_delay,
+        codex_window_application_id, notification_name_owned, parse_window, pixmap_to_rgba,
+        resolve_application_id, shell_command_payload, tray_retry_delay,
     };
+
+    #[test]
+    fn existing_notification_owner_does_not_block_shell_startup() {
+        assert!(!notification_name_owned(Err(zbus::Error::NameTaken)).unwrap());
+        assert!(notification_name_owned(Ok(zbus::fdo::RequestNameReply::PrimaryOwner)).unwrap());
+    }
 
     #[test]
     fn logout_uses_the_session_control_protocol() {
