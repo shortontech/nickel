@@ -79,7 +79,7 @@ pub fn load_svg_bytes(data: &[u8], raster_size: u32) -> Option<RgbaImage> {
 mod tests {
     use image::{Rgba, RgbaImage};
 
-    use super::{nickel_application, resized};
+    use super::{load_svg_bytes, nickel_application, resized};
 
     #[test]
     fn resize_preserves_aspect_ratio_and_centers_icon() {
@@ -99,5 +99,15 @@ mod tests {
         assert!(settings.pixels().any(|pixel| pixel.0[3] != 0));
         assert!(file.pixels().any(|pixel| pixel.0[3] != 0));
         assert!(nickel_application("Other application").is_none());
+    }
+
+    #[test]
+    fn embedded_chat_icon_is_a_compact_alpha_mask() {
+        let icon =
+            load_svg_bytes(include_bytes!("../../../assets/icons/nickel-chat.svg"), 24).unwrap();
+
+        assert_eq!(icon.dimensions(), (24, 24));
+        assert!(icon.pixels().any(|pixel| pixel.0[3] == 0));
+        assert!(icon.pixels().any(|pixel| pixel.0[3] != 0));
     }
 }

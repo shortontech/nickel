@@ -31,6 +31,7 @@ const PANEL_CONTROL_GAP: f32 = 8.0;
 const PANEL_TRAY_WIDTH: f32 = 28.0;
 const PANEL_TRAY_ICON_SIZE: u32 = 18;
 const PANEL_CODEX_WIDTH: f32 = 36.0;
+const PANEL_CODEX_ICON_SIZE: f32 = 28.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PanelHover {
@@ -55,6 +56,7 @@ pub struct LiveShell {
     wallpaper: Option<Arc<image::RgbaImage>>,
     wallpaper_size: (u32, u32),
     panel_icon: Arc<image::RgbaImage>,
+    codex_icon: Arc<image::RgbaImage>,
     palette: ThemePalette,
     network: NetworkStatus,
     bluetooth: BluetoothStatus,
@@ -88,6 +90,13 @@ impl LiveShell {
         .map(|icon| tint_panel_icon(icon, palette.text))
         .map(Arc::new)
         .expect("embedded Nickel start icon remains valid");
+        let codex_icon = crate::icons::load_svg_bytes(
+            include_bytes!("../../../assets/icons/nickel-chat.svg"),
+            96,
+        )
+        .map(|icon| tint_panel_icon(icon, palette.text))
+        .map(Arc::new)
+        .expect("embedded Nickel chat icon remains valid");
         let window_feed = WindowFeed::new();
         let tray_feed = TrayFeed::new();
         let notification_feed = NotificationFeed::new()?;
@@ -114,6 +123,7 @@ impl LiveShell {
             wallpaper: None,
             wallpaper_size: (0, 0),
             panel_icon,
+            codex_icon,
             palette,
             network,
             bluetooth,
@@ -163,6 +173,12 @@ impl LiveShell {
                 96,
             ) {
                 self.panel_icon = Arc::new(tint_panel_icon(icon, palette.text));
+            }
+            if let Some(icon) = crate::icons::load_svg_bytes(
+                include_bytes!("../../../assets/icons/nickel-chat.svg"),
+                96,
+            ) {
+                self.codex_icon = Arc::new(tint_panel_icon(icon, palette.text));
             }
             changed = true;
         }
@@ -712,26 +728,26 @@ impl LiveShell {
                 Rect::new(
                     width as f32 - PANEL_CLOCK_WIDTH,
                     6.0,
-                    PANEL_CLOCK_WIDTH - 10.0,
+                    PANEL_CLOCK_WIDTH,
                     22.0,
                 ),
                 &clock,
-                0.78,
+                1.0,
                 self.palette.text,
-                TextAlign::End,
+                TextAlign::Center,
                 false,
             ));
             commands.push(text(
                 Rect::new(
                     width as f32 - PANEL_CLOCK_WIDTH,
                     28.0,
-                    PANEL_CLOCK_WIDTH - 10.0,
+                    PANEL_CLOCK_WIDTH,
                     20.0,
                 ),
                 &date,
                 0.72,
                 self.palette.text,
-                TextAlign::End,
+                TextAlign::Center,
                 false,
             ));
         }
@@ -756,16 +772,6 @@ impl LiveShell {
         let tray_start =
             panel_control_start(width) - self.tray.len().min(4) as f32 * PANEL_TRAY_WIDTH;
         let codex_x = tray_start - PANEL_CODEX_WIDTH;
-        commands.push(PaintCommand::Fill {
-            rect: Rect::new(panel_control_start(width) - 4.0, 16.0, 1.0, 24.0),
-            color: self.palette.muted,
-        });
-        if !self.tray.is_empty() {
-            commands.push(PaintCommand::Fill {
-                rect: Rect::new(tray_start - 4.0, 16.0, 1.0, 24.0),
-                color: self.palette.muted,
-            });
-        }
         if self.panel_hover == Some(PanelHover::Codex) {
             commands.push(PaintCommand::RoundedFill {
                 rect: Rect::new(codex_x + 2.0, 7.0, PANEL_CODEX_WIDTH - 4.0, 42.0),
@@ -773,18 +779,16 @@ impl LiveShell {
                 radius: 8.0,
             });
         }
-        commands.push(PaintCommand::RoundedFill {
-            rect: Rect::new(codex_x + 7.0, 18.0, 22.0, 17.0),
-            color: self.palette.accent_soft,
-            radius: 6.0,
+        commands.push(PaintCommand::Image {
+            bounds: Rect::new(
+                codex_x + (PANEL_CODEX_WIDTH - PANEL_CODEX_ICON_SIZE) / 2.0,
+                (56.0 - PANEL_CODEX_ICON_SIZE) / 2.0,
+                PANEL_CODEX_ICON_SIZE,
+                PANEL_CODEX_ICON_SIZE,
+            ),
+            id: 0x5000,
+            image: Arc::clone(&self.codex_icon),
         });
-        for offset in [0.0, 6.0, 12.0] {
-            commands.push(PaintCommand::RoundedFill {
-                rect: Rect::new(codex_x + 11.0 + offset, 25.0, 3.0, 3.0),
-                color: self.palette.text,
-                radius: 1.5,
-            });
-        }
         commands
     }
 
@@ -967,9 +971,9 @@ mod tests {
     use image::{Rgba, RgbaImage};
 
     use super::{
-        PANEL_CLOCK_WIDTH, PANEL_CODEX_WIDTH, PANEL_CONTROL_GAP, PANEL_TRAY_ICON_SIZE,
-        PANEL_TRAY_WIDTH, panel_control_start, panel_tray_icons, platform::SecureStorageState,
-        secure_storage_status_label, visible_tray_item,
+        PANEL_CLOCK_WIDTH, PANEL_CODEX_ICON_SIZE, PANEL_CODEX_WIDTH, PANEL_CONTROL_GAP,
+        PANEL_TRAY_ICON_SIZE, PANEL_TRAY_WIDTH, panel_control_start, panel_tray_icons,
+        platform::SecureStorageState, secure_storage_status_label, visible_tray_item,
     };
     use crate::model::TrayItem;
 
@@ -998,6 +1002,7 @@ mod tests {
         assert_eq!(panel_control_start(width), 1816.0);
         assert_eq!(cluster_width, 224.0);
         assert!(cluster_width < 240.0);
+        assert!(PANEL_CODEX_ICON_SIZE > PANEL_TRAY_ICON_SIZE as f32);
     }
 
     #[test]
