@@ -26,6 +26,11 @@ use crate::{
 use sdl3::keyboard::{Keycode, Mod};
 
 const PANEL_ITEM_WIDTH: f32 = 52.0;
+const PANEL_CLOCK_WIDTH: f32 = 96.0;
+const PANEL_CONTROL_GAP: f32 = 8.0;
+const PANEL_TRAY_WIDTH: f32 = 28.0;
+const PANEL_TRAY_ICON_SIZE: u32 = 18;
+const PANEL_CODEX_WIDTH: f32 = 36.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PanelHover {
@@ -44,6 +49,7 @@ pub struct LiveShell {
     notification_feed: NotificationFeed,
     windows: Vec<OpenWindow>,
     tray: Vec<TrayItem>,
+    tray_icons: Vec<Arc<image::RgbaImage>>,
     notification: Option<DesktopNotification>,
     wallpaper_path: Option<std::path::PathBuf>,
     wallpaper: Option<Arc<image::RgbaImage>>,
@@ -87,6 +93,7 @@ impl LiveShell {
         let notification_feed = NotificationFeed::new()?;
         let windows = window_feed.snapshot(&launcher).unwrap_or_default();
         let tray = tray_feed.snapshot();
+        let tray_icons = panel_tray_icons(&tray);
         let network = platform::network_status();
         let bluetooth = platform::bluetooth_status();
         let audio = platform::audio_status();
@@ -101,6 +108,7 @@ impl LiveShell {
             notification_feed,
             windows,
             tray,
+            tray_icons,
             notification: None,
             wallpaper_path,
             wallpaper: None,
@@ -167,6 +175,7 @@ impl LiveShell {
         let tray = self.tray_feed.snapshot();
         if tray != self.tray {
             self.tray = tray;
+            self.tray_icons = panel_tray_icons(&self.tray);
             changed = true;
         }
         let notification = self.notification_feed.snapshot();
@@ -246,15 +255,15 @@ impl LiveShell {
             self.launcher_visible = false;
             return true;
         }
-        let tray_start = control_start - self.tray.len().min(4) as f32 * 34.0;
-        let codex_start = tray_start - 44.0;
+        let tray_start = control_start - self.tray.len().min(4) as f32 * PANEL_TRAY_WIDTH;
+        let codex_start = tray_start - PANEL_CODEX_WIDTH;
         if x >= codex_start && x < tray_start {
             self.codex_hub_visible = !self.codex_hub_visible;
             return true;
         }
         if x >= tray_start {
-            let index = ((x - tray_start) / 34.0) as usize;
-            if let Some(item) = self.tray.get(index) {
+            let index = ((x - tray_start) / PANEL_TRAY_WIDTH) as usize;
+            if let Some(item) = visible_tray_item(&self.tray, index) {
                 self.tray_feed.activate(&item.id);
             }
             return true;
@@ -685,13 +694,23 @@ impl LiveShell {
             let date = now.strftime("%-m/%-d/%Y").to_string();
             if self.panel_hover == Some(PanelHover::Control) {
                 commands.push(PaintCommand::RoundedFill {
-                    rect: Rect::new(width.saturating_sub(154) as f32, 7.0, 140.0, 42.0),
+                    rect: Rect::new(
+                        width as f32 - PANEL_CLOCK_WIDTH,
+                        7.0,
+                        PANEL_CLOCK_WIDTH - 8.0,
+                        42.0,
+                    ),
                     color: self.palette.surface_hover,
                     radius: 8.0,
                 });
             }
             commands.push(text(
-                Rect::new(width.saturating_sub(150) as f32, 6.0, 132.0, 22.0),
+                Rect::new(
+                    width as f32 - PANEL_CLOCK_WIDTH,
+                    6.0,
+                    PANEL_CLOCK_WIDTH - 10.0,
+                    22.0,
+                ),
                 &clock,
                 0.78,
                 self.palette.text,
@@ -699,7 +718,12 @@ impl LiveShell {
                 false,
             ));
             commands.push(text(
-                Rect::new(width.saturating_sub(150) as f32, 28.0, 132.0, 20.0),
+                Rect::new(
+                    width as f32 - PANEL_CLOCK_WIDTH,
+                    28.0,
+                    PANEL_CLOCK_WIDTH - 10.0,
+                    20.0,
+                ),
                 &date,
                 0.72,
                 self.palette.text,
@@ -707,37 +731,56 @@ impl LiveShell {
                 false,
             ));
         }
-        for (index, item) in self.tray.iter().rev().take(4).rev().enumerate() {
-            let x = panel_control_start(width) - (self.tray.len().min(4) - index) as f32 * 34.0;
+        for (index, _) in self.tray.iter().rev().take(4).rev().enumerate() {
+            let x = panel_control_start(width)
+                - (self.tray.len().min(4) - index) as f32 * PANEL_TRAY_WIDTH;
             if self.panel_hover == Some(PanelHover::Tray(index)) {
                 commands.push(PaintCommand::RoundedFill {
-                    rect: Rect::new(x + 1.0, 9.0, 28.0, 38.0),
+                    rect: Rect::new(x + 1.0, 10.0, PANEL_TRAY_WIDTH - 2.0, 36.0),
                     color: self.palette.surface_hover,
                     radius: 7.0,
                 });
             }
-            commands.push(text(
-                Rect::new(x, 14.0, 30.0, 26.0),
-                &item.title.chars().next().unwrap_or('•').to_string(),
-                0.8,
-                self.palette.text,
-                TextAlign::Center,
-                false,
-            ));
+            if let Some(image) = self.tray_icons.get(index) {
+                commands.push(PaintCommand::Image {
+                    bounds: Rect::new(x + 5.0, 19.0, 18.0, 18.0),
+                    id: 0x6000 + index as u16,
+                    image: Arc::clone(image),
+                });
+            }
         }
-        let codex_x = panel_control_start(width) - self.tray.len().min(4) as f32 * 34.0 - 44.0;
+        let tray_start =
+            panel_control_start(width) - self.tray.len().min(4) as f32 * PANEL_TRAY_WIDTH;
+        let codex_x = tray_start - PANEL_CODEX_WIDTH;
+        commands.push(PaintCommand::Fill {
+            rect: Rect::new(panel_control_start(width) - 4.0, 16.0, 1.0, 24.0),
+            color: self.palette.muted,
+        });
+        if !self.tray.is_empty() {
+            commands.push(PaintCommand::Fill {
+                rect: Rect::new(tray_start - 4.0, 16.0, 1.0, 24.0),
+                color: self.palette.muted,
+            });
+        }
         if self.panel_hover == Some(PanelHover::Codex) {
             commands.push(PaintCommand::RoundedFill {
-                rect: Rect::new(codex_x + 2.0, 7.0, 40.0, 42.0),
+                rect: Rect::new(codex_x + 2.0, 7.0, PANEL_CODEX_WIDTH - 4.0, 42.0),
                 color: self.palette.surface_hover,
                 radius: 8.0,
             });
         }
         commands.push(PaintCommand::RoundedFill {
-            rect: Rect::new(codex_x + 10.0, 15.0, 24.0, 24.0),
-            color: 0xf5cf3d,
-            radius: 3.0,
+            rect: Rect::new(codex_x + 7.0, 18.0, 22.0, 17.0),
+            color: self.palette.accent_soft,
+            radius: 6.0,
         });
+        for offset in [0.0, 6.0, 12.0] {
+            commands.push(PaintCommand::RoundedFill {
+                rect: Rect::new(codex_x + 11.0 + offset, 25.0, 3.0, 3.0),
+                color: self.palette.text,
+                radius: 1.5,
+            });
+        }
         commands
     }
 
@@ -759,11 +802,13 @@ impl LiveShell {
             return Some(PanelHover::Control);
         }
         let tray_count = self.tray.len().min(4);
-        let tray_start = control_start - tray_count as f32 * 34.0;
+        let tray_start = control_start - tray_count as f32 * PANEL_TRAY_WIDTH;
         if x >= tray_start {
-            return Some(PanelHover::Tray(((x - tray_start) / 34.0) as usize));
+            return Some(PanelHover::Tray(
+                ((x - tray_start) / PANEL_TRAY_WIDTH) as usize,
+            ));
         }
-        if x >= tray_start - 44.0 {
+        if x >= tray_start - PANEL_CODEX_WIDTH {
             return Some(PanelHover::Codex);
         }
         None
@@ -857,8 +902,28 @@ fn panel_control_start(width: u32) -> f32 {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        width.saturating_sub(190) as f32
+        width as f32 - PANEL_CLOCK_WIDTH - PANEL_CONTROL_GAP
     }
+}
+
+fn panel_tray_icons(items: &[TrayItem]) -> Vec<Arc<image::RgbaImage>> {
+    items
+        .iter()
+        .rev()
+        .take(4)
+        .rev()
+        .map(|item| {
+            Arc::new(crate::icons::resized(
+                &item.icon,
+                PANEL_TRAY_ICON_SIZE,
+                PANEL_TRAY_ICON_SIZE,
+            ))
+        })
+        .collect()
+}
+
+fn visible_tray_item(items: &[TrayItem], visual_index: usize) -> Option<&TrayItem> {
+    items.get(items.len().saturating_sub(4).checked_add(visual_index)?)
 }
 
 fn tint_panel_icon(mut icon: image::RgbaImage, color: u32) -> image::RgbaImage {
@@ -895,7 +960,14 @@ fn text(
 
 #[cfg(test)]
 mod tests {
-    use super::{platform::SecureStorageState, secure_storage_status_label};
+    use image::{Rgba, RgbaImage};
+
+    use super::{
+        PANEL_CLOCK_WIDTH, PANEL_CODEX_WIDTH, PANEL_CONTROL_GAP, PANEL_TRAY_ICON_SIZE,
+        PANEL_TRAY_WIDTH, panel_control_start, panel_tray_icons, platform::SecureStorageState,
+        secure_storage_status_label, visible_tray_item,
+    };
+    use crate::model::TrayItem;
 
     #[test]
     fn launcher_exposes_every_non_ready_secure_storage_state() {
@@ -908,5 +980,51 @@ mod tests {
             assert!(secure_storage_status_label(state).is_some());
         }
         assert_eq!(secure_storage_status_label(SecureStorageState::Ready), None);
+    }
+
+    #[test]
+    fn right_panel_cluster_is_compact_and_grouped() {
+        let width = 1920;
+        let tray_count = 3.0;
+        let cluster_width = PANEL_CLOCK_WIDTH
+            + PANEL_CONTROL_GAP
+            + tray_count * PANEL_TRAY_WIDTH
+            + PANEL_CODEX_WIDTH;
+
+        assert_eq!(panel_control_start(width), 1816.0);
+        assert_eq!(cluster_width, 224.0);
+        assert!(cluster_width < 240.0);
+    }
+
+    #[test]
+    fn tray_icons_are_normalized_without_letter_fallbacks() {
+        let item = TrayItem {
+            id: "status".into(),
+            title: "Status Application".into(),
+            icon: RgbaImage::from_pixel(32, 16, Rgba([10, 20, 30, 255])),
+        };
+        let icons = panel_tray_icons(&[item]);
+
+        assert_eq!(icons.len(), 1);
+        assert_eq!(
+            icons[0].dimensions(),
+            (PANEL_TRAY_ICON_SIZE, PANEL_TRAY_ICON_SIZE)
+        );
+        assert!(icons[0].pixels().any(|pixel| pixel.0[3] != 0));
+    }
+
+    #[test]
+    fn visible_tray_indices_address_the_last_four_items() {
+        let items = (0..5)
+            .map(|index| TrayItem {
+                id: index.to_string(),
+                title: String::new(),
+                icon: RgbaImage::new(1, 1),
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(visible_tray_item(&items, 0).unwrap().id, "1");
+        assert_eq!(visible_tray_item(&items, 3).unwrap().id, "4");
+        assert!(visible_tray_item(&items, 4).is_none());
     }
 }

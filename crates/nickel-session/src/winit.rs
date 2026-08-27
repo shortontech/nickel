@@ -10,7 +10,7 @@ use smithay::{
             Bind, Color32F, ExportMem, Frame, ImportAll, ImportMem, Offscreen, Renderer,
             damage::OutputDamageTracker,
             element::{
-                Kind,
+                AsRenderElements, Kind,
                 memory::MemoryRenderBufferRenderElement,
                 solid::{SolidColorBuffer, SolidColorRenderElement},
                 surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
@@ -24,7 +24,7 @@ use smithay::{
     desktop::Window,
     output::{Mode, Output, PhysicalProperties, Subpixel},
     reexports::{calloop::EventLoop, wayland_server::Resource},
-    utils::{Buffer, Rectangle, Transform},
+    utils::{Buffer, Rectangle, Scale, Transform},
 };
 
 use nickel_core::{
@@ -36,8 +36,21 @@ use crate::{CalloopData, NickelSession, state::PreviewFrame};
 
 smithay::backend::renderer::element::render_elements! {
     WinitFrameElement<R> where R: ImportAll + ImportMem;
+    Surface=WaylandSurfaceRenderElement<R>,
     Memory=MemoryRenderBufferRenderElement<R>,
     Solid=SolidColorRenderElement,
+}
+
+struct WindowRenderGroup<E> {
+    client: Vec<E>,
+    frame: Vec<E>,
+}
+
+fn flatten_window_groups<E>(groups: Vec<WindowRenderGroup<E>>) -> Vec<E> {
+    groups
+        .into_iter()
+        .flat_map(|group| group.client.into_iter().chain(group.frame))
+        .collect()
 }
 
 pub fn init_winit(
@@ -143,18 +156,18 @@ pub fn init_winit(
                         let frame_palette = ThemePalette::from_appearance(
                             ShellSettings::load_default().resolve_appearance(Appearance::default()),
                         );
-                        let frame_elements = frame_elements(
+                        let window_elements = composited_window_elements(
                             state,
                             renderer,
                             &output,
                             frame_icons.as_ref(),
                             &frame_palette,
                         );
-                        if !frame_elements.is_empty() {
+                        if !window_elements.is_empty() {
                             let mut frame = renderer
                                 .render(&mut framebuffer, size, output.current_transform())
                                 .unwrap();
-                            draw_render_elements(&mut frame, 1.0, &frame_elements, &[damage])
+                            draw_render_elements(&mut frame, 1.0, &window_elements, &[damage])
                                 .unwrap();
                             let _ = frame.finish().unwrap();
                         }
@@ -318,7 +331,7 @@ fn frame_cursor_icon(cursor: crate::window_frame::FrameCursor) -> ::winit::windo
     }
 }
 
-fn frame_elements(
+fn composited_window_elements(
     state: &NickelSession,
     renderer: &mut GlesRenderer,
     output: &Output,
@@ -332,7 +345,7 @@ fn frame_elements(
         .shell_windows()
         .filter_map(|window| window.toplevel().map(|surface| surface.wl_surface().id()))
         .collect::<Vec<_>>();
-    let mut elements = Vec::new();
+    let mut groups = Vec::new();
     for window in state.space.elements().rev() {
         let Some(bounds) = state.space.element_bbox(window) else {
             continue;
@@ -340,13 +353,33 @@ fn frame_elements(
         if !output_geometry.overlaps(bounds) {
             continue;
         }
+        let Some(location) = state.space.element_location(window) else {
+            continue;
+        };
+        let render_location = location - window.geometry().loc - output_geometry.loc;
+        let client = window
+            .render_elements::<WaylandSurfaceRenderElement<GlesRenderer>>(
+                renderer,
+                render_location.to_physical_precise_round(1),
+                Scale::from(1.0),
+                1.0,
+            )
+            .into_iter()
+            .map(WinitFrameElement::from)
+            .collect::<Vec<_>>();
+        if client.is_empty() {
+            continue;
+        }
+        let mut frame = Vec::new();
         let Some(surface) = window.toplevel().map(|top| top.wl_surface()) else {
+            groups.push(WindowRenderGroup { client, frame });
             continue;
         };
         if shell_surfaces.contains(&surface.id())
             || state.is_fullscreen_window(window)
             || !state.is_server_decorated(window)
         {
+            groups.push(WindowRenderGroup { client, frame });
             continue;
         }
         let registry_id = state.surface_windows.get(&surface.id()).copied();
@@ -355,7 +388,6 @@ fn frame_elements(
             .and_then(|id| state.windows.title(id))
             .unwrap_or_default();
         let foreground = if active { palette.text } else { palette.muted };
-        let frame_index = elements.len();
         if let Some(titlebar) =
             crate::window_frame::render_titlebar(bounds.size.w, title, palette.panel, foreground)
             && let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
@@ -373,7 +405,7 @@ fn frame_elements(
                 Kind::Unspecified,
             )
         {
-            elements.push(WinitFrameElement::from(element));
+            frame.push(WinitFrameElement::from(element));
         }
         if let Some(icons) = icons {
             let icon_y =
@@ -401,12 +433,13 @@ fn frame_elements(
                     None,
                     Kind::Unspecified,
                 ) {
-                    elements.insert(frame_index, WinitFrameElement::from(icon));
+                    frame.insert(0, WinitFrameElement::from(icon));
                 }
             }
         }
+        groups.push(WindowRenderGroup { client, frame });
     }
-    elements
+    flatten_window_groups(groups)
 }
 
 fn capture_output(
@@ -526,4 +559,33 @@ fn normalize_capture_rows(
             .copy_from_slice(&mapped[source_y * row_bytes..(source_y + 1) * row_bytes]);
     }
     Ok(rgba)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WindowRenderGroup, flatten_window_groups};
+
+    #[test]
+    fn window_frames_stay_with_their_clients_in_stacking_order() {
+        let elements = flatten_window_groups(vec![
+            WindowRenderGroup {
+                client: vec!["foreground-client"],
+                frame: vec!["foreground-frame"],
+            },
+            WindowRenderGroup {
+                client: vec!["background-client"],
+                frame: vec!["background-frame"],
+            },
+        ]);
+
+        assert_eq!(
+            elements,
+            [
+                "foreground-client",
+                "foreground-frame",
+                "background-client",
+                "background-frame",
+            ]
+        );
+    }
 }

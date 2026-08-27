@@ -1,7 +1,7 @@
 use std::{
     env,
     path::PathBuf,
-    sync::{Arc, Mutex, mpsc},
+    sync::{Arc, Mutex, OnceLock, mpsc},
     thread,
     time::Duration,
 };
@@ -441,31 +441,61 @@ fn read_tray_item(connection: &zbus::blocking::Connection, id: String) -> Option
     let (service, path) = item_address(&id);
     let proxy =
         zbus::blocking::Proxy::new(connection, service, path, "org.kde.StatusNotifierItem").ok()?;
+    type StatusNotifierToolTip = (String, Vec<(i32, i32, Vec<u8>)>, String, String);
+
     let title = proxy.get_property::<String>("Title").unwrap_or_default();
-    let icon = proxy
-        .get_property::<Vec<(i32, i32, Vec<u8>)>>("IconPixmap")
-        .ok()
-        .and_then(|pixmaps| {
-            pixmaps
-                .into_iter()
-                .max_by_key(|(width, height, _)| width * height)
-        })
-        .and_then(pixmap_to_rgba)
+    let tooltip_title = proxy
+        .get_property::<StatusNotifierToolTip>("ToolTip")
+        .map(|(_, _, title, _)| title)
+        .unwrap_or_default();
+    let icon_name = proxy.get_property::<String>("IconName").unwrap_or_default();
+    let icon = resolve_status_icon_name(&icon_name)
+        .or_else(|| resolve_status_application_icon(&title, &tooltip_title))
         .or_else(|| {
-            let name = proxy.get_property::<String>("IconName").ok()?;
+            proxy
+                .get_property::<Vec<(i32, i32, Vec<u8>)>>("IconPixmap")
+                .ok()
+                .and_then(|pixmaps| {
+                    pixmaps
+                        .into_iter()
+                        .max_by_key(|(width, height, _)| width * height)
+                })
+                .and_then(pixmap_to_rgba)
+        })?;
+    drop(proxy);
+    Some(TrayItem { id, title, icon })
+}
+
+fn resolve_status_icon_name(name: &str) -> Option<image::RgbaImage> {
+    (!name.trim().is_empty())
+        .then_some(())
+        .and_then(|()| {
             ["breeze-dark", "breeze", "hicolor", "Adwaita"]
                 .into_iter()
                 .find_map(|theme| {
-                    freedesktop_icons::lookup(&name)
+                    freedesktop_icons::lookup(name)
                         .with_size(32)
                         .with_theme(theme)
                         .with_cache()
                         .find()
                 })
-                .and_then(|path| icons::load(&path))
-        })?;
-    drop(proxy);
-    Some(TrayItem { id, title, icon })
+        })
+        .and_then(|path| icons::load(&path))
+}
+
+fn resolve_status_application_icon(title: &str, tooltip_title: &str) -> Option<image::RgbaImage> {
+    static APPLICATIONS: OnceLock<Vec<Application>> = OnceLock::new();
+    let applications = APPLICATIONS.get_or_init(desktop_entries::load_applications);
+    [title, tooltip_title]
+        .into_iter()
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+        .find_map(|label| {
+            applications
+                .iter()
+                .find(|application| application.name().eq_ignore_ascii_case(label))
+                .and_then(|application| application.icon_path().and_then(icons::load))
+        })
 }
 
 fn activate_tray_item(connection: &zbus::blocking::Connection, id: &str, context_menu: bool) {
