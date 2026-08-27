@@ -114,29 +114,45 @@ impl SettingsApp {
             .max(0.04);
         self.displays = outputs
             .into_iter()
-            .map(|output| DisplayCard {
-                connector: output.name.clone(),
-                detail: format!("{}  {} X {}", output.name, output.width, output.height),
-                name: output.model,
-                logical_width: output.width,
-                logical_height: output.height,
-                rect: Rect {
-                    x: 95
-                        + (f64::from(output.x - minimum_x) * self.pixels_per_logical).round()
-                            as i32,
-                    y: 155
-                        + (f64::from(output.y - minimum_y) * self.pixels_per_logical).round()
-                            as i32,
-                    w: (f64::from(output.physical_width.max(1)) * physical_scale).round() as i32,
-                    h: (f64::from(output.physical_height.max(1)) * physical_scale).round() as i32,
-                },
-                primary: output.primary,
+            .map(|output| {
+                let physical_size_known =
+                    output.physical_width >= 50 && output.physical_height >= 50;
+                let (card_width, card_height) = if physical_size_known {
+                    (
+                        (f64::from(output.physical_width) * physical_scale).round() as i32,
+                        (f64::from(output.physical_height) * physical_scale).round() as i32,
+                    )
+                } else {
+                    (
+                        (f64::from(output.width) * self.pixels_per_logical).round() as i32,
+                        (f64::from(output.height) * self.pixels_per_logical).round() as i32,
+                    )
+                };
+                DisplayCard {
+                    connector: output.name.clone(),
+                    detail: format!("{}  {} × {}", output.name, output.width, output.height),
+                    name: output.model,
+                    logical_width: output.width,
+                    logical_height: output.height,
+                    rect: Rect {
+                        x: self.display_plane.x
+                            + (f64::from(output.x - minimum_x) * self.pixels_per_logical).round()
+                                as i32,
+                        y: self.display_plane.y
+                            + (f64::from(output.y - minimum_y) * self.pixels_per_logical).round()
+                                as i32,
+                        w: card_width.max(120),
+                        h: card_height.max(80),
+                    },
+                    primary: output.primary,
+                }
             })
             .collect();
         for index in 1..self.displays.len() {
             let previous = self.displays[index - 1].rect;
             self.displays[index].rect = attach_rect_centered(self.displays[index].rect, previous);
         }
+        center_display_rects(&mut self.displays, self.display_plane);
         self.selected = self
             .displays
             .iter()

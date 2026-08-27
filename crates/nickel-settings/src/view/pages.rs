@@ -28,13 +28,29 @@ impl SettingsApp {
         .width(105.0);
         ui! {
             <Column grow={1.0} padding={Insets {
-                top: 24.0, right: 40.0, bottom: 20.0, left: 20.0,
+                top: 20.0, right: 32.0, bottom: 20.0, left: 20.0,
             }} gap={12.0}>
-                <Container height={340.0} background={palette.surface} border={(palette.muted, 2.0)} />
-                <Row height={42.0} gap={15.0}>
-                    <Text color={palette.text} width={183.0}>{&selected.name}</Text>
-                    {identify}{make_primary}{apply}
-                </Row>
+                <Container id={"display-plane"} grow={1.0} min_height={300.0}
+                    background={palette.surface} border={(palette.muted, 1.0)} />
+                <Container background={palette.surface} border={(palette.muted, 1.0)}
+                    padding={Insets::all(12.0)}>
+                    <Column gap={10.0}>
+                        <Row height={36.0} gap={12.0}>
+                            <Column grow={1.0} gap={3.0}>
+                                <Text color={palette.text}>{&selected.name}</Text>
+                                <Text scale={0.9} color={palette.muted}>{&selected.detail}</Text>
+                            </Column>
+                            <Text bold={true} color={if selected.primary { palette.accent } else { palette.muted }}>
+                                {if selected.primary {
+                                    self.localizer.text("settings-display-primary")
+                                } else { String::new() }}
+                            </Text>
+                        </Row>
+                        <Row height={42.0} gap={12.0}>
+                            {identify}{make_primary}{apply}
+                        </Row>
+                    </Column>
+                </Container>
                 <Text color={if self.applied { palette.complement } else { palette.muted }} height={18.0}>
                     {&self.status}
                 </Text>

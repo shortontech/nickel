@@ -200,6 +200,37 @@ fn value_control_emits_typed_payload_and_component_messages_map() {
 }
 
 #[test]
+fn slider_drag_emits_continuous_mapped_values_until_release() {
+    fn volume_message(fraction: f32) -> TestMessage {
+        TestMessage::Volume((fraction * 100.0).round() as u8)
+    }
+
+    let tree = UiTree::layout(
+        Slider::on_change(volume_message, 0.25)
+            .id("volume")
+            .width(200.0),
+        Rect::new(0.0, 0.0, 200.0, 24.0),
+    );
+    let mut state = UiStateStore::default();
+    tree.handle_event(
+        &mut state,
+        UiEvent::PointerPressed(Point { x: 50.0, y: 12.0 }),
+    );
+    let dragged = tree.handle_event(
+        &mut state,
+        UiEvent::PointerMoved(Point { x: 180.0, y: 12.0 }),
+    );
+    assert_eq!(dragged.messages, vec![TestMessage::Volume(90)]);
+    assert!(state.captured().is_some());
+
+    tree.handle_event(
+        &mut state,
+        UiEvent::PointerReleased(Point { x: 180.0, y: 12.0 }),
+    );
+    assert!(state.captured().is_none());
+}
+
+#[test]
 fn vertical_scroll_clips_painting_and_hit_regions() {
     let tree = UiTree::layout(
         VerticalScroll::new(TestMessage::Named("scroll"), 50.0).child(

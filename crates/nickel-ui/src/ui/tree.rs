@@ -898,6 +898,15 @@ impl<Message: Clone> UiTree<Message> {
                     };
                 }
                 let mut invalidation = state.set_hovered(self.id_at(point).cloned());
+                if let Some(captured) = state.captured()
+                    && let Some(hit) = self.hits.iter().rev().find(|hit| &hit.id == captured)
+                    && let Some(map) = hit.message_mapper
+                {
+                    let fraction = ((point.x - hit.rect.origin.x) / hit.rect.size.width.max(1.0))
+                        .clamp(0.0, 1.0);
+                    outcome.messages.push(map(fraction));
+                    invalidation = invalidation.merge(Invalidation::Paint);
+                }
                 if let Some(region_id) = state.captured().cloned()
                     && let Some(region) = self.selection_region(&region_id)
                     && let Some(endpoint) = region.endpoint_at(point, true)

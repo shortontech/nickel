@@ -23,6 +23,7 @@ settings-nav-section-connectivity = Conectividad
 settings-display-identify = Identificar
 settings-display-make-primary = Establecer como principal
 settings-display-apply = Aplicar
+settings-display-primary = Pantalla principal
 settings-status-changes-not-applied = Cambios no aplicados
 settings-status-identifying = Identificando pantallas
 settings-status-identify-failed = No se pudieron identificar las pantallas

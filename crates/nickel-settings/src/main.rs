@@ -54,7 +54,7 @@ const DISPLAY_PLANE: Rect = Rect {
     h: 340,
 };
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Rect {
     x: i32,
     y: i32,
@@ -339,8 +339,14 @@ impl SettingsApp {
     fn dispatch_ui_event(&mut self, event: UiEvent) {
         let outcome = self.ui.handle_event(&mut self.ui_state, event);
         for message in outcome.messages {
-            if let SettingsMessage::SidebarSearchChanged(value) = message {
-                self.sidebar_query = value;
+            match message {
+                SettingsMessage::SidebarSearchChanged(value) => self.sidebar_query = value,
+                SettingsMessage::SetDesktopCount(count) => self.set_desktop_count(count),
+                SettingsMessage::SetAppearanceHue(hue) => self.set_appearance_hue(hue),
+                SettingsMessage::SetAppearanceIntensity(intensity) => {
+                    self.set_appearance_intensity(intensity);
+                }
+                _ => {}
             }
         }
         if outcome.invalidation != nickel_ui::Invalidation::None {
@@ -354,12 +360,6 @@ impl SettingsApp {
             .and_then(|id| self.ui_state.state(id))
             .map(|state| state.scroll_offset)
             .unwrap_or(0.0)
-    }
-
-    fn captured_message(&self) -> Option<&SettingsMessage> {
-        self.ui_state
-            .captured()
-            .and_then(|id| self.ui.message_for_id(id))
     }
 
     fn hovered_message(&self) -> Option<&SettingsMessage> {
@@ -391,21 +391,11 @@ impl SettingsApp {
         };
         self.dispatch_ui_event(UiEvent::PointerPressed(point));
         if let Some(SettingsMessage::SetDesktopCount(count)) = self.ui.message_at_owned(point) {
-            let id = self
-                .ui
-                .id_for_message(&SettingsMessage::SetDesktopCount(count))
-                .cloned();
-            self.ui_state.set_capture(id);
             self.set_desktop_count(count);
             self.request_redraw();
             return;
         }
         if let Some(SettingsMessage::SetAppearanceHue(hue)) = self.ui.message_at_owned(point) {
-            let id = self
-                .ui
-                .id_for_message(&SettingsMessage::SetAppearanceHue(hue))
-                .cloned();
-            self.ui_state.set_capture(id);
             self.set_appearance_hue(hue);
             self.request_redraw();
             return;
@@ -413,11 +403,6 @@ impl SettingsApp {
         if let Some(SettingsMessage::SetAppearanceIntensity(intensity)) =
             self.ui.message_at_owned(point)
         {
-            let id = self
-                .ui
-                .id_for_message(&SettingsMessage::SetAppearanceIntensity(intensity))
-                .cloned();
-            self.ui_state.set_capture(id);
             self.set_appearance_intensity(intensity);
             self.request_redraw();
             return;
@@ -570,42 +555,7 @@ impl SettingsApp {
 
     fn pointer_moved(&mut self, x: f32, y: f32) {
         self.cursor = (x.round() as i32, y.round() as i32);
-        if matches!(
-            self.captured_message(),
-            Some(SettingsMessage::SetDesktopCount(_))
-        ) {
-            if let Some(fraction) = self.ui.horizontal_fraction_for_matching(x, |message| {
-                matches!(message, SettingsMessage::SetDesktopCount(_))
-            }) {
-                self.set_desktop_count_from_fraction(fraction);
-                self.request_redraw();
-            }
-            return;
-        }
-        if matches!(
-            self.captured_message(),
-            Some(SettingsMessage::SetAppearanceHue(_))
-        ) {
-            if let Some(fraction) = self.ui.horizontal_fraction_for_matching(x, |message| {
-                matches!(message, SettingsMessage::SetAppearanceHue(_))
-            }) {
-                self.set_appearance_hue_from_fraction(fraction);
-                self.request_redraw();
-            }
-            return;
-        }
-        if matches!(
-            self.captured_message(),
-            Some(SettingsMessage::SetAppearanceIntensity(_))
-        ) {
-            if let Some(fraction) = self.ui.horizontal_fraction_for_matching(x, |message| {
-                matches!(message, SettingsMessage::SetAppearanceIntensity(_))
-            }) {
-                self.set_appearance_intensity_from_fraction(fraction);
-                self.request_redraw();
-            }
-            return;
-        }
+        self.dispatch_ui_event(UiEvent::PointerMoved(UiPoint { x, y }));
         let hovered = self.ui.id_at(UiPoint { x, y }).cloned();
         if self.ui_state.set_hovered(hovered) != nickel_ui::Invalidation::None {
             self.request_redraw();
@@ -620,7 +570,7 @@ impl SettingsApp {
             let mut rect = self.displays[self.selected].rect;
             rect.x = self.cursor.0 - offset_x;
             rect.y = self.cursor.1 - offset_y;
-            rect = constrain_center(rect, DISPLAY_PLANE);
+            rect = constrain_center(rect, self.display_plane);
             rect = self
                 .displays
                 .iter()
@@ -690,13 +640,6 @@ impl SettingsApp {
         }
     }
 
-    fn set_desktop_count_from_fraction(&mut self, fraction: f32) {
-        let SettingsMessage::SetDesktopCount(count) = desktop_count_message(fraction) else {
-            unreachable!()
-        };
-        self.set_desktop_count(count);
-    }
-
     fn set_desktop_count(&mut self, count: u8) {
         if count == self.shell_settings.desktop_count {
             return;
@@ -709,28 +652,12 @@ impl SettingsApp {
         save_shell_settings(&self.shell_settings);
     }
 
-    fn set_appearance_hue_from_fraction(&mut self, fraction: f32) {
-        let SettingsMessage::SetAppearanceHue(hue) = appearance_hue_message(fraction) else {
-            unreachable!()
-        };
-        self.set_appearance_hue(hue);
-    }
-
     fn set_appearance_hue(&mut self, hue: u16) {
         if self.shell_settings.accent_hue == Some(hue) {
             return;
         }
         self.shell_settings.accent_hue = Some(hue);
         self.appearance_save_deadline = Some(Instant::now() + self.frame_interval);
-    }
-
-    fn set_appearance_intensity_from_fraction(&mut self, fraction: f32) {
-        let SettingsMessage::SetAppearanceIntensity(intensity) =
-            appearance_intensity_message(fraction)
-        else {
-            unreachable!()
-        };
-        self.set_appearance_intensity(intensity);
     }
 
     fn set_appearance_intensity(&mut self, intensity: u8) {
@@ -752,6 +679,7 @@ impl SettingsApp {
         let ui = self.build_ui(logical_width as f32, logical_height as f32);
         ui.reconcile_state(&mut self.ui_state);
         self.ui = ui;
+        self.sync_display_plane();
         let mut commands = self.ui.commands().to_vec();
         if self.page == SettingsPage::Display {
             for (index, display) in self.displays.iter().enumerate() {
@@ -823,6 +751,32 @@ impl SettingsApp {
         }
         presenter.present_accelerated(&commands, scale)?;
         Ok(())
+    }
+
+    fn sync_display_plane(&mut self) {
+        if self.page != SettingsPage::Display {
+            return;
+        }
+        let Some(node) = self
+            .ui
+            .resolved_layout()
+            .nodes()
+            .iter()
+            .find(|node| node.id.as_str().ends_with("/display-plane"))
+        else {
+            return;
+        };
+        let resolved = Rect {
+            x: node.allocated.origin.x.round() as i32,
+            y: node.allocated.origin.y.round() as i32,
+            w: node.allocated.size.width.round() as i32,
+            h: node.allocated.size.height.round() as i32,
+        };
+        if resolved.w <= 0 || resolved.h <= 0 || resolved == self.display_plane {
+            return;
+        }
+        self.display_plane = resolved;
+        center_display_rects(&mut self.displays, resolved);
     }
 }
 
@@ -900,6 +854,7 @@ impl SettingsApp {
                 ..
             } => {
                 self.pointer_moved(x, y);
+                self.dispatch_ui_event(UiEvent::PointerReleased(UiPoint { x, y }));
                 self.finish_drag();
             }
             Event::MouseWheel {
@@ -1071,6 +1026,43 @@ fn attach_rect_centered(moving: Rect, fixed: Rect) -> Rect {
             dx * dx + dy * dy
         })
         .unwrap_or(moving)
+}
+
+fn center_display_rects(displays: &mut [DisplayCard], plane: Rect) {
+    let Some(first) = displays.first() else {
+        return;
+    };
+    let minimum_x = displays
+        .iter()
+        .map(|display| display.rect.x)
+        .min()
+        .unwrap_or(first.rect.x);
+    let minimum_y = displays
+        .iter()
+        .map(|display| display.rect.y)
+        .min()
+        .unwrap_or(first.rect.y);
+    let maximum_x = displays
+        .iter()
+        .map(|display| display.rect.x + display.rect.w)
+        .max()
+        .unwrap_or(first.rect.x + first.rect.w);
+    let maximum_y = displays
+        .iter()
+        .map(|display| display.rect.y + display.rect.h)
+        .max()
+        .unwrap_or(first.rect.y + first.rect.h);
+    let arrangement_center_x = minimum_x + (maximum_x - minimum_x) / 2;
+    let arrangement_center_y = minimum_y + (maximum_y - minimum_y) / 2;
+    let target_center_x = plane.x + plane.w / 2;
+    let target_center_y = plane.y + plane.h / 2;
+    let delta_x = target_center_x - arrangement_center_x;
+    let delta_y = target_center_y - arrangement_center_y;
+    for display in displays {
+        display.rect.x += delta_x;
+        display.rect.y += delta_y;
+        display.rect = constrain_center(display.rect, plane);
+    }
 }
 
 fn logical_placements(displays: &[DisplayCard]) -> Vec<(i32, i32)> {
@@ -1269,8 +1261,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        NetworkAdapter, Rect, SettingsApp, SettingsMessage, SettingsPage, attach_rect_centered,
-        constrain_center, snap_rect,
+        NetworkAdapter, Rect, SIDEBAR_WIDTH, SettingsApp, SettingsMessage, SettingsPage,
+        attach_rect_centered, constrain_center, snap_rect,
     };
 
     #[test]
@@ -1441,5 +1433,21 @@ mod tests {
             tree.message_rect(&SettingsMessage::Navigate(SettingsPage::Appearance))
                 .is_none()
         );
+    }
+
+    #[test]
+    fn display_cards_follow_the_resolved_canvas_instead_of_legacy_coordinates() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Display);
+        app.ui = app.build_ui(1200.0, 760.0);
+        app.sync_display_plane();
+
+        let plane = app.display_plane;
+        assert!(plane.x > SIDEBAR_WIDTH);
+        for display in &app.displays {
+            assert!(display.rect.x >= plane.x);
+            assert!(display.rect.y >= plane.y);
+            assert!(display.rect.x + display.rect.w <= plane.x + plane.w);
+            assert!(display.rect.y + display.rect.h <= plane.y + plane.h);
+        }
     }
 }
