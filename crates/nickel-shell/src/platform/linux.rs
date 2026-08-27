@@ -607,15 +607,6 @@ impl WindowFeed {
         )
     }
 
-    pub fn launcher_visible(&self) -> Option<bool> {
-        let socket = self.socket.as_ref()?;
-        socket
-            .send_to(b"launcher-visible", env::var_os(SESSION_CONTROL_ENV)?)
-            .ok()?;
-        let mut response = [0_u8; 1];
-        (socket.recv(&mut response).ok()? == 1).then_some(response[0] == b'1')
-    }
-
     pub fn preview(&self, window: WindowId) -> Option<WindowPreview> {
         let socket = self.socket.as_ref()?;
         socket
@@ -648,7 +639,41 @@ impl WindowFeed {
 }
 
 pub fn launcher_hotkey_receiver() -> mpsc::Receiver<GlobalShortcut> {
-    let (_sender, receiver) = mpsc::channel();
+    use std::os::unix::net::UnixDatagram;
+
+    let (sender, receiver) = mpsc::channel();
+    let Some(session) = env::var_os(SESSION_CONTROL_ENV) else {
+        return receiver;
+    };
+    let path = env::temp_dir().join(format!(
+        "nickel-{}-launcher-events.sock",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let Ok(socket) = UnixDatagram::bind(&path) else {
+        return receiver;
+    };
+    if socket.send_to(b"subscribe-launcher", session).is_err() {
+        let _ = std::fs::remove_file(path);
+        return receiver;
+    }
+    thread::Builder::new()
+        .name("nickel-launcher-events".into())
+        .spawn(move || {
+            let mut event = [0_u8; 32];
+            while let Ok(length) = socket.recv(&mut event) {
+                let shortcut = match &event[..length] {
+                    b"launcher-shown" => GlobalShortcut::ShowLauncher,
+                    b"launcher-hidden" => GlobalShortcut::HideLauncher,
+                    _ => continue,
+                };
+                if sender.send(shortcut).is_err() {
+                    break;
+                }
+            }
+            let _ = std::fs::remove_file(path);
+        })
+        .expect("failed to start Nickel launcher event listener");
     receiver
 }
 

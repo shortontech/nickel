@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Nickel Settings
+Comment=Configure Nickel
+Exec=nickel-settings
+Icon=nickel-settings
+Terminal=false
+Categories=Settings;
+StartupWMClass=nickel-settings

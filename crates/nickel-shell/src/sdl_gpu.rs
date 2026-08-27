@@ -104,4 +104,8 @@ impl SdlGpuPresenter {
         buffer.present().map_err(|error| error.to_string())?;
         Ok(damage)
     }
+
+    pub fn invalidate(&mut self) {
+        self.renderer.invalidate();
+    }
 }

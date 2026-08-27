@@ -158,14 +158,6 @@ impl LiveShell {
             }
             changed = true;
         }
-        if let Some(visible) = self.window_feed.launcher_visible() {
-            changed |= self.launcher_visible != visible;
-            self.launcher_visible = visible;
-            if visible {
-                changed |= self.control_visible;
-                self.control_visible = false;
-            }
-        }
         if let Some(windows) = self.window_feed.snapshot(&self.launcher)
             && windows != self.windows
         {

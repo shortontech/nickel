@@ -12,7 +12,7 @@ use nickel_ui::{DamageRegion, PaintCommand};
 use sdl3::event::{Event, WindowEvent};
 use sdl3::keyboard::{Keycode, Mod};
 use sdl3::mouse::MouseButton;
-use sdl3::video::Window;
+use sdl3::video::{Window, WindowPos};
 
 use crate::sdl_gpu::{SdlGpuPresenter, SharedSdlGraphics};
 
@@ -48,6 +48,7 @@ pub struct DisplayGeometry {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ShellEvent {
+    GlobalShortcut(crate::platform::GlobalShortcut),
     Quit,
     Shown(SurfaceId),
     Hidden(SurfaceId),
@@ -154,6 +155,10 @@ impl SdlShell {
     pub fn new(started: Instant) -> Result<Self, String> {
         let sdl = sdl3::init().map_err(|error| error.to_string())?;
         let video = sdl.video().map_err(|error| error.to_string())?;
+        sdl.event()
+            .map_err(|error| error.to_string())?
+            .register_custom_event::<crate::platform::GlobalShortcut>()
+            .map_err(|error| error.to_string())?;
         let events = sdl.event_pump().map_err(|error| error.to_string())?;
         tracing::info!(
             elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0,
@@ -178,6 +183,13 @@ impl SdlShell {
         })
     }
 
+    pub fn event_sender(&self) -> sdl3::event::EventSender {
+        self._sdl
+            .event()
+            .expect("SDL event subsystem remains initialized")
+            .event_sender()
+    }
+
     pub fn create_shell_surfaces(&mut self) -> Result<(), String> {
         self.surfaces.clear();
         self.surface_indices.clear();
@@ -198,6 +210,42 @@ impl SdlShell {
             surface_count = self.surfaces.len(),
             "SDL shell windows created"
         );
+        Ok(())
+    }
+
+    pub fn sync_display_geometry(&mut self) -> Result<(), String> {
+        let displays = require_displays(self.display_geometries()?)?;
+        let panel_count = self
+            .surfaces
+            .iter()
+            .filter(|surface| surface.role == SurfaceRole::Panel)
+            .count();
+        if panel_count != displays.len() {
+            return Err(format!(
+                "display count changed from {panel_count} to {}; shell surface recreation is required",
+                displays.len()
+            ));
+        }
+
+        for surface in &mut self.surfaces {
+            if surface.role == SurfaceRole::CodexChat {
+                continue;
+            }
+            let Some(display) = displays.get(surface.display_index).copied() else {
+                continue;
+            };
+            let (_, x, y, width, height, _) = surface_geometry(surface.role, display);
+            surface
+                .window
+                .set_position(WindowPos::Positioned(x), WindowPos::Positioned(y));
+            surface
+                .window
+                .set_size(width, height)
+                .map_err(|error| error.to_string())?;
+            if let Some(presenter) = surface.presenter.as_mut() {
+                presenter.invalidate();
+            }
+        }
         Ok(())
     }
 
@@ -284,8 +332,12 @@ impl SdlShell {
     }
 
     pub fn show(&mut self, id: SurfaceId) -> bool {
-        self.surface_mut(id)
-            .is_some_and(|surface| surface.window_mut().show())
+        self.surface_mut(id).is_some_and(|surface| {
+            if let Some(presenter) = surface.presenter.as_mut() {
+                presenter.invalidate();
+            }
+            surface.window_mut().show()
+        })
     }
 
     pub fn hide(&mut self, id: SurfaceId) -> bool {
@@ -355,57 +407,7 @@ impl SdlShell {
         display_index: usize,
         geometry: DisplayGeometry,
     ) -> Result<(), String> {
-        let (title, x, y, width, height, hidden) = match role {
-            SurfaceRole::Desktop => (
-                DESKTOP_TITLE,
-                geometry.x,
-                geometry.y,
-                geometry.width,
-                geometry.height,
-                false,
-            ),
-            SurfaceRole::Panel => (
-                PANEL_TITLE,
-                geometry.x,
-                geometry.y + geometry.height.saturating_sub(PANEL_HEIGHT) as i32,
-                geometry.width,
-                PANEL_HEIGHT,
-                false,
-            ),
-            SurfaceRole::Launcher => (
-                LAUNCHER_TITLE,
-                geometry.x + 18,
-                geometry.y + geometry.height.saturating_sub(632) as i32,
-                760.min(geometry.width),
-                560.min(geometry.height),
-                true,
-            ),
-            SurfaceRole::ControlCenter => (
-                CONTROL_CENTER_TITLE,
-                geometry.x + geometry.width.saturating_sub(438) as i32,
-                geometry.y + geometry.height.saturating_sub(672) as i32,
-                420.min(geometry.width),
-                600.min(geometry.height),
-                true,
-            ),
-            SurfaceRole::Notification => (
-                NOTIFICATION_TITLE,
-                geometry.x + geometry.width.saturating_sub(438) as i32,
-                geometry.y + 24,
-                420.min(geometry.width),
-                140.min(geometry.height),
-                true,
-            ),
-            SurfaceRole::CodexHub => (
-                "Codex",
-                geometry.x + (geometry.width.saturating_sub(900) / 2) as i32,
-                geometry.y + (geometry.height.saturating_sub(640) / 2) as i32,
-                900.min(geometry.width),
-                640.min(geometry.height),
-                true,
-            ),
-            SurfaceRole::CodexChat => unreachable!("chat surfaces are created dynamically"),
-        };
+        let (title, x, y, width, height, hidden) = surface_geometry(role, geometry);
         let mut builder = self.video.window(title, width, height);
         builder.position(x, y).high_pixel_density();
         if role == SurfaceRole::CodexHub {
@@ -437,6 +439,9 @@ impl SdlShell {
     }
 
     fn translate_event(&self, event: Event) -> Option<ShellEvent> {
+        if let Some(shortcut) = event.as_user_event_type::<crate::platform::GlobalShortcut>() {
+            return Some(ShellEvent::GlobalShortcut(shortcut));
+        }
         let surface = event
             .get_window_id()
             .map(SurfaceId)
@@ -558,6 +563,63 @@ impl SdlShell {
     }
 }
 
+fn surface_geometry(
+    role: SurfaceRole,
+    geometry: DisplayGeometry,
+) -> (&'static str, i32, i32, u32, u32, bool) {
+    match role {
+        SurfaceRole::Desktop => (
+            DESKTOP_TITLE,
+            geometry.x,
+            geometry.y,
+            geometry.width,
+            geometry.height,
+            false,
+        ),
+        SurfaceRole::Panel => (
+            PANEL_TITLE,
+            geometry.x,
+            geometry.y + geometry.height.saturating_sub(PANEL_HEIGHT) as i32,
+            geometry.width,
+            PANEL_HEIGHT,
+            false,
+        ),
+        SurfaceRole::Launcher => (
+            LAUNCHER_TITLE,
+            geometry.x + 18,
+            geometry.y + geometry.height.saturating_sub(632) as i32,
+            760.min(geometry.width),
+            560.min(geometry.height),
+            true,
+        ),
+        SurfaceRole::ControlCenter => (
+            CONTROL_CENTER_TITLE,
+            geometry.x + geometry.width.saturating_sub(438) as i32,
+            geometry.y + geometry.height.saturating_sub(672) as i32,
+            420.min(geometry.width),
+            600.min(geometry.height),
+            true,
+        ),
+        SurfaceRole::Notification => (
+            NOTIFICATION_TITLE,
+            geometry.x + geometry.width.saturating_sub(438) as i32,
+            geometry.y + 24,
+            420.min(geometry.width),
+            140.min(geometry.height),
+            true,
+        ),
+        SurfaceRole::CodexHub => (
+            "Codex",
+            geometry.x + (geometry.width.saturating_sub(900) / 2) as i32,
+            geometry.y + (geometry.height.saturating_sub(640) / 2) as i32,
+            900.min(geometry.width),
+            640.min(geometry.height),
+            true,
+        ),
+        SurfaceRole::CodexChat => unreachable!("chat surfaces are created dynamically"),
+    }
+}
+
 fn require_displays(displays: Vec<DisplayGeometry>) -> Result<Vec<DisplayGeometry>, String> {
     if displays.is_empty() {
         Err("SDL reported no displays; refusing to start a headless Nickel shell".into())
@@ -568,7 +630,7 @@ fn require_displays(displays: Vec<DisplayGeometry>) -> Result<Vec<DisplayGeometr
 
 #[cfg(test)]
 mod tests {
-    use super::{DisplayGeometry, require_displays};
+    use super::{DisplayGeometry, PANEL_HEIGHT, SurfaceRole, require_displays, surface_geometry};
 
     #[test]
     fn rejects_a_headless_shell_startup() {
@@ -588,5 +650,31 @@ mod tests {
             scale: 1.0,
         };
         assert_eq!(require_displays(vec![display]).unwrap(), vec![display]);
+    }
+
+    #[test]
+    fn shell_surfaces_follow_updated_display_geometry() {
+        let display = DisplayGeometry {
+            x: 40,
+            y: 20,
+            width: 1920,
+            height: 1006,
+            scale: 1.5,
+        };
+        assert_eq!(
+            surface_geometry(SurfaceRole::Desktop, display),
+            ("Nickel Desktop", 40, 20, 1920, 1006, false)
+        );
+        assert_eq!(
+            surface_geometry(SurfaceRole::Panel, display),
+            (
+                "Nickel Panel",
+                40,
+                20 + 1006 - PANEL_HEIGHT as i32,
+                1920,
+                PANEL_HEIGHT,
+                false
+            )
+        );
     }
 }

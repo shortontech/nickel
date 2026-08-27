@@ -15,13 +15,13 @@ mod winit;
 
 use std::{
     ffi::OsString,
-    process::Command,
+    process::{Command, ExitStatus},
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU8, Ordering},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use smithay::reexports::{
@@ -129,20 +129,15 @@ fn import_runtime_environment() {
     }
 }
 
-const MAX_SHELL_STARTS: usize = 4;
+const MAX_SHELL_RESTART_DELAY: Duration = Duration::from_secs(4);
+const STABLE_SHELL_RUNTIME: Duration = Duration::from_secs(30);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ShellFailureAction {
-    Retry,
-    ExitSession,
-}
-
-fn shell_failure_action(attempt: usize) -> ShellFailureAction {
-    if attempt < MAX_SHELL_STARTS {
-        ShellFailureAction::Retry
-    } else {
-        ShellFailureAction::ExitSession
-    }
+fn shell_restart_delay(consecutive_failures: usize) -> Duration {
+    Duration::from_secs(
+        consecutive_failures
+            .max(1)
+            .min(MAX_SHELL_RESTART_DELAY.as_secs() as usize) as u64,
+    )
 }
 
 fn spawn_supervised(
@@ -186,48 +181,45 @@ fn supervise_shell(
         tracing::error!(%error, "failed to start secure-storage preparation");
     }
 
-    for attempt in 1..=MAX_SHELL_STARTS {
-        match Command::new(&program).args(&arguments).status() {
+    let mut consecutive_failures = 0_usize;
+    loop {
+        let started = Instant::now();
+        let status = Command::new(&program).args(&arguments).status();
+        let runtime = started.elapsed();
+        if runtime >= STABLE_SHELL_RUNTIME || status.as_ref().is_ok_and(ExitStatus::success) {
+            consecutive_failures = 0;
+        } else {
+            consecutive_failures = consecutive_failures.saturating_add(1);
+        }
+        match status {
             Ok(status) if status.success() => {
-                tracing::info!(?status, "Nickel shell exited normally");
-                std::process::exit(0);
+                tracing::info!(?status, "Nickel shell exited normally; restarting");
             }
             Ok(status) => {
-                tracing::error!(?status, attempt, "Nickel shell exited unexpectedly");
+                tracing::error!(
+                    ?status,
+                    consecutive_failures,
+                    "Nickel shell exited unexpectedly"
+                );
             }
             Err(error) => {
-                tracing::error!(%error, attempt, "failed to start Nickel shell");
+                tracing::error!(%error, consecutive_failures, "failed to start Nickel shell");
             }
         }
-
-        match shell_failure_action(attempt) {
-            ShellFailureAction::Retry => {
-                thread::sleep(Duration::from_secs(attempt as u64));
-            }
-            ShellFailureAction::ExitSession => {
-                tracing::error!(
-                    attempts = MAX_SHELL_STARTS,
-                    "Nickel shell restart limit reached; terminating session for display-manager recovery"
-                );
-                std::process::exit(1);
-            }
-        }
+        thread::sleep(shell_restart_delay(consecutive_failures));
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_SHELL_STARTS, ShellFailureAction, shell_failure_action};
+    use std::time::Duration;
+
+    use super::shell_restart_delay;
 
     #[test]
-    fn shell_restart_budget_ends_the_session() {
-        assert_eq!(
-            shell_failure_action(MAX_SHELL_STARTS - 1),
-            ShellFailureAction::Retry
-        );
-        assert_eq!(
-            shell_failure_action(MAX_SHELL_STARTS),
-            ShellFailureAction::ExitSession
-        );
+    fn shell_restart_backoff_is_bounded_without_ending_the_session() {
+        assert_eq!(shell_restart_delay(1), Duration::from_secs(1));
+        assert_eq!(shell_restart_delay(3), Duration::from_secs(3));
+        assert_eq!(shell_restart_delay(99), Duration::from_secs(4));
     }
 }

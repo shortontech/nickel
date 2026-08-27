@@ -465,6 +465,17 @@ fn main() -> Result<(), String> {
     let mut state = LiveShell::new()?;
     let mut codex = CodexSurfaces::new(&shell)?;
     let hotkey_rx = platform::launcher_hotkey_receiver();
+    let event_sender = shell.event_sender();
+    std::thread::Builder::new()
+        .name("nickel-shortcut-events".into())
+        .spawn(move || {
+            while let Ok(shortcut) = hotkey_rx.recv() {
+                if event_sender.push_custom_event(shortcut).is_err() {
+                    break;
+                }
+            }
+        })
+        .map_err(|error| error.to_string())?;
     sync_visibility(&mut shell, &state);
     render_all(&mut shell, &mut state)?;
     println!(
@@ -485,14 +496,6 @@ fn main() -> Result<(), String> {
     let mut refresh_deadline = Instant::now() + REFRESH_INTERVAL;
     let mut hover_repaint: Option<(SurfaceRole, Instant)> = None;
     loop {
-        while let Ok(shortcut) = hotkey_rx.try_recv() {
-            if state.global_shortcut(shortcut) {
-                sync_visibility(&mut shell, &state);
-                focus_visible_overlay(&mut shell, &state);
-                render_role(&mut shell, &mut state, SurfaceRole::Launcher)?;
-                render_role(&mut shell, &mut state, SurfaceRole::ControlCenter)?;
-            }
-        }
         let next_deadline = hover_repaint
             .map(|(_, deadline)| deadline.min(refresh_deadline))
             .unwrap_or(refresh_deadline);
@@ -504,6 +507,14 @@ fn main() -> Result<(), String> {
             continue;
         }
         match event {
+            Some(ShellEvent::GlobalShortcut(shortcut)) => {
+                if state.global_shortcut(shortcut) {
+                    sync_visibility(&mut shell, &state);
+                    focus_visible_overlay(&mut shell, &state);
+                    render_role(&mut shell, &mut state, SurfaceRole::Launcher)?;
+                    render_role(&mut shell, &mut state, SurfaceRole::ControlCenter)?;
+                }
+            }
             Some(ShellEvent::Quit) | Some(ShellEvent::CloseRequested(_)) => break,
             Some(ShellEvent::PointerButton {
                 surface,
@@ -661,7 +672,13 @@ fn main() -> Result<(), String> {
                     render_role(&mut shell, &mut state, role.unwrap_or(SurfaceRole::Desktop))?;
                 }
             }
-            Some(ShellEvent::PixelResize { surface, .. }) => {
+            Some(ShellEvent::DisplayTopologyChanged) => {
+                shell.sync_display_geometry()?;
+                render_all(&mut shell, &mut state)?;
+            }
+            Some(
+                ShellEvent::LogicalResize { surface, .. } | ShellEvent::PixelResize { surface, .. },
+            ) => {
                 let Some(role) = shell.surface(surface).map(|entry| entry.role()) else {
                     continue;
                 };

@@ -119,6 +119,7 @@ pub struct NickelSession {
     pub surface_windows: HashMap<ObjectId, WindowId>,
     pub launcher_window: Option<Window>,
     pub launcher_visibility: LauncherVisibility,
+    launcher_subscribers: Vec<PathBuf>,
     pub desktop_windows: Vec<Window>,
     pub panel_windows: Vec<Window>,
     pub utility_windows: Vec<Window>,
@@ -224,6 +225,7 @@ impl NickelSession {
             surface_windows: HashMap::new(),
             launcher_window: None,
             launcher_visibility: LauncherVisibility::default(),
+            launcher_subscribers: Vec::new(),
             desktop_windows: Vec::new(),
             panel_windows: Vec::new(),
             utility_windows: Vec::new(),
@@ -299,6 +301,20 @@ impl NickelSession {
                     while let Ok((length, source)) = socket.as_ref().recv_from(&mut command) {
                         let message = &command[..length];
                         match message {
+                            b"subscribe-launcher" => {
+                                if let Some(path) = source.as_pathname() {
+                                    let path = path.to_path_buf();
+                                    if !data.state.launcher_subscribers.contains(&path) {
+                                        data.state.launcher_subscribers.push(path.clone());
+                                    }
+                                    let event = if data.state.launcher_visibility.is_visible() {
+                                        b"launcher-shown".as_slice()
+                                    } else {
+                                        b"launcher-hidden".as_slice()
+                                    };
+                                    let _ = socket.as_ref().send_to(event, path);
+                                }
+                            }
                             b"toggle-launcher" => data.state.toggle_launcher(),
                             b"hide-launcher" => data.state.set_launcher_visible(false),
                             b"show-launcher" => data.state.set_launcher_visible(true),
@@ -442,6 +458,7 @@ impl NickelSession {
         let visible = self.launcher_visibility.toggle();
         self.hotkeys.launcher_visibility_applied(visible);
         self.apply_launcher_visibility(visible);
+        self.notify_launcher_visibility(visible);
     }
 
     fn window_snapshot_payload(&self) -> String {
@@ -582,9 +599,26 @@ impl NickelSession {
     }
 
     pub fn set_launcher_visible(&mut self, visible: bool) {
+        let changed = self.launcher_visibility.is_visible() != visible;
         self.launcher_visibility.set(visible);
         self.hotkeys.launcher_visibility_applied(visible);
         self.apply_launcher_visibility(visible);
+        if changed {
+            self.notify_launcher_visibility(visible);
+        }
+    }
+
+    fn notify_launcher_visibility(&mut self, visible: bool) {
+        let event = if visible {
+            b"launcher-shown".as_slice()
+        } else {
+            b"launcher-hidden".as_slice()
+        };
+        let Ok(socket) = UnixDatagram::unbound() else {
+            return;
+        };
+        self.launcher_subscribers
+            .retain(|path| socket.send_to(event, path).is_ok());
     }
 
     fn apply_launcher_visibility(&mut self, visible: bool) {
