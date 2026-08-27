@@ -25,7 +25,13 @@ pub use layout::{
 pub use runtime::{Application, ApplicationHost, HostEventOutcome, Shortcut, run};
 pub use state::{Invalidation, TransientState, UiId, UiStateStore};
 pub use text_editor::TextEditor;
-pub use theme::{RadiusScale, SemanticColors, SemanticTheme, SpacingScale};
+pub use theme::{
+    AccentColors, AccessibilityPreferences, AppearancePreference, BorderColors, ContrastPreference,
+    EasingCurve, FontWeight, MotionPreference, MotionScale, PlatformThemePreferences, RadiusScale,
+    ResolvedAppearance, ResolvedThemePreferences, SemanticColors, SemanticTheme, SemanticTokenSet,
+    SizingScale, SpacingScale, SurfaceColors, TextColors, TextStyle, ThemePreferences,
+    TransparencyPreference, TypographyScale,
+};
 pub use ui::{
     AccessibilityNode, AnyView, Background, Border, Button, ButtonLabel, Color, Column, Component,
     ComponentBuilderExt, Container, ContentPane, DiagnosticKind, Dropdown, EventOutcome, FileGrid,
@@ -46,11 +52,15 @@ impl<Message, T: Component<Message>> View<Message> for T {}
 
 pub mod prelude {
     pub use crate::{
-        Align, AnyView, Application, Background, Border, Button, Color, Column, Component,
-        ComponentBuilderExt, Container, DiagnosticKind, Dropdown, Fragment, Grid, GridColumnSpec,
-        Insets, Justify, Length, Menu, MenuBar, MenuItem, Overflow, PointerIcon, RadioButton,
-        RadiusScale, Row, SelectionRegion, SemanticColors, SemanticTheme, Shortcut, Slider, Spacer,
-        SpacingScale, Text, TextAlign, TextBoundary, TextField, Tone, Track, UiEvent, UiId,
+        AccentColors, AccessibilityPreferences, Align, AnyView, AppearancePreference, Application,
+        Background, Border, BorderColors, Button, Color, Column, Component, ComponentBuilderExt,
+        Container, ContrastPreference, DiagnosticKind, Dropdown, EasingCurve, FontWeight, Fragment,
+        Grid, GridColumnSpec, Insets, Justify, Length, Menu, MenuBar, MenuItem, MotionPreference,
+        MotionScale, Overflow, PlatformThemePreferences, PointerIcon, RadioButton, RadiusScale,
+        ResolvedAppearance, ResolvedThemePreferences, Row, SelectionRegion, SemanticColors,
+        SemanticTheme, SemanticTokenSet, Shortcut, SizingScale, Slider, Spacer, SpacingScale,
+        SurfaceColors, Text, TextAlign, TextBoundary, TextColors, TextField, TextStyle,
+        ThemePreferences, Tone, Track, TransparencyPreference, TypographyScale, UiEvent, UiId,
         UiStateStore, View, VirtualColumn, VirtualWindow, component, id, run, ui,
     };
 }
