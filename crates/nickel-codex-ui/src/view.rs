@@ -997,6 +997,13 @@ fn configured_chat_view(
                             <Text color={TEXT}>{diagnostic}</Text>
                         </Container>
                     })}
+                    {state.thread_error.as_ref().map(|diagnostic| ui! {
+                        <Row fill_width padding={Insets::all(10.0)} gap={10.0}
+                            background={ERROR} radius={6.0}>
+                            <Text color={TEXT} grow={1.0}>{format!("Conversations unavailable: {diagnostic}")}</Text>
+                            <Button on_press={ChatMessage::Refresh}>{"Retry"}</Button>
+                        </Row>
+                    })}
                     <Container fill_width min_height={52.0} max_height={140.0} shrink={0.0}
                         padding={Insets::all(12.0)} background={PANEL}
                         border={Border::new(BORDER, 1.0)} radius={10.0}

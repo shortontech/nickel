@@ -68,6 +68,7 @@ pub struct ChatState {
     pub projects: Vec<Project>,
     pub threads: Vec<Thread>,
     pub thread_runtime: HashMap<ThreadId, nickel_codex::ThreadRuntime>,
+    pub thread_error: Option<String>,
     pub selected_thread: Option<ThreadId>,
     pub active_turn: Option<TurnId>,
     pub interrupt_requested: bool,
@@ -99,6 +100,7 @@ impl Default for ChatState {
             projects: Vec::new(),
             threads: Vec::new(),
             thread_runtime: HashMap::new(),
+            thread_error: None,
             selected_thread: None,
             active_turn: None,
             interrupt_requested: false,
@@ -155,6 +157,7 @@ impl ChatState {
                 projects,
                 threads,
                 runtime,
+                thread_error,
             } => {
                 self.status = ConnectionStatus::Ready;
                 self.provenance = provenance;
@@ -163,6 +166,7 @@ impl ChatState {
                 self.projects = projects.into_iter().take(100).collect();
                 self.threads = threads.into_iter().take(MAX_THREADS).collect();
                 self.thread_runtime = runtime;
+                self.thread_error = thread_error.map(|message| sanitize_diagnostic(&message));
             }
             ControllerEvent::ThreadCreated(thread) => {
                 self.record_selected_thread(thread);

@@ -25,6 +25,8 @@ pub struct ReplayScenario {
     #[serde(default)]
     pub thread_runtime: HashMap<ThreadId, ThreadRuntime>,
     #[serde(default)]
+    pub thread_error: Option<String>,
+    #[serde(default)]
     pub events: Vec<CodexEvent>,
 }
 
@@ -80,6 +82,9 @@ impl CodexBackend for ReplayBackend {
         })
     }
     fn list_threads(&self, _: ThreadPage) -> Result<ThreadPageResult, CodexError> {
+        if let Some(message) = &self.scenario.thread_error {
+            return Err(CodexError::Protocol(message.clone()));
+        }
         Ok(ThreadPageResult {
             threads: self.scenario.threads.clone(),
             next_cursor: None,

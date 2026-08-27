@@ -91,6 +91,7 @@ pub enum ControllerEvent {
         projects: Vec<Project>,
         threads: Vec<Thread>,
         runtime: std::collections::HashMap<ThreadId, nickel_codex::ThreadRuntime>,
+        thread_error: Option<String>,
     },
     ThreadCreated(Thread),
     ThreadSelected(Thread),
@@ -358,22 +359,42 @@ pub(crate) fn codex_attribution(version: &str) -> String {
 
 fn snapshot(backend: &dyn CodexBackend, provenance: String) -> ControllerEvent {
     let result = (|| {
-        let mut page = list_threads(backend)?;
         let mut projects = list_projects(backend)?;
-        if import_missing_thread_projects(backend, &projects, &page.threads, &page.runtime)? {
-            projects = list_projects(backend)?;
-            page = list_threads(backend)?;
-        }
-        Ok::<_, nickel_codex::CodexError>((backend.account()?, backend.models()?, projects, page))
+        let (page, thread_error) = match list_threads(backend) {
+            Ok(mut page) => {
+                if import_missing_thread_projects(backend, &projects, &page.threads, &page.runtime)?
+                {
+                    projects = list_projects(backend)?;
+                    page = list_threads(backend)?;
+                }
+                (page, None)
+            }
+            Err(error) => (
+                ThreadPageResult {
+                    threads: Vec::new(),
+                    next_cursor: None,
+                    runtime: HashMap::new(),
+                },
+                Some(error.to_string()),
+            ),
+        };
+        Ok::<_, nickel_codex::CodexError>((
+            backend.account()?,
+            backend.models()?,
+            projects,
+            page,
+            thread_error,
+        ))
     })();
     match result {
-        Ok((account, models, projects, page)) => ControllerEvent::Ready {
+        Ok((account, models, projects, page, thread_error)) => ControllerEvent::Ready {
             provenance,
             account,
             models,
             projects,
             threads: page.threads,
             runtime: page.runtime,
+            thread_error,
         },
         Err(error) => ControllerEvent::Failure(error.to_string()),
     }
@@ -471,7 +492,9 @@ fn list_projects(backend: &dyn CodexBackend) -> Result<Vec<Project>, nickel_code
 
 #[cfg(test)]
 mod tests {
-    use super::{create_managed_workspace_at, next_new_thread_cwd};
+    use nickel_codex::{Project, ReplayBackend};
+
+    use super::{ControllerEvent, create_managed_workspace_at, next_new_thread_cwd, snapshot};
 
     #[test]
     fn managed_workspaces_are_dated_unique_children_of_documents() {
@@ -505,5 +528,43 @@ mod tests {
             nonexistent
         );
         assert!(!nonexistent.exists());
+    }
+
+    #[test]
+    fn rejected_thread_list_keeps_canonical_projects_ready() {
+        let backend = ReplayBackend::from_json(
+            r#"{
+                "name":"thread-list-error",
+                "projects":[{"id":"nickel","name":"Nickel","roots":["/projects/nickel"]}],
+                "thread_error":"duplicate thread id"
+            }"#,
+        )
+        .unwrap();
+
+        let ControllerEvent::Ready {
+            projects,
+            threads,
+            runtime,
+            thread_error,
+            ..
+        } = snapshot(&backend, "Replay fixture".into())
+        else {
+            panic!("thread failure must not disconnect project discovery");
+        };
+
+        assert_eq!(
+            projects,
+            vec![Project {
+                id: "nickel".into(),
+                name: "Nickel".into(),
+                roots: vec!["/projects/nickel".into()],
+            }]
+        );
+        assert!(threads.is_empty());
+        assert!(runtime.is_empty());
+        assert_eq!(
+            thread_error.as_deref(),
+            Some("Codex protocol error: duplicate thread id")
+        );
     }
 }
