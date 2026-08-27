@@ -34,9 +34,10 @@ use nickel_i18n::Localizer;
 use nickel_ui::{
     AnyView, Button, ButtonPresentation, ChoiceCard, ChoiceCardGroup, ColorSwatch,
     ControllerAction, ControllerInput, Insets, NavigationItem, NavigationPane, PageHeader,
-    PaintCommand, PaneNavigation, Point as UiPoint, Rect as UiRect, SdlCanvasPresenter,
-    SemanticColors, SemanticTheme, SettingsCard, SettingsNavigation, SettingsRow, SettingsShell,
-    SliderField, Surface, SurfaceRole, Switch, TabList, TextAlign, UiStateStore, UiTree, ui,
+    PaintCommand, PaneNavigation, Point as UiPoint, PreviewTile, Rect as UiRect,
+    SdlCanvasPresenter, SelectField, SemanticColors, SemanticTheme, SettingsCard,
+    SettingsNavigation, SettingsRow, SettingsShell, SliderField, Surface, SurfaceRole, Switch,
+    TabList, TextAlign, UiStateStore, UiTree, ui,
 };
 use sdl3::{
     event::{Event, WindowEvent},
@@ -199,8 +200,10 @@ enum SettingsMessage {
     SetAppearanceIntensity(u8),
     WallpaperChoose,
     WallpaperRemove,
+    ToggleWallpaperPositionSelect,
     WallpaperPosition(WallpaperPosition),
     SetReduceTransparency(bool),
+    ToggleAnimationSelect,
     SetAnimationLevel(AnimationLevel),
     AppearanceScroll,
     BarPrimaryDisplay,
@@ -367,8 +370,13 @@ impl SettingsApp {
                     self.wallpaper_settings.image = None;
                     save_wallpaper_settings(&self.wallpaper_settings);
                 }
+                SettingsMessage::ToggleWallpaperPositionSelect => {
+                    self.wallpaper_position_select_expanded =
+                        !self.wallpaper_position_select_expanded;
+                }
                 SettingsMessage::WallpaperPosition(position) => {
                     self.wallpaper_settings.position = position;
+                    self.wallpaper_position_select_expanded = false;
                     save_wallpaper_settings(&self.wallpaper_settings);
                 }
                 SettingsMessage::SetReduceTransparency(value) => {
@@ -377,7 +385,11 @@ impl SettingsApp {
                 }
                 SettingsMessage::SetAnimationLevel(level) => {
                     self.shell_settings.animations = level;
+                    self.animation_select_expanded = false;
                     save_shell_settings(&self.shell_settings);
+                }
+                SettingsMessage::ToggleAnimationSelect => {
+                    self.animation_select_expanded = !self.animation_select_expanded;
                 }
                 SettingsMessage::BarPrimaryDisplay => {
                     self.shell_settings.bar_on_all_displays = false;

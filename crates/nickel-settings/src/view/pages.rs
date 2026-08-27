@@ -397,7 +397,7 @@ impl SettingsApp {
             .and_then(|path| path.file_name())
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| self.localizer.text("settings-wallpaper-none"));
-        let positions = [
+        let position_options = [
             ("settings-wallpaper-fill", WallpaperPosition::Fill),
             ("settings-wallpaper-fit", WallpaperPosition::Fit),
             ("settings-wallpaper-stretch", WallpaperPosition::Stretch),
@@ -406,11 +406,32 @@ impl SettingsApp {
             ("settings-wallpaper-span", WallpaperPosition::Span),
         ]
         .into_iter()
-        .map(|(label, position)| ui! {
-            <RadioButton on_press={SettingsMessage::WallpaperPosition(position)}
-                label={self.localizer.text(label)} selected={self.wallpaper_settings.position == position}
-                colors_pair={(palette.accent, palette.text)} width={82.0} />
+        .map(|(label, position)| {
+            (
+                self.localizer.text(label),
+                SettingsMessage::WallpaperPosition(position),
+            )
         });
+        let position_label = self.localizer.text(match self.wallpaper_settings.position {
+            WallpaperPosition::Fill => "settings-wallpaper-fill",
+            WallpaperPosition::Fit => "settings-wallpaper-fit",
+            WallpaperPosition::Stretch => "settings-wallpaper-stretch",
+            WallpaperPosition::Center => "settings-wallpaper-center",
+            WallpaperPosition::Tile => "settings-wallpaper-tile",
+            WallpaperPosition::Span => "settings-wallpaper-span",
+        });
+        let wallpaper_preview = if self.wallpaper_settings.image.is_some() {
+            PreviewTile::new(
+                theme,
+                Surface::new(theme, SurfaceRole::Raised)
+                    .fill_width()
+                    .height(70.0),
+            )
+        } else {
+            PreviewTile::unavailable(theme, self.localizer.text("settings-wallpaper-none"))
+        }
+        .width(124.0)
+        .height(70.0);
         let mode_group = ChoiceCardGroup::new(mode_choices);
         let swatch_row = ui! {
             <Row height={44.0} gap={10.0} children={swatches}>
@@ -452,8 +473,7 @@ impl SettingsApp {
             .width(100.0);
             ui! {
             <Row gap={14.0} align_items={nickel_ui::Align::Center}>
-                {Surface::new(theme, SurfaceRole::Raised)
-                    .width(124.0).height(70.0).radius(theme.radii.control)}
+                {wallpaper_preview}
                 <Column grow={1.0} gap={8.0}>
                     <Text color={palette.text}>{wallpaper_name}</Text>
                     <Row gap={10.0}>
@@ -463,7 +483,15 @@ impl SettingsApp {
             </Row>
             }
         })
-        .child(ui! { <Row height={34.0} gap={8.0} children={positions} /> });
+        .child(SelectField::new(
+            theme,
+            self.localizer.text("settings-wallpaper-fit-label"),
+            self.localizer.text("settings-wallpaper-fit-description"),
+            SettingsMessage::ToggleWallpaperPositionSelect,
+            position_label,
+            position_options,
+            self.wallpaper_position_select_expanded,
+        ));
         let transparency_row = SettingsRow::new(
             theme,
             self.localizer.text("settings-reduce-transparency"),
@@ -475,27 +503,33 @@ impl SettingsApp {
             reduce_transparency_message,
             theme,
         ));
-        let animation_row = SettingsRow::new(
+        let animation_label = self.localizer.text(match self.shell_settings.animations {
+            AnimationLevel::Off => "settings-animations-off",
+            AnimationLevel::Reduced => "settings-animations-reduced",
+            AnimationLevel::Normal => "settings-animations-normal",
+        });
+        let animation_row = SelectField::new(
             theme,
             self.localizer.text("settings-animations"),
             self.localizer.text("settings-animations-description"),
-        )
-        .trailing(ui! {
-            <Row gap={8.0}>
-                <RadioButton on_press={SettingsMessage::SetAnimationLevel(AnimationLevel::Off)}
-                    label={self.localizer.text("settings-animations-off")}
-                    selected={self.shell_settings.animations == AnimationLevel::Off}
-                    colors_pair={(palette.accent, palette.text)} width={72.0} />
-                <RadioButton on_press={SettingsMessage::SetAnimationLevel(AnimationLevel::Reduced)}
-                    label={self.localizer.text("settings-animations-reduced")}
-                    selected={self.shell_settings.animations == AnimationLevel::Reduced}
-                    colors_pair={(palette.accent, palette.text)} width={96.0} />
-                <RadioButton on_press={SettingsMessage::SetAnimationLevel(AnimationLevel::Normal)}
-                    label={self.localizer.text("settings-animations-normal")}
-                    selected={self.shell_settings.animations == AnimationLevel::Normal}
-                    colors_pair={(palette.accent, palette.text)} width={88.0} />
-            </Row>
-        });
+            SettingsMessage::ToggleAnimationSelect,
+            animation_label,
+            [
+                (
+                    self.localizer.text("settings-animations-off"),
+                    SettingsMessage::SetAnimationLevel(AnimationLevel::Off),
+                ),
+                (
+                    self.localizer.text("settings-animations-reduced"),
+                    SettingsMessage::SetAnimationLevel(AnimationLevel::Reduced),
+                ),
+                (
+                    self.localizer.text("settings-animations-normal"),
+                    SettingsMessage::SetAnimationLevel(AnimationLevel::Normal),
+                ),
+            ],
+            self.animation_select_expanded,
+        );
         let interface_card = SettingsCard::titled(
             theme,
             self.localizer.text("settings-interface-settings"),
