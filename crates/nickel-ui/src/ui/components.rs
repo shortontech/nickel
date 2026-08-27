@@ -1,4 +1,5 @@
 use super::*;
+use crate::SemanticTheme;
 
 pub struct Spacer<Message = String>(Element<Message>);
 
@@ -1314,9 +1315,71 @@ impl<Message> Component<Message> for ShoulderHints<Message> {
 
 pub struct Button<Message = String>(Container<Message>);
 
+/// The semantic visual role of a button.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ButtonPresentation {
+    Primary,
+    Secondary,
+    Quiet,
+    Destructive,
+    Disabled,
+}
+
 impl<Message> Button<Message> {
     pub fn new(message: Message, label: impl Into<String>) -> Self {
         Self::with_label(message, ButtonLabel::new(label))
+    }
+
+    /// Creates a button whose appearance is resolved entirely from semantic
+    /// theme roles. A disabled presentation deliberately has no activation
+    /// message.
+    pub fn semantic(
+        theme: SemanticTheme,
+        message: Message,
+        label: impl Into<String>,
+        presentation: ButtonPresentation,
+    ) -> Self {
+        Self::new(message, label).presentation(theme, presentation)
+    }
+
+    /// Applies a semantic presentation without changing the existing button
+    /// construction API.
+    pub fn presentation(mut self, theme: SemanticTheme, presentation: ButtonPresentation) -> Self {
+        let (background, border, foreground) = match presentation {
+            ButtonPresentation::Primary => (
+                Some(theme.accent.ordinary),
+                theme.accent.ordinary,
+                theme.accent.on_accent,
+            ),
+            ButtonPresentation::Secondary => (
+                Some(theme.surfaces.raised),
+                theme.borders.ordinary,
+                theme.text.primary,
+            ),
+            ButtonPresentation::Quiet => (None, theme.borders.subtle, theme.text.primary),
+            ButtonPresentation::Destructive => (
+                Some(theme.text.danger),
+                theme.text.danger,
+                theme.accent.on_accent,
+            ),
+            ButtonPresentation::Disabled => (
+                Some(theme.surfaces.raised),
+                theme.borders.subtle,
+                theme.text.disabled,
+            ),
+        };
+        self.0.0.style.background = background.map(Background::Solid);
+        self.0.0.style.border = (presentation != ButtonPresentation::Quiet).then_some(border);
+        self.0.0.style.border_width = theme.sizing.border;
+        self.0.0.style.corner_radius = theme.radii.control;
+        self.0.0.style.height = Length::Px(theme.sizing.control_height);
+        if presentation == ButtonPresentation::Disabled {
+            self.0.0.message = None;
+        }
+        if let Some(label) = self.0.0.children.first_mut() {
+            label.style.foreground = Some(foreground);
+        }
+        self
     }
 
     pub fn id(mut self, id: impl Into<UiId>) -> Self {
@@ -1484,20 +1547,102 @@ impl<Message> Component<Message> for ButtonLabel<Message> {
 
 pub struct RadioButton<Message = String>(Container<Message>);
 
+/// A renderer-owned radio/selection mark that never depends on a font glyph.
+pub struct SelectionIndicator<Message = String>(Container<Message>);
+
+impl<Message> SelectionIndicator<Message> {
+    pub fn new(selected: bool, indicator: Color, background: Color) -> Self {
+        let mut inner = Container::new()
+            .width(14.0)
+            .height(14.0)
+            .radius(7.0)
+            .background(background);
+        if selected {
+            inner = inner.padding(3.0).child(
+                Container::new()
+                    .width(8.0)
+                    .height(8.0)
+                    .radius(4.0)
+                    .background(indicator),
+            );
+        }
+        Self(
+            Container::new()
+                .width(18.0)
+                .height(18.0)
+                .radius(9.0)
+                .background(indicator)
+                .padding(2.0)
+                .child(inner),
+        )
+    }
+
+    pub fn semantic(theme: SemanticTheme, selected: bool) -> Self {
+        Self::new(
+            selected,
+            if selected {
+                theme.accent.ordinary
+            } else {
+                theme.borders.strong
+            },
+            theme.surfaces.card,
+        )
+    }
+}
+
+impl<Message> Component<Message> for SelectionIndicator<Message> {
+    fn into_element(self) -> Element<Message> {
+        self.0.into_element()
+    }
+}
+
 impl<Message> RadioButton<Message> {
     pub fn new(message: Message, label: impl Into<String>, selected: bool) -> Self {
-        let indicator = if selected { "●" } else { "○" };
+        Self::with_colors(
+            message,
+            label,
+            selected,
+            if selected { 0x68b8ff } else { 0x8792a8 },
+            0xf4f7ff,
+            0x10151e,
+        )
+    }
+
+    pub fn semantic(
+        theme: SemanticTheme,
+        message: Message,
+        label: impl Into<String>,
+        selected: bool,
+    ) -> Self {
+        Self::with_colors(
+            message,
+            label,
+            selected,
+            if selected {
+                theme.accent.ordinary
+            } else {
+                theme.borders.strong
+            },
+            theme.text.primary,
+            theme.surfaces.card,
+        )
+    }
+
+    fn with_colors(
+        message: Message,
+        label: impl Into<String>,
+        selected: bool,
+        indicator: Color,
+        label_color: Color,
+        background: Color,
+    ) -> Self {
         Self(
             Container::new().height(34.0).message(message).child(
                 Row::new()
                     .gap(10.0)
-                    .child(
-                        Text::new(indicator)
-                            .width(22.0)
-                            .scale(1.35)
-                            .color(if selected { 0x68b8ff } else { 0x8792a8 }),
-                    )
-                    .child(Text::new(label).scale(1.15).color(0xf4f7ff)),
+                    .align_items(Align::Center)
+                    .child(SelectionIndicator::new(selected, indicator, background))
+                    .child(Text::new(label).scale(1.15).color(label_color)),
             ),
         )
     }
@@ -1514,8 +1659,13 @@ impl<Message> RadioButton<Message> {
 
     pub fn colors(mut self, indicator: Color, label: Color) -> Self {
         if let Some(row) = self.0.0.children.first_mut() {
-            if let Some(indicator_text) = row.children.first_mut() {
-                indicator_text.style.foreground = Some(indicator);
+            if let Some(indicator_element) = row.children.first_mut() {
+                indicator_element.style.background = Some(Background::Solid(indicator));
+                if let Some(inner) = indicator_element.children.first_mut()
+                    && let Some(dot) = inner.children.first_mut()
+                {
+                    dot.style.background = Some(Background::Solid(indicator));
+                }
             }
             if let Some(label_text) = row.children.get_mut(1) {
                 label_text.style.foreground = Some(label);
@@ -1812,5 +1962,131 @@ impl<Message> Default for MenuBar<Message> {
 impl<Message> Component<Message> for MenuBar<Message> {
     fn into_element(self) -> Element<Message> {
         self.0.into_element()
+    }
+}
+
+#[cfg(test)]
+mod semantic_control_tests {
+    use super::*;
+    use crate::{SemanticColors, UiTree};
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    enum Message {
+        Activate,
+        Select,
+    }
+
+    fn theme() -> SemanticTheme {
+        SemanticTheme::new(SemanticColors {
+            window: 0x101010,
+            sidebar: 0x181818,
+            card: 0x202020,
+            raised: 0x242424,
+            hover: 0x303030,
+            primary_text: 0xf0f0f0,
+            secondary_text: 0xa0a0a0,
+            accent: 0x9050e0,
+            accent_soft: 0x402060,
+            positive: 0x50c080,
+        })
+    }
+
+    #[test]
+    fn semantic_button_presentations_resolve_theme_roles() {
+        let theme = theme();
+        let cases = [
+            (
+                ButtonPresentation::Primary,
+                Some(Background::Solid(theme.accent.ordinary)),
+                Some(theme.accent.ordinary),
+                theme.accent.on_accent,
+            ),
+            (
+                ButtonPresentation::Secondary,
+                Some(Background::Solid(theme.surfaces.raised)),
+                Some(theme.borders.ordinary),
+                theme.text.primary,
+            ),
+            (ButtonPresentation::Quiet, None, None, theme.text.primary),
+            (
+                ButtonPresentation::Destructive,
+                Some(Background::Solid(theme.text.danger)),
+                Some(theme.text.danger),
+                theme.accent.on_accent,
+            ),
+        ];
+
+        for (presentation, background, border, foreground) in cases {
+            let button = Button::semantic(theme, Message::Activate, "Apply", presentation)
+                .0
+                .0;
+            assert_eq!(button.style.background, background);
+            assert_eq!(button.style.border, border);
+            assert_eq!(button.style.height, Length::Px(theme.sizing.control_height));
+            assert_eq!(button.style.corner_radius, theme.radii.control);
+            assert_eq!(button.children[0].style.foreground, Some(foreground));
+            assert_eq!(button.message, Some(Message::Activate));
+        }
+    }
+
+    #[test]
+    fn disabled_button_has_no_hit_region_or_message() {
+        let theme = theme();
+        let tree = UiTree::layout(
+            Button::semantic(
+                theme,
+                Message::Activate,
+                "Unavailable",
+                ButtonPresentation::Disabled,
+            )
+            .id("disabled"),
+            Rect::new(0.0, 0.0, 180.0, 60.0),
+        );
+
+        assert_eq!(tree.message_rect(&Message::Activate), None);
+        let node = tree
+            .resolved_layout()
+            .nodes()
+            .first()
+            .expect("disabled button remains in layout");
+        assert!(!node.interaction.interactive);
+    }
+
+    #[test]
+    fn radio_indicator_is_drawn_without_unicode_and_keeps_typed_activation() {
+        let theme = theme();
+        let tree = UiTree::layout(
+            RadioButton::semantic(theme, Message::Select, "Dark", true).id("dark"),
+            Rect::new(0.0, 0.0, 180.0, 44.0),
+        );
+
+        let indicator_circles = tree
+            .commands()
+            .iter()
+            .filter(|command| matches!(command, PaintCommand::RoundedFill { radius, .. } if *radius == 9.0 || *radius == 4.0))
+            .count();
+        assert_eq!(indicator_circles, 2);
+        assert!(!tree.commands().iter().any(|command| {
+            matches!(command, PaintCommand::Text { text, .. } if text == "●" || text == "○")
+        }));
+        assert!(tree.message_rect(&Message::Select).is_some());
+    }
+
+    #[test]
+    fn unselected_radio_has_no_inner_selection_mark() {
+        let tree = UiTree::layout(
+            RadioButton::semantic(theme(), Message::Select, "Light", false),
+            Rect::new(0.0, 0.0, 180.0, 44.0),
+        );
+        let radii = tree
+            .commands()
+            .iter()
+            .filter_map(|command| match command {
+                PaintCommand::RoundedFill { radius, .. } => Some(*radius),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(radii.contains(&9.0));
+        assert!(!radii.contains(&4.0));
     }
 }
