@@ -1,7 +1,250 @@
 use crate::{
-    Align, Border, Color, Column, Component, Container, Grid, Insets, Justify, Row, SemanticTheme,
-    Slider, Text, TextAlign, Track, UiId,
+    Align, Border, Color, Column, Component, ComponentBuilderExt, Container, Dropdown, Grid,
+    Insets, Justify, Overflow, Row, SemanticTheme, Slider, Spacer, Text, TextAlign, Track, UiId,
 };
+
+/// Width below which [`SettingsShell`] stacks navigation above its content.
+pub const SETTINGS_SHELL_NARROW_BREAKPOINT: f32 = 720.0;
+
+/// Localized page title and supporting description.
+pub struct PageHeader<Message = String>(Container<Message>);
+
+impl<Message> PageHeader<Message> {
+    pub fn new(
+        theme: SemanticTheme,
+        title: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Self {
+        Self(
+            Container::new()
+                .fill_width()
+                .min_height(76.0)
+                .padding(Insets::symmetric(
+                    theme.spacing.section,
+                    theme.spacing.content,
+                ))
+                .background(theme.colors.window)
+                .child(
+                    Column::new()
+                        .gap(theme.spacing.compact)
+                        .child(
+                            Text::new(title)
+                                .scale(1.75)
+                                .color(theme.colors.primary_text)
+                                .wrap(true),
+                        )
+                        .child(
+                            Text::new(description)
+                                .color(theme.colors.secondary_text)
+                                .wrap(true),
+                        ),
+                ),
+        )
+    }
+
+    pub fn id(mut self, id: impl Into<UiId>) -> Self {
+        self.0 = self.0.id(id);
+        self
+    }
+}
+
+impl<Message> Component<Message> for PageHeader<Message> {
+    fn into_element(self) -> super::Element<Message> {
+        self.0.into_element()
+    }
+}
+
+/// One Settings destination with a selected surface and accent rail.
+pub struct NavigationItem<Message = String>(Container<Message>);
+
+impl<Message> NavigationItem<Message> {
+    pub fn new(
+        theme: SemanticTheme,
+        message: Message,
+        label: impl Into<String>,
+        selected: bool,
+    ) -> Self {
+        Self::with_leading(theme, message, label, selected, Spacer::fixed(0.0))
+    }
+
+    pub fn with_leading(
+        theme: SemanticTheme,
+        message: Message,
+        label: impl Into<String>,
+        selected: bool,
+        leading: impl Component<Message>,
+    ) -> Self {
+        Self(
+            Container::new()
+                .fill_width()
+                .min_height(40.0)
+                .radius(theme.radii.control)
+                .background(if selected {
+                    theme.colors.accent_soft
+                } else {
+                    theme.colors.sidebar
+                })
+                .message(message)
+                .child(
+                    Row::new()
+                        .fill_width()
+                        .align_items(Align::Center)
+                        .gap(theme.spacing.control)
+                        .child(
+                            Container::new()
+                                .width(3.0)
+                                .height(24.0)
+                                .radius(1.5)
+                                .background(if selected {
+                                    theme.colors.accent
+                                } else {
+                                    theme.colors.sidebar
+                                }),
+                        )
+                        .child(leading)
+                        .child(
+                            Text::new(label)
+                                .color(theme.colors.primary_text)
+                                .wrap(true)
+                                .grow(1.0),
+                        ),
+                ),
+        )
+    }
+
+    pub fn id(mut self, id: impl Into<UiId>) -> Self {
+        self.0 = self.0.id(id);
+        self
+    }
+}
+
+impl<Message> Component<Message> for NavigationItem<Message> {
+    fn into_element(self) -> super::Element<Message> {
+        self.0.into_element()
+    }
+}
+
+/// A localized label separating a group of Settings destinations.
+pub struct NavigationSectionLabel<Message = String>(Text<Message>);
+
+impl<Message> NavigationSectionLabel<Message> {
+    pub fn new(theme: SemanticTheme, label: impl Into<String>) -> Self {
+        Self(
+            Text::new(label)
+                .scale(0.85)
+                .color(theme.colors.secondary_text),
+        )
+    }
+}
+
+impl<Message> Component<Message> for NavigationSectionLabel<Message> {
+    fn into_element(self) -> super::Element<Message> {
+        self.0.into_element()
+    }
+}
+
+/// Grouped, independently scrollable Settings navigation.
+pub struct SettingsNavigation<Message = String>(Container<Message>);
+
+impl<Message> SettingsNavigation<Message> {
+    pub fn new(theme: SemanticTheme, width: f32) -> Self {
+        Self(
+            Container::new()
+                .width(width)
+                .min_width(width)
+                .fill_height()
+                .padding(Insets::all(theme.spacing.content))
+                .gap(theme.spacing.control)
+                .overflow_y(Overflow::Auto)
+                .background(theme.colors.sidebar),
+        )
+    }
+
+    pub fn section(mut self, theme: SemanticTheme, label: impl Into<String>) -> Self {
+        self.0 = self.0.child(NavigationSectionLabel::new(theme, label));
+        self
+    }
+
+    pub fn item(mut self, item: NavigationItem<Message>) -> Self {
+        self.0 = self.0.child(item);
+        self
+    }
+
+    pub fn child(mut self, child: impl Component<Message>) -> Self {
+        self.0 = self.0.child(child);
+        self
+    }
+
+    pub fn id(mut self, id: impl Into<UiId>) -> Self {
+        self.0 = self.0.id(id);
+        self
+    }
+}
+
+impl<Message> Component<Message> for SettingsNavigation<Message> {
+    fn into_element(self) -> super::Element<Message> {
+        self.0.into_element()
+    }
+}
+
+/// Responsive Settings chrome composed from navigation, header, and content.
+pub struct SettingsShell<Message = String>(Container<Message>);
+
+impl<Message> SettingsShell<Message> {
+    pub fn new(
+        theme: SemanticTheme,
+        viewport_width: f32,
+        navigation: impl Component<Message>,
+        header: impl Component<Message>,
+        content: impl Component<Message>,
+    ) -> Self {
+        let root = if viewport_width < SETTINGS_SHELL_NARROW_BREAKPOINT {
+            Container::new().child(
+                Column::new()
+                    .fill_width()
+                    .fill_height()
+                    .child(header)
+                    .child(
+                        Container::new()
+                            .fill_width()
+                            .height(220.0)
+                            .shrink(0.0)
+                            .child(navigation),
+                    )
+                    .child(Container::new().grow(1.0).child(content)),
+            )
+        } else {
+            Container::new().child(
+                Row::new()
+                    .fill_width()
+                    .fill_height()
+                    .child(navigation)
+                    .child(
+                        Column::new()
+                            .grow(1.0)
+                            .child(header)
+                            .child(Container::new().grow(1.0).child(content)),
+                    ),
+            )
+        };
+        Self(
+            root.fill_width()
+                .fill_height()
+                .background(theme.colors.window),
+        )
+    }
+
+    pub fn id(mut self, id: impl Into<UiId>) -> Self {
+        self.0 = self.0.id(id);
+        self
+    }
+}
+
+impl<Message> Component<Message> for SettingsShell<Message> {
+    fn into_element(self) -> super::Element<Message> {
+        self.0.into_element()
+    }
+}
 
 /// The semantic background used by a [`Surface`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -264,6 +507,39 @@ impl<Message> Component<Message> for SliderField<Message> {
     }
 }
 
+/// A Settings row containing an existing typed [`Dropdown`].
+pub struct SelectField<Message = String>(SettingsRow<Message>);
+
+impl<Message> SelectField<Message> {
+    pub fn new(
+        theme: SemanticTheme,
+        label: impl Into<String>,
+        supporting_text: impl Into<String>,
+        toggle_message: Message,
+        selected: impl Into<String>,
+        options: impl IntoIterator<Item = (impl Into<String>, Message)>,
+        expanded: bool,
+    ) -> Self {
+        let dropdown = Dropdown::new(toggle_message, selected, options)
+            .expanded(expanded)
+            .colors(
+                theme.colors.raised,
+                theme.colors.hover,
+                theme.colors.primary_text,
+            );
+        Self(
+            SettingsRow::new(theme, label, supporting_text)
+                .trailing(Container::new().width(180.0).child(dropdown)),
+        )
+    }
+}
+
+impl<Message> Component<Message> for SelectField<Message> {
+    fn into_element(self) -> super::Element<Message> {
+        self.0.into_element()
+    }
+}
+
 /// A keyboard-order-preserving horizontal list of tabs.
 pub struct TabList<Message = String>(Row<Message>);
 
@@ -466,7 +742,7 @@ impl<Message> Component<Message> for ColorSwatch<Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Rect, SemanticColors, UiTree};
+    use crate::{DiagnosticKind, Rect, ResolvedNode, SemanticColors, UiTree};
 
     #[derive(Clone, Debug, PartialEq)]
     enum Message {
@@ -475,6 +751,9 @@ mod tests {
         Choice(u8),
         Color(u8),
         Slide(f32),
+        Navigate(u8),
+        ToggleSelect,
+        Select(u8),
     }
 
     fn toggle(value: bool) -> Message {
@@ -580,5 +859,99 @@ mod tests {
         assert!(tree.diagnostics().is_empty(), "{:?}", tree.diagnostics());
         assert!(tree.message_rect(&Message::Toggle(false)).is_some());
         assert!(tree.message_rect(&Message::Slide(0.85)).is_some());
+    }
+
+    fn shell(width: f32) -> SettingsShell<Message> {
+        let theme = theme();
+        let navigation = SettingsNavigation::new(theme, 240.0)
+            .id("navigation")
+            .section(theme, "System")
+            .item(
+                NavigationItem::new(theme, Message::Navigate(0), "Display", true)
+                    .id("selected-navigation-item"),
+            )
+            .item(NavigationItem::new(
+                theme,
+                Message::Navigate(1),
+                "Sound",
+                false,
+            ));
+        SettingsShell::new(
+            theme,
+            width,
+            navigation,
+            PageHeader::new(theme, "Appearance", "Customize how Nickel looks and feels")
+                .id("page-header"),
+            Surface::new(theme, SurfaceRole::Window)
+                .id("page-content")
+                .fill_width()
+                .height(300.0),
+        )
+    }
+
+    fn node_ending<'a>(tree: &'a UiTree<Message>, suffix: &str) -> &'a ResolvedNode {
+        tree.resolved_layout()
+            .nodes()
+            .iter()
+            .find(|node| node.id.as_str().ends_with(suffix))
+            .unwrap()
+    }
+
+    #[test]
+    fn settings_shell_reflows_at_its_own_breakpoint() {
+        let ordinary =
+            UiTree::layout_with_diagnostics(shell(1000.0), Rect::new(0.0, 0.0, 1000.0, 640.0));
+        let narrow =
+            UiTree::layout_with_diagnostics(shell(560.0), Rect::new(0.0, 0.0, 560.0, 760.0));
+        assert!(
+            ordinary.diagnostics().is_empty(),
+            "{:?}",
+            ordinary.diagnostics()
+        );
+        assert!(
+            narrow.diagnostics().iter().all(|diagnostic| !matches!(
+                diagnostic.kind,
+                DiagnosticKind::InvalidGeometry
+                    | DiagnosticKind::ContradictoryConstraints
+                    | DiagnosticKind::FlexOverflow
+            )),
+            "{:?}",
+            narrow.diagnostics()
+        );
+
+        let ordinary_navigation = node_ending(&ordinary, "/navigation");
+        let ordinary_header = node_ending(&ordinary, "/page-header");
+        let narrow_navigation = node_ending(&narrow, "/navigation");
+        let narrow_header = node_ending(&narrow, "/page-header");
+        assert!(ordinary_navigation.allocated.origin.x < ordinary_header.allocated.origin.x);
+        assert!(
+            narrow_navigation.allocated.origin.y
+                >= narrow_header.allocated.origin.y + narrow_header.allocated.size.height
+        );
+        assert!(ordinary.message_rect(&Message::Navigate(1)).is_some());
+        assert!(narrow.message_rect(&Message::Navigate(0)).is_some());
+    }
+
+    #[test]
+    fn select_field_preserves_toggle_and_option_messages() {
+        let theme = theme();
+        let tree = UiTree::layout(
+            SettingsCard::new(theme).child(SelectField::new(
+                theme,
+                "Animations",
+                "Control the level of interface animations",
+                Message::ToggleSelect,
+                "Normal",
+                [
+                    ("Reduced", Message::Select(0)),
+                    ("Normal", Message::Select(1)),
+                ],
+                true,
+            )),
+            Rect::new(0.0, 0.0, 760.0, 240.0),
+        );
+        assert!(tree.message_rect(&Message::ToggleSelect).is_some());
+        assert!(tree.message_rect(&Message::Select(0)).is_some());
+        assert!(tree.message_rect(&Message::Select(1)).is_some());
     }
 }
