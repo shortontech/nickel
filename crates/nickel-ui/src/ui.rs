@@ -1268,5 +1268,8 @@ flex_component!(Row, Axis::Horizontal);
 mod components;
 pub use components::*;
 
+mod settings_components;
+pub use settings_components::*;
+
 mod tree;
 pub use tree::*;

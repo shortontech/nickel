@@ -33,14 +33,16 @@ pub use theme::{
     TransparencyPreference, TypographyScale,
 };
 pub use ui::{
-    AccessibilityNode, AnyView, Background, Border, Button, ButtonLabel, Color, Column, Component,
-    ComponentBuilderExt, Container, ContentPane, DiagnosticKind, Dropdown, EventOutcome, FileGrid,
-    FileGridItem, GradientAxis, Grid, GridColumnSpec, Header, HorizontalRule, Image,
-    InteractionState, LayoutDiagnostic, LinearGradient, Menu, MenuBar, MenuItem, PaintCommand,
-    PointerIcon, RadioButton, ResolvedGrid, ResolvedLayout, ResolvedNode, Row, ScrollExtent,
-    SelectionRegion, ShoulderHints, Sidebar, SidebarFolder, SidebarItem, SidebarSection, Slider,
-    SourceLocation, Spacer, StyledText, StyledTextSpan, Text, TextAlign, TextField, Tone, UiEvent,
-    UiTree, VerticalScroll, VirtualColumn, VirtualWindow,
+    AccessibilityNode, AnyView, Background, Border, Button, ButtonLabel, ChoiceCard,
+    ChoiceCardGroup, Color, ColorSwatch, Column, Component, ComponentBuilderExt, Container,
+    ContentPane, DiagnosticKind, Dropdown, EventOutcome, FileGrid, FileGridItem, GradientAxis,
+    Grid, GridColumnSpec, Header, HorizontalRule, Image, InteractionState, LayoutDiagnostic,
+    LinearGradient, Menu, MenuBar, MenuItem, PaintCommand, PointerIcon, RadioButton, ResolvedGrid,
+    ResolvedLayout, ResolvedNode, Row, ScrollExtent, SelectionRegion, SettingsCard, SettingsRow,
+    ShoulderHints, Sidebar, SidebarFolder, SidebarItem, SidebarSection, Slider, SliderField,
+    SourceLocation, Spacer, StyledText, StyledTextSpan, Surface, SurfaceRole, Switch, TabList,
+    Text, TextAlign, TextField, Tone, UiEvent, UiTree, VerticalScroll, VirtualColumn,
+    VirtualWindow,
 };
 pub use ui_declarative_macros::{component, id, ui};
 
@@ -53,15 +55,17 @@ impl<Message, T: Component<Message>> View<Message> for T {}
 pub mod prelude {
     pub use crate::{
         AccentColors, AccessibilityPreferences, Align, AnyView, AppearancePreference, Application,
-        Background, Border, BorderColors, Button, Color, Column, Component, ComponentBuilderExt,
-        Container, ContrastPreference, DiagnosticKind, Dropdown, EasingCurve, FontWeight, Fragment,
-        Grid, GridColumnSpec, Insets, Justify, Length, Menu, MenuBar, MenuItem, MotionPreference,
-        MotionScale, Overflow, PlatformThemePreferences, PointerIcon, RadioButton, RadiusScale,
-        ResolvedAppearance, ResolvedThemePreferences, Row, SelectionRegion, SemanticColors,
-        SemanticTheme, SemanticTokenSet, Shortcut, SizingScale, Slider, Spacer, SpacingScale,
-        SurfaceColors, Text, TextAlign, TextBoundary, TextColors, TextField, TextStyle,
-        ThemePreferences, Tone, Track, TransparencyPreference, TypographyScale, UiEvent, UiId,
-        UiStateStore, View, VirtualColumn, VirtualWindow, component, id, run, ui,
+        Background, Border, BorderColors, Button, ChoiceCard, ChoiceCardGroup, Color, ColorSwatch,
+        Column, Component, ComponentBuilderExt, Container, ContrastPreference, DiagnosticKind,
+        Dropdown, EasingCurve, FontWeight, Fragment, Grid, GridColumnSpec, Insets, Justify, Length,
+        Menu, MenuBar, MenuItem, MotionPreference, MotionScale, Overflow, PlatformThemePreferences,
+        PointerIcon, RadioButton, RadiusScale, ResolvedAppearance, ResolvedThemePreferences, Row,
+        SelectionRegion, SemanticColors, SemanticTheme, SemanticTokenSet, SettingsCard,
+        SettingsRow, Shortcut, SizingScale, Slider, SliderField, Spacer, SpacingScale, Surface,
+        SurfaceColors, SurfaceRole, Switch, TabList, Text, TextAlign, TextBoundary, TextColors,
+        TextField, TextStyle, ThemePreferences, Tone, Track, TransparencyPreference,
+        TypographyScale, UiEvent, UiId, UiStateStore, View, VirtualColumn, VirtualWindow,
+        component, id, run, ui,
     };
 }
 
