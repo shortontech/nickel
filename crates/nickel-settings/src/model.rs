@@ -105,3 +105,26 @@ impl Default for SettingsApp {
         }
     }
 }
+
+impl SettingsApp {
+    pub(super) fn with_initial_page(page: SettingsPage) -> Self {
+        Self {
+            page,
+            controller_page: page,
+            ..Self::default()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initial_page_also_sets_controller_navigation_page() {
+        let app = SettingsApp::with_initial_page(SettingsPage::Appearance);
+
+        assert_eq!(app.page, SettingsPage::Appearance);
+        assert_eq!(app.controller_page, SettingsPage::Appearance);
+    }
+}

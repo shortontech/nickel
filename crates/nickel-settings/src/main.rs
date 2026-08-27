@@ -1,5 +1,6 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+mod cli;
 mod effects;
 mod model;
 mod persistence;
@@ -1008,6 +1009,17 @@ fn constrain_center(mut monitor: Rect, plane: Rect) -> Rect {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let initial_page = match cli::parse(std::env::args_os().skip(1)) {
+        Ok(cli::Action::Run(page)) => page,
+        Ok(cli::Action::Help) => {
+            print!("{}", cli::HELP);
+            return Ok(());
+        }
+        Err(error) => {
+            eprintln!("error: {error}\n\n{}", cli::HELP);
+            std::process::exit(2);
+        }
+    };
     let started = Instant::now();
     let _log_path = nickel_logging::init("nickel-settings").ok();
     sdl3::hint::set("SDL_APP_ID", "nickel-settings");
@@ -1030,10 +1042,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .filter(|refresh_rate| refresh_rate.is_finite() && *refresh_rate > 1.0)
         .map(|refresh_rate| Duration::from_secs_f64(1.0 / f64::from(refresh_rate)))
         .unwrap_or_else(|| Duration::from_millis(16));
-    let mut app = SettingsApp {
-        frame_interval,
-        ..SettingsApp::default()
-    };
+    let mut app = SettingsApp::with_initial_page(initial_page);
+    app.frame_interval = frame_interval;
     let mut presenter = SdlCanvasPresenter::new(window)?;
     app.render(&mut presenter)?;
     tracing::info!(
