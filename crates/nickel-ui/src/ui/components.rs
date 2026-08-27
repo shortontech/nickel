@@ -865,6 +865,27 @@ impl<Message> TextField<Message> {
         field
     }
 
+    pub fn on_change_with_placeholder(
+        value: &str,
+        placeholder: impl Into<String>,
+        map: fn(String) -> Message,
+    ) -> Self {
+        let displayed = if value.is_empty() {
+            placeholder.into()
+        } else {
+            value.to_owned()
+        };
+        let mut field = Self {
+            text: Text::new(&displayed),
+            displayed,
+        };
+        if let Kind::Text { input_value, .. } = &mut field.text.0.kind {
+            *input_value = Some(value.to_owned());
+        }
+        field.text.0.text_mapper = Some(map);
+        field
+    }
+
     pub fn display_text(&self) -> &str {
         &self.displayed
     }
@@ -886,6 +907,11 @@ impl<Message> TextField<Message> {
 
     pub fn wrap(mut self, wrap: bool) -> Self {
         self.text = self.text.wrap(wrap);
+        self
+    }
+
+    pub fn grow(mut self, grow: f32) -> Self {
+        self.text.0 = self.text.0.grow(grow);
         self
     }
 }

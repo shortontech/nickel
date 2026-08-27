@@ -56,51 +56,106 @@ impl SettingsApp {
         } else {
             self.page
         };
-        let display_button = NavigationItem::new(
+        let display_label = self.localizer.text("settings-nav-display");
+        let bar_label = self.localizer.text("settings-nav-bar");
+        let appearance_label = self.localizer.text("settings-nav-appearance");
+        let network_label = self.localizer.text("settings-nav-network");
+        let bluetooth_label = self.localizer.text("settings-nav-bluetooth");
+        let query = self.sidebar_query.trim().to_lowercase();
+        let matches = |label: &str| query.is_empty() || label.to_lowercase().contains(&query);
+        let show_display = matches(&display_label);
+        let show_bar = matches(&bar_label);
+        let show_appearance = matches(&appearance_label);
+        let show_network = matches(&network_label);
+        let show_bluetooth = matches(&bluetooth_label);
+        let display_selected = selected_page == SettingsPage::Display;
+        let bar_selected = selected_page == SettingsPage::Bar;
+        let appearance_selected = selected_page == SettingsPage::Appearance;
+        let network_selected = selected_page == SettingsPage::Network;
+        let bluetooth_selected = selected_page == SettingsPage::Bluetooth;
+        let display_button = NavigationItem::with_leading(
             theme,
             SettingsMessage::Navigate(SettingsPage::Display),
-            self.localizer.text("settings-nav-display"),
-            selected_page == SettingsPage::Display,
+            display_label,
+            display_selected,
+            sidebar_icon(SidebarIconKind::Display),
         );
-        let bar_button = NavigationItem::new(
+        let bar_button = NavigationItem::with_leading(
             theme,
             SettingsMessage::Navigate(SettingsPage::Bar),
-            self.localizer.text("settings-nav-bar"),
-            selected_page == SettingsPage::Bar,
+            bar_label,
+            bar_selected,
+            sidebar_icon(SidebarIconKind::Bar),
         );
-        let appearance_button = NavigationItem::new(
+        let appearance_button = NavigationItem::with_leading(
             theme,
             SettingsMessage::Navigate(SettingsPage::Appearance),
-            self.localizer.text("settings-nav-appearance"),
-            selected_page == SettingsPage::Appearance,
+            appearance_label,
+            appearance_selected,
+            sidebar_icon(SidebarIconKind::Appearance),
         );
-        let network_button = NavigationItem::new(
+        let network_button = NavigationItem::with_leading(
             theme,
             SettingsMessage::Navigate(SettingsPage::Network),
-            self.localizer.text("settings-nav-network"),
-            selected_page == SettingsPage::Network,
+            network_label,
+            network_selected,
+            sidebar_icon(SidebarIconKind::Network),
         );
-        let bluetooth_button = NavigationItem::new(
+        let bluetooth_button = NavigationItem::with_leading(
             theme,
             SettingsMessage::Navigate(SettingsPage::Bluetooth),
-            self.localizer.text("settings-nav-bluetooth"),
-            selected_page == SettingsPage::Bluetooth,
+            bluetooth_label,
+            bluetooth_selected,
+            sidebar_icon(SidebarIconKind::Bluetooth),
         );
-        let mut navigation = SettingsNavigation::new(theme, SIDEBAR_WIDTH as f32)
-            .section(theme, self.localizer.text("settings-nav-section-system"))
-            .item(display_button)
-            .section(
+        let mut navigation = SettingsNavigation::new(theme, SIDEBAR_WIDTH as f32).child(
+            SettingsSearchField::with_leading(
+                theme,
+                "settings-sidebar-search",
+                &self.sidebar_query,
+                self.localizer.text("settings-search-placeholder"),
+                sidebar_search_message,
+                sidebar_icon(SidebarIconKind::Search),
+            ),
+        );
+        if show_display {
+            navigation = navigation
+                .section(theme, self.localizer.text("settings-nav-section-system"))
+                .item(display_button);
+        }
+        if show_bar || show_appearance {
+            navigation = navigation.section(
                 theme,
                 self.localizer.text("settings-nav-section-personalization"),
-            )
-            .item(bar_button)
-            .item(appearance_button)
-            .section(
+            );
+            if show_bar {
+                navigation = navigation.item(bar_button);
+            }
+            if show_appearance {
+                navigation = navigation.item(appearance_button);
+            }
+        }
+        if show_network || show_bluetooth {
+            navigation = navigation.section(
                 theme,
                 self.localizer.text("settings-nav-section-connectivity"),
-            )
-            .item(network_button)
-            .item(bluetooth_button);
+            );
+            if show_network {
+                navigation = navigation.item(network_button);
+            }
+            if show_bluetooth {
+                navigation = navigation.item(bluetooth_button);
+            }
+        }
+        if !(show_display || show_bar || show_appearance || show_network || show_bluetooth) {
+            navigation = navigation.child(ui! {
+                <Container padding={Insets::all(10.0)}>
+                    <Text color={palette.muted} wrap={true}>
+                        {self.localizer.text("settings-search-no-results")}
+                    </Text>
+                </Container>
+            });
+        }
         if self.controller.connected() {
             navigation = navigation.child(ui! {
                 <Container grow={1.0} padding={Insets {

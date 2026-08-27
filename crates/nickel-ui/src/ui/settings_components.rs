@@ -1,6 +1,7 @@
 use crate::{
     Align, Border, Color, Column, Component, ComponentBuilderExt, Container, Dropdown, Grid,
-    Insets, Justify, Overflow, Row, SemanticTheme, Slider, Spacer, Text, TextAlign, Track, UiId,
+    Insets, Justify, Overflow, Row, SemanticTheme, Slider, Spacer, Text, TextAlign, TextField,
+    Track, UiId,
 };
 
 /// Width below which [`SettingsShell`] stacks navigation above its content.
@@ -78,13 +79,13 @@ impl<Message> NavigationItem<Message> {
             Container::new()
                 .fill_width()
                 .min_height(40.0)
+                .shrink(0.0)
                 .radius(theme.radii.control)
                 .background(if selected {
                     theme.colors.accent_soft
                 } else {
                     theme.colors.sidebar
                 })
-                .message(message)
                 .child(
                     Row::new()
                         .fill_width()
@@ -93,20 +94,43 @@ impl<Message> NavigationItem<Message> {
                         .child(
                             Container::new()
                                 .width(3.0)
-                                .height(24.0)
-                                .radius(1.5)
+                                .height(40.0)
                                 .background(if selected {
                                     theme.colors.accent
                                 } else {
                                     theme.colors.sidebar
                                 }),
                         )
-                        .child(leading)
                         .child(
-                            Text::new(label)
-                                .color(theme.colors.primary_text)
-                                .wrap(true)
-                                .grow(1.0),
+                            Container::new()
+                                .grow(1.0)
+                                .fill_height()
+                                .padding(Insets {
+                                    top: 0.0,
+                                    right: 1.0,
+                                    bottom: 0.0,
+                                    left: 0.0,
+                                })
+                                .child(
+                                    Container::new()
+                                        .fill_width()
+                                        .fill_height()
+                                        .message(message)
+                                        .child(
+                                            Row::new()
+                                                .fill_width()
+                                                .fill_height()
+                                                .align_items(Align::Center)
+                                                .gap(theme.spacing.control)
+                                                .child(leading)
+                                                .child(
+                                                    Text::new(label)
+                                                        .color(theme.colors.primary_text)
+                                                        .wrap(true)
+                                                        .grow(1.0),
+                                                ),
+                                        ),
+                                ),
                         ),
                 ),
         )
@@ -119,6 +143,78 @@ impl<Message> NavigationItem<Message> {
 }
 
 impl<Message> Component<Message> for NavigationItem<Message> {
+    fn into_element(self) -> super::Element<Message> {
+        self.0.into_element()
+    }
+}
+
+/// A real text-input filter styled for the Settings navigation rail.
+pub struct SettingsSearchField<Message = String>(Container<Message>);
+
+impl<Message> SettingsSearchField<Message> {
+    pub fn new(
+        theme: SemanticTheme,
+        id: impl Into<UiId>,
+        value: &str,
+        placeholder: impl Into<String>,
+        on_change: fn(String) -> Message,
+    ) -> Self {
+        Self::with_leading(
+            theme,
+            id,
+            value,
+            placeholder,
+            on_change,
+            Text::new("⌕")
+                .width(15.0)
+                .scale(1.1)
+                .align(TextAlign::Center)
+                .color(theme.colors.secondary_text),
+        )
+    }
+
+    pub fn with_leading(
+        theme: SemanticTheme,
+        id: impl Into<UiId>,
+        value: &str,
+        placeholder: impl Into<String>,
+        on_change: fn(String) -> Message,
+        leading: impl Component<Message>,
+    ) -> Self {
+        let text_color = if value.is_empty() {
+            theme.colors.secondary_text
+        } else {
+            theme.colors.primary_text
+        };
+        Self(
+            Container::new()
+                .fill_width()
+                .height(40.0)
+                .shrink(0.0)
+                .padding(Insets::symmetric(9.0, 10.0))
+                .radius(theme.radii.control)
+                .background(theme.colors.raised)
+                .border(theme.borders.subtle, theme.sizing.border)
+                .child(
+                    Row::new()
+                        .fill_width()
+                        .align_items(Align::Center)
+                        .gap(theme.spacing.control)
+                        .child(leading)
+                        .child(
+                            TextField::on_change_with_placeholder(value, placeholder, on_change)
+                                .id(id)
+                                .grow(1.0)
+                                .scale(0.9)
+                                .color(text_color)
+                                .wrap(false),
+                        ),
+                ),
+        )
+    }
+}
+
+impl<Message> Component<Message> for SettingsSearchField<Message> {
     fn into_element(self) -> super::Element<Message> {
         self.0.into_element()
     }
@@ -154,14 +250,24 @@ impl<Message> SettingsNavigation<Message> {
                 .min_width(width)
                 .fill_height()
                 .padding(Insets::all(theme.spacing.content))
-                .gap(theme.spacing.control)
+                .gap(theme.spacing.compact)
                 .overflow_y(Overflow::Auto)
                 .background(theme.colors.sidebar),
         )
     }
 
     pub fn section(mut self, theme: SemanticTheme, label: impl Into<String>) -> Self {
-        self.0 = self.0.child(NavigationSectionLabel::new(theme, label));
+        self.0 = self.0.child(
+            Container::new()
+                .shrink(0.0)
+                .padding(Insets {
+                    top: theme.spacing.compact,
+                    right: 0.0,
+                    bottom: 0.0,
+                    left: 0.0,
+                })
+                .child(NavigationSectionLabel::new(theme, label)),
+        );
         self
     }
 
@@ -833,7 +939,10 @@ impl<Message> Component<Message> for ColorSwatch<Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DiagnosticKind, PaintCommand, Rect, ResolvedNode, SemanticColors, UiTree};
+    use crate::{
+        DiagnosticKind, PaintCommand, Point, Rect, ResolvedNode, SemanticColors, UiEvent,
+        UiStateStore, UiTree,
+    };
 
     #[derive(Clone, Debug, PartialEq)]
     enum Message {
@@ -845,6 +954,7 @@ mod tests {
         Navigate(u8),
         ToggleSelect,
         Select(u8),
+        Search(String),
     }
 
     fn toggle(value: bool) -> Message {
@@ -853,6 +963,10 @@ mod tests {
 
     fn slide(value: f32) -> Message {
         Message::Slide(value)
+    }
+
+    fn search(value: String) -> Message {
+        Message::Search(value)
     }
 
     fn theme() -> SemanticTheme {
@@ -877,6 +991,28 @@ mod tests {
             Rect::new(0.0, 0.0, 100.0, 50.0),
         );
         assert!(tree.message_rect(&Message::Toggle(true)).is_some());
+    }
+
+    #[test]
+    fn settings_search_placeholder_keeps_an_empty_edit_value() {
+        let mut state = UiStateStore::default();
+        let tree = UiTree::layout(
+            SettingsSearchField::new(theme(), "search", "", "Search settings...", search),
+            Rect::new(0.0, 0.0, 220.0, 48.0),
+        );
+        let input = tree
+            .resolved_layout()
+            .nodes()
+            .iter()
+            .find(|node| node.id.as_str().ends_with("/search"))
+            .unwrap();
+        let point = Point {
+            x: input.allocated.origin.x + input.allocated.size.width / 2.0,
+            y: input.allocated.origin.y + input.allocated.size.height / 2.0,
+        };
+        tree.handle_event(&mut state, UiEvent::PointerPressed(point));
+        let outcome = tree.handle_event(&mut state, UiEvent::TextInput("net".into()));
+        assert_eq!(outcome.messages, vec![Message::Search("net".into())]);
     }
 
     #[test]

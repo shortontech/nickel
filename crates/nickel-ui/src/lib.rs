@@ -41,10 +41,11 @@ pub use ui::{
     NavigationItem, NavigationSectionLabel, PageHeader, PaintCommand, PointerIcon, PreviewState,
     PreviewTile, RadioButton, ResolvedGrid, ResolvedLayout, ResolvedNode, Row,
     SETTINGS_SHELL_NARROW_BREAKPOINT, ScrollExtent, SelectField, SelectionIndicator,
-    SelectionRegion, SettingsCard, SettingsNavigation, SettingsRow, SettingsShell, ShoulderHints,
-    Sidebar, SidebarFolder, SidebarItem, SidebarSection, Slider, SliderField, SourceLocation,
-    Spacer, StyledText, StyledTextSpan, Surface, SurfaceRole, Switch, TabList, Text, TextAlign,
-    TextField, Tone, UiEvent, UiTree, VerticalScroll, VirtualColumn, VirtualWindow,
+    SelectionRegion, SettingsCard, SettingsNavigation, SettingsRow, SettingsSearchField,
+    SettingsShell, ShoulderHints, Sidebar, SidebarFolder, SidebarItem, SidebarSection, Slider,
+    SliderField, SourceLocation, Spacer, StyledText, StyledTextSpan, Surface, SurfaceRole, Switch,
+    TabList, Text, TextAlign, TextField, Tone, UiEvent, UiTree, VerticalScroll, VirtualColumn,
+    VirtualWindow,
 };
 pub use ui_declarative_macros::{component, id, ui};
 

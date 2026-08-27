@@ -13,7 +13,7 @@ use platform::*;
 
 use std::{
     cell::Cell,
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -37,8 +37,8 @@ use nickel_ui::{
     ControllerAction, ControllerInput, Image, ImageFit, Insets, NavigationItem, NavigationPane,
     PageHeader, PaintCommand, PaneNavigation, Point as UiPoint, PreviewTile, Rect as UiRect,
     SdlCanvasPresenter, SelectField, SemanticColors, SemanticTheme, SettingsCard,
-    SettingsNavigation, SettingsRow, SettingsShell, SliderField, Surface, SurfaceRole, Switch,
-    TabList, TextAlign, UiStateStore, UiTree, ui,
+    SettingsNavigation, SettingsRow, SettingsSearchField, SettingsShell, SliderField, Surface,
+    SurfaceRole, Switch, TabList, TextAlign, UiEvent, UiStateStore, UiTree, ui,
 };
 use sdl3::{
     event::{Event, WindowEvent},
@@ -46,7 +46,7 @@ use sdl3::{
     mouse::{MouseButton, MouseWheelDirection},
 };
 
-const SIDEBAR_WIDTH: i32 = 190;
+const SIDEBAR_WIDTH: i32 = 220;
 const DISPLAY_PLANE: Rect = Rect {
     x: 210,
     y: 96,
@@ -83,6 +83,95 @@ fn load_wallpaper_preview(settings: &WallpaperSettings) -> Option<Arc<image::Rgb
         .as_ref()
         .and_then(|path| image::open(path).ok())
         .map(|image| Arc::new(image.to_rgba8()))
+}
+
+#[derive(Clone, Copy)]
+enum SidebarIconKind {
+    Search,
+    Display,
+    Bar,
+    Appearance,
+    Network,
+    Bluetooth,
+}
+
+impl SidebarIconKind {
+    const ALL: [Self; 6] = [
+        Self::Search,
+        Self::Display,
+        Self::Bar,
+        Self::Appearance,
+        Self::Network,
+        Self::Bluetooth,
+    ];
+
+    fn index(self) -> usize {
+        self as usize
+    }
+
+    fn glyph(self) -> char {
+        match self {
+            Self::Search => '\u{f002}',
+            Self::Display => '\u{f108}',
+            Self::Bar => '\u{f0c9}',
+            Self::Appearance => '\u{f1fc}',
+            Self::Network => '\u{f0ac}',
+            Self::Bluetooth => '\u{f294}',
+        }
+    }
+
+    fn fallback(self) -> &'static [u8] {
+        match self {
+            Self::Search => include_bytes!("../../../assets/icons/settings/search.svg"),
+            Self::Display => include_bytes!("../../../assets/icons/settings/display.svg"),
+            Self::Bar => include_bytes!("../../../assets/icons/settings/bar.svg"),
+            Self::Appearance => include_bytes!("../../../assets/icons/settings/appearance.svg"),
+            Self::Network => include_bytes!("../../../assets/icons/settings/network.svg"),
+            Self::Bluetooth => include_bytes!("../../../assets/icons/settings/bluetooth.svg"),
+        }
+    }
+}
+
+fn rasterize_sidebar_icon(kind: SidebarIconKind) -> Arc<image::RgbaImage> {
+    const SIZE: u32 = 24;
+    let mut options = resvg::usvg::Options::default();
+    let font_loaded = options
+        .fontdb_mut()
+        .load_font_file("/usr/share/fonts/opentype/font-awesome/FontAwesome.otf")
+        .is_ok();
+    let font_awesome = format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{SIZE}" height="{SIZE}">
+<text x="12" y="18" text-anchor="middle" font-family="FontAwesome" font-size="16" fill="#a8abb2">{}</text>
+</svg>"##,
+        kind.glyph()
+    );
+    let data = if font_loaded {
+        font_awesome.as_bytes()
+    } else {
+        kind.fallback()
+    };
+    let image = resvg::usvg::Tree::from_data(data, &options)
+        .ok()
+        .and_then(|tree| {
+            let mut pixmap = resvg::tiny_skia::Pixmap::new(SIZE, SIZE)?;
+            resvg::render(
+                &tree,
+                resvg::tiny_skia::Transform::identity(),
+                &mut pixmap.as_mut(),
+            );
+            image::RgbaImage::from_raw(SIZE, SIZE, pixmap.take())
+        })
+        .unwrap_or_else(|| image::RgbaImage::new(SIZE, SIZE));
+    Arc::new(image)
+}
+
+fn sidebar_icon<Message>(kind: SidebarIconKind) -> Image<Message> {
+    static ICONS: OnceLock<[Arc<image::RgbaImage>; 6]> = OnceLock::new();
+    let icons = ICONS.get_or_init(|| SidebarIconKind::ALL.map(rasterize_sidebar_icon));
+    Image::new(400 + kind.index() as u16, icons[kind.index()].clone())
+        .fit(ImageFit::Contain)
+        .width(20.0)
+        .height(20.0)
 }
 
 struct OutputSnapshot {
@@ -193,6 +282,7 @@ struct WifiNetwork {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum SettingsMessage {
     Navigate(SettingsPage),
+    SidebarSearchChanged(String),
     BluetoothPower,
     BluetoothDiscovery,
     BluetoothDevice(usize),
@@ -241,7 +331,23 @@ fn reduce_transparency_message(value: bool) -> SettingsMessage {
     SettingsMessage::SetReduceTransparency(value)
 }
 
+fn sidebar_search_message(value: String) -> SettingsMessage {
+    SettingsMessage::SidebarSearchChanged(value)
+}
+
 impl SettingsApp {
+    fn dispatch_ui_event(&mut self, event: UiEvent) {
+        let outcome = self.ui.handle_event(&mut self.ui_state, event);
+        for message in outcome.messages {
+            if let SettingsMessage::SidebarSearchChanged(value) = message {
+                self.sidebar_query = value;
+            }
+        }
+        if outcome.invalidation != nickel_ui::Invalidation::None {
+            self.request_redraw();
+        }
+    }
+
     fn transient_scroll(&self, message: &SettingsMessage) -> f32 {
         self.ui
             .id_for_message(message)
@@ -283,6 +389,7 @@ impl SettingsApp {
             x: x as f32,
             y: y as f32,
         };
+        self.dispatch_ui_event(UiEvent::PointerPressed(point));
         if let Some(SettingsMessage::SetDesktopCount(count)) = self.ui.message_at_owned(point) {
             let id = self
                 .ui
@@ -326,6 +433,7 @@ impl SettingsApp {
                         _ => {}
                     }
                 }
+                SettingsMessage::SidebarSearchChanged(value) => self.sidebar_query = value,
                 SettingsMessage::BluetoothPower => {
                     let _ = set_bluetooth_adapter_property("Powered", !self.bluetooth.powered);
                     self.next_bluetooth_refresh = Instant::now();
@@ -732,14 +840,31 @@ impl SettingsApp {
     fn handle_event(&mut self, event: Event) {
         match event {
             Event::Quit { .. }
-            | Event::KeyDown {
-                keycode: Some(Keycode::Escape),
-                ..
-            }
             | Event::Window {
                 win_event: WindowEvent::CloseRequested,
                 ..
             } => self.running = false,
+            Event::KeyDown {
+                keycode: Some(Keycode::Escape),
+                ..
+            } => {
+                if self.ui_state.focused().is_some() {
+                    self.ui_state.set_focus(None);
+                    self.sidebar_query.clear();
+                    self.request_redraw();
+                } else {
+                    self.running = false;
+                }
+            }
+            Event::KeyDown {
+                keycode: Some(Keycode::Backspace),
+                ..
+            } => self.dispatch_ui_event(UiEvent::TextBackspace),
+            Event::KeyDown {
+                keycode: Some(Keycode::Delete),
+                ..
+            } => self.dispatch_ui_event(UiEvent::TextDelete),
+            Event::TextInput { text, .. } => self.dispatch_ui_event(UiEvent::TextInput(text)),
             Event::Window {
                 win_event: WindowEvent::Exposed,
                 ..
@@ -1295,5 +1420,26 @@ mod tests {
                 "missing Appearance control for {message:?}"
             );
         }
+    }
+
+    #[test]
+    fn sidebar_search_filters_destinations_without_changing_the_page() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Appearance);
+        app.sidebar_query = "net".into();
+        let tree = app.build_ui(850.0, 580.0);
+
+        assert_eq!(app.page, SettingsPage::Appearance);
+        assert!(
+            tree.message_rect(&SettingsMessage::Navigate(SettingsPage::Network))
+                .is_some()
+        );
+        assert!(
+            tree.message_rect(&SettingsMessage::Navigate(SettingsPage::Display))
+                .is_none()
+        );
+        assert!(
+            tree.message_rect(&SettingsMessage::Navigate(SettingsPage::Appearance))
+                .is_none()
+        );
     }
 }

@@ -1731,6 +1731,14 @@ fn intersection(left: Rect, right: Rect) -> Option<Rect> {
     (right_edge > x && bottom_edge > y).then(|| Rect::new(x, y, right_edge - x, bottom_edge - y))
 }
 
+fn approximately_same_rect(left: Rect, right: Rect) -> bool {
+    const EPSILON: f32 = 0.01;
+    (left.origin.x - right.origin.x).abs() <= EPSILON
+        && (left.origin.y - right.origin.y).abs() <= EPSILON
+        && (left.size.width - right.size.width).abs() <= EPSILON
+        && (left.size.height - right.size.height).abs() <= EPSILON
+}
+
 pub(super) fn measure_element<Message>(
     element: &Element<Message>,
     constraints: Constraints,
@@ -2657,7 +2665,9 @@ fn layout_element<Message: Clone>(
     }
     if element.message.is_some()
         && !is_scroll_container(element)
-        && inherited_clip.is_some_and(|clip| intersection(rect, clip) != Some(rect))
+        && inherited_clip.is_some_and(|clip| {
+            intersection(rect, clip).is_none_or(|visible| !approximately_same_rect(visible, rect))
+        })
     {
         tree.diagnostic(
             DiagnosticKind::ClippedInteraction,

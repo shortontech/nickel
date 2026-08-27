@@ -12,6 +12,7 @@ nickel-i18n = { path = "../nickel-i18n" }
 nickel-logging = { path = "../nickel-logging" }
 nickel-platform = { path = "../nickel-platform" }
 image.workspace = true
+resvg.workspace = true
 tracing.workspace = true
 sdl3.workspace = true
 

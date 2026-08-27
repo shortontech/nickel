@@ -2629,6 +2629,7 @@ dependencies = [
  "nickel-logging",
  "nickel-platform",
  "nickel-ui",
+ "resvg",
  "sdl3",
  "tracing",
  "windows",

@@ -60,7 +60,7 @@ impl ThemePalette {
             text: Oklch::new(if dark { 0.955 } else { 0.185 }, 0.008, seed.h).to_rgb(),
             muted: Oklch::new(if dark { 0.710 } else { 0.455 }, 0.018, seed.h).to_rgb(),
             accent,
-            accent_soft: Oklch::new(if dark { 0.315 } else { 0.865 }, 0.040 * intensity, seed.h)
+            accent_soft: Oklch::new(if dark { 0.315 } else { 0.865 }, 0.065 * intensity, seed.h)
                 .to_rgb(),
             complement: Oklch::new(
                 if dark { 0.720 } else { 0.525 },

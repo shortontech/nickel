@@ -15,6 +15,8 @@ settings-nav-appearance = Appearance
 settings-nav-network = Network
 settings-nav-bluetooth = Bluetooth
 settings-nav-section-system = System
+settings-search-placeholder = Search settings...
+settings-search-no-results = No matching settings
 settings-nav-section-personalization = Personalization
 settings-nav-section-connectivity = Connectivity
 
