@@ -320,27 +320,56 @@ impl SettingsApp {
         let system = nickel_platform::appearance();
         let appearance = self.shell_settings.resolve_appearance(system);
         let palette = ThemePalette::from_appearance(appearance);
+        let theme = self.ui_theme();
         let hue = self.shell_settings.displayed_hue(system);
         let intensity = self.shell_settings.displayed_intensity(system);
-        let swatches = [
-            ("settings-swatch-background", palette.background),
-            ("settings-swatch-panel", palette.panel),
-            ("settings-swatch-surface", palette.surface),
-            ("settings-swatch-hover", palette.surface_hover),
-            ("settings-swatch-accent", palette.accent),
-            ("settings-swatch-complement", palette.complement),
-        ]
-        .into_iter()
-        .map(|(label, color)| {
-            ui! {
-                <Container width={88.0} height={76.0} background={color}
-                    border={(palette.muted, 1.0)}
-                    padding={Insets { top: 46.0, right: 4.0, bottom: 4.0, left: 4.0 }}>
-                    <Text align={TextAlign::Center} scale={0.72} color={palette.text}>
-                        {self.localizer.text(label)}
-                    </Text>
-                </Container>
-            }
+        let preview = || {
+            Surface::new(theme, SurfaceRole::Raised)
+                .height(82.0)
+                .radius(theme.radii.control)
+                .padding(Insets::all(8.0))
+                .child(ui! {
+                    <Row gap={6.0}>
+                        <Container width={22.0} background={palette.panel} radius={3.0} />
+                        <Column grow={1.0} gap={6.0}>
+                            <Container height={12.0} background={palette.surface_hover} radius={3.0} />
+                            <Container height={28.0} background={palette.background} radius={3.0} />
+                        </Column>
+                    </Row>
+                })
+        };
+        let mode_choices = [
+            ChoiceCard::new(
+                theme,
+                SettingsMessage::AppearanceLight,
+                self.localizer.text("settings-appearance-light"),
+                self.shell_settings.theme == ThemePreference::Light,
+                preview(),
+            ),
+            ChoiceCard::new(
+                theme,
+                SettingsMessage::AppearanceDark,
+                self.localizer.text("settings-appearance-dark"),
+                self.shell_settings.theme == ThemePreference::Dark,
+                preview(),
+            ),
+            ChoiceCard::new(
+                theme,
+                SettingsMessage::AppearanceSystem,
+                self.localizer.text("settings-appearance-automatic"),
+                self.shell_settings.theme == ThemePreference::System,
+                preview(),
+            ),
+        ];
+        let preset_hues = [224_u16, 188, 154, 78, 38, 16, 340, 305];
+        let swatches = preset_hues.into_iter().map(|preset| {
+            let [red, green, blue] = accent_from_hue(preset);
+            ColorSwatch::color(
+                theme,
+                SettingsMessage::SetAccentHue(preset),
+                (u32::from(red) << 16) | (u32::from(green) << 8) | u32::from(blue),
+                hue.abs_diff(preset) < 3,
+            )
         });
         let wallpaper_name = self
             .wallpaper_settings
@@ -363,48 +392,165 @@ impl SettingsApp {
                 label={self.localizer.text(label)} selected={self.wallpaper_settings.position == position}
                 colors_pair={(palette.accent, palette.text)} width={82.0} />
         });
+        let mode_group = ChoiceCardGroup::new(mode_choices);
+        let swatch_row = ui! {
+            <Row height={44.0} gap={10.0} children={swatches}>
+                {ColorSwatch::custom(theme, SettingsMessage::SetAccentHue(hue))}
+            </Row>
+        };
+        let mode_card = SettingsCard::titled(
+            theme,
+            self.localizer.text("settings-appearance-mode"),
+            self.localizer.text("settings-appearance-mode-description"),
+        )
+        .child(mode_group);
+        let accent_card = SettingsCard::titled(
+            theme,
+            self.localizer.text("settings-appearance-accent"),
+            self.localizer
+                .text("settings-appearance-accent-description"),
+        )
+        .child(swatch_row);
+        let wallpaper_card = SettingsCard::titled(
+            theme,
+            self.localizer.text("settings-wallpaper-image"),
+            self.localizer.text("settings-wallpaper-description"),
+        )
+        .child(ui! {
+            <Row gap={14.0} align_items={nickel_ui::Align::Center}>
+                {Surface::new(theme, SurfaceRole::Raised)
+                    .width(124.0).height(70.0).radius(theme.radii.control)}
+                <Column grow={1.0} gap={8.0}>
+                    <Text color={palette.text}>{wallpaper_name}</Text>
+                    <Row gap={10.0}>
+                        <Button on_press={SettingsMessage::WallpaperChoose} width={140.0}
+                            color={palette.text} background={palette.accent} radius={theme.radii.control}>
+                            {self.localizer.text("settings-wallpaper-choose")}
+                        </Button>
+                        <Button on_press={SettingsMessage::WallpaperRemove} width={100.0}
+                            color={palette.text} background={palette.surface_hover}
+                            border={(palette.muted, 1.0)} radius={theme.radii.control}>
+                            {self.localizer.text("settings-wallpaper-remove")}
+                        </Button>
+                    </Row>
+                </Column>
+            </Row>
+        })
+        .child(ui! { <Row height={34.0} gap={8.0} children={positions} /> });
+        let transparency_row = SettingsRow::new(
+            theme,
+            self.localizer.text("settings-reduce-transparency"),
+            self.localizer
+                .text("settings-reduce-transparency-description"),
+        )
+        .trailing(Switch::new(
+            self.shell_settings.reduce_transparency,
+            reduce_transparency_message,
+            theme,
+        ));
+        let animation_row = SettingsRow::new(
+            theme,
+            self.localizer.text("settings-animations"),
+            self.localizer.text("settings-animations-description"),
+        )
+        .trailing(ui! {
+            <Row gap={8.0}>
+                <RadioButton on_press={SettingsMessage::SetAnimationLevel(AnimationLevel::Off)}
+                    label={self.localizer.text("settings-animations-off")}
+                    selected={self.shell_settings.animations == AnimationLevel::Off}
+                    colors_pair={(palette.accent, palette.text)} width={72.0} />
+                <RadioButton on_press={SettingsMessage::SetAnimationLevel(AnimationLevel::Reduced)}
+                    label={self.localizer.text("settings-animations-reduced")}
+                    selected={self.shell_settings.animations == AnimationLevel::Reduced}
+                    colors_pair={(palette.accent, palette.text)} width={96.0} />
+                <RadioButton on_press={SettingsMessage::SetAnimationLevel(AnimationLevel::Normal)}
+                    label={self.localizer.text("settings-animations-normal")}
+                    selected={self.shell_settings.animations == AnimationLevel::Normal}
+                    colors_pair={(palette.accent, palette.text)} width={88.0} />
+            </Row>
+        });
+        let interface_card = SettingsCard::titled(
+            theme,
+            self.localizer.text("settings-interface-settings"),
+            "",
+        )
+        .child(SliderField::new(
+            theme,
+            self.localizer.text("settings-appearance-starting-hue"),
+            self.localizer.text("settings-appearance-hue-description"),
+            self.localizer
+                .number("settings-appearance-hue-value", "degrees", i64::from(hue)),
+            f32::from(hue) / 359.0,
+            appearance_hue_message,
+        ))
+        .child(SliderField::new(
+            theme,
+            self.localizer.text("settings-appearance-color-intensity"),
+            self.localizer
+                .text("settings-appearance-intensity-description"),
+            self.localizer.number(
+                "settings-appearance-intensity-value",
+                "percent",
+                i64::from(intensity),
+            ),
+            f32::from(intensity) / 100.0,
+            appearance_intensity_message,
+        ))
+        .child(transparency_row)
+        .child(animation_row);
+        let general = ui! {
+            <Column gap={10.0}>
+                {mode_card}{accent_card}{wallpaper_card}{interface_card}
+            </Column>
+        };
+        let unavailable = SettingsCard::titled(
+            theme,
+            self.localizer.text("settings-appearance-tab-unavailable"),
+            self.localizer
+                .text("settings-appearance-tab-unavailable-description"),
+        );
+        let content = if self.appearance_tab == AppearanceTab::General {
+            AnyView::new(general)
+        } else {
+            AnyView::new(unavailable)
+        };
+        let tabs = TabList::new(
+            theme,
+            [
+                (
+                    self.localizer.text("settings-tab-general"),
+                    SettingsMessage::AppearanceTab(AppearanceTab::General),
+                    self.appearance_tab == AppearanceTab::General,
+                ),
+                (
+                    self.localizer.text("settings-tab-theme"),
+                    SettingsMessage::AppearanceTab(AppearanceTab::Theme),
+                    self.appearance_tab == AppearanceTab::Theme,
+                ),
+                (
+                    self.localizer.text("settings-tab-fonts"),
+                    SettingsMessage::AppearanceTab(AppearanceTab::Fonts),
+                    self.appearance_tab == AppearanceTab::Fonts,
+                ),
+                (
+                    self.localizer.text("settings-tab-icons"),
+                    SettingsMessage::AppearanceTab(AppearanceTab::Icons),
+                    self.appearance_tab == AppearanceTab::Icons,
+                ),
+                (
+                    self.localizer.text("settings-tab-cursors"),
+                    SettingsMessage::AppearanceTab(AppearanceTab::Cursors),
+                    self.appearance_tab == AppearanceTab::Cursors,
+                ),
+            ],
+        );
         ui! {
             <Column grow={1.0} padding={Insets {
-                top: 24.0, right: 40.0, bottom: 20.0, left: 20.0,
-            }} gap={14.0}>
-                <Text color={palette.text} height={20.0}>{self.localizer.text("settings-appearance-mode")}</Text>
-                <Row height={38.0} gap={28.0}>
-                    <RadioButton on_press={SettingsMessage::AppearanceLight}
-                        label={self.localizer.text("settings-appearance-light")}
-                        selected={appearance.mode == ThemeMode::Light}
-                        colors_pair={(if appearance.mode == ThemeMode::Light { palette.accent } else { palette.muted }, palette.text)}
-                        width={180.0} />
-                    <RadioButton on_press={SettingsMessage::AppearanceDark}
-                        label={self.localizer.text("settings-appearance-dark")}
-                        selected={appearance.mode == ThemeMode::Dark}
-                        colors_pair={(if appearance.mode == ThemeMode::Dark { palette.accent } else { palette.muted }, palette.text)}
-                        width={180.0} />
-                </Row>
-                <Text color={palette.text} height={20.0}>{self.localizer.text("settings-wallpaper-image")}</Text>
-                <Row height={38.0} gap={12.0}>
-                    <Button on_press={SettingsMessage::WallpaperChoose} width={150.0}
-                        color={palette.text} background={palette.surface_hover}>
-                        {self.localizer.text("settings-wallpaper-choose")}
-                    </Button>
-                    <Text color={palette.muted} width={370.0}>{wallpaper_name}</Text>
-                </Row>
-                <Row height={34.0} gap={10.0} children={positions} />
-                <Text color={palette.text} height={20.0}>{self.localizer.text("settings-appearance-starting-hue")}</Text>
-                <Text scale={1.0} color={palette.muted} height={18.0}>
-                    {self.localizer.number("settings-appearance-hue-value", "degrees", i64::from(hue))}
-                </Text>
-                <Slider id={"appearance-hue"} value={f32::from(hue) / 359.0}
-                    on_change={appearance_hue_message}
-                    colors_triplet={(palette.surface, palette.accent, palette.text)} width={520.0} />
-                <Text color={palette.text} height={20.0}>{self.localizer.text("settings-appearance-color-intensity")}</Text>
-                <Text scale={1.0} color={palette.muted} height={18.0}>
-                    {self.localizer.number("settings-appearance-intensity-value", "percent", i64::from(intensity))}
-                </Text>
-                <Slider id={"appearance-intensity"} value={f32::from(intensity) / 100.0}
-                    on_change={appearance_intensity_message}
-                    colors_triplet={(palette.surface, palette.accent, palette.text)} width={520.0} />
-                <Text color={palette.text} height={20.0}>{self.localizer.text("settings-appearance-color-palette")}</Text>
-                <Row height={76.0} gap={8.0} children={swatches} />
+                top: 16.0, right: 24.0, bottom: 20.0, left: 20.0,
+            }} gap={10.0}>
+                {tabs}
+                <VerticalScroll id={"appearance-list"} on_scroll={SettingsMessage::AppearanceScroll}
+                    offset={self.transient_scroll(&SettingsMessage::AppearanceScroll)}>{content}</VerticalScroll>
             </Column>
         }
     }

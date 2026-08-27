@@ -26,15 +26,16 @@ use zbus::{
 };
 
 use nickel_core::{
-    shell_settings::{ShellSettings, ThemePreference},
-    theme::{ThemeMode, ThemePalette},
+    shell_settings::{AnimationLevel, ShellSettings, ThemePreference},
+    theme::{ThemePalette, accent_from_hue},
     wallpaper_settings::{WallpaperPosition, WallpaperSettings},
 };
 use nickel_i18n::Localizer;
 use nickel_ui::{
-    AnyView, ControllerAction, ControllerInput, Insets, LinearGradient, NavigationPane,
-    PaintCommand, PaneNavigation, Point as UiPoint, Rect as UiRect, SdlCanvasPresenter,
-    SemanticColors, SemanticTheme, TextAlign, UiStateStore, UiTree, ui,
+    AnyView, ChoiceCard, ChoiceCardGroup, ColorSwatch, ControllerAction, ControllerInput, Insets,
+    LinearGradient, NavigationPane, PaintCommand, PaneNavigation, Point as UiPoint, Rect as UiRect,
+    SdlCanvasPresenter, SemanticColors, SemanticTheme, SettingsCard, SettingsRow, SliderField,
+    Surface, SurfaceRole, Switch, TabList, TextAlign, UiStateStore, UiTree, ui,
 };
 use sdl3::{
     event::{Event, WindowEvent},
@@ -128,6 +129,16 @@ enum SettingsPage {
     Bluetooth,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum AppearanceTab {
+    #[default]
+    General,
+    Theme,
+    Fonts,
+    Icons,
+    Cursors,
+}
+
 impl SettingsPage {
     fn previous(self) -> Self {
         match self {
@@ -180,10 +191,17 @@ enum SettingsMessage {
     NetworkScroll,
     AppearanceLight,
     AppearanceDark,
+    AppearanceSystem,
+    AppearanceTab(AppearanceTab),
+    SetAccentHue(u16),
     SetAppearanceHue(u16),
     SetAppearanceIntensity(u8),
     WallpaperChoose,
+    WallpaperRemove,
     WallpaperPosition(WallpaperPosition),
+    SetReduceTransparency(bool),
+    SetAnimationLevel(AnimationLevel),
+    AppearanceScroll,
     BarPrimaryDisplay,
     BarAllDisplays,
     BarDisplayWindows,
@@ -204,6 +222,10 @@ fn appearance_hue_message(fraction: f32) -> SettingsMessage {
 
 fn appearance_intensity_message(fraction: f32) -> SettingsMessage {
     SettingsMessage::SetAppearanceIntensity((fraction.clamp(0.0, 1.0) * 100.0).round() as u8)
+}
+
+fn reduce_transparency_message(value: bool) -> SettingsMessage {
+    SettingsMessage::SetReduceTransparency(value)
 }
 
 impl SettingsApp {
@@ -325,15 +347,36 @@ impl SettingsApp {
                     self.shell_settings.theme = ThemePreference::Dark;
                     save_shell_settings(&self.shell_settings);
                 }
+                SettingsMessage::AppearanceSystem => {
+                    self.shell_settings.theme = ThemePreference::System;
+                    save_shell_settings(&self.shell_settings);
+                }
+                SettingsMessage::AppearanceTab(tab) => self.appearance_tab = tab,
+                SettingsMessage::SetAccentHue(hue) => {
+                    self.shell_settings.accent_hue = Some(hue.min(359));
+                    save_shell_settings(&self.shell_settings);
+                }
                 SettingsMessage::WallpaperChoose => {
                     if let Some(path) = choose_wallpaper() {
                         self.wallpaper_settings.image = Some(path);
                         save_wallpaper_settings(&self.wallpaper_settings);
                     }
                 }
+                SettingsMessage::WallpaperRemove => {
+                    self.wallpaper_settings.image = None;
+                    save_wallpaper_settings(&self.wallpaper_settings);
+                }
                 SettingsMessage::WallpaperPosition(position) => {
                     self.wallpaper_settings.position = position;
                     save_wallpaper_settings(&self.wallpaper_settings);
+                }
+                SettingsMessage::SetReduceTransparency(value) => {
+                    self.shell_settings.reduce_transparency = value;
+                    save_shell_settings(&self.shell_settings);
+                }
+                SettingsMessage::SetAnimationLevel(level) => {
+                    self.shell_settings.animations = level;
+                    save_shell_settings(&self.shell_settings);
                 }
                 SettingsMessage::BarPrimaryDisplay => {
                     self.shell_settings.bar_on_all_displays = false;
@@ -370,7 +413,8 @@ impl SettingsApp {
                 | SettingsMessage::SetAppearanceHue(_)
                 | SettingsMessage::SetAppearanceIntensity(_)
                 | SettingsMessage::BluetoothScroll
-                | SettingsMessage::NetworkScroll => {}
+                | SettingsMessage::NetworkScroll
+                | SettingsMessage::AppearanceScroll => {}
             }
             self.request_redraw();
             return;
@@ -487,41 +531,30 @@ impl SettingsApp {
     fn scroll_settings(&mut self, wheel_y: f32) {
         let delta = -wheel_y * 42.0;
         match self.page {
+            SettingsPage::Appearance => {
+                self.scroll_page(SettingsMessage::AppearanceScroll, delta);
+            }
             SettingsPage::Network => {
-                if let Some(id) = self
-                    .ui
-                    .id_for_message(&SettingsMessage::NetworkScroll)
-                    .cloned()
-                {
-                    let maximum = self
-                        .ui
-                        .scroll_extent(&SettingsMessage::NetworkScroll)
-                        .map(|extent| (extent.content.height - extent.viewport.height).max(0.0))
-                        .unwrap_or(0.0);
-                    if self.ui_state.scroll_by(id, delta, maximum) != nickel_ui::Invalidation::None
-                    {
-                        self.request_redraw();
-                    }
-                }
+                self.scroll_page(SettingsMessage::NetworkScroll, delta);
             }
             SettingsPage::Bluetooth => {
-                if let Some(id) = self
-                    .ui
-                    .id_for_message(&SettingsMessage::BluetoothScroll)
-                    .cloned()
-                {
-                    let maximum = self
-                        .ui
-                        .scroll_extent(&SettingsMessage::BluetoothScroll)
-                        .map(|extent| (extent.content.height - extent.viewport.height).max(0.0))
-                        .unwrap_or(0.0);
-                    if self.ui_state.scroll_by(id, delta, maximum) != nickel_ui::Invalidation::None
-                    {
-                        self.request_redraw();
-                    }
-                }
+                self.scroll_page(SettingsMessage::BluetoothScroll, delta);
             }
             _ => {}
+        }
+    }
+
+    fn scroll_page(&mut self, message: SettingsMessage, delta: f32) {
+        let Some(id) = self.ui.id_for_message(&message).cloned() else {
+            return;
+        };
+        let maximum = self
+            .ui
+            .scroll_extent(&message)
+            .map(|extent| (extent.content.height - extent.viewport.height).max(0.0))
+            .unwrap_or(0.0);
+        if self.ui_state.scroll_by(id, delta, maximum) != nickel_ui::Invalidation::None {
+            self.request_redraw();
         }
     }
 
@@ -1210,5 +1243,33 @@ mod tests {
         assert!(!source.contains(&["network_", "content_height"].concat()));
         assert!(!source.contains(&["bluetooth_", "content_height"].concat()));
         assert!(!source.contains(&["device_", "height"].concat()));
+    }
+
+    #[test]
+    fn appearance_composition_exposes_shared_controls_and_scrolls() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Appearance);
+        let tree = app.build_ui(850.0, 580.0);
+
+        assert!(
+            tree.scroll_extent(&SettingsMessage::AppearanceScroll)
+                .is_some_and(|extent| extent.can_scroll())
+        );
+        app.ui = tree;
+        app.scroll_settings(-1.0);
+        assert!(app.transient_scroll(&SettingsMessage::AppearanceScroll) > 0.0);
+        let expanded = app.build_ui(850.0, 1600.0);
+        for message in [
+            SettingsMessage::AppearanceLight,
+            SettingsMessage::AppearanceDark,
+            SettingsMessage::AppearanceSystem,
+            SettingsMessage::WallpaperChoose,
+            SettingsMessage::WallpaperRemove,
+            SettingsMessage::SetReduceTransparency(true),
+        ] {
+            assert!(
+                expanded.message_rect(&message).is_some(),
+                "missing Appearance control for {message:?}"
+            );
+        }
     }
 }

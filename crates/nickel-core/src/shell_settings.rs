@@ -12,6 +12,14 @@ pub enum ThemePreference {
     Dark,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum AnimationLevel {
+    Off,
+    Reduced,
+    #[default]
+    Normal,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ShellSettings {
     pub bar_on_all_displays: bool,
@@ -21,6 +29,8 @@ pub struct ShellSettings {
     pub theme: ThemePreference,
     pub accent_hue: Option<u16>,
     pub accent_intensity: Option<u8>,
+    pub reduce_transparency: bool,
+    pub animations: AnimationLevel,
 }
 
 impl Default for ShellSettings {
@@ -33,6 +43,8 @@ impl Default for ShellSettings {
             theme: ThemePreference::System,
             accent_hue: None,
             accent_intensity: None,
+            reduce_transparency: false,
+            animations: AnimationLevel::Normal,
         }
     }
 }
@@ -74,6 +86,14 @@ impl ShellSettings {
                     settings.accent_intensity =
                         value.trim().parse::<u8>().ok().map(|value| value.min(100))
                 }
+                "reduce_transparency" => settings.reduce_transparency = parse_bool(value),
+                "animations" => {
+                    settings.animations = match value.trim() {
+                        "off" => AnimationLevel::Off,
+                        "reduced" => AnimationLevel::Reduced,
+                        _ => AnimationLevel::Normal,
+                    }
+                }
                 _ => {}
             }
         }
@@ -91,7 +111,7 @@ impl ShellSettings {
         fs::write(
             path,
             format!(
-                "bar_on_all_displays={}\nall_windows_on_every_bar={}\ndesktop_count={}\nactive_desktop={}\ntheme={}\naccent_hue={}\naccent_intensity={}\n",
+                "bar_on_all_displays={}\nall_windows_on_every_bar={}\ndesktop_count={}\nactive_desktop={}\ntheme={}\naccent_hue={}\naccent_intensity={}\nreduce_transparency={}\nanimations={}\n",
                 self.bar_on_all_displays,
                 self.all_windows_on_every_bar,
                 self.desktop_count,
@@ -107,6 +127,12 @@ impl ShellSettings {
                 self.accent_intensity
                     .map(|value| value.to_string())
                     .unwrap_or_else(|| "system".to_owned()),
+                self.reduce_transparency,
+                match self.animations {
+                    AnimationLevel::Off => "off",
+                    AnimationLevel::Reduced => "reduced",
+                    AnimationLevel::Normal => "normal",
+                },
             ),
         )
     }
@@ -166,7 +192,7 @@ fn settings_path() -> io::Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::ShellSettings;
+    use super::{AnimationLevel, ShellSettings};
 
     #[test]
     fn defaults_to_two_display_friendly_bar_and_four_desktops() {
@@ -174,5 +200,27 @@ mod tests {
         assert!(settings.bar_on_all_displays);
         assert!(settings.all_windows_on_every_bar);
         assert_eq!(settings.desktop_count, 4);
+        assert!(!settings.reduce_transparency);
+        assert_eq!(settings.animations, AnimationLevel::Normal);
+    }
+
+    #[test]
+    fn appearance_accessibility_preferences_round_trip() {
+        let path = std::env::temp_dir().join(format!(
+            "nickel-shell-settings-appearance-{}",
+            std::process::id()
+        ));
+        let settings = ShellSettings {
+            reduce_transparency: true,
+            animations: AnimationLevel::Reduced,
+            ..ShellSettings::default()
+        };
+
+        settings.save(&path).expect("save settings");
+        let loaded = ShellSettings::load(&path).expect("load settings");
+        std::fs::remove_file(path).expect("remove settings fixture");
+
+        assert!(loaded.reduce_transparency);
+        assert_eq!(loaded.animations, AnimationLevel::Reduced);
     }
 }
