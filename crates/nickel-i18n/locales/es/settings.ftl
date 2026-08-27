@@ -14,6 +14,9 @@ settings-nav-bar = Barra de Nickel
 settings-nav-appearance = Apariencia
 settings-nav-network = Red
 settings-nav-bluetooth = Bluetooth
+settings-nav-section-system = Sistema
+settings-nav-section-personalization = Personalización
+settings-nav-section-connectivity = Conectividad
 
 settings-display-identify = Identificar
 settings-display-make-primary = Establecer como principal

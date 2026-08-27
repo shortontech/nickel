@@ -3,7 +3,29 @@ use super::*;
 impl SettingsApp {
     pub(super) fn display_components(&self) -> impl nickel_ui::Component<SettingsMessage> {
         let palette = self.palette();
+        let theme = self.ui_theme();
         let selected = &self.displays[self.selected];
+        let identify = Button::semantic(
+            theme,
+            SettingsMessage::DisplayIdentify,
+            self.localizer.text("settings-display-identify"),
+            ButtonPresentation::Secondary,
+        )
+        .width(135.0);
+        let make_primary = Button::semantic(
+            theme,
+            SettingsMessage::DisplayPrimary,
+            self.localizer.text("settings-display-make-primary"),
+            ButtonPresentation::Secondary,
+        )
+        .width(145.0);
+        let apply = Button::semantic(
+            theme,
+            SettingsMessage::DisplayApply,
+            self.localizer.text("settings-display-apply"),
+            ButtonPresentation::Primary,
+        )
+        .width(105.0);
         ui! {
             <Column grow={1.0} padding={Insets {
                 top: 24.0, right: 40.0, bottom: 20.0, left: 20.0,
@@ -11,16 +33,7 @@ impl SettingsApp {
                 <Container height={340.0} background={palette.surface} border={(palette.muted, 2.0)} />
                 <Row height={42.0} gap={15.0}>
                     <Text color={palette.text} width={183.0}>{&selected.name}</Text>
-                    <Button on_press={SettingsMessage::DisplayIdentify} width={135.0} color={palette.text}
-                        background={palette.surface_hover} border={(palette.muted, 1.0)}>
-                        {self.localizer.text("settings-display-identify")}
-                    </Button>
-                    <Button on_press={SettingsMessage::DisplayPrimary} width={145.0} color={palette.text}
-                        background={palette.surface_hover} border={(palette.muted, 1.0)}>
-                        {self.localizer.text("settings-display-make-primary")}
-                    </Button>
-                    <Button on_press={SettingsMessage::DisplayApply} width={105.0} color={palette.text}
-                        background={palette.accent}>{self.localizer.text("settings-display-apply")}</Button>
+                    {identify}{make_primary}{apply}
                 </Row>
                 <Text color={if self.applied { palette.complement } else { palette.muted }} height={18.0}>
                     {&self.status}
@@ -211,6 +224,13 @@ impl SettingsApp {
         } else {
             self.localizer.text("settings-bluetooth-discovery-start")
         };
+        let discovery_button = Button::semantic(
+            self.ui_theme(),
+            SettingsMessage::BluetoothDiscovery,
+            discoverability,
+            ButtonPresentation::Secondary,
+        )
+        .width(150.0);
         let device_list = if self.bluetooth.devices.is_empty() {
             ui! { <Column><Text color={palette.muted}>{if self.bluetooth.available {
                 self.localizer.text("settings-bluetooth-no-devices")
@@ -242,8 +262,7 @@ impl SettingsApp {
                 </Container>
                 <Row height={36.0}>
                     <Text width={390.0} color={palette.text}>{self.localizer.text("settings-bluetooth-devices")}</Text>
-                    <Button on_press={SettingsMessage::BluetoothDiscovery} width={150.0} color={palette.text}
-                        background={palette.surface_hover} border={(palette.muted, 1.0)}>{discoverability}</Button>
+                    {discovery_button}
                 </Row>
                 {device_list}
             </Column>
@@ -416,25 +435,33 @@ impl SettingsApp {
             self.localizer.text("settings-wallpaper-image"),
             self.localizer.text("settings-wallpaper-description"),
         )
-        .child(ui! {
+        .child({
+            let choose = Button::semantic(
+                theme,
+                SettingsMessage::WallpaperChoose,
+                self.localizer.text("settings-wallpaper-choose"),
+                ButtonPresentation::Primary,
+            )
+            .width(140.0);
+            let remove = Button::semantic(
+                theme,
+                SettingsMessage::WallpaperRemove,
+                self.localizer.text("settings-wallpaper-remove"),
+                ButtonPresentation::Secondary,
+            )
+            .width(100.0);
+            ui! {
             <Row gap={14.0} align_items={nickel_ui::Align::Center}>
                 {Surface::new(theme, SurfaceRole::Raised)
                     .width(124.0).height(70.0).radius(theme.radii.control)}
                 <Column grow={1.0} gap={8.0}>
                     <Text color={palette.text}>{wallpaper_name}</Text>
                     <Row gap={10.0}>
-                        <Button on_press={SettingsMessage::WallpaperChoose} width={140.0}
-                            color={palette.text} background={palette.accent} radius={theme.radii.control}>
-                            {self.localizer.text("settings-wallpaper-choose")}
-                        </Button>
-                        <Button on_press={SettingsMessage::WallpaperRemove} width={100.0}
-                            color={palette.text} background={palette.surface_hover}
-                            border={(palette.muted, 1.0)} radius={theme.radii.control}>
-                            {self.localizer.text("settings-wallpaper-remove")}
-                        </Button>
+                        {choose}{remove}
                     </Row>
                 </Column>
             </Row>
+            }
         })
         .child(ui! { <Row height={34.0} gap={8.0} children={positions} /> });
         let transparency_row = SettingsRow::new(

@@ -14,6 +14,9 @@ settings-nav-bar = Nickel Bar
 settings-nav-appearance = Appearance
 settings-nav-network = Network
 settings-nav-bluetooth = Bluetooth
+settings-nav-section-system = System
+settings-nav-section-personalization = Personalization
+settings-nav-section-connectivity = Connectivity
 
 settings-display-identify = Identify
 settings-display-make-primary = Make primary

@@ -32,10 +32,11 @@ use nickel_core::{
 };
 use nickel_i18n::Localizer;
 use nickel_ui::{
-    AnyView, ChoiceCard, ChoiceCardGroup, ColorSwatch, ControllerAction, ControllerInput, Insets,
-    LinearGradient, NavigationPane, PaintCommand, PaneNavigation, Point as UiPoint, Rect as UiRect,
-    SdlCanvasPresenter, SemanticColors, SemanticTheme, SettingsCard, SettingsRow, SliderField,
-    Surface, SurfaceRole, Switch, TabList, TextAlign, UiStateStore, UiTree, ui,
+    AnyView, Button, ButtonPresentation, ChoiceCard, ChoiceCardGroup, ColorSwatch,
+    ControllerAction, ControllerInput, Insets, NavigationItem, NavigationPane, PageHeader,
+    PaintCommand, PaneNavigation, Point as UiPoint, Rect as UiRect, SdlCanvasPresenter,
+    SemanticColors, SemanticTheme, SettingsCard, SettingsNavigation, SettingsRow, SettingsShell,
+    SliderField, Surface, SurfaceRole, Switch, TabList, TextAlign, UiStateStore, UiTree, ui,
 };
 use sdl3::{
     event::{Event, WindowEvent},
