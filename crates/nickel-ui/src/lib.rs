@@ -9,6 +9,7 @@ pub mod layout;
 mod runtime;
 pub mod state;
 pub mod text_editor;
+pub mod theme;
 pub mod ui;
 
 pub use controller::{ControllerAction, ControllerInput, NavigationPane, PaneNavigation};
@@ -24,6 +25,7 @@ pub use layout::{
 pub use runtime::{Application, ApplicationHost, HostEventOutcome, Shortcut, run};
 pub use state::{Invalidation, TransientState, UiId, UiStateStore};
 pub use text_editor::TextEditor;
+pub use theme::{RadiusScale, SemanticColors, SemanticTheme, SpacingScale};
 pub use ui::{
     AccessibilityNode, AnyView, Background, Border, Button, ButtonLabel, Color, Column, Component,
     ComponentBuilderExt, Container, ContentPane, DiagnosticKind, Dropdown, EventOutcome, FileGrid,
@@ -46,10 +48,10 @@ pub mod prelude {
     pub use crate::{
         Align, AnyView, Application, Background, Border, Button, Color, Column, Component,
         ComponentBuilderExt, Container, DiagnosticKind, Dropdown, Fragment, Grid, GridColumnSpec,
-        Insets, Justify, Length, Menu, MenuBar, MenuItem, Overflow, PointerIcon, RadioButton, Row,
-        SelectionRegion, Shortcut, Slider, Spacer, Text, TextAlign, TextBoundary, TextField, Tone,
-        Track, UiEvent, UiId, UiStateStore, View, VirtualColumn, VirtualWindow, component, id, run,
-        ui,
+        Insets, Justify, Length, Menu, MenuBar, MenuItem, Overflow, PointerIcon, RadioButton,
+        RadiusScale, Row, SelectionRegion, SemanticColors, SemanticTheme, Shortcut, Slider, Spacer,
+        SpacingScale, Text, TextAlign, TextBoundary, TextField, Tone, Track, UiEvent, UiId,
+        UiStateStore, View, VirtualColumn, VirtualWindow, component, id, run, ui,
     };
 }
 

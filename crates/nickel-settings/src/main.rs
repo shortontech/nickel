@@ -22,8 +22,8 @@ use nickel_core::{
 use nickel_i18n::Localizer;
 use nickel_ui::{
     AnyView, ControllerAction, ControllerInput, Insets, LinearGradient, NavigationPane,
-    PaintCommand, PaneNavigation, Point as UiPoint, Rect as UiRect, SdlCanvasPresenter, TextAlign,
-    UiStateStore, UiTree, ui,
+    PaintCommand, PaneNavigation, Point as UiPoint, Rect as UiRect, SdlCanvasPresenter,
+    SemanticColors, SemanticTheme, TextAlign, UiStateStore, UiTree, ui,
 };
 use sdl3::{
     event::{Event, WindowEvent},
@@ -45,6 +45,21 @@ struct Rect {
     y: i32,
     w: i32,
     h: i32,
+}
+
+fn semantic_theme(palette: ThemePalette) -> SemanticTheme {
+    SemanticTheme::new(SemanticColors {
+        window: palette.background,
+        sidebar: palette.panel,
+        card: palette.surface,
+        raised: palette.surface_hover,
+        hover: palette.surface_hover,
+        primary_text: palette.text,
+        secondary_text: palette.muted,
+        accent: palette.accent,
+        accent_soft: palette.accent_soft,
+        positive: palette.complement,
+    })
 }
 
 struct OutputSnapshot {
@@ -822,66 +837,6 @@ impl SettingsApp {
             .and_then(|id| self.ui.message_for_id(id))
     }
 
-    #[cfg(any())]
-    fn display_nav() -> Rect {
-        Rect {
-            x: 12,
-            y: 118,
-            w: 146,
-            h: 46,
-        }
-    }
-
-    #[cfg(any())]
-    fn network_nav() -> Rect {
-        Rect {
-            x: 12,
-            y: 172,
-            w: 146,
-            h: 46,
-        }
-    }
-
-    #[cfg(any())]
-    fn wifi_row(index: usize) -> Rect {
-        Rect {
-            x: 190,
-            y: 150 + index as i32 * 52,
-            w: 620,
-            h: 44,
-        }
-    }
-
-    #[cfg(any())]
-    fn primary_button() -> Rect {
-        Rect {
-            x: 540,
-            y: 510,
-            w: 145,
-            h: 42,
-        }
-    }
-
-    #[cfg(any())]
-    fn identify_button() -> Rect {
-        Rect {
-            x: 390,
-            y: 510,
-            w: 135,
-            h: 42,
-        }
-    }
-
-    #[cfg(any())]
-    fn apply_button() -> Rect {
-        Rect {
-            x: 700,
-            y: 510,
-            w: 105,
-            h: 42,
-        }
-    }
-
     fn request_redraw(&self) {
         self.redraw_requested.set(true);
     }
@@ -891,6 +846,10 @@ impl SettingsApp {
             self.shell_settings
                 .resolve_appearance(nickel_platform::appearance()),
         )
+    }
+
+    fn ui_theme(&self) -> SemanticTheme {
+        semantic_theme(self.palette())
     }
 
     fn navigation_item(
@@ -945,6 +904,7 @@ impl SettingsApp {
     }
 
     fn build_ui(&self, width: f32, height: f32) -> UiTree<SettingsMessage> {
+        let theme = self.ui_theme();
         let palette = self.palette();
         let (title, subtitle) = match self.page {
             SettingsPage::Display => (
@@ -1023,7 +983,7 @@ impl SettingsApp {
         );
         let sidebar = ui! {
             <Sidebar width={SIDEBAR_WIDTH as f32}
-                background={LinearGradient::vertical(palette.panel, palette.background)}
+                background={LinearGradient::vertical(theme.colors.sidebar, theme.colors.window)}
                 padding={Insets { top: 20.0, right: 12.0, bottom: 12.0, left: 12.0 }} gap={4.0}>
                 {display_button}{bar_button}{appearance_button}{network_button}{bluetooth_button}
                 {if self.controller.connected() {
@@ -1048,7 +1008,7 @@ impl SettingsApp {
             SettingsPage::Bluetooth => AnyView::new(self.bluetooth_components()),
         };
         let root = ui! {
-            <Column height={height} background={palette.background}>
+            <Column height={height} background={theme.colors.window}>
                 {header}
                 <Row grow={1.0}>
                     {sidebar}
@@ -2467,330 +2427,6 @@ impl SettingsApp {
         presenter.present_accelerated(&commands, scale)?;
         Ok(())
     }
-
-    #[cfg(any())]
-    #[allow(dead_code)]
-    fn render_legacy(&mut self) {
-        let Some(window) = &self.window else { return };
-        let Some(surface) = &mut self.surface else {
-            return;
-        };
-        let size = window.inner_size();
-        let Some(width) = NonZeroU32::new(size.width) else {
-            return;
-        };
-        let Some(height) = NonZeroU32::new(size.height) else {
-            return;
-        };
-        surface
-            .resize(width, height)
-            .expect("resize settings surface");
-        let mut buffer = surface.buffer_mut().expect("settings framebuffer");
-        let width = size.width as usize;
-        let height = size.height as usize;
-        buffer.fill(BACKGROUND);
-
-        fill_rect(
-            &mut buffer,
-            width,
-            height,
-            Rect {
-                x: 0,
-                y: 0,
-                w: size.width as i32,
-                h: 96,
-            },
-            PANEL,
-        );
-        fill_rect(
-            &mut buffer,
-            width,
-            height,
-            Rect {
-                x: 0,
-                y: 96,
-                w: SIDEBAR_WIDTH,
-                h: size.height as i32 - 96,
-            },
-            PANEL,
-        );
-        draw_text(
-            &mut buffer,
-            width,
-            height,
-            190,
-            29,
-            4,
-            match self.page {
-                SettingsPage::Display => "DISPLAY SETTINGS",
-                SettingsPage::Network => "NETWORK SETTINGS",
-            },
-            TEXT,
-        );
-        draw_text(
-            &mut buffer,
-            width,
-            height,
-            192,
-            68,
-            2,
-            match self.page {
-                SettingsPage::Display => "DRAG DISPLAYS TO MATCH THEIR PHYSICAL POSITION",
-                SettingsPage::Network => "AVAILABLE CONNECTIONS",
-            },
-            MUTED,
-        );
-
-        button(
-            &mut buffer,
-            width,
-            height,
-            Self::display_nav(),
-            "DISPLAY",
-            self.page == SettingsPage::Display,
-        );
-        button(
-            &mut buffer,
-            width,
-            height,
-            Self::network_nav(),
-            "NETWORK",
-            self.page == SettingsPage::Network,
-        );
-
-        if self.page == SettingsPage::Network {
-            Self::render_network(
-                &self.wifi_networks,
-                &self.wifi_status,
-                &self.network_adapters,
-                &mut buffer,
-                width,
-                height,
-            );
-            buffer.present().expect("present settings framebuffer");
-            return;
-        }
-
-        fill_rect(&mut buffer, width, height, DISPLAY_PLANE, 0x00202429);
-        stroke_rect(&mut buffer, width, height, DISPLAY_PLANE, BORDER, 2);
-
-        for (index, display) in self.displays.iter().enumerate() {
-            let color = if index == self.selected {
-                CARD_SELECTED
-            } else {
-                CARD
-            };
-            fill_rect(&mut buffer, width, height, display.rect, color);
-            stroke_rect(
-                &mut buffer,
-                width,
-                height,
-                display.rect,
-                if display.primary { PRIMARY } else { BORDER },
-                if display.primary { 4 } else { 2 },
-            );
-            draw_text(
-                &mut buffer,
-                width,
-                height,
-                display.rect.x + 18,
-                display.rect.y + 20,
-                3,
-                &display.name,
-                TEXT,
-            );
-            draw_text(
-                &mut buffer,
-                width,
-                height,
-                display.rect.x + 18,
-                display.rect.y + 58,
-                2,
-                &display.detail,
-                MUTED,
-            );
-            if display.primary {
-                draw_text(
-                    &mut buffer,
-                    width,
-                    height,
-                    display.rect.x + 18,
-                    display.rect.y + display.rect.h - 30,
-                    2,
-                    "PRIMARY",
-                    PRIMARY,
-                );
-            }
-        }
-
-        let selected = &self.displays[self.selected];
-        draw_text(
-            &mut buffer,
-            width,
-            height,
-            192,
-            486,
-            2,
-            &selected.name,
-            TEXT,
-        );
-        button(
-            &mut buffer,
-            width,
-            height,
-            Self::identify_button(),
-            "IDENTIFY",
-            false,
-        );
-        button(
-            &mut buffer,
-            width,
-            height,
-            Self::primary_button(),
-            "MAKE PRIMARY",
-            false,
-        );
-        button(
-            &mut buffer,
-            width,
-            height,
-            Self::apply_button(),
-            "APPLY",
-            true,
-        );
-        draw_text(
-            &mut buffer,
-            width,
-            height,
-            192,
-            535,
-            2,
-            &self.status,
-            if self.applied { SUCCESS } else { MUTED },
-        );
-        buffer.present().expect("present settings framebuffer");
-    }
-
-    #[cfg(any())]
-    fn render_network(
-        wifi_networks: &[WifiNetwork],
-        wifi_status: &str,
-        adapters: &[NetworkAdapter],
-        buffer: &mut [u32],
-        width: usize,
-        height: usize,
-    ) {
-        draw_text(buffer, width, height, 192, 116, 2, "SAVED WI-FI", TEXT);
-        draw_text(buffer, width, height, 500, 118, 1, wifi_status, MUTED);
-        for (index, network) in wifi_networks.iter().take(4).enumerate() {
-            let rect = Self::wifi_row(index);
-            fill_rect(buffer, width, height, rect, CARD);
-            stroke_rect(
-                buffer,
-                width,
-                height,
-                rect,
-                if network.connected { SUCCESS } else { BORDER },
-                2,
-            );
-            draw_text(
-                buffer,
-                width,
-                height,
-                rect.x + 14,
-                rect.y + 13,
-                2,
-                &network.profile,
-                TEXT,
-            );
-            let detail = if network.connected {
-                format!("CONNECTED  {}%", network.signal)
-            } else {
-                format!("{}%  CLICK TO CONNECT", network.signal)
-            };
-            draw_text(
-                buffer,
-                width,
-                height,
-                rect.x + 330,
-                rect.y + 15,
-                1,
-                &detail,
-                if network.connected { SUCCESS } else { MUTED },
-            );
-        }
-
-        let adapter_top = 378;
-        draw_text(
-            buffer,
-            width,
-            height,
-            192,
-            adapter_top - 24,
-            2,
-            "ADAPTERS",
-            TEXT,
-        );
-        if adapters.is_empty() {
-            draw_text(
-                buffer,
-                width,
-                height,
-                200,
-                adapter_top,
-                2,
-                "NO NETWORK ADAPTERS FOUND",
-                MUTED,
-            );
-            return;
-        }
-        for (index, adapter) in adapters.iter().take(2).enumerate() {
-            let top = adapter_top + index as i32 * 86;
-            let rect = Rect {
-                x: 190,
-                y: top,
-                w: 620,
-                h: 72,
-            };
-            fill_rect(buffer, width, height, rect, CARD);
-            stroke_rect(
-                buffer,
-                width,
-                height,
-                rect,
-                if adapter.connected { SUCCESS } else { BORDER },
-                2,
-            );
-            draw_text(buffer, width, height, 206, top + 12, 2, &adapter.name, TEXT);
-            let status = if adapter.connected {
-                format!("CONNECTED  {} MBPS", adapter.speed / 1_000_000)
-            } else {
-                "DISCONNECTED".to_owned()
-            };
-            draw_text(
-                buffer,
-                width,
-                height,
-                206,
-                top + 38,
-                2,
-                &status,
-                if adapter.connected { SUCCESS } else { MUTED },
-            );
-            if !adapter.description.eq_ignore_ascii_case(&adapter.name) {
-                draw_text(
-                    buffer,
-                    width,
-                    height,
-                    470,
-                    top + 38,
-                    1,
-                    &adapter.description,
-                    MUTED,
-                );
-            }
-        }
-    }
 }
 
 impl SettingsApp {
@@ -3138,189 +2774,6 @@ fn constrain_center(mut monitor: Rect, plane: Rect) -> Rect {
     monitor.x = monitor.x.clamp(plane.x, plane.x + plane.w - monitor.w);
     monitor.y = monitor.y.clamp(plane.y, plane.y + plane.h - monitor.h);
     monitor
-}
-
-#[cfg(any())]
-fn button(buffer: &mut [u32], width: usize, height: usize, rect: Rect, label: &str, accent: bool) {
-    fill_rect(
-        buffer,
-        width,
-        height,
-        rect,
-        if accent { PRIMARY } else { CARD },
-    );
-    stroke_rect(
-        buffer,
-        width,
-        height,
-        rect,
-        if accent { PRIMARY } else { BORDER },
-        2,
-    );
-    let text_width = label.chars().count() as i32 * 12;
-    draw_text(
-        buffer,
-        width,
-        height,
-        rect.x + (rect.w - text_width) / 2,
-        rect.y + 14,
-        2,
-        label,
-        TEXT,
-    );
-}
-
-#[cfg(any())]
-fn fill_rect(buffer: &mut [u32], width: usize, height: usize, rect: Rect, color: u32) {
-    let left = rect.x.max(0) as usize;
-    let top = rect.y.max(0) as usize;
-    let right = (rect.x + rect.w).clamp(0, width as i32) as usize;
-    let bottom = (rect.y + rect.h).clamp(0, height as i32) as usize;
-    for y in top..bottom {
-        buffer[y * width + left..y * width + right].fill(color);
-    }
-}
-
-#[cfg(any())]
-fn stroke_rect(
-    buffer: &mut [u32],
-    width: usize,
-    height: usize,
-    rect: Rect,
-    color: u32,
-    thickness: i32,
-) {
-    fill_rect(
-        buffer,
-        width,
-        height,
-        Rect {
-            x: rect.x,
-            y: rect.y,
-            w: rect.w,
-            h: thickness,
-        },
-        color,
-    );
-    fill_rect(
-        buffer,
-        width,
-        height,
-        Rect {
-            x: rect.x,
-            y: rect.y + rect.h - thickness,
-            w: rect.w,
-            h: thickness,
-        },
-        color,
-    );
-    fill_rect(
-        buffer,
-        width,
-        height,
-        Rect {
-            x: rect.x,
-            y: rect.y,
-            w: thickness,
-            h: rect.h,
-        },
-        color,
-    );
-    fill_rect(
-        buffer,
-        width,
-        height,
-        Rect {
-            x: rect.x + rect.w - thickness,
-            y: rect.y,
-            w: thickness,
-            h: rect.h,
-        },
-        color,
-    );
-}
-
-#[allow(clippy::too_many_arguments)]
-#[cfg(any())]
-fn draw_text(
-    buffer: &mut [u32],
-    width: usize,
-    height: usize,
-    x: i32,
-    y: i32,
-    scale: i32,
-    text: &str,
-    color: u32,
-) {
-    let mut cursor = x;
-    for character in text.chars() {
-        let rows = glyph(character.to_ascii_uppercase());
-        for (row, bits) in rows.iter().enumerate() {
-            for column in 0..5 {
-                if bits & (1 << (4 - column)) != 0 {
-                    fill_rect(
-                        buffer,
-                        width,
-                        height,
-                        Rect {
-                            x: cursor + column * scale,
-                            y: y + row as i32 * scale,
-                            w: scale,
-                            h: scale,
-                        },
-                        color,
-                    );
-                }
-            }
-        }
-        cursor += 6 * scale;
-    }
-}
-
-#[cfg(any())]
-fn glyph(character: char) -> [u8; 7] {
-    match character {
-        'A' => [14, 17, 17, 31, 17, 17, 17],
-        'B' => [30, 17, 17, 30, 17, 17, 30],
-        'C' => [14, 17, 16, 16, 16, 17, 14],
-        'D' => [30, 17, 17, 17, 17, 17, 30],
-        'E' => [31, 16, 16, 30, 16, 16, 31],
-        'F' => [31, 16, 16, 30, 16, 16, 16],
-        'G' => [14, 17, 16, 23, 17, 17, 15],
-        'H' => [17, 17, 17, 31, 17, 17, 17],
-        'I' => [14, 4, 4, 4, 4, 4, 14],
-        'J' => [7, 2, 2, 2, 18, 18, 12],
-        'K' => [17, 18, 20, 24, 20, 18, 17],
-        'L' => [16, 16, 16, 16, 16, 16, 31],
-        'M' => [17, 27, 21, 21, 17, 17, 17],
-        'N' => [17, 25, 21, 19, 17, 17, 17],
-        'O' => [14, 17, 17, 17, 17, 17, 14],
-        'P' => [30, 17, 17, 30, 16, 16, 16],
-        'Q' => [14, 17, 17, 17, 21, 18, 13],
-        'R' => [30, 17, 17, 30, 20, 18, 17],
-        'S' => [15, 16, 16, 14, 1, 1, 30],
-        'T' => [31, 4, 4, 4, 4, 4, 4],
-        'U' => [17, 17, 17, 17, 17, 17, 14],
-        'V' => [17, 17, 17, 17, 17, 10, 4],
-        'W' => [17, 17, 17, 21, 21, 21, 10],
-        'X' => [17, 17, 10, 4, 10, 17, 17],
-        'Y' => [17, 17, 10, 4, 4, 4, 4],
-        'Z' => [31, 1, 2, 4, 8, 16, 31],
-        '0' => [14, 17, 19, 21, 25, 17, 14],
-        '1' => [4, 12, 4, 4, 4, 4, 14],
-        '2' => [14, 17, 1, 2, 4, 8, 31],
-        '3' => [30, 1, 1, 14, 1, 1, 30],
-        '4' => [2, 6, 10, 18, 31, 2, 2],
-        '5' => [31, 16, 16, 30, 1, 1, 30],
-        '6' => [14, 16, 16, 30, 17, 17, 14],
-        '7' => [31, 1, 2, 4, 8, 8, 8],
-        '8' => [14, 17, 17, 14, 17, 17, 14],
-        '9' => [14, 17, 17, 15, 1, 1, 14],
-        '-' => [0, 0, 0, 31, 0, 0, 0],
-        '.' => [0, 0, 0, 0, 0, 12, 12],
-        ' ' => [0; 7],
-        _ => [31, 17, 2, 4, 4, 0, 4],
-    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
