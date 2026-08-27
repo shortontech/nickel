@@ -20,6 +20,98 @@ use crate::{
 
 pub type Color = u32;
 
+/// How image pixels are mapped into their allocated viewport.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ImageFit {
+    /// Preserve aspect ratio and show the complete image.
+    #[default]
+    Contain,
+    /// Preserve aspect ratio and fill the viewport, cropping overflow.
+    Cover,
+    /// Fill the viewport without preserving aspect ratio.
+    Stretch,
+    /// Keep the image at its intrinsic logical size.
+    Center,
+}
+
+/// Alignment along one image-presentation axis.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ImageAlignment {
+    Start,
+    #[default]
+    Center,
+    End,
+}
+
+impl ImageAlignment {
+    const fn factor(self) -> f32 {
+        match self {
+            Self::Start => 0.0,
+            Self::Center => 0.5,
+            Self::End => 1.0,
+        }
+    }
+}
+
+/// Typed, deterministic image sizing and alignment policy.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ImagePresentation {
+    pub fit: ImageFit,
+    pub horizontal: ImageAlignment,
+    pub vertical: ImageAlignment,
+}
+
+impl ImagePresentation {
+    pub const fn new(fit: ImageFit) -> Self {
+        Self {
+            fit,
+            horizontal: ImageAlignment::Center,
+            vertical: ImageAlignment::Center,
+        }
+    }
+
+    pub const fn aligned(mut self, horizontal: ImageAlignment, vertical: ImageAlignment) -> Self {
+        self.horizontal = horizontal;
+        self.vertical = vertical;
+        self
+    }
+
+    /// Resolve the destination rectangle. Cropping is performed by the image
+    /// viewport, so cover and large centered images may extend beyond it.
+    pub fn bounds(self, viewport: Rect, source: Size) -> Rect {
+        if source.width <= 0.0
+            || source.height <= 0.0
+            || !source.width.is_finite()
+            || !source.height.is_finite()
+        {
+            return Rect::new(viewport.origin.x, viewport.origin.y, 0.0, 0.0);
+        }
+
+        let viewport_width = viewport.size.width.max(0.0);
+        let viewport_height = viewport.size.height.max(0.0);
+        let (width, height) = match self.fit {
+            ImageFit::Stretch => (viewport_width, viewport_height),
+            ImageFit::Center => (source.width, source.height),
+            ImageFit::Contain | ImageFit::Cover => {
+                let horizontal_scale = viewport_width / source.width;
+                let vertical_scale = viewport_height / source.height;
+                let scale = if self.fit == ImageFit::Contain {
+                    horizontal_scale.min(vertical_scale)
+                } else {
+                    horizontal_scale.max(vertical_scale)
+                };
+                (source.width * scale, source.height * scale)
+            }
+        };
+        Rect::new(
+            viewport.origin.x + (viewport_width - width) * self.horizontal.factor(),
+            viewport.origin.y + (viewport_height - height) * self.vertical.factor(),
+            width,
+            height,
+        )
+    }
+}
+
 /// One non-overlapping byte range in a styled text stream.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct StyledTextSpan {
@@ -383,6 +475,7 @@ enum Kind {
     Image {
         id: u16,
         image: Arc<RgbaImage>,
+        presentation: ImagePresentation,
     },
     Slider {
         value: f32,

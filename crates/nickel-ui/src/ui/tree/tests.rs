@@ -9,6 +9,53 @@ enum TestMessage {
 }
 
 #[test]
+fn image_presentations_resolve_deterministic_bounds_and_alignment() {
+    let viewport = Rect::new(10.0, 20.0, 200.0, 100.0);
+    let source = Size::new(100.0, 100.0);
+
+    assert_eq!(
+        ImagePresentation::new(ImageFit::Contain).bounds(viewport, source),
+        Rect::new(60.0, 20.0, 100.0, 100.0)
+    );
+    assert_eq!(
+        ImagePresentation::new(ImageFit::Cover).bounds(viewport, source),
+        Rect::new(10.0, -30.0, 200.0, 200.0)
+    );
+    assert_eq!(
+        ImagePresentation::new(ImageFit::Stretch).bounds(viewport, source),
+        viewport
+    );
+    assert_eq!(
+        ImagePresentation::new(ImageFit::Center)
+            .aligned(ImageAlignment::End, ImageAlignment::Start)
+            .bounds(viewport, Size::new(40.0, 20.0)),
+        Rect::new(170.0, 20.0, 40.0, 20.0)
+    );
+}
+
+#[test]
+fn cover_image_is_cropped_by_its_allocated_viewport() {
+    let image = Arc::new(RgbaImage::new(100, 100));
+    let tree = UiTree::<TestMessage>::layout(
+        Image::new(7, image)
+            .width(200.0)
+            .height(100.0)
+            .fit(ImageFit::Cover),
+        Rect::new(10.0, 20.0, 200.0, 100.0),
+    );
+
+    assert!(matches!(
+        tree.commands(),
+        [
+            PaintCommand::PushClip(clip),
+            PaintCommand::Image { bounds, id: 7, .. },
+            PaintCommand::PopClip
+        ] if *clip == Rect::new(10.0, 20.0, 200.0, 100.0)
+            && *bounds == Rect::new(10.0, -30.0, 200.0, 200.0)
+    ));
+}
+
+#[test]
 fn nested_button_is_laid_out_and_hit_tested() {
     let tree = UiTree::layout(
         Column::new()

@@ -2407,8 +2407,13 @@ fn emit_element<Message: Clone>(
                 }
             }
         }
-        Kind::Image { id, image } => tree.commands.push(PaintCommand::Image {
-            bounds: rect,
+        Kind::Image {
+            id,
+            image,
+            presentation,
+        } => tree.commands.push(PaintCommand::Image {
+            bounds: presentation
+                .bounds(rect, Size::new(image.width() as f32, image.height() as f32)),
             id: *id,
             image: image.clone(),
         }),

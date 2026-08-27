@@ -760,15 +760,11 @@ impl SdlCanvasPresenter {
         if image.width() == 0 || image.height() == 0 {
             return Ok(());
         }
-        let fit = (bounds.size.width / image.width() as f32)
-            .min(bounds.size.height / image.height() as f32);
-        let width = image.width() as f32 * fit;
-        let height = image.height() as f32 * fit;
         let destination = FRect::new(
-            bounds.origin.x + (bounds.size.width - width) * 0.5,
-            bounds.origin.y + (bounds.size.height - height) * 0.5,
-            width,
-            height,
+            bounds.origin.x,
+            bounds.origin.y,
+            bounds.size.width,
+            bounds.size.height,
         );
         self.canvas
             .copy(
@@ -1251,16 +1247,6 @@ impl SdlComponentRenderer {
         if image.width() == 0 || image.height() == 0 {
             return;
         }
-        let scale =
-            (rect.size.width / image.width() as f32).min(rect.size.height / image.height() as f32);
-        let width = image.width() as f32 * scale;
-        let height = image.height() as f32 * scale;
-        let rect = Rect::new(
-            rect.origin.x + (rect.size.width - width) * 0.5,
-            rect.origin.y + (rect.size.height - height) * 0.5,
-            width,
-            height,
-        );
         let Some(bounds) = intersection(rect, clip) else {
             return;
         };

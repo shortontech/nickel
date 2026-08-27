@@ -674,6 +674,97 @@ impl<Message> Component<Message> for ChoiceCardGroup<Message> {
     }
 }
 
+/// Non-interactive state rendered by a [`PreviewTile`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PreviewState {
+    Loading,
+    Unavailable,
+    Error,
+}
+
+/// A bounded, rounded presentation surface for image or code-rendered previews.
+pub struct PreviewTile<Message = String>(Container<Message>);
+
+impl<Message> PreviewTile<Message> {
+    pub fn new(theme: SemanticTheme, preview: impl Component<Message>) -> Self {
+        Self(Self::frame(theme).child(preview))
+    }
+
+    pub fn placeholder(
+        theme: SemanticTheme,
+        state: PreviewState,
+        label: impl Into<String>,
+    ) -> Self {
+        let (mark, color) = match state {
+            PreviewState::Loading => ("…", theme.text.secondary),
+            PreviewState::Unavailable => ("—", theme.text.disabled),
+            PreviewState::Error => ("!", theme.text.danger),
+        };
+        Self(
+            Self::frame(theme).child(
+                Column::new()
+                    .gap(theme.spacing.compact)
+                    .align_items(Align::Center)
+                    .justify_content(Justify::Center)
+                    .child(Text::new(mark).scale(1.4).color(color))
+                    .child(
+                        Text::new(label)
+                            .color(color)
+                            .align(TextAlign::Center)
+                            .wrap(true),
+                    ),
+            ),
+        )
+    }
+
+    pub fn loading(theme: SemanticTheme, label: impl Into<String>) -> Self {
+        Self::placeholder(theme, PreviewState::Loading, label)
+    }
+
+    pub fn unavailable(theme: SemanticTheme, label: impl Into<String>) -> Self {
+        Self::placeholder(theme, PreviewState::Unavailable, label)
+    }
+
+    pub fn error(theme: SemanticTheme, label: impl Into<String>) -> Self {
+        Self::placeholder(theme, PreviewState::Error, label)
+    }
+
+    fn frame(theme: SemanticTheme) -> Container<Message> {
+        Container::new()
+            .min_width(96.0)
+            .min_height(72.0)
+            .fill_width()
+            .fill_height()
+            .align_items(Align::Center)
+            .justify_content(Justify::Center)
+            .background(theme.surfaces.raised)
+            .border(theme.borders.subtle, theme.sizing.border)
+            .radius(theme.radii.card)
+            .overflow(Overflow::Clip, Overflow::Clip)
+    }
+
+    pub fn id(mut self, id: impl Into<UiId>) -> Self {
+        self.0 = self.0.id(id);
+        self
+    }
+
+    pub fn width(mut self, width: f32) -> Self {
+        self.0 = self.0.width(width);
+        self
+    }
+
+    pub fn height(mut self, height: f32) -> Self {
+        self.0 = self.0.height(height);
+        self
+    }
+}
+
+impl<Message> Component<Message> for PreviewTile<Message> {
+    fn into_element(self) -> super::Element<Message> {
+        self.0.into_element()
+    }
+}
+
 /// A color value or custom-color action with a distinct add mark.
 pub struct ColorSwatch<Message = String>(Container<Message>);
 
@@ -742,7 +833,7 @@ impl<Message> Component<Message> for ColorSwatch<Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DiagnosticKind, Rect, ResolvedNode, SemanticColors, UiTree};
+    use crate::{DiagnosticKind, PaintCommand, Rect, ResolvedNode, SemanticColors, UiTree};
 
     #[derive(Clone, Debug, PartialEq)]
     enum Message {
@@ -835,6 +926,40 @@ mod tests {
         assert_eq!(wide.resolved_grid_columns(), Some(3));
         assert_eq!(narrow.resolved_grid_columns(), Some(1));
         assert!(wide.message_rect(&Message::Choice(2)).is_some());
+    }
+
+    #[test]
+    fn preview_tile_renders_rounded_content_and_explicit_placeholder_states() {
+        let theme = theme();
+        let content = UiTree::<Message>::layout(
+            PreviewTile::new(theme, Text::new("Preview"))
+                .width(160.0)
+                .height(96.0),
+            Rect::new(0.0, 0.0, 160.0, 96.0),
+        );
+        assert!(content.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::RoundedFill { radius, .. } if *radius == theme.radii.card
+        )));
+        assert!(content.commands().iter().any(
+            |command| matches!(command, PaintCommand::Text { text, .. } if text == "Preview")
+        ));
+
+        for tile in [
+            PreviewTile::loading(theme, "Loading preview"),
+            PreviewTile::unavailable(theme, "Preview unavailable"),
+            PreviewTile::error(theme, "Preview failed"),
+        ] {
+            let tree = UiTree::<Message>::layout(
+                tile.width(160.0).height(96.0),
+                Rect::new(0.0, 0.0, 160.0, 96.0),
+            );
+            assert!(tree.commands().iter().any(|command| matches!(
+                command,
+                PaintCommand::Text { text, .. }
+                    if text.contains("preview") || text.contains("Preview")
+            )));
+        }
     }
 
     #[test]

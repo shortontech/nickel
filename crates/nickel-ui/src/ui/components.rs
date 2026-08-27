@@ -759,8 +759,16 @@ impl<Message> Image<Message> {
         Self(Element {
             id: None,
             source: None,
-            kind: Kind::Image { id, image },
-            style: Style::default(),
+            kind: Kind::Image {
+                id,
+                image,
+                presentation: ImagePresentation::default(),
+            },
+            style: Style {
+                overflow_x: Overflow::Clip,
+                overflow_y: Overflow::Clip,
+                ..Style::default()
+            },
             message: None,
             message_mapper: None,
             text_mapper: None,
@@ -777,6 +785,28 @@ impl<Message> Image<Message> {
 
     pub fn height(mut self, height: f32) -> Self {
         self.0 = self.0.height(height);
+        self
+    }
+
+    pub fn fit(mut self, fit: ImageFit) -> Self {
+        if let Kind::Image { presentation, .. } = &mut self.0.kind {
+            presentation.fit = fit;
+        }
+        self
+    }
+
+    pub fn alignment(mut self, horizontal: ImageAlignment, vertical: ImageAlignment) -> Self {
+        if let Kind::Image { presentation, .. } = &mut self.0.kind {
+            presentation.horizontal = horizontal;
+            presentation.vertical = vertical;
+        }
+        self
+    }
+
+    pub fn presentation(mut self, value: ImagePresentation) -> Self {
+        if let Kind::Image { presentation, .. } = &mut self.0.kind {
+            *presentation = value;
+        }
         self
     }
 }
@@ -996,6 +1026,16 @@ impl<Message> Container<Message> {
 
     pub fn align_self(mut self, align: Align) -> Self {
         self.0 = self.0.align_self(align);
+        self
+    }
+
+    pub fn align_items(mut self, align: Align) -> Self {
+        self.0 = self.0.align_items(align);
+        self
+    }
+
+    pub fn justify_content(mut self, justify: Justify) -> Self {
+        self.0 = self.0.justify_content(justify);
         self
     }
 
