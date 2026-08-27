@@ -641,7 +641,11 @@ impl LiveShell {
                 .application_id
                 .as_ref()
                 .and_then(|id| self.launcher.application(id))
-                .and_then(|application| self.launcher_icons.resolve(application));
+                .and_then(|application| self.launcher_icons.resolve(application))
+                .or_else(|| {
+                    crate::icons::nickel_application(&group.application_name)
+                        .map(|(id, image)| (id, Arc::new(image)))
+                });
             if let Some((id, image)) = icon {
                 commands.push(PaintCommand::Image {
                     bounds: Rect::new(x + 10.0, 11.0, 32.0, 32.0),

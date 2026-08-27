@@ -35,6 +35,26 @@ pub fn resized(source: &RgbaImage, width: u32, height: u32) -> RgbaImage {
     output
 }
 
+pub fn nickel_application(name: &str) -> Option<(u16, RgbaImage)> {
+    let (id, bytes): (u16, &[u8]) = if name.starts_with("Nickel Settings") {
+        (
+            0x3000,
+            include_bytes!("../../../assets/icons/nickel-settings.png"),
+        )
+    } else if name.starts_with("Nickel File") {
+        (
+            0x3001,
+            include_bytes!("../../../assets/icons/nickel-file.png"),
+        )
+    } else {
+        return None;
+    };
+    image::load_from_memory(bytes)
+        .ok()
+        .map(DynamicImage::into_rgba8)
+        .map(|image| (id, image))
+}
+
 fn load_svg(path: &Path) -> Option<RgbaImage> {
     let data = fs::read(path).ok()?;
     load_svg_bytes(&data, RASTER_SIZE)
@@ -59,7 +79,7 @@ pub fn load_svg_bytes(data: &[u8], raster_size: u32) -> Option<RgbaImage> {
 mod tests {
     use image::{Rgba, RgbaImage};
 
-    use super::resized;
+    use super::{nickel_application, resized};
 
     #[test]
     fn resize_preserves_aspect_ratio_and_centers_icon() {
@@ -68,5 +88,16 @@ mod tests {
         assert_eq!(output.dimensions(), (8, 8));
         assert_eq!(output.get_pixel(0, 0).0[3], 0);
         assert_eq!(output.get_pixel(0, 2).0, [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn built_in_nickel_applications_keep_icons_without_desktop_entries() {
+        let (settings_id, settings) = nickel_application("Nickel Settings").unwrap();
+        let (file_id, file) = nickel_application("Nickel File").unwrap();
+
+        assert_ne!(settings_id, file_id);
+        assert!(settings.pixels().any(|pixel| pixel.0[3] != 0));
+        assert!(file.pixels().any(|pixel| pixel.0[3] != 0));
+        assert!(nickel_application("Other application").is_none());
     }
 }
