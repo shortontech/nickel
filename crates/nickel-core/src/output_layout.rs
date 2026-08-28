@@ -69,10 +69,26 @@ mod tests {
     fn outputs_are_laid_out_by_stable_priority_and_name() {
         let mut layout = OutputLayout::default();
         layout.connect("DP-1".into(), 1920, 1080, 1);
-        let outputs = layout.connect("DVI-I-1".into(), 1920, 1080, 0);
-        assert_eq!(outputs[0].name, "DVI-I-1");
-        assert_eq!((outputs[0].x, outputs[0].y), (0, 0));
-        assert_eq!(outputs[1].name, "DP-1");
-        assert_eq!((outputs[1].x, outputs[1].y), (1920, 0));
+        layout.connect("DVI-I-1".into(), 1280, 720, 0);
+        let outputs = layout.connect("DVI-I-2".into(), 800, 600, 0);
+        assert_eq!(
+            outputs
+                .iter()
+                .map(|output| {
+                    (
+                        output.name.as_str(),
+                        output.width,
+                        output.height,
+                        output.x,
+                        output.y,
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                ("DVI-I-1", 1280, 720, 0, 0),
+                ("DVI-I-2", 800, 600, 1280, 0),
+                ("DP-1", 1920, 1080, 2080, 0),
+            ]
+        );
     }
 }

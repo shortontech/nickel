@@ -117,8 +117,11 @@ mod tests {
             image: Some("/tmp/fantasy.png".into()),
             position: WallpaperPosition::Fit,
         };
-        expected.save(&path).unwrap();
-        assert_eq!(WallpaperSettings::load(&path).unwrap(), expected);
-        let _ = std::fs::remove_file(path);
+        expected.save(&path).expect("save wallpaper settings");
+        assert_eq!(
+            WallpaperSettings::load(&path).expect("load wallpaper settings"),
+            expected
+        );
+        std::fs::remove_file(path).expect("remove wallpaper settings fixture");
     }
 }

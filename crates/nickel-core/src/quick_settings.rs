@@ -133,7 +133,23 @@ mod tests {
         snapshot.normalize();
 
         assert_eq!(snapshot.volume_percent, 100);
-        assert_eq!(snapshot.devices[0].id, "headset");
+        assert_eq!(snapshot.availability, Availability::Available);
+        assert!(!snapshot.muted);
+        assert_eq!(
+            snapshot.devices,
+            vec![
+                AudioDevice {
+                    id: "headset".into(),
+                    name: "Headset".into(),
+                    is_default: true,
+                },
+                AudioDevice {
+                    id: "speakers".into(),
+                    name: "Speakers".into(),
+                    is_default: false,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -167,12 +183,30 @@ mod tests {
         snapshot.normalize();
 
         assert_eq!(
-            snapshot
-                .devices
-                .iter()
-                .map(|device| device.id.as_str())
-                .collect::<Vec<_>>(),
-            ["active", "paired", "new"]
+            snapshot.devices,
+            vec![
+                BluetoothDevice {
+                    id: "active".into(),
+                    name: "Active device".into(),
+                    paired: true,
+                    connected: true,
+                },
+                BluetoothDevice {
+                    id: "paired".into(),
+                    name: "Paired device".into(),
+                    paired: true,
+                    connected: false,
+                },
+                BluetoothDevice {
+                    id: "new".into(),
+                    name: "New device".into(),
+                    paired: false,
+                    connected: false,
+                },
+            ]
         );
+        assert_eq!(snapshot.availability, Availability::Available);
+        assert!(snapshot.powered);
+        assert!(!snapshot.discovering);
     }
 }

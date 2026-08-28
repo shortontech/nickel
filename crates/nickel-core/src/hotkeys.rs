@@ -274,20 +274,31 @@ impl HotkeyController {
 
 #[cfg(test)]
 mod tests {
-    use super::{Hotkey, HotkeyAction, HotkeyController, KeyEdge};
+    use super::{Hotkey, HotkeyAction, HotkeyController, HotkeyOutcome, KeyEdge};
 
     #[test]
     fn super_release_toggles_launcher_once() {
         let mut controller = HotkeyController::default();
-        assert!(!controller.handle(Hotkey::Super, KeyEdge::Pressed).suppress);
+        assert_eq!(
+            controller.handle(Hotkey::Super, KeyEdge::Pressed),
+            HotkeyOutcome::default()
+        );
         let released = controller.handle(Hotkey::Super, KeyEdge::Released);
-        assert!(!released.suppress);
-        assert_eq!(released.action, Some(HotkeyAction::ShowLauncher));
+        assert_eq!(
+            released,
+            HotkeyOutcome {
+                action: Some(HotkeyAction::ShowLauncher),
+                suppress: false,
+            }
+        );
         controller.launcher_visibility_applied(true);
         controller.handle(Hotkey::Super, KeyEdge::Pressed);
         assert_eq!(
-            controller.handle(Hotkey::Super, KeyEdge::Released).action,
-            Some(HotkeyAction::HideLauncher)
+            controller.handle(Hotkey::Super, KeyEdge::Released),
+            HotkeyOutcome {
+                action: Some(HotkeyAction::HideLauncher),
+                suppress: false,
+            }
         );
     }
 
@@ -324,26 +335,53 @@ mod tests {
         let mut controller = HotkeyController::default();
         controller.handle(Hotkey::Super, KeyEdge::Pressed);
         assert_eq!(
-            controller.handle(Hotkey::Run, KeyEdge::Pressed).action,
-            Some(HotkeyAction::ShowRun)
+            controller.handle(Hotkey::Run, KeyEdge::Pressed),
+            HotkeyOutcome {
+                action: Some(HotkeyAction::ShowRun),
+                suppress: true,
+            }
         );
-        controller.handle(Hotkey::Run, KeyEdge::Released);
+        assert_eq!(
+            controller.handle(Hotkey::Run, KeyEdge::Released),
+            HotkeyOutcome {
+                action: None,
+                suppress: true,
+            }
+        );
         assert!(!controller.snapshot().super_held);
-        assert!(!controller.handle(Hotkey::Run, KeyEdge::Pressed).suppress);
+        assert_eq!(
+            controller.handle(Hotkey::Run, KeyEdge::Pressed),
+            HotkeyOutcome::default()
+        );
     }
 
     #[test]
     fn alt_tab_commits_on_alt_release() {
         let mut controller = HotkeyController::default();
-        controller.handle(Hotkey::Alt, KeyEdge::Pressed);
         assert_eq!(
-            controller.handle(Hotkey::Tab, KeyEdge::Pressed).action,
-            Some(HotkeyAction::SwitchNext)
+            controller.handle(Hotkey::Alt, KeyEdge::Pressed),
+            HotkeyOutcome::default()
         );
-        controller.handle(Hotkey::Tab, KeyEdge::Released);
         assert_eq!(
-            controller.handle(Hotkey::Alt, KeyEdge::Released).action,
-            Some(HotkeyAction::CommitSwitch)
+            controller.handle(Hotkey::Tab, KeyEdge::Pressed),
+            HotkeyOutcome {
+                action: Some(HotkeyAction::SwitchNext),
+                suppress: true,
+            }
+        );
+        assert_eq!(
+            controller.handle(Hotkey::Tab, KeyEdge::Released),
+            HotkeyOutcome {
+                action: None,
+                suppress: true,
+            }
+        );
+        assert_eq!(
+            controller.handle(Hotkey::Alt, KeyEdge::Released),
+            HotkeyOutcome {
+                action: Some(HotkeyAction::CommitSwitch),
+                suppress: false,
+            }
         );
     }
 
@@ -367,21 +405,25 @@ mod tests {
         let mut controller = HotkeyController::default();
         controller.handle(Hotkey::Alt, KeyEdge::Pressed);
         assert_eq!(
-            controller
-                .handle(Hotkey::PrintScreen, KeyEdge::Pressed)
-                .action,
-            Some(HotkeyAction::CaptureActiveWindow)
+            controller.handle(Hotkey::PrintScreen, KeyEdge::Pressed),
+            HotkeyOutcome {
+                action: Some(HotkeyAction::CaptureActiveWindow),
+                suppress: true,
+            }
         );
         assert_eq!(
-            controller
-                .handle(Hotkey::PrintScreen, KeyEdge::Pressed)
-                .action,
-            None
+            controller.handle(Hotkey::PrintScreen, KeyEdge::Pressed),
+            HotkeyOutcome {
+                action: None,
+                suppress: true,
+            }
         );
-        assert!(
-            controller
-                .handle(Hotkey::PrintScreen, KeyEdge::Released)
-                .suppress
+        assert_eq!(
+            controller.handle(Hotkey::PrintScreen, KeyEdge::Released),
+            HotkeyOutcome {
+                action: None,
+                suppress: true,
+            }
         );
     }
 
@@ -389,21 +431,24 @@ mod tests {
     fn print_screen_opens_crop_tool() {
         let mut controller = HotkeyController::default();
         assert_eq!(
-            controller
-                .handle(Hotkey::PrintScreen, KeyEdge::Pressed)
-                .action,
-            Some(HotkeyAction::ShowScreenshotTool)
+            controller.handle(Hotkey::PrintScreen, KeyEdge::Pressed),
+            HotkeyOutcome {
+                action: Some(HotkeyAction::ShowScreenshotTool),
+                suppress: true,
+            }
         );
+        assert!(controller.snapshot().print_screen_held);
     }
 
     #[test]
     fn orphaned_print_screen_release_opens_crop_tool_once() {
         let mut controller = HotkeyController::default();
         assert_eq!(
-            controller
-                .handle_reconciled(Hotkey::PrintScreen, KeyEdge::Released)
-                .action,
-            Some(HotkeyAction::ShowScreenshotTool)
+            controller.handle_reconciled(Hotkey::PrintScreen, KeyEdge::Released),
+            HotkeyOutcome {
+                action: Some(HotkeyAction::ShowScreenshotTool),
+                suppress: true,
+            }
         );
         assert!(!controller.snapshot().print_screen_held);
     }

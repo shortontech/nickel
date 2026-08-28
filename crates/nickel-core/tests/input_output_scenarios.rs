@@ -5,8 +5,8 @@ use nickel_core::scenario::scenario;
 use nickel_core::task_switcher::TaskSwitchEffect;
 
 #[test]
-fn alt_tab_commits_when_alt_releases_before_tab() {
-    scenario("modifier release cancels the remaining tab edge")
+fn alt_release_commits_pending_switch_before_tab_release() {
+    scenario("Alt release commits the pending switch before Tab release")
         .window("current")
         .app("editor")
         .active()

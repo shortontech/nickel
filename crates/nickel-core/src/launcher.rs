@@ -90,8 +90,11 @@ mod tests {
     #[test]
     fn repeated_toggle_opens_then_closes_launcher() {
         let mut visibility = LauncherVisibility::default();
+        assert!(!visibility.is_visible());
         assert!(visibility.toggle());
+        assert!(visibility.is_visible());
         assert!(!visibility.toggle());
+        assert!(!visibility.is_visible());
     }
 
     #[test]

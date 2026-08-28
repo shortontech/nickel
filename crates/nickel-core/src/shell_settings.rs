@@ -192,7 +192,7 @@ fn settings_path() -> io::Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AnimationLevel, ShellSettings};
+    use super::{AnimationLevel, ShellSettings, ThemePreference};
 
     #[test]
     fn defaults_to_two_display_friendly_bar_and_four_desktops() {
@@ -200,27 +200,36 @@ mod tests {
         assert!(settings.bar_on_all_displays);
         assert!(settings.all_windows_on_every_bar);
         assert_eq!(settings.desktop_count, 4);
+        assert_eq!(settings.active_desktop, 0);
+        assert_eq!(settings.theme, ThemePreference::System);
+        assert_eq!(settings.accent_hue, None);
+        assert_eq!(settings.accent_intensity, None);
         assert!(!settings.reduce_transparency);
         assert_eq!(settings.animations, AnimationLevel::Normal);
     }
 
     #[test]
-    fn appearance_accessibility_preferences_round_trip() {
+    fn save_and_load_preserves_every_user_preference() {
         let path = std::env::temp_dir().join(format!(
             "nickel-shell-settings-appearance-{}",
             std::process::id()
         ));
         let settings = ShellSettings {
+            bar_on_all_displays: false,
+            all_windows_on_every_bar: false,
+            desktop_count: 7,
+            active_desktop: 5,
+            theme: super::ThemePreference::Dark,
+            accent_hue: Some(271),
+            accent_intensity: Some(63),
             reduce_transparency: true,
-            animations: AnimationLevel::Reduced,
-            ..ShellSettings::default()
+            animations: AnimationLevel::Off,
         };
 
         settings.save(&path).expect("save settings");
         let loaded = ShellSettings::load(&path).expect("load settings");
         std::fs::remove_file(path).expect("remove settings fixture");
 
-        assert!(loaded.reduce_transparency);
-        assert_eq!(loaded.animations, AnimationLevel::Reduced);
+        assert_eq!(loaded, settings);
     }
 }

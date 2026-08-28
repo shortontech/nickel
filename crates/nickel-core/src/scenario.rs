@@ -783,8 +783,8 @@ mod tests {
     use crate::task_switcher::{SwitchWindow, TaskSwitcher};
 
     #[test]
-    fn flip_remains_visible_until_modifier_release_and_gets_a_new_session() {
-        scenario("modifier release commits one flip session")
+    fn flip_commits_exact_effects_and_allocates_a_new_session() {
+        let first = scenario("modifier release commits one flip session")
             .window("a")
             .app("one")
             .active()
@@ -795,7 +795,17 @@ mod tests {
             .capture_surface("first", Surface::Flip)
             .expect_visible(Surface::Flip)
             .key_edge(Hotkey::Tab, KeyEdge::Released)
-            .key_edge(Hotkey::Alt, KeyEdge::Released)
+            .key_edge(Hotkey::Alt, KeyEdge::Released);
+
+        let second = first
+            .expect_actions(&[HotkeyAction::SwitchNext, HotkeyAction::CommitSwitch])
+            .expect_effects(&[
+                TaskSwitchEffect::ShowFlip { session: 1 },
+                TaskSwitchEffect::RequestPreviews(vec!["a".into(), "b".into()]),
+                TaskSwitchEffect::SelectPreview("b".into()),
+                TaskSwitchEffect::HideFlip { session: 1 },
+                TaskSwitchEffect::ActivateWindow("b".into()),
+            ])
             .expect_active("b")
             .expect_hidden(Surface::Flip)
             .key_edge(Hotkey::Alt, KeyEdge::Pressed)
@@ -803,6 +813,28 @@ mod tests {
             .expect_new_surface("first", Surface::Flip)
             .key_edge(Hotkey::Tab, KeyEdge::Released)
             .key_edge(Hotkey::Alt, KeyEdge::Released);
+
+        second
+            .expect_actions(&[
+                HotkeyAction::SwitchNext,
+                HotkeyAction::CommitSwitch,
+                HotkeyAction::SwitchNext,
+                HotkeyAction::CommitSwitch,
+            ])
+            .expect_effects(&[
+                TaskSwitchEffect::ShowFlip { session: 1 },
+                TaskSwitchEffect::RequestPreviews(vec!["a".into(), "b".into()]),
+                TaskSwitchEffect::SelectPreview("b".into()),
+                TaskSwitchEffect::HideFlip { session: 1 },
+                TaskSwitchEffect::ActivateWindow("b".into()),
+                TaskSwitchEffect::ShowFlip { session: 2 },
+                TaskSwitchEffect::RequestPreviews(vec!["a".into(), "b".into()]),
+                TaskSwitchEffect::SelectPreview("b".into()),
+                TaskSwitchEffect::HideFlip { session: 2 },
+                TaskSwitchEffect::ActivateWindow("b".into()),
+            ])
+            .expect_active("b")
+            .expect_hidden(Surface::Flip);
     }
 
     #[test]
