@@ -76,7 +76,7 @@ fn nested_button_is_laid_out_and_hit_tested() {
 }
 
 #[test]
-fn grid_places_all_children() {
+fn fixed_grid_gives_each_child_a_distinct_hit_region() {
     let tree = UiTree::layout(
         Grid::fixed(2).children([
             Button::new(TestMessage::Named("one"), "One"),
@@ -85,7 +85,38 @@ fn grid_places_all_children() {
         ]),
         Rect::new(0.0, 0.0, 200.0, 100.0),
     );
-    assert_eq!(tree.hits.len(), 3);
+    let messages = [
+        TestMessage::Named("one"),
+        TestMessage::Named("two"),
+        TestMessage::Named("three"),
+    ];
+    let regions = messages
+        .iter()
+        .map(|message| {
+            let rect = tree
+                .message_rect(message)
+                .expect("every grid child should expose its action bounds");
+            let center = Point {
+                x: rect.origin.x + rect.size.width * 0.5,
+                y: rect.origin.y + rect.size.height * 0.5,
+            };
+            assert_eq!(tree.message_at(center), Some(message));
+            (message, rect)
+        })
+        .collect::<Vec<_>>();
+
+    for (index, (_, first)) in regions.iter().enumerate() {
+        for (_, second) in regions.iter().skip(index + 1) {
+            let separated = first.origin.x + first.size.width <= second.origin.x
+                || second.origin.x + second.size.width <= first.origin.x
+                || first.origin.y + first.size.height <= second.origin.y
+                || second.origin.y + second.size.height <= first.origin.y;
+            assert!(
+                separated,
+                "grid hit regions overlap: {first:?} and {second:?}"
+            );
+        }
+    }
 }
 
 #[test]
