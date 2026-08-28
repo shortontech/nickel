@@ -12,14 +12,22 @@ fn help_and_argument_errors_do_not_create_application_state() {
         .output()
         .unwrap();
     assert!(help.status.success());
-    assert!(String::from_utf8_lossy(&help.stdout).contains("read-only Nickel viewer"));
+    assert_eq!(
+        String::from_utf8_lossy(&help.stdout),
+        "nickel-markdown-ui PATH\n\nOpen one local .md or .markdown file in a read-only Nickel viewer.\n"
+    );
+    assert!(help.stderr.is_empty());
 
     let missing = Command::new(executable)
         .current_dir(temporary.path())
         .output()
         .unwrap();
     assert_eq!(missing.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&missing.stderr).contains("usage:"));
+    assert_eq!(
+        String::from_utf8_lossy(&missing.stderr),
+        "usage: nickel-markdown-ui PATH\n"
+    );
+    assert!(missing.stdout.is_empty());
 
     let multiple = Command::new(executable)
         .args(["one.md", "two.md"])
@@ -27,7 +35,11 @@ fn help_and_argument_errors_do_not_create_application_state() {
         .output()
         .unwrap();
     assert_eq!(multiple.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&multiple.stderr).contains("usage:"));
+    assert_eq!(
+        String::from_utf8_lossy(&multiple.stderr),
+        "usage: nickel-markdown-ui PATH\n"
+    );
+    assert!(multiple.stdout.is_empty());
     assert_eq!(std::fs::read_dir(temporary.path()).unwrap().count(), 0);
 }
 
