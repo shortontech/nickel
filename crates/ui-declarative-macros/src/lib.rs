@@ -599,3 +599,113 @@ fn permutations(values: &[usize]) -> Vec<Vec<usize>> {
     }
     output
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{ViewInput, expand_component, expand_root, permutations};
+    use quote::quote;
+
+    fn parse(input: proc_macro2::TokenStream) -> ViewInput {
+        syn::parse2(input).expect("declarative input should parse")
+    }
+
+    fn parse_error(input: proc_macro2::TokenStream) -> String {
+        match syn::parse2::<ViewInput>(input) {
+            Ok(_) => panic!("declarative input unexpectedly parsed"),
+            Err(error) => error.to_string(),
+        }
+    }
+
+    #[test]
+    fn parser_accepts_nested_components_expressions_and_text_children() {
+        let input = parse(quote! {
+            <Column id={"settings"}>
+                "Settings"
+                {items.into_iter().map(render_item)}
+                <Button on_press={Message::Save}> "Save" </Button>
+            </Column>
+        });
+
+        assert_eq!(input.0.len(), 1);
+        let expanded = expand_root(input.0)
+            .expect("valid component tree should expand")
+            .to_string();
+        assert!(expanded.contains("SourceLocation"));
+        assert!(expanded.contains("children"));
+        assert!(expanded.contains("Message :: Save"));
+    }
+
+    #[test]
+    fn parser_rejects_duplicate_properties_mismatched_closers_and_unclosed_elements() {
+        let duplicate = parse_error(quote! {
+            <Button on_press={save} on_press={save}> "Save" </Button>
+        });
+        assert_eq!(duplicate, "duplicate property `on_press`");
+
+        let mismatched = parse_error(quote! { <Column> </Row> });
+        assert_eq!(mismatched, "expected closing tag `</Column>`");
+
+        let unclosed = parse_error(quote! { <Column> "content" });
+        assert_eq!(unclosed, "missing closing tag `</Column>`");
+    }
+
+    #[test]
+    fn expansion_rejects_missing_required_values_and_invalid_builtin_children() {
+        let missing = parse(quote! { <Button> "Save" </Button> });
+        let error = expand_root(missing.0)
+            .expect_err("Button without on_press must be rejected")
+            .to_string();
+        assert_eq!(error, "missing required property `on_press`");
+
+        let child = parse(quote! { <Slider value={value} on_change={change}> "bad" </Slider> });
+        let error = expand_root(child.0)
+            .expect_err("Slider children must be rejected")
+            .to_string();
+        assert_eq!(error, "`Slider` does not accept children");
+    }
+
+    #[test]
+    fn component_expansion_enforces_the_public_property_arity() {
+        let function = syn::parse2(quote! {
+            fn too_many(a: u8, b: u8, c: u8, d: u8, e: u8, f: u8, g: u8, h: u8) {}
+        })
+        .expect("component fixture should parse");
+        let error = expand_component(function)
+            .expect_err("components with eight properties must be rejected")
+            .to_string();
+        assert_eq!(
+            error,
+            "declarative components support at most seven properties"
+        );
+    }
+
+    #[test]
+    fn optional_component_properties_generate_each_supported_call_shape() {
+        let function = syn::parse2(quote! {
+            fn panel(title: String, compact: Option<bool>) {}
+        })
+        .expect("component fixture should parse");
+        let expanded = expand_component(function)
+            .expect("component with one optional property should expand")
+            .to_string();
+
+        assert_eq!(expanded.matches("=>").count(), 3);
+        assert!(expanded.contains("Option :: Some"));
+        assert!(expanded.contains("Option :: None"));
+    }
+
+    #[test]
+    fn permutations_preserves_all_orders_without_duplicates() {
+        assert_eq!(
+            permutations(&[0, 1, 2]),
+            vec![
+                vec![0, 1, 2],
+                vec![0, 2, 1],
+                vec![1, 0, 2],
+                vec![1, 2, 0],
+                vec![2, 0, 1],
+                vec![2, 1, 0],
+            ]
+        );
+    }
+}
