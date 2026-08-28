@@ -1548,7 +1548,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "view")]
-    fn representative_rasters_have_visible_hierarchy_at_three_sizes() {
+    fn representative_rasters_preserve_content_hierarchy_at_three_sizes() {
         let document = MarkdownDocument::parse(
             "# Raster hierarchy\n\n**Bold**, *italic*, ~~strike~~, `code`, and [link](guide.md).\n\n> Quote\n\n```rust\nfn main() {}\n```",
         );
@@ -1559,10 +1559,34 @@ mod tests {
                 }),
                 Rect::new(0.0, 0.0, width as f32 / scale, height as f32 / scale),
             );
+            assert!(
+                tree.diagnostics().is_empty(),
+                "unexpected layout diagnostics at {width}x{height}@{scale}: {:?}",
+                tree.diagnostics()
+            );
+            let text = tree
+                .commands()
+                .iter()
+                .filter_map(|command| match command {
+                    PaintCommand::Text { text, .. } | PaintCommand::StyledText { text, .. } => {
+                        Some(text.as_str())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            for expected in ["Raster hierarchy", "Bold", "Quote", "fn main"] {
+                assert!(
+                    text.iter().any(|actual| actual.contains(expected)),
+                    "missing {expected:?} at {width}x{height}@{scale}: {text:?}"
+                );
+            }
             let mut renderer = SdlComponentRenderer::new(width, height, scale);
             renderer.render(tree.commands());
             let visible = renderer.pixels().iter().filter(|pixel| pixel.a > 0).count();
-            assert!(visible > 1_000, "raster was unexpectedly empty");
+            assert!(
+                visible > 1_000,
+                "raster was unexpectedly empty at {width}x{height}@{scale}"
+            );
         }
     }
 

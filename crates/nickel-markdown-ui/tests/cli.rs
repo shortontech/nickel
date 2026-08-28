@@ -1,6 +1,6 @@
 #![cfg(feature = "application")]
 
-use std::{fs, process::Command, thread, time::Duration};
+use std::{fs, process::Child, process::Command, thread, time::Duration, time::Instant};
 
 #[test]
 fn help_and_argument_errors_do_not_create_application_state() {
@@ -32,7 +32,7 @@ fn help_and_argument_errors_do_not_create_application_state() {
 }
 
 #[test]
-fn successful_and_failed_file_startup_create_no_persistent_state() {
+fn valid_and_missing_documents_keep_viewer_alive_without_sidecar_files() {
     let executable = env!("CARGO_BIN_EXE_nickel-markdown-ui");
     let temporary = tempfile::tempdir().unwrap();
     let markdown = temporary.path().join("guide.md");
@@ -53,13 +53,23 @@ fn successful_and_failed_file_startup_create_no_persistent_state() {
             .current_dir(temporary.path())
             .spawn()
             .unwrap();
-        thread::sleep(Duration::from_millis(200));
-        assert!(
-            child.try_wait().unwrap().is_none(),
-            "viewer did not stay open"
-        );
+        wait_until_running(&mut child);
         child.kill().unwrap();
         child.wait().unwrap();
         assert_eq!(baseline(), before);
+    }
+}
+
+fn wait_until_running(child: &mut Child) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "viewer exited before its startup state could be inspected"
+        );
+        if Instant::now() >= deadline {
+            return;
+        }
+        thread::sleep(Duration::from_millis(10));
     }
 }
