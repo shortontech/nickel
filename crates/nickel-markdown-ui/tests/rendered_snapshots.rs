@@ -29,10 +29,24 @@ fn render_snapshot(
         bounds,
         &mut state,
     );
-    assert!(state.focused().is_some());
+    let reload_id = initial
+        .id_for_message(&nickel_markdown_ui::ViewerMessage::Reload)
+        .expect("viewer reload action should have a semantic identity")
+        .clone();
+    assert_eq!(state.focused(), Some(&reload_id));
+    assert_eq!(
+        tree.resolved_layout()
+            .nodes()
+            .iter()
+            .filter(|node| node.interaction.focused)
+            .count(),
+        1,
+        "FocusNext should focus exactly one viewer control"
+    );
     let mut renderer = SdlComponentRenderer::new(width, height, scale);
     renderer.render(tree.commands());
     let pixels = renderer.pixels();
+    assert_eq!(pixels.len(), (width * height) as usize);
     let nontransparent = pixels.iter().filter(|pixel| pixel.a > 0).count();
     assert!(nontransparent > pixels.len() / 3);
     let image = ImageBuffer::<Rgba<u8>, Vec<u8>>::from_fn(width, height, |x, y| {

@@ -1374,7 +1374,7 @@ mod tests {
     #[test]
     #[cfg(feature = "application")]
     fn recoverable_status_keeps_loaded_document_visible() {
-        use nickel_ui::{PaintCommand, Rect, UiTree};
+        use nickel_ui::{PaintCommand, Point, Rect, UiEvent, UiStateStore, UiTree};
 
         let document = LoadedDocument {
             path: PathBuf::from("/tmp/guide.md"),
@@ -1393,18 +1393,36 @@ mod tests {
         assert!(tree.commands().iter().any(|command| {
             matches!(command, PaintCommand::Text { text, .. } if text == "Could not reload")
         }));
-        assert!(tree.message_rect(&ViewerMessage::DismissStatus).is_some());
+        let dismiss = tree
+            .message_rect(&ViewerMessage::DismissStatus)
+            .expect("recoverable status should expose a dismiss action");
+        let dismiss_point = Point {
+            x: dismiss.origin.x + dismiss.size.width * 0.5,
+            y: dismiss.origin.y + dismiss.size.height * 0.5,
+        };
+        let mut interaction = UiStateStore::default();
+        tree.handle_event(&mut interaction, UiEvent::PointerPressed(dismiss_point));
+        assert_eq!(
+            tree.handle_event(&mut interaction, UiEvent::PointerReleased(dismiss_point))
+                .messages,
+            vec![ViewerMessage::DismissStatus]
+        );
     }
 
     #[test]
     #[cfg(feature = "application")]
     fn startup_failure_renders_the_path_and_classified_reason() {
-        use nickel_ui::{PaintCommand, Rect, UiTree};
+        use nickel_ui::{PaintCommand, Point, Rect, UiEvent, UiStateStore, UiTree};
 
         let mut model = ViewerModel::default();
         let missing = PathBuf::from("/definitely/missing/guide.md");
         let request = model.begin_open(&missing);
         model.complete(load_document(&request));
+        assert!(matches!(
+            &model.status,
+            ViewerStatus::Error(error)
+                if error.kind == ViewerErrorKind::Missing && error.path == missing
+        ));
         let tree = UiTree::layout(viewer_view(&model, None), Rect::new(0.0, 0.0, 800.0, 600.0));
         let visible = tree
             .commands()
@@ -1417,6 +1435,20 @@ mod tests {
             .join(" ");
         assert!(visible.contains("/definitely/missing/guide.md"));
         assert!(visible.contains("No such file") || visible.contains("not found"));
+        let dismiss = tree
+            .message_rect(&ViewerMessage::DismissStatus)
+            .expect("startup error should expose a dismiss action");
+        let dismiss_point = Point {
+            x: dismiss.origin.x + dismiss.size.width * 0.5,
+            y: dismiss.origin.y + dismiss.size.height * 0.5,
+        };
+        let mut interaction = UiStateStore::default();
+        tree.handle_event(&mut interaction, UiEvent::PointerPressed(dismiss_point));
+        assert_eq!(
+            tree.handle_event(&mut interaction, UiEvent::PointerReleased(dismiss_point))
+                .messages,
+            vec![ViewerMessage::DismissStatus]
+        );
     }
 
     #[test]
