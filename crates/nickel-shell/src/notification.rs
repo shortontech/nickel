@@ -138,7 +138,7 @@ impl NotificationStore {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_NOTIFICATIONS, NotificationStore};
+    use super::NotificationStore;
     use std::time::{Duration, Instant};
 
     fn notify(store: &mut NotificationStore, replaces_id: u32, now: Instant) -> u32 {
@@ -207,12 +207,12 @@ mod tests {
         let mut store = NotificationStore::default();
         let first = notify(&mut store, 0, now);
         let mut discarded = None;
-        for _ in 0..MAX_NOTIFICATIONS {
+        for _ in 0..100 {
             discarded = store
                 .notify(0, "App".into(), "New".into(), String::new(), 1_000, now)
                 .1;
         }
-        assert_eq!(store.len(), MAX_NOTIFICATIONS);
+        assert_eq!(store.len(), 100);
         assert_eq!(discarded.unwrap().id, first);
     }
 }

@@ -339,7 +339,7 @@ pub fn preview_close_at(position: PhysicalPosition<f64>, count: usize) -> Option
 
 #[cfg(test)]
 mod tests {
-    use super::{HEIGHT, PREVIEW_CARD_WIDTH, WIDTH, item_at, preview_at, preview_close_at};
+    use super::{item_at, preview_at, preview_close_at};
     use winit::dpi::PhysicalPosition;
 
     #[test]
@@ -347,10 +347,7 @@ mod tests {
         assert_eq!(item_at(PhysicalPosition::new(20.0, 20.0), 1), Some(0));
         assert_eq!(item_at(PhysicalPosition::new(0.0, 20.0), 1), None);
         assert_eq!(
-            item_at(
-                PhysicalPosition::new(f64::from(WIDTH), f64::from(HEIGHT)),
-                1
-            ),
+            item_at(PhysicalPosition::new(320.0, 52.0), 1),
             None
         );
     }
@@ -359,17 +356,11 @@ mod tests {
     fn preview_cards_and_close_buttons_are_independent() {
         assert_eq!(preview_at(PhysicalPosition::new(20.0, 80.0), 2), Some(0));
         assert_eq!(
-            preview_at(
-                PhysicalPosition::new(f64::from(PREVIEW_CARD_WIDTH) + 20.0, 80.0),
-                2
-            ),
+            preview_at(PhysicalPosition::new(280.0, 80.0), 2),
             Some(1)
         );
         assert_eq!(
-            preview_close_at(
-                PhysicalPosition::new(f64::from(PREVIEW_CARD_WIDTH) - 20.0, 20.0),
-                2
-            ),
+            preview_close_at(PhysicalPosition::new(240.0, 20.0), 2),
             Some(0)
         );
     }

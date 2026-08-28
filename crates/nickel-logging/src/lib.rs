@@ -82,7 +82,7 @@ fn install_panic_logging() {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_LOG_BYTES, rotate_if_needed};
+    use super::rotate_if_needed;
     use std::{fs, io::Write};
 
     #[test]
@@ -97,12 +97,12 @@ mod tests {
         assert!(!path.with_extension("log.previous").exists());
 
         fs::write(path.with_extension("log.previous"), b"stale").unwrap();
-        fs::write(&path, vec![b'x'; MAX_LOG_BYTES as usize]).unwrap();
+        fs::write(&path, vec![b'x'; 5_242_880]).unwrap();
         rotate_if_needed(&path).unwrap();
         assert!(!path.exists());
         assert_eq!(
             fs::read(path.with_extension("log.previous")).unwrap(),
-            vec![b'x'; MAX_LOG_BYTES as usize]
+            vec![b'x'; 5_242_880]
         );
     }
 }

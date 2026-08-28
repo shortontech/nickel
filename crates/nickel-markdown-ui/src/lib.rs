@@ -878,7 +878,7 @@ mod tests {
         let oversized = directory.path().join("oversized.md");
         fs::File::create(&oversized)
             .unwrap()
-            .set_len(MAX_DOCUMENT_BYTES + 1)
+            .set_len(16_777_217)
             .unwrap();
         let oversized_error = read_document(&oversized).unwrap_err();
         assert_eq!(oversized_error.kind, ViewerErrorKind::Oversized);

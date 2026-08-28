@@ -394,8 +394,7 @@ fn logit(value: f32, factor: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        IMAGE_MEAN, IMAGE_STD, Point, append_gaze_normalized, eye_aspect_ratio, eye_patch, logit,
-        openness_score,
+        Point, append_gaze_normalized, eye_aspect_ratio, eye_patch, logit, openness_score,
     };
     use image::{Rgb, RgbImage};
 
@@ -433,16 +432,10 @@ mod tests {
         image.put_pixel(1, 1, Rgb([0, 0, 40]));
         let mut values = Vec::new();
         append_gaze_normalized(&image, &mut values);
-        let normalize = |value: f32| (value / 255.0 - IMAGE_MEAN[0]) / IMAGE_STD[0];
-        assert_eq!(
-            values[..4],
-            [
-                normalize(10.0),
-                normalize(30.0),
-                normalize(20.0),
-                normalize(40.0)
-            ]
-        );
+        let published_openseeface_values = [-1.946_656_3, -1.604_161_3, -1.775_408_9, -1.432_913_8];
+        for (actual, expected) in values[..4].iter().zip(published_openseeface_values) {
+            assert!((actual - expected).abs() < 0.000_001);
+        }
     }
 
     #[test]
