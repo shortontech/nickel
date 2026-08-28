@@ -40,6 +40,14 @@ Nickel application code and shipped tooling must remain Rust: do not introduce J
 
 Place unit tests beside their modules and cross-crate tests in `tests/`. Name behavior tests descriptively, for example `recent_window_ranks_above_unused_match`. Test core logic with synthetic windows, notifications, clocks, and controller events. Gate platform adapter tests by target OS and record manual coverage for focus, DPI, multiple monitors, and permissions.
 
+For new shell interaction behavior and regressions—especially launcher, focus, task switching, input,
+surface identity, effect ordering, and multi-output behavior—prefer the semantic scenario harness in
+`nickel-core::scenario` over bespoke state mutation, copied coordinates, or test-only reducers. Drive
+semantic input through production reducers and hit testing, and assert production-owned state and
+recorded effects. This is a default for new interaction tests, not a requirement to rewrite suitable
+existing tests or to force pure unit, rendering, adapter-contract, and live platform tests into the
+scenario harness.
+
 ## Commit & Pull Request Guidelines
 
 Use concise, imperative commit subjects such as `Add fuzzy ranking pipeline`. Keep commits scoped and include tests with behavioral changes. Commit new specifications when written; archive them when completed. Pull requests should explain user-visible behavior, list platforms tested, link relevant specifications or issues, and include screenshots or recordings for visual changes.
