@@ -146,28 +146,32 @@ mod tests {
 
     #[test]
     fn seeded_secrets_and_paths_fail_closed() {
-        assert!(validate_str(r#"{"name":"bad","access_token":"x"}"#).is_err());
-        assert!(
+        assert!(matches!(
+            validate_str(r#"{"name":"bad","access_token":"x"}"#),
+            Err(FixtureError::Secret(path)) if path == "$.access_token"
+        ));
+        assert!(matches!(
             validate_str(
                 r#"{"name":"bad","models":[{"id":"/home/alice/private","display_name":"x"}]}"#
-            )
-            .is_err()
-        );
+            ),
+            Err(FixtureError::Secret(path)) if path == "$.models[0].id"
+        ));
     }
 
     #[test]
     fn sequence_gaps_are_rejected() {
-        assert!(
+        assert!(matches!(
             validate_str(
                 r#"{"name":"bad","events":[{"sequence":2,"kind":{"type":"account_updated"}}]}"#
-            )
-            .is_err()
-        );
+            ),
+            Err(FixtureError::Invalid(message)) if message == "event sequence 2 should be 1"
+        ));
     }
 
     #[test]
     fn checked_in_canonical_scenarios_validate() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let mut scenario_count = 0;
         for entry in fs::read_dir(root).unwrap() {
             let path = entry.unwrap().path();
             if path
@@ -180,18 +184,23 @@ mod tests {
                     .starts_with("transcript-")
             {
                 validate_file(&path).unwrap();
+                scenario_count += 1;
             }
         }
-        validate_transcript_str(include_str!("../fixtures/transcript-basic.json")).unwrap();
+        assert_eq!(scenario_count, 3);
+        let transcript =
+            validate_transcript_str(include_str!("../fixtures/transcript-basic.json")).unwrap();
+        assert_eq!(transcript.len(), 4);
+        assert_eq!(transcript.last().unwrap().sequence, transcript.len() as u64);
     }
 
     #[test]
     fn transcript_sanitization_rejects_secret_bearing_protocol() {
-        assert!(
+        assert!(matches!(
             validate_transcript_str(
                 r#"[{"sequence":1,"direction":"client","message":{"method":"initialize","params":{"authorization":"Bearer x"}}}]"#
-            )
-            .is_err()
-        );
+            ),
+            Err(FixtureError::Secret(path)) if path == "$[0].message.params.authorization"
+        ));
     }
 }
