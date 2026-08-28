@@ -402,7 +402,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn connected_network_is_rendered() {
+    fn connected_network_exposes_status_and_power_action() {
         let network = platform::NetworkStatus {
             available: true,
             enabled: true,
@@ -428,5 +428,19 @@ mod tests {
             command,
             nickel_ui::PaintCommand::Text { text, .. } if text == "SukiAlan"
         )));
+        assert!(ui.commands().iter().any(|command| matches!(
+            command,
+            nickel_ui::PaintCommand::Text { text, .. } if text == "CONNECTED  ·  82% SIGNAL"
+        )));
+        let power = ui
+            .message_rect(&ControlMessage::WifiPower)
+            .expect("connected Wi-Fi should expose its power action");
+        assert_eq!(
+            ui.message_at(Point {
+                x: power.origin.x + power.size.width * 0.5,
+                y: power.origin.y + power.size.height * 0.5,
+            }),
+            Some(&ControlMessage::WifiPower)
+        );
     }
 }
