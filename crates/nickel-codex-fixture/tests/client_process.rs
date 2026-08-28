@@ -140,7 +140,34 @@ fn automatic_selection_falls_back_from_incompatible_installed_candidate() {
 fn fixture_candidate_passes_schema_and_handshake_probe() {
     let fixture = Path::new(env!("CARGO_BIN_EXE_nickel-codex-fixture"));
     let selection = Selector::new(None).select(BackendChoice::Path(fixture.into()));
-    assert!(selection.selected.is_some(), "{:?}", selection.probes);
+    let selected = selection.selected.expect("fixture must pass its own probe");
+    assert_eq!(selected.source, CandidateSource::Explicit);
+    assert_eq!(selected.path, fixture);
+    assert_eq!(selection.probes.len(), 1);
+    let probe = &selection.probes[0];
+    assert_eq!(probe.candidate, selected);
+    assert!(probe.compatible);
+    assert_eq!(
+        probe.reason,
+        "required schema and initialize handshake accepted"
+    );
+    assert!(
+        probe
+            .version
+            .as_deref()
+            .is_some_and(|version| !version.is_empty())
+    );
+    assert!(probe.executable_sha256.as_deref().is_some_and(|digest| {
+        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }));
+    assert!(
+        probe
+            .generated_schema_sha256
+            .as_deref()
+            .is_some_and(|digest| {
+                digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+    );
 }
 
 #[test]
@@ -157,7 +184,13 @@ fn candidate_and_working_directory_support_spaces_and_unicode() {
     });
     install_fixture(fixture, &copied);
     let selection = Selector::new(None).select(BackendChoice::Path(copied.clone()));
-    assert!(selection.selected.is_some(), "{:?}", selection.probes);
+    let selected = selection
+        .selected
+        .expect("unicode and spaced fixture path must remain executable");
+    assert_eq!(selected.source, CandidateSource::Explicit);
+    assert_eq!(selected.path, copied);
+    assert_eq!(selection.probes.len(), 1);
+    assert!(selection.probes[0].compatible);
     let client = CodexClient::spawn(&copied, directory.path()).unwrap();
     assert!(!client.account().unwrap().authenticated);
     client.shutdown();
