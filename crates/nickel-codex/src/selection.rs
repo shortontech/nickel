@@ -453,6 +453,9 @@ mod tests {
             PathBuf::from("/missing/codex")
         );
         assert!(!selection.probes[0].compatible);
-        assert!(selection.probes[0].reason.contains("does not exist"));
+        assert_eq!(
+            selection.probes[0].reason,
+            "Codex unavailable: candidate does not exist: /missing/codex"
+        );
     }
 }

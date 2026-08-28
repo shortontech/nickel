@@ -287,6 +287,8 @@ fn sync_directory(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     fn host() -> RemoteHost {
         RemoteHost {
@@ -310,7 +312,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_round_trip_without_secret_values() {
+    fn settings_round_trip_preserves_hosts_in_a_private_file() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("nickel").join("hosts.toml");
         let settings = CodexSettings {
@@ -320,9 +322,14 @@ mod tests {
         };
         settings.save(&path).unwrap();
         assert_eq!(CodexSettings::load(&path).unwrap(), settings);
-        let stored = fs::read_to_string(path).unwrap();
+        let stored = fs::read_to_string(&path).unwrap();
         assert!(stored.contains("NICKEL_CODEX_TOKEN"));
         assert!(!stored.contains("actual-secret-value"));
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[test]
@@ -341,18 +348,27 @@ mod tests {
     fn validation_rejects_credentials_duplicates_and_relative_paths() {
         let mut credential = host();
         credential.endpoint = "wss://user:secret@example.test".into();
-        assert!(credential.validate().is_err());
+        assert_eq!(
+            credential.validate().unwrap_err().to_string(),
+            "invalid Codex host settings: remote endpoint must not contain credentials"
+        );
 
         let mut relative = host();
         relative.default_cwd = "projects/nickel".into();
-        assert!(relative.validate().is_err());
+        assert_eq!(
+            relative.validate().unwrap_err().to_string(),
+            "invalid Codex host settings: remote working directory must be absolute"
+        );
 
         let duplicate = CodexSettings {
             version: SETTINGS_VERSION,
             selected: "local".into(),
             hosts: vec![host(), host()],
         };
-        assert!(duplicate.validate().is_err());
+        assert_eq!(
+            duplicate.validate().unwrap_err().to_string(),
+            "invalid Codex host settings: duplicate remote host id workstation"
+        );
     }
 
     #[test]

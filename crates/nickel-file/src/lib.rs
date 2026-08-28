@@ -238,6 +238,8 @@ mod tests {
         fs::create_dir(root.join("Gamma")).unwrap();
 
         let browser = DirectoryBrowser::open(&root).unwrap();
+        assert!(!browser.can_go_back());
+        assert!(!browser.can_go_forward());
         let names = browser
             .entries()
             .iter()
@@ -257,9 +259,14 @@ mod tests {
 
         browser.enter(&child).unwrap();
         assert_eq!(browser.current(), child);
+        assert!(browser.can_go_back());
+        assert!(!browser.can_go_forward());
         assert!(browser.back().unwrap());
         assert_eq!(browser.current(), root);
+        assert!(!browser.can_go_back());
+        assert!(browser.can_go_forward());
         assert!(!browser.back().unwrap());
+        assert_eq!(browser.current(), root);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -275,6 +282,7 @@ mod tests {
         assert!(browser.can_go_forward());
         assert!(browser.forward().unwrap());
         assert_eq!(browser.current(), child);
+        assert!(browser.can_go_back());
         assert!(!browser.can_go_forward());
         fs::remove_dir_all(root).unwrap();
     }

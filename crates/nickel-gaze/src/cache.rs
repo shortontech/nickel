@@ -233,7 +233,7 @@ fn io_error(path: &Path, source: io::Error) -> CacheError {
 
 #[cfg(test)]
 mod tests {
-    use super::{ModelArtifact, parse_manifest, safe_component, verify_artifact};
+    use super::{CacheError, ModelArtifact, parse_manifest, safe_component, verify_artifact};
     use sha2::{Digest, Sha256};
     use std::{fs, time::SystemTime};
 
@@ -242,12 +242,31 @@ mod tests {
         let manifest = parse_manifest().expect("manifest should parse");
         assert_eq!(manifest.license, "BSD-2-Clause");
         assert_eq!(manifest.artifacts.len(), 3);
-        assert!(
+        assert_eq!(
             manifest
                 .artifacts
                 .iter()
-                .all(|artifact| artifact.url.starts_with("https://"))
+                .map(|artifact| (
+                    artifact.role.as_str(),
+                    artifact.file.as_str(),
+                    artifact.bytes
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("face_detection", "mnv3_detection_opt.onnx", 568302),
+                (
+                    "face_landmarks_wink_optimized",
+                    "lm_model4_opt.onnx",
+                    13501414,
+                ),
+                ("pupil_gaze", "mnv3_gaze32_split_opt.onnx", 3922610,),
+            ]
         );
+        assert!(manifest.artifacts.iter().all(|artifact| {
+            artifact.url.starts_with("https://")
+                && artifact.sha256.len() == 64
+                && artifact.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+        }));
     }
 
     #[test]
@@ -269,7 +288,20 @@ mod tests {
         };
         verify_artifact(&path, &artifact).expect("matching artifact should verify");
         fs::write(&path, b"wrong bytes").expect("fixture should rewrite");
-        assert!(verify_artifact(&path, &artifact).is_err());
+        assert!(matches!(
+            verify_artifact(&path, &artifact),
+            Err(CacheError::WrongDigest { expected, actual, .. })
+                if expected == artifact.sha256 && actual != expected
+        ));
+        fs::write(&path, b"short").expect("fixture should rewrite with a wrong length");
+        assert!(matches!(
+            verify_artifact(&path, &artifact),
+            Err(CacheError::WrongLength {
+                expected: 11,
+                actual: 5,
+                ..
+            })
+        ));
         let _ = fs::remove_dir_all(&directory);
     }
 

@@ -214,6 +214,9 @@ mod tests {
 
     #[test]
     fn rejects_unbounded_output_rate() {
-        assert!(parse_arguments(["--rate-hz".to_owned(), "100".to_owned()]).is_err());
+        assert_eq!(
+            parse_arguments(["--rate-hz".to_owned(), "100".to_owned()]).unwrap_err(),
+            "--rate-hz requires an integer from 1 through 60"
+        );
     }
 }
