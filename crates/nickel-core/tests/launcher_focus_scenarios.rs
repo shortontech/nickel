@@ -123,28 +123,3 @@ fn controller_and_accessibility_panel_activation_share_the_focus_effect_contract
             LauncherEffect::RequestFocus(first_focus_request()),
         ]);
 }
-
-#[test]
-#[ignore = "harness finding: acknowledged stale focus loss can dismiss a reopened launcher; proposed private spec: launcher focus callback authority"]
-fn stale_acknowledged_focus_loss_cannot_dismiss_reopened_launcher() {
-    let first = scenario("stale acknowledged focus loss after launcher reopen")
-        .click(ClickTarget::PanelLauncher)
-        .acknowledge_current_focus()
-        .capture_focus("old");
-
-    first
-        .click(ClickTarget::PanelLauncher)
-        .click(ClickTarget::PanelLauncher)
-        .lose_captured_focus("old")
-        .expect_visible(Surface::Launcher)
-        .expect_launcher_effects(&[
-            LauncherEffect::ShowSurface(SurfaceIdentity(1)),
-            LauncherEffect::RequestFocus(first_focus_request()),
-            LauncherEffect::HideSurface(SurfaceIdentity(1)),
-            LauncherEffect::ShowSurface(SurfaceIdentity(1)),
-            LauncherEffect::RequestFocus(FocusRequest {
-                transaction: FocusTransaction(2),
-                surface: SurfaceIdentity(1),
-            }),
-        ]);
-}

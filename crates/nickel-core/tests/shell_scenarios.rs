@@ -1,7 +1,8 @@
 //! Cross-policy semantic shell scenarios found during the test-authority audit.
 
+use nickel_core::focus::{FocusRequest, FocusTransaction};
 use nickel_core::hotkeys::{Hotkey, HotkeyAction, KeyEdge};
-use nickel_core::scenario::{ClickTarget, Key, Surface, scenario};
+use nickel_core::scenario::{ClickTarget, Key, LauncherEffect, Surface, SurfaceIdentity, scenario};
 use nickel_core::task_switcher::TaskSwitchEffect;
 
 #[test]
@@ -163,7 +164,7 @@ fn alt_shift_print_screen_routes_to_file_capture() {
 }
 
 #[test]
-#[ignore = "audit finding: acknowledged focus from an older launcher request remains current"]
+#[ignore = "harness finding: acknowledged stale focus loss can dismiss a reopened launcher; proposed private spec: launcher focus callback authority"]
 fn stale_focus_loss_cannot_dismiss_a_reopened_launcher() {
     scenario("stale focus loss during launcher reopen")
         .click(ClickTarget::PanelLauncher)
@@ -172,7 +173,20 @@ fn stale_focus_loss_cannot_dismiss_a_reopened_launcher() {
         .click(ClickTarget::PanelLauncher)
         .click(ClickTarget::PanelLauncher)
         .lose_captured_focus("old")
-        .expect_visible(Surface::Launcher);
+        .expect_visible(Surface::Launcher)
+        .expect_launcher_effects(&[
+            LauncherEffect::ShowSurface(SurfaceIdentity(1)),
+            LauncherEffect::RequestFocus(FocusRequest {
+                transaction: FocusTransaction(1),
+                surface: SurfaceIdentity(1),
+            }),
+            LauncherEffect::HideSurface(SurfaceIdentity(1)),
+            LauncherEffect::ShowSurface(SurfaceIdentity(1)),
+            LauncherEffect::RequestFocus(FocusRequest {
+                transaction: FocusTransaction(2),
+                surface: SurfaceIdentity(1),
+            }),
+        ]);
 }
 
 #[test]
