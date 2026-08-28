@@ -82,18 +82,27 @@ fn install_panic_logging() {
 
 #[cfg(test)]
 mod tests {
-    use super::rotate_if_needed;
+    use super::{MAX_LOG_BYTES, rotate_if_needed};
     use std::{fs, io::Write};
 
     #[test]
-    fn small_log_is_not_rotated() {
+    fn log_rotation_keeps_small_files_and_moves_threshold_files() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("nickel.log");
         let mut file = fs::File::create(&path).unwrap();
         file.write_all(b"hello").unwrap();
         drop(file);
         rotate_if_needed(&path).unwrap();
-        assert!(path.exists());
+        assert_eq!(fs::read(&path).unwrap(), b"hello");
         assert!(!path.with_extension("log.previous").exists());
+
+        fs::write(path.with_extension("log.previous"), b"stale").unwrap();
+        fs::write(&path, vec![b'x'; MAX_LOG_BYTES as usize]).unwrap();
+        rotate_if_needed(&path).unwrap();
+        assert!(!path.exists());
+        assert_eq!(
+            fs::read(path.with_extension("log.previous")).unwrap(),
+            vec![b'x'; MAX_LOG_BYTES as usize]
+        );
     }
 }

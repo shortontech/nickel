@@ -1347,10 +1347,7 @@ mod tests {
         let recipe = apple().with_seed("same-seed");
         let first = generate_shape(&recipe, Lod::Gameplay);
         let second = generate_shape(&recipe, Lod::Gameplay);
-        assert_eq!(first.vertices.len(), second.vertices.len());
-        assert_eq!(first.indices, second.indices);
-        assert_eq!(first.vertices[50].position, second.vertices[50].position);
-        assert_eq!(first.vertices[50].color, second.vertices[50].color);
+        assert_eq!(first, second);
     }
 
     #[test]
@@ -1417,6 +1414,7 @@ root:
     fn renderer_produces_visible_pixels() {
         let mesh = generate_shape(&apple(), Lod::Distant);
         let image = render(&mesh, 160, 120, 0.3);
+        assert_eq!((image.width(), image.height()), (160, 120));
         assert!(image.pixels().any(|pixel| pixel.0 != [21, 24, 31, 255]));
     }
 }

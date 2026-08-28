@@ -289,8 +289,14 @@ fn render(name: &str) {
 "#,
         );
         assert_eq!(diagnostics.len(), 2);
-        assert_eq!(diagnostics[0].literal, "Hello");
-        assert_eq!(diagnostics[1].literal, "Open {name}");
+        assert_eq!(
+            diagnostics
+                .iter()
+                .map(|diagnostic| (diagnostic.literal.as_str(), diagnostic.sink.as_str()))
+                .collect::<Vec<_>>(),
+            [("Hello", "Text::new"), ("Open {name}", "Button::new")]
+        );
+        assert!(diagnostics.iter().all(|diagnostic| diagnostic.line > 0));
     }
 
     #[test]

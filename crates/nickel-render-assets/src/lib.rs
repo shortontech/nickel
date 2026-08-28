@@ -333,8 +333,15 @@ mod tests {
         let first = cache.get(TextRequest::label("Nickel", 18.0, [255, 255, 255, 255]));
         let second = cache.get(TextRequest::label("Nickel", 18.0, [255, 255, 255, 255]));
 
+        assert!(first.width() > 0);
+        assert!(first.height() > 0);
+        assert_eq!(first.pitch(), first.width() as usize * 4);
         assert!(first.image().pixels().any(|pixel| pixel[3] != 0));
         assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(cache.len(), 1);
+
+        cache.clear();
+        assert!(cache.is_empty());
     }
 
     #[test]
