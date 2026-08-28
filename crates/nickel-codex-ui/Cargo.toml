@@ -6,6 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 description = "Standalone Nickel Codex chat application"
 
+[features]
+authenticated-live-tests = []
+
 [dependencies]
 nickel-codex = { path = "../nickel-codex" }
 nickel-markdown = { path = "../nickel-markdown" }

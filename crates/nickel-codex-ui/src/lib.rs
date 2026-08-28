@@ -44,9 +44,11 @@ pub fn shell_application(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "authenticated-live-tests")]
+    use nickel_codex::BackendChoice;
     use nickel_codex::{
-        BackendChoice, CodexEvent, CodexSettings, EventKind, ReplayBackend, ServerRequestId,
-        Thread, ThreadId, TurnId,
+        CodexEvent, CodexSettings, EventKind, ReplayBackend, ServerRequestId, Thread, ThreadId,
+        TurnId,
     };
     use nickel_ui::{
         Application, DocumentSelection, PaintCommand, Point, Rect, SdlComponentRenderer,
@@ -1126,8 +1128,8 @@ mod tests {
         assert!(!manifest.contains("nickel-session"));
     }
 
+    #[cfg(feature = "authenticated-live-tests")]
     #[test]
-    #[ignore = "requires explicit authenticated Codex subscription access"]
     fn authenticated_live_first_turn_and_fresh_connection_resume() {
         assert_eq!(
             std::env::var("NICKEL_CODEX_LIVE").as_deref(),
@@ -1208,6 +1210,7 @@ mod tests {
         panic!("application state did not reach the expected condition");
     }
 
+    #[cfg(feature = "authenticated-live-tests")]
     fn wait_for_message(app: &mut ChatApplication, expected: &str) {
         let mut saw_active_turn = false;
         wait_until(app, |state| {
