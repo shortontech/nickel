@@ -875,6 +875,13 @@ mod tests {
             ViewerErrorKind::UnsupportedExtension
         );
 
+        let boundary = directory.path().join("boundary.md");
+        fs::File::create(&boundary)
+            .unwrap()
+            .set_len(16_777_216)
+            .unwrap();
+        assert_eq!(read_document(&boundary).unwrap().source.len(), 16_777_216);
+
         let oversized = directory.path().join("oversized.md");
         fs::File::create(&oversized)
             .unwrap()
