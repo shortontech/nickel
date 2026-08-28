@@ -65,6 +65,35 @@ fn alt_backtick_scopes_candidates_to_the_active_application() {
 }
 
 #[test]
+fn reverse_alt_backtick_selects_the_oldest_window_in_the_active_application() {
+    scenario("reverse group switch stays inside active application")
+        .window("chrome-current")
+        .app("chrome")
+        .active()
+        .window("editor")
+        .app("editor")
+        .window("chrome-oldest")
+        .app("chrome")
+        .press(Key::AltShiftBacktick)
+        .expect_active("chrome-oldest")
+        .expect_actions(&[
+            HotkeyAction::SwitchGroupPrevious,
+            HotkeyAction::CommitSwitch,
+        ])
+        .expect_effects(&[
+            TaskSwitchEffect::ShowFlip { session: 1 },
+            TaskSwitchEffect::RequestPreviews(vec![
+                "chrome-current".into(),
+                "chrome-oldest".into(),
+            ]),
+            TaskSwitchEffect::SelectPreview("chrome-oldest".into()),
+            TaskSwitchEffect::HideFlip { session: 1 },
+            TaskSwitchEffect::ActivateWindow("chrome-oldest".into()),
+        ])
+        .expect_flip_hidden();
+}
+
+#[test]
 fn reverse_alt_tab_commits_the_oldest_candidate_with_exact_effects() {
     scenario("reverse switch commits oldest candidate")
         .window("current")
@@ -154,7 +183,7 @@ fn output_disconnect_and_reconnect_reflows_deterministically() {
 }
 
 #[test]
-#[ignore = "audit finding: Shift is dropped from PrintScreen action routing"]
+#[ignore = "Spec 0092: Shift is dropped from PrintScreen action routing"]
 fn alt_shift_print_screen_routes_to_file_capture() {
     scenario("alt-shift-print-screen file capture")
         .key_edge(Hotkey::Alt, KeyEdge::Pressed)
@@ -164,7 +193,7 @@ fn alt_shift_print_screen_routes_to_file_capture() {
 }
 
 #[test]
-#[ignore = "harness finding: acknowledged stale focus loss can dismiss a reopened launcher; proposed private spec: launcher focus callback authority"]
+#[ignore = "Spec 0091: acknowledged stale focus loss can dismiss a reopened launcher"]
 fn stale_focus_loss_cannot_dismiss_a_reopened_launcher() {
     scenario("stale focus loss during launcher reopen")
         .click(ClickTarget::PanelLauncher)
@@ -190,7 +219,7 @@ fn stale_focus_loss_cannot_dismiss_a_reopened_launcher() {
 }
 
 #[test]
-#[ignore = "executable reproducer: lifecycle removal does not reconcile the selected candidate"]
+#[ignore = "Spec 0093: lifecycle removal does not reconcile the selected candidate"]
 fn removing_selected_window_during_flip_does_not_activate_it() {
     scenario("removed selected window during flip")
         .window("current")
@@ -215,7 +244,7 @@ fn removing_selected_window_during_flip_does_not_activate_it() {
 }
 
 #[test]
-#[ignore = "executable reproducer: lifecycle removal does not reconcile unselected candidates"]
+#[ignore = "Spec 0093: lifecycle removal does not reconcile unselected candidates"]
 fn removing_unselected_window_during_flip_updates_preview_candidates() {
     scenario("removed unselected window leaves only live previews")
         .window("current")
@@ -242,7 +271,7 @@ fn removing_unselected_window_during_flip_updates_preview_candidates() {
 }
 
 #[test]
-#[ignore = "executable reproducer: lifecycle removal does not reconcile the active candidate list"]
+#[ignore = "Spec 0093: lifecycle removal does not reconcile the active candidate list"]
 fn removing_current_window_during_flip_never_reactivates_it() {
     scenario("removed current window cannot remain a flip candidate")
         .window("current")
@@ -269,7 +298,7 @@ fn removing_current_window_during_flip_never_reactivates_it() {
 }
 
 #[test]
-#[ignore = "executable reproducer: removing every candidate still emits activation"]
+#[ignore = "Spec 0093: removing every candidate still emits activation"]
 fn removing_all_flip_candidates_closes_without_activation() {
     scenario("empty flip after final window removal")
         .window("current")
@@ -293,7 +322,7 @@ fn removing_all_flip_candidates_closes_without_activation() {
 }
 
 #[test]
-#[ignore = "audit finding: click_window bypasses the production input and effect path"]
+#[ignore = "Spec 0094: click_window bypasses the production input and effect path"]
 fn semantic_window_click_is_observed_through_production_effects() {
     scenario("window click authority")
         .window("editor")

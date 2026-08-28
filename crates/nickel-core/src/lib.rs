@@ -1,7 +1,11 @@
+pub mod focus;
 pub mod hotkeys;
 pub mod launcher;
+pub mod output_layout;
 pub mod quick_settings;
 pub mod run;
+pub mod scenario;
 pub mod shell_settings;
+pub mod task_switcher;
 pub mod theme;
 pub mod wallpaper_settings;

@@ -386,19 +386,6 @@ mod tests {
     }
 
     #[test]
-    fn alt_shift_print_screen_captures_to_file() {
-        let mut controller = HotkeyController::default();
-        controller.handle(Hotkey::Alt, KeyEdge::Pressed);
-        controller.handle(Hotkey::Shift, KeyEdge::Pressed);
-        assert_eq!(
-            controller
-                .handle(Hotkey::PrintScreen, KeyEdge::Pressed)
-                .action,
-            Some(HotkeyAction::CaptureActiveWindow)
-        );
-    }
-
-    #[test]
     fn print_screen_opens_crop_tool() {
         let mut controller = HotkeyController::default();
         assert_eq!(

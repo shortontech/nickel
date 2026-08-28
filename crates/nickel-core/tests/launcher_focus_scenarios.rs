@@ -56,7 +56,7 @@ fn closing_and_reopening_launcher_reuses_surface_but_allocates_a_new_focus_trans
 }
 
 #[test]
-#[ignore = "harness finding: acknowledged focus loss hides without restoring prior window focus; proposed private spec: launcher focus restoration effects"]
+#[ignore = "Spec 0097: acknowledged focus loss hides without restoring prior window focus"]
 fn acknowledged_launcher_focus_loss_hides_once_and_restores_previous_window_focus() {
     let opened = scenario("acknowledged launcher focus restoration")
         .window("editor")
@@ -79,7 +79,7 @@ fn acknowledged_launcher_focus_loss_hides_once_and_restores_previous_window_focu
 }
 
 #[test]
-#[ignore = "harness finding: pointer dismissal hides without restoring prior window focus; proposed private spec: launcher focus restoration effects"]
+#[ignore = "Spec 0097: pointer dismissal hides without restoring prior window focus"]
 fn desktop_dismissal_is_idempotent_and_restores_focus_only_on_the_transition() {
     let opened = scenario("desktop dismissal is one transition")
         .window("terminal")
@@ -118,6 +118,21 @@ fn controller_and_accessibility_panel_activation_share_the_focus_effect_contract
             ClickTarget::PanelLauncher,
         )
         .expect_visible(Surface::Launcher)
+        .expect_launcher_effects(&[
+            LauncherEffect::ShowSurface(SurfaceIdentity(1)),
+            LauncherEffect::RequestFocus(first_focus_request()),
+        ]);
+}
+
+#[test]
+fn invoking_taskbar_output_owns_launcher_without_replacing_its_surface() {
+    scenario("launcher follows the invoking taskbar")
+        .output("DP-1", 1920, 1080, 0)
+        .output("HDMI-A-1", 2560, 1440, 1)
+        .click_panel_launcher_on("HDMI-A-1")
+        .capture_surface("launcher", Surface::Launcher)
+        .expect_launcher_output("HDMI-A-1")
+        .expect_same_surface("launcher", Surface::Launcher)
         .expect_launcher_effects(&[
             LauncherEffect::ShowSurface(SurfaceIdentity(1)),
             LauncherEffect::RequestFocus(first_focus_request()),
