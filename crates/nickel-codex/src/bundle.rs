@@ -115,20 +115,33 @@ mod tests {
     fn release_manifest_pins_all_declared_targets() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let manifest = BundleManifest::read(&root.join("packaging/codex/manifest.toml")).unwrap();
-        for target in [
+        let targets = [
             "x86_64-unknown-linux-musl",
             "aarch64-unknown-linux-musl",
             "x86_64-pc-windows-msvc",
             "aarch64-pc-windows-msvc",
             "x86_64-apple-darwin",
             "aarch64-apple-darwin",
-        ] {
-            assert!(
-                manifest
-                    .artifact
-                    .iter()
-                    .any(|artifact| artifact.target == target)
-            );
+        ];
+        assert_eq!(manifest.artifact.len(), targets.len());
+        for target in targets {
+            let artifact = manifest
+                .artifact
+                .iter()
+                .find(|artifact| artifact.target == target)
+                .unwrap_or_else(|| panic!("missing release target {target}"));
+            for (label, digest) in [
+                ("archive", &artifact.archive_sha256),
+                ("binary", &artifact.sha256),
+            ] {
+                assert_eq!(digest.len(), 64, "{target} {label} digest length");
+                assert!(
+                    digest.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                    "{target} {label} digest is not hexadecimal"
+                );
+            }
+            assert!(!artifact.filename.is_empty());
+            assert!(!artifact.archive_member.is_empty());
         }
         assert!(root.join("LICENSE-APACHE").is_file());
         assert!(!manifest.upstream_revision.is_empty());

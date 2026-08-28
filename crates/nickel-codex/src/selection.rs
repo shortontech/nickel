@@ -429,7 +429,13 @@ mod tests {
         fs::write(&executable, b"fixture").unwrap();
         let selector = Selector::new(Some(executable.clone()));
         let path = env::join_paths([directory.path()]).unwrap();
-        assert_eq!(selector.discover(Some(&path)).len(), 1);
+        assert_eq!(
+            selector.discover(Some(&path)),
+            vec![Candidate {
+                source: CandidateSource::Installed,
+                path: executable,
+            }]
+        );
     }
 
     #[test]
@@ -438,5 +444,15 @@ mod tests {
             Selector::new(None).select(BackendChoice::Path(PathBuf::from("/missing/codex")));
         assert!(selection.selected.is_none());
         assert_eq!(selection.probes.len(), 1);
+        assert_eq!(
+            selection.probes[0].candidate.source,
+            CandidateSource::Explicit
+        );
+        assert_eq!(
+            selection.probes[0].candidate.path,
+            PathBuf::from("/missing/codex")
+        );
+        assert!(!selection.probes[0].compatible);
+        assert!(selection.probes[0].reason.contains("does not exist"));
     }
 }
