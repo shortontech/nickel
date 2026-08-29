@@ -19,6 +19,7 @@ Usage:
   nickel-test-input window activate|close|minimize|maximize|fullscreen WINDOW_ID
   nickel-test-input session restart-shell|lock|unlock|suspend|logout|reboot|power-off
   nickel-test-input idle-inhibition
+  nickel-test-input caches
   nickel-test-input move X Y
   nickel-test-input move-relative DX DY
   nickel-test-input button left|right pressed|released
@@ -53,6 +54,7 @@ enum Parsed {
     SessionAction(Option<nickel_session_protocol::SessionAction>),
     Unlock,
     IdleInhibition,
+    Caches,
     Help,
 }
 
@@ -142,6 +144,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, String> {
             }))
         }
         [command] if command == "idle-inhibition" => Ok(Parsed::IdleInhibition),
+        [command] if command == "caches" => Ok(Parsed::Caches),
         [command, x, y] if command == "move" => Ok(Parsed::Input(TestInput::PointerMove {
             x: x.parse()
                 .map_err(|_| format!("invalid X coordinate {x:?}"))?,
@@ -252,6 +255,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Parsed::SessionAction(None) => Request::Command(Command::LogOut),
         Parsed::Unlock => Request::Command(Command::Unlock),
         Parsed::IdleInhibition => Request::Query(nickel_session_protocol::Query::IdleInhibition),
+        Parsed::Caches => Request::Query(nickel_session_protocol::Query::CacheDiagnostics),
     };
     let control = env::var_os("NICKEL_SESSION_CONTROL")
         .map(PathBuf::from)
@@ -311,6 +315,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         ServerMessage::IdleInhibition { surfaces } => {
             println!("{surfaces}");
+            Ok(())
+        }
+        ServerMessage::CacheDiagnostics(diagnostics) => {
+            println!(
+                "previews={}/{} bytes={}",
+                diagnostics.preview_entries,
+                diagnostics.preview_capacity,
+                diagnostics.preview_bytes
+            );
             Ok(())
         }
         ServerMessage::Workspaces(state) => {
@@ -397,6 +410,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         | Parsed::IdleInhibition => {
             Err("nested compositor test input is only available on Unix".into())
         }
+        Parsed::Caches => Err("nested compositor diagnostics are only available on Unix".into()),
     }
 }
 
@@ -410,6 +424,7 @@ mod tests {
             parse(["idle-inhibition".into()]),
             Ok(Parsed::IdleInhibition)
         ));
+        assert!(matches!(parse(["caches".into()]), Ok(Parsed::Caches)));
         assert!(matches!(
             parse(["workspaces".into()]),
             Ok(Parsed::Workspaces)

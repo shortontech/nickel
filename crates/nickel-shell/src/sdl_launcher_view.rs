@@ -4,7 +4,7 @@
 //! into component paint commands and stable semantic actions.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::{Arc, OnceLock},
 };
 
@@ -240,11 +240,14 @@ pub fn reduce_launcher_action(
 }
 
 /// CPU image cache with stable IDs for `PaintCommand::Image`.
-#[derive(Default)]
 pub struct LauncherIconCache {
     icons: HashMap<String, CachedIcon>,
+    insertion_order: VecDeque<String>,
     next_id: u16,
+    evictions: u64,
 }
+
+const LAUNCHER_ICON_CACHE_CAPACITY: usize = 512;
 
 struct CachedIcon {
     id: u16,
@@ -255,8 +258,41 @@ impl LauncherIconCache {
     pub fn new() -> Self {
         Self {
             icons: HashMap::new(),
+            insertion_order: VecDeque::new(),
             // Keep launcher IDs away from wallpaper and panel fixed IDs.
             next_id: 0x4000,
+            evictions: 0,
+        }
+    }
+
+    pub fn diagnostics(&self) -> LauncherIconCacheDiagnostics {
+        LauncherIconCacheDiagnostics {
+            entries: self.icons.len(),
+            capacity: LAUNCHER_ICON_CACHE_CAPACITY,
+            evictions: self.evictions,
+        }
+    }
+
+    fn insert(&mut self, key: String, cached: CachedIcon) {
+        let evictions_before = self.evictions;
+        while self.icons.len() >= LAUNCHER_ICON_CACHE_CAPACITY {
+            let Some(oldest) = self.insertion_order.pop_front() else {
+                break;
+            };
+            if self.icons.remove(&oldest).is_some() {
+                self.evictions = self.evictions.saturating_add(1);
+            }
+        }
+        self.insertion_order.push_back(key.clone());
+        self.icons.insert(key, cached);
+        if self.evictions != evictions_before {
+            let diagnostics = self.diagnostics();
+            tracing::debug!(
+                entries = diagnostics.entries,
+                capacity = diagnostics.capacity,
+                evictions = diagnostics.evictions,
+                "launcher icon cache evicted its oldest entry"
+            );
         }
     }
 
@@ -275,7 +311,7 @@ impl LauncherIconCache {
             .map(Arc::new);
         let id = self.next_id;
         self.next_id = self.next_id.checked_add(1).unwrap_or(0x4000);
-        self.icons.insert(
+        self.insert(
             application.id().to_owned(),
             CachedIcon {
                 id,
@@ -313,7 +349,7 @@ impl LauncherIconCache {
         });
         let id = self.next_id;
         self.next_id = self.next_id.checked_add(1).unwrap_or(0x4000);
-        self.icons.insert(
+        self.insert(
             key,
             CachedIcon {
                 id,
@@ -322,6 +358,19 @@ impl LauncherIconCache {
         );
         image.map(|image| (id, image))
     }
+}
+
+impl Default for LauncherIconCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LauncherIconCacheDiagnostics {
+    pub entries: usize,
+    pub capacity: usize,
+    pub evictions: u64,
 }
 
 pub fn build_launcher_frame(
@@ -1439,6 +1488,27 @@ mod tests {
                 .iter()
                 .all(|target| target.action != LauncherAction::Dismiss),
             "inside-surface hit testing cannot own outside dismissal"
+        );
+    }
+
+    #[test]
+    fn launcher_icon_cache_reports_and_enforces_its_hard_bound() {
+        let mut cache = LauncherIconCache::new();
+        for index in 0..=LAUNCHER_ICON_CACHE_CAPACITY {
+            let _ = cache.structural(
+                &format!("fixture-{index}"),
+                include_bytes!("../../../assets/icons/nickel-start.svg"),
+                index as u32,
+            );
+        }
+
+        assert_eq!(
+            cache.diagnostics(),
+            LauncherIconCacheDiagnostics {
+                entries: LAUNCHER_ICON_CACHE_CAPACITY,
+                capacity: LAUNCHER_ICON_CACHE_CAPACITY,
+                evictions: 1,
+            }
         );
     }
 

@@ -719,11 +719,28 @@ impl NickelSession {
             Query::IdleInhibition => ServerMessage::IdleInhibition {
                 surfaces: u16::try_from(self.idle_inhibitors.len()).unwrap_or(u16::MAX),
             },
+            Query::CacheDiagnostics => {
+                ServerMessage::CacheDiagnostics(nickel_session_protocol::CacheDiagnostics {
+                    preview_entries: u16::try_from(self.preview_frames.len()).unwrap_or(u16::MAX),
+                    preview_capacity: u16::try_from(nickel_session_protocol::MAX_WINDOWS)
+                        .unwrap_or(u16::MAX),
+                    preview_bytes: self
+                        .preview_frames
+                        .values()
+                        .map(|frame| frame.rgba.len() as u64)
+                        .sum(),
+                })
+            }
             Query::Workspaces => ServerMessage::Workspaces(self.protocol_workspaces()),
             Query::Preview { window } => {
                 let id = WindowId(window.0);
                 if !self.windows.snapshot().iter().any(|entry| entry.id == id) {
                     return protocol_error(ErrorCode::InvalidWindow, "unknown window id");
+                }
+                if !self.preview_requests.contains(&id)
+                    && self.preview_requests.len() >= nickel_session_protocol::MAX_WINDOWS
+                {
+                    return protocol_error(ErrorCode::ResourceLimit, "preview cache is full");
                 }
                 self.preview_requests.insert(id);
                 let Some(frame) = self.preview_frames.get(&id) else {

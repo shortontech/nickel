@@ -5,7 +5,7 @@
 //! software renderer can blend the same bytes directly.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     hash::{Hash, Hasher},
     sync::Arc,
 };
@@ -107,6 +107,19 @@ pub struct TextAssetCache {
     font_system: FontSystem,
     swash_cache: SwashCache,
     assets: HashMap<TextKey, Arc<RgbaAsset>>,
+    insertion_order: VecDeque<TextKey>,
+    evictions: u64,
+}
+
+const TEXT_ASSET_CAPACITY: usize = 512;
+const IMAGE_ORIGINAL_CAPACITY: usize = 256;
+const IMAGE_SCALED_CAPACITY: usize = 512;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CacheDiagnostics {
+    pub entries: usize,
+    pub capacity: usize,
+    pub evictions: u64,
 }
 
 impl Default for TextAssetCache {
@@ -121,6 +134,8 @@ impl TextAssetCache {
             font_system: FontSystem::new(),
             swash_cache: SwashCache::new(),
             assets: HashMap::new(),
+            insertion_order: VecDeque::new(),
+            evictions: 0,
         }
     }
 
@@ -130,12 +145,22 @@ impl TextAssetCache {
             return Arc::clone(asset);
         }
         let asset = Arc::new(self.rasterize(&key));
+        while self.assets.len() >= TEXT_ASSET_CAPACITY {
+            let Some(oldest) = self.insertion_order.pop_front() else {
+                break;
+            };
+            if self.assets.remove(&oldest).is_some() {
+                self.evictions = self.evictions.saturating_add(1);
+            }
+        }
+        self.insertion_order.push_back(key.clone());
         self.assets.insert(key, Arc::clone(&asset));
         asset
     }
 
     pub fn clear(&mut self) {
         self.assets.clear();
+        self.insertion_order.clear();
     }
 
     pub fn len(&self) -> usize {
@@ -144,6 +169,14 @@ impl TextAssetCache {
 
     pub fn is_empty(&self) -> bool {
         self.assets.is_empty()
+    }
+
+    pub fn diagnostics(&self) -> CacheDiagnostics {
+        CacheDiagnostics {
+            entries: self.assets.len(),
+            capacity: TEXT_ASSET_CAPACITY,
+            evictions: self.evictions,
+        }
     }
 
     fn rasterize(&mut self, key: &TextKey) -> RgbaAsset {
@@ -233,12 +266,27 @@ struct ImageKey {
 pub struct ImageAssetCache {
     originals: HashMap<ImageAssetId, Arc<RgbaAsset>>,
     scaled: HashMap<ImageKey, Arc<RgbaAsset>>,
+    original_order: VecDeque<ImageAssetId>,
+    scaled_order: VecDeque<ImageKey>,
+    original_evictions: u64,
+    scaled_evictions: u64,
 }
 
 impl ImageAssetCache {
     pub fn insert(&mut self, id: ImageAssetId, image: RgbaImage) -> Arc<RgbaAsset> {
-        self.scaled.retain(|key, _| key.id != id);
+        self.remove(id);
+        while self.originals.len() >= IMAGE_ORIGINAL_CAPACITY {
+            let Some(oldest) = self.original_order.pop_front() else {
+                break;
+            };
+            if self.originals.remove(&oldest).is_some() {
+                self.scaled.retain(|key, _| key.id != oldest);
+                self.scaled_order.retain(|key| key.id != oldest);
+                self.original_evictions = self.original_evictions.saturating_add(1);
+            }
+        }
         let asset = Arc::new(RgbaAsset::new(image));
+        self.original_order.push_back(id);
         self.originals.insert(id, Arc::clone(&asset));
         asset
     }
@@ -270,6 +318,15 @@ impl ImageAssetCache {
             FilterType::Triangle,
         );
         let asset = Arc::new(RgbaAsset::new(pixels));
+        while self.scaled.len() >= IMAGE_SCALED_CAPACITY {
+            let Some(oldest) = self.scaled_order.pop_front() else {
+                break;
+            };
+            if self.scaled.remove(&oldest).is_some() {
+                self.scaled_evictions = self.scaled_evictions.saturating_add(1);
+            }
+        }
+        self.scaled_order.push_back(key);
         self.scaled.insert(key, Arc::clone(&asset));
         Some(asset)
     }
@@ -277,11 +334,30 @@ impl ImageAssetCache {
     pub fn remove(&mut self, id: ImageAssetId) {
         self.originals.remove(&id);
         self.scaled.retain(|key, _| key.id != id);
+        self.original_order.retain(|candidate| *candidate != id);
+        self.scaled_order.retain(|key| key.id != id);
     }
 
     pub fn clear(&mut self) {
         self.originals.clear();
         self.scaled.clear();
+        self.original_order.clear();
+        self.scaled_order.clear();
+    }
+
+    pub fn diagnostics(&self) -> (CacheDiagnostics, CacheDiagnostics) {
+        (
+            CacheDiagnostics {
+                entries: self.originals.len(),
+                capacity: IMAGE_ORIGINAL_CAPACITY,
+                evictions: self.original_evictions,
+            },
+            CacheDiagnostics {
+                entries: self.scaled.len(),
+                capacity: IMAGE_SCALED_CAPACITY,
+                evictions: self.scaled_evictions,
+            },
+        )
     }
 }
 
@@ -354,5 +430,61 @@ mod tests {
 
         assert_eq!((first.width(), first.height()), (16, 16));
         assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn text_cache_reports_and_enforces_its_hard_bound() {
+        let mut cache = TextAssetCache::new();
+        for index in 0..=TEXT_ASSET_CAPACITY {
+            cache.get(TextRequest::label(
+                &format!("label-{index}"),
+                8.0,
+                [255, 255, 255, 255],
+            ));
+        }
+
+        assert_eq!(
+            cache.diagnostics(),
+            CacheDiagnostics {
+                entries: TEXT_ASSET_CAPACITY,
+                capacity: TEXT_ASSET_CAPACITY,
+                evictions: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn image_cache_bounds_originals_and_scaled_variants_independently() {
+        let mut cache = ImageAssetCache::default();
+        for index in 0..=IMAGE_ORIGINAL_CAPACITY {
+            cache.insert(
+                ImageAssetId(index as u64),
+                RgbaImage::from_pixel(1, 1, Rgba([index as u8, 0, 0, 255])),
+            );
+        }
+        let retained = ImageAssetId(IMAGE_ORIGINAL_CAPACITY as u64);
+        for size in 1..=IMAGE_SCALED_CAPACITY + 1 {
+            cache
+                .scaled(retained, size as u32, 1)
+                .expect("retained original");
+        }
+
+        let (originals, scaled) = cache.diagnostics();
+        assert_eq!(
+            originals,
+            CacheDiagnostics {
+                entries: IMAGE_ORIGINAL_CAPACITY,
+                capacity: IMAGE_ORIGINAL_CAPACITY,
+                evictions: 1,
+            }
+        );
+        assert_eq!(
+            scaled,
+            CacheDiagnostics {
+                entries: IMAGE_SCALED_CAPACITY,
+                capacity: IMAGE_SCALED_CAPACITY,
+                evictions: 1,
+            }
+        );
     }
 }

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-pub const PROTOCOL_VERSION: u16 = 5;
+pub const PROTOCOL_VERSION: u16 = 6;
 pub const MAX_FRAME_BYTES: usize = 196_608;
 pub const MAX_PREVIEW_WIDTH: u16 = 256;
 pub const MAX_PREVIEW_HEIGHT: u16 = 144;
@@ -44,6 +44,7 @@ pub enum Query {
     LauncherVisibility,
     SecureStorage,
     IdleInhibition,
+    CacheDiagnostics,
     Workspaces,
     Preview { window: WindowId },
 }
@@ -196,9 +197,17 @@ pub enum ServerMessage {
     LauncherVisibility { visible: bool },
     SecureStorage { state: SecureStorageState },
     IdleInhibition { surfaces: u16 },
+    CacheDiagnostics(CacheDiagnostics),
     Workspaces(WorkspaceState),
     Preview(PreviewFrame),
     Event(Event),
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheDiagnostics {
+    pub preview_entries: u16,
+    pub preview_capacity: u16,
+    pub preview_bytes: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
