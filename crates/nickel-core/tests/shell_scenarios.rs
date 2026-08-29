@@ -371,3 +371,23 @@ fn semantic_window_click_is_observed_through_production_effects() {
             &["WindowSurface geometry", "hit_test", "reduce_pointer_press"],
         );
 }
+
+#[test]
+fn semantic_window_target_tracks_production_geometry_changes() {
+    for (x, y, width, height) in [
+        (0.0, 0.0, 80.0, 60.0),
+        (973.0, 411.0, 377.0, 289.0),
+    ] {
+        scenario("window target follows fixture geometry")
+            .window("target")
+            .app("editor")
+            .bounds(x, y, width, height)
+            .window("other")
+            .app("terminal")
+            .bounds(x + width + 10.0, y, width, height)
+            .active()
+            .click_window("target")
+            .expect_active("target")
+            .expect_last_event_authority();
+    }
+}
