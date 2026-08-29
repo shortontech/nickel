@@ -136,12 +136,13 @@ impl XdgShellHandler for NickelSession {
             self.preview_window = None;
         }
         if let Some(id) = self.surface_windows.remove(&surface.wl_surface().id()) {
-            self.shell_owned_windows.remove(&id);
+            let restore_focus = self.windows.is_active(id) && !self.shell_owned_windows.remove(&id);
             self.minimized_windows.remove(&id);
             self.workspace_hidden_windows.remove(&id);
             self.workspaces.remove_window(&id);
             self.remove_window_from_switcher(id);
             self.windows.remove(id);
+            self.restore_focus_after_window_removal(restore_focus);
         }
         self.notify_protocol_snapshot();
     }

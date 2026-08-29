@@ -11,17 +11,18 @@ pub enum FileDialogOutcome {
     Failed(String),
 }
 
-/// Opens the platform-native image chooser through SDL's dialog adapter. On
-/// Linux SDL delegates to the desktop portal rather than a desktop-specific
-/// executable; Windows uses the native common dialog.
-pub fn choose_image_file(callback: Box<dyn Fn(FileDialogOutcome) + 'static>) -> Result<(), String> {
+/// Opens the platform-native image chooser. Linux uses the XDG portal
+/// directly; other platforms use SDL's native dialog adapter.
+#[cfg(not(target_os = "linux"))]
+pub fn choose_image_file(
+    callback: Box<dyn Fn(FileDialogOutcome) + Send + 'static>,
+) -> Result<(), String> {
     use sdl3::dialog::{DialogError, DialogFileFilter, show_open_file_dialog};
 
     let filters = [DialogFileFilter {
         name: "Images",
         pattern: "png;jpg;jpeg;webp;bmp",
     }];
-    configure_file_dialog_backend();
     show_open_file_dialog(
         &filters,
         None::<&std::path::Path>,
@@ -42,9 +43,11 @@ pub fn choose_image_file(callback: Box<dyn Fn(FileDialogOutcome) + 'static>) -> 
     .map_err(|error| error.to_string())
 }
 
-fn configure_file_dialog_backend() {
-    #[cfg(target_os = "linux")]
-    sdl3::hint::set("SDL_FILE_DIALOG_DRIVER", "portal");
+#[cfg(target_os = "linux")]
+pub fn choose_image_file(
+    callback: Box<dyn Fn(FileDialogOutcome) + Send + 'static>,
+) -> Result<(), String> {
+    linux::choose_image_file(callback)
 }
 
 #[cfg(target_os = "windows")]
@@ -157,20 +160,11 @@ pub fn open_external_url(_url: &str) -> Result<(), String> {
     Err("opening external URLs is unsupported on this platform".into())
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
 mod external_url_tests {
     use std::path::Path;
 
-    use super::{configure_file_dialog_backend, nickel_file_command};
-
-    #[test]
-    fn linux_file_dialogs_require_the_portal_backend() {
-        configure_file_dialog_backend();
-        assert_eq!(
-            sdl3::hint::get("SDL_FILE_DIALOG_DRIVER").as_deref(),
-            Some("portal")
-        );
-    }
+    use super::nickel_file_command;
 
     #[test]
     fn directories_delegate_to_the_sibling_nickel_file() {

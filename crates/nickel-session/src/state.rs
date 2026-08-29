@@ -2535,6 +2535,28 @@ impl NickelSession {
         self.apply_task_switch_effects(effects);
     }
 
+    pub(crate) fn restore_focus_after_window_removal(&mut self, restore: bool) {
+        if !restore || self.locked {
+            return;
+        }
+        let replacement = self
+            .workspaces
+            .ordered()
+            .iter()
+            .find(|workspace| workspace.id == self.workspaces.active())
+            .and_then(|workspace| workspace.last_focused)
+            .filter(|candidate| !self.minimized_windows.contains_key(candidate));
+        if let Some(replacement) = replacement {
+            self.activate_window(replacement);
+        } else {
+            self.windows.deactivate_all();
+            self.seat
+                .get_keyboard()
+                .unwrap()
+                .set_focus(self, None, SERIAL_COUNTER.next_serial());
+        }
+    }
+
     fn apply_task_switch_effects(&mut self, effects: Vec<TaskSwitchEffect<WindowId>>) {
         for effect in effects {
             match effect {

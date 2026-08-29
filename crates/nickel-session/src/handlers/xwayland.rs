@@ -199,10 +199,12 @@ impl NickelSession {
             self.space.unmap_elem(&window);
         }
         if let Some(id) = self.x11_windows.remove(&surface.window_id()) {
+            let restore_focus = self.windows.is_active(id);
             self.workspace_hidden_windows.remove(&id);
             self.workspaces.remove_window(&id);
             self.windows.remove(id);
             self.remove_window_from_switcher(id);
+            self.restore_focus_after_window_removal(restore_focus);
         }
         if let Some(wl_surface) = surface.wl_surface() {
             self.surface_windows.remove(&wl_surface.id());

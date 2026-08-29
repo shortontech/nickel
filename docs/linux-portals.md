@@ -5,8 +5,9 @@ session bus. It does not launch desktop-specific helper programs.
 
 ## Current integration
 
-- SDL file dialogs are forced through SDL's `portal` backend. A missing portal is an explicit dialog
-  failure rather than permission to fall back to Zenity or another desktop helper.
+- Linux file dialogs call `org.freedesktop.portal.FileChooser` directly through the Rust platform
+  adapter. A missing portal is an explicit dialog failure; Nickel cannot fall back to Zenity or
+  another desktop helper. Windows and macOS continue to use SDL's native dialog adapters.
 - HTTP and HTTPS links are submitted directly to `org.freedesktop.portal.OpenURI` on the session bus.
 - The session installer supplies `nickel-portals.conf`. It selects the GTK implementation by default,
   retains KWallet as the Secret portal implementation where it is installed, and selects
@@ -28,6 +29,13 @@ video stream, and rendered recursively captured frames at the same resolution. W
 remained active, crossing Nickel's authenticated nested lock boundary changed a sampled captured
 client pixel from white to the compositor's opaque lock-cover color. This proves the portal receives
 the final locked composition rather than readable client content.
+
+On the same date, Nickel Settings ran in a read-only Bubblewrap mount namespace against an isolated
+session bus containing only `xdg-desktop-portal` and its GTK backend. Its production image-picker
+action opened `org.freedesktop.portal.FileChooser` inside Nickel, exposed only the configured image
+patterns, returned the selected file URI, and rendered the decoded image preview. Process inspection
+and the portal log confirmed that no Zenity or other desktop helper was launched. A forged Flatpak
+identity was separately rejected by the portal and is not counted as package-sandbox acceptance.
 
 ## Outstanding compatibility
 
