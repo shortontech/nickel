@@ -2684,7 +2684,6 @@ dependencies = [
  "nucleo-matcher",
  "pollster",
  "raw-window-handle",
- "redb",
  "resvg",
  "sdl3",
  "sha2",
@@ -3724,15 +3723,6 @@ dependencies = [
  "bytemuck",
  "font-types 0.12.4",
  "once_cell",
-]
-
-[[package]]
-name = "redb"
-version = "4.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de6c3b63e007e90ce536ec2ae4690826136a20ec8dbbbb400daef1bb999d2e36"
-dependencies = [
- "libc",
 ]
 
 [[package]]
