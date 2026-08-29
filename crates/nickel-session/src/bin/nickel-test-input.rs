@@ -26,6 +26,7 @@ Usage:
   nickel-test-input semantic panel-app APPLICATION_ID hover|click [OUTPUT]
   nickel-test-input semantic preview WINDOW_ID hover|activate|close|menu
   nickel-test-input semantic menu WINDOW_ID close|maximize|minimize
+  nickel-test-input scenario grouped-windows APPLICATION_ID
   nickel-test-input move X Y
   nickel-test-input move-relative DX DY
   nickel-test-input button left|right pressed|released
@@ -35,6 +36,7 @@ Usage:
 enum Parsed {
     Input(TestInput),
     Semantic(ShellSemanticTarget),
+    GroupedWindowsScenario(String),
     Windows,
     Workspaces,
     Outputs,
@@ -198,6 +200,11 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, String> {
                 },
             }))
         }
+        [command, scenario, application_id]
+            if command == "scenario" && scenario == "grouped-windows" =>
+        {
+            Ok(Parsed::GroupedWindowsScenario(application_id.clone()))
+        }
         [command, x, y] if command == "move" => Ok(Parsed::Input(TestInput::PointerMove {
             x: x.parse()
                 .map_err(|_| format!("invalid X coordinate {x:?}"))?,
@@ -258,19 +265,231 @@ fn parse_state(value: &str) -> Result<InputState, String> {
 }
 
 #[cfg(unix)]
+#[derive(Clone, Debug)]
+struct LiveWindowState {
+    id: u64,
+    application_id: String,
+    active: bool,
+    minimized: bool,
+    maximized: bool,
+}
+
+#[cfg(unix)]
+fn live_windows() -> Result<Vec<LiveWindowState>, Box<dyn std::error::Error>> {
+    let output = std::process::Command::new(std::env::current_exe()?)
+        .arg("windows")
+        .output()?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr)
+            .trim()
+            .to_owned()
+            .into());
+    }
+    String::from_utf8(output.stdout)?
+        .lines()
+        .map(|line| {
+            let fields = line.split('\t').collect::<Vec<_>>();
+            let id = fields
+                .first()
+                .ok_or("window snapshot is missing an ID")?
+                .parse()?;
+            let application_id = fields
+                .get(1)
+                .ok_or("window snapshot is missing an application ID")?
+                .to_string();
+            Ok(LiveWindowState {
+                id,
+                application_id,
+                active: fields.contains(&"active"),
+                minimized: fields.contains(&"minimized"),
+                maximized: fields.contains(&"maximized"),
+            })
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+fn run_live_command(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let output = std::process::Command::new(std::env::current_exe()?)
+        .args(arguments)
+        .output()?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} failed: {}",
+            arguments.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+        .into())
+    }
+}
+
+#[cfg(unix)]
+fn run_live_command_when_ready(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match run_live_command(arguments) {
+            Ok(()) => return Ok(()),
+            Err(error) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+                let _ = error;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn wait_for_live_state(
+    description: &str,
+    mut predicate: impl FnMut(&[LiveWindowState]) -> bool,
+) -> Result<Vec<LiveWindowState>, Box<dyn std::error::Error>> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let windows = live_windows()?;
+        if predicate(&windows) {
+            return Ok(windows);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(
+                format!("timed out waiting for {description}; last state: {windows:?}").into(),
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
+
+#[cfg(unix)]
+fn run_grouped_windows_scenario(application_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let initial = wait_for_live_state("two grouped fixture windows", |windows| {
+        windows
+            .iter()
+            .filter(|window| window.application_id == application_id)
+            .count()
+            >= 2
+    })?;
+    let fixtures = initial
+        .iter()
+        .filter(|window| window.application_id == application_id)
+        .take(2)
+        .cloned()
+        .collect::<Vec<_>>();
+    let initial_active = fixtures
+        .iter()
+        .find(|window| window.active)
+        .map(|window| window.id)
+        .ok_or("one grouped fixture window must initially be active")?;
+    let other = fixtures
+        .iter()
+        .find(|window| window.id != initial_active)
+        .map(|window| window.id)
+        .ok_or("two distinct grouped fixture windows are required")?;
+
+    let panel_hover = || {
+        run_live_command_when_ready(&[
+            "semantic".into(),
+            "panel-app".into(),
+            application_id.into(),
+            "hover".into(),
+        ])
+    };
+    let semantic = |kind: &str, window: u64, action: &str| {
+        run_live_command_when_ready(&[
+            "semantic".into(),
+            kind.into(),
+            window.to_string(),
+            action.into(),
+        ])
+    };
+
+    panel_hover()?;
+    semantic("preview", other, "hover")?;
+    wait_for_live_state("peek without an active-window change", |windows| {
+        windows
+            .iter()
+            .find(|window| window.id == initial_active)
+            .is_some_and(|window| window.active)
+    })?;
+
+    semantic("preview", other, "activate")?;
+    wait_for_live_state("preview activation", |windows| {
+        windows
+            .iter()
+            .find(|window| window.id == other)
+            .is_some_and(|window| window.active)
+    })?;
+
+    panel_hover()?;
+    semantic("preview", initial_active, "close")?;
+    wait_for_live_state("one exact grouped window to close", |windows| {
+        !windows.iter().any(|window| window.id == initial_active)
+            && windows.iter().any(|window| window.id == other)
+    })?;
+    panel_hover()?;
+    semantic("preview", other, "menu")?;
+    semantic("menu", other, "minimize")?;
+    wait_for_live_state("menu minimize", |windows| {
+        windows
+            .iter()
+            .find(|window| window.id == other)
+            .is_some_and(|window| window.minimized)
+    })?;
+
+    panel_hover()?;
+    semantic("preview", other, "activate")?;
+    wait_for_live_state("restore by preview activation", |windows| {
+        windows
+            .iter()
+            .find(|window| window.id == other)
+            .is_some_and(|window| window.active && !window.minimized)
+    })?;
+
+    panel_hover()?;
+    semantic("preview", other, "menu")?;
+    semantic("menu", other, "maximize")?;
+    wait_for_live_state("menu maximize", |windows| {
+        windows
+            .iter()
+            .find(|window| window.id == other)
+            .is_some_and(|window| window.maximized)
+    })?;
+
+    panel_hover()?;
+    semantic("preview", other, "menu")?;
+    semantic("menu", other, "maximize")?;
+    wait_for_live_state("menu restore", |windows| {
+        windows
+            .iter()
+            .find(|window| window.id == other)
+            .is_some_and(|window| !window.maximized)
+    })?;
+
+    println!(
+        "PASS: grouped windows used renderer-resolved hover, peek, activation, close, minimize, maximize, and restore targets"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use nickel_session_protocol::{
         ClientEnvelope, Command, Request, ServerEnvelope, ServerMessage, decode, encode,
     };
     use std::{env, fs, os::unix::net::UnixDatagram, path::PathBuf, process, time::Duration};
 
-    let (request, semantic) = match parse(env::args_os().skip(1))? {
+    let parsed = parse(env::args_os().skip(1))?;
+    if let Parsed::GroupedWindowsScenario(application_id) = &parsed {
+        return run_grouped_windows_scenario(application_id);
+    }
+    let (request, semantic) = match parsed {
         Parsed::Help => {
             print!("{HELP}");
             return Ok(());
         }
         Parsed::Input(input) => (Some(Request::Command(Command::TestInput { input })), None),
         Parsed::Semantic(target) => (None, Some(target)),
+        Parsed::GroupedWindowsScenario(_) => unreachable!("handled above"),
         Parsed::Windows => (
             Some(Request::Query(nickel_session_protocol::Query::Windows)),
             None,
@@ -538,6 +757,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Parsed::Input(_)
         | Parsed::Semantic(_)
+        | Parsed::GroupedWindowsScenario(_)
         | Parsed::Windows
         | Parsed::Workspaces
         | Parsed::Outputs
@@ -596,6 +816,15 @@ mod tests {
                 window: nickel_session_protocol::WindowId(9),
                 action: PreviewTargetAction::OpenMenu,
             }))
+        ));
+        assert!(matches!(
+            parse([
+                "scenario".into(),
+                "grouped-windows".into(),
+                "org.kde.konsole".into(),
+            ]),
+            Ok(Parsed::GroupedWindowsScenario(application_id))
+                if application_id == "org.kde.konsole"
         ));
         assert!(matches!(
             parse([

@@ -168,6 +168,8 @@ cargo run -p nickel-session --bin nickel-test-input -- \
   semantic preview 10 menu
 cargo run -p nickel-session --bin nickel-test-input -- \
   semantic menu 10 minimize
+cargo run -p nickel-session --bin nickel-test-input -- \
+  scenario grouped-windows org.kde.konsole
 ```
 
 The shell resolves these names from its live grouping and preview/menu frame records. The compositor
@@ -175,6 +177,12 @@ then translates the returned surface-local point through its authoritative shell
 and injects normal pointer motion and button events. The capability endpoint is absent unless the
 nested session was started with `--test-control`, requires the session token, and is removed from
 ordinary application environments.
+
+The grouped-windows scenario requires two disposable windows with the supplied application ID. It
+discovers their compositor IDs, drives hover, peek, activation, close, minimize, maximize, and
+restore through renderer-resolved targets, and polls authoritative window snapshots after each
+transition. Because it deliberately closes and changes those windows, use it only with fixtures in
+an explicitly test-controlled nested session.
 
 The client does not mutate shell state directly: events still pass through the compositor's normal
 hit testing, focus handling, and input reducers.

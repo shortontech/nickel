@@ -7,6 +7,11 @@ compositor to peek that window above a dimmed workspace without changing keyboar
 stacking. Close, activation, minimize, maximize/restore, and context-menu requests retain the exact
 window ID across the shell/session boundary.
 
+`nickel-test-input scenario grouped-windows APPLICATION_ID` turns this into an unattended live
+regression once two disposable fixture windows with that ID are mapped. It discovers window IDs from
+compositor snapshots, uses only renderer-resolved semantic targets for the interaction sequence, and
+polls compositor state after each operation. It contains no panel, preview-card, or menu geometry.
+
 Preview targets are renderer-owned. In an explicitly test-controlled nested session,
 `nickel-test-input semantic` asks the live shell frame to resolve a panel group, preview card, close
 button, or menu row. The compositor converts that surface-local result using its current mapped
