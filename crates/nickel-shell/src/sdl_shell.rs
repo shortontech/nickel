@@ -630,7 +630,7 @@ fn require_displays(displays: Vec<DisplayGeometry>) -> Result<Vec<DisplayGeometr
 
 #[cfg(test)]
 mod tests {
-    use super::{DisplayGeometry, PANEL_HEIGHT, SurfaceRole, require_displays, surface_geometry};
+    use super::{DisplayGeometry, SurfaceRole, require_displays, surface_geometry};
 
     #[test]
     fn rejects_a_headless_shell_startup() {
@@ -667,14 +667,7 @@ mod tests {
         );
         assert_eq!(
             surface_geometry(SurfaceRole::Panel, display),
-            (
-                "Nickel Panel",
-                40,
-                20 + 1006 - PANEL_HEIGHT as i32,
-                1920,
-                PANEL_HEIGHT,
-                false
-            )
+            ("Nickel Panel", 40, 970, 1920, 56, false)
         );
     }
 }
