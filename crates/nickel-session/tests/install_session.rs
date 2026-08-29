@@ -61,4 +61,6 @@ fn installer_stages_self_contained_sddm_session_from_any_working_directory() {
         .expect("installed portal preference");
     assert!(portals.contains("default=gtk"));
     assert!(portals.contains("org.freedesktop.impl.portal.Secret=kwallet"));
+    assert!(portals.contains("org.freedesktop.impl.portal.ScreenCast=wlr"));
+    assert!(portals.contains("org.freedesktop.impl.portal.Screenshot=wlr"));
 }

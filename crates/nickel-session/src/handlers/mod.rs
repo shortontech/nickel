@@ -1,5 +1,7 @@
 mod compatibility;
 mod compositor;
+mod image_copy_capture;
+pub(crate) use image_copy_capture::{is_portal_capture_client, portal_capture_pid_allowed};
 mod xdg_activation;
 mod xdg_shell;
 mod xwayland;

@@ -44,6 +44,8 @@ use smithay::{
     wayland::{
         compositor::{CompositorClientState, CompositorState},
         idle_inhibit::IdleInhibitManagerState,
+        image_capture_source::{ImageCaptureSourceState, OutputCaptureSourceState},
+        image_copy_capture::{Frame as ImageCopyFrame, ImageCopyCaptureState, Session},
         input_method::InputMethodManagerState,
         output::OutputManagerState,
         pointer_constraints::PointerConstraintsState,
@@ -197,6 +199,11 @@ pub struct NickelSession {
     pub idle_inhibit_state: IdleInhibitManagerState,
     pub input_method_state: InputMethodManagerState,
     pub xwayland_shell_state: XWaylandShellState,
+    pub image_capture_source_state: ImageCaptureSourceState,
+    pub output_capture_source_state: OutputCaptureSourceState,
+    pub image_copy_capture_state: ImageCopyCaptureState,
+    pub image_copy_sessions: Vec<Session>,
+    pub pending_image_copy_frames: Vec<(Output, ImageCopyFrame)>,
     pub xwm: Option<(XwmId, X11Wm)>,
     pub xwayland_restart_pending: bool,
     pub xwayland_display: Option<u32>,
@@ -380,6 +387,15 @@ impl NickelSession {
         // the compositor socket's same-user boundary.
         let input_method_state = InputMethodManagerState::new::<Self, _>(&dh, |_| true);
         let xwayland_shell_state = XWaylandShellState::new::<Self>(&dh);
+        let image_capture_source_state = ImageCaptureSourceState::new();
+        let output_capture_source_state = OutputCaptureSourceState::new_with_filter::<Self, _>(
+            &dh,
+            crate::handlers::is_portal_capture_client,
+        );
+        let image_copy_capture_state = ImageCopyCaptureState::new_with_filter::<Self, _>(
+            &dh,
+            crate::handlers::is_portal_capture_client,
+        );
         let popups = PopupManager::default();
 
         // A seat is a group of keyboards, pointer and touch devices.
@@ -460,6 +476,11 @@ impl NickelSession {
             idle_inhibit_state,
             input_method_state,
             xwayland_shell_state,
+            image_capture_source_state,
+            output_capture_source_state,
+            image_copy_capture_state,
+            image_copy_sessions: Vec::new(),
+            pending_image_copy_frames: Vec::new(),
             xwm: None,
             xwayland_restart_pending: false,
             xwayland_display: None,
@@ -3076,9 +3097,23 @@ impl NickelSession {
                 // Inside the callback, you should insert the client into the display.
                 //
                 // You may also associate some data with the client when inserting the client.
+                let portal_capture_allowed = nix::sys::socket::getsockopt(
+                    &client_stream,
+                    nix::sys::socket::sockopt::PeerCredentials,
+                )
+                .ok()
+                .is_some_and(|credentials| {
+                    crate::handlers::portal_capture_pid_allowed(credentials.pid())
+                });
                 state
                     .display_handle
-                    .insert_client(client_stream, Arc::new(ClientState::default()))
+                    .insert_client(
+                        client_stream,
+                        Arc::new(ClientState {
+                            compositor_state: CompositorClientState::default(),
+                            portal_capture_allowed,
+                        }),
+                    )
                     .unwrap();
             })
             .expect("Failed to init the wayland event source.");
@@ -3183,6 +3218,7 @@ impl Drop for NickelSession {
 #[derive(Default)]
 pub struct ClientState {
     pub compositor_state: CompositorClientState,
+    pub portal_capture_allowed: bool,
 }
 
 impl ClientData for ClientState {

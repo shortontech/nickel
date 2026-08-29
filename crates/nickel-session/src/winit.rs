@@ -326,6 +326,24 @@ pub fn init_winit(
                     }
                     backend.submit(Some(&[damage])).unwrap();
 
+                    if state.has_pending_image_copy_frames(&output) {
+                        match capture_output_rgba(&mut backend, size) {
+                            Ok(rgba) => state.complete_image_copy_frames(
+                                &output,
+                                &rgba,
+                                size.w as usize,
+                                size.h as usize,
+                            ),
+                            Err(error) => {
+                                tracing::warn!(%error, "failed to capture nested portal frame");
+                                state.fail_image_copy_frames(
+                                    &output,
+                                    smithay::wayland::image_copy_capture::CaptureFailureReason::Unknown,
+                                );
+                            }
+                        }
+                    }
+
                     if let Some(started) = state.launcher_show_requested_at.take()
                         && std::env::var_os("NICKEL_PERF_METRICS").is_some()
                     {
@@ -535,18 +553,7 @@ fn capture_output(
     path: &Path,
 ) -> nickel_session_protocol::CaptureResult {
     let result = (|| -> Result<(), String> {
-        let (renderer, framebuffer) = backend.bind().map_err(|error| error.to_string())?;
-        let buffer_size = smithay::utils::Size::<i32, Buffer>::from((size.w, size.h));
-        let region = Rectangle::<i32, Buffer>::from_size(buffer_size);
-        let mapping = renderer
-            .copy_framebuffer(&framebuffer, region, Fourcc::Abgr8888)
-            .map_err(|error| error.to_string())?;
-        let mapped = renderer
-            .map_texture(&mapping)
-            .map_err(|error| error.to_string())?;
-        // The nested output uses `Flipped180` for presentation, so restore its
-        // mapped framebuffer rows to top-down image order unconditionally.
-        let rgba = normalize_capture_rows(mapped, size.w as usize, size.h as usize, false)?;
+        let rgba = capture_output_rgba(backend, size)?;
         image::save_buffer(
             path,
             &rgba,
@@ -562,6 +569,27 @@ fn capture_output(
         },
         Err(message) => nickel_session_protocol::CaptureResult::Failed { message },
     }
+}
+
+fn capture_output_rgba(
+    backend: &mut winit::WinitGraphicsBackend<GlesRenderer>,
+    size: smithay::utils::Size<i32, smithay::utils::Physical>,
+) -> Result<Vec<u8>, String> {
+    if size.w <= 0 || size.h <= 0 {
+        return Err("output has no drawable size".into());
+    }
+    let (renderer, framebuffer) = backend.bind().map_err(|error| error.to_string())?;
+    let buffer_size = smithay::utils::Size::<i32, Buffer>::from((size.w, size.h));
+    let region = Rectangle::<i32, Buffer>::from_size(buffer_size);
+    let mapping = renderer
+        .copy_framebuffer(&framebuffer, region, Fourcc::Abgr8888)
+        .map_err(|error| error.to_string())?;
+    let mapped = renderer
+        .map_texture(&mapping)
+        .map_err(|error| error.to_string())?;
+    // The nested output uses `Flipped180` for presentation, so restore its
+    // mapped framebuffer rows to top-down image order unconditionally.
+    normalize_capture_rows(mapped, size.w as usize, size.h as usize, false)
 }
 
 fn capture_preview(renderer: &mut GlesRenderer, window: &Window) -> Option<PreviewFrame> {

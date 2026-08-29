@@ -9,15 +9,31 @@ session bus. It does not launch desktop-specific helper programs.
   failure rather than permission to fall back to Zenity or another desktop helper.
 - HTTP and HTTPS links are submitted directly to `org.freedesktop.portal.OpenURI` on the session bus.
 - The session installer supplies `nickel-portals.conf`. It selects the GTK implementation by default,
-  while retaining KWallet as the Secret portal implementation where it is installed.
+  retains KWallet as the Secret portal implementation where it is installed, and selects
+  `xdg-desktop-portal-wlr` for ScreenCast and Screenshot.
+- Nickel advertises the standard output-capture and image-copy-capture Wayland protocols. Portal
+  frames come from the final composited output rather than raw client buffers, so lock and recovery
+  overlays remain authoritative. The globals are visible only to the dedicated
+  `xdg-desktop-portal-wlr` process, not ordinary Wayland clients.
 
 These choices keep the request authority with the user's portal frontend and avoid depending on a
 KDE, GNOME, or other shell process being present in a Nickel session.
 
+## Recorded acceptance
+
+On 2026-08-29, Google Chrome's standard `getDisplayMedia` flow ran as a Wayland client in the nested
+Nickel compositor with an isolated `xdg-desktop-portal` session configured for
+`xdg-desktop-portal-wlr`. The browser selected the Nickel output, negotiated a 1280x800 PipeWire
+video stream, and rendered recursively captured frames at the same resolution. While that stream
+remained active, crossing Nickel's authenticated nested lock boundary changed a sampled captured
+client pixel from white to the compositor's opaque lock-cover color. This proves the portal receives
+the final locked composition rather than readable client content.
+
 ## Outstanding compatibility
 
-Nickel does not yet provide the compositor-side ScreenCast, Screenshot, or RemoteDesktop integration
-needed for reliable screen sharing. A portal implementation discovered from the host desktop is not
-acceptance evidence: for example, the KDE screen-capture backend depends on KWin and cannot serve a
-standalone Nickel compositor. Screen sharing remains incomplete until a representative sandboxed
-application negotiates a portal session, selects a Nickel-owned source, and receives PipeWire frames.
+The session image must provide `xdg-desktop-portal`, `xdg-desktop-portal-gtk`,
+`xdg-desktop-portal-wlr`, and PipeWire. RemoteDesktop input injection is not provided. A portal
+implementation discovered from the host desktop is not acceptance evidence: for example, the KDE
+screen-capture backend depends on KWin and cannot serve a standalone Nickel compositor. Native
+completion remains outstanding until the same application-level flow receives PipeWire
+frames in an SDDM-launched Nickel session.

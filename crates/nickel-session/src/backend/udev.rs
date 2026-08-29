@@ -1311,6 +1311,25 @@ impl NickelSession {
                 };
                 self.complete_output_capture(&path, response);
             }
+            if self.has_pending_image_copy_frames(&output)
+                && let Some(mode) = output.current_mode()
+            {
+                match capture_composited_rgba(&mut renderer, &elements, mode.size) {
+                    Ok(rgba) => self.complete_image_copy_frames(
+                        &output,
+                        &rgba,
+                        mode.size.w as usize,
+                        mode.size.h as usize,
+                    ),
+                    Err(error) => {
+                        tracing::warn!(%error, output = %output.name(), "failed to capture portal frame");
+                        self.fail_image_copy_frames(
+                            &output,
+                            smithay::wayland::image_copy_capture::CaptureFailureReason::Unknown,
+                        );
+                    }
+                }
+            }
             let retry = match surface.drm.render_frame(
                 &mut renderer,
                 &elements,
@@ -1840,6 +1859,25 @@ fn capture_composited_output<'a>(
     size: smithay::utils::Size<i32, Physical>,
     path: &Path,
 ) -> Result<(), String> {
+    let rgba = capture_composited_rgba(renderer, elements, size)?;
+    image::save_buffer(
+        path,
+        &rgba,
+        size.w as u32,
+        size.h as u32,
+        image::ColorType::Rgba8,
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn capture_composited_rgba<'a>(
+    renderer: &mut NativeRenderer<'a>,
+    elements: &[NativeElement<
+        NativeRenderer<'a>,
+        WaylandSurfaceRenderElement<NativeRenderer<'a>>,
+    >],
+    size: smithay::utils::Size<i32, Physical>,
+) -> Result<Vec<u8>, String> {
     if size.w <= 0 || size.h <= 0 {
         return Err("output has no drawable size".into());
     }
@@ -1875,15 +1913,7 @@ fn capture_composited_output<'a>(
     let mapped = renderer
         .map_texture(&mapping)
         .map_err(|error| error.to_string())?;
-    let rgba = normalize_capture_rows(mapped, size.w as usize, size.h as usize, flipped)?;
-    image::save_buffer(
-        path,
-        &rgba,
-        size.w as u32,
-        size.h as u32,
-        image::ColorType::Rgba8,
-    )
-    .map_err(|error| error.to_string())
+    normalize_capture_rows(mapped, size.w as usize, size.h as usize, flipped)
 }
 
 fn normalize_capture_rows(
