@@ -55,11 +55,11 @@ fn nickel_file_command(path: &std::path::Path) -> std::process::Command {
 
 #[cfg(target_os = "windows")]
 pub fn open_external_url(url: &str) -> Result<(), String> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows::{
+    use ::windows::{
         Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
         core::PCWSTR,
     };
+    use std::os::windows::ffi::OsStrExt;
 
     let operation = std::ffi::OsStr::new("open")
         .encode_wide()
