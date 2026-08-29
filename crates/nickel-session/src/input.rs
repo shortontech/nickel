@@ -77,6 +77,7 @@ impl NickelSession {
     }
 
     pub fn process_input_event<I: InputBackend>(&mut self, event: InputEvent<I>) -> Option<i32> {
+        self.note_input_activity();
         match event {
             InputEvent::Keyboard { event, .. } => {
                 let serial = SERIAL_COUNTER.next_serial();
@@ -693,6 +694,7 @@ impl NickelSession {
                 let output = self.space.outputs().next()?;
                 let geometry = self.space.output_geometry(output)?;
                 let location = event.position_transformed(geometry.size) + geometry.loc.to_f64();
+                self.active_touch_slots.insert(event.slot());
                 let touch = self.seat.get_touch().unwrap();
                 touch.down(
                     self,
@@ -721,6 +723,7 @@ impl NickelSession {
                 );
             }
             InputEvent::TouchUp { event, .. } => {
+                self.active_touch_slots.remove(&event.slot());
                 let touch = self.seat.get_touch().unwrap();
                 touch.up(
                     self,
@@ -732,7 +735,10 @@ impl NickelSession {
                 );
             }
             InputEvent::TouchFrame { .. } => self.seat.get_touch().unwrap().frame(self),
-            InputEvent::TouchCancel { .. } => self.seat.get_touch().unwrap().cancel(self),
+            InputEvent::TouchCancel { .. } => {
+                self.active_touch_slots.clear();
+                self.seat.get_touch().unwrap().cancel(self);
+            }
             _ => {}
         }
         None

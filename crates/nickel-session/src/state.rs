@@ -14,7 +14,9 @@ use std::{
 use nickel_core::{
     focus::FocusTransactions,
     hotkeys::{HotkeyAction, HotkeyController},
+    idle::{IdleController, IdleEffect, IdlePolicy},
     launcher::{LauncherPointerTarget, LauncherVisibility},
+    shell_settings::ShellSettings,
     task_switcher::{SwitchWindow, TaskSwitchEffect, TaskSwitcher},
     workspaces::{WorkspaceError, WorkspaceId, WorkspaceTransition, Workspaces},
 };
@@ -239,6 +241,9 @@ pub struct NickelSession {
     pub last_titlebar_click: Option<(ObjectId, u32, Point<f64, Logical>)>,
     pub suppress_left_button_release: bool,
     pub idle_inhibitors: HashMap<ObjectId, usize>,
+    pub(crate) active_touch_slots: HashSet<smithay::backend::input::TouchSlot>,
+    idle_controller: IdleController,
+    pub dimmed: bool,
     pub frame_cursor: crate::window_frame::FrameCursor,
     pub buffer_commit_tx: Option<smithay::reexports::calloop::channel::Sender<SurfaceBufferCommit>>,
     pub identify_outputs_until: Option<std::time::Instant>,
@@ -275,6 +280,58 @@ pub struct SurfaceBufferCommit {
 }
 
 impl NickelSession {
+    pub(crate) fn note_input_activity(&mut self) {
+        if self
+            .idle_controller
+            .note_activity(self.start_time.elapsed())
+            == Some(IdleEffect::Undim)
+        {
+            self.dimmed = false;
+            self.request_output_redraw();
+            #[cfg(feature = "backend-udev")]
+            if self.native.is_some() {
+                self.render_all_outputs();
+            }
+        }
+    }
+
+    pub(crate) fn poll_idle_policy(&mut self) {
+        let effects = self.idle_controller.poll(
+            self.start_time.elapsed(),
+            !self.idle_inhibitors.is_empty(),
+            self.locked,
+        );
+        for effect in effects {
+            match effect {
+                IdleEffect::Dim => {
+                    self.dimmed = true;
+                    self.request_output_redraw();
+                    #[cfg(feature = "backend-udev")]
+                    if self.native.is_some() {
+                        self.render_all_outputs();
+                    }
+                }
+                IdleEffect::Undim => {
+                    self.dimmed = false;
+                    self.request_output_redraw();
+                    #[cfg(feature = "backend-udev")]
+                    if self.native.is_some() {
+                        self.render_all_outputs();
+                    }
+                }
+                IdleEffect::Lock => {
+                    self.dimmed = false;
+                    self.lock_session();
+                }
+                IdleEffect::Suspend => {
+                    crate::session_services::request(
+                        crate::session_services::SystemAction::Suspend,
+                    );
+                }
+            }
+        }
+    }
+
     pub(crate) fn is_authenticated_shell_pid(&self, pid: u32) -> bool {
         self.expected_shell_pid.load(Ordering::Acquire) == pid
             && self.authenticated_shell_pids.contains(&pid)
@@ -286,6 +343,15 @@ impl NickelSession {
         test_control_enabled: bool,
     ) -> Self {
         let start_time = std::time::Instant::now();
+        let shell_settings = ShellSettings::load_default();
+        let idle_controller = IdleController::new(
+            IdlePolicy::from_seconds(
+                shell_settings.idle_dim_seconds,
+                shell_settings.idle_lock_seconds,
+                shell_settings.idle_suspend_seconds,
+            ),
+            std::time::Duration::ZERO,
+        );
 
         let dh = display.handle();
 
@@ -435,6 +501,9 @@ impl NickelSession {
             last_titlebar_click: None,
             suppress_left_button_release: false,
             idle_inhibitors: HashMap::new(),
+            active_touch_slots: HashSet::new(),
+            idle_controller,
+            dimmed: false,
             frame_cursor: crate::window_frame::FrameCursor::Arrow,
             buffer_commit_tx: None,
             identify_outputs_until: None,
@@ -1908,6 +1977,17 @@ impl NickelSession {
         self.lock_windows
             .retain(|candidate| self.space.elements().any(|mapped| mapped == candidate));
         if !self.lock_windows.contains(&window) {
+            // SDL recreates native Wayland surfaces when a hidden window is
+            // shown. The replacement may register before the old surface's
+            // unmap reaches Smithay, so mapped-state alone cannot identify the
+            // stale identity. There is exactly one lock surface per output;
+            // once that capacity is full, a newly registered identity replaces
+            // the oldest one and is the surface that receives configuration.
+            let output_count = self.space.outputs().count().max(1);
+            while self.lock_windows.len() >= output_count {
+                let stale = self.lock_windows.remove(0);
+                self.space.unmap_elem(&stale);
+            }
             self.lock_windows.push(window.clone());
         }
         self.relayout_lock_surfaces();
@@ -1988,7 +2068,10 @@ impl NickelSession {
             },
         );
         pointer.frame(self);
-        self.seat.get_touch().unwrap().cancel(self);
+        if !self.active_touch_slots.is_empty() {
+            self.active_touch_slots.clear();
+            self.seat.get_touch().unwrap().cancel(self);
+        }
         let focus = self
             .lock_windows
             .first()
@@ -2006,6 +2089,7 @@ impl NickelSession {
             return;
         }
         self.locked = false;
+        self.note_input_activity();
         self.relayout_lock_surfaces();
         if let Some(window) = self.lock_restore_window.take() {
             self.activate_window(window);

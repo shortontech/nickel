@@ -28,7 +28,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use smithay::reexports::{calloop::EventLoop, wayland_server::Display};
+use smithay::reexports::{
+    calloop::{
+        EventLoop,
+        timer::{TimeoutAction, Timer},
+    },
+    wayland_server::Display,
+};
 pub use state::NickelSession;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -43,6 +49,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let display: Display<NickelSession> = Display::new()?;
     let mut state = NickelSession::new(&mut event_loop, display, arguments.test_control);
+    event_loop.handle().insert_source(
+        Timer::from_duration(Duration::from_secs(1)),
+        |_, _, state| {
+            state.poll_idle_policy();
+            TimeoutAction::ToDuration(Duration::from_secs(1))
+        },
+    )?;
 
     let (shell_health_tx, shell_health_rx) = smithay::reexports::calloop::channel::channel();
     event_loop

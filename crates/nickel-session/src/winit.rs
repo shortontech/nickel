@@ -253,6 +253,20 @@ pub fn init_winit(
                             ));
                         }
                         overlay_elements.extend(window_elements);
+                        if state.dimmed && !state.locked {
+                            let dim =
+                                SolidColorBuffer::new(size.to_logical(1), [0.0, 0.0, 0.0, 0.48]);
+                            overlay_elements.insert(
+                                0,
+                                WinitFrameElement::from(SolidColorRenderElement::from_buffer(
+                                    &dim,
+                                    (0, 0),
+                                    1.0,
+                                    1.0,
+                                    Kind::Unspecified,
+                                )),
+                            );
+                        }
                         if state.locked {
                             let cover = SolidColorBuffer::new(
                                 size.to_logical(1),

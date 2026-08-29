@@ -1196,6 +1196,25 @@ impl NickelSession {
                     .into(),
                 );
             }
+            if self.dimmed && !self.locked {
+                let size = self
+                    .space
+                    .output_geometry(&output)
+                    .map(|geometry| geometry.size)
+                    .unwrap_or_else(|| (1, 1).into());
+                let dim = SolidColorBuffer::new(size, [0.0, 0.0, 0.0, 0.48]);
+                elements.insert(
+                    0,
+                    NativeCustomElement::from(SolidColorRenderElement::from_buffer(
+                        &dim,
+                        (0, 0),
+                        1.0,
+                        1.0,
+                        Kind::Unspecified,
+                    ))
+                    .into(),
+                );
+            }
             elements.push(
                 NativeCustomElement::from(SolidColorRenderElement::from_buffer(
                     &background,
