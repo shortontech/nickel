@@ -130,6 +130,36 @@ pub struct LiveShell {
     requested_codex_project: Option<String>,
 }
 
+fn notification_action_rects(action_count: usize, width: u32, height: u32) -> Vec<(usize, Rect)> {
+    let count = action_count;
+    if count == 0 {
+        return Vec::new();
+    }
+    let gap = 8.0;
+    let available = (width as f32 - 40.0 - gap * (count.saturating_sub(1) as f32)).max(1.0);
+    let button_width = available / count as f32;
+    (0..count)
+        .map(|index| {
+            (
+                index,
+                Rect::new(
+                    20.0 + index as f32 * (button_width + gap),
+                    height as f32 - 46.0,
+                    button_width,
+                    30.0,
+                ),
+            )
+        })
+        .collect()
+}
+
+fn contains_rect(rect: Rect, point: Point) -> bool {
+    point.x >= rect.origin.x
+        && point.y >= rect.origin.y
+        && point.x < rect.origin.x + rect.size.width
+        && point.y < rect.origin.y + rect.size.height
+}
+
 impl LiveShell {
     pub fn set_dashboard_projects(
         &mut self,
@@ -397,6 +427,21 @@ impl LiveShell {
         };
         self.notification_feed.dismiss(notification.id);
         true
+    }
+
+    pub fn notification_click(&mut self, x: f32, y: f32, width: u32, height: u32) -> bool {
+        let Some(notification) = self.notification.as_ref() else {
+            return false;
+        };
+        let action = notification_action_rects(notification.actions.len(), width, height)
+            .into_iter()
+            .find(|(_, rect)| contains_rect(*rect, Point { x, y }))
+            .map(|(index, _)| notification.actions[index].key.clone());
+        if let Some(action) = action {
+            let id = notification.id;
+            self.notification_feed.invoke(id, &action);
+        }
+        self.dismiss_notification()
     }
 
     pub fn panel_click(&mut self, x: f32, width: u32) -> bool {
@@ -1167,7 +1212,7 @@ impl LiveShell {
         } else {
             &notification.summary
         };
-        vec![
+        let mut commands = vec![
             PaintCommand::RoundedFill {
                 rect: Rect::new(0.0, 0.0, width as f32, height as f32),
                 color: self.palette.panel,
@@ -1187,14 +1232,30 @@ impl LiveShell {
                 true,
             ),
             text(
-                Rect::new(20.0, 55.0, width as f32 - 40.0, height as f32 - 70.0),
+                Rect::new(20.0, 55.0, width as f32 - 40.0, height as f32 - 116.0),
                 &notification.body,
                 16.0,
                 self.palette.muted,
                 TextAlign::Start,
                 false,
             ),
-        ]
+        ];
+        for (index, rect) in notification_action_rects(notification.actions.len(), width, height) {
+            commands.push(PaintCommand::RoundedFill {
+                rect,
+                color: self.palette.surface_hover,
+                radius: 7.0,
+            });
+            commands.push(text(
+                rect,
+                &notification.actions[index].label,
+                13.0,
+                self.palette.text,
+                TextAlign::Center,
+                true,
+            ));
+        }
+        commands
     }
 
     fn window_preview_scene(&mut self) -> Vec<PaintCommand> {
@@ -1690,12 +1751,12 @@ mod tests {
     use std::cell::Cell;
 
     use image::{Rgba, RgbaImage};
-    use nickel_ui::Rect;
+    use nickel_ui::{Point, Rect};
     use sdl3::keyboard::Keycode;
 
     use super::{
-        LiveShell, panel_status_layout, panel_tray_icons, platform::SecureStorageState,
-        secure_storage_status_label, visible_tray_item,
+        LiveShell, contains_rect, notification_action_rects, panel_status_layout, panel_tray_icons,
+        platform::SecureStorageState, secure_storage_status_label, visible_tray_item,
     };
     use crate::model::TrayItem;
 
@@ -1788,5 +1849,26 @@ mod tests {
         assert_eq!(visible_tray_item(&items, 0).unwrap().id, "1");
         assert_eq!(visible_tray_item(&items, 3).unwrap().id, "4");
         assert!(visible_tray_item(&items, 4).is_none());
+    }
+
+    #[test]
+    fn notification_action_targets_derive_from_production_geometry() {
+        let targets = notification_action_rects(3, 420, 180);
+        assert_eq!(targets.len(), 3);
+        for (expected, (index, rect)) in targets.iter().enumerate() {
+            assert_eq!(*index, expected);
+            let center = Point {
+                x: rect.origin.x + rect.size.width / 2.0,
+                y: rect.origin.y + rect.size.height / 2.0,
+            };
+            assert!(contains_rect(*rect, center));
+            assert_eq!(
+                targets
+                    .iter()
+                    .find(|(_, candidate)| contains_rect(*candidate, center))
+                    .map(|(index, _)| *index),
+                Some(expected)
+            );
+        }
     }
 }

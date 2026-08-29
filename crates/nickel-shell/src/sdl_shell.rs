@@ -751,7 +751,7 @@ fn surface_geometry(
             geometry.x + geometry.width.saturating_sub(438) as i32,
             geometry.y + 24,
             420.min(geometry.width),
-            140.min(geometry.height),
+            180.min(geometry.height),
             true,
         ),
         SurfaceRole::WindowPreview => (

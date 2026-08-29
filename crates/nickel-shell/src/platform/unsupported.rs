@@ -119,6 +119,7 @@ impl NotificationSource for NotificationFeed {
         None
     }
     fn dismiss(&self, _: u32) {}
+    fn invoke(&self, _: u32, _: &str) {}
 }
 
 pub fn send_shell_command(_: ShellCommand) -> bool {

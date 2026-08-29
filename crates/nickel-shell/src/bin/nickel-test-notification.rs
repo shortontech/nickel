@@ -10,6 +10,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "org.freedesktop.Notifications",
     )?;
     let mut closed = proxy.receive_signal("NotificationClosed")?;
+    let (server_name, _, _, _): (String, String, String, String) =
+        proxy.call("GetServerInformation", &())?;
+    if server_name != "Nickel" {
+        return Err(format!("notification owner is {server_name:?}, not Nickel").into());
+    }
     let hints = HashMap::<String, zbus::zvariant::OwnedValue>::new();
     let id: u32 = proxy.call(
         "Notify",
@@ -58,7 +63,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .into());
     }
-    println!("notification_id={id} replacement_id={replacement} closed_reason={reason}");
+    println!(
+        "server={server_name} notification_id={id} replacement_id={replacement} closed_reason={reason}"
+    );
     Ok(())
 }
 

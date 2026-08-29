@@ -13,7 +13,7 @@ window titles, icons, scales, and preview targets cannot grow a desktop session 
 | SDL text layouts and rasters | 2,048 each | Whole-cache reset at the limit |
 | SDL uploaded image textures | 512 | Whole-cache reset with explicit texture destruction |
 | Compositor window previews | 1,024 | Removed when no longer requested or when the window closes |
-| Notification history | 100 | Oldest notification is closed with the expired reason |
+| Notification history | 100 entries; 256-character app, 512-character summary, 4,096-character body, 3 actions | Oldest notification is closed with the expired reason |
 | Server-decoration title and shadow rasters | 128 each | Whole-cache reset at the limit |
 
 `nickel-test-input caches` reports the compositor preview entry count, hard limit, and current RGBA

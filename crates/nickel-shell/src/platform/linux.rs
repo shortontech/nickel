@@ -24,7 +24,10 @@ use crate::{
     icons,
     launcher::Launcher,
     model::{Application, ApplicationId, OpenWindow, TrayItem, WindowId, WindowPreview},
-    notification::{ClosedNotification, DesktopNotification, NotificationStore},
+    notification::{
+        ClosedNotification, DesktopNotification, MAX_NOTIFICATION_ACTIONS, NotificationAction,
+        NotificationRequest, NotificationStore,
+    },
     platform::{GlobalShortcut, NotificationSource, ShellCommand, TraySource, WindowAction},
 };
 
@@ -226,6 +229,25 @@ impl NotificationSource for NotificationFeed {
             emit_notification_closed(&self.connection, closed);
         }
     }
+
+    fn invoke(&self, id: u32, action_key: &str) {
+        let known = self
+            .store
+            .lock()
+            .is_ok_and(|store| store.has_action(id, action_key));
+        if !known {
+            return;
+        }
+        if let Err(error) = self.connection.emit_signal(
+            None::<&str>,
+            NOTIFICATION_PATH,
+            NOTIFICATION_SERVICE,
+            "ActionInvoked",
+            &(id, action_key),
+        ) {
+            tracing::warn!(%error, id, action_key, "failed to emit ActionInvoked");
+        }
+    }
 }
 
 struct NotificationService {
@@ -235,7 +257,7 @@ struct NotificationService {
 #[zbus::interface(name = "org.freedesktop.Notifications")]
 impl NotificationService {
     fn get_capabilities(&self) -> Vec<String> {
-        vec!["body".into(), "persistence".into()]
+        vec!["actions".into(), "body".into(), "persistence".into()]
     }
 
     fn get_server_information(&self) -> (String, String, String, String) {
@@ -255,7 +277,7 @@ impl NotificationService {
         _app_icon: String,
         summary: String,
         body: String,
-        _actions: Vec<String>,
+        actions: Vec<String>,
         _hints: std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
         expire_timeout: i32,
         #[zbus(signal_emitter)] emitter: zbus::object_server::SignalEmitter<'_>,
@@ -266,10 +288,13 @@ impl NotificationService {
             };
             store.notify(
                 replaces_id,
-                app_name,
-                summary,
-                body,
-                expire_timeout,
+                NotificationRequest {
+                    app_name: bounded_notification_text(app_name, 256),
+                    summary: bounded_notification_text(summary, 512),
+                    body: bounded_notification_text(body, 4_096),
+                    actions: notification_actions(actions),
+                    expire_timeout_ms: expire_timeout,
+                },
                 std::time::Instant::now(),
             )
         };
@@ -317,6 +342,29 @@ impl NotificationService {
         id: u32,
         action_key: &str,
     ) -> zbus::Result<()>;
+}
+
+fn notification_actions(values: Vec<String>) -> Vec<NotificationAction> {
+    values
+        .chunks_exact(2)
+        .filter_map(|pair| {
+            let key = pair[0].trim();
+            let label = pair[1].trim();
+            (!key.is_empty() && !label.is_empty()).then(|| NotificationAction {
+                key: key.chars().take(128).collect(),
+                label: label.chars().take(128).collect(),
+            })
+        })
+        .take(MAX_NOTIFICATION_ACTIONS)
+        .collect()
+}
+
+fn bounded_notification_text(value: String, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        value
+    } else {
+        value.chars().take(max_chars).collect()
+    }
 }
 
 fn notification_expiry_worker(
@@ -1031,14 +1079,45 @@ mod tests {
     };
 
     use super::{
-        SubscriptionState, notification_name_owned, parse_window, pixmap_to_rgba,
-        resolve_application_id, shell_command_payload, subscription_shortcut, tray_retry_delay,
+        SubscriptionState, bounded_notification_text, notification_actions,
+        notification_name_owned, parse_window, pixmap_to_rgba, resolve_application_id,
+        shell_command_payload, subscription_shortcut, tray_retry_delay,
     };
 
     #[test]
     fn existing_notification_owner_does_not_block_shell_startup() {
         assert!(!notification_name_owned(Err(zbus::Error::NameTaken)).unwrap());
         assert!(notification_name_owned(Ok(zbus::fdo::RequestNameReply::PrimaryOwner)).unwrap());
+    }
+
+    #[test]
+    fn notification_actions_require_complete_nonempty_pairs_and_are_bounded() {
+        let actions = notification_actions(vec![
+            "open".into(),
+            "Open".into(),
+            "".into(),
+            "Ignored".into(),
+            "reply".into(),
+            "Reply".into(),
+            "later".into(),
+            "Later".into(),
+            "overflow".into(),
+            "Overflow".into(),
+            "orphan".into(),
+        ]);
+        assert_eq!(
+            actions
+                .iter()
+                .map(|action| action.key.as_str())
+                .collect::<Vec<_>>(),
+            ["open", "reply", "later"]
+        );
+    }
+
+    #[test]
+    fn notification_text_limits_preserve_unicode_boundaries() {
+        assert_eq!(bounded_notification_text("éclair".into(), 2), "éc");
+        assert_eq!(bounded_notification_text("short".into(), 8), "short");
     }
 
     #[test]

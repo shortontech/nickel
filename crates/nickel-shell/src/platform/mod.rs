@@ -106,6 +106,7 @@ pub trait TraySource {
 pub trait NotificationSource {
     fn snapshot(&self) -> Option<crate::notification::DesktopNotification>;
     fn dismiss(&self, id: u32);
+    fn invoke(&self, id: u32, action_key: &str);
 }
 
 #[derive(Clone, Copy)]

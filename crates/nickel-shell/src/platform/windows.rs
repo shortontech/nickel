@@ -2434,6 +2434,7 @@ impl NotificationSource for NotificationFeed {
         None
     }
     fn dismiss(&self, _: u32) {}
+    fn invoke(&self, _: u32, _: &str) {}
 }
 
 impl TrayFeed {

@@ -843,12 +843,18 @@ fn main() -> Result<(), String> {
             Some(ShellEvent::PointerButton {
                 surface,
                 pressed: true,
+                x,
+                y,
                 ..
             }) if shell
                 .surface(surface)
                 .is_some_and(|entry| entry.role() == SurfaceRole::Notification) =>
             {
-                if state.dismiss_notification() {
+                let (width, height) = shell
+                    .surface(surface)
+                    .map(|entry| entry.window().size())
+                    .unwrap_or_default();
+                if state.notification_click(x, y, width, height) {
                     sync_visibility(&mut shell, &state);
                 }
             }
@@ -876,7 +882,6 @@ fn main() -> Result<(), String> {
                 let changed = match role {
                     SurfaceRole::Launcher => state.launcher_click(x, y),
                     SurfaceRole::ControlCenter => state.control_click(x, y, width, height),
-                    SurfaceRole::Notification => state.dismiss_notification(),
                     _ => false,
                 };
                 if changed {
