@@ -166,6 +166,7 @@ impl NickelSession {
         self.space.map_element(window.clone(), geometry.loc, true);
         if managed {
             let id = self.windows.insert();
+            self.workspaces.add_window(id);
             self.windows
                 .update_metadata(id, Some(surface.title()), Some(surface.class()));
             self.x11_windows.insert(surface.window_id(), id);
@@ -181,6 +182,7 @@ impl NickelSession {
                 Some(KeyboardFocusTarget::X11(surface)),
                 smithay::utils::SERIAL_COUNTER.next_serial(),
             );
+            self.workspaces.focused(&id);
             self.space.elements().for_each(|candidate| {
                 if let Some(toplevel) = candidate.toplevel() {
                     toplevel.send_pending_configure();
@@ -197,6 +199,8 @@ impl NickelSession {
             self.space.unmap_elem(&window);
         }
         if let Some(id) = self.x11_windows.remove(&surface.window_id()) {
+            self.workspace_hidden_windows.remove(&id);
+            self.workspaces.remove_window(&id);
             self.windows.remove(id);
             self.remove_window_from_switcher(id);
         }
@@ -503,6 +507,8 @@ impl XwmHandler for NickelSession {
             .map(|(_, id)| id)
             .collect::<Vec<_>>();
         for id in &removed_ids {
+            self.workspace_hidden_windows.remove(id);
+            self.workspaces.remove_window(id);
             self.windows.remove(*id);
         }
         self.surface_windows

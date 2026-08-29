@@ -1,12 +1,13 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-pub const PROTOCOL_VERSION: u16 = 4;
+pub const PROTOCOL_VERSION: u16 = 5;
 pub const MAX_FRAME_BYTES: usize = 196_608;
 pub const MAX_PREVIEW_WIDTH: u16 = 256;
 pub const MAX_PREVIEW_HEIGHT: u16 = 144;
 pub const MAX_SUBSCRIBERS: usize = 8;
 pub const MAX_WINDOWS: usize = 1_024;
 pub const MAX_OUTPUTS: usize = 32;
+pub const MAX_WORKSPACES: usize = 32;
 
 const MAGIC: [u8; 4] = *b"NIKL";
 const HEADER_BYTES: usize = 10;
@@ -39,9 +40,11 @@ pub enum Query {
     Snapshot,
     Windows,
     Outputs,
+    ShellSurfaces,
     LauncherVisibility,
     SecureStorage,
     IdleInhibition,
+    Workspaces,
     Preview { window: WindowId },
 }
 
@@ -67,6 +70,18 @@ pub enum Command {
     ApplyOutputs {
         layout: OutputLayout,
     },
+    CreateWorkspace,
+    RemoveWorkspace {
+        workspace: WorkspaceId,
+    },
+    SwitchWorkspace {
+        workspace: WorkspaceId,
+        output: Option<String>,
+    },
+    MoveWindowToWorkspace {
+        window: WindowId,
+        workspace: WorkspaceId,
+    },
     HighlightWindow {
         window: Option<WindowId>,
     },
@@ -78,6 +93,26 @@ pub enum Command {
     /// explicitly started with its test-control capability enabled.
     TestInput {
         input: TestInput,
+    },
+    /// Add or remove an output through the nested compositor's explicit test
+    /// capability. The native backend rejects this capability at startup.
+    TestOutput {
+        output: TestOutput,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case")]
+pub enum TestOutput {
+    Connect {
+        name: String,
+        logical_width: i32,
+        logical_height: i32,
+        scale_120: u32,
+        transform: OutputTransform,
+    },
+    Disconnect {
+        name: String,
     },
 }
 
@@ -119,7 +154,11 @@ pub enum TestKey {
     Tab,
     LeftAlt,
     LeftShift,
+    LeftControl,
     LeftMeta,
+    Left,
+    Right,
+    F11,
     PrintScreen,
 }
 
@@ -139,9 +178,11 @@ pub enum ServerMessage {
     Snapshot(Snapshot),
     Windows(Vec<WindowSnapshot>),
     Outputs(Vec<OutputSnapshot>),
+    ShellSurfaces(Vec<ShellSurfaceSnapshot>),
     LauncherVisibility { visible: bool },
     SecureStorage { state: SecureStorageState },
     IdleInhibition { surfaces: u16 },
+    Workspaces(WorkspaceState),
     Preview(PreviewFrame),
     Event(Event),
 }
@@ -169,6 +210,7 @@ pub enum Event {
     WindowRemoved { window: WindowId },
     Preview(PreviewFrame),
     OutputCaptureCompleted { path: String, result: CaptureResult },
+    Workspaces(WorkspaceState),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -192,6 +234,7 @@ pub struct Snapshot {
     pub focused: Option<WindowId>,
     pub stacking_front_to_back: Vec<WindowId>,
     pub launcher_visible: bool,
+    pub workspaces: WorkspaceState,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -205,7 +248,26 @@ pub struct WindowSnapshot {
     pub active: bool,
     pub minimized: bool,
     pub maximized: bool,
+    pub fullscreen: bool,
     pub geometry: Option<Geometry>,
+    pub workspace: WorkspaceId,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct WorkspaceId(pub u64);
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceState {
+    pub active: WorkspaceId,
+    pub active_output: Option<String>,
+    pub ordered: Vec<WorkspaceSnapshot>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceSnapshot {
+    pub id: WorkspaceId,
+    pub windows: Vec<WindowId>,
+    pub focused: Option<WindowId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -214,9 +276,33 @@ pub struct OutputSnapshot {
     pub model: String,
     pub geometry: Geometry,
     pub work_area: Geometry,
+    /// Fractional scale in Wayland protocol units (120 == 1.0).
+    pub scale_120: u32,
+    pub transform: OutputTransform,
     pub physical_width_mm: i32,
     pub physical_height_mm: i32,
     pub primary: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShellSurfaceSnapshot {
+    pub role: ShellRole,
+    pub geometry: Option<Geometry>,
+    pub output: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputTransform {
+    #[default]
+    Normal,
+    Rotate90,
+    Rotate180,
+    Rotate270,
+    Flipped,
+    Flipped90,
+    Flipped180,
+    Flipped270,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -296,6 +382,7 @@ pub enum WindowAction {
     Close,
     Minimize,
     MaximizeRestore,
+    FullscreenRestore,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -488,6 +575,60 @@ mod tests {
     }
 
     #[test]
+    fn nested_test_output_commands_round_trip() {
+        for output in [
+            TestOutput::Connect {
+                name: "DP-test".into(),
+                logical_width: 1024,
+                logical_height: 768,
+                scale_120: 180,
+                transform: OutputTransform::Rotate90,
+            },
+            TestOutput::Disconnect {
+                name: "DP-test".into(),
+            },
+        ] {
+            let envelope = ClientEnvelope {
+                token: "test-capability".into(),
+                request_id: 10,
+                request: Request::Command(Command::TestOutput { output }),
+            };
+            assert_eq!(
+                decode::<ClientEnvelope>(&encode(&envelope).unwrap()).unwrap(),
+                envelope
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_commands_round_trip_with_stable_ids_and_output_identity() {
+        for command in [
+            Command::CreateWorkspace,
+            Command::RemoveWorkspace {
+                workspace: WorkspaceId(3),
+            },
+            Command::SwitchWorkspace {
+                workspace: WorkspaceId(7),
+                output: Some("DP-2".into()),
+            },
+            Command::MoveWindowToWorkspace {
+                window: WindowId(11),
+                workspace: WorkspaceId(7),
+            },
+        ] {
+            let envelope = ClientEnvelope {
+                token: "session-token".into(),
+                request_id: 12,
+                request: Request::Command(command),
+            };
+            assert_eq!(
+                decode::<ClientEnvelope>(&encode(&envelope).unwrap()).unwrap(),
+                envelope
+            );
+        }
+    }
+
+    #[test]
     fn shell_role_ids_are_explicit_and_round_trip() {
         for role in [
             ShellRole::Desktop,
@@ -527,6 +668,8 @@ mod tests {
                     width: 1280,
                     height: 672,
                 },
+                scale_120: 180,
+                transform: OutputTransform::Rotate90,
                 physical_width_mm: 300,
                 physical_height_mm: 170,
                 primary: true,
@@ -538,16 +681,27 @@ mod tests {
                 active: true,
                 minimized: false,
                 maximized: false,
+                fullscreen: false,
                 geometry: Some(Geometry {
                     x: 32,
                     y: 32,
                     width: 800,
                     height: 600,
                 }),
+                workspace: WorkspaceId(1),
             }],
             focused: Some(WindowId(9)),
             stacking_front_to_back: vec![WindowId(9)],
             launcher_visible: false,
+            workspaces: WorkspaceState {
+                active: WorkspaceId(1),
+                active_output: Some("DP-1".into()),
+                ordered: vec![WorkspaceSnapshot {
+                    id: WorkspaceId(1),
+                    windows: vec![WindowId(9)],
+                    focused: Some(WindowId(9)),
+                }],
+            },
         };
         let envelope = ServerEnvelope {
             request_id: 44,
@@ -566,13 +720,24 @@ mod tests {
             active: true,
             minimized: false,
             maximized: false,
+            fullscreen: false,
             geometry: None,
+            workspace: WorkspaceId(1),
         };
         for message in [
             ServerMessage::Windows(vec![window.clone()]),
             ServerMessage::Event(Event::Windows(vec![window.clone()])),
             ServerMessage::Event(Event::Stacking {
                 front_to_back: vec![window.id],
+            }),
+            ServerMessage::Workspaces(WorkspaceState {
+                active: WorkspaceId(1),
+                active_output: None,
+                ordered: vec![WorkspaceSnapshot {
+                    id: WorkspaceId(1),
+                    windows: vec![window.id],
+                    focused: Some(window.id),
+                }],
             }),
         ] {
             let envelope = ServerEnvelope {
@@ -586,6 +751,30 @@ mod tests {
                 message
             );
         }
+    }
+
+    #[test]
+    fn shell_surface_diagnostics_round_trip_authoritative_placement() {
+        let message = ServerMessage::ShellSurfaces(vec![ShellSurfaceSnapshot {
+            role: ShellRole::Launcher,
+            geometry: Some(Geometry {
+                x: 1298,
+                y: 24,
+                width: 920,
+                height: 680,
+            }),
+            output: Some("DP-test".into()),
+        }]);
+        let envelope = ServerEnvelope {
+            request_id: 18,
+            message: message.clone(),
+        };
+        assert_eq!(
+            decode::<ServerEnvelope>(&encode(&envelope).unwrap())
+                .unwrap()
+                .message,
+            message
+        );
     }
 
     #[test]

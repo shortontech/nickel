@@ -671,7 +671,7 @@ impl NickelSession {
                     crtc,
                     SurfaceData {
                         global: Some(global),
-                        output,
+                        output: output.clone(),
                         drm,
                         background: SolidColorBuffer::new(
                             wl_mode.size.to_logical(1),
@@ -681,6 +681,7 @@ impl NickelSession {
                         invalidate_pending: device.is_evdi,
                     },
                 );
+                self.restore_output_windows(&output);
                 self.relayout_shell_surfaces();
                 self.schedule_render(node, Duration::ZERO);
                 tracing::info!(output = %name, "DRM output connected");
@@ -702,17 +703,20 @@ impl NickelSession {
         let Some(native) = self.native.as_mut() else {
             return;
         };
-        if let Some(mut surface) = native
+        let surface = native
             .devices
             .get_mut(&node)
-            .and_then(|device| device.surfaces.remove(&crtc))
-        {
+            .and_then(|device| device.surfaces.remove(&crtc));
+        let positions = native.layout.disconnect(&name);
+        if let Some(mut surface) = surface {
+            self.stage_output_removal(&surface.output);
             self.space.unmap_output(&surface.output);
+            surface.output.leave_all();
             if let Some(global) = surface.global.take() {
                 self.display_handle.remove_global::<NickelSession>(global);
             }
         }
-        let positions = native.layout.disconnect(&name);
+        self.reconcile_output_removal(&name);
         for position in positions {
             let output = self
                 .space
@@ -726,6 +730,8 @@ impl NickelSession {
             }
         }
         self.reflow_windows_to_connected_outputs();
+        self.relayout_maximized_windows();
+        self.relayout_fullscreen_windows();
         self.relayout_shell_surfaces();
         tracing::info!(output = %name, "DRM output disconnected");
     }
@@ -738,15 +744,30 @@ impl NickelSession {
             return;
         };
         let mut positions = Vec::new();
-        for (_, mut surface) in device.surfaces.drain() {
-            positions = native.layout.disconnect(&surface.output.name());
+        let mut removed_names = Vec::new();
+        let mut removed_surfaces = device
+            .surfaces
+            .drain()
+            .map(|(_, surface)| surface)
+            .collect::<Vec<_>>();
+        for surface in &removed_surfaces {
+            let name = surface.output.name();
+            positions = native.layout.disconnect(&name);
+            removed_names.push(name);
+        }
+        native.gpus.as_mut().remove_node(&device.render_node);
+        self.event_loop_handle.remove(device.registration);
+        for mut surface in removed_surfaces.drain(..) {
+            self.stage_output_removal(&surface.output);
             self.space.unmap_output(&surface.output);
+            surface.output.leave_all();
             if let Some(global) = surface.global.take() {
                 self.display_handle.remove_global::<NickelSession>(global);
             }
         }
-        native.gpus.as_mut().remove_node(&device.render_node);
-        self.event_loop_handle.remove(device.registration);
+        for name in removed_names {
+            self.reconcile_output_removal(&name);
+        }
         for position in positions {
             let output = self
                 .space
@@ -760,6 +781,8 @@ impl NickelSession {
             }
         }
         self.reflow_windows_to_connected_outputs();
+        self.relayout_maximized_windows();
+        self.relayout_fullscreen_windows();
         self.relayout_shell_surfaces();
         tracing::info!(%node, "DRM device removed");
     }

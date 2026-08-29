@@ -146,10 +146,16 @@ With the session-issued `NICKEL_SESSION_CONTROL` and `NICKEL_SESSION_TOKEN` envi
 
 ```bash
 cargo run -p nickel-session --bin nickel-test-input -- windows
+cargo run -p nickel-session --bin nickel-test-input -- workspaces
+cargo run -p nickel-session --bin nickel-test-input -- outputs
+cargo run -p nickel-session --bin nickel-test-input -- surfaces
 cargo run -p nickel-session --bin nickel-test-input -- move 64 700
 cargo run -p nickel-session --bin nickel-test-input -- button left pressed
 cargo run -p nickel-session --bin nickel-test-input -- button left released
 ```
+
+The same capability provides semantic workspace commands and nested output hotplug without copied
+coordinates or private state mutation. Run `nickel-test-input --help` for the complete command set.
 
 The client does not mutate shell state directly: events still pass through the compositor's normal
 hit testing, focus handling, and input reducers.

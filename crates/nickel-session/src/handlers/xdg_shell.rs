@@ -54,6 +54,7 @@ impl XdgShellHandler for NickelSession {
         });
         let cascade = i32::try_from(self.windows.len() % 8).unwrap_or(0) * 32;
         let id = self.windows.insert();
+        self.workspaces.add_window(id);
         self.surface_windows.insert(surface.wl_surface().id(), id);
         let geometry = self
             .output_geometry_for_shell()
@@ -76,6 +77,7 @@ impl XdgShellHandler for NickelSession {
                 Some(KeyboardFocusTarget::Wayland(wl_surface)),
                 smithay::utils::SERIAL_COUNTER.next_serial(),
             );
+            self.workspaces.focused(&id);
         }
         for panel in self.panel_windows.clone() {
             self.space.raise_element(&panel, false);
@@ -116,6 +118,8 @@ impl XdgShellHandler for NickelSession {
         }
         if let Some(id) = self.surface_windows.remove(&surface.wl_surface().id()) {
             self.minimized_windows.remove(&id);
+            self.workspace_hidden_windows.remove(&id);
+            self.workspaces.remove_window(&id);
             self.remove_window_from_switcher(id);
             self.windows.remove(id);
         }
@@ -423,6 +427,9 @@ impl NickelSession {
             .copied()
         {
             self.windows.update_metadata(id, title, app_id);
+            if shell_role.is_some() {
+                self.workspaces.remove_window(&id);
+            }
         }
         self.notify_protocol_snapshot();
         if is_launcher && self.launcher_window.is_none() {
@@ -499,6 +506,13 @@ impl NickelSession {
                 Some(KeyboardFocusTarget::Wayland(surface.wl_surface().clone())),
                 smithay::utils::SERIAL_COUNTER.next_serial(),
             );
+            if let Some(id) = self
+                .surface_windows
+                .get(&surface.wl_surface().id())
+                .copied()
+            {
+                self.workspaces.focused(&id);
+            }
             self.space.elements().for_each(|window| {
                 if let Some(toplevel) = window.toplevel() {
                     toplevel.send_pending_configure();

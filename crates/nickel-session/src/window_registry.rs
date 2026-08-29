@@ -63,6 +63,12 @@ impl WindowRegistry {
         }
     }
 
+    pub fn deactivate_all(&mut self) {
+        for window in self.windows.values_mut() {
+            window.active = false;
+        }
+    }
+
     pub fn remove(&mut self, id: WindowId) {
         self.windows.remove(&id);
         self.stacking_order.retain(|candidate| *candidate != id);

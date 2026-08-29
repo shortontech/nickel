@@ -118,6 +118,7 @@ pub struct ShellSurface {
     id: SurfaceId,
     role: SurfaceRole,
     display_index: usize,
+    display_connected: bool,
     // Drop the GPU surface before the native window whose handles it borrows.
     presenter: Option<SdlGpuPresenter>,
     window: Window,
@@ -227,16 +228,63 @@ impl SdlShell {
         let panel_count = self
             .surfaces
             .iter()
-            .filter(|surface| surface.role == SurfaceRole::Panel)
+            .filter(|surface| surface.display_connected && surface.role == SurfaceRole::Panel)
             .count();
         if panel_count != displays.len() {
-            return Err(format!(
-                "display count changed from {panel_count} to {}; shell surface recreation is required",
-                displays.len()
-            ));
+            for surface in &mut self.surfaces {
+                if matches!(surface.role, SurfaceRole::Desktop | SurfaceRole::Panel)
+                    && surface.display_index >= displays.len()
+                {
+                    surface.display_connected = false;
+                    let _ = surface.window.hide();
+                    if let Some(presenter) = surface.presenter.as_mut() {
+                        presenter.invalidate();
+                    }
+                }
+            }
+            self.rebuild_surface_indices();
+            for (display_index, geometry) in displays.iter().copied().enumerate() {
+                let has_panel = self.surfaces.iter().any(|surface| {
+                    surface.display_connected
+                        && surface.role == SurfaceRole::Panel
+                        && surface.display_index == display_index
+                });
+                if has_panel {
+                    continue;
+                }
+                for role in [SurfaceRole::Desktop, SurfaceRole::Panel] {
+                    if role == SurfaceRole::Desktop
+                        && !crate::platform::renders_desktop_background()
+                    {
+                        continue;
+                    }
+                    if let Some(surface) = self.surfaces.iter_mut().find(|surface| {
+                        !surface.display_connected
+                            && surface.role == role
+                            && surface.display_index == display_index
+                    }) {
+                        surface.display_connected = true;
+                        let (_, x, y, width, height, _) = surface_geometry(role, geometry);
+                        surface
+                            .window
+                            .set_position(WindowPos::Positioned(x), WindowPos::Positioned(y));
+                        surface
+                            .window
+                            .set_size(width, height)
+                            .map_err(|error| error.to_string())?;
+                        let _ = surface.window.show();
+                    } else {
+                        self.create_surface(role, display_index, geometry)?;
+                    }
+                }
+            }
+            self.rebuild_surface_indices();
         }
 
         for surface in &mut self.surfaces {
+            if !surface.display_connected {
+                continue;
+            }
             if matches!(
                 surface.role,
                 SurfaceRole::CodexChat
@@ -263,14 +311,33 @@ impl SdlShell {
         Ok(())
     }
 
+    fn rebuild_surface_indices(&mut self) {
+        self.surface_indices.clear();
+        for (index, surface) in self
+            .surfaces
+            .iter()
+            .enumerate()
+            .filter(|(_, surface)| surface.display_connected)
+        {
+            self.surface_indices.insert(surface.id.0, index);
+        }
+    }
+
     pub fn surfaces(&self) -> impl Iterator<Item = &ShellSurface> {
-        self.surfaces.iter()
+        self.surfaces
+            .iter()
+            .filter(|surface| surface.display_connected)
     }
 
     pub fn surface(&self, id: SurfaceId) -> Option<&ShellSurface> {
         self.surface_indices
             .get(&id.0)
             .and_then(|index| self.surfaces.get(*index))
+    }
+
+    pub fn surface_display_geometry(&self, id: SurfaceId) -> Option<DisplayGeometry> {
+        let display_index = self.surface(id)?.display_index();
+        self.display_geometries().ok()?.get(display_index).copied()
     }
 
     pub fn surface_mut(&mut self, id: SurfaceId) -> Option<&mut ShellSurface> {
@@ -305,6 +372,7 @@ impl SdlShell {
             id,
             role: SurfaceRole::CodexChat,
             display_index: 0,
+            display_connected: true,
             presenter: None,
             window,
         });
@@ -316,9 +384,7 @@ impl SdlShell {
             return;
         };
         self.surfaces.remove(index);
-        for (index, surface) in self.surfaces.iter().enumerate() {
-            self.surface_indices.insert(surface.id().0, index);
-        }
+        self.rebuild_surface_indices();
     }
 
     pub fn clipboard_text(&self) -> Option<String> {
@@ -502,6 +568,7 @@ impl SdlShell {
             id,
             role,
             display_index,
+            display_connected: true,
             presenter: None,
             window,
         });

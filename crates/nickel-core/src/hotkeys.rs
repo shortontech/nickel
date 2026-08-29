@@ -3,6 +3,9 @@ pub enum Hotkey {
     Super,
     Alt,
     Shift,
+    Control,
+    Left,
+    Right,
     Tab,
     Grave,
     Run,
@@ -29,6 +32,10 @@ pub enum HotkeyAction {
     CaptureActiveWindow,
     CaptureActiveWindowToFile,
     ShowScreenshotTool,
+    SwitchWorkspacePrevious,
+    SwitchWorkspaceNext,
+    MoveWindowToPreviousWorkspace,
+    MoveWindowToNextWorkspace,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -43,10 +50,13 @@ pub struct HotkeySnapshot {
     pub super_chorded: bool,
     pub alt_held: bool,
     pub shift_held: bool,
+    pub control_held: bool,
     pub tab_held: bool,
     pub grave_held: bool,
     pub run_held: bool,
     pub print_screen_held: bool,
+    pub left_held: bool,
+    pub right_held: bool,
     pub switch_active: bool,
     pub launcher_visible: bool,
 }
@@ -57,10 +67,13 @@ pub struct HotkeyController {
     super_chorded: bool,
     alt_held: bool,
     shift_held: bool,
+    control_held: bool,
     tab_held: bool,
     grave_held: bool,
     run_held: bool,
     print_screen_held: bool,
+    left_held: bool,
+    right_held: bool,
     switch_active: bool,
     launcher_visible: bool,
 }
@@ -72,10 +85,13 @@ impl HotkeyController {
             super_chorded: self.super_chorded,
             alt_held: self.alt_held,
             shift_held: self.shift_held,
+            control_held: self.control_held,
             tab_held: self.tab_held,
             grave_held: self.grave_held,
             run_held: self.run_held,
             print_screen_held: self.print_screen_held,
+            left_held: self.left_held,
+            right_held: self.right_held,
             switch_active: self.switch_active,
             launcher_visible: self.launcher_visible,
         }
@@ -150,6 +166,49 @@ impl HotkeyController {
             (Hotkey::Shift, edge) => {
                 self.shift_held = edge == KeyEdge::Pressed;
                 HotkeyOutcome::default()
+            }
+            (Hotkey::Control, edge) => {
+                self.control_held = edge == KeyEdge::Pressed;
+                HotkeyOutcome::default()
+            }
+            (Hotkey::Left | Hotkey::Right, KeyEdge::Pressed)
+                if self.super_held && self.control_held =>
+            {
+                self.super_chorded = true;
+                let held = match key {
+                    Hotkey::Left => &mut self.left_held,
+                    Hotkey::Right => &mut self.right_held,
+                    _ => unreachable!(),
+                };
+                if *held {
+                    return HotkeyOutcome {
+                        suppress: true,
+                        ..Default::default()
+                    };
+                }
+                *held = true;
+                let action = match (key, self.shift_held) {
+                    (Hotkey::Left, false) => HotkeyAction::SwitchWorkspacePrevious,
+                    (Hotkey::Right, false) => HotkeyAction::SwitchWorkspaceNext,
+                    (Hotkey::Left, true) => HotkeyAction::MoveWindowToPreviousWorkspace,
+                    (Hotkey::Right, true) => HotkeyAction::MoveWindowToNextWorkspace,
+                    _ => unreachable!(),
+                };
+                HotkeyOutcome {
+                    action: Some(action),
+                    suppress: true,
+                }
+            }
+            (Hotkey::Left | Hotkey::Right, KeyEdge::Released) => {
+                match key {
+                    Hotkey::Left => self.left_held = false,
+                    Hotkey::Right => self.right_held = false,
+                    _ => unreachable!(),
+                }
+                HotkeyOutcome {
+                    suppress: self.super_held && self.control_held,
+                    ..Default::default()
+                }
             }
             (Hotkey::Tab, KeyEdge::Pressed) if self.alt_held => {
                 let action = if self.tab_held {
@@ -249,6 +308,8 @@ impl HotkeyController {
             self.super_held = false;
             self.super_chorded = false;
             self.run_held = false;
+            self.left_held = false;
+            self.right_held = false;
         }
     }
 
@@ -477,5 +538,29 @@ mod tests {
         controller.handle(Hotkey::Super, KeyEdge::Pressed);
         controller.reconcile_super(false);
         assert!(!controller.begin_pointer_chord());
+    }
+
+    #[test]
+    fn workspace_chords_distinguish_switch_move_direction_and_repeats() {
+        let mut controller = HotkeyController::default();
+        controller.handle(Hotkey::Super, KeyEdge::Pressed);
+        controller.handle(Hotkey::Control, KeyEdge::Pressed);
+        assert_eq!(
+            controller.handle(Hotkey::Right, KeyEdge::Pressed),
+            HotkeyOutcome {
+                action: Some(HotkeyAction::SwitchWorkspaceNext),
+                suppress: true,
+            }
+        );
+        assert_eq!(
+            controller.handle(Hotkey::Right, KeyEdge::Pressed).action,
+            None
+        );
+        controller.handle(Hotkey::Right, KeyEdge::Released);
+        controller.handle(Hotkey::Shift, KeyEdge::Pressed);
+        assert_eq!(
+            controller.handle(Hotkey::Left, KeyEdge::Pressed).action,
+            Some(HotkeyAction::MoveWindowToPreviousWorkspace)
+        );
     }
 }

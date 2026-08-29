@@ -10,3 +10,4 @@ pub mod task_switcher;
 pub mod theme;
 pub mod wallpaper_settings;
 pub mod window_input;
+pub mod workspaces;

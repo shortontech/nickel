@@ -147,6 +147,10 @@ impl WindowFeed {
         None
     }
 
+    pub fn workspaces(&self) -> Option<Vec<super::WorkspaceSummary>> {
+        None
+    }
+
     pub fn preview(&self, _: WindowId) -> Option<WindowPreview> {
         None
     }

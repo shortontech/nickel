@@ -679,7 +679,7 @@ pub fn request_secure_storage_retry() -> bool {
 pub fn send_shell_command(command: ShellCommand) -> bool {
     matches!(
         one_shot_session_request(SessionRequest::Command(shell_command_payload(command))),
-        Some(ServerMessage::Ack)
+        Some(ServerMessage::Ack | ServerMessage::Workspaces(_))
     )
 }
 
@@ -730,6 +730,20 @@ fn shell_command_payload(command: ShellCommand) -> SessionCommand {
                 WindowAction::Minimize => SessionWindowAction::Minimize,
             },
         },
+        ShellCommand::CreateWorkspace => SessionCommand::CreateWorkspace,
+        ShellCommand::RemoveWorkspace(workspace) => SessionCommand::RemoveWorkspace {
+            workspace: nickel_session_protocol::WorkspaceId(workspace),
+        },
+        ShellCommand::SwitchWorkspace(workspace) => SessionCommand::SwitchWorkspace {
+            workspace: nickel_session_protocol::WorkspaceId(workspace),
+            output: None,
+        },
+        ShellCommand::MoveWindowToWorkspace { window, workspace } => {
+            SessionCommand::MoveWindowToWorkspace {
+                window: SessionWindowId(window.0),
+                workspace: nickel_session_protocol::WorkspaceId(workspace),
+            }
+        }
     }
 }
 
@@ -768,6 +782,25 @@ impl WindowFeed {
                     application_id: resolve_application_id(&window.application_id, launcher),
                     active: window.active,
                     title: window.title,
+                })
+                .collect(),
+        )
+    }
+
+    pub fn workspaces(&self) -> Option<Vec<super::WorkspaceSummary>> {
+        let socket = self.socket.as_ref()?;
+        let ServerMessage::Workspaces(state) =
+            session_request_on(socket, SessionRequest::Query(SessionQuery::Workspaces))?
+        else {
+            return None;
+        };
+        Some(
+            state
+                .ordered
+                .into_iter()
+                .map(|workspace| super::WorkspaceSummary {
+                    id: workspace.id.0,
+                    active: workspace.id == state.active,
                 })
                 .collect(),
         )

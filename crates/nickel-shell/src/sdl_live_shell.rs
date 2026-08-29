@@ -31,8 +31,8 @@ use crate::{
     },
     sdl_shell::SurfaceRole,
     sdl_window_preview::{
-        MENU_HEIGHT, MENU_WIDTH, MenuAction, PreviewAction, WindowMenuFrame, WindowPreviewFrame,
-        build_menu_frame, build_preview_frame, preview_dimensions,
+        MENU_WIDTH, MenuAction, PreviewAction, WindowMenuFrame, WindowPreviewFrame,
+        build_menu_frame, build_preview_frame, menu_height, preview_dimensions,
     },
 };
 use sdl3::keyboard::{Keycode, Mod};
@@ -90,6 +90,7 @@ pub struct LiveShell {
     tray_feed: TrayFeed,
     notification_feed: NotificationFeed,
     windows: Vec<OpenWindow>,
+    workspaces: Vec<platform::WorkspaceSummary>,
     tray: Vec<TrayItem>,
     tray_icons: Vec<Arc<image::RgbaImage>>,
     notification: Option<DesktopNotification>,
@@ -114,6 +115,7 @@ pub struct LiveShell {
     preview_frame: Option<WindowPreviewFrame>,
     window_menu: Option<crate::model::WindowId>,
     window_menu_frame: Option<WindowMenuFrame>,
+    panel_origin_x: i32,
     control_state: ControlViewState,
     launcher_view: LauncherViewState,
     launcher_icons: LauncherIconCache,
@@ -176,6 +178,7 @@ impl LiveShell {
         let tray_feed = TrayFeed::new();
         let notification_feed = NotificationFeed::new()?;
         let windows = window_feed.snapshot(&launcher).unwrap_or_default();
+        let workspaces = window_feed.workspaces().unwrap_or_default();
         let tray = tray_feed.snapshot();
         let tray_icons = panel_tray_icons(&tray);
         let network = platform::network_status();
@@ -191,6 +194,7 @@ impl LiveShell {
             tray_feed,
             notification_feed,
             windows,
+            workspaces,
             tray,
             tray_icons,
             notification: None,
@@ -215,6 +219,7 @@ impl LiveShell {
             preview_frame: None,
             window_menu: None,
             window_menu_frame: None,
+            panel_origin_x: 0,
             control_state: ControlViewState::default(),
             launcher_view: LauncherViewState::default(),
             launcher_icons: LauncherIconCache::new(),
@@ -257,6 +262,13 @@ impl LiveShell {
             && windows != self.windows
         {
             self.windows = windows;
+            changed = true;
+        }
+        if let Some(workspaces) = self.window_feed.workspaces()
+            && workspaces != self.workspaces
+        {
+            self.workspaces = workspaces;
+            self.close_window_preview();
             changed = true;
         }
         if self
@@ -440,6 +452,10 @@ impl LiveShell {
         changed
     }
 
+    pub fn set_panel_origin_x(&mut self, origin_x: i32) {
+        self.panel_origin_x = origin_x;
+    }
+
     pub fn panel_pointer_left(&mut self) -> bool {
         if self.panel_hover.is_none() {
             return false;
@@ -502,14 +518,16 @@ impl LiveShell {
             }
             PreviewAction::OpenMenu(window) => {
                 self.window_menu = Some(window);
-                self.window_menu_frame = Some(build_menu_frame(window, self.palette));
-                let x = self.preview_group.map_or(0, |index| {
-                    (PANEL_ITEM_WIDTH + index as f32 * PANEL_ITEM_WIDTH) as i32
-                });
+                self.window_menu_frame =
+                    Some(build_menu_frame(window, &self.workspaces, self.palette));
+                let x = self.panel_origin_x
+                    + self.preview_group.map_or(0, |index| {
+                        (PANEL_ITEM_WIDTH + index as f32 * PANEL_ITEM_WIDTH) as i32
+                    });
                 let _ = platform::send_shell_command(ShellCommand::ShowContextMenu {
                     x,
                     width: MENU_WIDTH as i32,
-                    height: MENU_HEIGHT as i32,
+                    height: menu_height(&self.workspaces) as i32,
                 });
             }
         }
@@ -530,6 +548,12 @@ impl LiveShell {
                 self.send_window_action(window, WindowAction::Maximize)
             }
             MenuAction::Minimize(window) => self.send_window_action(window, WindowAction::Minimize),
+            MenuAction::MoveToWorkspace(window, workspace) => {
+                let _ = platform::send_shell_command(ShellCommand::MoveWindowToWorkspace {
+                    window,
+                    workspace,
+                });
+            }
         }
         self.close_window_preview();
         true
@@ -545,8 +569,8 @@ impl LiveShell {
                     .map(|window| window.id)
                     .collect::<Vec<_>>();
                 let (width, height) = preview_dimensions(windows.len());
-                let x =
-                    (PANEL_ITEM_WIDTH + index as f32 * PANEL_ITEM_WIDTH + PANEL_ITEM_WIDTH / 2.0
+                let x = self.panel_origin_x
+                    + (PANEL_ITEM_WIDTH + index as f32 * PANEL_ITEM_WIDTH + PANEL_ITEM_WIDTH / 2.0
                         - width as f32 / 2.0) as i32;
                 let _ = platform::send_shell_command(ShellCommand::ShowPreview {
                     x,
@@ -557,13 +581,14 @@ impl LiveShell {
             }
         }
         if self.window_menu.is_some() {
-            let x = self.preview_group.map_or(0, |index| {
-                (PANEL_ITEM_WIDTH + index as f32 * PANEL_ITEM_WIDTH) as i32
-            });
+            let x = self.panel_origin_x
+                + self.preview_group.map_or(0, |index| {
+                    (PANEL_ITEM_WIDTH + index as f32 * PANEL_ITEM_WIDTH) as i32
+                });
             let _ = platform::send_shell_command(ShellCommand::ShowContextMenu {
                 x,
                 width: MENU_WIDTH as i32,
-                height: MENU_HEIGHT as i32,
+                height: menu_height(&self.workspaces) as i32,
             });
         }
     }
@@ -1040,7 +1065,7 @@ impl LiveShell {
             self.window_menu_frame = None;
             return Vec::new();
         };
-        let frame = build_menu_frame(window, self.palette);
+        let frame = build_menu_frame(window, &self.workspaces, self.palette);
         let commands = frame.commands.clone();
         self.window_menu_frame = Some(frame);
         commands
@@ -1282,6 +1307,7 @@ impl LiveShell {
             &self.network,
             &self.bluetooth,
             &self.audio,
+            &self.workspaces,
             self.control_state,
             (width as f32, height as f32),
         )
@@ -1395,6 +1421,15 @@ impl LiveShell {
             }
             ControlAction::SelectAudioDevice { id } => {
                 let _ = platform::select_audio_device(&id);
+            }
+            ControlAction::SwitchWorkspace(workspace) => {
+                let _ = platform::send_shell_command(ShellCommand::SwitchWorkspace(workspace));
+            }
+            ControlAction::CreateWorkspace => {
+                let _ = platform::send_shell_command(ShellCommand::CreateWorkspace);
+            }
+            ControlAction::RemoveWorkspace(workspace) => {
+                let _ = platform::send_shell_command(ShellCommand::RemoveWorkspace(workspace));
             }
             ControlAction::ToggleLogoutConfirmation => {
                 self.control_state.logout_confirmation = !self.control_state.logout_confirmation;

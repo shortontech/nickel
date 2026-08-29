@@ -814,6 +814,9 @@ fn main() -> Result<(), String> {
                 .surface(surface)
                 .is_some_and(|entry| entry.role() == SurfaceRole::Panel) =>
             {
+                if let Some(display) = shell.surface_display_geometry(surface) {
+                    state.set_panel_origin_x(display.x);
+                }
                 let width = shell
                     .surface(surface)
                     .map(|entry| entry.window().size().0)
@@ -951,6 +954,9 @@ fn main() -> Result<(), String> {
             Some(ShellEvent::PointerMoved { surface, x, y }) => {
                 let role = shell.surface(surface).map(|entry| entry.role());
                 if role == Some(SurfaceRole::Panel) {
+                    if let Some(display) = shell.surface_display_geometry(surface) {
+                        state.set_panel_origin_x(display.x);
+                    }
                     let width = shell
                         .surface(surface)
                         .map(|entry| entry.window().size().0)
@@ -1043,13 +1049,16 @@ fn main() -> Result<(), String> {
                 shell.present(surface, &state.scene(role, logical_width, logical_height))?;
             }
             Some(ShellEvent::Shown(surface)) => {
-                if shell.surface(surface).is_some_and(|entry| {
-                    matches!(
-                        entry.role(),
-                        SurfaceRole::WindowPreview | SurfaceRole::WindowContextMenu
-                    )
-                }) {
+                let role = shell.surface(surface).map(|entry| entry.role());
+                if let Some(role @ (SurfaceRole::WindowPreview | SurfaceRole::WindowContextMenu)) =
+                    role
+                {
                     state.sync_transient_overlays();
+                    // Wayland recreates the wl_surface when SDL shows one of
+                    // these transient windows again. The earlier presenter
+                    // contents do not belong to that new surface, and the
+                    // one-shot initial Exposed handler has already run.
+                    render_role(&mut shell, &mut state, role)?;
                 }
             }
             Some(ShellEvent::Redraw(surface)) if initial_exposures.insert(surface) => {

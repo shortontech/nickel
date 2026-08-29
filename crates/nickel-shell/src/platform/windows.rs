@@ -2795,6 +2795,10 @@ impl WindowFeed {
         Some(windows)
     }
 
+    pub fn workspaces(&self) -> Option<Vec<super::WorkspaceSummary>> {
+        None
+    }
+
     pub fn preview(&self, window: WindowId) -> Option<WindowPreview> {
         unsafe { IsWindow(Some(hwnd(window))).as_bool() }.then(|| WindowPreview {
             window,

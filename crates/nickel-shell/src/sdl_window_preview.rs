@@ -3,7 +3,10 @@ use std::{collections::HashMap, sync::Arc};
 use nickel_core::theme::ThemePalette;
 use nickel_ui::{PaintCommand, Point, Rect, TextAlign};
 
-use crate::model::{WindowGroup, WindowId};
+use crate::{
+    model::{WindowGroup, WindowId},
+    platform::WorkspaceSummary,
+};
 
 pub const CARD_WIDTH: f32 = 276.0;
 pub const PREVIEW_HEIGHT: f32 = 214.0;
@@ -11,7 +14,9 @@ const GAP: f32 = 10.0;
 const PADDING: f32 = 12.0;
 const CLOSE_SIZE: f32 = 28.0;
 pub const MENU_WIDTH: f32 = 220.0;
-pub const MENU_HEIGHT: f32 = 144.0;
+const MENU_ROW_HEIGHT: f32 = 40.0;
+const MENU_ROW_GAP: f32 = 4.0;
+const MENU_PADDING: f32 = 8.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PreviewAction {
@@ -25,6 +30,7 @@ pub enum MenuAction {
     Close(WindowId),
     MaximizeRestore(WindowId),
     Minimize(WindowId),
+    MoveToWorkspace(WindowId, u64),
 }
 
 #[derive(Clone, Debug)]
@@ -74,30 +80,24 @@ impl WindowPreviewFrame {
 #[derive(Clone, Debug)]
 pub struct WindowMenuFrame {
     pub commands: Vec<PaintCommand>,
-    window: WindowId,
-    rows: [Rect; 3],
+    rows: Vec<(Rect, MenuAction)>,
 }
 
 impl WindowMenuFrame {
     pub fn action_at(&self, point: Point) -> Option<MenuAction> {
         self.rows
             .iter()
-            .position(|row| contains(*row, point))
-            .map(|row| match row {
-                0 => MenuAction::Close(self.window),
-                1 => MenuAction::MaximizeRestore(self.window),
-                _ => MenuAction::Minimize(self.window),
-            })
+            .find_map(|(row, action)| contains(*row, point).then_some(*action))
     }
 
     #[cfg(test)]
     pub fn target_point(&self, action: MenuAction) -> Point {
-        let row = match action {
-            MenuAction::Close(_) => 0,
-            MenuAction::MaximizeRestore(_) => 1,
-            MenuAction::Minimize(_) => 2,
-        };
-        center(self.rows[row])
+        let (row, _) = self
+            .rows
+            .iter()
+            .find(|(_, candidate)| *candidate == action)
+            .expect("menu target exists");
+        center(*row)
     }
 }
 
@@ -172,25 +172,73 @@ pub fn build_preview_frame(
     WindowPreviewFrame { commands, cards }
 }
 
-pub fn build_menu_frame(window: WindowId, palette: ThemePalette) -> WindowMenuFrame {
-    let rows = [
-        Rect::new(8.0, 8.0, MENU_WIDTH - 16.0, 40.0),
-        Rect::new(8.0, 52.0, MENU_WIDTH - 16.0, 40.0),
-        Rect::new(8.0, 96.0, MENU_WIDTH - 16.0, 40.0),
+pub fn menu_height(workspaces: &[WorkspaceSummary]) -> f32 {
+    let destination_count = workspace_move_destinations(workspaces).len();
+    let row_count = 3 + destination_count;
+    MENU_PADDING * 2.0
+        + row_count as f32 * MENU_ROW_HEIGHT
+        + row_count.saturating_sub(1) as f32 * MENU_ROW_GAP
+}
+
+pub fn build_menu_frame(
+    window: WindowId,
+    workspaces: &[WorkspaceSummary],
+    palette: ThemePalette,
+) -> WindowMenuFrame {
+    let mut entries = vec![
+        ("Close".to_owned(), MenuAction::Close(window)),
+        (
+            "Maximize / Restore".to_owned(),
+            MenuAction::MaximizeRestore(window),
+        ),
+        ("Minimize".to_owned(), MenuAction::Minimize(window)),
     ];
+    entries.extend(
+        workspace_move_destinations(workspaces)
+            .into_iter()
+            .map(|(label, workspace)| (label, MenuAction::MoveToWorkspace(window, workspace))),
+    );
+    let rows = entries
+        .iter()
+        .enumerate()
+        .map(|(index, (_, action))| {
+            (
+                Rect::new(
+                    MENU_PADDING,
+                    MENU_PADDING + index as f32 * (MENU_ROW_HEIGHT + MENU_ROW_GAP),
+                    MENU_WIDTH - MENU_PADDING * 2.0,
+                    MENU_ROW_HEIGHT,
+                ),
+                *action,
+            )
+        })
+        .collect::<Vec<_>>();
     let mut commands = vec![PaintCommand::RoundedFill {
-        rect: Rect::new(0.0, 0.0, MENU_WIDTH, MENU_HEIGHT),
+        rect: Rect::new(0.0, 0.0, MENU_WIDTH, menu_height(workspaces)),
         color: palette.panel,
         radius: 10.0,
     }];
-    for (row, label) in rows.iter().zip(["Close", "Maximize / Restore", "Minimize"]) {
+    for ((row, _), (label, _)) in rows.iter().zip(&entries) {
         commands.push(text(*row, label, 0.9, palette.text));
     }
-    WindowMenuFrame {
-        commands,
-        window,
-        rows,
+    WindowMenuFrame { commands, rows }
+}
+
+fn workspace_move_destinations(workspaces: &[WorkspaceSummary]) -> Vec<(String, u64)> {
+    let Some(active) = workspaces.iter().position(|workspace| workspace.active) else {
+        return Vec::new();
+    };
+    let mut destinations = Vec::with_capacity(2);
+    if let Some(previous) = active
+        .checked_sub(1)
+        .and_then(|index| workspaces.get(index))
+    {
+        destinations.push(("Move to previous workspace".to_owned(), previous.id));
     }
+    if let Some(next) = workspaces.get(active + 1) {
+        destinations.push(("Move to next workspace".to_owned(), next.id));
+    }
+    destinations
 }
 
 pub fn window_title<'a>(title: &'a str, application_name: &'a str) -> &'a str {
@@ -285,14 +333,31 @@ mod tests {
 
     #[test]
     fn menu_targets_route_every_action_to_the_selected_window() {
+        let workspaces = [
+            WorkspaceSummary {
+                id: 1,
+                active: false,
+            },
+            WorkspaceSummary {
+                id: 7,
+                active: true,
+            },
+            WorkspaceSummary {
+                id: 8,
+                active: false,
+            },
+        ];
         let frame = build_menu_frame(
             WindowId(9),
+            &workspaces,
             ThemePalette::from_appearance(Appearance::default()),
         );
         for action in [
             MenuAction::Close(WindowId(9)),
             MenuAction::MaximizeRestore(WindowId(9)),
             MenuAction::Minimize(WindowId(9)),
+            MenuAction::MoveToWorkspace(WindowId(9), 1),
+            MenuAction::MoveToWorkspace(WindowId(9), 8),
         ] {
             assert_eq!(frame.action_at(frame.target_point(action)), Some(action));
         }

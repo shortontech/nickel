@@ -117,6 +117,22 @@ impl NickelSession {
                                     | HotkeyAction::SwitchGroupPrevious
                                     | HotkeyAction::CommitSwitch),
                                 ) => session.apply_task_switch_action(action),
+                                Some(HotkeyAction::SwitchWorkspacePrevious) => session
+                                    .switch_workspace_direction(
+                                        nickel_core::workspaces::WorkspaceDirection::Previous,
+                                    ),
+                                Some(HotkeyAction::SwitchWorkspaceNext) => session
+                                    .switch_workspace_direction(
+                                        nickel_core::workspaces::WorkspaceDirection::Next,
+                                    ),
+                                Some(HotkeyAction::MoveWindowToPreviousWorkspace) => session
+                                    .move_active_window_to_workspace(
+                                        nickel_core::workspaces::WorkspaceDirection::Previous,
+                                    ),
+                                Some(HotkeyAction::MoveWindowToNextWorkspace) => session
+                                    .move_active_window_to_workspace(
+                                        nickel_core::workspaces::WorkspaceDirection::Next,
+                                    ),
                                 Some(HotkeyAction::CaptureActiveWindow) => {
                                     tracing::info!(
                                         action = "capture_active_window",
@@ -306,6 +322,7 @@ impl NickelSession {
                         }
                         if let Some(id) = registry_id {
                             self.windows.raise(id);
+                            self.workspaces.focused(&id);
                         }
                         keyboard.set_focus(
                             self,
@@ -505,6 +522,7 @@ impl NickelSession {
                                     if actual_window == Some(id) =>
                                 {
                                     self.windows.raise(id);
+                                    self.workspaces.focused(&id);
                                 }
                                 WindowPointerEffect::ActivateWindow(_) => {}
                             }
@@ -772,6 +790,14 @@ fn hotkey_from_keysym(sym: Keysym) -> Hotkey {
         {
             Hotkey::Shift
         }
+        value
+            if value == Keysym::new(keysyms::KEY_Control_L)
+                || value == Keysym::new(keysyms::KEY_Control_R) =>
+        {
+            Hotkey::Control
+        }
+        value if value == Keysym::new(keysyms::KEY_Left) => Hotkey::Left,
+        value if value == Keysym::new(keysyms::KEY_Right) => Hotkey::Right,
         value if value == Keysym::new(keysyms::KEY_Tab) => Hotkey::Tab,
         value
             if value == Keysym::new(keysyms::KEY_Print)

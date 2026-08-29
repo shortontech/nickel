@@ -90,6 +90,7 @@ pub fn init_winit(
     output.set_preferred(mode);
 
     state.space.map_output(&output, (0, 0));
+    state.primary_output_name = Some(output.name());
 
     let mut damage_tracker = OutputDamageTracker::from_output(&output);
     let mut last_preview_capture = Instant::now() - Duration::from_secs(1);

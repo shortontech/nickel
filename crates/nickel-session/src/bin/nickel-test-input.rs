@@ -7,16 +7,48 @@ Inject one input event into a Nickel nested session started with --test-control.
 
 Usage:
   nickel-test-input windows
+  nickel-test-input workspaces
+  nickel-test-input outputs
+  nickel-test-input surfaces
+  nickel-test-input output-connect NAME WIDTH HEIGHT SCALE_120 normal|90|180|270
+  nickel-test-input output-disconnect NAME
+  nickel-test-input workspace-create
+  nickel-test-input workspace-switch ID
+  nickel-test-input workspace-remove ID
+  nickel-test-input workspace-move WINDOW_ID WORKSPACE_ID
+  nickel-test-input window activate|close|minimize|maximize|fullscreen WINDOW_ID
   nickel-test-input idle-inhibition
   nickel-test-input move X Y
   nickel-test-input move-relative DX DY
   nickel-test-input button left|right pressed|released
-  nickel-test-input key a|c|p|enter|tab|alt|shift|meta|print-screen pressed|released
+  nickel-test-input key a|c|p|enter|tab|alt|shift|control|meta|left|right|f11|print-screen pressed|released
 ";
 
 enum Parsed {
     Input(TestInput),
     Windows,
+    Workspaces,
+    Outputs,
+    Surfaces,
+    OutputConnect {
+        name: String,
+        width: i32,
+        height: i32,
+        scale_120: u32,
+        transform: nickel_session_protocol::OutputTransform,
+    },
+    OutputDisconnect(String),
+    WorkspaceCreate,
+    WorkspaceSwitch(u64),
+    WorkspaceRemove(u64),
+    WorkspaceMove {
+        window: u64,
+        workspace: u64,
+    },
+    WindowAction {
+        window: u64,
+        action: nickel_session_protocol::WindowAction,
+    },
     IdleInhibition,
     Help,
 }
@@ -35,6 +67,63 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, String> {
     }
     match args.as_slice() {
         [command] if command == "windows" => Ok(Parsed::Windows),
+        [command] if command == "workspaces" => Ok(Parsed::Workspaces),
+        [command] if command == "outputs" => Ok(Parsed::Outputs),
+        [command] if command == "surfaces" => Ok(Parsed::Surfaces),
+        [command, name] if command == "output-disconnect" => {
+            Ok(Parsed::OutputDisconnect(name.clone()))
+        }
+        [command, name, width, height, scale_120, transform] if command == "output-connect" => {
+            Ok(Parsed::OutputConnect {
+                name: name.clone(),
+                width: width
+                    .parse()
+                    .map_err(|_| format!("invalid output width {width:?}"))?,
+                height: height
+                    .parse()
+                    .map_err(|_| format!("invalid output height {height:?}"))?,
+                scale_120: scale_120
+                    .parse()
+                    .map_err(|_| format!("invalid output scale {scale_120:?}"))?,
+                transform: match transform.as_str() {
+                    "normal" => nickel_session_protocol::OutputTransform::Normal,
+                    "90" => nickel_session_protocol::OutputTransform::Rotate90,
+                    "180" => nickel_session_protocol::OutputTransform::Rotate180,
+                    "270" => nickel_session_protocol::OutputTransform::Rotate270,
+                    _ => return Err(format!("unknown output transform {transform:?}")),
+                },
+            })
+        }
+        [command] if command == "workspace-create" => Ok(Parsed::WorkspaceCreate),
+        [command, id] if command == "workspace-switch" => Ok(Parsed::WorkspaceSwitch(
+            id.parse()
+                .map_err(|_| format!("invalid workspace ID {id:?}"))?,
+        )),
+        [command, id] if command == "workspace-remove" => Ok(Parsed::WorkspaceRemove(
+            id.parse()
+                .map_err(|_| format!("invalid workspace ID {id:?}"))?,
+        )),
+        [command, window, workspace] if command == "workspace-move" => Ok(Parsed::WorkspaceMove {
+            window: window
+                .parse()
+                .map_err(|_| format!("invalid window ID {window:?}"))?,
+            workspace: workspace
+                .parse()
+                .map_err(|_| format!("invalid workspace ID {workspace:?}"))?,
+        }),
+        [command, action, window] if command == "window" => Ok(Parsed::WindowAction {
+            window: window
+                .parse()
+                .map_err(|_| format!("invalid window ID {window:?}"))?,
+            action: match action.as_str() {
+                "activate" => nickel_session_protocol::WindowAction::Activate,
+                "close" => nickel_session_protocol::WindowAction::Close,
+                "minimize" => nickel_session_protocol::WindowAction::Minimize,
+                "maximize" => nickel_session_protocol::WindowAction::MaximizeRestore,
+                "fullscreen" => nickel_session_protocol::WindowAction::FullscreenRestore,
+                _ => return Err(format!("unknown window action {action:?}")),
+            },
+        }),
         [command] if command == "idle-inhibition" => Ok(Parsed::IdleInhibition),
         [command, x, y] if command == "move" => Ok(Parsed::Input(TestInput::PointerMove {
             x: x.parse()
@@ -67,7 +156,11 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, String> {
                 "tab" => TestKey::Tab,
                 "alt" => TestKey::LeftAlt,
                 "shift" => TestKey::LeftShift,
+                "control" => TestKey::LeftControl,
                 "meta" => TestKey::LeftMeta,
+                "left" => TestKey::Left,
+                "right" => TestKey::Right,
+                "f11" => TestKey::F11,
                 "print-screen" => TestKey::PrintScreen,
                 _ => return Err(format!("unknown key {key:?}")),
             },
@@ -99,6 +192,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Parsed::Input(input) => Request::Command(Command::TestInput { input }),
         Parsed::Windows => Request::Query(nickel_session_protocol::Query::Windows),
+        Parsed::Workspaces => Request::Query(nickel_session_protocol::Query::Workspaces),
+        Parsed::Outputs => Request::Query(nickel_session_protocol::Query::Outputs),
+        Parsed::Surfaces => Request::Query(nickel_session_protocol::Query::ShellSurfaces),
+        Parsed::OutputConnect {
+            name,
+            width,
+            height,
+            scale_120,
+            transform,
+        } => Request::Command(Command::TestOutput {
+            output: nickel_session_protocol::TestOutput::Connect {
+                name,
+                logical_width: width,
+                logical_height: height,
+                scale_120,
+                transform,
+            },
+        }),
+        Parsed::OutputDisconnect(name) => Request::Command(Command::TestOutput {
+            output: nickel_session_protocol::TestOutput::Disconnect { name },
+        }),
+        Parsed::WorkspaceCreate => Request::Command(Command::CreateWorkspace),
+        Parsed::WorkspaceSwitch(workspace) => Request::Command(Command::SwitchWorkspace {
+            workspace: nickel_session_protocol::WorkspaceId(workspace),
+            output: None,
+        }),
+        Parsed::WorkspaceRemove(workspace) => Request::Command(Command::RemoveWorkspace {
+            workspace: nickel_session_protocol::WorkspaceId(workspace),
+        }),
+        Parsed::WorkspaceMove { window, workspace } => {
+            Request::Command(Command::MoveWindowToWorkspace {
+                window: nickel_session_protocol::WindowId(window),
+                workspace: nickel_session_protocol::WorkspaceId(workspace),
+            })
+        }
+        Parsed::WindowAction { window, action } => Request::Command(Command::WindowAction {
+            window: nickel_session_protocol::WindowId(window),
+            action,
+        }),
         Parsed::IdleInhibition => Request::Query(nickel_session_protocol::Query::IdleInhibition),
     };
     let control = env::var_os("NICKEL_SESSION_CONTROL")
@@ -126,7 +258,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ServerMessage::Windows(windows) => {
             for window in windows {
                 println!(
-                    "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                     window.id.0,
                     window.application_id,
                     window.title,
@@ -140,6 +272,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "maximized"
                     } else {
                         "restored"
+                    },
+                    if window.fullscreen {
+                        "fullscreen"
+                    } else {
+                        "windowed"
                     },
                     window.geometry.map_or_else(
                         || "unmapped".to_owned(),
@@ -156,6 +293,63 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("{surfaces}");
             Ok(())
         }
+        ServerMessage::Workspaces(state) => {
+            for workspace in state.ordered {
+                println!(
+                    "{}\t{}\t{}",
+                    workspace.id.0,
+                    if workspace.id == state.active {
+                        "active"
+                    } else {
+                        "inactive"
+                    },
+                    workspace
+                        .windows
+                        .iter()
+                        .map(|window| window.0.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                );
+            }
+            Ok(())
+        }
+        ServerMessage::Outputs(outputs) => {
+            for output in outputs {
+                println!(
+                    "{}\t{},{} {}x{}\tscale={}/120\t{:?}\t{}",
+                    output.name,
+                    output.geometry.x,
+                    output.geometry.y,
+                    output.geometry.width,
+                    output.geometry.height,
+                    output.scale_120,
+                    output.transform,
+                    if output.primary {
+                        "primary"
+                    } else {
+                        "secondary"
+                    }
+                );
+            }
+            Ok(())
+        }
+        ServerMessage::ShellSurfaces(surfaces) => {
+            for surface in surfaces {
+                println!(
+                    "{:?}\t{}\t{}",
+                    surface.role,
+                    surface.output.as_deref().unwrap_or("unmapped"),
+                    surface.geometry.map_or_else(
+                        || "hidden".to_owned(),
+                        |geometry| format!(
+                            "{},{} {}x{}",
+                            geometry.x, geometry.y, geometry.width, geometry.height
+                        )
+                    )
+                );
+            }
+            Ok(())
+        }
         ServerMessage::Error { message, .. } => Err(message.into()),
         _ => Err("unexpected test input response".into()),
     }
@@ -168,7 +362,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             print!("{HELP}");
             Ok(())
         }
-        Parsed::Input(_) | Parsed::Windows | Parsed::IdleInhibition => {
+        Parsed::Input(_)
+        | Parsed::Windows
+        | Parsed::Workspaces
+        | Parsed::Outputs
+        | Parsed::Surfaces
+        | Parsed::OutputConnect { .. }
+        | Parsed::OutputDisconnect(_)
+        | Parsed::WorkspaceCreate
+        | Parsed::WorkspaceSwitch(_)
+        | Parsed::WorkspaceRemove(_)
+        | Parsed::WorkspaceMove { .. }
+        | Parsed::WindowAction { .. }
+        | Parsed::IdleInhibition => {
             Err("nested compositor test input is only available on Unix".into())
         }
     }
@@ -183,6 +389,38 @@ mod tests {
         assert!(matches!(
             parse(["idle-inhibition".into()]),
             Ok(Parsed::IdleInhibition)
+        ));
+        assert!(matches!(
+            parse(["workspaces".into()]),
+            Ok(Parsed::Workspaces)
+        ));
+        assert!(matches!(
+            parse([
+                "output-connect".into(),
+                "DP-test".into(),
+                "1024".into(),
+                "768".into(),
+                "180".into(),
+                "90".into()
+            ]),
+            Ok(Parsed::OutputConnect {
+                width: 1024,
+                height: 768,
+                scale_120: 180,
+                transform: nickel_session_protocol::OutputTransform::Rotate90,
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse(["workspace-switch".into(), "2".into()]),
+            Ok(Parsed::WorkspaceSwitch(2))
+        ));
+        assert!(matches!(
+            parse(["workspace-move".into(), "7".into(), "3".into()]),
+            Ok(Parsed::WorkspaceMove {
+                window: 7,
+                workspace: 3
+            })
         ));
         assert!(matches!(
             parse(["move".into(), "64".into(), "700".into()]),

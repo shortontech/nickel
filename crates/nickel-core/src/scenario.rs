@@ -13,6 +13,7 @@ use crate::{
         PointerPosition, WindowGeometry, WindowPointerEffect, WindowSurface, hit_test,
         reduce_pointer_press, resolve_semantic_target,
     },
+    workspaces::{WorkspaceDirection, WorkspaceId, WorkspaceTransition, Workspaces},
 };
 use std::{collections::HashMap, time::Duration};
 
@@ -52,6 +53,14 @@ pub enum LauncherEffect {
 pub enum RecordedEffect {
     Launcher(LauncherEffect),
     Task(TaskSwitchEffect<String>),
+    Workspace(WorkspaceEffect),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WorkspaceEffect {
+    HideWindow(String),
+    ShowWindow(String),
+    ActivateWindow(String),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -155,6 +164,8 @@ pub struct Scenario {
     task_reduce: TaskReducer,
     window_target_resolver: WindowTargetResolver,
     actions: Vec<HotkeyAction>,
+    workspaces: Workspaces<String>,
+    workspace_names: HashMap<String, WorkspaceId>,
     authority: Vec<AuthorityRecord>,
     state_before_event: String,
 }
@@ -209,6 +220,8 @@ pub fn scenario(name: impl Into<String>) -> Scenario {
         task_reduce: production_task_reduce,
         window_target_resolver: production_window_target_resolver,
         actions: Vec::new(),
+        workspaces: Workspaces::default(),
+        workspace_names: HashMap::from([("main".into(), WorkspaceId(1))]),
         authority: Vec::new(),
         state_before_event: "initial scenario state".into(),
     }
@@ -221,8 +234,10 @@ impl Scenario {
     }
 
     pub fn window(mut self, name: impl Into<String>) -> WindowCursor {
+        let name = name.into();
+        self.workspaces.add_window(name.clone());
         self.windows.push(WindowFact {
-            name: name.into(),
+            name,
             application_id: String::new(),
             active: false,
             geometry: None,
@@ -351,6 +366,7 @@ impl Scenario {
     /// Applies a production window-lifecycle removal while the scenario is active.
     pub fn remove_window(mut self, window: &str) -> Self {
         self.consume_event(format!("window removed {window:?}"));
+        self.workspaces.remove_window(&window.to_owned());
         let before = self.windows.len();
         self.windows.retain(|candidate| candidate.name != window);
         assert_eq!(
@@ -401,6 +417,90 @@ impl Scenario {
         self
     }
 
+    pub fn create_workspace(mut self, name: impl Into<String>) -> Self {
+        let name = name.into();
+        assert!(
+            !self.workspace_names.contains_key(&name),
+            "scenario {:?} already has workspace {name:?}",
+            self.name
+        );
+        let id = self
+            .workspaces
+            .create()
+            .expect("scenario workspace limit exceeded");
+        self.workspace_names.insert(name, id);
+        self
+    }
+
+    pub fn switch_workspace(mut self, name: &str, output: &str) -> Self {
+        self.consume_event(format!("switch workspace {name:?} on {output:?}"));
+        assert!(
+            self.outputs
+                .outputs()
+                .iter()
+                .any(|item| item.name == output),
+            "scenario {:?} has no output {output:?}",
+            self.name
+        );
+        let id = *self
+            .workspace_names
+            .get(name)
+            .unwrap_or_else(|| panic!("scenario {:?} has no workspace {name:?}", self.name));
+        let transition = self
+            .workspaces
+            .switch_to(id, Some(output.to_owned()))
+            .expect("named workspace was validated");
+        self.apply_workspace_transition(transition, "Workspaces::switch_to");
+        self
+    }
+
+    pub fn move_window_to_workspace(mut self, window: &str, workspace: &str) -> Self {
+        self.consume_event(format!("move window {window:?} to workspace {workspace:?}"));
+        let id = *self
+            .workspace_names
+            .get(workspace)
+            .unwrap_or_else(|| panic!("scenario {:?} has no workspace {workspace:?}", self.name));
+        let transition = self
+            .workspaces
+            .move_window(&window.to_owned(), id)
+            .unwrap_or_else(|_| panic!("scenario {:?} has no window {window:?}", self.name));
+        self.apply_workspace_transition(transition, "Workspaces::move_window");
+        self
+    }
+
+    pub fn remove_workspace(mut self, name: &str) -> Self {
+        self.consume_event(format!("remove workspace {name:?}"));
+        let id = self
+            .workspace_names
+            .remove(name)
+            .unwrap_or_else(|| panic!("scenario {:?} has no workspace {name:?}", self.name));
+        let transition = self
+            .workspaces
+            .remove(id)
+            .expect("scenario must retain one workspace");
+        self.apply_workspace_transition(transition, "Workspaces::remove");
+        self
+    }
+
+    pub fn expect_workspace(self, expected: &str) -> Self {
+        let actual = self
+            .workspace_names
+            .iter()
+            .find_map(|(name, id)| (*id == self.workspaces.active()).then(|| name.clone()));
+        self.assert(
+            actual.as_deref() == Some(expected),
+            format!("expected active workspace {expected:?}, got {actual:?}"),
+        )
+    }
+
+    pub fn expect_window_visible(self, window: &str, visible: bool) -> Self {
+        let actual = self.workspaces.is_visible(&window.to_owned());
+        self.assert(
+            actual == visible,
+            format!("expected window {window:?} visibility {visible}, got {actual}"),
+        )
+    }
+
     pub fn expect_output_position(self, output: &str, x: i32, y: i32) -> Self {
         let actual = self
             .outputs
@@ -429,6 +529,22 @@ impl Scenario {
             let _ = self.focus.acknowledge(&request);
         }
         self
+    }
+
+    pub fn expect_visible_windows(self, expected: &[&str]) -> Self {
+        let actual = self
+            .production_window_facts()
+            .into_iter()
+            .map(|window| window.id)
+            .collect::<Vec<_>>();
+        let expected = expected
+            .iter()
+            .map(|window| (*window).to_owned())
+            .collect::<Vec<_>>();
+        self.assert(
+            actual == expected,
+            format!("expected visible window feed {expected:?}, got {actual:?}"),
+        )
     }
 
     pub fn lose_focus(mut self, request: FocusRequest<SurfaceIdentity>) -> Self {
@@ -608,12 +724,91 @@ impl Scenario {
 
     fn apply_hotkey_action(&mut self, action: HotkeyAction) {
         self.actions.push(action);
+        let workspace_transition = match action {
+            HotkeyAction::SwitchWorkspacePrevious | HotkeyAction::SwitchWorkspaceNext => {
+                let direction = if action == HotkeyAction::SwitchWorkspacePrevious {
+                    WorkspaceDirection::Previous
+                } else {
+                    WorkspaceDirection::Next
+                };
+                let target = self.workspaces.neighbor(direction);
+                let output = self
+                    .workspaces
+                    .active_output()
+                    .map(str::to_owned)
+                    .or_else(|| {
+                        self.outputs
+                            .outputs()
+                            .first()
+                            .map(|output| output.name.clone())
+                    });
+                Some(self.workspaces.switch_to(target, output))
+            }
+            HotkeyAction::MoveWindowToPreviousWorkspace
+            | HotkeyAction::MoveWindowToNextWorkspace => {
+                let direction = if action == HotkeyAction::MoveWindowToPreviousWorkspace {
+                    WorkspaceDirection::Previous
+                } else {
+                    WorkspaceDirection::Next
+                };
+                self.platform.active_window.clone().map(|window| {
+                    let target = self.workspaces.neighbor(direction);
+                    self.workspaces.move_window(&window, target)
+                })
+            }
+            _ => None,
+        };
+        if let Some(transition) = workspace_transition {
+            self.apply_workspace_transition(
+                transition.expect("directional workspace target must remain valid"),
+                "HotkeyController -> Workspaces directional reducer",
+            );
+            return;
+        }
         let windows = self.production_window_facts();
         let effects = (self.task_reduce)(&mut self.switcher, action, &windows);
         self.apply_task_effects(
             effects,
             format!("semantic key -> HotkeyController -> {action:?} -> TaskSwitcher"),
         );
+    }
+
+    fn apply_workspace_transition(
+        &mut self,
+        transition: WorkspaceTransition<String>,
+        authority: &str,
+    ) {
+        let effects = transition
+            .hide
+            .into_iter()
+            .map(WorkspaceEffect::HideWindow)
+            .chain(transition.show.into_iter().map(WorkspaceEffect::ShowWindow))
+            .chain(
+                transition
+                    .focus
+                    .into_iter()
+                    .map(WorkspaceEffect::ActivateWindow),
+            );
+        for effect in effects {
+            self.consumed_effects += 1;
+            self.authority.push(AuthorityRecord {
+                field: match effect {
+                    WorkspaceEffect::HideWindow(_) | WorkspaceEffect::ShowWindow(_) => {
+                        "window.workspace.visible"
+                    }
+                    WorkspaceEffect::ActivateWindow(_) => "window.active",
+                }
+                .into(),
+                path: format!("semantic workspace action -> {authority} -> {effect:?}"),
+            });
+            if let WorkspaceEffect::ActivateWindow(window) = &effect {
+                self.platform.active_window = Some(window.clone());
+            }
+            self.platform
+                .ordered_effects
+                .push(RecordedEffect::Workspace(effect));
+        }
+        self.check_budget();
     }
 
     fn apply_task_effects(
@@ -729,9 +924,15 @@ impl Scenario {
         let mut windows = self
             .windows
             .iter()
+            .filter(|window| self.workspaces.is_visible(&window.name))
             .filter(|window| window.active)
             .collect::<Vec<_>>();
-        windows.extend(self.windows.iter().filter(|window| !window.active));
+        windows.extend(
+            self.windows
+                .iter()
+                .filter(|window| self.workspaces.is_visible(&window.name))
+                .filter(|window| !window.active),
+        );
         windows
             .into_iter()
             .map(|window| SwitchWindow {
@@ -745,6 +946,7 @@ impl Scenario {
     fn production_window_surfaces(&self) -> Vec<WindowSurface<String>> {
         self.windows
             .iter()
+            .filter(|window| self.workspaces.is_visible(&window.name))
             .filter_map(|window| {
                 window.geometry.map(|geometry| WindowSurface {
                     id: window.name.clone(),
@@ -840,6 +1042,9 @@ impl WindowCursor {
         self.scenario.windows[self.current].active = true;
         self.scenario.platform.active_window =
             Some(self.scenario.windows[self.current].name.clone());
+        self.scenario
+            .workspaces
+            .focused(&self.scenario.windows[self.current].name);
         self
     }
 
@@ -854,8 +1059,10 @@ impl WindowCursor {
     }
 
     pub fn window(mut self, name: impl Into<String>) -> Self {
+        let name = name.into();
+        self.scenario.workspaces.add_window(name.clone());
         self.scenario.windows.push(WindowFact {
-            name: name.into(),
+            name,
             application_id: String::new(),
             active: false,
             geometry: None,
@@ -878,6 +1085,22 @@ impl WindowCursor {
 
     pub fn click_window(self, window: &str) -> Scenario {
         self.scenario.click_window(window)
+    }
+
+    pub fn create_workspace(self, name: impl Into<String>) -> Scenario {
+        self.scenario.create_workspace(name)
+    }
+
+    pub fn switch_workspace(self, name: &str, output: &str) -> Scenario {
+        self.scenario.switch_workspace(name, output)
+    }
+
+    pub fn move_window_to_workspace(self, window: &str, workspace: &str) -> Scenario {
+        self.scenario.move_window_to_workspace(window, workspace)
+    }
+
+    pub fn expect_visible_windows(self, expected: &[&str]) -> Scenario {
+        self.scenario.expect_visible_windows(expected)
     }
 }
 

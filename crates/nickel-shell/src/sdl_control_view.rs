@@ -2,7 +2,7 @@
 
 use nickel_ui::{LinearGradient, PaintCommand, Rect, TextAlign};
 
-use crate::platform::{AudioStatus, BluetoothStatus, NetworkStatus};
+use crate::platform::{AudioStatus, BluetoothStatus, NetworkStatus, WorkspaceSummary};
 
 const BACKGROUND_TOP: u32 = 0x202b43;
 const BACKGROUND_BOTTOM: u32 = 0x111827;
@@ -31,6 +31,9 @@ pub enum ControlAction {
     ToggleAudioSection,
     SetAudioVolume(u8),
     SelectAudioDevice { id: String },
+    SwitchWorkspace(u64),
+    CreateWorkspace,
+    RemoveWorkspace(u64),
     ToggleLogoutConfirmation,
     LogOut,
 }
@@ -84,6 +87,7 @@ pub fn build_control_center(
     network: &NetworkStatus,
     bluetooth: &BluetoothStatus,
     audio: &AudioStatus,
+    workspaces: &[WorkspaceSummary],
     state: ControlViewState,
     size: (f32, f32),
 ) -> ControlCenterFrame {
@@ -119,6 +123,7 @@ pub fn build_control_center(
     builder.wifi(network, state.wifi_expanded);
     builder.bluetooth(bluetooth, state.bluetooth_expanded);
     builder.audio(audio, state.audio_expanded);
+    builder.workspaces(workspaces);
     builder.session(state.logout_confirmation);
 
     let content_bottom = builder.y + state.scroll_offset.max(0.0);
@@ -142,6 +147,50 @@ struct ViewBuilder {
 }
 
 impl ViewBuilder {
+    fn workspaces(&mut self, workspaces: &[WorkspaceSummary]) {
+        let card = self.card(82.0);
+        self.commands.push(text(
+            Rect::new(
+                card.origin.x + 14.0,
+                card.origin.y + 10.0,
+                card.size.width - 28.0,
+                22.0,
+            ),
+            "Workspaces",
+            1.5,
+            PRIMARY,
+            true,
+        ));
+        let mut x = card.origin.x + 14.0;
+        for (index, workspace) in workspaces.iter().take(8).enumerate() {
+            let bounds = Rect::new(x, card.origin.y + 42.0, 34.0, 28.0);
+            self.action_button(
+                bounds,
+                &(index + 1).to_string(),
+                ControlAction::SwitchWorkspace(workspace.id),
+                workspace.active,
+            );
+            x += 40.0;
+        }
+        self.action_button(
+            Rect::new(x, card.origin.y + 42.0, 34.0, 28.0),
+            "+",
+            ControlAction::CreateWorkspace,
+            false,
+        );
+        if workspaces.len() > 1
+            && let Some(active) = workspaces.iter().find(|workspace| workspace.active)
+        {
+            self.action_button(
+                Rect::new(x + 40.0, card.origin.y + 42.0, 34.0, 28.0),
+                "−",
+                ControlAction::RemoveWorkspace(active.id),
+                false,
+            );
+        }
+        self.finish_card(card);
+    }
+
     fn session(&mut self, confirming_logout: bool) {
         let card = self.card(if confirming_logout { 92.0 } else { 68.0 });
         self.commands.push(text(
@@ -654,7 +703,7 @@ fn intersection(left: Rect, right: Rect) -> Option<Rect> {
 
 #[cfg(test)]
 mod tests {
-    use crate::platform::{AudioStatus, BluetoothStatus, NetworkStatus};
+    use crate::platform::{AudioStatus, BluetoothStatus, NetworkStatus, WorkspaceSummary};
 
     use super::{ControlAction, ControlViewState, build_control_center};
 
@@ -663,6 +712,7 @@ mod tests {
             &NetworkStatus::default(),
             &BluetoothStatus::default(),
             &AudioStatus::default(),
+            &[],
             state,
             (380.0, 650.0),
         );
@@ -699,6 +749,7 @@ mod tests {
             &NetworkStatus::default(),
             &BluetoothStatus::default(),
             &AudioStatus::default(),
+            &[],
             ControlViewState {
                 logout_confirmation: true,
                 ..ControlViewState::default()
@@ -711,5 +762,36 @@ mod tests {
                 .iter()
                 .any(|target| target.action == ControlAction::LogOut)
         );
+    }
+
+    #[test]
+    fn workspace_card_routes_switch_create_and_active_remove_actions() {
+        let frame = build_control_center(
+            &NetworkStatus::default(),
+            &BluetoothStatus::default(),
+            &AudioStatus::default(),
+            &[
+                WorkspaceSummary {
+                    id: 4,
+                    active: false,
+                },
+                WorkspaceSummary {
+                    id: 9,
+                    active: true,
+                },
+            ],
+            ControlViewState::default(),
+            (380.0, 650.0),
+        );
+        let actions = frame
+            .hit_targets
+            .iter()
+            .map(|target| target.action.clone())
+            .collect::<Vec<_>>();
+        assert!(actions.contains(&ControlAction::SwitchWorkspace(4)));
+        assert!(actions.contains(&ControlAction::SwitchWorkspace(9)));
+        assert!(actions.contains(&ControlAction::CreateWorkspace));
+        assert!(actions.contains(&ControlAction::RemoveWorkspace(9)));
+        assert!(!actions.contains(&ControlAction::RemoveWorkspace(4)));
     }
 }

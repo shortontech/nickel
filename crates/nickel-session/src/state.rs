@@ -15,26 +15,29 @@ use nickel_core::{
     hotkeys::{HotkeyAction, HotkeyController},
     launcher::{LauncherPointerTarget, LauncherVisibility},
     task_switcher::{SwitchWindow, TaskSwitchEffect, TaskSwitcher},
+    workspaces::{WorkspaceError, WorkspaceId, WorkspaceTransition, Workspaces},
 };
 use nickel_session_protocol::{
     ClientEnvelope, Command as SessionCommand, ErrorCode, Event as SessionEvent,
-    Geometry as ProtocolGeometry, OutputSnapshot, PreviewFrame as ProtocolPreview, Query, Request,
-    SecureStorageState as ProtocolSecureStorage, ServerEnvelope, ServerMessage, ShellRole,
-    Snapshot as SessionSnapshot, WindowAction as ProtocolWindowAction,
-    WindowId as ProtocolWindowId, WindowSnapshot, decode, encode,
+    Geometry as ProtocolGeometry, OutputSnapshot, OutputTransform, PreviewFrame as ProtocolPreview,
+    Query, Request, SecureStorageState as ProtocolSecureStorage, ServerEnvelope, ServerMessage,
+    ShellRole, ShellSurfaceSnapshot, Snapshot as SessionSnapshot, TestOutput,
+    WindowAction as ProtocolWindowAction, WindowId as ProtocolWindowId, WindowSnapshot,
+    WorkspaceId as ProtocolWorkspaceId, WorkspaceSnapshot, WorkspaceState, decode, encode,
 };
 use smithay::{
     desktop::{PopupManager, Space, Window, WindowSurfaceType},
     input::{Seat, SeatState},
+    output::{Mode as OutputMode, Output, PhysicalProperties, Scale as OutputScale, Subpixel},
     reexports::{
         calloop::{EventLoop, Interest, LoopSignal, Mode, PostAction, channel, generic::Generic},
         wayland_server::{
             Display, DisplayHandle, Resource,
-            backend::{ClientData, ClientId, DisconnectReason, ObjectId},
+            backend::{ClientData, ClientId, DisconnectReason, GlobalId, ObjectId},
             protocol::wl_surface::WlSurface,
         },
     },
-    utils::{Logical, Point, SERIAL_COUNTER, Size},
+    utils::{Logical, Point, SERIAL_COUNTER, Size, Transform},
     wayland::{
         compositor::{CompositorClientState, CompositorState},
         idle_inhibit::IdleInhibitManagerState,
@@ -63,6 +66,32 @@ fn protocol_error(code: ErrorCode, message: impl Into<String>) -> ServerMessage 
         code,
         message: message.into(),
     }
+}
+
+fn workspace_error(error: WorkspaceError) -> &'static str {
+    match error {
+        WorkspaceError::UnknownWorkspace => "unknown workspace",
+        WorkspaceError::LastWorkspace => "cannot remove the last workspace",
+        WorkspaceError::LimitReached => "workspace limit reached",
+        WorkspaceError::UnknownWindow => "window has no workspace",
+    }
+}
+
+fn clamp_window_location(
+    location: Point<i32, Logical>,
+    size: Size<i32, Logical>,
+    work_area: Geometry,
+) -> Point<i32, Logical> {
+    (
+        location
+            .x
+            .clamp(work_area.x, work_area.x + (work_area.width - size.w).max(0)),
+        location.y.clamp(
+            work_area.y,
+            work_area.y + (work_area.height - size.h).max(0),
+        ),
+    )
+        .into()
 }
 
 fn process_uid(pid: u32) -> Option<String> {
@@ -121,6 +150,7 @@ pub struct NickelSession {
     pub x11_windows: HashMap<u32, WindowId>,
     pub launcher_window: Option<Window>,
     pub launcher_visibility: LauncherVisibility,
+    launcher_output_name: Option<String>,
     launcher_focus: FocusTransactions<ObjectId>,
     launcher_restore_window: Option<WindowId>,
     launcher_subscribers: Vec<PathBuf>,
@@ -136,10 +166,14 @@ pub struct NickelSession {
     pub preview_window: Option<Window>,
     pub server_decorated: HashSet<ObjectId>,
     pub primary_output_name: Option<String>,
+    virtual_test_outputs: HashMap<String, (Output, GlobalId)>,
     pub preview_frames: HashMap<WindowId, PreviewFrame>,
     pub preview_requests: HashSet<WindowId>,
     pub hotkeys: HotkeyController,
     pub task_switcher: TaskSwitcher<WindowId>,
+    pub workspaces: Workspaces<WindowId>,
+    pub workspace_hidden_windows: HashMap<WindowId, (Window, Point<i32, Logical>)>,
+    displaced_output_windows: HashMap<String, Vec<DisplacedWindow>>,
     pub preview_highlight: Option<WindowId>,
     pub minimized_windows: HashMap<WindowId, (Window, Point<i32, Logical>)>,
     maximized_restore: HashMap<ObjectId, Geometry>,
@@ -169,6 +203,13 @@ pub struct PreviewFrame {
     pub width: u16,
     pub height: u16,
     pub rgba: Vec<u8>,
+}
+
+#[derive(Clone, Copy)]
+struct DisplacedWindow {
+    id: WindowId,
+    relative_location: Point<i32, Logical>,
+    rescue_location: Point<i32, Logical>,
 }
 
 pub struct SurfaceBufferCommit {
@@ -299,6 +340,7 @@ impl NickelSession {
             x11_windows: HashMap::new(),
             launcher_window: None,
             launcher_visibility: LauncherVisibility::default(),
+            launcher_output_name: None,
             launcher_focus: FocusTransactions::default(),
             launcher_restore_window: None,
             launcher_subscribers: Vec::new(),
@@ -314,10 +356,14 @@ impl NickelSession {
             preview_window: None,
             server_decorated: HashSet::new(),
             primary_output_name: None,
+            virtual_test_outputs: HashMap::new(),
             preview_frames: HashMap::new(),
             preview_requests: HashSet::new(),
             hotkeys: HotkeyController::default(),
             task_switcher: TaskSwitcher::default(),
+            workspaces: Workspaces::default(),
+            workspace_hidden_windows: HashMap::new(),
+            displaced_output_windows: HashMap::new(),
             preview_highlight: None,
             minimized_windows: HashMap::new(),
             maximized_restore: HashMap::new(),
@@ -495,8 +541,14 @@ impl NickelSession {
     fn handle_protocol_query(&mut self, query: Query) -> ServerMessage {
         match query {
             Query::Snapshot => ServerMessage::Snapshot(self.protocol_snapshot()),
-            Query::Windows => ServerMessage::Windows(self.protocol_windows()),
+            Query::Windows => ServerMessage::Windows(
+                self.protocol_windows()
+                    .into_iter()
+                    .filter(|window| window.workspace.0 == self.workspaces.active().0)
+                    .collect(),
+            ),
             Query::Outputs => ServerMessage::Outputs(self.protocol_outputs()),
+            Query::ShellSurfaces => ServerMessage::ShellSurfaces(self.protocol_shell_surfaces()),
             Query::LauncherVisibility => ServerMessage::LauncherVisibility {
                 visible: self.launcher_visibility.is_visible(),
             },
@@ -506,6 +558,7 @@ impl NickelSession {
             Query::IdleInhibition => ServerMessage::IdleInhibition {
                 surfaces: u16::try_from(self.idle_inhibitors.len()).unwrap_or(u16::MAX),
             },
+            Query::Workspaces => ServerMessage::Workspaces(self.protocol_workspaces()),
             Query::Preview { window } => {
                 let id = WindowId(window.0);
                 if !self.windows.snapshot().iter().any(|entry| entry.id == id) {
@@ -597,6 +650,49 @@ impl NickelSession {
                     return protocol_error(ErrorCode::InvalidRequest, error);
                 }
             }
+            SessionCommand::CreateWorkspace => {
+                if let Err(error) = self.workspaces.create() {
+                    return protocol_error(ErrorCode::ResourceLimit, workspace_error(error));
+                }
+                self.notify_workspace_state();
+                return ServerMessage::Workspaces(self.protocol_workspaces());
+            }
+            SessionCommand::RemoveWorkspace { workspace } => {
+                let transition = match self.workspaces.remove(WorkspaceId(workspace.0)) {
+                    Ok(transition) => transition,
+                    Err(error) => {
+                        return protocol_error(ErrorCode::InvalidRequest, workspace_error(error));
+                    }
+                };
+                self.apply_workspace_transition(transition);
+            }
+            SessionCommand::SwitchWorkspace { workspace, output } => {
+                if output.as_ref().is_some_and(|name| {
+                    !self
+                        .space
+                        .outputs()
+                        .any(|candidate| candidate.name() == *name)
+                }) {
+                    return protocol_error(ErrorCode::InvalidRequest, "unknown output");
+                }
+                let transition = match self.workspaces.switch_to(WorkspaceId(workspace.0), output) {
+                    Ok(transition) => transition,
+                    Err(error) => {
+                        return protocol_error(ErrorCode::InvalidRequest, workspace_error(error));
+                    }
+                };
+                self.apply_workspace_transition(transition);
+            }
+            SessionCommand::MoveWindowToWorkspace { window, workspace } => {
+                let id = WindowId(window.0);
+                let transition = match self.workspaces.move_window(&id, WorkspaceId(workspace.0)) {
+                    Ok(transition) => transition,
+                    Err(error) => {
+                        return protocol_error(ErrorCode::InvalidRequest, workspace_error(error));
+                    }
+                };
+                self.apply_workspace_transition(transition);
+            }
             SessionCommand::HighlightWindow { window } => {
                 if let Some(window) = window
                     && !self.window_exists(window)
@@ -615,6 +711,7 @@ impl NickelSession {
                     ProtocolWindowAction::Close => self.close_window(id),
                     ProtocolWindowAction::Minimize => self.minimize_window(id),
                     ProtocolWindowAction::MaximizeRestore => self.maximize_window(id),
+                    ProtocolWindowAction::FullscreenRestore => self.toggle_fullscreen_window(id),
                 }
             }
             SessionCommand::TestInput { input } => {
@@ -625,6 +722,17 @@ impl NickelSession {
                     );
                 }
                 if let Err(error) = self.inject_test_input(input) {
+                    return protocol_error(ErrorCode::InvalidRequest, error);
+                }
+            }
+            SessionCommand::TestOutput { output } => {
+                if !self.test_control_enabled {
+                    return protocol_error(
+                        ErrorCode::Unauthorized,
+                        "test output control is not enabled for this session",
+                    );
+                }
+                if let Err(error) = self.apply_test_output(output) {
                     return protocol_error(ErrorCode::InvalidRequest, error);
                 }
             }
@@ -675,28 +783,56 @@ impl NickelSession {
             .snapshot()
             .into_iter()
             .filter(|window| !shell_ids.contains(&window.id))
+            .filter(|window| self.workspaces.is_visible(&window.id))
             .take(nickel_session_protocol::MAX_WINDOWS)
             .map(|window| {
                 let surface = self
                     .surface_windows
                     .iter()
                     .find_map(|(surface, id)| (*id == window.id).then_some(surface));
-                let geometry = surface.and_then(|surface| {
-                    self.space
-                        .elements()
-                        .find(|candidate| {
-                            candidate
-                                .wl_surface()
-                                .is_some_and(|candidate| candidate.id() == *surface)
-                        })
-                        .and_then(|candidate| self.space.element_bbox(candidate))
-                        .map(|bounds| ProtocolGeometry {
-                            x: bounds.loc.x,
-                            y: bounds.loc.y,
-                            width: bounds.size.w,
-                            height: bounds.size.h,
-                        })
-                });
+                let geometry = surface
+                    .and_then(|surface| {
+                        self.space
+                            .elements()
+                            .find(|candidate| {
+                                candidate
+                                    .wl_surface()
+                                    .is_some_and(|candidate| candidate.id() == *surface)
+                            })
+                            .and_then(|candidate| self.space.element_bbox(candidate))
+                            .map(|bounds| ProtocolGeometry {
+                                x: bounds.loc.x,
+                                y: bounds.loc.y,
+                                width: bounds.size.w,
+                                height: bounds.size.h,
+                            })
+                    })
+                    .or_else(|| {
+                        self.workspace_hidden_windows
+                            .get(&window.id)
+                            .map(|(hidden, location)| {
+                                let size = hidden.geometry().size;
+                                ProtocolGeometry {
+                                    x: location.x,
+                                    y: location.y,
+                                    width: size.w,
+                                    height: size.h,
+                                }
+                            })
+                    })
+                    .or_else(|| {
+                        self.minimized_windows
+                            .get(&window.id)
+                            .map(|(hidden, location)| {
+                                let size = hidden.geometry().size;
+                                ProtocolGeometry {
+                                    x: location.x,
+                                    y: location.y,
+                                    width: size.w,
+                                    height: size.h,
+                                }
+                            })
+                    });
                 WindowSnapshot {
                     id: ProtocolWindowId(window.id.0),
                     application_id: window.app_id.clone(),
@@ -711,10 +847,130 @@ impl NickelSession {
                                     && x11.is_maximized()
                             })
                         }),
+                    fullscreen: surface
+                        .is_some_and(|surface| self.fullscreen_restore.contains_key(surface))
+                        || self.space.elements().any(|candidate| {
+                            candidate.x11_surface().is_some_and(|x11| {
+                                self.x11_windows.get(&x11.window_id()).copied() == Some(window.id)
+                                    && self.x11_fullscreen_restore.contains_key(&x11.window_id())
+                            })
+                        }),
                     geometry,
+                    workspace: ProtocolWorkspaceId(
+                        self.workspaces
+                            .workspace_for(&window.id)
+                            .unwrap_or(WorkspaceId(1))
+                            .0,
+                    ),
                 }
             })
             .collect()
+    }
+
+    fn apply_test_output(&mut self, operation: TestOutput) -> Result<(), &'static str> {
+        match operation {
+            TestOutput::Connect {
+                name,
+                logical_width,
+                logical_height,
+                scale_120,
+                transform,
+            } => {
+                if name.trim().is_empty() || name == "winit" {
+                    return Err("test output needs a distinct non-empty name");
+                }
+                if self.space.outputs().any(|output| output.name() == name) {
+                    return Err("output is already connected");
+                }
+                if self.space.outputs().count() >= nickel_session_protocol::MAX_OUTPUTS {
+                    return Err("output limit reached");
+                }
+                if logical_width < 320 || logical_height < 240 || !(60..=480).contains(&scale_120) {
+                    return Err("invalid test output geometry or scale");
+                }
+                let smithay_transform = match transform {
+                    OutputTransform::Normal => Transform::Normal,
+                    OutputTransform::Rotate90 => Transform::_90,
+                    OutputTransform::Rotate180 => Transform::_180,
+                    OutputTransform::Rotate270 => Transform::_270,
+                    OutputTransform::Flipped => Transform::Flipped,
+                    OutputTransform::Flipped90 => Transform::Flipped90,
+                    OutputTransform::Flipped180 => Transform::Flipped180,
+                    OutputTransform::Flipped270 => Transform::Flipped270,
+                };
+                let scale = f64::from(scale_120) / 120.0;
+                let scaled_width = (f64::from(logical_width) * scale).round() as i32;
+                let scaled_height = (f64::from(logical_height) * scale).round() as i32;
+                let rotated = matches!(
+                    smithay_transform,
+                    Transform::_90 | Transform::_270 | Transform::Flipped90 | Transform::Flipped270
+                );
+                let mode = OutputMode {
+                    size: if rotated {
+                        (scaled_height, scaled_width).into()
+                    } else {
+                        (scaled_width, scaled_height).into()
+                    },
+                    refresh: 60_000,
+                };
+                let x = self
+                    .space
+                    .outputs()
+                    .filter_map(|output| self.space.output_geometry(output))
+                    .map(|geometry| geometry.loc.x + geometry.size.w)
+                    .max()
+                    .unwrap_or(0);
+                let output = Output::new(
+                    name.clone(),
+                    PhysicalProperties {
+                        size: (0, 0).into(),
+                        subpixel: Subpixel::Unknown,
+                        make: "Nickel".into(),
+                        model: "Nested test output".into(),
+                        serial_number: name.clone(),
+                    },
+                );
+                output.set_preferred(mode);
+                output.change_current_state(
+                    Some(mode),
+                    Some(smithay_transform),
+                    Some(OutputScale::Fractional(scale)),
+                    Some((x, 0).into()),
+                );
+                let global = output.create_global::<NickelSession>(&self.display_handle);
+                self.space.map_output(&output, (x, 0));
+                self.restore_output_windows(&output);
+                self.virtual_test_outputs.insert(name, (output, global));
+            }
+            TestOutput::Disconnect { name } => {
+                let Some((output, global)) = self.virtual_test_outputs.remove(&name) else {
+                    return Err("unknown virtual test output");
+                };
+                self.stage_output_removal(&output);
+                self.space.unmap_output(&output);
+                output.leave_all();
+                self.display_handle.remove_global::<NickelSession>(global);
+                self.reconcile_output_removal(&name);
+                self.rescue_stranded_windows();
+                self.relayout_maximized_windows();
+                self.relayout_fullscreen_windows();
+            }
+        }
+        self.relayout_shell_surfaces();
+        self.request_output_redraw();
+        self.notify_protocol_snapshot();
+        Ok(())
+    }
+
+    pub(crate) fn reconcile_output_removal(&mut self, name: &str) {
+        if self.primary_output_name.as_deref() == Some(name) {
+            self.primary_output_name = self.space.outputs().next().map(|output| output.name());
+        }
+        if self.launcher_output_name.as_deref() == Some(name) {
+            self.launcher_output_name = self.primary_output_name.clone();
+        }
+        self.workspaces
+            .output_disconnected(name, self.primary_output_name.clone());
     }
 
     fn protocol_outputs(&self) -> Vec<OutputSnapshot> {
@@ -746,12 +1002,71 @@ impl NickelSession {
                             height: area.height,
                         }
                     },
+                    scale_120: (output.current_scale().fractional_scale() * 120.0).round() as u32,
+                    transform: match output.current_transform() {
+                        Transform::Normal => OutputTransform::Normal,
+                        Transform::_90 => OutputTransform::Rotate90,
+                        Transform::_180 => OutputTransform::Rotate180,
+                        Transform::_270 => OutputTransform::Rotate270,
+                        Transform::Flipped => OutputTransform::Flipped,
+                        Transform::Flipped90 => OutputTransform::Flipped90,
+                        Transform::Flipped180 => OutputTransform::Flipped180,
+                        Transform::Flipped270 => OutputTransform::Flipped270,
+                    },
                     physical_width_mm: physical.size.w,
                     physical_height_mm: physical.size.h,
                     primary: self.primary_output_name.as_deref() == Some(output.name().as_str()),
                 })
             })
             .take(nickel_session_protocol::MAX_OUTPUTS)
+            .collect()
+    }
+
+    fn protocol_shell_surfaces(&self) -> Vec<ShellSurfaceSnapshot> {
+        let registry = self.windows.snapshot();
+        self.shell_windows()
+            .filter_map(|window| {
+                let id = window
+                    .wl_surface()
+                    .and_then(|surface| self.surface_windows.get(&surface.id()))?;
+                let app_id = registry
+                    .iter()
+                    .find(|entry| entry.id == *id)
+                    .map(|entry| entry.app_id.as_str())?;
+                let role = ShellRole::from_application_id(app_id)?;
+                let bounds = self.space.element_bbox(window);
+                let geometry = bounds.map(|bounds| ProtocolGeometry {
+                    x: bounds.loc.x,
+                    y: bounds.loc.y,
+                    width: bounds.size.w,
+                    height: bounds.size.h,
+                });
+                let output = bounds.and_then(|bounds| {
+                    self.space
+                        .outputs()
+                        .filter_map(|output| {
+                            let output_bounds = self.space.output_geometry(output)?;
+                            let left = bounds.loc.x.max(output_bounds.loc.x);
+                            let top = bounds.loc.y.max(output_bounds.loc.y);
+                            let right = (bounds.loc.x + bounds.size.w)
+                                .min(output_bounds.loc.x + output_bounds.size.w);
+                            let bottom = (bounds.loc.y + bounds.size.h)
+                                .min(output_bounds.loc.y + output_bounds.size.h);
+                            let area =
+                                i64::from((right - left).max(0)) * i64::from((bottom - top).max(0));
+                            Some((area, output.name()))
+                        })
+                        .max_by_key(|(area, _)| *area)
+                        .filter(|(area, _)| *area > 0)
+                        .map(|(_, name)| name)
+                });
+                Some(ShellSurfaceSnapshot {
+                    role,
+                    geometry,
+                    output,
+                })
+            })
+            .take(nickel_session_protocol::MAX_WINDOWS)
             .collect()
     }
 
@@ -766,6 +1081,41 @@ impl NickelSession {
             outputs: self.protocol_outputs(),
             windows,
             launcher_visible: self.launcher_visibility.is_visible(),
+            workspaces: self.protocol_workspaces(),
+        }
+    }
+
+    fn protocol_workspaces(&self) -> WorkspaceState {
+        let shell_ids = self
+            .shell_windows()
+            .filter_map(|window| {
+                self.surface_windows
+                    .get(&window.toplevel()?.wl_surface().id())
+            })
+            .copied()
+            .collect::<HashSet<_>>();
+        WorkspaceState {
+            active: ProtocolWorkspaceId(self.workspaces.active().0),
+            active_output: self.workspaces.active_output().map(str::to_owned),
+            ordered: self
+                .workspaces
+                .ordered()
+                .iter()
+                .take(nickel_session_protocol::MAX_WORKSPACES)
+                .map(|workspace| WorkspaceSnapshot {
+                    id: ProtocolWorkspaceId(workspace.id.0),
+                    windows: workspace
+                        .windows
+                        .iter()
+                        .filter(|window| !shell_ids.contains(window))
+                        .map(|window| ProtocolWindowId(window.0))
+                        .collect(),
+                    focused: workspace
+                        .last_focused
+                        .filter(|window| !shell_ids.contains(window))
+                        .map(|window| ProtocolWindowId(window.0)),
+                })
+                .collect(),
         }
     }
 
@@ -789,6 +1139,9 @@ impl NickelSession {
 
     pub fn toggle_launcher(&mut self) {
         let visible = self.launcher_visibility.toggle();
+        if visible {
+            self.launcher_output_name = self.preferred_interaction_output_name();
+        }
         self.hotkeys.launcher_visibility_applied(visible);
         self.apply_launcher_visibility(visible);
         if !visible {
@@ -898,10 +1251,287 @@ impl NickelSession {
         }
     }
 
+    pub(crate) fn stage_output_removal(&mut self, output: &Output) {
+        let Some(removed) = self.space.output_geometry(output) else {
+            return;
+        };
+        let Some(fallback) = self
+            .space
+            .outputs()
+            .filter(|candidate| *candidate != output)
+            .find_map(|candidate| self.space.output_geometry(candidate))
+        else {
+            return;
+        };
+        let removed_geometry = Geometry {
+            x: removed.loc.x,
+            y: removed.loc.y,
+            width: removed.size.w,
+            height: removed.size.h,
+        };
+        let fallback_geometry = shell_layout::work_area(Geometry {
+            x: fallback.loc.x,
+            y: fallback.loc.y,
+            width: fallback.size.w,
+            height: fallback.size.h,
+        });
+        let output_geometries = self
+            .space
+            .outputs()
+            .filter_map(|output| self.space.output_geometry(output))
+            .map(|geometry| Geometry {
+                x: geometry.loc.x,
+                y: geometry.loc.y,
+                width: geometry.size.w,
+                height: geometry.size.h,
+            })
+            .collect::<Vec<_>>();
+        let mut displaced = Vec::new();
+        let mapped = self
+            .space
+            .elements()
+            .filter_map(|window| {
+                let id = window
+                    .wl_surface()
+                    .and_then(|surface| self.surface_windows.get(&surface.id()))
+                    .copied()?;
+                self.workspaces.workspace_for(&id)?;
+                let bounds = self.space.element_bbox(window)?;
+                let geometry = Geometry {
+                    x: bounds.loc.x,
+                    y: bounds.loc.y,
+                    width: bounds.size.w,
+                    height: bounds.size.h,
+                };
+                (shell_layout::output_for_window(geometry, &output_geometries)
+                    == Some(removed_geometry))
+                .then(|| (id, window.clone(), bounds.loc, bounds.size))
+            })
+            .collect::<Vec<_>>();
+        for (id, window, location, size) in mapped {
+            let relative_location: Point<i32, Logical> =
+                (location.x - removed.loc.x, location.y - removed.loc.y).into();
+            let rescue_location = clamp_window_location(
+                (
+                    fallback_geometry.x + relative_location.x,
+                    fallback_geometry.y + relative_location.y,
+                )
+                    .into(),
+                size,
+                fallback_geometry,
+            );
+            self.space.map_element(window, rescue_location, false);
+            displaced.push(DisplacedWindow {
+                id,
+                relative_location,
+                rescue_location,
+            });
+        }
+        for (id, (window, location)) in &mut self.minimized_windows {
+            let size = window.geometry().size;
+            let geometry = Geometry {
+                x: location.x,
+                y: location.y,
+                width: size.w,
+                height: size.h,
+            };
+            if shell_layout::output_for_window(geometry, &output_geometries)
+                != Some(removed_geometry)
+            {
+                continue;
+            }
+            let relative_location: Point<i32, Logical> =
+                (location.x - removed.loc.x, location.y - removed.loc.y).into();
+            let rescue_location = clamp_window_location(
+                (
+                    fallback_geometry.x + relative_location.x,
+                    fallback_geometry.y + relative_location.y,
+                )
+                    .into(),
+                size,
+                fallback_geometry,
+            );
+            *location = rescue_location;
+            displaced.push(DisplacedWindow {
+                id: *id,
+                relative_location,
+                rescue_location,
+            });
+        }
+        for (id, (window, location)) in &mut self.workspace_hidden_windows {
+            let size = window.geometry().size;
+            let geometry = Geometry {
+                x: location.x,
+                y: location.y,
+                width: size.w,
+                height: size.h,
+            };
+            if shell_layout::output_for_window(geometry, &output_geometries)
+                != Some(removed_geometry)
+            {
+                continue;
+            }
+            let relative_location: Point<i32, Logical> =
+                (location.x - removed.loc.x, location.y - removed.loc.y).into();
+            let rescue_location = clamp_window_location(
+                (
+                    fallback_geometry.x + relative_location.x,
+                    fallback_geometry.y + relative_location.y,
+                )
+                    .into(),
+                size,
+                fallback_geometry,
+            );
+            *location = rescue_location;
+            displaced.push(DisplacedWindow {
+                id: *id,
+                relative_location,
+                rescue_location,
+            });
+        }
+        self.displaced_output_windows
+            .insert(output.name(), displaced);
+    }
+
+    pub(crate) fn restore_output_windows(&mut self, output: &Output) {
+        let Some(displaced) = self.displaced_output_windows.remove(&output.name()) else {
+            return;
+        };
+        let Some(geometry) = self.space.output_geometry(output) else {
+            return;
+        };
+        let work_area = shell_layout::work_area(Geometry {
+            x: geometry.loc.x,
+            y: geometry.loc.y,
+            width: geometry.size.w,
+            height: geometry.size.h,
+        });
+        for displaced in displaced {
+            let desired = (
+                geometry.loc.x + displaced.relative_location.x,
+                geometry.loc.y + displaced.relative_location.y,
+            )
+                .into();
+            if let Some((window, location)) = self.minimized_windows.get_mut(&displaced.id) {
+                if *location == displaced.rescue_location {
+                    *location = clamp_window_location(desired, window.geometry().size, work_area);
+                }
+                continue;
+            }
+            if let Some((window, location)) = self.workspace_hidden_windows.get_mut(&displaced.id) {
+                if *location == displaced.rescue_location {
+                    *location = clamp_window_location(desired, window.geometry().size, work_area);
+                }
+                continue;
+            }
+            let window = self.space.elements().find(|window| {
+                window
+                    .wl_surface()
+                    .and_then(|surface| self.surface_windows.get(&surface.id()))
+                    .copied()
+                    == Some(displaced.id)
+            });
+            if let Some(window) = window.cloned()
+                && self.space.element_location(&window) == Some(displaced.rescue_location)
+            {
+                let location = clamp_window_location(desired, window.geometry().size, work_area);
+                self.space.map_element(window, location, false);
+            }
+        }
+        self.relayout_maximized_windows();
+        self.relayout_fullscreen_windows();
+    }
+
+    fn apply_workspace_transition(&mut self, transition: WorkspaceTransition<WindowId>) {
+        self.hide_overlays();
+        for id in transition.hide {
+            if self.minimized_windows.contains_key(&id)
+                || self.workspace_hidden_windows.contains_key(&id)
+            {
+                continue;
+            }
+            let window = self.space.elements().find(|window| {
+                window
+                    .wl_surface()
+                    .and_then(|surface| self.surface_windows.get(&surface.id()))
+                    .copied()
+                    == Some(id)
+            });
+            if let Some(window) = window.cloned() {
+                let location = self.space.element_location(&window).unwrap_or_default();
+                window.set_activated(false);
+                self.space.unmap_elem(&window);
+                self.workspace_hidden_windows.insert(id, (window, location));
+            }
+        }
+        for id in transition.show {
+            if self.minimized_windows.contains_key(&id) {
+                continue;
+            }
+            if let Some((window, location)) = self.workspace_hidden_windows.remove(&id) {
+                self.space.map_element(window, location, true);
+            }
+        }
+        if let Some(focus) = transition.focus {
+            self.activate_window(focus);
+        } else {
+            self.windows.deactivate_all();
+            self.seat
+                .get_keyboard()
+                .unwrap()
+                .set_focus(self, None, SERIAL_COUNTER.next_serial());
+        }
+        self.raise_panels();
+        self.request_output_redraw();
+        self.notify_workspace_state();
+        self.notify_protocol_snapshot();
+    }
+
+    pub fn switch_workspace_direction(
+        &mut self,
+        direction: nickel_core::workspaces::WorkspaceDirection,
+    ) {
+        let target = self.workspaces.neighbor(direction);
+        let output = self.output_name_at_pointer();
+        if let Ok(transition) = self.workspaces.switch_to(target, output) {
+            self.apply_workspace_transition(transition);
+        }
+    }
+
+    pub fn move_active_window_to_workspace(
+        &mut self,
+        direction: nickel_core::workspaces::WorkspaceDirection,
+    ) {
+        let Some(window) = self
+            .windows
+            .snapshot()
+            .into_iter()
+            .find(|window| window.active)
+            .map(|window| window.id)
+        else {
+            return;
+        };
+        let target = self.workspaces.neighbor(direction);
+        if let Ok(transition) = self.workspaces.move_window(&window, target) {
+            self.apply_workspace_transition(transition);
+        }
+    }
+
+    fn output_name_at_pointer(&self) -> Option<String> {
+        let location = self.seat.get_pointer()?.current_location();
+        self.space.outputs().find_map(|output| {
+            self.space
+                .output_geometry(output)
+                .filter(|geometry| geometry.to_f64().contains(location))
+                .map(|_| output.name())
+        })
+    }
+
     pub fn set_launcher_visible(&mut self, visible: bool) {
         let changed = self.launcher_visibility.is_visible() != visible;
         if changed && visible {
             self.launcher_show_requested_at = Some(std::time::Instant::now());
+            self.launcher_output_name = self.preferred_interaction_output_name();
         }
         self.launcher_visibility.set(visible);
         self.hotkeys.launcher_visibility_applied(visible);
@@ -970,6 +1600,20 @@ impl NickelSession {
         self.launcher_subscribers
             .retain(|path| socket.send_to(&event, path).is_ok());
         self.notify_protocol_snapshot();
+    }
+
+    fn notify_workspace_state(&mut self) {
+        let Ok(event) = encode(&ServerEnvelope {
+            request_id: 0,
+            message: ServerMessage::Event(SessionEvent::Workspaces(self.protocol_workspaces())),
+        }) else {
+            return;
+        };
+        let Ok(socket) = UnixDatagram::unbound() else {
+            return;
+        };
+        self.launcher_subscribers
+            .retain(|path| socket.send_to(&event, path).is_ok());
     }
 
     pub(crate) fn notify_protocol_snapshot(&mut self) {
@@ -1176,13 +1820,28 @@ impl NickelSession {
         focus: bool,
         label: &str,
     ) {
-        let (Some(window), Some(output)) = (window, self.output_geometry()) else {
+        let Some(window) = window else {
+            return;
+        };
+        let output = self
+            .space
+            .outputs()
+            .filter_map(|output| self.space.output_geometry(output))
+            .find(|geometry| x >= geometry.loc.x && x < geometry.loc.x + geometry.size.w)
+            .map(|geometry| Geometry {
+                x: geometry.loc.x,
+                y: geometry.loc.y,
+                width: geometry.size.w,
+                height: geometry.size.h,
+            })
+            .or_else(|| self.output_geometry());
+        let Some(output) = output else {
             return;
         };
         let width = requested_width.clamp(120, output.width.max(120));
         let maximum_height = (output.height - shell_layout::PANEL_HEIGHT).max(52);
         let height = requested_height.clamp(52, maximum_height);
-        let x = (output.x + x).clamp(output.x, output.x + output.width - width);
+        let x = x.clamp(output.x, output.x + output.width - width);
         let y = output.y + output.height - shell_layout::PANEL_HEIGHT - height - 4;
         Self::configure_window(
             &window,
@@ -1249,6 +1908,15 @@ impl NickelSession {
             self.hide_context_menu();
             return;
         }
+        if let Some((window, _)) = self.workspace_hidden_windows.remove(&id) {
+            if let Some(surface) = window.toplevel() {
+                surface.send_close();
+            } else if let Some(surface) = window.x11_surface() {
+                let _ = surface.close();
+            }
+            self.hide_context_menu();
+            return;
+        }
         if let Some(window) = self.space.elements().find(|window| {
             window
                 .wl_surface()
@@ -1264,6 +1932,14 @@ impl NickelSession {
     }
 
     pub fn activate_window(&mut self, id: WindowId) {
+        if let Some(workspace) = self.workspaces.workspace_for(&id)
+            && workspace != self.workspaces.active()
+            && let Ok(mut transition) = self.workspaces.switch_to(workspace, None)
+        {
+            transition.focus = Some(id);
+            self.apply_workspace_transition(transition);
+            return;
+        }
         if let Some((window, location)) = self.minimized_windows.remove(&id) {
             if let Some(surface) = window.x11_surface() {
                 let _ = surface.set_mapped(true);
@@ -1294,6 +1970,7 @@ impl NickelSession {
             self.raise_x11_surface(surface);
         }
         self.windows.raise(id);
+        self.workspaces.focused(&id);
         self.space.elements().for_each(|candidate| {
             candidate.set_activated(candidate == &window);
         });
@@ -1338,6 +2015,7 @@ impl NickelSession {
             .into_iter()
             .rev()
             .filter(|window| !shell_ids.contains(&window.id))
+            .filter(|window| self.workspaces.is_visible(&window.id))
             .map(|window| SwitchWindow {
                 id: window.id,
                 application_id: window.app_id.clone(),
@@ -1386,8 +2064,34 @@ impl NickelSession {
         if let Some(surface) = window.x11_surface() {
             let _ = surface.set_mapped(false);
         }
+        window.set_activated(false);
         self.space.unmap_elem(&window);
         self.minimized_windows.insert(id, (window, location));
+        self.workspaces.unfocused(&id);
+        let replacement = self
+            .workspaces
+            .ordered()
+            .iter()
+            .find(|workspace| workspace.id == self.workspaces.active())
+            .and_then(|workspace| {
+                workspace
+                    .windows
+                    .iter()
+                    .rev()
+                    .find(|candidate| {
+                        **candidate != id && !self.minimized_windows.contains_key(candidate)
+                    })
+                    .copied()
+            });
+        if let Some(replacement) = replacement {
+            self.activate_window(replacement);
+        } else {
+            self.windows.deactivate_all();
+            self.seat
+                .get_keyboard()
+                .unwrap()
+                .set_focus(self, None, SERIAL_COUNTER.next_serial());
+        }
         self.raise_panels();
         self.notify_protocol_snapshot();
     }
@@ -1437,15 +2141,47 @@ impl NickelSession {
         }
     }
 
+    pub fn toggle_fullscreen_window(&mut self, id: WindowId) {
+        self.activate_window(id);
+        let window = self.space.elements().find(|window| {
+            window
+                .wl_surface()
+                .and_then(|surface| self.surface_windows.get(&surface.id()))
+                .copied()
+                == Some(id)
+        });
+        if let Some(surface) = window.and_then(Window::x11_surface).cloned() {
+            if self
+                .x11_fullscreen_restore
+                .contains_key(&surface.window_id())
+            {
+                self.unfullscreen_x11(&surface);
+            } else {
+                self.fullscreen_x11(&surface);
+            }
+            return;
+        }
+        let surface = window.and_then(Window::toplevel).cloned();
+        if let Some(surface) = surface {
+            if self
+                .fullscreen_restore
+                .contains_key(&surface.wl_surface().id())
+            {
+                self.unfullscreen_toplevel(&surface);
+            } else {
+                self.fullscreen_toplevel(&surface);
+            }
+        }
+    }
+
     pub fn relayout_shell_surfaces(&mut self) {
         if self.output_geometry().is_none() {
             return;
         }
-        let mut outputs = self.space.outputs().cloned().collect::<Vec<_>>();
-        // nickel creates panel surfaces in monitor-name order. Preserve the
-        // same stable order here so differently sized outputs receive their
-        // own panel rather than whichever surface happened to commit last.
-        outputs.sort_by_key(|output| output.name());
+        // SDL creates desktop and panel windows in the compositor-advertised
+        // display order. Space preserves that output insertion order, so the
+        // shell surfaces must use it rather than a separately sorted model.
+        let outputs = self.space.outputs().cloned().collect::<Vec<_>>();
         for (desktop, output) in self.desktop_windows.clone().into_iter().zip(&outputs) {
             let Some(geometry) = self.space.output_geometry(output) else {
                 continue;
@@ -1661,7 +2397,7 @@ impl NickelSession {
         self.fullscreen_restore.remove(&surface.wl_surface().id());
     }
 
-    fn relayout_maximized_windows(&mut self) {
+    pub(crate) fn relayout_maximized_windows(&mut self) {
         let maximized: Vec<_> = self
             .space
             .elements()
@@ -1688,6 +2424,38 @@ impl NickelSession {
             surface.send_pending_configure();
         }
         self.raise_panels();
+    }
+
+    pub(crate) fn relayout_fullscreen_windows(&mut self) {
+        let fullscreen = self
+            .space
+            .elements()
+            .filter(|window| self.is_fullscreen_window(window))
+            .cloned()
+            .collect::<Vec<_>>();
+        for window in fullscreen {
+            let Some(output) = self.output_geometry_for_window(&window) else {
+                continue;
+            };
+            if let Some(surface) = window.toplevel() {
+                Self::configure_window(&window, output);
+                window.override_z_index(45);
+                self.space
+                    .map_element(window.clone(), (output.x, output.y), true);
+                surface.send_pending_configure();
+            } else if let Some(surface) = window.x11_surface() {
+                let geometry = smithay::utils::Rectangle::new(
+                    (output.x, output.y).into(),
+                    (output.width, output.height).into(),
+                );
+                let _ = surface.configure(geometry);
+                window.override_z_index(45);
+                self.space
+                    .map_element(window.clone(), (output.x, output.y), true);
+            }
+        }
+        self.raise_panels();
+        self.request_output_redraw();
     }
 
     fn window_for_surface(&self, surface: &WlSurface) -> Option<Window> {
@@ -1718,6 +2486,24 @@ impl NickelSession {
         })
     }
 
+    fn output_geometry_named(&self, name: &str) -> Option<Geometry> {
+        let output = self.space.outputs().find(|output| output.name() == name)?;
+        let geometry = self.space.output_geometry(output)?;
+        Some(Geometry {
+            x: geometry.loc.x,
+            y: geometry.loc.y,
+            width: geometry.size.w,
+            height: geometry.size.h,
+        })
+    }
+
+    fn preferred_interaction_output_name(&self) -> Option<String> {
+        self.output_name_at_pointer()
+            .or_else(|| self.workspaces.active_output().map(str::to_owned))
+            .or_else(|| self.primary_output_name.clone())
+            .or_else(|| self.space.outputs().next().map(|output| output.name()))
+    }
+
     fn output_geometry_for_window(&self, window: &Window) -> Option<Geometry> {
         let bounds = self.space.element_bbox(window)?;
         let window_geometry = Geometry {
@@ -1741,11 +2527,7 @@ impl NickelSession {
     }
 
     fn work_area_for_output(&self, output: Geometry) -> Geometry {
-        if self.output_geometry() == Some(output) {
-            shell_layout::work_area(output)
-        } else {
-            output
-        }
+        shell_layout::work_area(output)
     }
 
     pub(crate) fn output_geometry_for_shell(&self) -> Option<Geometry> {
@@ -1764,12 +2546,18 @@ impl NickelSession {
         } else {
             680
         };
-        let work_area = shell_layout::work_area(self.output_geometry().unwrap_or(Geometry {
-            x: 0,
-            y: 0,
-            width,
-            height: height + shell_layout::PANEL_HEIGHT + 8,
-        }));
+        let output = self
+            .launcher_output_name
+            .as_deref()
+            .and_then(|name| self.output_geometry_named(name))
+            .or_else(|| self.output_geometry())
+            .unwrap_or(Geometry {
+                x: 0,
+                y: 0,
+                width,
+                height: height + shell_layout::PANEL_HEIGHT + 8,
+            });
+        let work_area = shell_layout::work_area(output);
         shell_layout::bottom_left_in(work_area, (width, height), 18, 8)
     }
 
@@ -1914,7 +2702,8 @@ impl ClientData for ClientState {
 
 #[cfg(test)]
 mod protocol_tests {
-    use super::shell_registration_allowed;
+    use super::{clamp_window_location, shell_registration_allowed};
+    use crate::shell_layout::Geometry;
 
     #[test]
     fn only_the_exact_supervised_shell_pid_can_register() {
@@ -1926,5 +2715,23 @@ mod protocol_tests {
             current
         ));
         assert!(!shell_registration_allowed(current, u32::MAX));
+    }
+
+    #[test]
+    fn output_rescue_clamps_windows_to_the_authoritative_work_area() {
+        let work_area = Geometry {
+            x: 100,
+            y: 40,
+            width: 800,
+            height: 500,
+        };
+        assert_eq!(
+            clamp_window_location((850, 500).into(), (300, 200).into(), work_area),
+            (600, 340).into()
+        );
+        assert_eq!(
+            clamp_window_location((-20, -30).into(), (300, 200).into(), work_area),
+            (100, 40).into()
+        );
     }
 }

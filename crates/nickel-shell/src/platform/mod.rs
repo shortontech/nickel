@@ -117,6 +117,12 @@ pub enum WindowAction {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorkspaceSummary {
+    pub id: u64,
+    pub active: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub enum GlobalShortcut {
     ShowLauncher,
@@ -155,6 +161,13 @@ pub enum ShellCommand {
     WindowAction {
         window: WindowId,
         action: WindowAction,
+    },
+    CreateWorkspace,
+    RemoveWorkspace(u64),
+    SwitchWorkspace(u64),
+    MoveWindowToWorkspace {
+        window: WindowId,
+        workspace: u64,
     },
 }
 
