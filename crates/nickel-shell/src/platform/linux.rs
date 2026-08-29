@@ -688,6 +688,24 @@ fn shell_command_payload(command: ShellCommand) -> SessionCommand {
         ShellCommand::Show => SessionCommand::SetLauncherVisible { visible: true },
         ShellCommand::Hide => SessionCommand::SetLauncherVisible { visible: false },
         ShellCommand::LogOut => SessionCommand::LogOut,
+        ShellCommand::SessionAction(action) => match action {
+            super::SessionAction::LogOut => SessionCommand::LogOut,
+            super::SessionAction::RestartShell => SessionCommand::SessionAction {
+                action: nickel_session_protocol::SessionAction::RestartShell,
+            },
+            super::SessionAction::Lock => SessionCommand::SessionAction {
+                action: nickel_session_protocol::SessionAction::Lock,
+            },
+            super::SessionAction::Suspend => SessionCommand::SessionAction {
+                action: nickel_session_protocol::SessionAction::Suspend,
+            },
+            super::SessionAction::Reboot => SessionCommand::SessionAction {
+                action: nickel_session_protocol::SessionAction::Reboot,
+            },
+            super::SessionAction::PowerOff => SessionCommand::SessionAction {
+                action: nickel_session_protocol::SessionAction::PowerOff,
+            },
+        },
         ShellCommand::ShowContextMenu { x, width, height } => SessionCommand::ShowOverlay {
             role: SessionShellRole::ContextMenu,
             geometry: SessionGeometry {

@@ -7,6 +7,7 @@ mod focus;
 mod grabs;
 mod input;
 mod login_services;
+mod session_services;
 mod shell_layout;
 mod state;
 mod test_input;
@@ -21,6 +22,7 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering},
+        mpsc,
     },
     thread,
     time::{Duration, Instant},
@@ -84,22 +86,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         import_runtime_environment();
     }
 
-    if let Some((program, command_arguments)) = arguments.command {
-        spawn_supervised(
+    let (supervisor_tx, supervisor_rx) = mpsc::channel();
+    state.set_shell_supervisor(supervisor_tx.clone());
+    let shell_supervisor = if let Some((program, command_arguments)) = arguments.command {
+        Some(spawn_supervised(
             program,
             command_arguments,
             state.secure_storage_state_handle(),
             state.secure_storage_retry_handle(),
             state.expected_shell_pid_handle(),
             shell_health_tx,
-        )?;
-    }
+            supervisor_rx,
+        )?)
+    } else {
+        None
+    };
 
     event_loop.run(None, &mut state, move |_| {
         // NickelSession is running
     })?;
 
+    let _ = supervisor_tx.send(ShellSupervisorCommand::Stop);
+    if let Some(supervisor) = shell_supervisor {
+        let _ = supervisor.join();
+    }
+
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ShellSupervisorCommand {
+    Restart,
+    Stop,
 }
 
 const USER_SESSION_ENVIRONMENT: &[&str] = &[
@@ -154,7 +172,8 @@ fn spawn_supervised(
     secure_storage_retry: Arc<AtomicBool>,
     expected_shell_pid: Arc<AtomicU32>,
     shell_health: smithay::reexports::calloop::channel::Sender<u8>,
-) -> std::io::Result<()> {
+    supervisor: mpsc::Receiver<ShellSupervisorCommand>,
+) -> std::io::Result<thread::JoinHandle<()>> {
     thread::Builder::new()
         .name("nickel-shell-supervisor".into())
         .spawn(move || {
@@ -165,9 +184,9 @@ fn spawn_supervised(
                 secure_storage_retry,
                 expected_shell_pid,
                 shell_health,
+                supervisor,
             )
         })
-        .map(|_| ())
 }
 
 fn supervise_shell(
@@ -177,6 +196,7 @@ fn supervise_shell(
     secure_storage_retry: Arc<AtomicBool>,
     expected_shell_pid: Arc<AtomicU32>,
     shell_health: smithay::reexports::calloop::channel::Sender<u8>,
+    supervisor: mpsc::Receiver<ShellSupervisorCommand>,
 ) {
     if let Err(error) = thread::Builder::new()
         .name("nickel-login-services".into())
@@ -197,12 +217,20 @@ fn supervise_shell(
     let mut consecutive_failures = 0_usize;
     loop {
         let started = Instant::now();
-        let status = match Command::new(&program).args(&arguments).spawn() {
+        let status = match shell_command(&program, &arguments).spawn() {
             Ok(mut child) => {
                 expected_shell_pid.store(child.id(), Ordering::Release);
-                let result = child.wait();
+                let result = wait_for_shell(&mut child, &supervisor);
                 expected_shell_pid.store(0, Ordering::Release);
-                result
+                match result {
+                    ShellWait::Exited(status) => status,
+                    ShellWait::Restarted => {
+                        consecutive_failures = 0;
+                        let _ = shell_health.send(0);
+                        continue;
+                    }
+                    ShellWait::Stopped => return,
+                }
             }
             Err(error) => Err(error),
         };
@@ -232,17 +260,95 @@ fn supervise_shell(
     }
 }
 
+fn shell_command(program: &OsString, arguments: &[OsString]) -> Command {
+    use std::os::unix::process::CommandExt;
+
+    let mut command = Command::new(program);
+    command.args(arguments).process_group(0);
+    command
+}
+
+enum ShellWait {
+    Exited(std::io::Result<ExitStatus>),
+    Restarted,
+    Stopped,
+}
+
+fn wait_for_shell(
+    child: &mut std::process::Child,
+    supervisor: &mpsc::Receiver<ShellSupervisorCommand>,
+) -> ShellWait {
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return ShellWait::Exited(Ok(status)),
+            Ok(None) => {}
+            Err(error) => return ShellWait::Exited(Err(error)),
+        }
+        match supervisor.recv_timeout(Duration::from_millis(100)) {
+            Ok(command) => {
+                terminate_shell_group(child);
+                return match command {
+                    ShellSupervisorCommand::Restart => ShellWait::Restarted,
+                    ShellSupervisorCommand::Stop => ShellWait::Stopped,
+                };
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                terminate_shell_group(child);
+                return ShellWait::Stopped;
+            }
+        }
+    }
+}
+
+fn terminate_shell_group(child: &mut std::process::Child) {
+    use nix::{
+        sys::signal::{Signal, kill},
+        unistd::Pid,
+    };
+
+    let group = Pid::from_raw(-(child.id() as i32));
+    let _ = kill(group, Signal::SIGTERM);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if child.try_wait().ok().flatten().is_some() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    let _ = kill(group, Signal::SIGKILL);
+    let _ = child.wait();
+}
+
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{ffi::OsString, sync::mpsc, time::Duration};
 
-    use super::{USER_SESSION_ENVIRONMENT, shell_restart_delay};
+    use super::{
+        ShellSupervisorCommand, ShellWait, USER_SESSION_ENVIRONMENT, shell_command,
+        shell_restart_delay, wait_for_shell,
+    };
 
     #[test]
     fn shell_restart_backoff_is_bounded_without_ending_the_session() {
         assert_eq!(shell_restart_delay(1), Duration::from_secs(1));
         assert_eq!(shell_restart_delay(3), Duration::from_secs(3));
         assert_eq!(shell_restart_delay(99), Duration::from_secs(4));
+    }
+
+    #[test]
+    fn supervisor_stop_terminates_and_reaps_the_shell_process_group() {
+        let mut child = shell_command(&OsString::from("sleep"), &[OsString::from("30")])
+            .spawn()
+            .unwrap();
+        let (sender, receiver) = mpsc::channel();
+        sender.send(ShellSupervisorCommand::Stop).unwrap();
+
+        assert!(matches!(
+            wait_for_shell(&mut child, &receiver),
+            ShellWait::Stopped
+        ));
+        assert!(child.try_wait().unwrap().is_some());
     }
 
     #[test]

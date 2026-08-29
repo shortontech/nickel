@@ -117,6 +117,16 @@ pub enum WindowAction {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionAction {
+    RestartShell,
+    Lock,
+    Suspend,
+    LogOut,
+    Reboot,
+    PowerOff,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WorkspaceSummary {
     pub id: u64,
     pub active: bool,
@@ -144,6 +154,7 @@ pub enum ShellCommand {
     Show,
     Hide,
     LogOut,
+    SessionAction(SessionAction),
     ShowContextMenu {
         x: i32,
         width: i32,

@@ -194,6 +194,7 @@ pub struct NickelSession {
     secure_storage_state: Arc<AtomicU8>,
     secure_storage_retry: Arc<std::sync::atomic::AtomicBool>,
     deferred_focus_restore: channel::Sender<WindowId>,
+    shell_supervisor: Option<std::sync::mpsc::Sender<crate::ShellSupervisorCommand>>,
     #[cfg(feature = "backend-winit")]
     winit_redraw_window: Option<*const dyn smithay::reexports::winit::window::Window>,
 }
@@ -384,6 +385,7 @@ impl NickelSession {
             secure_storage_state,
             secure_storage_retry,
             deferred_focus_restore,
+            shell_supervisor: None,
             #[cfg(feature = "backend-winit")]
             winit_redraw_window: None,
         }
@@ -421,6 +423,13 @@ impl NickelSession {
 
     pub fn expected_shell_pid_handle(&self) -> Arc<AtomicU32> {
         self.expected_shell_pid.clone()
+    }
+
+    pub(crate) fn set_shell_supervisor(
+        &mut self,
+        supervisor: std::sync::mpsc::Sender<crate::ShellSupervisorCommand>,
+    ) {
+        self.shell_supervisor = Some(supervisor);
     }
 
     pub fn shell_recovery_visible(&self) -> bool {
@@ -592,6 +601,44 @@ impl NickelSession {
             SessionCommand::ToggleLauncher => self.toggle_launcher(),
             SessionCommand::SetLauncherVisible { visible } => self.set_launcher_visible(visible),
             SessionCommand::LogOut => self.loop_signal.stop(),
+            SessionCommand::SessionAction { action } => match action {
+                nickel_session_protocol::SessionAction::RestartShell => {
+                    let Some(supervisor) = &self.shell_supervisor else {
+                        return protocol_error(
+                            ErrorCode::InvalidRequest,
+                            "shell supervisor is unavailable",
+                        );
+                    };
+                    if supervisor
+                        .send(crate::ShellSupervisorCommand::Restart)
+                        .is_err()
+                    {
+                        return protocol_error(
+                            ErrorCode::InvalidRequest,
+                            "shell supervisor stopped",
+                        );
+                    }
+                }
+                nickel_session_protocol::SessionAction::Lock => {
+                    return protocol_error(
+                        ErrorCode::InvalidRequest,
+                        "session locking is not implemented yet",
+                    );
+                }
+                nickel_session_protocol::SessionAction::Suspend => {
+                    crate::session_services::request(
+                        crate::session_services::SystemAction::Suspend,
+                    );
+                }
+                nickel_session_protocol::SessionAction::Reboot => {
+                    crate::session_services::request(crate::session_services::SystemAction::Reboot);
+                }
+                nickel_session_protocol::SessionAction::PowerOff => {
+                    crate::session_services::request(
+                        crate::session_services::SystemAction::PowerOff,
+                    );
+                }
+            },
             SessionCommand::RetrySecureStorage => self
                 .secure_storage_retry
                 .store(true, std::sync::atomic::Ordering::Release),

@@ -11,6 +11,7 @@ bitflags.workspace = true
 image.workspace = true
 nickel-core = { path = "../nickel-core" }
 nickel-session-protocol = { path = "../nickel-session-protocol" }
+nix.workspace = true
 resvg.workspace = true
 smithay.workspace = true
 thiserror.workspace = true

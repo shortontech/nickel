@@ -56,6 +56,9 @@ pub enum Command {
         visible: bool,
     },
     LogOut,
+    SessionAction {
+        action: SessionAction,
+    },
     RetrySecureStorage,
     HideOverlay,
     ShowOverlay {
@@ -114,6 +117,16 @@ pub enum TestOutput {
     Disconnect {
         name: String,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionAction {
+    RestartShell,
+    Lock,
+    Suspend,
+    Reboot,
+    PowerOff,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -648,6 +661,27 @@ mod tests {
             );
         }
         assert_eq!(ShellRole::from_application_id("io.nickel.shell.fake"), None);
+    }
+
+    #[test]
+    fn session_actions_round_trip_without_ui_specific_authorization_state() {
+        for action in [
+            SessionAction::RestartShell,
+            SessionAction::Lock,
+            SessionAction::Suspend,
+            SessionAction::Reboot,
+            SessionAction::PowerOff,
+        ] {
+            let envelope = ClientEnvelope {
+                token: "session-token".into(),
+                request_id: 14,
+                request: Request::Command(Command::SessionAction { action }),
+            };
+            assert_eq!(
+                decode::<ClientEnvelope>(&encode(&envelope).unwrap()).unwrap(),
+                envelope
+            );
+        }
     }
 
     #[test]

@@ -2,7 +2,9 @@
 
 use nickel_ui::{LinearGradient, PaintCommand, Rect, TextAlign};
 
-use crate::platform::{AudioStatus, BluetoothStatus, NetworkStatus, WorkspaceSummary};
+use crate::platform::{
+    AudioStatus, BluetoothStatus, NetworkStatus, SessionAction, WorkspaceSummary,
+};
 
 const BACKGROUND_TOP: u32 = 0x202b43;
 const BACKGROUND_BOTTOM: u32 = 0x111827;
@@ -34,8 +36,10 @@ pub enum ControlAction {
     SwitchWorkspace(u64),
     CreateWorkspace,
     RemoveWorkspace(u64),
-    ToggleLogoutConfirmation,
-    LogOut,
+    RequestSessionAction(SessionAction),
+    CancelSessionAction,
+    ConfirmSessionAction,
+    SessionAction(SessionAction),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -49,7 +53,7 @@ pub struct ControlViewState {
     pub wifi_expanded: bool,
     pub bluetooth_expanded: bool,
     pub audio_expanded: bool,
-    pub logout_confirmation: bool,
+    pub pending_session_action: Option<SessionAction>,
     /// Positive logical pixels scrolled below the fixed header.
     pub scroll_offset: f32,
 }
@@ -124,7 +128,7 @@ pub fn build_control_center(
     builder.bluetooth(bluetooth, state.bluetooth_expanded);
     builder.audio(audio, state.audio_expanded);
     builder.workspaces(workspaces);
-    builder.session(state.logout_confirmation);
+    builder.session(state.pending_session_action);
 
     let content_bottom = builder.y + state.scroll_offset.max(0.0);
     builder.commands.push(PaintCommand::PopClip);
@@ -191,8 +195,8 @@ impl ViewBuilder {
         self.finish_card(card);
     }
 
-    fn session(&mut self, confirming_logout: bool) {
-        let card = self.card(if confirming_logout { 92.0 } else { 68.0 });
+    fn session(&mut self, pending: Option<SessionAction>) {
+        let card = self.card(if pending.is_some() { 98.0 } else { 174.0 });
         self.commands.push(text(
             Rect::new(
                 card.origin.x + 14.0,
@@ -200,8 +204,8 @@ impl ViewBuilder {
                 card.size.width - 28.0,
                 22.0,
             ),
-            if confirming_logout {
-                "Log out of Nickel?"
+            if let Some(action) = pending {
+                session_confirmation(action)
             } else {
                 "Session"
             },
@@ -210,11 +214,11 @@ impl ViewBuilder {
             true,
         ));
 
-        if confirming_logout {
+        if pending.is_some() {
             self.action_button(
                 Rect::new(card.origin.x + 14.0, card.origin.y + 47.0, 104.0, 30.0),
                 "Cancel",
-                ControlAction::ToggleLogoutConfirmation,
+                ControlAction::CancelSessionAction,
                 false,
             );
             self.action_button(
@@ -224,22 +228,40 @@ impl ViewBuilder {
                     118.0,
                     30.0,
                 ),
-                "Log out",
-                ControlAction::LogOut,
+                "Confirm",
+                ControlAction::ConfirmSessionAction,
                 true,
             );
         } else {
-            self.action_button(
-                Rect::new(
-                    card.origin.x + card.size.width - 132.0,
-                    card.origin.y + 19.0,
-                    118.0,
-                    30.0,
-                ),
-                "Log out",
-                ControlAction::ToggleLogoutConfirmation,
-                false,
-            );
+            let entries = [
+                ("Lock", SessionAction::Lock),
+                ("Suspend", SessionAction::Suspend),
+                ("Restart shell", SessionAction::RestartShell),
+                ("Log out", SessionAction::LogOut),
+                ("Restart", SessionAction::Reboot),
+                ("Shut down", SessionAction::PowerOff),
+            ];
+            let width = (card.size.width - 42.0) / 2.0;
+            for (index, (label, action)) in entries.into_iter().enumerate() {
+                let column = index % 2;
+                let row = index / 2;
+                let action = if action == SessionAction::Lock {
+                    ControlAction::SessionAction(action)
+                } else {
+                    ControlAction::RequestSessionAction(action)
+                };
+                self.action_button(
+                    Rect::new(
+                        card.origin.x + 14.0 + column as f32 * (width + 14.0),
+                        card.origin.y + 43.0 + row as f32 * 40.0,
+                        width,
+                        32.0,
+                    ),
+                    label,
+                    action,
+                    false,
+                );
+            }
         }
         self.finish_card(card);
     }
@@ -666,6 +688,17 @@ impl ViewBuilder {
     }
 }
 
+fn session_confirmation(action: SessionAction) -> &'static str {
+    match action {
+        SessionAction::RestartShell => "Restart the Nickel shell?",
+        SessionAction::Lock => "Lock this session?",
+        SessionAction::Suspend => "Suspend this computer?",
+        SessionAction::LogOut => "Log out of Nickel?",
+        SessionAction::Reboot => "Restart this computer?",
+        SessionAction::PowerOff => "Shut down this computer?",
+    }
+}
+
 fn text(bounds: Rect, value: &str, scale: f32, color: u32, bold: bool) -> PaintCommand {
     PaintCommand::Text {
         bounds,
@@ -703,11 +736,13 @@ fn intersection(left: Rect, right: Rect) -> Option<Rect> {
 
 #[cfg(test)]
 mod tests {
-    use crate::platform::{AudioStatus, BluetoothStatus, NetworkStatus, WorkspaceSummary};
+    use crate::platform::{
+        AudioStatus, BluetoothStatus, NetworkStatus, SessionAction, WorkspaceSummary,
+    };
 
     use super::{ControlAction, ControlViewState, build_control_center};
 
-    fn logout_action(state: ControlViewState) -> Option<ControlAction> {
+    fn session_actions(state: ControlViewState) -> Vec<ControlAction> {
         let frame = build_control_center(
             &NetworkStatus::default(),
             &BluetoothStatus::default(),
@@ -716,52 +751,46 @@ mod tests {
             state,
             (380.0, 650.0),
         );
-        let target = frame.hit_targets.iter().find(|target| {
-            matches!(
-                target.action,
-                ControlAction::ToggleLogoutConfirmation | ControlAction::LogOut
-            )
-        })?;
-        frame.action_at(
-            target.bounds.origin.x + target.bounds.size.width / 2.0,
-            target.bounds.origin.y + target.bounds.size.height / 2.0,
-        )
+        frame
+            .hit_targets
+            .iter()
+            .filter_map(|target| {
+                frame.action_at(
+                    target.bounds.origin.x + target.bounds.size.width / 2.0,
+                    target.bounds.origin.y + target.bounds.size.height / 2.0,
+                )
+            })
+            .collect()
     }
 
     #[test]
-    fn logout_requires_confirmation() {
-        assert_eq!(
-            logout_action(ControlViewState::default()),
-            Some(ControlAction::ToggleLogoutConfirmation)
-        );
-        assert_eq!(
-            logout_action(ControlViewState {
-                logout_confirmation: true,
-                ..ControlViewState::default()
-            }),
-            Some(ControlAction::ToggleLogoutConfirmation)
-        );
+    fn disruptive_session_actions_require_confirmation_but_lock_is_immediate() {
+        let actions = session_actions(ControlViewState::default());
+        assert!(actions.contains(&ControlAction::SessionAction(SessionAction::Lock)));
+        for action in [
+            SessionAction::RestartShell,
+            SessionAction::Suspend,
+            SessionAction::LogOut,
+            SessionAction::Reboot,
+            SessionAction::PowerOff,
+        ] {
+            assert!(actions.contains(&ControlAction::RequestSessionAction(action)));
+            assert!(!actions.contains(&ControlAction::SessionAction(action)));
+        }
     }
 
     #[test]
-    fn confirmed_logout_is_available_as_a_distinct_action() {
-        let frame = build_control_center(
-            &NetworkStatus::default(),
-            &BluetoothStatus::default(),
-            &AudioStatus::default(),
-            &[],
-            ControlViewState {
-                logout_confirmation: true,
-                ..ControlViewState::default()
-            },
-            (380.0, 650.0),
-        );
-        assert!(
-            frame
-                .hit_targets
-                .iter()
-                .any(|target| target.action == ControlAction::LogOut)
-        );
+    fn pending_session_action_exposes_only_cancel_and_confirm() {
+        let actions = session_actions(ControlViewState {
+            pending_session_action: Some(SessionAction::PowerOff),
+            ..ControlViewState::default()
+        });
+        assert!(actions.contains(&ControlAction::CancelSessionAction));
+        assert!(actions.contains(&ControlAction::ConfirmSessionAction));
+        assert!(!actions.iter().any(|action| matches!(
+            action,
+            ControlAction::SessionAction(_) | ControlAction::RequestSessionAction(_)
+        )));
     }
 
     #[test]

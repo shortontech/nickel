@@ -1385,7 +1385,7 @@ impl LiveShell {
             LauncherShellEffect::RequestLogout => {
                 self.set_launcher_visible(false);
                 self.control_visible = true;
-                self.control_state.logout_confirmation = true;
+                self.control_state.pending_session_action = Some(platform::SessionAction::LogOut);
             }
         }
     }
@@ -1431,11 +1431,19 @@ impl LiveShell {
             ControlAction::RemoveWorkspace(workspace) => {
                 let _ = platform::send_shell_command(ShellCommand::RemoveWorkspace(workspace));
             }
-            ControlAction::ToggleLogoutConfirmation => {
-                self.control_state.logout_confirmation = !self.control_state.logout_confirmation;
+            ControlAction::RequestSessionAction(action) => {
+                self.control_state.pending_session_action = Some(action);
             }
-            ControlAction::LogOut => {
-                let _ = platform::send_shell_command(ShellCommand::LogOut);
+            ControlAction::CancelSessionAction => {
+                self.control_state.pending_session_action = None;
+            }
+            ControlAction::ConfirmSessionAction => {
+                if let Some(action) = self.control_state.pending_session_action.take() {
+                    let _ = platform::send_shell_command(ShellCommand::SessionAction(action));
+                }
+            }
+            ControlAction::SessionAction(action) => {
+                let _ = platform::send_shell_command(ShellCommand::SessionAction(action));
             }
         }
         let _ = self.refresh();

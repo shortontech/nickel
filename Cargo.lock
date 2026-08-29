@@ -2654,6 +2654,7 @@ dependencies = [
  "image",
  "nickel-core",
  "nickel-session-protocol",
+ "nix",
  "resvg",
  "smithay",
  "tempfile",

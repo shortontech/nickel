@@ -17,6 +17,7 @@ Usage:
   nickel-test-input workspace-remove ID
   nickel-test-input workspace-move WINDOW_ID WORKSPACE_ID
   nickel-test-input window activate|close|minimize|maximize|fullscreen WINDOW_ID
+  nickel-test-input session restart-shell|lock|suspend|logout|reboot|power-off
   nickel-test-input idle-inhibition
   nickel-test-input move X Y
   nickel-test-input move-relative DX DY
@@ -49,6 +50,7 @@ enum Parsed {
         window: u64,
         action: nickel_session_protocol::WindowAction,
     },
+    SessionAction(Option<nickel_session_protocol::SessionAction>),
     IdleInhibition,
     Help,
 }
@@ -124,6 +126,17 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, String> {
                 _ => return Err(format!("unknown window action {action:?}")),
             },
         }),
+        [command, action] if command == "session" => {
+            Ok(Parsed::SessionAction(match action.as_str() {
+                "restart-shell" => Some(nickel_session_protocol::SessionAction::RestartShell),
+                "lock" => Some(nickel_session_protocol::SessionAction::Lock),
+                "suspend" => Some(nickel_session_protocol::SessionAction::Suspend),
+                "logout" => None,
+                "reboot" => Some(nickel_session_protocol::SessionAction::Reboot),
+                "power-off" => Some(nickel_session_protocol::SessionAction::PowerOff),
+                _ => return Err(format!("unknown session action {action:?}")),
+            }))
+        }
         [command] if command == "idle-inhibition" => Ok(Parsed::IdleInhibition),
         [command, x, y] if command == "move" => Ok(Parsed::Input(TestInput::PointerMove {
             x: x.parse()
@@ -231,6 +244,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             window: nickel_session_protocol::WindowId(window),
             action,
         }),
+        Parsed::SessionAction(Some(action)) => Request::Command(Command::SessionAction { action }),
+        Parsed::SessionAction(None) => Request::Command(Command::LogOut),
         Parsed::IdleInhibition => Request::Query(nickel_session_protocol::Query::IdleInhibition),
     };
     let control = env::var_os("NICKEL_SESSION_CONTROL")
@@ -421,6 +436,16 @@ mod tests {
                 window: 7,
                 workspace: 3
             })
+        ));
+        assert!(matches!(
+            parse(["session".into(), "restart-shell".into()]),
+            Ok(Parsed::SessionAction(Some(
+                nickel_session_protocol::SessionAction::RestartShell
+            )))
+        ));
+        assert!(matches!(
+            parse(["session".into(), "logout".into()]),
+            Ok(Parsed::SessionAction(None))
         ));
         assert!(matches!(
             parse(["move".into(), "64".into(), "700".into()]),
