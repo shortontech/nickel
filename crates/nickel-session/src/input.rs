@@ -165,6 +165,7 @@ impl NickelSession {
             }
             InputEvent::PointerMotion { event, .. } => {
                 let current = self.seat.get_pointer().unwrap().current_location();
+                let current = self.restore_released_pointer_lock_hint(current);
                 let max_x = self
                     .space
                     .outputs()

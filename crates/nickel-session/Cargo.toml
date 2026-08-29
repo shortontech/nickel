@@ -22,6 +22,7 @@ xcursor.workspace = true
 zbus.workspace = true
 
 [dev-dependencies]
+softbuffer.workspace = true
 tempfile.workspace = true
 
 [features]
