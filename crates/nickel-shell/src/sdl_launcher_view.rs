@@ -20,7 +20,10 @@ use nickel_ui::{
 
 use crate::{
     icons,
-    launcher::{Application, Launcher, LauncherMode, LauncherView, SettingsDestination},
+    launcher::{
+        Application, Launcher, LauncherInput, LauncherInputOutcome, LauncherMode, LauncherView,
+        SettingsDestination,
+    },
     platform,
 };
 
@@ -237,6 +240,27 @@ pub fn reduce_launcher_action(
             None
         }
     }
+}
+
+/// Applies text/IME/editing input and the associated view-state transition as one
+/// production-owned operation. Live input and semantic scenarios must share this
+/// path so tests cannot reproduce the mode/scroll coordination independently.
+pub fn reduce_launcher_input(
+    launcher: &mut Launcher,
+    view: &mut LauncherViewState,
+    input: LauncherInput,
+) -> LauncherInputOutcome {
+    let previous = launcher.mode();
+    let reset_search_scroll = matches!(
+        input,
+        LauncherInput::Text(_) | LauncherInput::Preedit(_) | LauncherInput::Backspace
+    );
+    let outcome = launcher.reduce_input(input);
+    view.transition_mode(previous, launcher.mode());
+    if reset_search_scroll && launcher.mode() == LauncherMode::Search {
+        view.reset_active_scroll(LauncherMode::Search);
+    }
+    outcome
 }
 
 /// CPU image cache with stable IDs for `PaintCommand::Image`.
@@ -1334,43 +1358,38 @@ mod tests {
         }
 
         fn text(mut self, text: &str) -> Self {
-            let previous = self.launcher.mode();
-            let _ = self
-                .launcher
-                .reduce_input(crate::launcher::LauncherInput::Text(text.into()));
-            self.view.transition_mode(previous, self.launcher.mode());
-            self.view.reset_active_scroll(self.launcher.mode());
+            let _ = super::reduce_launcher_input(
+                &mut self.launcher,
+                &mut self.view,
+                crate::launcher::LauncherInput::Text(text.into()),
+            );
             self
         }
 
         fn preedit(mut self, text: &str) -> Self {
-            let previous = self.launcher.mode();
-            let _ = self
-                .launcher
-                .reduce_input(crate::launcher::LauncherInput::Preedit(text.into()));
-            self.view.transition_mode(previous, self.launcher.mode());
-            self.view.reset_active_scroll(self.launcher.mode());
+            let _ = super::reduce_launcher_input(
+                &mut self.launcher,
+                &mut self.view,
+                crate::launcher::LauncherInput::Preedit(text.into()),
+            );
             self
         }
 
         fn escape(mut self) -> Self {
-            let previous = self.launcher.mode();
-            let _ = self
-                .launcher
-                .reduce_input(crate::launcher::LauncherInput::Escape);
-            self.view.transition_mode(previous, self.launcher.mode());
+            let _ = super::reduce_launcher_input(
+                &mut self.launcher,
+                &mut self.view,
+                crate::launcher::LauncherInput::Escape,
+            );
             self
         }
 
         fn backspace(mut self) -> Self {
-            let previous = self.launcher.mode();
-            let _ = self
-                .launcher
-                .reduce_input(crate::launcher::LauncherInput::Backspace);
-            self.view.transition_mode(previous, self.launcher.mode());
-            if self.launcher.mode() == LauncherMode::Search {
-                self.view.reset_active_scroll(LauncherMode::Search);
-            }
+            let _ = super::reduce_launcher_input(
+                &mut self.launcher,
+                &mut self.view,
+                crate::launcher::LauncherInput::Backspace,
+            );
             self
         }
 

@@ -27,7 +27,7 @@ use crate::{
     sdl_control_view::{ControlAction, ControlCenterFrame, ControlViewState, build_control_center},
     sdl_launcher_view::{
         LauncherAction, LauncherFrame, LauncherIconCache, LauncherShellEffect, LauncherViewState,
-        build_launcher_frame, reduce_launcher_action,
+        build_launcher_frame, reduce_launcher_action, reduce_launcher_input,
     },
     sdl_shell::SurfaceRole,
     sdl_window_preview::{
@@ -1049,13 +1049,11 @@ impl LiveShell {
         if !self.launcher_visible {
             return false;
         }
-        let previous = self.launcher.mode();
-        let _ = self
-            .launcher
-            .reduce_input(LauncherInput::Text(value.to_owned()));
-        self.launcher_view
-            .transition_mode(previous, self.launcher.mode());
-        self.launcher_view.reset_active_scroll(self.launcher.mode());
+        let _ = reduce_launcher_input(
+            &mut self.launcher,
+            &mut self.launcher_view,
+            LauncherInput::Text(value.to_owned()),
+        );
         true
     }
 
@@ -1067,13 +1065,11 @@ impl LiveShell {
         if !self.launcher_visible {
             return false;
         }
-        let previous = self.launcher.mode();
-        let _ = self
-            .launcher
-            .reduce_input(LauncherInput::Preedit(value.to_owned()));
-        self.launcher_view
-            .transition_mode(previous, self.launcher.mode());
-        self.launcher_view.reset_active_scroll(self.launcher.mode());
+        let _ = reduce_launcher_input(
+            &mut self.launcher,
+            &mut self.launcher_view,
+            LauncherInput::Preedit(value.to_owned()),
+        );
         true
     }
 
@@ -1121,24 +1117,21 @@ impl LiveShell {
         }
         match key {
             Some(Keycode::Escape) => {
-                let previous = self.launcher.mode();
-                if self.launcher.reduce_input(LauncherInput::Escape)
-                    == LauncherInputOutcome::DismissRequested
+                if reduce_launcher_input(
+                    &mut self.launcher,
+                    &mut self.launcher_view,
+                    LauncherInput::Escape,
+                ) == LauncherInputOutcome::DismissRequested
                 {
                     self.set_launcher_visible(false);
-                } else {
-                    self.launcher_view
-                        .transition_mode(previous, self.launcher.mode());
                 }
             }
             Some(Keycode::Backspace) => {
-                let previous = self.launcher.mode();
-                let _ = self.launcher.reduce_input(LauncherInput::Backspace);
-                self.launcher_view
-                    .transition_mode(previous, self.launcher.mode());
-                if self.launcher.mode() == LauncherMode::Search {
-                    self.launcher_view.reset_active_scroll(LauncherMode::Search);
-                }
+                let _ = reduce_launcher_input(
+                    &mut self.launcher,
+                    &mut self.launcher_view,
+                    LauncherInput::Backspace,
+                );
             }
             Some(Keycode::Down) => self.launcher.select_grid_down(columns),
             Some(Keycode::Up) => self.launcher.select_grid_up(columns),
@@ -1194,11 +1187,11 @@ impl LiveShell {
                     character.to_ascii_lowercase()
                 };
             }
-            let previous = self.launcher.mode();
-            self.launcher.insert(&character.to_string());
-            self.launcher_view
-                .transition_mode(previous, self.launcher.mode());
-            self.launcher_view.reset_active_scroll(LauncherMode::Search);
+            let _ = reduce_launcher_input(
+                &mut self.launcher,
+                &mut self.launcher_view,
+                LauncherInput::Text(character.to_string()),
+            );
             true
         }
     }
