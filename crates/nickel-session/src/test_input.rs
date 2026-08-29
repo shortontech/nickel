@@ -8,8 +8,8 @@ use std::path::PathBuf;
 use nickel_session_protocol::{InputState, TestInput, TestKey, TestPointerButton};
 use smithay::backend::input::{
     AbsolutePositionEvent, ButtonState, Device, DeviceCapability, Event, InputBackend, InputEvent,
-    KeyState, KeyboardKeyEvent, Keycode, PointerButtonEvent, PointerMotionAbsoluteEvent,
-    UnusedEvent,
+    InputTime, KeyState, KeyboardKeyEvent, Keycode, PointerButtonEvent, PointerMotionAbsoluteEvent,
+    PointerMotionEvent, UnusedEvent,
 };
 
 use crate::state::NickelSession;
@@ -47,13 +47,13 @@ impl Device for TestInputDevice {
 
 #[derive(Clone, Copy, Debug)]
 struct TestKeyEvent {
-    time: u64,
+    time: InputTime,
     key_code: u32,
     state: KeyState,
 }
 
 impl Event<TestInputBackend> for TestKeyEvent {
-    fn time(&self) -> u64 {
+    fn time(&self) -> InputTime {
         self.time
     }
 
@@ -78,13 +78,13 @@ impl KeyboardKeyEvent<TestInputBackend> for TestKeyEvent {
 
 #[derive(Clone, Copy, Debug)]
 struct TestPointerMotionEvent {
-    time: u64,
+    time: InputTime,
     x: i32,
     y: i32,
 }
 
 impl Event<TestInputBackend> for TestPointerMotionEvent {
-    fn time(&self) -> u64 {
+    fn time(&self) -> InputTime {
         self.time
     }
 
@@ -114,14 +114,49 @@ impl AbsolutePositionEvent<TestInputBackend> for TestPointerMotionEvent {
 impl PointerMotionAbsoluteEvent<TestInputBackend> for TestPointerMotionEvent {}
 
 #[derive(Clone, Copy, Debug)]
+struct TestPointerRelativeMotionEvent {
+    time: InputTime,
+    dx: i32,
+    dy: i32,
+}
+
+impl Event<TestInputBackend> for TestPointerRelativeMotionEvent {
+    fn time(&self) -> InputTime {
+        self.time
+    }
+
+    fn device(&self) -> TestInputDevice {
+        TestInputDevice
+    }
+}
+
+impl PointerMotionEvent<TestInputBackend> for TestPointerRelativeMotionEvent {
+    fn delta_x(&self) -> f64 {
+        f64::from(self.dx)
+    }
+
+    fn delta_y(&self) -> f64 {
+        f64::from(self.dy)
+    }
+
+    fn delta_x_unaccel(&self) -> f64 {
+        f64::from(self.dx)
+    }
+
+    fn delta_y_unaccel(&self) -> f64 {
+        f64::from(self.dy)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 struct TestPointerButtonEvent {
-    time: u64,
+    time: InputTime,
     button_code: u32,
     state: ButtonState,
 }
 
 impl Event<TestInputBackend> for TestPointerButtonEvent {
-    fn time(&self) -> u64 {
+    fn time(&self) -> InputTime {
         self.time
     }
 
@@ -145,7 +180,7 @@ impl InputBackend for TestInputBackend {
     type KeyboardKeyEvent = TestKeyEvent;
     type PointerAxisEvent = UnusedEvent;
     type PointerButtonEvent = TestPointerButtonEvent;
-    type PointerMotionEvent = UnusedEvent;
+    type PointerMotionEvent = TestPointerRelativeMotionEvent;
     type PointerMotionAbsoluteEvent = TestPointerMotionEvent;
     type GestureSwipeBeginEvent = UnusedEvent;
     type GestureSwipeUpdateEvent = UnusedEvent;
@@ -170,11 +205,7 @@ impl InputBackend for TestInputBackend {
 
 impl NickelSession {
     pub(crate) fn inject_test_input(&mut self, input: TestInput) -> Result<(), String> {
-        let time = self
-            .start_time
-            .elapsed()
-            .as_micros()
-            .min(u128::from(u64::MAX)) as u64;
+        let time = InputTime::now();
         let event = match input {
             TestInput::Key { key, state } => InputEvent::Keyboard {
                 event: TestKeyEvent {
@@ -191,6 +222,9 @@ impl NickelSession {
                     event: TestPointerMotionEvent { time, x, y },
                 }
             }
+            TestInput::PointerMoveRelative { dx, dy } => InputEvent::PointerMotion {
+                event: TestPointerRelativeMotionEvent { time, dx, dy },
+            },
             TestInput::PointerButton { button, state } => InputEvent::PointerButton {
                 event: TestPointerButtonEvent {
                     time,
@@ -200,6 +234,9 @@ impl NickelSession {
             },
         };
         let _ = self.process_input_event::<TestInputBackend>(event);
+        self.display_handle
+            .flush_clients()
+            .map_err(|error| format!("failed to flush injected input: {error}"))?;
         Ok(())
     }
 
@@ -229,6 +266,9 @@ fn button_state(state: InputState) -> ButtonState {
 fn linux_key_code(key: TestKey) -> u32 {
     match key {
         TestKey::A => 30,
+        TestKey::C => 46,
+        TestKey::P => 25,
+        TestKey::Enter => 28,
         TestKey::Tab => 15,
         TestKey::LeftAlt => 56,
         TestKey::LeftShift => 42,
@@ -254,6 +294,9 @@ mod tests {
     #[test]
     fn semantic_keys_map_to_linux_input_codes_at_the_backend_boundary() {
         assert_eq!(linux_key_code(TestKey::A), 30);
+        assert_eq!(linux_key_code(TestKey::C), 46);
+        assert_eq!(linux_key_code(TestKey::P), 25);
+        assert_eq!(linux_key_code(TestKey::Enter), 28);
         assert_eq!(linux_key_code(TestKey::Tab), 15);
         assert_eq!(linux_key_code(TestKey::LeftAlt), 56);
         assert_eq!(linux_key_code(TestKey::LeftShift), 42);

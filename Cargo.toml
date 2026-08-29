@@ -58,7 +58,7 @@ resvg = "0.47.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.149"
 sdl3 = { version = "0.18.4", features = ["raw-window-handle", "unsafe_textures", "use-pkg-config"] }
-smithay = { version = "0.7.0", default-features = false, features = ["wayland_frontend", "desktop"] }
+smithay = { git = "https://github.com/Smithay/smithay.git", rev = "e3d461a057ba244d213a8498ec372b0799cca103", default-features = false, features = ["wayland_frontend", "desktop", "xwayland"] }
 thiserror = "2.0.17"
 toml = "0.9.8"
 tungstenite = { version = "0.28.0", features = ["rustls-tls-webpki-roots"] }

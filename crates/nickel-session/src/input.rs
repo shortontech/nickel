@@ -7,16 +7,17 @@ use nickel_core::window_input::{
 use smithay::{
     backend::input::{
         AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, InputBackend, InputEvent,
-        KeyState, KeyboardKeyEvent, MouseButton, PointerAxisEvent, PointerButtonEvent,
+        InputTime, KeyState, KeyboardKeyEvent, MouseButton, PointerAxisEvent, PointerButtonEvent,
         PointerMotionEvent, TouchEvent,
     },
     input::{
         keyboard::{FilterResult, Keysym, keysyms},
-        pointer::{AxisFrame, ButtonEvent, Focus, GrabStartData, MotionEvent},
+        pointer::{AxisFrame, ButtonEvent, Focus, GrabStartData, MotionEvent, RelativeMotionEvent},
         touch::{DownEvent, MotionEvent as TouchMotion, UpEvent},
     },
-    reexports::wayland_server::{Resource, protocol::wl_surface::WlSurface},
+    reexports::wayland_server::Resource,
     utils::{Logical, Rectangle, SERIAL_COUNTER},
+    wayland::seat::WaylandFocus,
 };
 
 use crate::{
@@ -35,7 +36,7 @@ impl NickelSession {
                 keycode,
                 KeyState::Released,
                 SERIAL_COUNTER.next_serial(),
-                0,
+                InputTime::now(),
                 |_session, _modifiers, _handle| FilterResult::Forward,
             );
         }
@@ -75,7 +76,7 @@ impl NickelSession {
         match event {
             InputEvent::Keyboard { event, .. } => {
                 let serial = SERIAL_COUNTER.next_serial();
-                let time = Event::time_msec(&event);
+                let time = event.time();
                 let state = event.state();
                 let keyboard = self.seat.get_keyboard().unwrap();
                 return keyboard
@@ -156,20 +157,37 @@ impl NickelSession {
                     .max()
                     .unwrap_or(1);
                 let delta = event.delta();
-                let position = (
+                let proposed = (
                     (current.x + delta.x).clamp(0.0, f64::from(max_x.saturating_sub(1))),
                     (current.y + delta.y).clamp(0.0, f64::from(max_y.saturating_sub(1))),
                 )
                     .into();
-                self.update_frame_cursor(position);
                 let pointer = self.seat.get_pointer().unwrap();
+                let current_focus = self.pointer_surface_under(current);
+                pointer.relative_motion(
+                    self,
+                    current_focus.clone(),
+                    &RelativeMotionEvent {
+                        delta,
+                        delta_unaccel: event.delta_unaccel(),
+                        time: event.time(),
+                    },
+                );
+                let position = current_focus
+                    .as_ref()
+                    .map_or(proposed, |(surface, origin)| {
+                        surface.wl_surface().map_or(proposed, |surface| {
+                            self.constrained_pointer_position(&surface, *origin, current, proposed)
+                        })
+                    });
+                self.update_frame_cursor(position);
                 pointer.motion(
                     self,
-                    self.surface_under(position),
+                    self.pointer_surface_under(position),
                     &MotionEvent {
                         location: position,
                         serial: SERIAL_COUNTER.next_serial(),
-                        time: event.time_msec(),
+                        time: event.time(),
                     },
                 );
                 pointer.frame(self);
@@ -179,14 +197,23 @@ impl NickelSession {
 
                 let output_geo = self.space.output_geometry(output).unwrap();
 
-                let pos = event.position_transformed(output_geo.size) + output_geo.loc.to_f64();
+                let proposed =
+                    event.position_transformed(output_geo.size) + output_geo.loc.to_f64();
+                let pointer = self.seat.get_pointer().unwrap();
+                let current = pointer.current_location();
+                let current_focus = self.pointer_surface_under(current);
+                let pos = current_focus
+                    .as_ref()
+                    .map_or(proposed, |(surface, origin)| {
+                        surface.wl_surface().map_or(proposed, |surface| {
+                            self.constrained_pointer_position(&surface, *origin, current, proposed)
+                        })
+                    });
                 self.update_frame_cursor(pos);
 
                 let serial = SERIAL_COUNTER.next_serial();
 
-                let pointer = self.seat.get_pointer().unwrap();
-
-                let under = self.surface_under(pos);
+                let under = self.pointer_surface_under(pos);
 
                 pointer.motion(
                     self,
@@ -194,7 +221,7 @@ impl NickelSession {
                     &MotionEvent {
                         location: pos,
                         serial,
-                        time: event.time_msec(),
+                        time: event.time(),
                     },
                 );
                 pointer.frame(self);
@@ -268,18 +295,27 @@ impl NickelSession {
                         .next_back();
 
                     if let Some((window, part)) = frame_target {
-                        let surface = window.toplevel().unwrap().clone();
-                        let id = surface.wl_surface().id();
+                        let surface = window.wl_surface().map(std::borrow::Cow::into_owned)?;
+                        let id = surface.id();
                         let registry_id = self.surface_windows.get(&id).copied();
                         frame_handled = true;
                         suppress_pointer_event = true;
                         self.space.raise_element(&window, true);
+                        if let Some(surface) = window.x11_surface() {
+                            self.raise_x11_surface(surface);
+                        }
                         if let Some(id) = registry_id {
                             self.windows.raise(id);
                         }
-                        keyboard.set_focus(self, Some(surface.wl_surface().clone()), serial);
+                        keyboard.set_focus(
+                            self,
+                            crate::focus::KeyboardFocusTarget::for_window(&window),
+                            serial,
+                        );
                         self.space.elements().for_each(|window| {
-                            window.toplevel().unwrap().send_pending_configure();
+                            if let Some(toplevel) = window.toplevel() {
+                                toplevel.send_pending_configure();
+                            }
                         });
                         self.notify_protocol_snapshot();
                         match part {
@@ -297,14 +333,19 @@ impl NickelSession {
                             }
                             FramePart::Maximize => {
                                 self.suppress_left_button_release = true;
-                                self.toggle_maximized_toplevel(&surface);
+                                if let Some(id) = registry_id {
+                                    self.maximize_window(id);
+                                }
                             }
                             FramePart::Titlebar => {
                                 let is_double_click =
                                     self.last_titlebar_click.as_ref().is_some_and(
                                         |(previous_id, previous_time, previous_location)| {
                                             previous_id == &id
-                                                && event.time_msec().wrapping_sub(*previous_time)
+                                                && event
+                                                    .time()
+                                                    .millis()
+                                                    .wrapping_sub(*previous_time)
                                                     <= DOUBLE_CLICK_MS
                                                 && (location.x - previous_location.x).abs()
                                                     <= DOUBLE_CLICK_DISTANCE
@@ -315,10 +356,12 @@ impl NickelSession {
                                 if is_double_click {
                                     self.last_titlebar_click = None;
                                     self.suppress_left_button_release = true;
-                                    self.toggle_maximized_toplevel(&surface);
+                                    if let Some(id) = registry_id {
+                                        self.maximize_window(id);
+                                    }
                                 } else {
                                     self.last_titlebar_click =
-                                        Some((id, event.time_msec(), location));
+                                        Some((id, event.time().millis(), location));
                                     let initial_window_location =
                                         self.space.element_location(&window).unwrap_or_default();
                                     let start_data = GrabStartData {
@@ -342,7 +385,7 @@ impl NickelSession {
                                             button,
                                             state: button_state,
                                             serial,
-                                            time: event.time_msec(),
+                                            time: event.time(),
                                         },
                                     );
                                 }
@@ -393,7 +436,7 @@ impl NickelSession {
                                         button,
                                         state: button_state,
                                         serial,
-                                        time: event.time_msec(),
+                                        time: event.time(),
                                     },
                                 );
                             }
@@ -422,7 +465,7 @@ impl NickelSession {
                         .filter_map(|window| {
                             let id = self
                                 .surface_windows
-                                .get(&window.toplevel()?.wl_surface().id())
+                                .get(&window.wl_surface()?.id())
                                 .copied()?;
                             let bounds = self.space.element_bbox(window)?;
                             Some(WindowSurface {
@@ -449,9 +492,12 @@ impl NickelSession {
                         .map(|(w, l)| (w.clone(), l))
                     {
                         self.space.raise_element(&window, true);
+                        if let Some(surface) = window.x11_surface() {
+                            self.raise_x11_surface(surface);
+                        }
                         let actual_window = self
                             .surface_windows
-                            .get(&window.toplevel().unwrap().wl_surface().id())
+                            .get(&window.wl_surface()?.id())
                             .copied();
                         for effect in window_effects {
                             match effect {
@@ -464,21 +510,32 @@ impl NickelSession {
                             }
                         }
                         if !self.is_panel_window(&window) {
+                            self.space.elements().for_each(|candidate| {
+                                candidate.set_activated(candidate == &window);
+                            });
                             keyboard.set_focus(
                                 self,
-                                Some(window.toplevel().unwrap().wl_surface().clone()),
+                                crate::focus::KeyboardFocusTarget::for_window(&window),
                                 serial,
                             );
                             self.space.elements().for_each(|window| {
-                                window.toplevel().unwrap().send_pending_configure();
+                                if let Some(toplevel) = window.toplevel() {
+                                    toplevel.send_pending_configure();
+                                }
                             });
                         }
                     } else {
                         self.space.elements().for_each(|window| {
                             window.set_activated(false);
-                            window.toplevel().unwrap().send_pending_configure();
+                            if let Some(toplevel) = window.toplevel() {
+                                toplevel.send_pending_configure();
+                            }
                         });
-                        keyboard.set_focus(self, Option::<WlSurface>::None, serial);
+                        keyboard.set_focus(
+                            self,
+                            Option::<crate::focus::KeyboardFocusTarget>::None,
+                            serial,
+                        );
                     }
                     self.notify_protocol_snapshot();
                 };
@@ -502,7 +559,7 @@ impl NickelSession {
                     let location = pointer.current_location();
                     let initial_window_location = self.space.element_location(&window).unwrap();
                     let start_data = GrabStartData {
-                        focus: self.surface_under(location),
+                        focus: self.pointer_surface_under(location),
                         button,
                         location,
                     };
@@ -540,7 +597,7 @@ impl NickelSession {
                         Rectangle::new(initial_window_location, window.geometry().size);
                     let edges = resize_edges_at(location, initial_rect);
                     let start_data = GrabStartData {
-                        focus: self.surface_under(location),
+                        focus: self.pointer_surface_under(location),
                         button,
                         location,
                     };
@@ -559,7 +616,7 @@ impl NickelSession {
                             button,
                             state: button_state,
                             serial,
-                            time: event.time_msec(),
+                            time: event.time(),
                         },
                     );
                 }
@@ -577,7 +634,7 @@ impl NickelSession {
                 let horizontal_amount_discrete = event.amount_v120(Axis::Horizontal);
                 let vertical_amount_discrete = event.amount_v120(Axis::Vertical);
 
-                let mut frame = AxisFrame::new(event.time_msec()).source(source);
+                let mut frame = AxisFrame::new(event.time()).source(source);
                 if horizontal_amount != 0.0 {
                     frame = frame.value(Axis::Horizontal, horizontal_amount);
                     if let Some(discrete) = horizontal_amount_discrete {
@@ -616,7 +673,7 @@ impl NickelSession {
                         slot: event.slot(),
                         location,
                         serial: SERIAL_COUNTER.next_serial(),
-                        time: event.time_msec(),
+                        time: event.time(),
                     },
                 );
             }
@@ -631,7 +688,7 @@ impl NickelSession {
                     &TouchMotion {
                         slot: event.slot(),
                         location,
-                        time: event.time_msec(),
+                        time: event.time(),
                     },
                 );
             }
@@ -642,7 +699,7 @@ impl NickelSession {
                     &UpEvent {
                         slot: event.slot(),
                         serial: SERIAL_COUNTER.next_serial(),
-                        time: event.time_msec(),
+                        time: event.time(),
                     },
                 );
             }

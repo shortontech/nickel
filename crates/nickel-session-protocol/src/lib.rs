@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 4;
 pub const MAX_FRAME_BYTES: usize = 196_608;
 pub const MAX_PREVIEW_WIDTH: u16 = 256;
 pub const MAX_PREVIEW_HEIGHT: u16 = 144;
@@ -41,6 +41,7 @@ pub enum Query {
     Outputs,
     LauncherVisibility,
     SecureStorage,
+    IdleInhibition,
     Preview { window: WindowId },
 }
 
@@ -91,6 +92,10 @@ pub enum TestInput {
         x: i32,
         y: i32,
     },
+    PointerMoveRelative {
+        dx: i32,
+        dy: i32,
+    },
     PointerButton {
         button: TestPointerButton,
         state: InputState,
@@ -108,6 +113,9 @@ pub enum InputState {
 #[serde(rename_all = "snake_case")]
 pub enum TestKey {
     A,
+    C,
+    P,
+    Enter,
     Tab,
     LeftAlt,
     LeftShift,
@@ -133,6 +141,7 @@ pub enum ServerMessage {
     Outputs(Vec<OutputSnapshot>),
     LauncherVisibility { visible: bool },
     SecureStorage { state: SecureStorageState },
+    IdleInhibition { surfaces: u16 },
     Preview(PreviewFrame),
     Event(Event),
 }
@@ -196,6 +205,7 @@ pub struct WindowSnapshot {
     pub active: bool,
     pub minimized: bool,
     pub maximized: bool,
+    pub geometry: Option<Geometry>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -459,6 +469,7 @@ mod tests {
                 state: InputState::Pressed,
             },
             TestInput::PointerMove { x: 640, y: 360 },
+            TestInput::PointerMoveRelative { dx: 12, dy: -7 },
             TestInput::PointerButton {
                 button: TestPointerButton::Left,
                 state: InputState::Released,
@@ -527,6 +538,12 @@ mod tests {
                 active: true,
                 minimized: false,
                 maximized: false,
+                geometry: Some(Geometry {
+                    x: 32,
+                    y: 32,
+                    width: 800,
+                    height: 600,
+                }),
             }],
             focused: Some(WindowId(9)),
             stacking_front_to_back: vec![WindowId(9)],
@@ -549,6 +566,7 @@ mod tests {
             active: true,
             minimized: false,
             maximized: false,
+            geometry: None,
         };
         for message in [
             ServerMessage::Windows(vec![window.clone()]),

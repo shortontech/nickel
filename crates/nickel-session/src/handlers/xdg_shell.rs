@@ -1,8 +1,8 @@
 use nickel_session_protocol::ShellRole;
 use smithay::{
-    delegate_xdg_decoration, delegate_xdg_shell,
     desktop::{
-        PopupKind, PopupManager, Space, Window, find_popup_root_surface, get_popup_toplevel_coords,
+        PopupKeyboardGrab, PopupKind, PopupManager, PopupPointerGrab, Space, Window,
+        find_popup_root_surface, get_popup_toplevel_coords,
     },
     input::{
         Seat,
@@ -18,6 +18,7 @@ use smithay::{
     utils::{Rectangle, Serial},
     wayland::{
         compositor::with_states,
+        seat::WaylandFocus,
         shell::xdg::{
             PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
             XdgToplevelSurfaceData, decoration::XdgDecorationHandler,
@@ -27,6 +28,7 @@ use smithay::{
 
 use crate::{
     NickelSession,
+    focus::KeyboardFocusTarget,
     grabs::{MoveSurfaceGrab, ResizeSurfaceGrab},
     shell_layout,
 };
@@ -71,7 +73,7 @@ impl XdgShellHandler for NickelSession {
         if !is_shell_client && self.launcher_window.is_some() {
             self.seat.get_keyboard().unwrap().set_focus(
                 self,
-                Some(wl_surface),
+                Some(KeyboardFocusTarget::Wayland(wl_surface)),
                 smithay::utils::SERIAL_COUNTER.next_serial(),
             );
         }
@@ -179,7 +181,7 @@ impl XdgShellHandler for NickelSession {
             let window = self
                 .space
                 .elements()
-                .find(|w| w.toplevel().unwrap().wl_surface() == wl_surface)
+                .find(|window| window.wl_surface().as_deref() == Some(wl_surface))
                 .unwrap()
                 .clone();
             let initial_window_location = self.space.element_location(&window).unwrap();
@@ -211,7 +213,7 @@ impl XdgShellHandler for NickelSession {
             let window = self
                 .space
                 .elements()
-                .find(|w| w.toplevel().unwrap().wl_surface() == wl_surface)
+                .find(|window| window.wl_surface().as_deref() == Some(wl_surface))
                 .unwrap()
                 .clone();
             let initial_window_location = self.space.element_location(&window).unwrap();
@@ -234,14 +236,30 @@ impl XdgShellHandler for NickelSession {
         }
     }
 
-    fn grab(&mut self, _surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {
-        // TODO popup grabs
+    fn grab(&mut self, surface: PopupSurface, seat: wl_seat::WlSeat, serial: Serial) {
+        let Some(seat) = Seat::from_resource(&seat) else {
+            return;
+        };
+        let popup = PopupKind::Xdg(surface);
+        let Ok(root_surface) = find_popup_root_surface(&popup) else {
+            return;
+        };
+        let root = KeyboardFocusTarget::Wayland(root_surface);
+        match self.popups.grab_popup(root, popup, &seat, serial) {
+            Ok(grab) => {
+                if let Some(keyboard) = seat.get_keyboard() {
+                    keyboard.set_grab(self, PopupKeyboardGrab::new(&grab), serial);
+                }
+                if let Some(pointer) = seat.get_pointer() {
+                    pointer.set_grab(self, PopupPointerGrab::new(&grab), serial, Focus::Keep);
+                }
+            }
+            Err(error) => tracing::debug!(?error, "denied invalid popup grab"),
+        }
     }
 }
 
 // Xdg Shell
-delegate_xdg_shell!(NickelSession);
-
 impl XdgDecorationHandler for NickelSession {
     fn new_decoration(&mut self, toplevel: ToplevelSurface) {
         self.prefer_server_decoration(toplevel);
@@ -297,8 +315,6 @@ impl NickelSession {
     }
 }
 
-delegate_xdg_decoration!(NickelSession);
-
 fn check_grab(
     seat: &Seat<NickelSession>,
     surface: &WlSurface,
@@ -315,7 +331,7 @@ fn check_grab(
 
     let (focus, _) = start_data.focus.as_ref()?;
     // If the focus was for a different surface, ignore the request.
-    if !focus.id().same_client_as(&surface.id()) {
+    if !focus.same_client_as(&surface.id()) {
         return None;
     }
 
@@ -327,7 +343,11 @@ pub fn handle_commit(popups: &mut PopupManager, space: &Space<Window>, surface: 
     // Handle toplevel commits.
     if let Some(window) = space
         .elements()
-        .find(|w| w.toplevel().unwrap().wl_surface() == surface)
+        .find(|window| {
+            window
+                .toplevel()
+                .is_some_and(|toplevel| toplevel.wl_surface() == surface)
+        })
         .cloned()
     {
         let initial_configure_sent = with_states(surface, |states| {
@@ -409,7 +429,7 @@ impl NickelSession {
             let launcher = self
                 .space
                 .elements()
-                .find(|window| window.toplevel().unwrap().wl_surface() == surface.wl_surface())
+                .find(|window| window.wl_surface().as_deref() == Some(surface.wl_surface()))
                 .cloned();
             if let Some(launcher) = launcher {
                 self.register_launcher(launcher);
@@ -419,7 +439,7 @@ impl NickelSession {
             let desktop = self
                 .space
                 .elements()
-                .find(|window| window.toplevel().unwrap().wl_surface() == surface.wl_surface())
+                .find(|window| window.wl_surface().as_deref() == Some(surface.wl_surface()))
                 .cloned();
             if let Some(desktop) = desktop {
                 self.register_desktop(desktop);
@@ -429,7 +449,7 @@ impl NickelSession {
             let panel = self
                 .space
                 .elements()
-                .find(|window| window.toplevel().unwrap().wl_surface() == surface.wl_surface())
+                .find(|window| window.wl_surface().as_deref() == Some(surface.wl_surface()))
                 .cloned();
             if let Some(panel) = panel {
                 self.register_panel(panel);
@@ -439,7 +459,7 @@ impl NickelSession {
             let menu = self
                 .space
                 .elements()
-                .find(|window| window.toplevel().unwrap().wl_surface() == surface.wl_surface())
+                .find(|window| window.wl_surface().as_deref() == Some(surface.wl_surface()))
                 .cloned();
             if let Some(menu) = menu {
                 self.register_context_menu(menu);
@@ -449,7 +469,7 @@ impl NickelSession {
             let preview = self
                 .space
                 .elements()
-                .find(|window| window.toplevel().unwrap().wl_surface() == surface.wl_surface())
+                .find(|window| window.wl_surface().as_deref() == Some(surface.wl_surface()))
                 .cloned();
             if let Some(preview) = preview {
                 self.register_preview(preview);
@@ -459,7 +479,7 @@ impl NickelSession {
             let utility = self
                 .space
                 .elements()
-                .find(|window| window.toplevel().unwrap().wl_surface() == surface.wl_surface())
+                .find(|window| window.wl_surface().as_deref() == Some(surface.wl_surface()))
                 .cloned();
             if let Some(utility) = utility {
                 if is_notification {
@@ -476,11 +496,13 @@ impl NickelSession {
         if is_codex_project_chat {
             self.seat.get_keyboard().unwrap().set_focus(
                 self,
-                Some(surface.wl_surface().clone()),
+                Some(KeyboardFocusTarget::Wayland(surface.wl_surface().clone())),
                 smithay::utils::SERIAL_COUNTER.next_serial(),
             );
             self.space.elements().for_each(|window| {
-                window.toplevel().unwrap().send_pending_configure();
+                if let Some(toplevel) = window.toplevel() {
+                    toplevel.send_pending_configure();
+                }
             });
         }
     }
@@ -489,11 +511,11 @@ impl NickelSession {
         let Ok(root) = find_popup_root_surface(&PopupKind::Xdg(popup.clone())) else {
             return;
         };
-        let Some(window) = self
-            .space
-            .elements()
-            .find(|w| w.toplevel().unwrap().wl_surface() == &root)
-        else {
+        let Some(window) = self.space.elements().find(|window| {
+            window
+                .toplevel()
+                .is_some_and(|toplevel| toplevel.wl_surface() == &root)
+        }) else {
             return;
         };
 

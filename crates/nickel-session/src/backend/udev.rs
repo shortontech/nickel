@@ -26,7 +26,7 @@ use smithay::{
                 AsRenderElements, Kind,
                 memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
                 solid::{SolidColorBuffer, SolidColorRenderElement},
-                surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
+                surface::WaylandSurfaceRenderElement,
                 utils::{ConstrainAlign, ConstrainScaleBehavior, constrain_render_elements},
             },
             gles::{GlesRenderer, GlesTexture},
@@ -52,6 +52,7 @@ use smithay::{
         wayland_server::{Resource, backend::GlobalId},
     },
     utils::{Buffer, DeviceFd, Physical, Point, Rectangle, Scale, Transform},
+    wayland::seat::WaylandFocus,
 };
 use thiserror::Error;
 
@@ -61,7 +62,7 @@ use nickel_core::{
 };
 
 use crate::{
-    CalloopData, NickelSession,
+    NickelSession,
     backend::{
         OutputLayout, SessionActivity,
         drm_scanner::{DrmScanEvent, DrmScanner},
@@ -184,8 +185,8 @@ enum DeviceError {
 }
 
 pub fn init_udev(
-    event_loop: &mut EventLoop<'static, CalloopData>,
-    data: &mut CalloopData,
+    event_loop: &mut EventLoop<'static, NickelSession>,
+    data: &mut NickelSession,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (session, notifier) = LibSeatSession::new()?;
     let seat_name = session.seat();
@@ -207,7 +208,7 @@ pub fn init_udev(
         identify_badges: (1..=9).map(identify_badge).collect(),
     });
     let (buffer_commit_tx, buffer_commit_rx) = channel::channel();
-    data.state.buffer_commit_tx = Some(buffer_commit_tx);
+    data.buffer_commit_tx = Some(buffer_commit_tx);
     event_loop
         .handle()
         .insert_source(buffer_commit_rx, |event, _, data| {
@@ -237,7 +238,6 @@ pub fn init_udev(
                 root = parent;
             }
             let affected_outputs = data
-                .state
                 .space
                 .elements()
                 .find(|window| {
@@ -246,8 +246,7 @@ pub fn init_udev(
                         .is_some_and(|toplevel| toplevel.wl_surface() == &root)
                 })
                 .map(|window| {
-                    data.state
-                        .space
+                    data.space
                         .outputs_for_element(window)
                         .into_iter()
                         .map(|output| output.name())
@@ -334,7 +333,7 @@ pub fn init_udev(
         .map_err(|()| "libinput rejected the active seat")?;
     let input = LibinputInputBackend::new(libinput.clone());
     event_loop.handle().insert_source(input, |event, _, data| {
-        if let Some(vt) = data.state.process_input_event(event)
+        if let Some(vt) = data.process_input_event(event)
             && let Some(native) = data.native.as_mut()
             && let Err(error) = native.session.change_vt(vt)
         {
@@ -371,7 +370,7 @@ pub fn init_udev(
                     }
                     native.activity.activate();
                     for device in native.devices.values_mut() {
-                        if let Err(error) = device.manager.activate(false) {
+                        if let Err(error) = device.manager.lock().activate(false) {
                             tracing::error!(?error, "failed to reactivate DRM device");
                         }
                     }
@@ -418,7 +417,7 @@ pub fn init_udev(
             }
         })?;
 
-    unsafe { std::env::set_var("WAYLAND_DISPLAY", &data.state.socket_name) };
+    unsafe { std::env::set_var("WAYLAND_DISPLAY", &data.socket_name) };
     tracing::info!(seat = %seat_name, gpu = %primary_gpu, "native backend initialized");
     Ok(())
 }
@@ -437,7 +436,7 @@ fn select_primary_gpu(session: &LibSeatSession) -> Result<DrmNode, Box<dyn std::
     Ok(DrmNode::from_path(path)?)
 }
 
-impl CalloopData {
+impl NickelSession {
     pub(crate) fn render_all_outputs(&mut self) {
         let nodes = self
             .native
@@ -513,7 +512,7 @@ impl CalloopData {
                 gbm.clone(),
                 GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT,
             ),
-            GbmFramebufferExporter::new(gbm.clone(), Some(render_node)),
+            GbmFramebufferExporter::new(gbm.clone(), Some(render_node).into()),
             Some(gbm),
             FORMATS.iter().copied(),
             formats,
@@ -600,6 +599,7 @@ impl CalloopData {
                 subpixel: connector.subpixel().into(),
                 make: "Unknown".into(),
                 model,
+                serial_number: String::new(),
             },
         );
         let native = self.native.as_mut().expect("native backend should exist");
@@ -620,11 +620,10 @@ impl CalloopData {
         output.set_preferred(wl_mode);
         output.change_current_state(Some(wl_mode), Some(Transform::Normal), None, Some(location));
         let global = output.create_global::<NickelSession>(&self.display_handle);
-        self.state.space.map_output(&output, location);
+        self.space.map_output(&output, location);
         for position in &positions {
             let mapped = {
-                self.state
-                    .space
+                self.space
                     .outputs()
                     .find(|mapped| mapped.name() == position.name)
                     .cloned()
@@ -632,11 +631,11 @@ impl CalloopData {
             if let Some(mapped) = mapped {
                 let location = (position.x, position.y).into();
                 mapped.change_current_state(None, None, None, Some(location));
-                self.state.space.map_output(&mapped, location);
+                self.space.map_output(&mapped, location);
             }
         }
         if is_primary {
-            self.state.primary_output_name = Some(name.clone());
+            self.primary_output_name = Some(name.clone());
         }
         output
             .user_data()
@@ -654,15 +653,19 @@ impl CalloopData {
             NativeRenderer<'_>,
             NativeElement<NativeRenderer<'_>, WaylandSurfaceRenderElement<NativeRenderer<'_>>>,
         >::default();
-        match device.manager.initialize_output(
-            crtc,
-            mode,
-            &[connector.handle()],
-            &output,
-            None,
-            &mut renderer,
-            &empty,
-        ) {
+        let initialized = {
+            let mut manager = device.manager.lock();
+            manager.initialize_output(
+                crtc,
+                mode,
+                &[connector.handle()],
+                &output,
+                None,
+                &mut renderer,
+                &empty,
+            )
+        };
+        match initialized {
             Ok(drm) => {
                 device.surfaces.insert(
                     crtc,
@@ -678,12 +681,12 @@ impl CalloopData {
                         invalidate_pending: device.is_evdi,
                     },
                 );
-                self.state.relayout_shell_surfaces();
+                self.relayout_shell_surfaces();
                 self.schedule_render(node, Duration::ZERO);
                 tracing::info!(output = %name, "DRM output connected");
             }
             Err(error) => {
-                self.state.space.unmap_output(&output);
+                self.space.unmap_output(&output);
                 self.display_handle.remove_global::<NickelSession>(global);
                 tracing::error!(output = %name, ?error, "failed to initialize DRM output");
             }
@@ -704,7 +707,7 @@ impl CalloopData {
             .get_mut(&node)
             .and_then(|device| device.surfaces.remove(&crtc))
         {
-            self.state.space.unmap_output(&surface.output);
+            self.space.unmap_output(&surface.output);
             if let Some(global) = surface.global.take() {
                 self.display_handle.remove_global::<NickelSession>(global);
             }
@@ -712,7 +715,6 @@ impl CalloopData {
         let positions = native.layout.disconnect(&name);
         for position in positions {
             let output = self
-                .state
                 .space
                 .outputs()
                 .find(|output| output.name() == position.name)
@@ -720,11 +722,11 @@ impl CalloopData {
             if let Some(output) = output {
                 let location = (position.x, position.y).into();
                 output.change_current_state(None, None, None, Some(location));
-                self.state.space.map_output(&output, location);
+                self.space.map_output(&output, location);
             }
         }
         self.reflow_windows_to_connected_outputs();
-        self.state.relayout_shell_surfaces();
+        self.relayout_shell_surfaces();
         tracing::info!(output = %name, "DRM output disconnected");
     }
 
@@ -738,7 +740,7 @@ impl CalloopData {
         let mut positions = Vec::new();
         for (_, mut surface) in device.surfaces.drain() {
             positions = native.layout.disconnect(&surface.output.name());
-            self.state.space.unmap_output(&surface.output);
+            self.space.unmap_output(&surface.output);
             if let Some(global) = surface.global.take() {
                 self.display_handle.remove_global::<NickelSession>(global);
             }
@@ -747,7 +749,6 @@ impl CalloopData {
         self.event_loop_handle.remove(device.registration);
         for position in positions {
             let output = self
-                .state
                 .space
                 .outputs()
                 .find(|output| output.name() == position.name)
@@ -755,11 +756,11 @@ impl CalloopData {
             if let Some(output) = output {
                 let location = (position.x, position.y).into();
                 output.change_current_state(None, None, None, Some(location));
-                self.state.space.map_output(&output, location);
+                self.space.map_output(&output, location);
             }
         }
         self.reflow_windows_to_connected_outputs();
-        self.state.relayout_shell_surfaces();
+        self.relayout_shell_surfaces();
         tracing::info!(%node, "DRM device removed");
     }
 
@@ -793,20 +794,18 @@ impl CalloopData {
 
     fn reflow_windows_to_connected_outputs(&mut self) {
         let output_geometries: Vec<_> = self
-            .state
             .space
             .outputs()
-            .filter_map(|output| self.state.space.output_geometry(output))
+            .filter_map(|output| self.space.output_geometry(output))
             .collect();
         let Some(fallback) = output_geometries.first().copied() else {
             return;
         };
         let stranded: Vec<_> = self
-            .state
             .space
             .elements()
             .filter(|window| {
-                self.state.space.element_bbox(window).is_some_and(|bounds| {
+                self.space.element_bbox(window).is_some_and(|bounds| {
                     !output_geometries
                         .iter()
                         .any(|output| output.overlaps(bounds))
@@ -815,7 +814,7 @@ impl CalloopData {
             .cloned()
             .collect();
         for window in stranded {
-            self.state.space.map_element(window, fallback.loc, false);
+            self.space.map_element(window, fallback.loc, false);
         }
     }
 
@@ -832,16 +831,14 @@ impl CalloopData {
     }
 
     fn render_output(&mut self, node: DrmNode, crtc: crtc::Handle) {
-        let shell_bootstrapping = self.state.launcher_window.is_none();
+        let shell_bootstrapping = self.launcher_window.is_none();
         let identify_index = self
-            .state
             .identify_outputs_until
             .filter(|deadline| *deadline > std::time::Instant::now())
             .and_then(|_| {
-                let mut outputs = self.state.space.outputs().cloned().collect::<Vec<_>>();
+                let mut outputs = self.space.outputs().cloned().collect::<Vec<_>>();
                 outputs.sort_by_key(|output| {
-                    self.state
-                        .space
+                    self.space
                         .output_geometry(output)
                         .map(|geometry| (geometry.loc.x, geometry.loc.y))
                         .unwrap_or_default()
@@ -854,23 +851,19 @@ impl CalloopData {
                         .is_some_and(|surface| surface.output == *output)
                 })
             });
-        let (output, retry) = {
-            let Some(native) = self.native.as_mut() else {
-                return;
-            };
+        let Some(mut native) = self.native.take() else {
+            return;
+        };
+        let rendered = (|| {
             if !native.activity.is_active() {
-                return;
+                return None;
             }
-            let Some(device) = native.devices.get_mut(&node) else {
-                return;
-            };
-            let Some(surface) = device.surfaces.get_mut(&crtc) else {
-                return;
-            };
+            let device = native.devices.get_mut(&node)?;
+            let surface = device.surfaces.get_mut(&crtc)?;
             let output = surface.output.clone();
             let cursor = native
                 .cursors
-                .get(&self.state.frame_cursor)
+                .get(&self.frame_cursor)
                 .or_else(|| native.cursors.get(&crate::window_frame::FrameCursor::Arrow))
                 .cloned()
                 .unwrap_or_else(fallback_arrow_cursor);
@@ -880,16 +873,11 @@ impl CalloopData {
                 .and_then(|index| native.identify_badges.get(index))
                 .cloned();
             let preview_windows = self
-                .state
                 .space
                 .elements()
                 .filter_map(|window| {
-                    let id = self
-                        .state
-                        .surface_windows
-                        .get(&window.toplevel()?.wl_surface().id())?;
-                    self.state
-                        .preview_requests
+                    let id = self.surface_windows.get(&window.wl_surface()?.id())?;
+                    self.preview_requests
                         .contains(id)
                         .then(|| (*id, window.clone()))
                 })
@@ -935,25 +923,23 @@ impl CalloopData {
                         target = %target_gpu,
                         "failed to acquire multi-GPU renderer"
                     );
-                    return;
+                    return None;
                 }
             };
             for (id, window) in preview_windows {
                 if let Some(frame) = capture_preview(&mut renderer, &window) {
-                    self.state.preview_frames.insert(id, frame);
-                    self.state.notify_preview_frame(id);
+                    self.preview_frames.insert(id, frame);
+                    self.notify_preview_frame(id);
                 }
             }
             let mut elements: Vec<
                 NativeElement<NativeRenderer<'_>, WaylandSurfaceRenderElement<NativeRenderer<'_>>>,
             > = Vec::new();
             let shell_surfaces = self
-                .state
                 .shell_windows()
                 .filter_map(|window| window.toplevel().map(|surface| surface.wl_surface().id()))
                 .collect::<Vec<_>>();
             let desktop_surfaces = self
-                .state
                 .desktop_windows
                 .iter()
                 .filter_map(|window| window.toplevel().map(|surface| surface.wl_surface().id()))
@@ -961,18 +947,18 @@ impl CalloopData {
             let frame_palette = ThemePalette::from_appearance(
                 ShellSettings::load_default().resolve_appearance(Appearance::default()),
             );
-            if let Some(output_geometry) = self.state.space.output_geometry(&output) {
+            if let Some(output_geometry) = self.space.output_geometry(&output) {
                 // Space stores windows back-to-front. Build each window and its
                 // frame together, front-to-back, so overlapping frames obey the
                 // same stacking order as their client surfaces.
-                for window in self.state.space.elements().rev() {
-                    let Some(bounds) = self.state.space.element_bbox(window) else {
+                for window in self.space.elements().rev() {
+                    let Some(bounds) = self.space.element_bbox(window) else {
                         continue;
                     };
                     if !output_geometry.overlaps(bounds) {
                         continue;
                     }
-                    let Some(location) = self.state.space.element_location(window) else {
+                    let Some(location) = self.space.element_location(window) else {
                         continue;
                     };
                     let render_location = location - window.geometry().loc - output_geometry.loc;
@@ -990,22 +976,22 @@ impl CalloopData {
                             .map(|element| NativeElement::from(NativeCustomElement::from(element))),
                     );
 
-                    let Some(surface) = window.toplevel().map(|top| top.wl_surface()) else {
+                    let Some(surface) = window.wl_surface() else {
                         continue;
                     };
                     if !has_content
                         || shell_surfaces.contains(&surface.id())
-                        || self.state.is_fullscreen_window(window)
-                        || !self.state.is_server_decorated(window)
+                        || self.is_fullscreen_window(window)
+                        || !self.is_server_decorated(window)
                     {
                         continue;
                     }
-                    let registry_id = self.state.surface_windows.get(&surface.id()).copied();
-                    let active = registry_id.is_some_and(|id| self.state.windows.is_active(id));
+                    let registry_id = self.surface_windows.get(&surface.id()).copied();
+                    let active = registry_id.is_some_and(|id| self.windows.is_active(id));
                     let title = registry_id
-                        .and_then(|id| self.state.windows.title(id))
+                        .and_then(|id| self.windows.title(id))
                         .unwrap_or_default();
-                    let maximized = self.state.is_maximized_window(window);
+                    let maximized = self.is_maximized_window(window);
                     let frame_index = elements.len();
                     let foreground = if active {
                         frame_palette.text
@@ -1088,17 +1074,15 @@ impl CalloopData {
                     }
                 }
             }
-            if let Some(highlighted) = self.state.preview_highlight.and_then(|highlight| {
-                self.state.space.elements().find(|window| {
+            if let Some(highlighted) = self.preview_highlight.and_then(|highlight| {
+                self.space.elements().find(|window| {
                     window
-                        .toplevel()
-                        .and_then(|surface| {
-                            self.state.surface_windows.get(&surface.wl_surface().id())
-                        })
+                        .wl_surface()
+                        .and_then(|surface| self.surface_windows.get(&surface.id()))
                         .copied()
                         == Some(highlight)
                 })
-            }) && let Some(output_geometry) = self.state.space.output_geometry(&output)
+            }) && let Some(output_geometry) = self.space.output_geometry(&output)
             {
                 // Peek is a single front-to-back composition: shell overlays
                 // remain legible, the selected client stays bright, the dim
@@ -1107,13 +1091,13 @@ impl CalloopData {
                 // because plane assignment and damage history can expose stale
                 // content between passes.
                 let mut peek_elements = Vec::new();
-                for shell in self.state.space.elements().rev().filter(|window| {
+                for shell in self.space.elements().rev().filter(|window| {
                     window.toplevel().is_some_and(|surface| {
                         shell_surfaces.contains(&surface.wl_surface().id())
                             && !desktop_surfaces.contains(&surface.wl_surface().id())
                     })
                 }) {
-                    let Some(location) = self.state.space.element_location(shell) else {
+                    let Some(location) = self.space.element_location(shell) else {
                         continue;
                     };
                     let render_location = location - shell.geometry().loc - output_geometry.loc;
@@ -1129,7 +1113,7 @@ impl CalloopData {
                             .map(|element| NativeElement::from(NativeCustomElement::from(element))),
                     );
                 }
-                if let Some(location) = self.state.space.element_location(highlighted) {
+                if let Some(location) = self.space.element_location(highlighted) {
                     let render_location =
                         location - highlighted.geometry().loc - output_geometry.loc;
                     peek_elements.extend(
@@ -1158,7 +1142,7 @@ impl CalloopData {
                 peek_elements.append(&mut elements);
                 elements = peek_elements;
             }
-            if self.state.shell_recovery_visible() {
+            if self.shell_recovery_visible() {
                 let recovery_size = output
                     .current_mode()
                     .map(|mode| mode.size)
@@ -1192,14 +1176,12 @@ impl CalloopData {
                 .into(),
             );
             let is_primary = self
-                .state
                 .primary_output_name
                 .as_deref()
                 .is_none_or(|name| name == output.name());
             if is_primary
                 && let Some(mode) = output.current_mode()
-                && let Some((switcher, switcher_size)) =
-                    task_switcher_buffer(&self.state, mode.size)
+                && let Some((switcher, switcher_size)) = task_switcher_buffer(self, mode.size)
             {
                 let location = (
                     (mode.size.w - switcher_size.w).max(0) / 2,
@@ -1238,8 +1220,8 @@ impl CalloopData {
                     Err(error) => tracing::warn!(?error, "failed to upload identify badge"),
                 }
             }
-            if let Some(geometry) = self.state.space.output_geometry(&output) {
-                let pointer = self.state.seat.get_pointer().unwrap().current_location();
+            if let Some(geometry) = self.space.output_geometry(&output) {
+                let pointer = self.seat.get_pointer().unwrap().current_location();
                 if geometry.to_f64().contains(pointer) {
                     let location = (pointer - geometry.loc.to_f64())
                         .to_i32_round()
@@ -1259,7 +1241,7 @@ impl CalloopData {
                     }
                 }
             }
-            if is_primary && let Some(path) = self.state.output_capture_path.take() {
+            if is_primary && let Some(path) = self.output_capture_path.take() {
                 let result = output
                     .current_mode()
                     .ok_or_else(|| "output has no active mode".to_owned())
@@ -1275,7 +1257,7 @@ impl CalloopData {
                         nickel_session_protocol::CaptureResult::Failed { message: error }
                     }
                 };
-                self.state.complete_output_capture(&path, response);
+                self.complete_output_capture(&path, response);
             }
             let retry = match surface.drm.render_frame(
                 &mut renderer,
@@ -1312,21 +1294,25 @@ impl CalloopData {
                     true
                 }
             };
-            (output, retry)
+            Some((output, retry))
+        })();
+        self.native = Some(native);
+        let Some((output, retry)) = rendered else {
+            return;
         };
         if retry {
             self.schedule_render(node, Duration::from_millis(16));
         }
-        self.state.space.elements().for_each(|window| {
+        self.space.elements().for_each(|window| {
             window.send_frame(
                 &output,
-                self.state.start_time.elapsed(),
+                self.start_time.elapsed(),
                 Some(Duration::ZERO),
                 |_, _| Some(output.clone()),
             );
         });
-        self.state.space.refresh();
-        self.state.popups.cleanup();
+        self.space.refresh();
+        self.popups.cleanup();
         let _ = self.display_handle.flush_clients();
     }
 
@@ -1755,16 +1741,11 @@ fn capture_preview(
     )
     .ok()?;
     let mut framebuffer = renderer.bind(&mut texture).ok()?;
-    let elements = render_elements_from_surface_tree::<
-        NativeRenderer<'_>,
-        WaylandSurfaceRenderElement<NativeRenderer<'_>>,
-    >(
+    let elements = window.render_elements::<WaylandSurfaceRenderElement<NativeRenderer<'_>>>(
         renderer,
-        window.toplevel()?.wl_surface(),
-        (0, 0),
+        (-geometry.loc.x, -geometry.loc.y).into(),
+        Scale::from(1.0),
         1.0,
-        1.0,
-        Kind::Unspecified,
     );
     let damage = Rectangle::from_size((WIDTH, HEIGHT).into());
     let reference = Rectangle::from_size(geometry.size.to_physical(1));

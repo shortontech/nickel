@@ -156,6 +156,9 @@ hit testing, focus handling, and input reducers.
 
 ### Linux Direct Session
 
+Protocol policies, compatibility evidence, and known limitations are tracked in
+[`docs/linux-application-compatibility.md`](docs/linux-application-compatibility.md).
+
 The direct backend requires DRM, GBM, libinput, udev, libseat, and EGL development packages. Build
 it without the nested backend:
 

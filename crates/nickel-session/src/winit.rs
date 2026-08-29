@@ -13,7 +13,7 @@ use smithay::{
                 AsRenderElements, Kind,
                 memory::MemoryRenderBufferRenderElement,
                 solid::{SolidColorBuffer, SolidColorRenderElement},
-                surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
+                surface::WaylandSurfaceRenderElement,
                 utils::{ConstrainAlign, ConstrainScaleBehavior, constrain_render_elements},
             },
             gles::{GlesRenderer, GlesTexture},
@@ -25,6 +25,7 @@ use smithay::{
     output::{Mode, Output, PhysicalProperties, Subpixel},
     reexports::{calloop::EventLoop, wayland_server::Resource},
     utils::{Buffer, Rectangle, Scale, Transform},
+    wayland::seat::WaylandFocus,
 };
 
 use nickel_core::{
@@ -32,7 +33,7 @@ use nickel_core::{
     theme::{Appearance, ThemePalette},
 };
 
-use crate::{CalloopData, NickelSession, state::PreviewFrame};
+use crate::{NickelSession, state::PreviewFrame};
 
 smithay::backend::renderer::element::render_elements! {
     WinitFrameElement<R> where R: ImportAll + ImportMem;
@@ -54,11 +55,11 @@ fn flatten_window_groups<E>(groups: Vec<WindowRenderGroup<E>>) -> Vec<E> {
 }
 
 pub fn init_winit(
-    event_loop: &mut EventLoop<CalloopData>,
-    data: &mut CalloopData,
+    event_loop: &mut EventLoop<NickelSession>,
+    data: &mut NickelSession,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let display_handle = &mut data.display_handle;
-    let state = &mut data.state;
+    let display_handle = data.display_handle.clone();
+    let state = data;
 
     let (mut backend, winit) = winit::init()?;
     state.set_winit_redraw_window(backend.window());
@@ -76,9 +77,10 @@ pub fn init_winit(
             subpixel: Subpixel::Unknown,
             make: "Smithay".into(),
             model: "Winit".into(),
+            serial_number: String::new(),
         },
     );
-    let _global = output.create_global::<NickelSession>(display_handle);
+    let _global = output.create_global::<NickelSession>(&display_handle);
     output.change_current_state(
         Some(mode),
         Some(Transform::Flipped180),
@@ -101,8 +103,8 @@ pub fn init_winit(
     event_loop
         .handle()
         .insert_source(winit, move |event, _, data| {
-            let display = &mut data.display_handle;
-            let state = &mut data.state;
+            let mut display = data.display_handle.clone();
+            let state = data;
 
             match event {
                 WinitEvent::Resized { size, .. } => {
@@ -121,6 +123,7 @@ pub fn init_winit(
                 }
                 WinitEvent::Input(event) => {
                     let _ = state.process_input_event(event);
+                    let _ = display.flush_clients();
                     backend.window().request_redraw();
                 }
                 WinitEvent::Focus(false) => {
@@ -130,7 +133,9 @@ pub fn init_winit(
                 WinitEvent::Redraw => {
                     backend
                         .window()
-                        .set_cursor(frame_cursor_icon(state.frame_cursor));
+                        .set_cursor(smithay::reexports::winit::cursor::Cursor::Icon(
+                            frame_cursor_icon(state.frame_cursor),
+                        ));
                     let size = backend.window_size();
                     let damage = Rectangle::from_size(size);
                     if state.preview_highlight.is_some()
@@ -174,10 +179,8 @@ pub fn init_winit(
                         if let Some(window) = state.preview_highlight.and_then(|highlight| {
                             state.space.elements().find(|window| {
                                 window
-                                    .toplevel()
-                                    .and_then(|surface| {
-                                        state.surface_windows.get(&surface.wl_surface().id())
-                                    })
+                                    .wl_surface()
+                                    .and_then(|surface| state.surface_windows.get(&surface.id()))
                                     .copied()
                                     == Some(highlight)
                             })
@@ -300,9 +303,7 @@ pub fn init_winit(
                             .elements()
                             .filter(|window| !state.shell_windows().any(|shell| shell == *window))
                             .filter_map(|window| {
-                                let id = state
-                                    .surface_windows
-                                    .get(&window.toplevel()?.wl_surface().id())?;
+                                let id = state.surface_windows.get(&window.wl_surface()?.id())?;
                                 state
                                     .preview_requests
                                     .contains(id)
@@ -406,7 +407,7 @@ fn composited_window_elements(
             continue;
         }
         let mut frame = Vec::new();
-        let Some(surface) = window.toplevel().map(|top| top.wl_surface()) else {
+        let Some(surface) = window.wl_surface() else {
             groups.push(WindowRenderGroup { client, frame });
             continue;
         };
@@ -523,16 +524,11 @@ fn capture_preview(renderer: &mut GlesRenderer, window: &Window) -> Option<Previ
         Offscreen::<GlesTexture>::create_buffer(renderer, Fourcc::Abgr8888, (WIDTH, HEIGHT).into())
             .ok()?;
     let mut framebuffer = renderer.bind(&mut texture).ok()?;
-    let elements = render_elements_from_surface_tree::<
-        GlesRenderer,
-        WaylandSurfaceRenderElement<GlesRenderer>,
-    >(
+    let elements = window.render_elements::<WaylandSurfaceRenderElement<GlesRenderer>>(
         renderer,
-        window.toplevel()?.wl_surface(),
-        (0, 0),
+        (-geometry.loc.x, -geometry.loc.y).into(),
+        Scale::from(1.0),
         1.0,
-        1.0,
-        Kind::Unspecified,
     );
     let damage = Rectangle::from_size((WIDTH, HEIGHT).into());
     let reference = Rectangle::from_size(geometry.size.to_physical(1));

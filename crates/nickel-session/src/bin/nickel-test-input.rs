@@ -7,14 +7,17 @@ Inject one input event into a Nickel nested session started with --test-control.
 
 Usage:
   nickel-test-input windows
+  nickel-test-input idle-inhibition
   nickel-test-input move X Y
+  nickel-test-input move-relative DX DY
   nickel-test-input button left|right pressed|released
-  nickel-test-input key a|tab|alt|shift|meta|print-screen pressed|released
+  nickel-test-input key a|c|p|enter|tab|alt|shift|meta|print-screen pressed|released
 ";
 
 enum Parsed {
     Input(TestInput),
     Windows,
+    IdleInhibition,
     Help,
 }
 
@@ -32,12 +35,19 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, String> {
     }
     match args.as_slice() {
         [command] if command == "windows" => Ok(Parsed::Windows),
+        [command] if command == "idle-inhibition" => Ok(Parsed::IdleInhibition),
         [command, x, y] if command == "move" => Ok(Parsed::Input(TestInput::PointerMove {
             x: x.parse()
                 .map_err(|_| format!("invalid X coordinate {x:?}"))?,
             y: y.parse()
                 .map_err(|_| format!("invalid Y coordinate {y:?}"))?,
         })),
+        [command, dx, dy] if command == "move-relative" => {
+            Ok(Parsed::Input(TestInput::PointerMoveRelative {
+                dx: dx.parse().map_err(|_| format!("invalid X delta {dx:?}"))?,
+                dy: dy.parse().map_err(|_| format!("invalid Y delta {dy:?}"))?,
+            }))
+        }
         [command, button, state] if command == "button" => {
             Ok(Parsed::Input(TestInput::PointerButton {
                 button: match button.as_str() {
@@ -51,6 +61,9 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, String> {
         [command, key, state] if command == "key" => Ok(Parsed::Input(TestInput::Key {
             key: match key.as_str() {
                 "a" => TestKey::A,
+                "c" => TestKey::C,
+                "p" => TestKey::P,
+                "enter" => TestKey::Enter,
                 "tab" => TestKey::Tab,
                 "alt" => TestKey::LeftAlt,
                 "shift" => TestKey::LeftShift,
@@ -60,7 +73,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, String> {
             },
             state: parse_state(state)?,
         })),
-        _ => Err("expected move, button, or key command; use --help".into()),
+        _ => Err("expected move, move-relative, button, or key command; use --help".into()),
     }
 }
 
@@ -86,6 +99,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Parsed::Input(input) => Request::Command(Command::TestInput { input }),
         Parsed::Windows => Request::Query(nickel_session_protocol::Query::Windows),
+        Parsed::IdleInhibition => Request::Query(nickel_session_protocol::Query::IdleInhibition),
     };
     let control = env::var_os("NICKEL_SESSION_CONTROL")
         .map(PathBuf::from)
@@ -112,7 +126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ServerMessage::Windows(windows) => {
             for window in windows {
                 println!(
-                    "{}\t{}\t{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}",
                     window.id.0,
                     window.application_id,
                     window.title,
@@ -126,9 +140,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "maximized"
                     } else {
                         "restored"
-                    }
+                    },
+                    window.geometry.map_or_else(
+                        || "unmapped".to_owned(),
+                        |geometry| format!(
+                            "{},{} {}x{}",
+                            geometry.x, geometry.y, geometry.width, geometry.height
+                        ),
+                    )
                 );
             }
+            Ok(())
+        }
+        ServerMessage::IdleInhibition { surfaces } => {
+            println!("{surfaces}");
             Ok(())
         }
         ServerMessage::Error { message, .. } => Err(message.into()),
@@ -143,7 +168,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             print!("{HELP}");
             Ok(())
         }
-        Parsed::Input(_) | Parsed::Windows => {
+        Parsed::Input(_) | Parsed::Windows | Parsed::IdleInhibition => {
             Err("nested compositor test input is only available on Unix".into())
         }
     }
@@ -156,8 +181,19 @@ mod tests {
     #[test]
     fn parses_each_input_family() {
         assert!(matches!(
+            parse(["idle-inhibition".into()]),
+            Ok(Parsed::IdleInhibition)
+        ));
+        assert!(matches!(
             parse(["move".into(), "64".into(), "700".into()]),
             Ok(Parsed::Input(TestInput::PointerMove { x: 64, y: 700 }))
+        ));
+        assert!(matches!(
+            parse(["move-relative".into(), "12".into(), "-7".into()]),
+            Ok(Parsed::Input(TestInput::PointerMoveRelative {
+                dx: 12,
+                dy: -7
+            }))
         ));
         assert!(matches!(
             parse(["button".into(), "right".into(), "pressed".into()]),

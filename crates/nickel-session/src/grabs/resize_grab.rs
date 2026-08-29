@@ -1,4 +1,4 @@
-use crate::NickelSession;
+use crate::{NickelSession, focus::PointerFocusTarget};
 use smithay::{
     desktop::{Space, Window},
     input::pointer::{
@@ -39,6 +39,22 @@ impl From<xdg_toplevel::ResizeEdge> for ResizeEdge {
     }
 }
 
+impl From<smithay::xwayland::xwm::ResizeEdge> for ResizeEdge {
+    fn from(edge: smithay::xwayland::xwm::ResizeEdge) -> Self {
+        use smithay::xwayland::xwm::ResizeEdge as X11Edge;
+        match edge {
+            X11Edge::Top => Self::TOP,
+            X11Edge::Bottom => Self::BOTTOM,
+            X11Edge::Left => Self::LEFT,
+            X11Edge::TopLeft => Self::TOP_LEFT,
+            X11Edge::BottomLeft => Self::BOTTOM_LEFT,
+            X11Edge::Right => Self::RIGHT,
+            X11Edge::TopRight => Self::TOP_RIGHT,
+            X11Edge::BottomRight => Self::BOTTOM_RIGHT,
+        }
+    }
+}
+
 pub struct ResizeSurfaceGrab {
     start_data: PointerGrabStartData<NickelSession>,
     window: Window,
@@ -58,12 +74,14 @@ impl ResizeSurfaceGrab {
     ) -> Self {
         let initial_rect = initial_window_rect;
 
-        ResizeSurfaceState::with(window.toplevel().unwrap().wl_surface(), |state| {
-            *state = ResizeSurfaceState::Resizing {
-                edges,
-                initial_rect,
-            };
-        });
+        if let Some(toplevel) = window.toplevel() {
+            ResizeSurfaceState::with(toplevel.wl_surface(), |state| {
+                *state = ResizeSurfaceState::Resizing {
+                    edges,
+                    initial_rect,
+                };
+            });
+        }
 
         Self {
             start_data,
@@ -80,7 +98,7 @@ impl PointerGrab<NickelSession> for ResizeSurfaceGrab {
         &mut self,
         data: &mut NickelSession,
         handle: &mut PointerInnerHandle<'_, NickelSession>,
-        _focus: Option<(WlSurface, Point<f64, Logical>)>,
+        _focus: Option<(PointerFocusTarget, Point<f64, Logical>)>,
         event: &MotionEvent,
     ) {
         // While the grab is active, no client has pointer focus
@@ -107,12 +125,20 @@ impl PointerGrab<NickelSession> for ResizeSurfaceGrab {
             new_window_height = (self.initial_rect.size.h as f64 + delta.y) as i32;
         }
 
-        let (min_size, max_size) =
+        let (min_size, max_size) = if let Some(surface) = self.window.x11_surface() {
+            (
+                surface.min_size().unwrap_or_else(|| Size::from((1, 1))),
+                surface
+                    .max_size()
+                    .unwrap_or_else(|| Size::from((i32::MAX, i32::MAX))),
+            )
+        } else {
             compositor::with_states(self.window.toplevel().unwrap().wl_surface(), |states| {
                 let mut guard = states.cached_state.get::<SurfaceCachedState>();
                 let data = guard.current();
                 (data.min_size, data.max_size)
-            });
+            })
+        };
 
         let min_width = min_size.w.max(1);
         let min_height = min_size.h.max(1);
@@ -133,20 +159,34 @@ impl PointerGrab<NickelSession> for ResizeSurfaceGrab {
             new_window_height.max(min_height).min(max_height),
         ));
 
-        let xdg = self.window.toplevel().unwrap();
-        xdg.with_pending_state(|state| {
-            state.states.set(xdg_toplevel::State::Resizing);
-            state.size = Some(self.last_window_size);
-        });
-
-        xdg.send_pending_configure();
+        if let Some(x11) = self.window.x11_surface() {
+            let mut location = self.initial_rect.loc;
+            if self.edges.contains(ResizeEdge::LEFT) {
+                location.x += self.initial_rect.size.w - self.last_window_size.w;
+            }
+            if self.edges.contains(ResizeEdge::TOP) {
+                location.y += self.initial_rect.size.h - self.last_window_size.h;
+            }
+            let geometry = Rectangle::new(location, self.last_window_size);
+            if let Err(error) = x11.configure(geometry) {
+                tracing::warn!(?error, "X11 interactive resize failed");
+            }
+            data.space.map_element(self.window.clone(), location, false);
+        } else {
+            let xdg = self.window.toplevel().unwrap();
+            xdg.with_pending_state(|state| {
+                state.states.set(xdg_toplevel::State::Resizing);
+                state.size = Some(self.last_window_size);
+            });
+            xdg.send_pending_configure();
+        }
     }
 
     fn relative_motion(
         &mut self,
         data: &mut NickelSession,
         handle: &mut PointerInnerHandle<'_, NickelSession>,
-        focus: Option<(WlSurface, Point<f64, Logical>)>,
+        focus: Option<(PointerFocusTarget, Point<f64, Logical>)>,
         event: &RelativeMotionEvent,
     ) {
         handle.relative_motion(data, focus, event);
@@ -165,20 +205,19 @@ impl PointerGrab<NickelSession> for ResizeSurfaceGrab {
             // No more buttons are pressed, release the grab.
             handle.unset_grab(self, data, event.serial, event.time, true);
 
-            let xdg = self.window.toplevel().unwrap();
-            xdg.with_pending_state(|state| {
-                state.states.unset(xdg_toplevel::State::Resizing);
-                state.size = Some(self.last_window_size);
-            });
-
-            xdg.send_pending_configure();
-
-            ResizeSurfaceState::with(xdg.wl_surface(), |state| {
-                *state = ResizeSurfaceState::WaitingForLastCommit {
-                    edges: self.edges,
-                    initial_rect: self.initial_rect,
-                };
-            });
+            if let Some(xdg) = self.window.toplevel() {
+                xdg.with_pending_state(|state| {
+                    state.states.unset(xdg_toplevel::State::Resizing);
+                    state.size = Some(self.last_window_size);
+                });
+                xdg.send_pending_configure();
+                ResizeSurfaceState::with(xdg.wl_surface(), |state| {
+                    *state = ResizeSurfaceState::WaitingForLastCommit {
+                        edges: self.edges,
+                        initial_rect: self.initial_rect,
+                    };
+                });
+            }
         }
     }
 
@@ -336,7 +375,11 @@ impl ResizeSurfaceState {
 pub fn handle_commit(space: &mut Space<Window>, surface: &WlSurface) -> Option<()> {
     let window = space
         .elements()
-        .find(|w| w.toplevel().unwrap().wl_surface() == surface)
+        .find(|window| {
+            window
+                .toplevel()
+                .is_some_and(|toplevel| toplevel.wl_surface() == surface)
+        })
         .cloned()?;
 
     let mut window_loc = space.element_location(&window)?;

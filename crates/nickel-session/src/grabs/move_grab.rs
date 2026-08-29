@@ -1,4 +1,4 @@
-use crate::NickelSession;
+use crate::{NickelSession, focus::PointerFocusTarget};
 use smithay::{
     desktop::Window,
     input::pointer::{
@@ -7,7 +7,6 @@ use smithay::{
         GestureSwipeEndEvent, GestureSwipeUpdateEvent, GrabStartData as PointerGrabStartData,
         MotionEvent, PointerGrab, PointerInnerHandle, RelativeMotionEvent,
     },
-    reexports::wayland_server::protocol::wl_surface::WlSurface,
     utils::{Logical, Point},
 };
 
@@ -22,7 +21,7 @@ impl PointerGrab<NickelSession> for MoveSurfaceGrab {
         &mut self,
         data: &mut NickelSession,
         handle: &mut PointerInnerHandle<'_, NickelSession>,
-        _focus: Option<(WlSurface, Point<f64, Logical>)>,
+        _focus: Option<(PointerFocusTarget, Point<f64, Logical>)>,
         event: &MotionEvent,
     ) {
         // While the grab is active, no client has pointer focus
@@ -38,7 +37,7 @@ impl PointerGrab<NickelSession> for MoveSurfaceGrab {
         &mut self,
         data: &mut NickelSession,
         handle: &mut PointerInnerHandle<'_, NickelSession>,
-        focus: Option<(WlSurface, Point<f64, Logical>)>,
+        focus: Option<(PointerFocusTarget, Point<f64, Logical>)>,
         event: &RelativeMotionEvent,
     ) {
         handle.relative_motion(data, focus, event);

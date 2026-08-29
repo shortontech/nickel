@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     ffi::OsString,
+    os::fd::AsFd,
     os::unix::net::UnixDatagram,
     path::PathBuf,
     sync::{
@@ -36,21 +37,26 @@ use smithay::{
     utils::{Logical, Point, SERIAL_COUNTER, Size},
     wayland::{
         compositor::{CompositorClientState, CompositorState},
+        idle_inhibit::IdleInhibitManagerState,
+        input_method::InputMethodManagerState,
         output::OutputManagerState,
-        selection::data_device::DataDeviceState,
+        pointer_constraints::PointerConstraintsState,
+        relative_pointer::RelativePointerManagerState,
+        seat::WaylandFocus,
+        selection::{data_device::DataDeviceState, primary_selection::PrimarySelectionState},
         shell::xdg::{ToplevelSurface, XdgShellState, decoration::XdgDecorationState},
         shm::ShmState,
         socket::ListeningSocketSource,
         xdg_activation::XdgActivationState,
+        xwayland_shell::XWaylandShellState,
     },
+    xwayland::{X11Wm, xwm::XwmId},
 };
 
 use crate::{
     shell_layout::{self, Geometry},
     window_registry::{WindowId, WindowRegistry},
 };
-
-use crate::CalloopData;
 
 fn protocol_error(code: ErrorCode, message: impl Into<String>) -> ServerMessage {
     ServerMessage::Error {
@@ -80,6 +86,9 @@ pub struct NickelSession {
     pub start_time: std::time::Instant,
     pub socket_name: OsString,
     pub display_handle: DisplayHandle,
+    pub event_loop_handle: smithay::reexports::calloop::LoopHandle<'static, NickelSession>,
+    #[cfg(feature = "backend-udev")]
+    pub native: Option<crate::backend::udev::UdevData>,
 
     pub space: Space<Window>,
     pub loop_signal: LoopSignal,
@@ -93,11 +102,23 @@ pub struct NickelSession {
     pub output_manager_state: OutputManagerState,
     pub seat_state: SeatState<NickelSession>,
     pub data_device_state: DataDeviceState,
+    pub primary_selection_state: PrimarySelectionState,
+    pub dnd_icon: Option<WlSurface>,
+    pub relative_pointer_state: RelativePointerManagerState,
+    pub pointer_constraints_state: PointerConstraintsState,
+    pub idle_inhibit_state: IdleInhibitManagerState,
+    pub input_method_state: InputMethodManagerState,
+    pub xwayland_shell_state: XWaylandShellState,
+    pub xwm: Option<(XwmId, X11Wm)>,
+    pub xwayland_restart_pending: bool,
+    pub xwayland_display: Option<u32>,
+    pub xwayland_registration: Option<smithay::reexports::calloop::RegistrationToken>,
     pub popups: PopupManager,
 
     pub seat: Seat<Self>,
     pub windows: WindowRegistry,
     pub surface_windows: HashMap<ObjectId, WindowId>,
+    pub x11_windows: HashMap<u32, WindowId>,
     pub launcher_window: Option<Window>,
     pub launcher_visibility: LauncherVisibility,
     launcher_focus: FocusTransactions<ObjectId>,
@@ -122,9 +143,12 @@ pub struct NickelSession {
     pub preview_highlight: Option<WindowId>,
     pub minimized_windows: HashMap<WindowId, (Window, Point<i32, Logical>)>,
     maximized_restore: HashMap<ObjectId, Geometry>,
+    x11_maximized_restore: HashMap<u32, smithay::utils::Rectangle<i32, Logical>>,
     fullscreen_restore: HashMap<ObjectId, Geometry>,
+    x11_fullscreen_restore: HashMap<u32, smithay::utils::Rectangle<i32, Logical>>,
     pub last_titlebar_click: Option<(ObjectId, u32, Point<f64, Logical>)>,
     pub suppress_left_button_release: bool,
+    pub idle_inhibitors: HashMap<ObjectId, usize>,
     pub frame_cursor: crate::window_frame::FrameCursor,
     pub buffer_commit_tx: Option<smithay::reexports::calloop::channel::Sender<SurfaceBufferCommit>>,
     pub identify_outputs_until: Option<std::time::Instant>,
@@ -137,7 +161,7 @@ pub struct NickelSession {
     secure_storage_retry: Arc<std::sync::atomic::AtomicBool>,
     deferred_focus_restore: channel::Sender<WindowId>,
     #[cfg(feature = "backend-winit")]
-    winit_redraw_window: Option<usize>,
+    winit_redraw_window: Option<*const dyn smithay::reexports::winit::window::Window>,
 }
 
 #[derive(Clone)]
@@ -159,7 +183,7 @@ impl NickelSession {
     }
 
     pub fn new(
-        event_loop: &mut EventLoop<CalloopData>,
+        event_loop: &mut EventLoop<'static, NickelSession>,
         display: Display<Self>,
         test_control_enabled: bool,
     ) -> Self {
@@ -177,6 +201,15 @@ impl NickelSession {
             smithay::wayland::text_input::TextInputManagerState::new::<Self>(&dh);
         let mut seat_state = SeatState::new();
         let data_device_state = DataDeviceState::new::<Self>(&dh);
+        let primary_selection_state = PrimarySelectionState::new::<Self>(&dh);
+        let relative_pointer_state = RelativePointerManagerState::new::<Self>(&dh);
+        let pointer_constraints_state = PointerConstraintsState::new::<Self>(&dh);
+        let idle_inhibit_state = IdleInhibitManagerState::new::<Self>(&dh);
+        // The protocol itself permits only one active input method per seat.
+        // Visibility is session-local: every connected client already passed
+        // the compositor socket's same-user boundary.
+        let input_method_state = InputMethodManagerState::new::<Self, _>(&dh, |_| true);
+        let xwayland_shell_state = XWaylandShellState::new::<Self>(&dh);
         let popups = PopupManager::default();
 
         // A seat is a group of keyboards, pointer and touch devices.
@@ -218,8 +251,8 @@ impl NickelSession {
             .handle()
             .insert_source(deferred_focus_restore_rx, |event, _, data| {
                 if let channel::Event::Msg(window) = event {
-                    data.state.activate_window(window);
-                    data.state.request_output_redraw();
+                    data.activate_window(window);
+                    data.request_output_redraw();
                 }
             })
             .expect("failed to register deferred focus restoration");
@@ -232,6 +265,9 @@ impl NickelSession {
         Self {
             start_time,
             display_handle: dh,
+            event_loop_handle: event_loop.handle(),
+            #[cfg(feature = "backend-udev")]
+            native: None,
 
             space,
             loop_signal,
@@ -245,10 +281,22 @@ impl NickelSession {
             output_manager_state,
             seat_state,
             data_device_state,
+            primary_selection_state,
+            dnd_icon: None,
+            relative_pointer_state,
+            pointer_constraints_state,
+            idle_inhibit_state,
+            input_method_state,
+            xwayland_shell_state,
+            xwm: None,
+            xwayland_restart_pending: false,
+            xwayland_display: None,
+            xwayland_registration: None,
             popups,
             seat,
             windows: WindowRegistry::default(),
             surface_windows: HashMap::new(),
+            x11_windows: HashMap::new(),
             launcher_window: None,
             launcher_visibility: LauncherVisibility::default(),
             launcher_focus: FocusTransactions::default(),
@@ -273,9 +321,12 @@ impl NickelSession {
             preview_highlight: None,
             minimized_windows: HashMap::new(),
             maximized_restore: HashMap::new(),
+            x11_maximized_restore: HashMap::new(),
             fullscreen_restore: HashMap::new(),
+            x11_fullscreen_restore: HashMap::new(),
             last_titlebar_click: None,
             suppress_left_button_release: false,
+            idle_inhibitors: HashMap::new(),
             frame_cursor: crate::window_frame::FrameCursor::Arrow,
             buffer_commit_tx: None,
             identify_outputs_until: None,
@@ -293,19 +344,22 @@ impl NickelSession {
     }
 
     #[cfg(feature = "backend-winit")]
-    pub fn set_winit_redraw_window(&mut self, window: &winit::window::Window) {
-        self.winit_redraw_window = Some(std::ptr::from_ref(window) as usize);
+    pub fn set_winit_redraw_window(
+        &mut self,
+        window: &dyn smithay::reexports::winit::window::Window,
+    ) {
+        self.winit_redraw_window = Some(std::ptr::from_ref(window));
     }
 
     #[cfg(feature = "backend-winit")]
     pub fn request_output_redraw(&self) {
-        let Some(address) = self.winit_redraw_window else {
+        let Some(window) = self.winit_redraw_window else {
             return;
         };
         // SAFETY: Smithay owns this window in an Arc for exactly the lifetime
         // of the winit backend and this session state. Moving the backend does
         // not move the Arc allocation, and all calls occur on the event thread.
-        unsafe { &*(address as *const winit::window::Window) }.request_redraw();
+        unsafe { &*window }.request_redraw();
     }
 
     #[cfg(not(feature = "backend-winit"))]
@@ -327,7 +381,7 @@ impl NickelSession {
         crate::shell_recovery_visible_for(self.shell_failure_count)
     }
 
-    fn init_control_socket(event_loop: &mut EventLoop<CalloopData>) -> PathBuf {
+    fn init_control_socket(event_loop: &mut EventLoop<'static, NickelSession>) -> PathBuf {
         let runtime = std::env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(std::env::temp_dir);
@@ -354,9 +408,8 @@ impl NickelSession {
                         let (request_id, message) = match request {
                             Ok(envelope) => {
                                 let request_id = envelope.request_id;
-                                let message = data
-                                    .state
-                                    .handle_protocol_request(envelope, source.as_pathname());
+                                let message =
+                                    data.handle_protocol_request(envelope, source.as_pathname());
                                 (request_id, message)
                             }
                             Err(error) => (
@@ -388,7 +441,7 @@ impl NickelSession {
                                 ),
                             }
                         }
-                        data.state.request_output_redraw();
+                        data.request_output_redraw();
                     }
                     Ok(PostAction::Continue)
                 },
@@ -449,6 +502,9 @@ impl NickelSession {
             },
             Query::SecureStorage => ServerMessage::SecureStorage {
                 state: self.protocol_secure_storage_state(),
+            },
+            Query::IdleInhibition => ServerMessage::IdleInhibition {
+                surfaces: u16::try_from(self.idle_inhibitors.len()).unwrap_or(u16::MAX),
             },
             Query::Preview { window } => {
                 let id = WindowId(window.0);
@@ -625,6 +681,22 @@ impl NickelSession {
                     .surface_windows
                     .iter()
                     .find_map(|(surface, id)| (*id == window.id).then_some(surface));
+                let geometry = surface.and_then(|surface| {
+                    self.space
+                        .elements()
+                        .find(|candidate| {
+                            candidate
+                                .wl_surface()
+                                .is_some_and(|candidate| candidate.id() == *surface)
+                        })
+                        .and_then(|candidate| self.space.element_bbox(candidate))
+                        .map(|bounds| ProtocolGeometry {
+                            x: bounds.loc.x,
+                            y: bounds.loc.y,
+                            width: bounds.size.w,
+                            height: bounds.size.h,
+                        })
+                });
                 WindowSnapshot {
                     id: ProtocolWindowId(window.id.0),
                     application_id: window.app_id.clone(),
@@ -632,7 +704,14 @@ impl NickelSession {
                     active: window.active,
                     minimized: self.minimized_windows.contains_key(&window.id),
                     maximized: surface
-                        .is_some_and(|surface| self.maximized_restore.contains_key(surface)),
+                        .is_some_and(|surface| self.maximized_restore.contains_key(surface))
+                        || self.space.elements().any(|candidate| {
+                            candidate.x11_surface().is_some_and(|x11| {
+                                self.x11_windows.get(&x11.window_id()).copied() == Some(window.id)
+                                    && x11.is_maximized()
+                            })
+                        }),
+                    geometry,
                 }
             })
             .collect()
@@ -953,11 +1032,13 @@ impl NickelSession {
             let _request = self.launcher_focus.request(surface.id());
             self.seat.get_keyboard().unwrap().set_focus(
                 self,
-                Some(surface),
+                Some(crate::focus::KeyboardFocusTarget::Wayland(surface)),
                 SERIAL_COUNTER.next_serial(),
             );
             self.space.elements().for_each(|window| {
-                window.toplevel().unwrap().send_pending_configure();
+                if let Some(toplevel) = window.toplevel() {
+                    toplevel.send_pending_configure();
+                }
             });
             self.raise_panels();
         } else {
@@ -1004,14 +1085,20 @@ impl NickelSession {
     }
 
     pub fn is_fullscreen_window(&self, window: &Window) -> bool {
-        window.toplevel().is_some_and(|surface| {
+        window.x11_surface().is_some_and(|surface| {
+            self.x11_fullscreen_restore
+                .contains_key(&surface.window_id())
+        }) || window.toplevel().is_some_and(|surface| {
             self.fullscreen_restore
                 .contains_key(&surface.wl_surface().id())
         })
     }
 
     pub fn is_maximized_window(&self, window: &Window) -> bool {
-        window.toplevel().is_some_and(|surface| {
+        window.x11_surface().is_some_and(|surface| {
+            self.x11_maximized_restore
+                .contains_key(&surface.window_id())
+        }) || window.toplevel().is_some_and(|surface| {
             self.maximized_restore
                 .contains_key(&surface.wl_surface().id())
         })
@@ -1019,8 +1106,11 @@ impl NickelSession {
 
     pub fn is_server_decorated(&self, window: &Window) -> bool {
         window
-            .toplevel()
-            .is_some_and(|surface| self.server_decorated.contains(&surface.wl_surface().id()))
+            .x11_surface()
+            .is_some_and(|surface| self.x11_windows.contains_key(&surface.window_id()))
+            || window
+                .toplevel()
+                .is_some_and(|surface| self.server_decorated.contains(&surface.wl_surface().id()))
     }
 
     pub fn shell_windows(&self) -> impl Iterator<Item = &Window> {
@@ -1107,12 +1197,14 @@ impl NickelSession {
         if focus {
             self.seat.get_keyboard().unwrap().set_focus(
                 self,
-                Some(window.toplevel().unwrap().wl_surface().clone()),
+                crate::focus::KeyboardFocusTarget::for_window(&window),
                 SERIAL_COUNTER.next_serial(),
             );
         }
         self.space.elements().for_each(|element| {
-            element.toplevel().unwrap().send_pending_configure();
+            if let Some(toplevel) = element.toplevel() {
+                toplevel.send_pending_configure();
+            }
         });
         self.space.raise_element(&window, true);
         self.raise_panels();
@@ -1151,23 +1243,31 @@ impl NickelSession {
         if let Some((window, _)) = self.minimized_windows.remove(&id) {
             if let Some(surface) = window.toplevel() {
                 surface.send_close();
+            } else if let Some(surface) = window.x11_surface() {
+                let _ = surface.close();
             }
             self.hide_context_menu();
             return;
         }
         if let Some(window) = self.space.elements().find(|window| {
             window
-                .toplevel()
-                .is_some_and(|surface| surface.wl_surface().id() == surface_id)
-        }) && let Some(surface) = window.toplevel()
-        {
-            surface.send_close();
+                .wl_surface()
+                .is_some_and(|surface| surface.id() == surface_id)
+        }) {
+            if let Some(surface) = window.toplevel() {
+                surface.send_close();
+            } else if let Some(surface) = window.x11_surface() {
+                let _ = surface.close();
+            }
         }
         self.hide_context_menu();
     }
 
     pub fn activate_window(&mut self, id: WindowId) {
         if let Some((window, location)) = self.minimized_windows.remove(&id) {
+            if let Some(surface) = window.x11_surface() {
+                let _ = surface.set_mapped(true);
+            }
             self.space.map_element(window, location, true);
         }
         let Some(surface_id) = self
@@ -1182,22 +1282,30 @@ impl NickelSession {
             .elements()
             .find(|window| {
                 window
-                    .toplevel()
-                    .is_some_and(|surface| surface.wl_surface().id() == surface_id)
+                    .wl_surface()
+                    .is_some_and(|surface| surface.id() == surface_id)
             })
             .cloned()
         else {
             return;
         };
         self.space.raise_element(&window, true);
+        if let Some(surface) = window.x11_surface() {
+            self.raise_x11_surface(surface);
+        }
         self.windows.raise(id);
+        self.space.elements().for_each(|candidate| {
+            candidate.set_activated(candidate == &window);
+        });
         self.seat.get_keyboard().unwrap().set_focus(
             self,
-            Some(window.toplevel().unwrap().wl_surface().clone()),
+            crate::focus::KeyboardFocusTarget::for_window(&window),
             SERIAL_COUNTER.next_serial(),
         );
         self.space.elements().for_each(|window| {
-            window.toplevel().unwrap().send_pending_configure();
+            if let Some(toplevel) = window.toplevel() {
+                toplevel.send_pending_configure();
+            }
         });
         self.raise_panels();
         self.notify_protocol_snapshot();
@@ -1265,8 +1373,8 @@ impl NickelSession {
             .elements()
             .find(|window| {
                 window
-                    .toplevel()
-                    .and_then(|surface| self.surface_windows.get(&surface.wl_surface().id()))
+                    .wl_surface()
+                    .and_then(|surface| self.surface_windows.get(&surface.id()))
                     .copied()
                     == Some(id)
             })
@@ -1275,6 +1383,9 @@ impl NickelSession {
             return;
         };
         let location = self.space.element_location(&window).unwrap_or_default();
+        if let Some(surface) = window.x11_surface() {
+            let _ = surface.set_mapped(false);
+        }
         self.space.unmap_elem(&window);
         self.minimized_windows.insert(id, (window, location));
         self.raise_panels();
@@ -1283,6 +1394,35 @@ impl NickelSession {
 
     pub fn maximize_window(&mut self, id: WindowId) {
         self.activate_window(id);
+        let x11_window = self
+            .space
+            .elements()
+            .find(|window| {
+                window
+                    .wl_surface()
+                    .and_then(|surface| self.surface_windows.get(&surface.id()))
+                    .copied()
+                    == Some(id)
+            })
+            .cloned();
+        if let Some(window) = x11_window
+            && let Some(surface) = window.x11_surface()
+            && let Some(output) = self.space.outputs_for_element(&window).first()
+            && let Some(geometry) = self.space.output_geometry(output)
+        {
+            let maximize = !surface.is_maximized();
+            let _ = surface.set_maximized(maximize);
+            if maximize {
+                self.x11_maximized_restore
+                    .insert(surface.window_id(), surface.geometry());
+                let _ = surface.configure(geometry);
+                self.space.map_element(window, geometry.loc, true);
+            } else if let Some(restore) = self.x11_maximized_restore.remove(&surface.window_id()) {
+                let _ = surface.configure(restore);
+                self.space.map_element(window, restore.loc, true);
+            }
+            return;
+        }
         let surface = self.space.elements().find_map(|window| {
             let surface = window.toplevel()?;
             (self
@@ -1453,6 +1593,58 @@ impl NickelSession {
         surface.send_pending_configure();
     }
 
+    pub fn fullscreen_x11(&mut self, surface: &smithay::xwayland::X11Surface) {
+        let Some(window) = self
+            .space
+            .elements()
+            .find(|window| window.x11_surface() == Some(surface))
+            .cloned()
+        else {
+            return;
+        };
+        let Some(output) = self.space.outputs_for_element(&window).first().cloned() else {
+            return;
+        };
+        let Some(geometry) = self.space.output_geometry(&output) else {
+            return;
+        };
+        self.x11_fullscreen_restore
+            .entry(surface.window_id())
+            .or_insert_with(|| surface.geometry());
+        let _ = surface.set_fullscreen(true);
+        let _ = surface.configure(geometry);
+        window.override_z_index(45);
+        self.space.map_element(window, geometry.loc, true);
+        self.request_output_redraw();
+        self.notify_protocol_snapshot();
+    }
+
+    pub fn unfullscreen_x11(&mut self, surface: &smithay::xwayland::X11Surface) {
+        let Some(restore) = self.x11_fullscreen_restore.remove(&surface.window_id()) else {
+            return;
+        };
+        let _ = surface.set_fullscreen(false);
+        let _ = surface.configure(restore);
+        let window = {
+            self.space
+                .elements()
+                .find(|window| window.x11_surface() == Some(surface))
+                .cloned()
+        };
+        if let Some(window) = window {
+            window.override_z_index(30);
+            self.space.map_element(window, restore.loc, true);
+        }
+        self.raise_panels();
+        self.request_output_redraw();
+        self.notify_protocol_snapshot();
+    }
+
+    pub fn forget_x11_geometry(&mut self, surface: &smithay::xwayland::X11Surface) {
+        self.x11_maximized_restore.remove(&surface.window_id());
+        self.x11_fullscreen_restore.remove(&surface.window_id());
+    }
+
     pub fn toggle_maximized_toplevel(&mut self, surface: &ToplevelSurface) {
         if self
             .maximized_restore
@@ -1501,7 +1693,7 @@ impl NickelSession {
     fn window_for_surface(&self, surface: &WlSurface) -> Option<Window> {
         self.space
             .elements()
-            .find(|window| window.toplevel().unwrap().wl_surface() == surface)
+            .find(|window| window.wl_surface().as_deref() == Some(surface))
             .cloned()
     }
 
@@ -1592,7 +1784,7 @@ impl NickelSession {
 
     fn init_wayland_listener(
         display: Display<NickelSession>,
-        event_loop: &mut EventLoop<CalloopData>,
+        event_loop: &mut EventLoop<'static, NickelSession>,
     ) -> OsString {
         // Creates a new listening socket, automatically choosing the next available `wayland` socket name.
         let listening_socket = ListeningSocketSource::new_auto().unwrap();
@@ -1616,21 +1808,45 @@ impl NickelSession {
             .expect("Failed to init the wayland event source.");
 
         // You also need to add the display itself to the event loop, so that client events will be processed by wayland-server.
-        loop_handle
-            .insert_source(
-                Generic::new(display, Interest::READ, Mode::Level),
-                |_, display, state| {
-                    // Safety: we don't drop the display
-                    unsafe {
-                        display
-                            .get_mut()
-                            .dispatch_clients(&mut state.state)
-                            .unwrap();
+        // The Rust Wayland backend exposes an epoll descriptor. Polling that
+        // epoll descriptor from calloop's epoll can lose readiness on some
+        // nested-compositor stacks, so a tiny blocking poller converts it into
+        // an ordinary calloop channel. Dispatch and all state mutation remain
+        // on the compositor event-loop thread.
+        let poll_fd = smithay::reexports::rustix::io::dup(display.as_fd())
+            .expect("failed to duplicate Wayland backend poll fd");
+        let (ready_tx, ready_rx) = channel::channel();
+        let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel(0);
+        std::thread::Builder::new()
+            .name("nickel-wayland-poll".into())
+            .spawn(move || {
+                use smithay::reexports::rustix::event::{PollFd, PollFlags, poll};
+                let mut descriptors = [PollFd::new(&poll_fd, PollFlags::IN)];
+                loop {
+                    if poll(&mut descriptors, None).is_err() || ready_tx.send(()).is_err() {
+                        break;
                     }
-                    Ok(PostAction::Continue)
-                },
-            )
-            .unwrap();
+                    if ack_rx.recv().is_err() {
+                        break;
+                    }
+                    descriptors[0].clear_revents();
+                }
+            })
+            .expect("failed to start Wayland backend poller");
+        let mut display = display;
+        loop_handle
+            .insert_source(ready_rx, move |event, _, state| {
+                if let channel::Event::Msg(()) = event {
+                    if let Err(error) = display.dispatch_clients(state) {
+                        tracing::warn!(%error, "Wayland client dispatch failed");
+                    }
+                    if let Err(error) = display.flush_clients() {
+                        tracing::debug!(%error, "Wayland client flush deferred");
+                    }
+                    let _ = ack_tx.send(());
+                }
+            })
+            .expect("failed to register Wayland backend dispatch channel");
 
         socket_name
     }
@@ -1645,6 +1861,25 @@ impl NickelSession {
                 window
                     .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
                     .map(|(s, p)| (s, (p + location).to_f64()))
+            })
+    }
+
+    pub fn pointer_surface_under(
+        &self,
+        pos: Point<f64, Logical>,
+    ) -> Option<(crate::focus::PointerFocusTarget, Point<f64, Logical>)> {
+        self.space
+            .element_under(pos)
+            .and_then(|(window, location)| {
+                window
+                    .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
+                    .map(|(surface, origin)| {
+                        let target = window.x11_surface().map_or_else(
+                            || crate::focus::PointerFocusTarget::Wayland(surface),
+                            |x11| crate::focus::PointerFocusTarget::X11(x11.clone()),
+                        );
+                        (target, (origin + location).to_f64())
+                    })
             })
     }
 }

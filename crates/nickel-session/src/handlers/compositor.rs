@@ -5,7 +5,6 @@ use crate::{
 };
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
-    delegate_compositor, delegate_shm,
     reexports::wayland_server::{
         Client,
         protocol::{wl_buffer, wl_surface::WlSurface},
@@ -16,6 +15,7 @@ use smithay::{
             CompositorClientState, CompositorHandler, CompositorState, get_parent,
             is_sync_subsurface,
         },
+        seat::WaylandFocus,
         shm::{ShmHandler, ShmState},
     },
 };
@@ -32,7 +32,14 @@ impl CompositorHandler for NickelSession {
     }
 
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
-        &client.get_data::<ClientState>().unwrap().compositor_state
+        if let Some(client) = client.get_data::<ClientState>() {
+            &client.compositor_state
+        } else {
+            &client
+                .get_data::<smithay::xwayland::XWaylandClientData>()
+                .expect("all compositor clients have compositor state")
+                .compositor_state
+        }
     }
 
     fn commit(&mut self, surface: &WlSurface) {
@@ -46,7 +53,7 @@ impl CompositorHandler for NickelSession {
             if let Some(window) = self
                 .space
                 .elements()
-                .find(|w| w.toplevel().unwrap().wl_surface() == &root)
+                .find(|window| window.wl_surface().as_deref() == Some(&root))
             {
                 window.on_commit();
             }
@@ -75,9 +82,6 @@ impl ShmHandler for NickelSession {
         &self.shm_state
     }
 }
-
-delegate_compositor!(NickelSession);
-delegate_shm!(NickelSession);
 
 #[cfg(test)]
 mod tests {

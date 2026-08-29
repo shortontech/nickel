@@ -3,6 +3,7 @@
 mod handlers;
 
 mod backend;
+mod focus;
 mod grabs;
 mod input;
 mod login_services;
@@ -25,20 +26,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use smithay::reexports::{
-    calloop::EventLoop,
-    wayland_server::{Display, DisplayHandle},
-};
+use smithay::reexports::{calloop::EventLoop, wayland_server::Display};
 pub use state::NickelSession;
-
-pub struct CalloopData {
-    state: NickelSession,
-    display_handle: DisplayHandle,
-    #[cfg(feature = "backend-udev")]
-    event_loop_handle: smithay::reexports::calloop::LoopHandle<'static, CalloopData>,
-    #[cfg(feature = "backend-udev")]
-    native: Option<backend::udev::UdevData>,
-}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Ok(env_filter) = tracing_subscriber::EnvFilter::try_from_default_env() {
@@ -48,20 +37,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let arguments = backend::SessionArguments::parse(std::env::args_os().skip(1))?;
-    let mut event_loop: EventLoop<'static, CalloopData> = EventLoop::try_new()?;
+    let mut event_loop: EventLoop<'static, NickelSession> = EventLoop::try_new()?;
 
     let display: Display<NickelSession> = Display::new()?;
-    let display_handle = display.handle();
-    let state = NickelSession::new(&mut event_loop, display, arguments.test_control);
-
-    let mut data = CalloopData {
-        state,
-        display_handle,
-        #[cfg(feature = "backend-udev")]
-        event_loop_handle: event_loop.handle(),
-        #[cfg(feature = "backend-udev")]
-        native: None,
-    };
+    let mut state = NickelSession::new(&mut event_loop, display, arguments.test_control);
 
     let (shell_health_tx, shell_health_rx) = smithay::reexports::calloop::channel::channel();
     event_loop
@@ -70,8 +49,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let smithay::reexports::calloop::channel::Event::Msg(failures) = event else {
                 return;
             };
-            data.state.shell_failure_count = failures;
-            data.state.request_output_redraw();
+            data.shell_failure_count = failures;
+            data.request_output_redraw();
             #[cfg(feature = "backend-udev")]
             if data.native.is_some() {
                 data.render_all_outputs();
@@ -81,21 +60,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match arguments.backend {
         backend::BackendKind::Winit => {
             #[cfg(feature = "backend-winit")]
-            backend::winit::init_winit(&mut event_loop, &mut data)?;
+            backend::winit::init_winit(&mut event_loop, &mut state)?;
             #[cfg(not(feature = "backend-winit"))]
             unreachable!("backend availability was validated while parsing arguments");
         }
         backend::BackendKind::Udev => {
             #[cfg(feature = "backend-udev")]
-            backend::udev::init_udev(&mut event_loop, &mut data)?;
+            backend::udev::init_udev(&mut event_loop, &mut state)?;
             #[cfg(not(feature = "backend-udev"))]
             unreachable!("backend availability was validated while parsing arguments");
         }
     }
 
+    state.start_xwayland();
+
     println!(
         "nickel-session listening on {}",
-        data.state.socket_name.to_string_lossy()
+        state.socket_name.to_string_lossy()
     );
 
     if arguments.backend == backend::BackendKind::Udev {
@@ -107,14 +88,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         spawn_supervised(
             program,
             command_arguments,
-            data.state.secure_storage_state_handle(),
-            data.state.secure_storage_retry_handle(),
-            data.state.expected_shell_pid_handle(),
+            state.secure_storage_state_handle(),
+            state.secure_storage_retry_handle(),
+            state.expected_shell_pid_handle(),
             shell_health_tx,
         )?;
     }
 
-    event_loop.run(None, &mut data, move |_| {
+    event_loop.run(None, &mut state, move |_| {
         // NickelSession is running
     })?;
 
