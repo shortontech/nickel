@@ -1318,12 +1318,17 @@ mod tests {
             error
         }
 
-        assert!(rejected(Some(Message::Binary(vec![1, 2, 3].into()))).contains("stopped"));
-        assert!(rejected(Some(Message::Text("not json".into()))).contains("stopped"));
         assert!(
-            rejected(Some(Message::Text("x".repeat(MAX_FRAME_BYTES + 1).into())))
-                .contains("stopped")
+            rejected(Some(Message::Binary(vec![1, 2, 3].into())))
+                .contains("binary protocol message")
         );
+        assert!(rejected(Some(Message::Text("not json".into()))).contains("malformed"));
+        let oversized = serde_json::json!({
+            "id": 1,
+            "result": {"padding": "x".repeat(8_388_609)},
+        })
+        .to_string();
+        assert!(rejected(Some(Message::Text(oversized.into()))).contains("frame exceeded limit"));
         assert!(rejected(None).contains("stopped"));
     }
 
