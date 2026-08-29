@@ -56,6 +56,8 @@ pub struct ControlViewState {
     pub pending_session_action: Option<SessionAction>,
     /// Positive logical pixels scrolled below the fixed header.
     pub scroll_offset: f32,
+    /// Production hit-target order used by keyboard and controller navigation.
+    pub selected_action: usize,
 }
 
 pub struct ControlCenterFrame {
@@ -84,6 +86,25 @@ impl ControlCenterFrame {
 
     pub fn maximum_scroll(&self) -> f32 {
         (self.content_height - self.viewport_height).max(0.0)
+    }
+
+    pub fn action(&self, index: usize) -> Option<ControlAction> {
+        self.hit_targets
+            .get(index)
+            .map(|target| target.action.clone())
+    }
+
+    pub fn reveal_delta(&self, index: usize) -> f32 {
+        let Some(target) = self.hit_targets.get(index) else {
+            return 0.0;
+        };
+        if target.bounds.origin.y < HEADER_HEIGHT {
+            target.bounds.origin.y - HEADER_HEIGHT
+        } else {
+            let target_bottom = target.bounds.origin.y + target.bounds.size.height;
+            let viewport_bottom = HEADER_HEIGHT + self.viewport_height;
+            (target_bottom - viewport_bottom).max(0.0)
+        }
     }
 }
 
@@ -131,6 +152,15 @@ pub fn build_control_center(
     builder.session(state.pending_session_action);
 
     let content_bottom = builder.y + state.scroll_offset.max(0.0);
+    if let Some(target) = builder.hits.get(state.selected_action)
+        && let Some(visible) = intersection(target.bounds, viewport)
+    {
+        builder.commands.push(PaintCommand::Stroke {
+            rect: visible,
+            color: ACCENT,
+            width: 2.0,
+        });
+    }
     builder.commands.push(PaintCommand::PopClip);
     ControlCenterFrame {
         commands: builder.commands,

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-pub const PROTOCOL_VERSION: u16 = 6;
+pub const PROTOCOL_VERSION: u16 = 7;
 pub const MAX_FRAME_BYTES: usize = 196_608;
 pub const MAX_PREVIEW_WIDTH: u16 = 256;
 pub const MAX_PREVIEW_HEIGHT: u16 = 144;
@@ -68,6 +68,10 @@ pub enum Command {
         geometry: Geometry,
         windows: Vec<WindowId>,
     },
+    FocusShellRole {
+        role: ShellRole,
+    },
+    RestoreApplicationFocus,
     IdentifyOutputs,
     CaptureOutput {
         path: String,
@@ -674,6 +678,26 @@ mod tests {
             );
         }
         assert_eq!(ShellRole::from_application_id("io.nickel.shell.fake"), None);
+    }
+
+    #[test]
+    fn shell_focus_handoff_round_trips_with_typed_roles() {
+        for command in [
+            Command::FocusShellRole {
+                role: ShellRole::ControlCenter,
+            },
+            Command::RestoreApplicationFocus,
+        ] {
+            let envelope = ClientEnvelope {
+                token: "session-token".into(),
+                request_id: 13,
+                request: Request::Command(command),
+            };
+            assert_eq!(
+                decode::<ClientEnvelope>(&encode(&envelope).unwrap()).unwrap(),
+                envelope
+            );
+        }
     }
 
     #[test]

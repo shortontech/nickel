@@ -505,6 +505,11 @@ impl NickelSession {
                 self.register_lock(lock);
             }
         }
+        if let Some(role) = shell_role
+            && self.pending_shell_focus_role == Some(role)
+        {
+            self.focus_shell_role(role);
+        }
         // The SDL shell and its dynamic Codex windows share one Wayland
         // client. New toplevels from that client are deliberately not focused
         // until their role is known, so shell chrome cannot steal keyboard

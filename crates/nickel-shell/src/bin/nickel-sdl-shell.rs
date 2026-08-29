@@ -973,9 +973,17 @@ fn main() -> Result<(), String> {
                     }
                     continue;
                 }
-                if state.launcher_key(key, modifiers)
-                    && let Some(role) = shell.surface(surface).map(|entry| entry.role())
-                {
+                let Some(entry) = shell.surface(surface) else {
+                    continue;
+                };
+                let role = entry.role();
+                let (width, height) = entry.window().size();
+                let changed = match role {
+                    SurfaceRole::ControlCenter => state.control_key(key, width, height),
+                    _ => state.launcher_key(key, modifiers),
+                };
+                if changed {
+                    sync_visibility(&mut shell, &state);
                     render_role(&mut shell, &mut state, role)?;
                 }
             }

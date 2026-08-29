@@ -473,7 +473,7 @@ impl LiveShell {
             if self.launcher_visible {
                 self.set_launcher_visible(false);
             }
-            self.control_visible = !self.control_visible;
+            self.set_control_visible(!self.control_visible);
             return true;
         }
         if x >= status.codex_start && x < status.tray_start {
@@ -719,6 +719,16 @@ impl LiveShell {
         platform::launcher_visibility_applied(visible);
     }
 
+    fn set_control_visible(&mut self, visible: bool) {
+        self.control_visible = visible;
+        #[cfg(target_os = "linux")]
+        let _ = platform::send_shell_command(if visible {
+            ShellCommand::FocusControlCenter
+        } else {
+            ShellCommand::RestoreApplicationFocus
+        });
+    }
+
     fn apply_launcher_signal(&mut self, visible: bool) {
         #[cfg(target_os = "linux")]
         self.apply_session_launcher_visibility(visible);
@@ -750,9 +760,49 @@ impl LiveShell {
 
     pub fn control_click(&mut self, x: f32, y: f32, width: u32, height: u32) -> bool {
         let frame = self.control_frame(width, height);
+        if let Some(index) = frame
+            .hit_targets
+            .iter()
+            .rposition(|target| contains_rect(target.bounds, Point { x, y }))
+        {
+            self.control_state.selected_action = index;
+        }
         if let Some(action) = frame.action_at(x, y) {
             self.apply_control_action(action);
         }
+        true
+    }
+
+    pub fn control_key(&mut self, key: Option<Keycode>, width: u32, height: u32) -> bool {
+        if !self.control_visible {
+            return false;
+        }
+        let frame = self.control_frame(width, height);
+        let count = frame.hit_targets.len();
+        if count > 0 {
+            self.control_state.selected_action = self.control_state.selected_action.min(count - 1);
+        }
+        match key {
+            Some(Keycode::Escape) => self.set_control_visible(false),
+            Some(Keycode::Down | Keycode::Right | Keycode::Tab) if count > 0 => {
+                self.control_state.selected_action =
+                    (self.control_state.selected_action + 1) % count;
+            }
+            Some(Keycode::Up | Keycode::Left) if count > 0 => {
+                self.control_state.selected_action =
+                    (self.control_state.selected_action + count - 1) % count;
+            }
+            Some(Keycode::Return | Keycode::KpEnter) => {
+                if let Some(action) = frame.action(self.control_state.selected_action) {
+                    self.apply_control_action(action);
+                }
+            }
+            _ => return false,
+        }
+        let frame = self.control_frame(width, height);
+        let delta = frame.reveal_delta(self.control_state.selected_action);
+        self.control_state.scroll_offset =
+            (self.control_state.scroll_offset + delta).clamp(0.0, frame.maximum_scroll());
         true
     }
 
@@ -765,7 +815,7 @@ impl LiveShell {
                 true
             }
             SurfaceRole::ControlCenter if self.control_visible => {
-                self.control_visible = false;
+                self.set_control_visible(false);
                 true
             }
             SurfaceRole::CodexProjectMenu if self.codex_project_menu_visible => {
@@ -1600,11 +1650,11 @@ impl LiveShell {
             }
             LauncherShellEffect::OpenAccount => {
                 self.set_launcher_visible(false);
-                self.control_visible = true;
+                self.set_control_visible(true);
             }
             LauncherShellEffect::RequestLogout => {
                 self.set_launcher_visible(false);
-                self.control_visible = true;
+                self.set_control_visible(true);
                 self.control_state.pending_session_action = Some(platform::SessionAction::LogOut);
             }
         }
@@ -1808,6 +1858,19 @@ mod tests {
         );
         assert!(requested.get());
         assert!(shell.lock_password.is_empty());
+    }
+
+    #[test]
+    fn control_center_keyboard_navigation_uses_production_hit_target_order() {
+        let mut shell = LiveShell::new().unwrap();
+        shell.control_visible = true;
+
+        assert!(shell.control_key(Some(Keycode::Down), 420, 600));
+        assert_eq!(shell.control_state.selected_action, 1);
+        assert!(shell.control_key(Some(Keycode::Up), 420, 600));
+        assert_eq!(shell.control_state.selected_action, 0);
+        assert!(shell.control_key(Some(Keycode::Escape), 420, 600));
+        assert!(!shell.control_visible);
     }
 
     #[test]

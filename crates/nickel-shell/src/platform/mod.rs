@@ -169,6 +169,10 @@ pub enum ShellCommand {
         height: i32,
         windows: Vec<WindowId>,
     },
+    #[cfg(target_os = "linux")]
+    FocusControlCenter,
+    #[cfg(target_os = "linux")]
+    RestoreApplicationFocus,
     HideContextMenu,
     HighlightWindow(WindowId),
     ClearWindowHighlight,

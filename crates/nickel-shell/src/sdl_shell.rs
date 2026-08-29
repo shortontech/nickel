@@ -10,7 +10,9 @@ use std::time::Instant;
 
 use nickel_session_protocol::ShellRole as SessionShellRole;
 use nickel_ui::{DamageRegion, PaintCommand};
+use sdl3::GamepadSubsystem;
 use sdl3::event::{Event, WindowEvent};
+use sdl3::gamepad::{Button as GamepadButton, Gamepad};
 use sdl3::keyboard::{Keycode, Mod};
 use sdl3::mouse::MouseButton;
 use sdl3::video::{Window, WindowPos};
@@ -155,6 +157,8 @@ pub struct SdlShell {
     graphics: Option<std::sync::Arc<SharedSdlGraphics>>,
     surface_indices: HashMap<u32, usize>,
     events: sdl3::EventPump,
+    gamepads: HashMap<u32, Gamepad>,
+    gamepad: GamepadSubsystem,
     video: sdl3::VideoSubsystem,
     _sdl: sdl3::Sdl,
     started: Instant,
@@ -162,9 +166,22 @@ pub struct SdlShell {
 
 impl SdlShell {
     pub fn new(started: Instant) -> Result<Self, String> {
-        sdl3::hint::set("SDL_MOUSE_FOCUS_CLICKTHROUGH", "1");
+        configure_input_hints();
         let sdl = sdl3::init().map_err(|error| error.to_string())?;
         let video = sdl.video().map_err(|error| error.to_string())?;
+        let gamepad = sdl.gamepad().map_err(|error| error.to_string())?;
+        let gamepads = gamepad
+            .gamepads()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .filter_map(|id| match gamepad.open(id) {
+                Ok(opened) => Some((id.0, opened)),
+                Err(error) => {
+                    tracing::warn!(id = id.0, %error, "could not open SDL gamepad");
+                    None
+                }
+            })
+            .collect();
         sdl.event()
             .map_err(|error| error.to_string())?
             .register_custom_event::<crate::platform::GlobalShortcut>()
@@ -187,6 +204,8 @@ impl SdlShell {
             graphics: None,
             surface_indices: HashMap::new(),
             events,
+            gamepads,
+            gamepad,
             video,
             _sdl: sdl,
             started,
@@ -584,7 +603,7 @@ impl SdlShell {
         Ok(())
     }
 
-    fn translate_event(&self, event: Event) -> Option<ShellEvent> {
+    fn translate_event(&mut self, event: Event) -> Option<ShellEvent> {
         if let Some(shortcut) = event.as_user_event_type::<crate::platform::GlobalShortcut>() {
             return Some(ShellEvent::GlobalShortcut(shortcut));
         }
@@ -592,6 +611,12 @@ impl SdlShell {
             .get_window_id()
             .map(SurfaceId)
             .filter(|id| self.surface_indices.contains_key(&id.0));
+        let focused_surface = || {
+            self.surfaces
+                .iter()
+                .find(|surface| surface.window().has_input_focus())
+                .map(|surface| surface.id())
+        };
         match event {
             Event::Quit { .. } => Some(ShellEvent::Quit),
             Event::Display { .. } => Some(ShellEvent::DisplayTopologyChanged),
@@ -652,6 +677,44 @@ impl SdlShell {
                 pressed: false,
                 repeat,
             }),
+            Event::ControllerDeviceAdded { which, .. } => {
+                let id = sdl3::sys::joystick::SDL_JoystickID(which);
+                match self.gamepad.open(id) {
+                    Ok(gamepad) => {
+                        self.gamepads.insert(which, gamepad);
+                    }
+                    Err(error) => tracing::warn!(id = which, %error, "could not open SDL gamepad"),
+                }
+                None
+            }
+            Event::ControllerDeviceRemoved { which, .. } => {
+                self.gamepads.remove(&which);
+                None
+            }
+            Event::ControllerButtonDown {
+                button: GamepadButton::Guide,
+                ..
+            } => Some(ShellEvent::GlobalShortcut(
+                crate::platform::GlobalShortcut::ShowLauncher,
+            )),
+            Event::ControllerButtonDown { button, .. } => controller_key(button)
+                .zip(focused_surface())
+                .map(|(key, surface)| ShellEvent::Key {
+                    surface,
+                    key: Some(key),
+                    modifiers: Mod::NOMOD,
+                    pressed: true,
+                    repeat: false,
+                }),
+            Event::ControllerButtonUp { button, .. } => controller_key(button)
+                .zip(focused_surface())
+                .map(|(key, surface)| ShellEvent::Key {
+                    surface,
+                    key: Some(key),
+                    modifiers: Mod::NOMOD,
+                    pressed: false,
+                    repeat: false,
+                }),
             Event::TextInput { text, .. } => Some(ShellEvent::Text {
                 surface: surface?,
                 value: text,
@@ -706,6 +769,26 @@ impl SdlShell {
             WindowEvent::DisplayChanged(_) => Some(ShellEvent::DisplayTopologyChanged),
             _ => None,
         }
+    }
+}
+
+fn configure_input_hints() {
+    sdl3::hint::set("SDL_MOUSE_FOCUS_CLICKTHROUGH", "1");
+    // SDL translates a primary finger into the ordinary pointer path. Nickel
+    // therefore applies production hit testing and reducers identically for
+    // mouse and single-touch activation, without a second geometry model.
+    sdl3::hint::set("SDL_TOUCH_MOUSE_EVENTS", "1");
+}
+
+fn controller_key(button: GamepadButton) -> Option<Keycode> {
+    match button {
+        GamepadButton::DPadUp => Some(Keycode::Up),
+        GamepadButton::DPadDown => Some(Keycode::Down),
+        GamepadButton::DPadLeft => Some(Keycode::Left),
+        GamepadButton::DPadRight => Some(Keycode::Right),
+        GamepadButton::South => Some(Keycode::Return),
+        GamepadButton::East | GamepadButton::Back => Some(Keycode::Escape),
+        _ => None,
     }
 }
 
@@ -800,7 +883,34 @@ fn require_displays(displays: Vec<DisplayGeometry>) -> Result<Vec<DisplayGeometr
 
 #[cfg(test)]
 mod tests {
-    use super::{DisplayGeometry, SurfaceRole, require_displays, surface_geometry};
+    use sdl3::{gamepad::Button as GamepadButton, keyboard::Keycode};
+
+    use super::{DisplayGeometry, SurfaceRole, controller_key, require_displays, surface_geometry};
+
+    #[test]
+    fn primary_touch_uses_the_production_pointer_path() {
+        super::configure_input_hints();
+        assert_eq!(
+            sdl3::hint::get("SDL_TOUCH_MOUSE_EVENTS").as_deref(),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn standard_gamepad_navigation_enters_the_keyboard_navigation_path() {
+        assert_eq!(controller_key(GamepadButton::DPadUp), Some(Keycode::Up));
+        assert_eq!(controller_key(GamepadButton::DPadDown), Some(Keycode::Down));
+        assert_eq!(controller_key(GamepadButton::DPadLeft), Some(Keycode::Left));
+        assert_eq!(
+            controller_key(GamepadButton::DPadRight),
+            Some(Keycode::Right)
+        );
+        assert_eq!(controller_key(GamepadButton::South), Some(Keycode::Return));
+        assert_eq!(controller_key(GamepadButton::East), Some(Keycode::Escape));
+        assert_eq!(controller_key(GamepadButton::Back), Some(Keycode::Escape));
+        assert_eq!(controller_key(GamepadButton::North), None);
+        assert_eq!(controller_key(GamepadButton::Guide), None);
+    }
 
     #[test]
     fn rejects_a_headless_shell_startup() {

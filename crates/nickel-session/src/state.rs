@@ -117,7 +117,11 @@ fn shell_registration_allowed(expected_pid: u32, claimed_pid: u32) -> bool {
 fn command_requires_shell_identity(command: &SessionCommand) -> bool {
     matches!(
         command,
-        SessionCommand::LogOut | SessionCommand::Unlock | SessionCommand::SessionAction { .. }
+        SessionCommand::LogOut
+            | SessionCommand::Unlock
+            | SessionCommand::SessionAction { .. }
+            | SessionCommand::FocusShellRole { .. }
+            | SessionCommand::RestoreApplicationFocus
     )
 }
 
@@ -219,6 +223,8 @@ pub struct NickelSession {
     pub lock_windows: Vec<Window>,
     pub locked: bool,
     lock_restore_window: Option<WindowId>,
+    shell_focus_restore_window: Option<WindowId>,
+    pub(crate) pending_shell_focus_role: Option<ShellRole>,
     pub utility_windows: Vec<Window>,
     pub context_menu_window: Option<Window>,
     pub preview_window: Option<Window>,
@@ -479,6 +485,8 @@ impl NickelSession {
             lock_windows: Vec::new(),
             locked: false,
             lock_restore_window: None,
+            shell_focus_restore_window: None,
+            pending_shell_focus_role: None,
             utility_windows: Vec::new(),
             context_menu_window: None,
             preview_window: None,
@@ -873,6 +881,22 @@ impl NickelSession {
                     );
                 }
             },
+            SessionCommand::FocusShellRole { role } => {
+                if !matches!(
+                    role,
+                    ShellRole::ControlCenter
+                        | ShellRole::ProjectMenu
+                        | ShellRole::Preview
+                        | ShellRole::ContextMenu
+                ) {
+                    return protocol_error(
+                        ErrorCode::InvalidRequest,
+                        "role does not accept ordinary shell focus",
+                    );
+                }
+                self.focus_shell_role(role);
+            }
+            SessionCommand::RestoreApplicationFocus => self.restore_application_focus(),
             SessionCommand::IdentifyOutputs => {
                 self.identify_outputs_until =
                     Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
@@ -1938,6 +1962,80 @@ impl NickelSession {
     fn restore_launcher_focus(&mut self) {
         if let Some(window) = self.launcher_restore_window.take() {
             self.activate_window(window);
+        }
+    }
+
+    pub(crate) fn focus_shell_role(&mut self, role: ShellRole) -> bool {
+        self.pending_shell_focus_role = Some(role);
+        let registry = self.windows.snapshot();
+        let target = self.shell_windows().find_map(|window| {
+            let id = window
+                .wl_surface()
+                .and_then(|surface| self.surface_windows.get(&surface.id()))?;
+            let app_id = registry
+                .iter()
+                .find(|entry| entry.id == *id)?
+                .app_id
+                .as_str();
+            (ShellRole::from_application_id(app_id) == Some(role)).then(|| window.clone())
+        });
+        let Some(target) = target else {
+            return false;
+        };
+        if self.shell_focus_restore_window.is_none() {
+            let shell_ids = self
+                .shell_windows()
+                .filter_map(|window| {
+                    window
+                        .wl_surface()
+                        .and_then(|surface| self.surface_windows.get(&surface.id()))
+                        .copied()
+                })
+                .collect::<HashSet<_>>();
+            let focused = self
+                .seat
+                .get_keyboard()
+                .and_then(|keyboard| keyboard.current_focus())
+                .and_then(|focus| match focus {
+                    crate::focus::KeyboardFocusTarget::Wayland(surface) => {
+                        self.surface_windows.get(&surface.id()).copied()
+                    }
+                    crate::focus::KeyboardFocusTarget::X11(surface) => {
+                        self.x11_windows.get(&surface.window_id()).copied()
+                    }
+                })
+                .filter(|window| !shell_ids.contains(window));
+            self.shell_focus_restore_window = focused.or_else(|| {
+                registry
+                    .iter()
+                    .find(|window| window.active && !shell_ids.contains(&window.id))
+                    .map(|window| window.id)
+            });
+        }
+        self.space.raise_element(&target, true);
+        self.seat.get_keyboard().unwrap().set_focus(
+            self,
+            crate::focus::KeyboardFocusTarget::for_window(&target),
+            SERIAL_COUNTER.next_serial(),
+        );
+        self.space.elements().for_each(|window| {
+            if let Some(toplevel) = window.toplevel() {
+                toplevel.send_pending_configure();
+            }
+        });
+        true
+    }
+
+    fn restore_application_focus(&mut self) {
+        self.pending_shell_focus_role = None;
+        if let Some(window) = self.shell_focus_restore_window.take() {
+            self.activate_window(window);
+        } else {
+            self.seat.get_keyboard().unwrap().set_focus(
+                self,
+                Option::<crate::focus::KeyboardFocusTarget>::None,
+                SERIAL_COUNTER.next_serial(),
+            );
         }
     }
 
@@ -3099,7 +3197,7 @@ mod protocol_tests {
         test_control_may_invoke,
     };
     use crate::shell_layout::Geometry;
-    use nickel_session_protocol::{Command, SessionAction};
+    use nickel_session_protocol::{Command, SessionAction, ShellRole};
 
     #[test]
     fn only_the_exact_supervised_shell_pid_can_register() {
@@ -3114,7 +3212,7 @@ mod protocol_tests {
     }
 
     #[test]
-    fn destructive_and_unlock_commands_require_the_registered_shell_pid() {
+    fn privileged_shell_commands_require_the_registered_shell_pid() {
         for command in [
             Command::LogOut,
             Command::Unlock,
@@ -3124,6 +3222,10 @@ mod protocol_tests {
             Command::SessionAction {
                 action: SessionAction::PowerOff,
             },
+            Command::FocusShellRole {
+                role: ShellRole::ControlCenter,
+            },
+            Command::RestoreApplicationFocus,
         ] {
             assert!(command_requires_shell_identity(&command));
         }

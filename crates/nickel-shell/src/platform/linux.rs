@@ -783,6 +783,10 @@ fn shell_command_payload(command: ShellCommand) -> SessionCommand {
                 .map(|window| SessionWindowId(window.0))
                 .collect(),
         },
+        ShellCommand::FocusControlCenter => SessionCommand::FocusShellRole {
+            role: SessionShellRole::ControlCenter,
+        },
+        ShellCommand::RestoreApplicationFocus => SessionCommand::RestoreApplicationFocus,
         ShellCommand::HideContextMenu => SessionCommand::HideOverlay,
         ShellCommand::HighlightWindow(window) => SessionCommand::HighlightWindow {
             window: Some(SessionWindowId(window.0)),
