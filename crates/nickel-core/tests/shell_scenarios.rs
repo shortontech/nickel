@@ -374,10 +374,7 @@ fn semantic_window_click_is_observed_through_production_effects() {
 
 #[test]
 fn semantic_window_target_tracks_production_geometry_changes() {
-    for (x, y, width, height) in [
-        (0.0, 0.0, 80.0, 60.0),
-        (973.0, 411.0, 377.0, 289.0),
-    ] {
+    for (x, y, width, height) in [(0.0, 0.0, 80.0, 60.0), (973.0, 411.0, 377.0, 289.0)] {
         scenario("window target follows fixture geometry")
             .window("target")
             .app("editor")
