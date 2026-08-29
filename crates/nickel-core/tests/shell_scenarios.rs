@@ -2,7 +2,9 @@
 
 use nickel_core::focus::{FocusRequest, FocusTransaction};
 use nickel_core::hotkeys::{Hotkey, HotkeyAction, KeyEdge};
-use nickel_core::scenario::{ClickTarget, Key, LauncherEffect, Surface, SurfaceIdentity, scenario};
+use nickel_core::scenario::{
+    ClickTarget, Key, LauncherEffect, RecordedEffect, Surface, SurfaceIdentity, scenario,
+};
 use nickel_core::task_switcher::TaskSwitchEffect;
 
 #[test]
@@ -322,16 +324,30 @@ fn removing_all_flip_candidates_closes_without_activation() {
 }
 
 #[test]
-#[ignore = "Spec 0094: click_window bypasses the production input and effect path"]
 fn semantic_window_click_is_observed_through_production_effects() {
     scenario("window click authority")
         .window("editor")
         .app("editor")
+        .bounds(40.0, 70.0, 500.0, 400.0)
         .window("terminal")
         .app("terminal")
+        .bounds(600.0, 100.0, 500.0, 400.0)
         .active()
         .click(ClickTarget::PanelLauncher)
         .click_window("editor")
         .expect_active("editor")
-        .expect_effects(&[TaskSwitchEffect::ActivateWindow("editor".into())]);
+        .expect_effects(&[TaskSwitchEffect::ActivateWindow("editor".into())])
+        .expect_ordered_effects(&[
+            RecordedEffect::Launcher(LauncherEffect::ShowSurface(SurfaceIdentity(1))),
+            RecordedEffect::Launcher(LauncherEffect::RequestFocus(FocusRequest {
+                transaction: FocusTransaction(1),
+                surface: SurfaceIdentity(1),
+            })),
+            RecordedEffect::Launcher(LauncherEffect::HideSurface(SurfaceIdentity(1))),
+            RecordedEffect::Task(TaskSwitchEffect::ActivateWindow("editor".into())),
+        ])
+        .expect_authority_path(
+            "window.active",
+            &["WindowSurface geometry", "hit_test", "reduce_pointer_press"],
+        );
 }

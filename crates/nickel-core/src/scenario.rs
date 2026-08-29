@@ -9,6 +9,10 @@ use crate::{
     },
     output_layout::OutputLayout,
     task_switcher::{SwitchWindow, TaskSwitchEffect, TaskSwitcher},
+    window_input::{
+        PointerPosition, WindowGeometry, WindowPointerEffect, WindowSurface, hit_test,
+        reduce_pointer_press, resolve_semantic_target,
+    },
 };
 use std::{collections::HashMap, time::Duration};
 
@@ -45,6 +49,12 @@ pub enum LauncherEffect {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RecordedEffect {
+    Launcher(LauncherEffect),
+    Task(TaskSwitchEffect<String>),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EffectAcknowledgement {
     pub effect: String,
     pub acknowledged: bool,
@@ -56,11 +66,12 @@ pub struct AuthorityRecord {
     pub path: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct WindowFact {
     name: String,
     application_id: String,
     active: bool,
+    geometry: Option<WindowGeometry>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -72,6 +83,7 @@ pub struct RecordingPlatform {
     visible_launcher: Option<SurfaceIdentity>,
     launcher_output: Option<String>,
     acknowledgements: Vec<EffectAcknowledgement>,
+    ordered_effects: Vec<RecordedEffect>,
 }
 
 impl RecordingPlatform {
@@ -91,6 +103,8 @@ impl RecordingPlatform {
             TaskSwitchEffect::RequestPreviews(_) | TaskSwitchEffect::SelectPreview(_) => {}
             TaskSwitchEffect::HideFlip { .. } => {}
         }
+        self.ordered_effects
+            .push(RecordedEffect::Task(effect.clone()));
         self.effects.push(effect);
     }
 
@@ -139,6 +153,7 @@ pub struct Scenario {
     captured_focus: HashMap<String, FocusRequest<SurfaceIdentity>>,
     outputs: OutputLayout,
     task_reduce: TaskReducer,
+    window_target_resolver: WindowTargetResolver,
     actions: Vec<HotkeyAction>,
     authority: Vec<AuthorityRecord>,
     state_before_event: String,
@@ -150,12 +165,21 @@ type TaskReducer = fn(
     &[SwitchWindow<String>],
 ) -> Vec<TaskSwitchEffect<String>>;
 
+type WindowTargetResolver = fn(&[WindowSurface<String>], &str) -> Option<PointerPosition>;
+
 fn production_task_reduce(
     switcher: &mut TaskSwitcher<String>,
     action: HotkeyAction,
     windows: &[SwitchWindow<String>],
 ) -> Vec<TaskSwitchEffect<String>> {
     switcher.apply(action, windows)
+}
+
+fn production_window_target_resolver(
+    surfaces: &[WindowSurface<String>],
+    name: &str,
+) -> Option<PointerPosition> {
+    resolve_semantic_target(surfaces, &name.to_owned())
 }
 
 pub struct WindowCursor {
@@ -183,6 +207,7 @@ pub fn scenario(name: impl Into<String>) -> Scenario {
         captured_focus: HashMap::new(),
         outputs: OutputLayout::default(),
         task_reduce: production_task_reduce,
+        window_target_resolver: production_window_target_resolver,
         actions: Vec::new(),
         authority: Vec::new(),
         state_before_event: "initial scenario state".into(),
@@ -200,6 +225,7 @@ impl Scenario {
             name: name.into(),
             application_id: String::new(),
             active: false,
+            geometry: None,
         });
         let current = self.windows.len() - 1;
         WindowCursor {
@@ -292,19 +318,39 @@ impl Scenario {
 
     pub fn click_window(mut self, window: &str) -> Self {
         self.consume_event(format!("pointer click window {window:?}"));
-        assert!(
-            self.windows
-                .iter()
-                .any(|candidate| candidate.name == window),
-            "scenario {:?} has no window {window:?}",
-            self.name
-        );
+        let surfaces = self.production_window_surfaces();
+        let position = (self.window_target_resolver)(&surfaces, window).unwrap_or_else(|| {
+            panic!(
+                "scenario {:?} has no pointer geometry for window {window:?}",
+                self.name
+            )
+        });
+        let resolved = hit_test(&surfaces, position);
         if self.launcher.pointer_press(LauncherPointerTarget::Other) {
             self.platform.visible_launcher = None;
             self.platform.launcher_output = None;
             self.record_launcher_effect(LauncherEffect::HideSurface(self.launcher_identity));
         }
-        self.platform.active_window = Some(window.to_owned());
+        for effect in reduce_pointer_press(resolved) {
+            match effect {
+                WindowPointerEffect::ActivateWindow(window) => {
+                    let effect = TaskSwitchEffect::ActivateWindow(window);
+                    self.consumed_effects += 1;
+                    self.authority.push(AuthorityRecord {
+                        field: "window.active".into(),
+                        path: format!(
+                            "semantic named window -> production WindowSurface geometry -> hit_test({position:?}) -> reduce_pointer_press -> {effect:?} -> RecordingPlatform"
+                        ),
+                    });
+                    self.platform.acknowledgements.push(EffectAcknowledgement {
+                        effect: format!("{effect:?}"),
+                        acknowledged: true,
+                    });
+                    self.platform.apply(effect);
+                }
+            }
+        }
+        self.check_budget();
         self
     }
 
@@ -529,6 +575,26 @@ impl Scenario {
         self.assert(condition, detail)
     }
 
+    pub fn expect_ordered_effects(self, expected: &[RecordedEffect]) -> Self {
+        let condition = self.platform.ordered_effects == expected;
+        let detail = format!(
+            "ordered effect sequence differed\nexpected: {expected:#?}\nactual: {:#?}",
+            self.platform.ordered_effects
+        );
+        self.assert(condition, detail)
+    }
+
+    pub fn expect_authority_path(self, field: &str, required: &[&str]) -> Self {
+        let matching = self.authority.iter().any(|record| {
+            record.field == field && required.iter().all(|part| record.path.contains(part))
+        });
+        let detail = format!(
+            "expected authority field {field:?} containing {required:?}, got {:#?}",
+            self.authority
+        );
+        self.assert(matching, detail)
+    }
+
     pub fn expect_within_budget(self) -> Self {
         let condition = self.consumed_events <= self.budget.events
             && self.consumed_effects <= self.budget.effects
@@ -635,6 +701,9 @@ impl Scenario {
         if let LauncherEffect::RestoreWindowFocus(window) = &effect {
             self.platform.active_window = Some(window.clone());
         }
+        self.platform
+            .ordered_effects
+            .push(RecordedEffect::Launcher(effect.clone()));
         self.platform.launcher_effects.push(effect);
         self.check_budget();
     }
@@ -659,6 +728,18 @@ impl Scenario {
                 id: window.name.clone(),
                 application_id: window.application_id.clone(),
                 active: window.active,
+            })
+            .collect()
+    }
+
+    fn production_window_surfaces(&self) -> Vec<WindowSurface<String>> {
+        self.windows
+            .iter()
+            .filter_map(|window| {
+                window.geometry.map(|geometry| WindowSurface {
+                    id: window.name.clone(),
+                    geometry,
+                })
             })
             .collect()
     }
@@ -752,11 +833,22 @@ impl WindowCursor {
         self
     }
 
+    pub fn bounds(mut self, x: f64, y: f64, width: f64, height: f64) -> Self {
+        self.scenario.windows[self.current].geometry = Some(WindowGeometry {
+            x,
+            y,
+            width,
+            height,
+        });
+        self
+    }
+
     pub fn window(mut self, name: impl Into<String>) -> Self {
         self.scenario.windows.push(WindowFact {
             name: name.into(),
             application_id: String::new(),
             active: false,
+            geometry: None,
         });
         self.current = self.scenario.windows.len() - 1;
         self
@@ -773,6 +865,10 @@ impl WindowCursor {
     pub fn click(self, target: ClickTarget) -> Scenario {
         self.scenario.click(target)
     }
+
+    pub fn click_window(self, window: &str) -> Scenario {
+        self.scenario.click_window(window)
+    }
 }
 
 #[cfg(test)]
@@ -781,6 +877,7 @@ mod tests {
     use crate::hotkeys::{Hotkey, HotkeyAction, KeyEdge};
     use crate::task_switcher::TaskSwitchEffect;
     use crate::task_switcher::{SwitchWindow, TaskSwitcher};
+    use crate::window_input::{PointerPosition, WindowSurface};
 
     #[test]
     fn flip_commits_exact_effects_and_allocates_a_new_session() {
@@ -870,6 +967,24 @@ mod tests {
             .window("b")
             .press(Key::AltTab)
             .expect_active("b");
+    }
+
+    #[test]
+    #[should_panic(expected = "expected active window")]
+    fn admission_catches_a_substituted_incorrect_window_target_resolver() {
+        fn incorrect(_: &[WindowSurface<String>], _: &str) -> Option<PointerPosition> {
+            Some(PointerPosition { x: 250.0, y: 50.0 })
+        }
+
+        let mut test = scenario("window target anti-cheating admission");
+        test.window_target_resolver = incorrect;
+        test.window("editor")
+            .bounds(0.0, 0.0, 100.0, 100.0)
+            .window("terminal")
+            .bounds(200.0, 0.0, 100.0, 100.0)
+            .active()
+            .click_window("editor")
+            .expect_active("editor");
     }
 
     #[test]

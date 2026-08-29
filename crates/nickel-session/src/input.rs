@@ -1,5 +1,9 @@
 use nickel_core::hotkeys::{Hotkey, HotkeyAction, KeyEdge};
 use nickel_core::launcher::LauncherPointerTarget;
+use nickel_core::window_input::{
+    PointerPosition, WindowGeometry, WindowPointerEffect, WindowSurface, hit_test,
+    reduce_pointer_press,
+};
 use smithay::{
     backend::input::{
         AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, InputBackend, InputEvent,
@@ -394,22 +398,54 @@ impl NickelSession {
                 }
 
                 if ButtonState::Pressed == button_state && !pointer.is_grabbed() && !frame_handled {
+                    let pointer_position = pointer.current_location();
+                    let ordinary_windows = self
+                        .space
+                        .elements()
+                        .filter(|window| !self.shell_windows().any(|shell| shell == *window))
+                        .filter_map(|window| {
+                            let id = self
+                                .surface_windows
+                                .get(&window.toplevel()?.wl_surface().id())
+                                .copied()?;
+                            let bounds = self.space.element_bbox(window)?;
+                            Some(WindowSurface {
+                                id,
+                                geometry: WindowGeometry {
+                                    x: f64::from(bounds.loc.x),
+                                    y: f64::from(bounds.loc.y),
+                                    width: f64::from(bounds.size.w),
+                                    height: f64::from(bounds.size.h),
+                                },
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    let window_effects = reduce_pointer_press(hit_test(
+                        &ordinary_windows,
+                        PointerPosition {
+                            x: pointer_position.x,
+                            y: pointer_position.y,
+                        },
+                    ));
                     if let Some((window, _loc)) = self
                         .space
-                        .element_under(pointer.current_location())
+                        .element_under(pointer_position)
                         .map(|(w, l)| (w.clone(), l))
                     {
                         self.space.raise_element(&window, true);
-                        if let Some(id) = self
+                        let actual_window = self
                             .surface_windows
                             .get(&window.toplevel().unwrap().wl_surface().id())
-                            .copied()
-                            .filter(|_| {
-                                !self.is_panel_window(&window)
-                                    && self.launcher_window.as_ref() != Some(&window)
-                            })
-                        {
-                            self.windows.raise(id);
+                            .copied();
+                        for effect in window_effects {
+                            match effect {
+                                WindowPointerEffect::ActivateWindow(id)
+                                    if actual_window == Some(id) =>
+                                {
+                                    self.windows.raise(id);
+                                }
+                                WindowPointerEffect::ActivateWindow(_) => {}
+                            }
                         }
                         if !self.is_panel_window(&window) {
                             keyboard.set_focus(
