@@ -1106,6 +1106,8 @@ impl WindowCursor {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::{Key, ScenarioBudget, Surface, scenario};
     use crate::hotkeys::{Hotkey, HotkeyAction, KeyEdge};
     use crate::task_switcher::TaskSwitchEffect;
@@ -1180,6 +1182,39 @@ mod tests {
             .active()
             .window("b")
             .press(Key::AltTab);
+    }
+
+    #[test]
+    #[should_panic(expected = "exceeded budget")]
+    fn hard_effect_budget_fails_during_dispatch() {
+        scenario("effect budget admission")
+            .budget(ScenarioBudget {
+                events: 32,
+                effects: 1,
+                redraws: 8,
+            })
+            .click(super::ClickTarget::PanelLauncher);
+    }
+
+    #[test]
+    #[should_panic(expected = "exceeded budget")]
+    fn hard_redraw_budget_fails_during_dispatch() {
+        scenario("redraw budget admission")
+            .budget(ScenarioBudget {
+                events: 32,
+                effects: 32,
+                redraws: 0,
+            })
+            .click(super::ClickTarget::PanelLauncher);
+    }
+
+    #[test]
+    fn deterministic_stability_advances_time_without_spurious_activity() {
+        scenario("stable launcher interval")
+            .click(super::ClickTarget::PanelLauncher)
+            .expect_stable_for(Duration::from_millis(250))
+            .expect_visible(Surface::Launcher)
+            .expect_within_budget();
     }
 
     #[test]
