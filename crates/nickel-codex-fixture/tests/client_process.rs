@@ -246,12 +246,12 @@ fn bounded_stderr_flood_cannot_block_protocol_progress() {
     let client = CodexClient::spawn(executable, directory.path()).unwrap();
     assert_eq!(client.models().unwrap()[0].id, "fixture-model");
     for _ in 0..20 {
-        if client.stderr_snapshot().len() == 64 * 1024 {
+        if client.stderr_snapshot().len() == 65_536 {
             break;
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert_eq!(client.stderr_snapshot().len(), 64 * 1024);
+    assert_eq!(client.stderr_snapshot().len(), 65_536);
     client.shutdown();
 }
 
