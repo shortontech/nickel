@@ -305,11 +305,7 @@ impl Scenario {
             }
             ClickTarget::Desktop => {
                 if self.launcher.pointer_press(LauncherPointerTarget::Other) {
-                    self.platform.visible_launcher = None;
-                    self.platform.launcher_output = None;
-                    self.record_launcher_effect(LauncherEffect::HideSurface(
-                        self.launcher_identity,
-                    ));
+                    self.hide_launcher(true);
                 }
             }
         }
@@ -327,9 +323,7 @@ impl Scenario {
         });
         let resolved = hit_test(&surfaces, position);
         if self.launcher.pointer_press(LauncherPointerTarget::Other) {
-            self.platform.visible_launcher = None;
-            self.platform.launcher_output = None;
-            self.record_launcher_effect(LauncherEffect::HideSurface(self.launcher_identity));
+            self.hide_launcher(false);
         }
         for effect in reduce_pointer_press(resolved) {
             match effect {
@@ -437,8 +431,7 @@ impl Scenario {
         if self.focus.loses_current(&request)
             && self.launcher.pointer_press(LauncherPointerTarget::Other)
         {
-            self.platform.visible_launcher = None;
-            self.record_launcher_effect(LauncherEffect::HideSurface(self.launcher_identity));
+            self.hide_launcher(true);
         }
         self
     }
@@ -466,8 +459,7 @@ impl Scenario {
         if self.focus.loses_current(&request)
             && self.launcher.pointer_press(LauncherPointerTarget::Other)
         {
-            self.platform.visible_launcher = None;
-            self.record_launcher_effect(LauncherEffect::HideSurface(self.launcher_identity));
+            self.hide_launcher(true);
         }
         self
     }
@@ -666,12 +658,16 @@ impl Scenario {
             let request = self.focus.request(self.launcher_identity);
             self.record_launcher_effect(LauncherEffect::RequestFocus(request));
         } else if transition == LauncherTransition::Hidden {
-            self.platform.visible_launcher = None;
-            self.platform.launcher_output = None;
-            self.record_launcher_effect(LauncherEffect::HideSurface(self.launcher_identity));
-            if let Some(window) = self.platform.active_window.clone() {
-                self.record_launcher_effect(LauncherEffect::RestoreWindowFocus(window));
-            }
+            self.hide_launcher(true);
+        }
+    }
+
+    fn hide_launcher(&mut self, restore_window_focus: bool) {
+        self.platform.visible_launcher = None;
+        self.platform.launcher_output = None;
+        self.record_launcher_effect(LauncherEffect::HideSurface(self.launcher_identity));
+        if restore_window_focus && let Some(window) = self.platform.active_window.clone() {
+            self.record_launcher_effect(LauncherEffect::RestoreWindowFocus(window));
         }
     }
 

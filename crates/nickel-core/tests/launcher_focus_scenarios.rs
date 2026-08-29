@@ -6,7 +6,9 @@
 
 use nickel_core::focus::{FocusRequest, FocusTransaction};
 use nickel_core::launcher::LauncherActivationSource;
-use nickel_core::scenario::{ClickTarget, LauncherEffect, Surface, SurfaceIdentity, scenario};
+use nickel_core::scenario::{
+    ClickTarget, LauncherEffect, RecordedEffect, Surface, SurfaceIdentity, scenario,
+};
 
 fn first_focus_request() -> FocusRequest<SurfaceIdentity> {
     FocusRequest {
@@ -56,7 +58,6 @@ fn closing_and_reopening_launcher_reuses_surface_but_allocates_a_new_focus_trans
 }
 
 #[test]
-#[ignore = "Spec 0097: acknowledged focus loss hides without restoring prior window focus"]
 fn acknowledged_launcher_focus_loss_hides_once_and_restores_previous_window_focus() {
     let opened = scenario("acknowledged launcher focus restoration")
         .window("editor")
@@ -75,11 +76,16 @@ fn acknowledged_launcher_focus_loss_hides_once_and_restores_previous_window_focu
             LauncherEffect::RequestFocus(first_focus_request()),
             LauncherEffect::HideSurface(SurfaceIdentity(1)),
             LauncherEffect::RestoreWindowFocus("editor".into()),
+        ])
+        .expect_ordered_effects(&[
+            RecordedEffect::Launcher(LauncherEffect::ShowSurface(SurfaceIdentity(1))),
+            RecordedEffect::Launcher(LauncherEffect::RequestFocus(first_focus_request())),
+            RecordedEffect::Launcher(LauncherEffect::HideSurface(SurfaceIdentity(1))),
+            RecordedEffect::Launcher(LauncherEffect::RestoreWindowFocus("editor".into())),
         ]);
 }
 
 #[test]
-#[ignore = "Spec 0097: pointer dismissal hides without restoring prior window focus"]
 fn desktop_dismissal_is_idempotent_and_restores_focus_only_on_the_transition() {
     let opened = scenario("desktop dismissal is one transition")
         .window("terminal")
@@ -96,6 +102,12 @@ fn desktop_dismissal_is_idempotent_and_restores_focus_only_on_the_transition() {
             LauncherEffect::RequestFocus(first_focus_request()),
             LauncherEffect::HideSurface(SurfaceIdentity(1)),
             LauncherEffect::RestoreWindowFocus("terminal".into()),
+        ])
+        .expect_ordered_effects(&[
+            RecordedEffect::Launcher(LauncherEffect::ShowSurface(SurfaceIdentity(1))),
+            RecordedEffect::Launcher(LauncherEffect::RequestFocus(first_focus_request())),
+            RecordedEffect::Launcher(LauncherEffect::HideSurface(SurfaceIdentity(1))),
+            RecordedEffect::Launcher(LauncherEffect::RestoreWindowFocus("terminal".into())),
         ]);
 }
 

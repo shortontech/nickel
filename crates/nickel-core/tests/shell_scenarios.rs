@@ -195,7 +195,6 @@ fn alt_shift_print_screen_routes_to_file_capture() {
 }
 
 #[test]
-#[ignore = "Spec 0091: acknowledged stale focus loss can dismiss a reopened launcher"]
 fn stale_focus_loss_cannot_dismiss_a_reopened_launcher() {
     scenario("stale focus loss during launcher reopen")
         .click(ClickTarget::PanelLauncher)

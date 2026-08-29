@@ -206,6 +206,7 @@ impl NickelSession {
                 const DOUBLE_CLICK_DISTANCE: f64 = 6.0;
                 let mut suppress_pointer_event = false;
                 let mut frame_handled = false;
+                let mut launcher_focus_restored = false;
                 let mouse_button = event.button();
                 let super_pressed = keyboard.modifier_state().logo;
 
@@ -217,12 +218,16 @@ impl NickelSession {
                         .space
                         .element_under(pointer.current_location())
                         .map(|(window, _)| window.clone());
+                    let restore_window_focus = target
+                        .as_ref()
+                        .is_none_or(|window| self.shell_windows().any(|shell| shell == window));
                     let target = if target.as_ref() == self.launcher_window.as_ref() {
                         LauncherPointerTarget::Launcher
                     } else {
                         LauncherPointerTarget::Other
                     };
-                    self.launcher_pointer_press(target);
+                    launcher_focus_restored =
+                        self.launcher_pointer_press(target, restore_window_focus);
                 }
 
                 if mouse_button == Some(MouseButton::Left)
@@ -397,7 +402,11 @@ impl NickelSession {
                     suppress_pointer_event = true;
                 }
 
-                if ButtonState::Pressed == button_state && !pointer.is_grabbed() && !frame_handled {
+                if ButtonState::Pressed == button_state
+                    && !pointer.is_grabbed()
+                    && !frame_handled
+                    && !launcher_focus_restored
+                {
                     let pointer_position = pointer.current_location();
                     let ordinary_windows = self
                         .space

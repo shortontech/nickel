@@ -10,6 +10,7 @@ use std::{
 };
 
 use nickel_core::{
+    focus::FocusTransactions,
     hotkeys::{HotkeyAction, HotkeyController},
     launcher::{LauncherPointerTarget, LauncherVisibility},
     task_switcher::{SwitchWindow, TaskSwitchEffect, TaskSwitcher},
@@ -99,6 +100,8 @@ pub struct NickelSession {
     pub surface_windows: HashMap<ObjectId, WindowId>,
     pub launcher_window: Option<Window>,
     pub launcher_visibility: LauncherVisibility,
+    launcher_focus: FocusTransactions<ObjectId>,
+    launcher_restore_window: Option<WindowId>,
     launcher_subscribers: Vec<PathBuf>,
     protocol_token: String,
     authenticated_shell_pids: HashSet<u32>,
@@ -231,6 +234,8 @@ impl NickelSession {
             surface_windows: HashMap::new(),
             launcher_window: None,
             launcher_visibility: LauncherVisibility::default(),
+            launcher_focus: FocusTransactions::default(),
+            launcher_restore_window: None,
             launcher_subscribers: Vec::new(),
             protocol_token,
             authenticated_shell_pids: HashSet::new(),
@@ -633,6 +638,9 @@ impl NickelSession {
         let visible = self.launcher_visibility.toggle();
         self.hotkeys.launcher_visibility_applied(visible);
         self.apply_launcher_visibility(visible);
+        if !visible {
+            self.restore_launcher_focus();
+        }
         self.notify_launcher_visibility(visible);
     }
 
@@ -746,15 +754,47 @@ impl NickelSession {
         self.hotkeys.launcher_visibility_applied(visible);
         self.apply_launcher_visibility(visible);
         if changed {
+            if !visible {
+                self.restore_launcher_focus();
+            }
             self.notify_launcher_visibility(visible);
         }
     }
 
-    pub fn launcher_pointer_press(&mut self, target: LauncherPointerTarget) {
+    pub fn launcher_pointer_press(
+        &mut self,
+        target: LauncherPointerTarget,
+        restore_window_focus: bool,
+    ) -> bool {
         if self.launcher_visibility.pointer_press(target) {
             self.hotkeys.launcher_visibility_applied(false);
             self.apply_launcher_visibility(false);
+            if restore_window_focus {
+                self.restore_launcher_focus();
+            } else {
+                self.launcher_restore_window = None;
+            }
             self.notify_launcher_visibility(false);
+            restore_window_focus
+        } else {
+            false
+        }
+    }
+
+    pub fn launcher_keyboard_focus_changed(&mut self, focused: Option<&WlSurface>) {
+        if let Some(focused) = focused
+            && let Some(request) = self.launcher_focus.requested().cloned()
+            && focused.id() == request.surface
+        {
+            let _ = self.launcher_focus.acknowledge(&request);
+            return;
+        }
+        let Some(acknowledged) = self.launcher_focus.acknowledged().cloned() else {
+            return;
+        };
+        if self.launcher_visibility.is_visible() && self.launcher_focus.loses_current(&acknowledged)
+        {
+            self.set_launcher_visible(false);
         }
     }
 
@@ -818,10 +858,19 @@ impl NickelSession {
             return;
         };
         if visible {
+            if self.launcher_restore_window.is_none() {
+                self.launcher_restore_window = self
+                    .windows
+                    .snapshot()
+                    .into_iter()
+                    .find(|window| window.active)
+                    .map(|window| window.id);
+            }
             let geometry = self.launcher_geometry(&window);
             self.space
                 .map_element(window.clone(), (geometry.x, geometry.y), true);
             let surface = window.toplevel().unwrap().wl_surface().clone();
+            let _request = self.launcher_focus.request(surface.id());
             self.seat.get_keyboard().unwrap().set_focus(
                 self,
                 Some(surface),
@@ -838,6 +887,12 @@ impl NickelSession {
             "nickel-session: launcher {}",
             if visible { "shown" } else { "hidden" }
         );
+    }
+
+    fn restore_launcher_focus(&mut self) {
+        if let Some(window) = self.launcher_restore_window.take() {
+            self.activate_window(window);
+        }
     }
 
     pub fn register_launcher(&mut self, window: Window) {

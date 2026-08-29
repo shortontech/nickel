@@ -31,6 +31,7 @@ impl<Surface: Clone + Eq> FocusTransactions<Surface> {
             transaction: FocusTransaction(self.next),
             surface,
         };
+        self.acknowledged = None;
         self.requested = Some(request.clone());
         request
     }
@@ -57,5 +58,24 @@ impl<Surface: Clone + Eq> FocusTransactions<Surface> {
 
     pub fn acknowledged(&self) -> Option<&FocusRequest<Surface>> {
         self.acknowledged.as_ref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FocusTransactions;
+
+    #[test]
+    fn newer_request_invalidates_an_acknowledged_older_generation() {
+        let mut focus = FocusTransactions::default();
+        let first = focus.request("launcher");
+        assert!(focus.acknowledge(&first));
+
+        let second = focus.request("launcher");
+
+        assert!(focus.acknowledged().is_none());
+        assert!(!focus.loses_current(&first));
+        assert!(focus.acknowledge(&second));
+        assert!(focus.loses_current(&second));
     }
 }
