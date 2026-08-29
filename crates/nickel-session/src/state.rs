@@ -566,6 +566,32 @@ impl NickelSession {
         crate::shell_recovery_visible_for(self.shell_failure_count)
     }
 
+    pub(crate) fn retry_shell_from_recovery(&mut self) -> bool {
+        if !self.shell_recovery_visible() {
+            return false;
+        }
+        let Some(supervisor) = &self.shell_supervisor else {
+            return false;
+        };
+        if supervisor
+            .send(crate::ShellSupervisorCommand::Restart)
+            .is_err()
+        {
+            return false;
+        }
+        self.shell_failure_count = 0;
+        self.request_output_redraw();
+        true
+    }
+
+    pub(crate) fn exit_from_recovery(&mut self) -> bool {
+        if !self.shell_recovery_visible() {
+            return false;
+        }
+        self.loop_signal.stop();
+        true
+    }
+
     fn init_control_socket(event_loop: &mut EventLoop<'static, NickelSession>) -> PathBuf {
         let runtime = std::env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)

@@ -286,25 +286,35 @@ pub fn init_winit(
                             ));
                         }
 
-                        let recovery_banner = state.shell_recovery_visible().then(|| {
-                            let banner_width = size.w.clamp(1, 560);
-                            let banner_height = size.h.clamp(1, 112);
-                            let banner_buffer = SolidColorBuffer::new(
-                                (banner_width, banner_height),
-                                [0.45, 0.06, 0.08, 1.0],
-                            );
-                            SolidColorRenderElement::from_buffer(
-                                &banner_buffer,
-                                ((size.w - banner_width) / 2, (size.h - banner_height) / 2),
-                                1.0,
-                                1.0,
-                                Kind::Unspecified,
-                            )
-                        });
+                        let recovery_banner = state
+                            .shell_recovery_visible()
+                            .then(crate::window_frame::render_recovery_panel)
+                            .flatten()
+                            .and_then(|panel| {
+                                let banner_width = size.w.clamp(1, 560);
+                                let banner_height = size.h.clamp(1, 144);
+                                MemoryRenderBufferRenderElement::from_buffer(
+                                    renderer,
+                                    (
+                                        f64::from((size.w - banner_width) / 2),
+                                        f64::from((size.h - banner_height) / 2),
+                                    ),
+                                    &panel,
+                                    None,
+                                    None,
+                                    Some((banner_width, banner_height).into()),
+                                    Kind::Unspecified,
+                                )
+                                .map_err(|error| {
+                                    tracing::error!(?error, "failed to import recovery panel")
+                                })
+                                .ok()
+                                .map(WinitFrameElement::from)
+                            });
 
                         if !overlay_elements.is_empty() || recovery_banner.is_some() {
                             if let Some(banner) = recovery_banner {
-                                overlay_elements.insert(0, WinitFrameElement::from(banner));
+                                overlay_elements.insert(0, banner);
                             }
                             let mut frame = renderer
                                 .render(&mut framebuffer, size, output.current_transform())

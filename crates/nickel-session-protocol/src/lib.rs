@@ -166,6 +166,7 @@ pub enum TestKey {
     C,
     P,
     Enter,
+    Escape,
     Tab,
     LeftAlt,
     LeftShift,

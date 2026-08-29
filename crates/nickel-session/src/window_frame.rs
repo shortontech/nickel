@@ -103,6 +103,46 @@ fn render_glyph(glyph: char) -> Option<MemoryRenderBuffer> {
     ))
 }
 
+pub fn render_recovery_panel() -> Option<MemoryRenderBuffer> {
+    static PANEL: OnceLock<Option<MemoryRenderBuffer>> = OnceLock::new();
+    PANEL
+        .get_or_init(render_recovery_panel_uncached)
+        .as_ref()
+        .cloned()
+}
+
+fn render_recovery_panel_uncached() -> Option<MemoryRenderBuffer> {
+    const WIDTH: u32 = 560;
+    const HEIGHT: u32 = 144;
+    let svg = format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{WIDTH}" height="{HEIGHT}">
+<rect width="{WIDTH}" height="{HEIGHT}" rx="14" fill="#24191c" stroke="#d05a68"/>
+<text x="28" y="42" font-family="sans-serif" font-size="20" font-weight="600" fill="#fff4f5">Nickel shell needs attention</text>
+<text x="28" y="72" font-family="sans-serif" font-size="14" fill="#e8c9cd">The compositor is still running and your applications are safe.</text>
+<rect x="28" y="94" width="156" height="30" rx="7" fill="#9d3444"/>
+<text x="45" y="114" font-family="sans-serif" font-size="13" font-weight="600" fill="white">Enter  Retry now</text>
+<text x="208" y="114" font-family="sans-serif" font-size="13" fill="#e8c9cd">Esc  Log out safely</text>
+</svg>"##
+    );
+    let mut options = resvg::usvg::Options::default();
+    options.fontdb_mut().load_system_fonts();
+    let tree = resvg::usvg::Tree::from_data(svg.as_bytes(), &options).ok()?;
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(WIDTH, HEIGHT)?;
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::identity(),
+        &mut pixmap.as_mut(),
+    );
+    Some(MemoryRenderBuffer::from_slice(
+        pixmap.data(),
+        Fourcc::Abgr8888,
+        (WIDTH as i32, HEIGHT as i32),
+        1,
+        Transform::Normal,
+        None,
+    ))
+}
+
 pub fn render_titlebar(
     width: i32,
     title: &str,
@@ -262,7 +302,7 @@ pub fn hit_test(content: Geometry, x: i32, y: i32) -> Option<FramePart> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FramePart, hit_test, outer_geometry};
+    use super::{FramePart, hit_test, outer_geometry, render_recovery_panel};
     use crate::shell_layout::Geometry;
 
     const CONTENT: Geometry = Geometry {
@@ -310,5 +350,10 @@ mod tests {
         );
         assert_eq!(FramePart::ResizeEast.cursor(), super::FrameCursor::East);
         assert_eq!(FramePart::Titlebar.cursor(), super::FrameCursor::Arrow);
+    }
+
+    #[test]
+    fn compositor_recovery_panel_rasterizes_without_the_shell() {
+        assert!(render_recovery_panel().is_some());
     }
 }

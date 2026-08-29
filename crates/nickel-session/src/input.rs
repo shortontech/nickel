@@ -78,6 +78,22 @@ impl NickelSession {
 
     pub fn process_input_event<I: InputBackend>(&mut self, event: InputEvent<I>) -> Option<i32> {
         self.note_input_activity();
+        if self.shell_recovery_visible()
+            && matches!(
+                &event,
+                InputEvent::PointerMotion { .. }
+                    | InputEvent::PointerMotionAbsolute { .. }
+                    | InputEvent::PointerButton { .. }
+                    | InputEvent::PointerAxis { .. }
+                    | InputEvent::TouchDown { .. }
+                    | InputEvent::TouchMotion { .. }
+                    | InputEvent::TouchUp { .. }
+                    | InputEvent::TouchFrame { .. }
+                    | InputEvent::TouchCancel { .. }
+            )
+        {
+            return None;
+        }
         match event {
             InputEvent::Keyboard { event, .. } => {
                 let serial = SERIAL_COUNTER.next_serial();
@@ -103,6 +119,20 @@ impl NickelSession {
                                 return FilterResult::Intercept(
                                     (state == KeyState::Pressed).then_some(vt),
                                 );
+                            }
+                            if session.shell_recovery_visible() {
+                                if state == KeyState::Pressed {
+                                    match recovery_action_from_keysym(sym) {
+                                        Some(RecoveryAction::Retry) => {
+                                            session.retry_shell_from_recovery();
+                                        }
+                                        Some(RecoveryAction::Exit) => {
+                                            session.exit_from_recovery();
+                                        }
+                                        None => {}
+                                    }
+                                }
+                                return FilterResult::Intercept(None);
                             }
                             let key = hotkey_from_keysym(sym);
                             let edge = if state == KeyState::Pressed {
@@ -861,13 +891,29 @@ fn vt_from_keysym(sym: Keysym) -> Option<i32> {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RecoveryAction {
+    Retry,
+    Exit,
+}
+
+fn recovery_action_from_keysym(sym: Keysym) -> Option<RecoveryAction> {
+    match sym.raw() {
+        keysyms::KEY_Return | keysyms::KEY_KP_Enter => Some(RecoveryAction::Retry),
+        keysyms::KEY_Escape => Some(RecoveryAction::Exit),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use smithay::utils::{Point, Rectangle};
 
     use smithay::input::keyboard::{Keysym, keysyms};
 
-    use super::{ResizeEdge, resize_edges_at, vt_from_keysym};
+    use super::{
+        RecoveryAction, ResizeEdge, recovery_action_from_keysym, resize_edges_at, vt_from_keysym,
+    };
 
     #[test]
     fn resize_edges_follow_pointer_region() {
@@ -921,6 +967,26 @@ mod tests {
         assert_eq!(
             super::hotkey_from_keysym(Keysym::new(keysyms::KEY_Sys_Req)),
             nickel_core::hotkeys::Hotkey::PrintScreen
+        );
+    }
+
+    #[test]
+    fn recovery_keys_offer_retry_and_safe_exit_without_forwarding_text() {
+        assert_eq!(
+            recovery_action_from_keysym(Keysym::new(keysyms::KEY_Return)),
+            Some(RecoveryAction::Retry)
+        );
+        assert_eq!(
+            recovery_action_from_keysym(Keysym::new(keysyms::KEY_KP_Enter)),
+            Some(RecoveryAction::Retry)
+        );
+        assert_eq!(
+            recovery_action_from_keysym(Keysym::new(keysyms::KEY_Escape)),
+            Some(RecoveryAction::Exit)
+        );
+        assert_eq!(
+            recovery_action_from_keysym(Keysym::new(keysyms::KEY_a)),
+            None
         );
     }
 }

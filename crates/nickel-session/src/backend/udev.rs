@@ -1179,22 +1179,23 @@ impl NickelSession {
                     .map(|mode| mode.size)
                     .unwrap_or_else(|| (1, 1).into());
                 let banner_width = recovery_size.w.clamp(1, 560);
-                let banner_height = recovery_size.h.clamp(1, 112);
-                let banner =
-                    SolidColorBuffer::new((banner_width, banner_height), [0.45, 0.06, 0.08, 1.0]);
-                elements.push(
-                    NativeCustomElement::from(SolidColorRenderElement::from_buffer(
-                        &banner,
+                let banner_height = recovery_size.h.clamp(1, 144);
+                if let Some(panel) = crate::window_frame::render_recovery_panel()
+                    && let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
+                        &mut renderer,
                         (
-                            (recovery_size.w - banner_width) / 2,
-                            (recovery_size.h - banner_height) / 2,
+                            f64::from((recovery_size.w - banner_width) / 2),
+                            f64::from((recovery_size.h - banner_height) / 2),
                         ),
-                        1.0,
-                        1.0,
+                        &panel,
+                        None,
+                        None,
+                        Some((banner_width, banner_height).into()),
                         Kind::Unspecified,
-                    ))
-                    .into(),
-                );
+                    )
+                {
+                    elements.insert(0, NativeCustomElement::from(element).into());
+                }
             }
             if self.dimmed && !self.locked {
                 let size = self
