@@ -1,0 +1,77 @@
+version = 1
+
+[[reference]]
+id = "nickel-settings-appearance-2026-08-28"
+path = "references/nickel-settings-appearance.png"
+kind = "visual-composition-reference"
+width = 1424
+height = 1105
+sha256 = "568c4a9528b2002979398857a7d8634790d8471f7f2fc875b7f5600a03ba9cd7"
+authorship = "User-provided Nickel Settings design reference; original production method is not independently recorded."
+usage_status = "Authorized by the repository owner for use as a Nickel design and test reference; not shipped as product artwork."
+source = "Copied from the repository owner's supplied /home/shorton/Documents/Nickel Settings.png on 2026-08-28."
+
+[[reference]]
+id = "nickel-start-menu-2026-08-27"
+path = "references/nickel-start-menu.png"
+kind = "visual-composition-reference"
+width = 1401
+height = 1123
+sha256 = "548e5269189a1b4d1e8341527296d7974d23f7fc239b28a91a6e7f0ae1f31eb8"
+authorship = "User-provided Nickel design reference; original production method is not independently recorded."
+usage_status = "Authorized by the repository owner for use as a Nickel design and test reference; not shipped as product artwork."
+source = "Copied from the repository owner's supplied /home/shorton/Documents/Nickel Start Menu.png on 2026-08-27."
+
+[[icon_family]]
+id = "start-menu-structural"
+directory = "icons/start-menu"
+format = "SVG 24x24 viewBox"
+authorship = "Created in the Nickel repository for the Start Menu implementation."
+license = "Same license as Nickel"
+members = [
+  "about.svg",
+  "account.svg",
+  "applications.svg",
+  "keyboard.svg",
+  "logout.svg",
+  "nickel.svg",
+  "project.svg",
+  "settings.svg",
+]
+
+[[icon_family]]
+id = "settings-structural"
+directory = "icons/settings"
+format = "SVG 24x24 viewBox"
+authorship = "Created in the Nickel repository and contributed by the repository owner in commit d70f94a."
+license = "Same license as Nickel"
+members = [
+  "appearance.svg",
+  "bar.svg",
+  "bluetooth.svg",
+  "display.svg",
+  "network.svg",
+  "search.svg",
+]
+
+[[icon_family]]
+id = "nickel-product-icons"
+directory = "icons"
+format = "Repository-owned PNG and SVG application identity artwork"
+authorship = "Contributed by the repository owner in commits 90d6828, a730fba, and e351f15."
+license = "Same license as Nickel"
+members = [
+  "nickel-file.png",
+  "nickel-panel.png",
+  "nickel-settings.png",
+  "nickel-start.svg",
+]
+
+[[asset]]
+id = "nickel-chat-icon"
+path = "icons/nickel-chat.svg"
+kind = "themeable-product-icon"
+authorship = "User-provided generated base, recolored in GIMP and reduced to one currentColor shape for Nickel."
+usage_status = "Authorized by the repository owner for use as Nickel product artwork."
+license = "Same license as Nickel"
+source = "Added as the themeable Codex panel icon in commit e74ad07."

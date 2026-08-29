@@ -2,7 +2,7 @@ use std::ffi::OsString;
 
 use crate::SettingsPage;
 
-pub(super) const HELP: &str = "Nickel Settings\n\nUsage: nickel-settings [OPTIONS]\n\nOptions:\n  -s, --screen <SCREEN>  Screen to show initially [default: display]\n                         [values: display, nickel-bar, appearance, network, bluetooth]\n  -h, --help             Print help\n";
+pub(super) const HELP: &str = "Nickel Settings\n\nUsage: nickel-settings [OPTIONS]\n\nOptions:\n  -s, --screen <SCREEN>  Screen to show initially [default: display]\n                         [values: display, nickel-bar, appearance, network, bluetooth, keyboard-shortcuts, about]\n  -h, --help             Print help\n";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Action {
@@ -52,8 +52,10 @@ fn parse_screen(value: &str) -> Result<SettingsPage, String> {
         "appearance" => Ok(SettingsPage::Appearance),
         "network" => Ok(SettingsPage::Network),
         "bluetooth" => Ok(SettingsPage::Bluetooth),
+        "keyboard" | "keyboard-shortcuts" => Ok(SettingsPage::KeyboardShortcuts),
+        "about" => Ok(SettingsPage::About),
         _ => Err(format!(
-            "unknown screen '{value}'; expected display, nickel-bar, appearance, network, or bluetooth"
+            "unknown screen '{value}'; expected display, nickel-bar, appearance, network, bluetooth, keyboard-shortcuts, or about"
         )),
     }
 }
@@ -80,6 +82,9 @@ mod tests {
             ("appearance", SettingsPage::Appearance),
             ("network", SettingsPage::Network),
             ("bluetooth", SettingsPage::Bluetooth),
+            ("keyboard", SettingsPage::KeyboardShortcuts),
+            ("keyboard-shortcuts", SettingsPage::KeyboardShortcuts),
+            ("about", SettingsPage::About),
         ];
 
         for (name, page) in cases {

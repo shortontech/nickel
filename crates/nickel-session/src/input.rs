@@ -1,4 +1,5 @@
 use nickel_core::hotkeys::{Hotkey, HotkeyAction, KeyEdge};
+use nickel_core::launcher::LauncherPointerTarget;
 use smithay::{
     backend::input::{
         AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, InputBackend, InputEvent,
@@ -21,6 +22,23 @@ use crate::{
 };
 
 impl NickelSession {
+    pub fn release_pressed_keys_on_host_focus_loss(&mut self) {
+        let keyboard = self.seat.get_keyboard().unwrap();
+        let pressed = keyboard.pressed_keys();
+        for keycode in pressed {
+            keyboard.input::<Option<i32>, _>(
+                self,
+                keycode,
+                KeyState::Released,
+                SERIAL_COUNTER.next_serial(),
+                0,
+                |_session, _modifiers, _handle| FilterResult::Forward,
+            );
+        }
+        self.hotkeys.reconcile_super(false);
+        let _ = self.hotkeys.reconcile_alt(false);
+    }
+
     fn update_frame_cursor(&mut self, position: smithay::utils::Point<f64, Logical>) {
         self.frame_cursor = self
             .space
@@ -87,15 +105,13 @@ impl NickelSession {
                                 Some(HotkeyAction::HideLauncher) => {
                                     session.set_launcher_visible(false)
                                 }
-                                Some(HotkeyAction::SwitchNext) => session.cycle_windows(true),
-                                Some(HotkeyAction::SwitchPrevious) => session.cycle_windows(false),
-                                Some(HotkeyAction::SwitchGroupNext) => session.cycle_windows(true),
-                                Some(HotkeyAction::SwitchGroupPrevious) => {
-                                    session.cycle_windows(false)
-                                }
-                                Some(HotkeyAction::CommitSwitch) => {
-                                    session.commit_window_cycle();
-                                }
+                                Some(
+                                    action @ (HotkeyAction::SwitchNext
+                                    | HotkeyAction::SwitchPrevious
+                                    | HotkeyAction::SwitchGroupNext
+                                    | HotkeyAction::SwitchGroupPrevious
+                                    | HotkeyAction::CommitSwitch),
+                                ) => session.apply_task_switch_action(action),
                                 Some(
                                     HotkeyAction::ShowRun
                                     | HotkeyAction::CaptureActiveWindow
@@ -191,6 +207,22 @@ impl NickelSession {
 
                 if mouse_button == Some(MouseButton::Left)
                     && button_state == ButtonState::Pressed
+                    && self.launcher_visibility.is_visible()
+                {
+                    let target = self
+                        .space
+                        .element_under(pointer.current_location())
+                        .map(|(window, _)| window.clone());
+                    let target = if target.as_ref() == self.launcher_window.as_ref() {
+                        LauncherPointerTarget::Launcher
+                    } else {
+                        LauncherPointerTarget::Other
+                    };
+                    self.launcher_pointer_press(target);
+                }
+
+                if mouse_button == Some(MouseButton::Left)
+                    && button_state == ButtonState::Pressed
                     && !super_pressed
                 {
                     let location = pointer.current_location();
@@ -233,6 +265,7 @@ impl NickelSession {
                         self.space.elements().for_each(|window| {
                             window.toplevel().unwrap().send_pending_configure();
                         });
+                        self.notify_protocol_snapshot();
                         match part {
                             FramePart::Close => {
                                 self.suppress_left_button_release = true;
@@ -395,6 +428,7 @@ impl NickelSession {
                         });
                         keyboard.set_focus(self, Option::<WlSurface>::None, serial);
                     }
+                    self.notify_protocol_snapshot();
                 };
 
                 if mouse_button == Some(MouseButton::Left)

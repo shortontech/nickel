@@ -369,6 +369,36 @@ impl SemanticTheme {
         self.motion = self.motion.reduced();
         self
     }
+
+    /// Resolves light/dark palettes and accessibility preferences into the
+    /// semantic roles consumed by components.
+    pub fn resolve(
+        light: SemanticColors,
+        dark: SemanticColors,
+        preferences: ResolvedThemePreferences,
+    ) -> Self {
+        let colors = match preferences.appearance {
+            ResolvedAppearance::Light => light,
+            ResolvedAppearance::Dark => dark,
+        };
+        let mut theme = Self::new(colors);
+        if preferences.high_contrast {
+            theme.borders.subtle = mix(theme.surfaces.card, theme.text.primary, 60);
+            theme.borders.ordinary = theme.text.primary;
+            theme.borders.strong = theme.text.primary;
+            theme.text.secondary = mix(theme.text.primary, theme.surfaces.window, 18);
+        }
+        if preferences.reduced_transparency {
+            theme.surfaces.window = opaque(theme.surfaces.window);
+            theme.surfaces.sidebar = opaque(theme.surfaces.sidebar);
+            theme.surfaces.card = opaque(theme.surfaces.card);
+            theme.surfaces.raised = opaque(theme.surfaces.raised);
+        }
+        if preferences.reduced_motion {
+            theme.motion = theme.motion.reduced();
+        }
+        theme
+    }
 }
 
 impl From<SemanticColors> for SemanticTokenSet {
@@ -417,14 +447,31 @@ impl From<SemanticColors> for SemanticTokenSet {
 }
 
 fn contrasting_text(color: Color) -> Color {
-    let red = (color >> 16) & 0xff;
-    let green = (color >> 8) & 0xff;
-    let blue = color & 0xff;
-    if red * 299 + green * 587 + blue * 114 >= 128_000 {
-        0x111111
+    let dark = 0x111111;
+    let light = 0xffffff;
+    if contrast_ratio(color, dark) >= contrast_ratio(color, light) {
+        dark
     } else {
-        0xffffff
+        light
     }
+}
+
+fn relative_luminance(color: Color) -> f32 {
+    let channel = |shift: u32| {
+        let value = ((color >> shift) & 0xff_u32) as f32 / 255.0;
+        if value <= 0.04045 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
+}
+
+fn contrast_ratio(left: Color, right: Color) -> f32 {
+    let left = relative_luminance(left);
+    let right = relative_luminance(right);
+    (left.max(right) + 0.05) / (left.min(right) + 0.05)
 }
 
 fn mix(left: Color, right: Color, right_percent: u32) -> Color {
@@ -437,6 +484,10 @@ fn mix(left: Color, right: Color, right_percent: u32) -> Color {
             << shift
     };
     channel(16) | channel(8) | channel(0)
+}
+
+fn opaque(color: Color) -> Color {
+    color & 0x00ff_ffff
 }
 
 #[cfg(test)]
@@ -544,9 +595,48 @@ mod tests {
     }
 
     #[test]
+    fn resolved_theme_applies_appearance_contrast_transparency_and_motion() {
+        let light = SemanticColors {
+            window: 0x80f0f0f0,
+            primary_text: 0x111111,
+            ..colors()
+        };
+        let resolved = SemanticTheme::resolve(
+            light,
+            colors(),
+            ResolvedThemePreferences {
+                appearance: ResolvedAppearance::Light,
+                high_contrast: true,
+                reduced_transparency: true,
+                reduced_motion: true,
+            },
+        );
+        assert_eq!(resolved.surfaces.window, 0xf0f0f0);
+        assert_eq!(resolved.borders.ordinary, resolved.text.primary);
+        assert_eq!(resolved.motion.ordinary_ms, 0);
+    }
+
+    #[test]
     fn color_helpers_are_deterministic() {
         assert_eq!(contrasting_text(0x000000), 0xffffff);
         assert_eq!(contrasting_text(0xffffff), 0x111111);
         assert_eq!(mix(0x000000, 0xffffff, 50), 0x808080);
+    }
+
+    #[test]
+    fn representative_accent_families_keep_readable_and_distinct_states() {
+        for accent in [0xd94b4b, 0x4b8bd8, 0x45a56b] {
+            let colors = SemanticColors {
+                accent,
+                accent_soft: mix(accent, 0x111111, 68),
+                ..colors()
+            };
+            let theme = SemanticTheme::new(colors);
+            assert!(contrast_ratio(theme.accent.ordinary, theme.accent.on_accent) >= 4.5);
+            assert_ne!(theme.accent.ordinary, theme.accent.hover);
+            assert_ne!(theme.accent.hover, theme.accent.pressed);
+            assert_ne!(theme.surfaces.hover, theme.surfaces.pressed);
+            assert_ne!(theme.borders.focus, theme.surfaces.selected);
+        }
     }
 }

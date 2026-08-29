@@ -1,3 +1,4 @@
+use nickel_session_protocol::ShellRole;
 use smithay::{
     delegate_xdg_decoration, delegate_xdg_shell,
     desktop::{
@@ -29,6 +30,10 @@ use crate::{
     grabs::{MoveSurfaceGrab, ResizeSurfaceGrab},
     shell_layout,
 };
+
+fn is_codex_project_chat(app_id: Option<&str>) -> bool {
+    app_id.is_some_and(|app_id| app_id.starts_with("io.nickel.codex.project."))
+}
 
 impl XdgShellHandler for NickelSession {
     fn xdg_shell_state(&mut self) -> &mut XdgShellState {
@@ -73,6 +78,7 @@ impl XdgShellHandler for NickelSession {
         for panel in self.panel_windows.clone() {
             self.space.raise_element(&panel, false);
         }
+        self.notify_protocol_snapshot();
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
@@ -103,6 +109,7 @@ impl XdgShellHandler for NickelSession {
             self.minimized_windows.remove(&id);
             self.windows.remove(id);
         }
+        self.notify_protocol_snapshot();
     }
 
     fn app_id_changed(&mut self, surface: ToplevelSurface) {
@@ -346,19 +353,30 @@ impl NickelSession {
                 .expect("xdg toplevel attributes are not poisoned");
             (attributes.title.clone(), attributes.app_id.clone())
         });
-        let is_launcher = title.as_deref() == Some("Nickel Launcher");
-        let is_desktop = title.as_deref() == Some("Nickel Desktop");
-        let is_panel = title.as_deref() == Some("Nickel Panel");
-        let is_context_menu = title.as_deref() == Some("Nickel Context Menu");
-        let is_notification = title.as_deref() == Some("Nickel Notification");
+        let client_pid = surface
+            .wl_surface()
+            .client()
+            .and_then(|client| client.get_credentials(&self.display_handle).ok())
+            .and_then(|credentials| u32::try_from(credentials.pid).ok());
+        let shell_role = client_pid
+            .filter(|pid| self.is_authenticated_shell_pid(*pid))
+            .and_then(|_| app_id.as_deref().and_then(ShellRole::from_application_id));
+        let is_launcher = shell_role == Some(ShellRole::Launcher);
+        let is_desktop = shell_role == Some(ShellRole::Desktop);
+        let is_panel = shell_role == Some(ShellRole::Panel);
+        let is_context_menu = shell_role == Some(ShellRole::ContextMenu);
+        let is_notification = shell_role == Some(ShellRole::Notification);
+        let is_codex_project_chat = is_codex_project_chat(app_id.as_deref());
         let is_utility = matches!(
-            title.as_deref(),
+            shell_role,
             Some(
-                "Run"
-                    | "Nickel Screenshot"
-                    | "Nickel Volume"
-                    | "Nickel Control Center"
-                    | "Nickel Notification"
+                ShellRole::ControlCenter
+                    | ShellRole::Notification
+                    | ShellRole::ProjectMenu
+                    | ShellRole::ContextMenu
+                    | ShellRole::Preview
+                    | ShellRole::Lock
+                    | ShellRole::Recovery
             )
         );
         if let Some(id) = self
@@ -368,6 +386,7 @@ impl NickelSession {
         {
             self.windows.update_metadata(id, title, app_id);
         }
+        self.notify_protocol_snapshot();
         if is_launcher && self.launcher_window.is_none() {
             let launcher = self
                 .space
@@ -421,6 +440,21 @@ impl NickelSession {
                 self.register_utility_window(utility);
             }
         }
+        // The SDL shell and its dynamic Codex windows share one Wayland
+        // client. New toplevels from that client are deliberately not focused
+        // until their role is known, so shell chrome cannot steal keyboard
+        // focus while starting. Once metadata identifies an ordinary Codex
+        // project window, complete the deferred focus handoff.
+        if is_codex_project_chat {
+            self.seat.get_keyboard().unwrap().set_focus(
+                self,
+                Some(surface.wl_surface().clone()),
+                smithay::utils::SERIAL_COUNTER.next_serial(),
+            );
+            self.space.elements().for_each(|window| {
+                window.toplevel().unwrap().send_pending_configure();
+            });
+        }
     }
 
     fn unconstrain_popup(&self, popup: &PopupSurface) {
@@ -448,5 +482,19 @@ impl NickelSession {
         popup.with_pending_state(|state| {
             state.geometry = state.positioner.get_unconstrained_geometry(target);
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_codex_project_chat;
+
+    #[test]
+    fn codex_project_chat_uses_canonical_application_identity() {
+        assert!(is_codex_project_chat(Some(
+            "io.nickel.codex.project.bd247278c96614ec"
+        )));
+        assert!(!is_codex_project_chat(Some("Codex — sentrygist")));
+        assert!(!is_codex_project_chat(Some("io.nickel.shell")));
     }
 }

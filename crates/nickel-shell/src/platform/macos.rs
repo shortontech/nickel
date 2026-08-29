@@ -336,6 +336,10 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
     }
 }
 
+pub fn register_session_shell() -> bool {
+    true
+}
+
 pub fn launcher_hotkey_receiver() -> Receiver<GlobalShortcut> {
     let (sender, receiver) = mpsc::channel();
     let _ = SHORTCUT_SENDER.set(sender.clone());

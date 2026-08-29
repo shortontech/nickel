@@ -5,13 +5,17 @@ pub(super) fn load_shell_settings() -> ShellSettings {
 }
 
 pub(super) fn save_shell_settings(settings: &ShellSettings) {
-    let _ = settings.save_default();
+    let _ = try_save_shell_settings(settings);
+}
+
+pub(super) fn try_save_shell_settings(settings: &ShellSettings) -> Result<(), String> {
+    settings.save_default().map_err(|error| error.to_string())
 }
 
 pub(super) fn load_wallpaper_settings() -> WallpaperSettings {
     WallpaperSettings::load_default()
 }
 
-pub(super) fn save_wallpaper_settings(settings: &WallpaperSettings) {
-    let _ = settings.save_default();
+pub(super) fn try_save_wallpaper_settings(settings: &WallpaperSettings) -> Result<(), String> {
+    settings.save_default().map_err(|error| error.to_string())
 }

@@ -257,6 +257,7 @@ impl ScreenshotTool {
             bounds: self.image_rect(),
             id: 65000,
             image: image.clone(),
+            high_density: None,
         }];
         commands.push(PaintCommand::Fill {
             rect: Rect::new(0.0, 0.0, size.width as f32, TOOLBAR_HEIGHT),
@@ -299,6 +300,7 @@ impl ScreenshotTool {
                 color: palette.text,
                 align: TextAlign::Center,
                 bold: false,
+                wrap: false,
             });
         }
         commands.push(PaintCommand::Text {
@@ -308,6 +310,7 @@ impl ScreenshotTool {
             color: palette.muted,
             align: TextAlign::Start,
             bold: false,
+            wrap: false,
         });
         if let Err(error) = self.gpu.render(&commands) {
             tracing::warn!(%error, "failed to render screenshot crop surface");

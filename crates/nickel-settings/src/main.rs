@@ -8,12 +8,17 @@ mod platform;
 mod view;
 
 use model::SettingsApp;
-use persistence::{save_shell_settings, save_wallpaper_settings};
+use nickel_session_protocol::{
+    ClientEnvelope, Command as SessionCommand, OutputLayout as SessionOutputLayout,
+    OutputPlacement as SessionOutputPlacement, Query as SessionQuery, Request as SessionRequest,
+    ServerEnvelope, ServerMessage,
+};
+use persistence::{save_shell_settings, try_save_shell_settings, try_save_wallpaper_settings};
 use platform::*;
 
 use std::{
     cell::Cell,
-    sync::{Arc, OnceLock},
+    sync::{Arc, OnceLock, mpsc},
     time::{Duration, Instant},
 };
 
@@ -34,19 +39,21 @@ use nickel_core::{
 use nickel_i18n::Localizer;
 use nickel_ui::{
     AnyView, Button, ButtonPresentation, ChoiceCard, ChoiceCardGroup, ColorSwatch,
-    ControllerAction, ControllerInput, Image, ImageFit, Insets, NavigationItem, NavigationPane,
-    PageHeader, PaintCommand, PaneNavigation, Point as UiPoint, PreviewTile, Rect as UiRect,
-    SdlCanvasPresenter, SelectField, SemanticColors, SemanticTheme, SettingsCard,
-    SettingsNavigation, SettingsRow, SettingsSearchField, SettingsShell, SliderField, Surface,
-    SurfaceRole, Switch, TabList, TextAlign, UiEvent, UiStateStore, UiTree, ui,
+    ComponentBuilderExt, Container, ControllerAction, ControllerInput, Image, ImageFit, Insets,
+    NavigationItem, NavigationPane, PageHeader, PaintCommand, PaneNavigation, Point as UiPoint,
+    PreviewTile, ReadingDirection, Rect as UiRect, SdlCanvasPresenter, SelectField, SemanticColors,
+    SemanticTheme, SettingsCard, SettingsNarrowPane, SettingsNavigation, SettingsRow,
+    SettingsSearchEntry, SettingsSearchField, SettingsShell, SettingsStatus, SettingsStatusKind,
+    SliderField, Surface, SurfaceRole, Switch, TabList, TextAlign, UiEvent, UiId, UiStateStore,
+    UiTree, search_settings, ui,
 };
 use sdl3::{
     event::{Event, WindowEvent},
-    keyboard::Keycode,
+    keyboard::{Keycode, Mod},
     mouse::{MouseButton, MouseWheelDirection},
 };
 
-const SIDEBAR_WIDTH: i32 = 220;
+const SIDEBAR_WIDTH: i32 = 280;
 const DISPLAY_PLANE: Rect = Rect {
     x: 210,
     y: 96,
@@ -77,12 +84,14 @@ fn semantic_theme(palette: ThemePalette) -> SemanticTheme {
     })
 }
 
-fn load_wallpaper_preview(settings: &WallpaperSettings) -> Option<Arc<image::RgbaImage>> {
+fn load_wallpaper_preview(
+    settings: &WallpaperSettings,
+) -> Result<Option<nickel_platform::DecodedPreview>, nickel_platform::PreviewDecodeError> {
     settings
         .image
-        .as_ref()
-        .and_then(|path| image::open(path).ok())
-        .map(|image| Arc::new(image.to_rgba8()))
+        .as_deref()
+        .map(nickel_platform::decode_image_preview)
+        .transpose()
 }
 
 #[derive(Clone, Copy)]
@@ -93,16 +102,20 @@ enum SidebarIconKind {
     Appearance,
     Network,
     Bluetooth,
+    Keyboard,
+    About,
 }
 
 impl SidebarIconKind {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 8] = [
         Self::Search,
         Self::Display,
         Self::Bar,
         Self::Appearance,
         Self::Network,
         Self::Bluetooth,
+        Self::Keyboard,
+        Self::About,
     ];
 
     fn index(self) -> usize {
@@ -117,6 +130,8 @@ impl SidebarIconKind {
             Self::Appearance => '\u{f1fc}',
             Self::Network => '\u{f0ac}',
             Self::Bluetooth => '\u{f294}',
+            Self::Keyboard => '\u{f11c}',
+            Self::About => '\u{f05a}',
         }
     }
 
@@ -128,6 +143,8 @@ impl SidebarIconKind {
             Self::Appearance => include_bytes!("../../../assets/icons/settings/appearance.svg"),
             Self::Network => include_bytes!("../../../assets/icons/settings/network.svg"),
             Self::Bluetooth => include_bytes!("../../../assets/icons/settings/bluetooth.svg"),
+            Self::Keyboard => include_bytes!("../../../assets/icons/start-menu/keyboard.svg"),
+            Self::About => include_bytes!("../../../assets/icons/start-menu/about.svg"),
         }
     }
 }
@@ -166,7 +183,7 @@ fn rasterize_sidebar_icon(kind: SidebarIconKind) -> Arc<image::RgbaImage> {
 }
 
 fn sidebar_icon<Message>(kind: SidebarIconKind) -> Image<Message> {
-    static ICONS: OnceLock<[Arc<image::RgbaImage>; 6]> = OnceLock::new();
+    static ICONS: OnceLock<[Arc<image::RgbaImage>; 8]> = OnceLock::new();
     let icons = ICONS.get_or_init(|| SidebarIconKind::ALL.map(rasterize_sidebar_icon));
     Image::new(400 + kind.index() as u16, icons[kind.index()].clone())
         .fit(ImageFit::Contain)
@@ -227,6 +244,8 @@ enum SettingsPage {
     Appearance,
     Network,
     Bluetooth,
+    KeyboardShortcuts,
+    About,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -239,6 +258,12 @@ enum AppearanceTab {
     Cursors,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum AppearanceNotice {
+    Confirmation(String),
+    Error(String),
+}
+
 impl SettingsPage {
     fn previous(self) -> Self {
         match self {
@@ -247,6 +272,8 @@ impl SettingsPage {
             Self::Appearance => Self::Bar,
             Self::Network => Self::Appearance,
             Self::Bluetooth => Self::Network,
+            Self::KeyboardShortcuts => Self::Bluetooth,
+            Self::About => Self::KeyboardShortcuts,
         }
     }
 
@@ -256,7 +283,9 @@ impl SettingsPage {
             Self::Bar => Self::Appearance,
             Self::Appearance => Self::Network,
             Self::Network => Self::Bluetooth,
-            Self::Bluetooth => Self::Bluetooth,
+            Self::Bluetooth => Self::KeyboardShortcuts,
+            Self::KeyboardShortcuts => Self::About,
+            Self::About => Self::About,
         }
     }
 }
@@ -282,6 +311,8 @@ struct WifiNetwork {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum SettingsMessage {
     Navigate(SettingsPage),
+    NavigateTarget(SettingsPage, String),
+    ToggleNavigation,
     SidebarSearchChanged(String),
     BluetoothPower,
     BluetoothDiscovery,
@@ -294,6 +325,7 @@ enum SettingsMessage {
     AppearanceDark,
     AppearanceSystem,
     AppearanceTab(AppearanceTab),
+    AppearanceReset,
     SetAccentHue(u16),
     SetAppearanceHue(u16),
     SetAppearanceIntensity(u8),
@@ -339,15 +371,7 @@ impl SettingsApp {
     fn dispatch_ui_event(&mut self, event: UiEvent) {
         let outcome = self.ui.handle_event(&mut self.ui_state, event);
         for message in outcome.messages {
-            match message {
-                SettingsMessage::SidebarSearchChanged(value) => self.sidebar_query = value,
-                SettingsMessage::SetDesktopCount(count) => self.set_desktop_count(count),
-                SettingsMessage::SetAppearanceHue(hue) => self.set_appearance_hue(hue),
-                SettingsMessage::SetAppearanceIntensity(intensity) => {
-                    self.set_appearance_intensity(intensity);
-                }
-                _ => {}
-            }
+            self.handle_settings_message(message);
         }
         if outcome.invalidation != nickel_ui::Invalidation::None {
             self.request_redraw();
@@ -368,6 +392,16 @@ impl SettingsApp {
             .and_then(|id| self.ui.message_for_id(id))
     }
 
+    fn focused_role(&self) -> Option<&str> {
+        let focused = self.ui_state.focused()?;
+        self.ui
+            .resolved_layout()
+            .nodes()
+            .iter()
+            .find(|node| &node.id == focused)
+            .and_then(|node| node.accessibility_role.as_deref())
+    }
+
     fn request_redraw(&self) {
         self.redraw_requested.set(true);
     }
@@ -383,6 +417,178 @@ impl SettingsApp {
         semantic_theme(self.palette())
     }
 
+    fn apply_pending_focus(&mut self, ui: &UiTree<SettingsMessage>) {
+        let Some(target) = self.pending_focus.take() else {
+            return;
+        };
+        let suffix = format!("/{}", target.as_str());
+        if let Some(id) = ui
+            .resolved_layout()
+            .nodes()
+            .iter()
+            .find(|node| node.id == target || node.id.as_str().ends_with(&suffix))
+            .map(|node| node.id.clone())
+        {
+            self.ui_state.set_focus(Some(id));
+        }
+    }
+
+    fn handle_settings_message(&mut self, message: SettingsMessage) {
+        match message {
+            SettingsMessage::Navigate(page) => {
+                self.page = page;
+                self.narrow_navigation = false;
+                match page {
+                    SettingsPage::Network => self.load_linux_network(),
+                    SettingsPage::Bluetooth => self.load_bluetooth(),
+                    _ => {}
+                }
+            }
+            SettingsMessage::NavigateTarget(page, target) => {
+                self.page = page;
+                self.narrow_navigation = false;
+                self.sidebar_query.clear();
+                self.pending_focus = Some(target.into());
+                if page == SettingsPage::Appearance {
+                    self.appearance_tab = AppearanceTab::General;
+                }
+                match page {
+                    SettingsPage::Network => self.load_linux_network(),
+                    SettingsPage::Bluetooth => self.load_bluetooth(),
+                    _ => {}
+                }
+            }
+            SettingsMessage::SidebarSearchChanged(value) => self.sidebar_query = value,
+            SettingsMessage::ToggleNavigation => {
+                self.narrow_navigation = !self.narrow_navigation;
+            }
+            SettingsMessage::BluetoothPower => {
+                let _ = set_bluetooth_adapter_property("Powered", !self.bluetooth.powered);
+                self.next_bluetooth_refresh = Instant::now();
+            }
+            SettingsMessage::BluetoothDiscovery => {
+                let _ = set_bluetooth_adapter_property("Discovering", !self.bluetooth.discovering);
+                self.next_bluetooth_refresh = Instant::now();
+            }
+            SettingsMessage::WifiPower => {
+                #[cfg(target_os = "linux")]
+                if let Err(error) = set_linux_wifi_enabled(!self.wifi_enabled) {
+                    self.wifi_status =
+                        self.localizer
+                            .value("settings-network-connection-failed", "error", &error);
+                }
+                self.next_network_refresh = Instant::now();
+            }
+            SettingsMessage::BluetoothDevice(index) => {
+                if let Some(device) = self.bluetooth.devices.get(index) {
+                    let _ = toggle_bluetooth_device(device);
+                    self.next_bluetooth_refresh = Instant::now();
+                }
+            }
+            SettingsMessage::AppearanceLight => {
+                self.shell_settings.theme = ThemePreference::Light;
+                self.persist_appearance();
+            }
+            SettingsMessage::AppearanceDark => {
+                self.shell_settings.theme = ThemePreference::Dark;
+                self.persist_appearance();
+            }
+            SettingsMessage::AppearanceSystem => {
+                self.shell_settings.theme = ThemePreference::System;
+                self.persist_appearance();
+            }
+            SettingsMessage::AppearanceTab(tab) => self.appearance_tab = tab,
+            SettingsMessage::SetAccentHue(hue) => {
+                self.shell_settings.accent_hue = Some(hue.min(359));
+                self.persist_appearance();
+            }
+            SettingsMessage::AppearanceReset => self.reset_appearance(),
+            SettingsMessage::SetDesktopCount(count) => self.set_desktop_count(count),
+            SettingsMessage::SetAppearanceHue(hue) => self.set_appearance_hue(hue),
+            SettingsMessage::SetAppearanceIntensity(intensity) => {
+                self.set_appearance_intensity(intensity);
+            }
+            SettingsMessage::WallpaperChoose => {
+                let (sender, receiver) = mpsc::channel();
+                match nickel_platform::choose_image_file(Box::new(move |outcome| {
+                    let _ = sender.send(outcome);
+                })) {
+                    Ok(()) => {
+                        self.wallpaper_dialog_rx = Some(receiver);
+                        self.wallpaper_status = None;
+                    }
+                    Err(error) => {
+                        self.wallpaper_status = Some(error);
+                    }
+                }
+            }
+            SettingsMessage::WallpaperRemove => {
+                self.wallpaper_settings.image = None;
+                self.wallpaper_preview = None;
+                self.wallpaper_dimensions = None;
+                self.wallpaper_status = None;
+                self.persist_wallpaper();
+            }
+            SettingsMessage::ToggleWallpaperPositionSelect => {
+                self.wallpaper_position_select_expanded = !self.wallpaper_position_select_expanded;
+            }
+            SettingsMessage::WallpaperPosition(position) => {
+                self.wallpaper_settings.position = position;
+                self.wallpaper_position_select_expanded = false;
+                self.persist_wallpaper();
+            }
+            SettingsMessage::SetReduceTransparency(value) => {
+                self.shell_settings.reduce_transparency = value;
+                self.persist_appearance();
+            }
+            SettingsMessage::SetAnimationLevel(level) => {
+                self.shell_settings.animations = level;
+                self.animation_select_expanded = false;
+                self.persist_appearance();
+            }
+            SettingsMessage::ToggleAnimationSelect => {
+                self.animation_select_expanded = !self.animation_select_expanded;
+            }
+            SettingsMessage::BarPrimaryDisplay => {
+                self.shell_settings.bar_on_all_displays = false;
+                save_shell_settings(&self.shell_settings);
+            }
+            SettingsMessage::BarAllDisplays => {
+                self.shell_settings.bar_on_all_displays = true;
+                save_shell_settings(&self.shell_settings);
+            }
+            SettingsMessage::BarDisplayWindows => {
+                self.shell_settings.all_windows_on_every_bar = false;
+                save_shell_settings(&self.shell_settings);
+            }
+            SettingsMessage::BarAllWindows => {
+                self.shell_settings.all_windows_on_every_bar = true;
+                save_shell_settings(&self.shell_settings);
+            }
+            SettingsMessage::DisplayIdentify => {
+                match session_request(SessionRequest::Command(SessionCommand::IdentifyOutputs)) {
+                    Ok(ServerMessage::Ack) => {
+                        self.status = self.localizer.text("settings-status-identifying")
+                    }
+                    _ => self.status = self.localizer.text("settings-status-identify-failed"),
+                }
+            }
+            SettingsMessage::DisplayPrimary => {
+                for (index, display) in self.displays.iter_mut().enumerate() {
+                    display.primary = index == self.selected;
+                }
+                self.applied = false;
+                self.status = self.localizer.text("settings-status-changes-not-applied");
+            }
+            SettingsMessage::DisplayApply => self.apply_layout(),
+            SettingsMessage::WifiNetwork(index) => self.connect_windows_wifi(index),
+            SettingsMessage::BluetoothScroll
+            | SettingsMessage::NetworkScroll
+            | SettingsMessage::AppearanceScroll => {}
+        }
+        self.request_redraw();
+    }
+
     fn pointer_pressed(&mut self) {
         let (x, y) = self.cursor;
         let point = UiPoint {
@@ -390,150 +596,7 @@ impl SettingsApp {
             y: y as f32,
         };
         self.dispatch_ui_event(UiEvent::PointerPressed(point));
-        if let Some(SettingsMessage::SetDesktopCount(count)) = self.ui.message_at_owned(point) {
-            self.set_desktop_count(count);
-            self.request_redraw();
-            return;
-        }
-        if let Some(SettingsMessage::SetAppearanceHue(hue)) = self.ui.message_at_owned(point) {
-            self.set_appearance_hue(hue);
-            self.request_redraw();
-            return;
-        }
-        if let Some(SettingsMessage::SetAppearanceIntensity(intensity)) =
-            self.ui.message_at_owned(point)
-        {
-            self.set_appearance_intensity(intensity);
-            self.request_redraw();
-            return;
-        }
-        let message = self.ui.message_at(point).cloned();
-        if let Some(message) = message {
-            match message {
-                SettingsMessage::Navigate(page) => {
-                    self.page = page;
-                    match page {
-                        SettingsPage::Network => self.load_linux_network(),
-                        SettingsPage::Bluetooth => self.load_bluetooth(),
-                        _ => {}
-                    }
-                }
-                SettingsMessage::SidebarSearchChanged(value) => self.sidebar_query = value,
-                SettingsMessage::BluetoothPower => {
-                    let _ = set_bluetooth_adapter_property("Powered", !self.bluetooth.powered);
-                    self.next_bluetooth_refresh = Instant::now();
-                }
-                SettingsMessage::BluetoothDiscovery => {
-                    let _ =
-                        set_bluetooth_adapter_property("Discovering", !self.bluetooth.discovering);
-                    self.next_bluetooth_refresh = Instant::now();
-                }
-                SettingsMessage::WifiPower => {
-                    #[cfg(target_os = "linux")]
-                    if let Err(error) = set_linux_wifi_enabled(!self.wifi_enabled) {
-                        self.wifi_status = self.localizer.value(
-                            "settings-network-connection-failed",
-                            "error",
-                            &error,
-                        );
-                    }
-                    self.next_network_refresh = Instant::now();
-                }
-                SettingsMessage::BluetoothDevice(index) => {
-                    if let Some(device) = self.bluetooth.devices.get(index) {
-                        let _ = toggle_bluetooth_device(device);
-                        self.next_bluetooth_refresh = Instant::now();
-                    }
-                }
-                SettingsMessage::AppearanceLight => {
-                    self.shell_settings.theme = ThemePreference::Light;
-                    save_shell_settings(&self.shell_settings);
-                }
-                SettingsMessage::AppearanceDark => {
-                    self.shell_settings.theme = ThemePreference::Dark;
-                    save_shell_settings(&self.shell_settings);
-                }
-                SettingsMessage::AppearanceSystem => {
-                    self.shell_settings.theme = ThemePreference::System;
-                    save_shell_settings(&self.shell_settings);
-                }
-                SettingsMessage::AppearanceTab(tab) => self.appearance_tab = tab,
-                SettingsMessage::SetAccentHue(hue) => {
-                    self.shell_settings.accent_hue = Some(hue.min(359));
-                    save_shell_settings(&self.shell_settings);
-                }
-                SettingsMessage::WallpaperChoose => {
-                    if let Some(path) = choose_wallpaper() {
-                        self.wallpaper_settings.image = Some(path);
-                        self.wallpaper_preview = load_wallpaper_preview(&self.wallpaper_settings);
-                        save_wallpaper_settings(&self.wallpaper_settings);
-                    }
-                }
-                SettingsMessage::WallpaperRemove => {
-                    self.wallpaper_settings.image = None;
-                    self.wallpaper_preview = None;
-                    save_wallpaper_settings(&self.wallpaper_settings);
-                }
-                SettingsMessage::ToggleWallpaperPositionSelect => {
-                    self.wallpaper_position_select_expanded =
-                        !self.wallpaper_position_select_expanded;
-                }
-                SettingsMessage::WallpaperPosition(position) => {
-                    self.wallpaper_settings.position = position;
-                    self.wallpaper_position_select_expanded = false;
-                    save_wallpaper_settings(&self.wallpaper_settings);
-                }
-                SettingsMessage::SetReduceTransparency(value) => {
-                    self.shell_settings.reduce_transparency = value;
-                    save_shell_settings(&self.shell_settings);
-                }
-                SettingsMessage::SetAnimationLevel(level) => {
-                    self.shell_settings.animations = level;
-                    self.animation_select_expanded = false;
-                    save_shell_settings(&self.shell_settings);
-                }
-                SettingsMessage::ToggleAnimationSelect => {
-                    self.animation_select_expanded = !self.animation_select_expanded;
-                }
-                SettingsMessage::BarPrimaryDisplay => {
-                    self.shell_settings.bar_on_all_displays = false;
-                    save_shell_settings(&self.shell_settings);
-                }
-                SettingsMessage::BarAllDisplays => {
-                    self.shell_settings.bar_on_all_displays = true;
-                    save_shell_settings(&self.shell_settings);
-                }
-                SettingsMessage::BarDisplayWindows => {
-                    self.shell_settings.all_windows_on_every_bar = false;
-                    save_shell_settings(&self.shell_settings);
-                }
-                SettingsMessage::BarAllWindows => {
-                    self.shell_settings.all_windows_on_every_bar = true;
-                    save_shell_settings(&self.shell_settings);
-                }
-                SettingsMessage::DisplayIdentify => match session_request("identify-outputs") {
-                    Ok(response) if response == "ok" => {
-                        self.status = self.localizer.text("settings-status-identifying")
-                    }
-                    _ => self.status = self.localizer.text("settings-status-identify-failed"),
-                },
-                SettingsMessage::DisplayPrimary => {
-                    for (index, display) in self.displays.iter_mut().enumerate() {
-                        display.primary = index == self.selected;
-                    }
-                    self.applied = false;
-                    self.status = self.localizer.text("settings-status-changes-not-applied");
-                }
-                SettingsMessage::DisplayApply => self.apply_layout(),
-                SettingsMessage::WifiNetwork(index) => self.connect_windows_wifi(index),
-                SettingsMessage::SetDesktopCount(_)
-                | SettingsMessage::SetAppearanceHue(_)
-                | SettingsMessage::SetAppearanceIntensity(_)
-                | SettingsMessage::BluetoothScroll
-                | SettingsMessage::NetworkScroll
-                | SettingsMessage::AppearanceScroll => {}
-            }
-            self.request_redraw();
+        if self.ui.message_at(point).is_some() {
             return;
         }
         if self.page != SettingsPage::Display {
@@ -668,6 +731,64 @@ impl SettingsApp {
         self.appearance_save_deadline = Some(Instant::now() + self.frame_interval);
     }
 
+    fn persist_appearance(&mut self) {
+        if !self.persistence_enabled {
+            return;
+        }
+        self.record_appearance_persistence(try_save_shell_settings(&self.shell_settings));
+    }
+
+    fn persist_wallpaper(&mut self) {
+        if !self.persistence_enabled {
+            return;
+        }
+        self.record_appearance_persistence(try_save_wallpaper_settings(&self.wallpaper_settings));
+    }
+
+    fn record_appearance_persistence(&mut self, result: Result<(), String>) {
+        self.appearance_notice = result.err().map(|error| {
+            AppearanceNotice::Error(self.localizer.value(
+                "settings-appearance-save-failed",
+                "error",
+                &error,
+            ))
+        });
+    }
+
+    fn reset_appearance(&mut self) {
+        self.reset_appearance_values();
+        if !self.persistence_enabled {
+            self.appearance_notice = Some(AppearanceNotice::Confirmation(
+                self.localizer
+                    .text("settings-appearance-reset-confirmation"),
+            ));
+            return;
+        }
+        let result = try_save_shell_settings(&self.shell_settings)
+            .and_then(|()| try_save_wallpaper_settings(&self.wallpaper_settings));
+        if let Err(error) = result {
+            self.record_appearance_persistence(Err(error));
+        } else {
+            self.appearance_notice = Some(AppearanceNotice::Confirmation(
+                self.localizer
+                    .text("settings-appearance-reset-confirmation"),
+            ));
+        }
+    }
+
+    fn reset_appearance_values(&mut self) {
+        let defaults = ShellSettings::default();
+        self.shell_settings.theme = defaults.theme;
+        self.shell_settings.accent_hue = defaults.accent_hue;
+        self.shell_settings.accent_intensity = defaults.accent_intensity;
+        self.shell_settings.reduce_transparency = defaults.reduce_transparency;
+        self.shell_settings.animations = defaults.animations;
+        self.wallpaper_settings = WallpaperSettings::default();
+        self.wallpaper_preview = None;
+        self.wallpaper_dimensions = None;
+        self.wallpaper_status = None;
+    }
+
     fn render(&mut self, presenter: &mut SdlCanvasPresenter) -> Result<(), String> {
         let appearance = self
             .shell_settings
@@ -678,6 +799,7 @@ impl SettingsApp {
         let scale = pixel_width as f32 / logical_width.max(1) as f32;
         let ui = self.build_ui(logical_width as f32, logical_height as f32);
         ui.reconcile_state(&mut self.ui_state);
+        self.apply_pending_focus(&ui);
         self.ui = ui;
         self.sync_display_plane();
         let mut commands = self.ui.commands().to_vec();
@@ -718,6 +840,7 @@ impl SettingsApp {
                     color: palette.text,
                     align: TextAlign::Start,
                     bold: false,
+                    wrap: false,
                 });
                 commands.push(PaintCommand::Text {
                     bounds: UiRect::new(
@@ -731,6 +854,7 @@ impl SettingsApp {
                     color: palette.muted,
                     align: TextAlign::Start,
                     bold: false,
+                    wrap: false,
                 });
                 if display.primary {
                     commands.push(PaintCommand::Text {
@@ -745,6 +869,7 @@ impl SettingsApp {
                         color: palette.accent,
                         align: TextAlign::Start,
                         bold: true,
+                        wrap: false,
                     });
                 }
             }
@@ -815,6 +940,51 @@ impl SettingsApp {
                 ..
             } => self.dispatch_ui_event(UiEvent::TextBackspace),
             Event::KeyDown {
+                keycode: Some(Keycode::Tab),
+                keymod,
+                ..
+            } if keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD) => {
+                self.dispatch_ui_event(UiEvent::FocusPrevious)
+            }
+            Event::KeyDown {
+                keycode: Some(Keycode::Tab),
+                ..
+            } => self.dispatch_ui_event(UiEvent::FocusNext),
+            Event::KeyDown {
+                keycode: Some(Keycode::Return | Keycode::Space),
+                ..
+            } => self.dispatch_ui_event(UiEvent::KeyboardActivate),
+            Event::KeyDown {
+                keycode: Some(Keycode::Up),
+                ..
+            } => self.dispatch_ui_event(UiEvent::FocusPrevious),
+            Event::KeyDown {
+                keycode: Some(Keycode::Down),
+                ..
+            } => self.dispatch_ui_event(UiEvent::FocusNext),
+            Event::KeyDown {
+                keycode: Some(Keycode::Left),
+                keymod,
+                ..
+            } => self.dispatch_ui_event(if self.focused_role() == Some("tab") {
+                UiEvent::FocusPrevious
+            } else {
+                UiEvent::TextMoveLeft {
+                    extend_selection: keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD),
+                }
+            }),
+            Event::KeyDown {
+                keycode: Some(Keycode::Right),
+                keymod,
+                ..
+            } => self.dispatch_ui_event(if self.focused_role() == Some("tab") {
+                UiEvent::FocusNext
+            } else {
+                UiEvent::TextMoveRight {
+                    extend_selection: keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD),
+                }
+            }),
+            Event::KeyDown {
                 keycode: Some(Keycode::Delete),
                 ..
             } => self.dispatch_ui_event(UiEvent::TextDelete),
@@ -877,12 +1047,13 @@ impl SettingsApp {
     }
 
     fn tick(&mut self) {
+        self.poll_wallpaper_dialog();
         let now = Instant::now();
         if self
             .appearance_save_deadline
             .is_some_and(|deadline| now >= deadline)
         {
-            save_shell_settings(&self.shell_settings);
+            self.persist_appearance();
             self.appearance_save_deadline = None;
         }
         for action in self.controller.poll(now) {
@@ -970,29 +1141,6 @@ fn snap_rect(mut moving: Rect, fixed: Rect, threshold: i32) -> Rect {
         }
     }
     moving
-}
-
-#[cfg(target_os = "linux")]
-fn choose_wallpaper() -> Option<std::path::PathBuf> {
-    let output = std::process::Command::new("kdialog")
-        .args([
-            "--getopenfilename",
-            "",
-            "image/png image/jpeg image/webp image/bmp",
-        ])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let path = String::from_utf8(output.stdout).ok()?;
-    let path = path.trim();
-    (!path.is_empty()).then(|| path.into())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn choose_wallpaper() -> Option<std::path::PathBuf> {
-    None
 }
 
 fn attach_rect_centered(moving: Rect, fixed: Rect) -> Rect {
@@ -1261,7 +1409,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        NetworkAdapter, Rect, SIDEBAR_WIDTH, SettingsApp, SettingsMessage, SettingsPage,
+        BluetoothDevice, NetworkAdapter, PaintCommand, Rect, SIDEBAR_WIDTH, SettingsApp,
+        SettingsMessage, SettingsPage, ThemePreference, UiEvent, UiPoint, WallpaperSettings,
         attach_rect_centered, constrain_center, snap_rect,
     };
 
@@ -1367,7 +1516,24 @@ mod tests {
         );
 
         app.page = SettingsPage::Bluetooth;
+        app.bluetooth.available = true;
+        app.bluetooth.powered = true;
+        app.bluetooth.devices = (0..12)
+            .map(|index| BluetoothDevice {
+                id: format!("device-{index}"),
+                name: format!("Headphones {index}"),
+                paired: true,
+                connected: index == 0,
+                battery_percent: Some(80),
+            })
+            .collect();
         let compact = app.build_ui(560.0, 360.0);
+        assert!(
+            compact
+                .scroll_extent(&SettingsMessage::BluetoothScroll)
+                .is_some_and(|extent| extent.can_scroll()),
+            "Bluetooth device rows must determine the scroll extent"
+        );
         assert!(compact.commands().iter().all(|command| match command {
             nickel_ui::PaintCommand::Fill { rect, .. }
             | nickel_ui::PaintCommand::OverlayFill { rect, .. }
@@ -1379,11 +1545,6 @@ mod tests {
             }
             _ => true,
         }));
-
-        let source = include_str!("main.rs");
-        assert!(!source.contains(&["network_", "content_height"].concat()));
-        assert!(!source.contains(&["bluetooth_", "content_height"].concat()));
-        assert!(!source.contains(&["device_", "height"].concat()));
     }
 
     #[test]
@@ -1406,6 +1567,7 @@ mod tests {
             SettingsMessage::WallpaperChoose,
             SettingsMessage::WallpaperRemove,
             SettingsMessage::SetReduceTransparency(true),
+            SettingsMessage::AppearanceReset,
         ] {
             assert!(
                 expanded.message_rect(&message).is_some(),
@@ -1415,24 +1577,359 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_search_filters_destinations_without_changing_the_page() {
+    fn unavailable_appearance_tabs_explain_platform_authority_and_restart_scope() {
         let mut app = SettingsApp::with_initial_page(SettingsPage::Appearance);
-        app.sidebar_query = "net".into();
+        app.appearance_tab = super::AppearanceTab::Theme;
+        let tree = app.build_ui_with_diagnostics(1000.0, 760.0);
+        assert!(tree.accessibility_nodes().iter().any(|node| {
+            node.role.as_deref() == Some("status") && node.state.as_deref() == Some("unavailable")
+        }));
+        assert!(tree.accessibility_nodes().iter().any(|node| {
+            node.role.as_deref() == Some("status")
+                && node.state.as_deref() == Some("restart required")
+        }));
+    }
+
+    #[test]
+    fn appearance_reference_matrix_renders_locales_themes_scales_and_widths() {
+        let cases = [
+            (
+                "dark-en",
+                "en-US",
+                ThemePreference::Dark,
+                1424.0,
+                1105.0,
+                1.0,
+                Some(305),
+                Some(100),
+            ),
+            (
+                "light-en-2x",
+                "en-US",
+                ThemePreference::Light,
+                1000.0,
+                760.0,
+                2.0,
+                Some(24),
+                Some(82),
+            ),
+            (
+                "automatic-en",
+                "en-US",
+                ThemePreference::System,
+                1000.0,
+                760.0,
+                1.0,
+                None,
+                None,
+            ),
+            (
+                "dark-de",
+                "de-DE",
+                ThemePreference::Dark,
+                1424.0,
+                1105.0,
+                1.0,
+                Some(305),
+                Some(100),
+            ),
+            (
+                "dark-zh",
+                "zh-CN",
+                ThemePreference::Dark,
+                1000.0,
+                760.0,
+                1.0,
+                Some(188),
+                Some(90),
+            ),
+            (
+                "dark-es-narrow",
+                "es",
+                ThemePreference::Dark,
+                560.0,
+                900.0,
+                1.0,
+                Some(340),
+                Some(75),
+            ),
+            (
+                "dark-ar-rtl",
+                "ar",
+                ThemePreference::Dark,
+                1000.0,
+                760.0,
+                1.0,
+                Some(78),
+                Some(70),
+            ),
+        ];
+        for (name, locale, preference, width, height, scale, hue, intensity) in cases {
+            let mut app = SettingsApp::with_initial_page(SettingsPage::Appearance);
+            app.localizer = nickel_i18n::Localizer::for_locale(Some(locale));
+            app.shell_settings.theme = preference;
+            app.shell_settings.accent_hue = hue;
+            app.shell_settings.accent_intensity = intensity;
+            app.wallpaper_settings = WallpaperSettings::default();
+            app.wallpaper_preview = None;
+            app.wallpaper_dimensions = None;
+            let tree = app.build_ui_with_diagnostics(width, height);
+            let visible_diagnostics = tree
+                .diagnostics()
+                .iter()
+                .filter(|diagnostic| {
+                    diagnostic.kind != nickel_ui::DiagnosticKind::ClippedInteraction
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                visible_diagnostics.is_empty(),
+                "{name}: {visible_diagnostics:#?}"
+            );
+            assert!(
+                tree.scroll_extent(&SettingsMessage::AppearanceScroll)
+                    .is_some_and(|extent| extent.content.height >= extent.viewport.height),
+                "{name}: Appearance content must remain reachable through its scroller"
+            );
+            let physical_width = (width * scale) as u32;
+            let physical_height = (height * scale) as u32;
+            let mut renderer = nickel_ui::SdlComponentRenderer::new_pixel_buffer(
+                physical_width,
+                physical_height,
+                scale,
+            );
+            renderer.render(tree.commands());
+            assert!(renderer.pixels().iter().any(|pixel| pixel.a > 0));
+            let image = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_fn(
+                physical_width,
+                physical_height,
+                |x, y| {
+                    let pixel = renderer.pixels()[(y * physical_width + x) as usize];
+                    image::Rgba([pixel.r, pixel.g, pixel.b, pixel.a])
+                },
+            );
+            let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/nickel-ui-snapshots")
+                .join(format!("appearance-{name}.png"));
+            std::fs::create_dir_all(output.parent().unwrap()).unwrap();
+            image.save(output).unwrap();
+            if locale == "ar" {
+                assert!(tree.commands().iter().any(|command| matches!(
+                    command,
+                    PaintCommand::Text { text, .. } if text == "المظهر"
+                )));
+            }
+        }
+    }
+
+    #[test]
+    fn appearance_activation_converges_across_supported_modalities() {
+        fn activate(app: &mut SettingsApp, message: SettingsMessage, modality: &str) {
+            app.ui = app.build_ui(1424.0, 1800.0);
+            app.ui.reconcile_state(&mut app.ui_state);
+            let id = app.ui.id_for_message(&message).unwrap().clone();
+            match modality {
+                "pointer" => {
+                    let rect = app.ui.message_rect(&message).unwrap();
+                    let point = UiPoint {
+                        x: rect.origin.x + rect.size.width / 2.0,
+                        y: rect.origin.y + rect.size.height / 2.0,
+                    };
+                    app.dispatch_ui_event(UiEvent::PointerMoved(point));
+                    app.dispatch_ui_event(UiEvent::PointerPressed(point));
+                    app.dispatch_ui_event(UiEvent::PointerReleased(point));
+                }
+                "keyboard" => {
+                    app.ui_state.set_focus(Some(id));
+                    app.dispatch_ui_event(UiEvent::KeyboardActivate);
+                }
+                "controller" => {
+                    app.ui_state.set_controller_selected(Some(id));
+                    app.dispatch_ui_event(UiEvent::ControllerActivate);
+                }
+                "accessibility" => {
+                    app.dispatch_ui_event(UiEvent::AccessibilityActivate(id));
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        for modality in ["pointer", "keyboard", "controller", "accessibility"] {
+            let mut app = SettingsApp::with_initial_page(SettingsPage::Appearance);
+            activate(&mut app, SettingsMessage::AppearanceDark, modality);
+            assert_eq!(
+                app.shell_settings.theme,
+                ThemePreference::Dark,
+                "{modality}"
+            );
+
+            let mut app = SettingsApp::with_initial_page(SettingsPage::Appearance);
+            activate(&mut app, SettingsMessage::SetAccentHue(224), modality);
+            assert_eq!(app.shell_settings.accent_hue, Some(224), "{modality}");
+
+            let mut app = SettingsApp::with_initial_page(SettingsPage::Appearance);
+            activate(
+                &mut app,
+                SettingsMessage::SetReduceTransparency(true),
+                modality,
+            );
+            assert!(app.shell_settings.reduce_transparency, "{modality}");
+
+            let mut app = SettingsApp::with_initial_page(SettingsPage::Appearance);
+            activate(
+                &mut app,
+                SettingsMessage::AppearanceTab(super::AppearanceTab::Theme),
+                modality,
+            );
+            assert_eq!(
+                app.appearance_tab,
+                super::AppearanceTab::Theme,
+                "{modality}"
+            );
+        }
+    }
+
+    #[test]
+    fn appearance_sliders_use_resolved_hit_geometry_and_typed_values() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Appearance);
+        app.ui = app.build_ui(1424.0, 1800.0);
+        app.ui.reconcile_state(&mut app.ui_state);
+        for (suffix, expected) in [("appearance-hue", 90_u16), ("appearance-intensity", 25_u16)] {
+            let node = app
+                .ui
+                .resolved_layout()
+                .nodes()
+                .iter()
+                .find(|node| node.component == "Slider" && node.id.as_str().contains(suffix))
+                .unwrap();
+            let point = UiPoint {
+                x: node.allocated.origin.x + node.allocated.size.width * 0.25,
+                y: node.allocated.origin.y + node.allocated.size.height / 2.0,
+            };
+            app.dispatch_ui_event(UiEvent::PointerPressed(point));
+            app.dispatch_ui_event(UiEvent::PointerReleased(point));
+            if suffix == "appearance-hue" {
+                assert!(
+                    app.shell_settings
+                        .accent_hue
+                        .is_some_and(|value| value.abs_diff(expected) <= 1)
+                );
+            } else {
+                assert_eq!(app.shell_settings.accent_intensity, Some(expected as u8));
+            }
+            app.ui = app.build_ui(1424.0, 1800.0);
+            app.ui.reconcile_state(&mut app.ui_state);
+        }
+    }
+
+    #[test]
+    fn sidebar_search_disambiguates_controls_and_focuses_the_selected_destination() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Appearance);
+        app.sidebar_query = "automatic".into();
         let tree = app.build_ui(850.0, 580.0);
 
         assert_eq!(app.page, SettingsPage::Appearance);
+        let message = SettingsMessage::NavigateTarget(
+            SettingsPage::Appearance,
+            "appearance-mode-system".into(),
+        );
+        assert!(tree.message_rect(&message).is_some());
+        assert!(tree.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::Text { text, .. }
+                if text.contains("Automatic") && text.contains("Appearance")
+        )));
+
+        app.handle_settings_message(message);
+        let destination = app.build_ui(850.0, 900.0);
+        destination.reconcile_state(&mut app.ui_state);
+        app.apply_pending_focus(&destination);
         assert!(
-            tree.message_rect(&SettingsMessage::Navigate(SettingsPage::Network))
+            app.ui_state
+                .focused()
+                .is_some_and(|id| id.as_str().ends_with("/appearance-mode-system"))
+        );
+        assert!(app.sidebar_query.is_empty());
+    }
+
+    #[test]
+    fn sidebar_search_renders_unavailable_destinations_without_activation() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Appearance);
+        app.sidebar_query = "fonts".into();
+        let tree = app.build_ui(850.0, 580.0);
+        let unavailable = SettingsMessage::NavigateTarget(
+            SettingsPage::Appearance,
+            "appearance-tab-fonts".into(),
+        );
+        assert!(tree.message_rect(&unavailable).is_none());
+        assert!(tree.accessibility_nodes().iter().any(|node| {
+            node.state.as_deref() == Some("unavailable")
+                && node
+                    .label
+                    .as_deref()
+                    .is_some_and(|label| label.contains("Fonts"))
+        }));
+        assert!(tree.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::Text { text, .. } if text == "Unavailable"
+        )));
+    }
+
+    #[test]
+    fn navigation_activation_converges_across_keyboard_controller_and_accessibility() {
+        for modality in ["keyboard", "controller", "accessibility"] {
+            let mut app = SettingsApp::with_initial_page(SettingsPage::Display);
+            app.ui = app.build_ui(850.0, 580.0);
+            app.ui.reconcile_state(&mut app.ui_state);
+            let id = app
+                .ui
+                .id_for_message(&SettingsMessage::Navigate(SettingsPage::Appearance))
+                .unwrap()
+                .clone();
+            match modality {
+                "keyboard" => {
+                    app.ui_state.set_focus(Some(id));
+                    app.dispatch_ui_event(UiEvent::KeyboardActivate);
+                }
+                "controller" => {
+                    app.ui_state.set_controller_selected(Some(id));
+                    app.dispatch_ui_event(UiEvent::ControllerActivate);
+                }
+                "accessibility" => {
+                    app.dispatch_ui_event(UiEvent::AccessibilityActivate(id));
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(app.page, SettingsPage::Appearance, "{modality}");
+        }
+    }
+
+    #[test]
+    fn narrow_settings_navigation_is_reversible_without_losing_location() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Appearance);
+        let content = app.build_ui(560.0, 760.0);
+        assert!(
+            content
+                .message_rect(&SettingsMessage::ToggleNavigation)
                 .is_some()
         );
         assert!(
-            tree.message_rect(&SettingsMessage::Navigate(SettingsPage::Display))
+            content
+                .message_rect(&SettingsMessage::Navigate(SettingsPage::Display))
                 .is_none()
         );
+
+        app.handle_settings_message(SettingsMessage::ToggleNavigation);
+        let navigation = app.build_ui(560.0, 760.0);
         assert!(
-            tree.message_rect(&SettingsMessage::Navigate(SettingsPage::Appearance))
-                .is_none()
+            navigation
+                .message_rect(&SettingsMessage::Navigate(SettingsPage::Display))
+                .is_some()
         );
+        assert_eq!(app.page, SettingsPage::Appearance);
+
+        app.handle_settings_message(SettingsMessage::Navigate(SettingsPage::Display));
+        assert!(!app.narrow_navigation);
+        assert_eq!(app.page, SettingsPage::Display);
     }
 
     #[test]

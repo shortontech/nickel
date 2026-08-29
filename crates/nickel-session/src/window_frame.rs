@@ -1,9 +1,8 @@
 use crate::shell_layout::Geometry;
+#[cfg(feature = "backend-udev")]
+use smithay::backend::renderer::element::solid::SolidColorBuffer;
 use smithay::{
-    backend::{
-        allocator::Fourcc,
-        renderer::element::{memory::MemoryRenderBuffer, solid::SolidColorBuffer},
-    },
+    backend::{allocator::Fourcc, renderer::element::memory::MemoryRenderBuffer},
     utils::Transform,
 };
 use std::{
@@ -20,11 +19,13 @@ pub const RESTORE_GLYPH: char = '\u{f2d2}';
 pub const CLOSE_GLYPH: char = '\u{f2d3}';
 
 #[derive(Clone)]
+#[cfg(feature = "backend-udev")]
 pub struct ShadowLayer {
     pub buffer: SolidColorBuffer,
     pub offset: (i32, i32),
 }
 
+#[cfg(feature = "backend-udev")]
 pub fn shadow_layers(width: i32, height: i32) -> Vec<ShadowLayer> {
     type ShadowCache = HashMap<(i32, i32), Vec<ShadowLayer>>;
     static CACHE: OnceLock<Mutex<ShadowCache>> = OnceLock::new();

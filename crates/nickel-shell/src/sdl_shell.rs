@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 use std::time::Instant;
 
+use nickel_session_protocol::ShellRole as SessionShellRole;
 use nickel_ui::{DamageRegion, PaintCommand};
 use sdl3::event::{Event, WindowEvent};
 use sdl3::keyboard::{Keycode, Mod};
@@ -21,6 +22,7 @@ pub const PANEL_TITLE: &str = "Nickel Panel";
 pub const LAUNCHER_TITLE: &str = "Nickel Launcher";
 pub const CONTROL_CENTER_TITLE: &str = "Nickel Control Center";
 pub const NOTIFICATION_TITLE: &str = "Nickel Notification";
+pub const CODEX_PROJECT_MENU_TITLE: &str = "Nickel Codex Projects";
 pub const PANEL_HEIGHT: u32 = 56;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -33,7 +35,7 @@ pub enum SurfaceRole {
     Launcher,
     ControlCenter,
     Notification,
-    CodexHub,
+    CodexProjectMenu,
     CodexChat,
 }
 
@@ -204,7 +206,7 @@ impl SdlShell {
         self.create_surface(SurfaceRole::Launcher, 0, primary)?;
         self.create_surface(SurfaceRole::ControlCenter, 0, primary)?;
         self.create_surface(SurfaceRole::Notification, 0, primary)?;
-        self.create_surface(SurfaceRole::CodexHub, 0, primary)?;
+        self.create_surface(SurfaceRole::CodexProjectMenu, 0, primary)?;
         tracing::info!(
             elapsed_ms = self.started.elapsed().as_secs_f64() * 1_000.0,
             surface_count = self.surfaces.len(),
@@ -264,13 +266,25 @@ impl SdlShell {
         self.surfaces.get_mut(index)
     }
 
-    pub fn create_codex_chat_surface(&mut self, title: &str) -> Result<SurfaceId, String> {
+    pub fn create_codex_chat_surface(
+        &mut self,
+        title: &str,
+        application_id: &str,
+    ) -> Result<SurfaceId, String> {
         let geometry = require_displays(self.display_geometries()?)?[0];
+        let previous_app_id = sdl3::hint::get("SDL_APP_ID");
+        sdl3::hint::set("SDL_APP_ID", application_id);
         let mut builder =
             self.video
                 .window(title, 1120.min(geometry.width), 760.min(geometry.height));
         builder.position_centered().resizable().high_pixel_density();
-        let window = builder.build().map_err(|error| error.to_string())?;
+        let window = builder.build().map_err(|error| error.to_string());
+        if let Some(previous_app_id) = previous_app_id {
+            sdl3::hint::set("SDL_APP_ID", &previous_app_id);
+        } else {
+            sdl3::hint::set("SDL_APP_ID", "io.nickel.shell");
+        }
+        let window = window?;
         self.video.text_input().start(&window);
         let id = SurfaceId(window.id());
         let index = self.surfaces.len();
@@ -345,6 +359,11 @@ impl SdlShell {
             .is_some_and(|surface| surface.window_mut().hide())
     }
 
+    pub fn raise(&mut self, id: SurfaceId) -> bool {
+        self.surface_mut(id)
+            .is_some_and(|surface| surface.window_mut().raise())
+    }
+
     pub fn raise_role(&mut self, role: SurfaceRole) -> bool {
         let ids = self
             .surfaces
@@ -359,6 +378,13 @@ impl SdlShell {
             }
         }
         raised
+    }
+
+    pub fn start_text_input(&self, id: SurfaceId) -> bool {
+        self.surface(id).is_some_and(|surface| {
+            self.video.text_input().start(surface.window());
+            true
+        })
     }
 
     pub fn poll_events(&mut self) -> Vec<ShellEvent> {
@@ -378,8 +404,17 @@ impl SdlShell {
     }
 
     pub fn wait_event_timeout(&mut self, timeout: Duration) -> Option<ShellEvent> {
-        let event = self.events.wait_event_timeout(timeout)?;
-        self.translate_event(event)
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let event = self.events.wait_event_timeout(remaining)?;
+            if let Some(event) = self.translate_event(event) {
+                return Some(event);
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+        }
     }
 
     pub fn display_geometries(&self) -> Result<Vec<DisplayGeometry>, String> {
@@ -408,18 +443,29 @@ impl SdlShell {
         geometry: DisplayGeometry,
     ) -> Result<(), String> {
         let (title, x, y, width, height, hidden) = surface_geometry(role, geometry);
+        let session_role = match role {
+            SurfaceRole::Desktop => SessionShellRole::Desktop,
+            SurfaceRole::Panel => SessionShellRole::Panel,
+            SurfaceRole::Launcher => SessionShellRole::Launcher,
+            SurfaceRole::ControlCenter => SessionShellRole::ControlCenter,
+            SurfaceRole::Notification => SessionShellRole::Notification,
+            SurfaceRole::CodexProjectMenu => SessionShellRole::ProjectMenu,
+            SurfaceRole::CodexChat => unreachable!("chat surfaces are dynamic"),
+        };
+        let previous_app_id = sdl3::hint::get("SDL_APP_ID");
+        sdl3::hint::set("SDL_APP_ID", session_role.application_id());
         let mut builder = self.video.window(title, width, height);
         builder.position(x, y).high_pixel_density();
-        if role == SurfaceRole::CodexHub {
-            builder.resizable();
-        } else {
-            builder.borderless();
-        }
+        builder.borderless();
         if hidden {
             builder.hidden();
         }
-        let window = builder.build().map_err(|error| error.to_string())?;
-        if role == SurfaceRole::CodexHub {
+        let window = builder.build().map_err(|error| error.to_string());
+        if let Some(previous_app_id) = previous_app_id {
+            sdl3::hint::set("SDL_APP_ID", &previous_app_id);
+        }
+        let window = window?;
+        if role == SurfaceRole::CodexProjectMenu {
             self.video.text_input().start(&window);
         }
         if role == SurfaceRole::Launcher {
@@ -587,10 +633,10 @@ fn surface_geometry(
         SurfaceRole::Launcher => (
             LAUNCHER_TITLE,
             geometry.x + 18,
-            geometry.y + geometry.height.saturating_sub(632) as i32,
-            760.min(geometry.width),
-            560.min(geometry.height),
-            true,
+            geometry.y + geometry.height.saturating_sub(744) as i32,
+            920.min(geometry.width),
+            680.min(geometry.height.saturating_sub(PANEL_HEIGHT + 8)),
+            cfg!(not(target_os = "linux")),
         ),
         SurfaceRole::ControlCenter => (
             CONTROL_CENTER_TITLE,
@@ -608,12 +654,12 @@ fn surface_geometry(
             140.min(geometry.height),
             true,
         ),
-        SurfaceRole::CodexHub => (
-            "Codex",
-            geometry.x + (geometry.width.saturating_sub(900) / 2) as i32,
-            geometry.y + (geometry.height.saturating_sub(640) / 2) as i32,
-            900.min(geometry.width),
-            640.min(geometry.height),
+        SurfaceRole::CodexProjectMenu => (
+            CODEX_PROJECT_MENU_TITLE,
+            geometry.x + geometry.width.saturating_sub(464) as i32,
+            geometry.y + geometry.height.saturating_sub(476) as i32,
+            360.min(geometry.width),
+            420.min(geometry.height.saturating_sub(PANEL_HEIGHT)),
             true,
         ),
         SurfaceRole::CodexChat => unreachable!("chat surfaces are created dynamically"),

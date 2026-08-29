@@ -1,7 +1,20 @@
+use nickel_session_protocol::{
+    ClientEnvelope, Command as SessionCommand, Event as SessionEvent, Geometry as SessionGeometry,
+    Query as SessionQuery, Request as SessionRequest, SecureStorageState as SessionSecureStorage,
+    ServerEnvelope, ServerMessage, ShellRole as SessionShellRole,
+    WindowAction as SessionWindowAction, WindowId as SessionWindowId, decode as decode_session,
+    encode as encode_session,
+};
 use std::{
+    collections::HashMap,
     env,
+    hash::{DefaultHasher, Hash, Hasher},
     path::PathBuf,
-    sync::{Arc, Mutex, OnceLock, mpsc},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
     thread,
     time::Duration,
 };
@@ -98,10 +111,12 @@ pub fn update_panel_fullscreen_state() {}
 mod desktop_entries;
 
 const SESSION_CONTROL_ENV: &str = "NICKEL_SESSION_CONTROL";
+const SESSION_TOKEN_ENV: &str = "NICKEL_SESSION_TOKEN";
+static SESSION_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 const STATUS_NOTIFIER_WATCHER: &str = "org.kde.StatusNotifierWatcher";
 const STATUS_NOTIFIER_PATH: &str = "/StatusNotifierWatcher";
 const STATUS_NOTIFIER_INTERFACE: &str = "org.kde.StatusNotifierWatcher";
-const TRAY_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const TRAY_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const TRAY_RETRY_MAX: Duration = Duration::from_secs(60);
 const NOTIFICATION_SERVICE: &str = "org.freedesktop.Notifications";
 const NOTIFICATION_PATH: &str = "/org/freedesktop/Notifications";
@@ -350,6 +365,7 @@ fn tray_worker(items: Arc<Mutex<Vec<TrayItem>>>, actions: mpsc::Receiver<(String
     let mut watcher = None;
     let mut failures = 0_u32;
     let mut next_attempt = std::time::Instant::now();
+    let mut icon_cache = HashMap::new();
     loop {
         let now = std::time::Instant::now();
         if watcher.is_none() && now >= next_attempt {
@@ -393,7 +409,7 @@ fn tray_worker(items: Arc<Mutex<Vec<TrayItem>>>, actions: mpsc::Receiver<(String
             }
         }
         if let Some(proxy) = &watcher {
-            if let Some(snapshot) = read_tray_items(proxy) {
+            if let Some(snapshot) = read_tray_items(proxy, &mut icon_cache) {
                 if let Ok(mut current) = items.lock() {
                     *current = snapshot;
                 }
@@ -404,6 +420,7 @@ fn tray_worker(items: Arc<Mutex<Vec<TrayItem>>>, actions: mpsc::Receiver<(String
                 if let Ok(mut current) = items.lock() {
                     current.clear();
                 }
+                icon_cache.clear();
                 tracing::warn!(
                     "status-notifier watcher stopped responding; tray will reconnect in the background"
                 );
@@ -421,15 +438,31 @@ fn tray_retry_delay(failures: u32) -> Duration {
     Duration::from_secs(1_u64 << exponent).min(TRAY_RETRY_MAX)
 }
 
-fn read_tray_items(watcher: &zbus::blocking::Proxy<'_>) -> Option<Vec<TrayItem>> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum TrayIconKey {
+    Named(String),
+    Application(String, String),
+    Pixmap { width: i32, height: i32, hash: u64 },
+}
+
+struct CachedTrayIcon {
+    key: TrayIconKey,
+    icon: image::RgbaImage,
+}
+
+fn read_tray_items(
+    watcher: &zbus::blocking::Proxy<'_>,
+    icon_cache: &mut HashMap<String, CachedTrayIcon>,
+) -> Option<Vec<TrayItem>> {
     let ids = watcher
         .get_property::<Vec<String>>("RegisteredStatusNotifierItems")
         .ok()?;
-    Some(
-        ids.into_iter()
-            .filter_map(|id| read_tray_item(watcher.connection(), id))
-            .collect(),
-    )
+    let snapshot = ids
+        .into_iter()
+        .filter_map(|id| read_tray_item(watcher.connection(), id, icon_cache))
+        .collect::<Vec<_>>();
+    icon_cache.retain(|id, _| snapshot.iter().any(|item| item.id == *id));
+    Some(snapshot)
 }
 
 fn item_address(id: &str) -> (&str, &str) {
@@ -437,7 +470,11 @@ fn item_address(id: &str) -> (&str, &str) {
         .map_or((id, "/StatusNotifierItem"), |at| (&id[..at], &id[at..]))
 }
 
-fn read_tray_item(connection: &zbus::blocking::Connection, id: String) -> Option<TrayItem> {
+fn read_tray_item(
+    connection: &zbus::blocking::Connection,
+    id: String,
+    icon_cache: &mut HashMap<String, CachedTrayIcon>,
+) -> Option<TrayItem> {
     let (service, path) = item_address(&id);
     let proxy =
         zbus::blocking::Proxy::new(connection, service, path, "org.kde.StatusNotifierItem").ok()?;
@@ -449,21 +486,61 @@ fn read_tray_item(connection: &zbus::blocking::Connection, id: String) -> Option
         .map(|(_, _, title, _)| title)
         .unwrap_or_default();
     let icon_name = proxy.get_property::<String>("IconName").unwrap_or_default();
-    let icon = resolve_status_icon_name(&icon_name)
-        .or_else(|| resolve_status_application_icon(&title, &tooltip_title))
+    let named_key = TrayIconKey::Named(icon_name.clone());
+    let application_key = TrayIconKey::Application(title.clone(), tooltip_title.clone());
+    let icon = cached_tray_icon(icon_cache, &id, &named_key)
         .or_else(|| {
-            proxy
+            resolve_status_icon_name(&icon_name).inspect(|icon| {
+                cache_tray_icon(icon_cache, &id, named_key.clone(), icon.clone());
+            })
+        })
+        .or_else(|| cached_tray_icon(icon_cache, &id, &application_key))
+        .or_else(|| {
+            resolve_status_application_icon(&title, &tooltip_title).inspect(|icon| {
+                cache_tray_icon(icon_cache, &id, application_key.clone(), icon.clone());
+            })
+        })
+        .or_else(|| {
+            let pixmap = proxy
                 .get_property::<Vec<(i32, i32, Vec<u8>)>>("IconPixmap")
-                .ok()
-                .and_then(|pixmaps| {
-                    pixmaps
-                        .into_iter()
-                        .max_by_key(|(width, height, _)| width * height)
+                .ok()?
+                .into_iter()
+                .max_by_key(|(width, height, _)| width * height)?;
+            let mut hasher = DefaultHasher::new();
+            pixmap.hash(&mut hasher);
+            let key = TrayIconKey::Pixmap {
+                width: pixmap.0,
+                height: pixmap.1,
+                hash: hasher.finish(),
+            };
+            cached_tray_icon(icon_cache, &id, &key).or_else(|| {
+                pixmap_to_rgba(pixmap).inspect(|icon| {
+                    cache_tray_icon(icon_cache, &id, key, icon.clone());
                 })
-                .and_then(pixmap_to_rgba)
+            })
         })?;
     drop(proxy);
     Some(TrayItem { id, title, icon })
+}
+
+fn cached_tray_icon(
+    cache: &HashMap<String, CachedTrayIcon>,
+    id: &str,
+    key: &TrayIconKey,
+) -> Option<image::RgbaImage> {
+    cache
+        .get(id)
+        .filter(|cached| cached.key == *key)
+        .map(|cached| cached.icon.clone())
+}
+
+fn cache_tray_icon(
+    cache: &mut HashMap<String, CachedTrayIcon>,
+    id: &str,
+    key: TrayIconKey,
+    icon: image::RgbaImage,
+) {
+    cache.insert(id.to_owned(), CachedTrayIcon { key, icon });
 }
 
 fn resolve_status_icon_name(name: &str) -> Option<image::RgbaImage> {
@@ -528,76 +605,122 @@ pub fn applications() -> Vec<Application> {
     desktop_entries::load_applications()
 }
 
-pub fn secure_storage_state() -> super::SecureStorageState {
+fn session_request_on(
+    socket: &std::os::unix::net::UnixDatagram,
+    request: SessionRequest,
+) -> Option<ServerMessage> {
+    let server = env::var_os(SESSION_CONTROL_ENV)?;
+    let envelope = ClientEnvelope {
+        token: env::var(SESSION_TOKEN_ENV).ok()?,
+        request_id: SESSION_REQUEST_ID.fetch_add(1, Ordering::Relaxed),
+        request,
+    };
+    socket
+        .send_to(&encode_session(&envelope).ok()?, server)
+        .ok()?;
+    let mut response = vec![0_u8; nickel_session_protocol::MAX_FRAME_BYTES];
+    let length = socket.recv(&mut response).ok()?;
+    let response = decode_session::<ServerEnvelope>(&response[..length]).ok()?;
+    Some(response.message)
+}
+
+fn one_shot_session_request(request: SessionRequest) -> Option<ServerMessage> {
     use std::os::unix::net::UnixDatagram;
 
-    let Some(session) = env::var_os(SESSION_CONTROL_ENV) else {
-        return super::SecureStorageState::Unavailable;
-    };
-    let path = env::temp_dir().join(format!("nickel-{}-secure-storage.sock", std::process::id()));
+    let runtime = env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(env::temp_dir);
+    let path = runtime.join(format!(
+        "nickel-{}-{}.sock",
+        std::process::id(),
+        SESSION_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
+    ));
     let _ = std::fs::remove_file(&path);
     let result = (|| {
         let socket = UnixDatagram::bind(&path).ok()?;
         socket
-            .set_read_timeout(Some(Duration::from_millis(25)))
+            .set_read_timeout(Some(Duration::from_millis(250)))
             .ok()?;
-        socket.send_to(b"secure-storage-state", session).ok()?;
-        let mut response = [0_u8; 32];
-        let length = socket.recv(&mut response).ok()?;
-        Some(match &response[..length] {
-            b"starting" => super::SecureStorageState::Starting,
-            b"locked" => super::SecureStorageState::Locked,
-            b"prompt-required" => super::SecureStorageState::PromptRequired,
-            b"ready" => super::SecureStorageState::Ready,
-            _ => super::SecureStorageState::Unavailable,
-        })
+        session_request_on(&socket, request)
     })();
     let _ = std::fs::remove_file(path);
-    result.unwrap_or(super::SecureStorageState::Unavailable)
+    result
+}
+
+pub fn register_session_shell() -> bool {
+    matches!(
+        one_shot_session_request(SessionRequest::RegisterShell {
+            pid: std::process::id(),
+        }),
+        Some(ServerMessage::Snapshot(_))
+    )
+}
+
+pub fn secure_storage_state() -> super::SecureStorageState {
+    match one_shot_session_request(SessionRequest::Query(SessionQuery::SecureStorage)) {
+        Some(ServerMessage::SecureStorage { state }) => match state {
+            SessionSecureStorage::Starting => super::SecureStorageState::Starting,
+            SessionSecureStorage::Locked => super::SecureStorageState::Locked,
+            SessionSecureStorage::PromptRequired => super::SecureStorageState::PromptRequired,
+            SessionSecureStorage::Ready => super::SecureStorageState::Ready,
+            SessionSecureStorage::Unavailable => super::SecureStorageState::Unavailable,
+        },
+        _ => super::SecureStorageState::Unavailable,
+    }
 }
 
 pub fn request_secure_storage_retry() -> bool {
-    let Some(session) = env::var_os(SESSION_CONTROL_ENV) else {
-        return false;
-    };
-    std::os::unix::net::UnixDatagram::unbound()
-        .and_then(|socket| socket.send_to(b"retry-secure-storage", session))
-        .is_ok()
+    matches!(
+        one_shot_session_request(SessionRequest::Command(SessionCommand::RetrySecureStorage)),
+        Some(ServerMessage::Ack)
+    )
 }
 
 pub fn send_shell_command(command: ShellCommand) -> bool {
-    use std::os::unix::net::UnixDatagram;
-
-    let Some(path) = env::var_os(SESSION_CONTROL_ENV) else {
-        return false;
-    };
-    let command = shell_command_payload(command);
-    UnixDatagram::unbound()
-        .and_then(|socket| socket.send_to(command.as_bytes(), path))
-        .is_ok()
+    matches!(
+        one_shot_session_request(SessionRequest::Command(shell_command_payload(command))),
+        Some(ServerMessage::Ack)
+    )
 }
 
-fn shell_command_payload(command: ShellCommand) -> String {
+fn shell_command_payload(command: ShellCommand) -> SessionCommand {
     match command {
-        ShellCommand::Show => "show-launcher".to_owned(),
-        ShellCommand::Hide => "hide-launcher".to_owned(),
-        ShellCommand::LogOut => "logout".to_owned(),
-        ShellCommand::ShowContextMenu { x, width, height } => {
-            format!("show-context-menu\t{x}\t{width}\t{height}")
-        }
+        ShellCommand::Show => SessionCommand::SetLauncherVisible { visible: true },
+        ShellCommand::Hide => SessionCommand::SetLauncherVisible { visible: false },
+        ShellCommand::LogOut => SessionCommand::LogOut,
+        ShellCommand::ShowContextMenu { x, width, height } => SessionCommand::ShowOverlay {
+            role: SessionShellRole::ContextMenu,
+            geometry: SessionGeometry {
+                x,
+                y: 0,
+                width,
+                height,
+            },
+        },
         ShellCommand::ShowPreview {
             x, width, height, ..
-        } => {
-            format!("show-preview\t{x}\t{width}\t{height}")
-        }
-        ShellCommand::HideContextMenu => "hide-context-menu".to_owned(),
-        ShellCommand::HighlightWindow(window) => format!("highlight-window\t{}", window.0),
-        ShellCommand::ClearWindowHighlight => "clear-window-highlight".to_owned(),
-        ShellCommand::WindowAction { window, action } => match action {
-            WindowAction::Activate => format!("activate-window\t{}", window.0),
-            WindowAction::Close => format!("close-window\t{}", window.0),
-            WindowAction::Maximize => format!("maximize-window\t{}", window.0),
-            WindowAction::Minimize => format!("minimize-window\t{}", window.0),
+        } => SessionCommand::ShowOverlay {
+            role: SessionShellRole::Preview,
+            geometry: SessionGeometry {
+                x,
+                y: 0,
+                width,
+                height,
+            },
+        },
+        ShellCommand::HideContextMenu => SessionCommand::HideOverlay,
+        ShellCommand::HighlightWindow(window) => SessionCommand::HighlightWindow {
+            window: Some(SessionWindowId(window.0)),
+        },
+        ShellCommand::ClearWindowHighlight => SessionCommand::HighlightWindow { window: None },
+        ShellCommand::WindowAction { window, action } => SessionCommand::WindowAction {
+            window: SessionWindowId(window.0),
+            action: match action {
+                WindowAction::Activate => SessionWindowAction::Activate,
+                WindowAction::Close => SessionWindowAction::Close,
+                WindowAction::Maximize => SessionWindowAction::MaximizeRestore,
+                WindowAction::Minimize => SessionWindowAction::Minimize,
+            },
         },
     }
 }
@@ -624,37 +747,40 @@ impl WindowFeed {
 
     pub fn snapshot(&self, launcher: &Launcher) -> Option<Vec<OpenWindow>> {
         let socket = self.socket.as_ref()?;
-        socket
-            .send_to(b"list-windows", env::var_os(SESSION_CONTROL_ENV)?)
-            .ok()?;
-        let mut response = [0_u8; 16 * 1024];
-        let length = socket.recv(&mut response).ok()?;
-        let text = std::str::from_utf8(&response[..length]).ok()?;
+        let ServerMessage::Windows(windows) =
+            session_request_on(socket, SessionRequest::Query(SessionQuery::Windows))?
+        else {
+            return None;
+        };
         Some(
-            text.lines()
-                .filter_map(|line| parse_window(line, launcher))
+            windows
+                .into_iter()
+                .map(|window| OpenWindow {
+                    id: WindowId(window.id.0),
+                    application_id: resolve_application_id(&window.application_id, launcher),
+                    active: window.active,
+                    title: window.title,
+                })
                 .collect(),
         )
     }
 
     pub fn preview(&self, window: WindowId) -> Option<WindowPreview> {
         let socket = self.socket.as_ref()?;
-        socket
-            .send_to(
-                format!("get-preview\t{}", window.0).as_bytes(),
-                env::var_os(SESSION_CONTROL_ENV)?,
-            )
-            .ok()?;
-        let mut response = vec![0_u8; 256 * 144 * 4 + 12];
         for _ in 0..4 {
-            let length = socket.recv(&mut response).ok()?;
-            if length < 12 || u64::from_le_bytes(response[..8].try_into().ok()?) != window.0 {
-                continue;
+            if let Some(ServerMessage::Preview(preview)) = session_request_on(
+                socket,
+                SessionRequest::Query(SessionQuery::Preview {
+                    window: SessionWindowId(window.0),
+                }),
+            ) {
+                let image = image::RgbaImage::from_raw(
+                    u32::from(preview.width),
+                    u32::from(preview.height),
+                    preview.rgba,
+                )?;
+                return Some(WindowPreview { window, image });
             }
-            let width = u16::from_le_bytes([response[8], response[9]]) as u32;
-            let height = u16::from_le_bytes([response[10], response[11]]) as u32;
-            let image = image::RgbaImage::from_raw(width, height, response[12..length].to_vec())?;
-            return Some(WindowPreview { window, image });
         }
         None
     }
@@ -683,18 +809,45 @@ pub fn launcher_hotkey_receiver() -> mpsc::Receiver<GlobalShortcut> {
     let Ok(socket) = UnixDatagram::bind(&path) else {
         return receiver;
     };
-    if socket.send_to(b"subscribe-launcher", session).is_err() {
+    let envelope = ClientEnvelope {
+        token: match env::var(SESSION_TOKEN_ENV) {
+            Ok(token) => token,
+            Err(_) => return receiver,
+        },
+        request_id: SESSION_REQUEST_ID.fetch_add(1, Ordering::Relaxed),
+        request: SessionRequest::Subscribe,
+    };
+    if socket
+        .send_to(&encode_session(&envelope).unwrap_or_default(), session)
+        .is_err()
+    {
         let _ = std::fs::remove_file(path);
         return receiver;
     }
     thread::Builder::new()
         .name("nickel-launcher-events".into())
         .spawn(move || {
-            let mut event = [0_u8; 32];
+            let mut event = vec![0_u8; nickel_session_protocol::MAX_FRAME_BYTES];
             while let Ok(length) = socket.recv(&mut event) {
-                let shortcut = match &event[..length] {
-                    b"launcher-shown" => GlobalShortcut::ShowLauncher,
-                    b"launcher-hidden" => GlobalShortcut::HideLauncher,
+                let shortcut = match decode_session::<ServerEnvelope>(&event[..length])
+                    .ok()
+                    .map(|envelope| envelope.message)
+                {
+                    Some(ServerMessage::Event(SessionEvent::LauncherVisibility { visible }))
+                    | Some(ServerMessage::LauncherVisibility { visible }) => {
+                        if visible {
+                            GlobalShortcut::ShowLauncher
+                        } else {
+                            GlobalShortcut::HideLauncher
+                        }
+                    }
+                    Some(ServerMessage::Event(SessionEvent::Snapshot(snapshot))) => {
+                        if snapshot.launcher_visible {
+                            GlobalShortcut::ShowLauncher
+                        } else {
+                            GlobalShortcut::HideLauncher
+                        }
+                    }
                     _ => continue,
                 };
                 if sender.send(shortcut).is_err() {
@@ -752,26 +905,10 @@ fn parse_window(line: &str, launcher: &Launcher) -> Option<OpenWindow> {
     let title = fields.next().unwrap_or_default().to_owned();
     Some(OpenWindow {
         id,
-        application_id: codex_window_application_id(&title)
-            .or_else(|| resolve_application_id(native_app_id, launcher)),
+        application_id: resolve_application_id(native_app_id, launcher),
         active,
         title,
     })
-}
-
-fn codex_window_application_id(title: &str) -> Option<ApplicationId> {
-    if title == "Codex" {
-        return Some(ApplicationId::new("io.nickel.codex.hub"));
-    }
-    let project = title.strip_prefix("Codex — ")?;
-    let mut hash = 0xcbf29ce484222325_u64;
-    for byte in project.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    Some(ApplicationId::new(format!(
-        "io.nickel.codex.project.{hash:016x}"
-    )))
 }
 
 fn resolve_application_id(native_app_id: &str, launcher: &Launcher) -> Option<ApplicationId> {
@@ -797,8 +934,8 @@ mod tests {
     use crate::{launcher::Launcher, model::Application, platform::ShellCommand};
 
     use super::{
-        codex_window_application_id, notification_name_owned, parse_window, pixmap_to_rgba,
-        resolve_application_id, shell_command_payload, tray_retry_delay,
+        notification_name_owned, parse_window, pixmap_to_rgba, resolve_application_id,
+        shell_command_payload, tray_retry_delay,
     };
 
     #[test]
@@ -809,7 +946,10 @@ mod tests {
 
     #[test]
     fn logout_uses_the_session_control_protocol() {
-        assert_eq!(shell_command_payload(ShellCommand::LogOut), "logout");
+        assert_eq!(
+            shell_command_payload(ShellCommand::LogOut),
+            nickel_session_protocol::Command::LogOut
+        );
     }
 
     #[test]
@@ -834,24 +974,6 @@ mod tests {
             resolve_application_id("io.nickel.codex.project.0123", &launcher)
                 .map(|id| id.as_str().to_owned()),
             Some("io.nickel.codex.project.0123".into())
-        );
-    }
-
-    #[test]
-    fn codex_windows_group_by_full_project_directory() {
-        let first = codex_window_application_id("Codex — /work/one/sample")
-            .expect("project window identity");
-        let same = codex_window_application_id("Codex — /work/one/sample")
-            .expect("stable project window identity");
-        let other = codex_window_application_id("Codex — /work/two/sample")
-            .expect("different project window identity");
-        assert_eq!(first, same);
-        assert_ne!(first, other);
-        assert_eq!(
-            codex_window_application_id("Codex")
-                .expect("hub window identity")
-                .as_str(),
-            "io.nickel.codex.hub"
         );
     }
 

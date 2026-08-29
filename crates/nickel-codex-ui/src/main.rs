@@ -2,15 +2,15 @@
 
 use std::{env, path::PathBuf, process::ExitCode};
 
-use nickel_codex::{BackendChoice, CodexSettings, ReplayBackend};
+use nickel_codex::{BackendChoice, CodexSettings, ReplayBackend, ThreadId};
 use nickel_codex_ui::{BackendMode, ChatApplication, create_managed_workspace};
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         println!(
-            "nickel-codex-ui [--backend auto|installed|bundled|ABSOLUTE_PATH] [--cwd PATH]\n\
-             nickel-codex-ui --replay SCENARIO [--cwd PATH]"
+            "nickel-codex-ui [--backend auto|installed|bundled|ABSOLUTE_PATH] [--cwd PATH] [--thread THREAD_ID]\n\
+             nickel-codex-ui --replay SCENARIO [--cwd PATH] [--thread THREAD_ID]"
         );
         return ExitCode::SUCCESS;
     }
@@ -82,11 +82,20 @@ fn main() -> ExitCode {
         };
         BackendMode::Live { choice, cwd }
     };
-    match nickel_ui::run(ChatApplication::with_settings(
-        mode,
-        settings,
-        Some(settings_path),
-    )) {
+    let project_root = match &mode {
+        BackendMode::Live { cwd, .. } | BackendMode::Replay { cwd, .. } => cwd.clone(),
+        BackendMode::Remote { host } => PathBuf::from(&host.default_cwd),
+    };
+    let mut application = ChatApplication::with_settings(mode, settings, Some(settings_path))
+        .as_shell_chat(&project_root);
+    application.use_project_root(project_root);
+    if let Some(thread) = option(&args, "--thread")
+        && let Err(error) = application.resume_thread(ThreadId(thread.into()))
+    {
+        eprintln!("cannot resume Codex thread: {error}");
+        return ExitCode::from(2);
+    }
+    match nickel_ui::run(application) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("Nickel Codex UI failed: {error}");

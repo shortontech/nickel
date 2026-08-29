@@ -62,10 +62,16 @@ pub enum BackendMode {
 #[derive(Clone, Debug)]
 pub enum ControllerCommand {
     Refresh,
+    LoadThreads,
     NewChat,
     NewChatIn(PathBuf, Option<String>),
     SelectThread(ThreadId),
-    Send(String),
+    Send {
+        text: String,
+        model: Option<String>,
+        reasoning_effort: Option<String>,
+    },
+    Shell(String),
     Interrupt,
     CommandApproval {
         request_id: ServerRequestId,
@@ -108,15 +114,39 @@ pub struct ChatController {
     worker: Option<thread::JoinHandle<()>>,
 }
 
+#[derive(Clone, Copy)]
+enum SnapshotScope {
+    Full,
+    ProjectsOnly,
+    NewProjectChat,
+}
+
 impl ChatController {
     pub fn spawn(mode: BackendMode) -> Self {
-        Self::spawn_generation(mode, 1)
+        Self::spawn_generation_with_scope(mode, 1, SnapshotScope::Full)
     }
 
     pub fn spawn_generation(mode: BackendMode, generation: u64) -> Self {
+        Self::spawn_generation_with_scope(mode, generation, SnapshotScope::Full)
+    }
+
+    pub fn spawn_project_menu(mode: BackendMode, generation: u64) -> Self {
+        Self::spawn_generation_with_scope(mode, generation, SnapshotScope::ProjectsOnly)
+    }
+
+    pub fn spawn_project_chat(mode: BackendMode, generation: u64) -> Self {
+        Self::spawn_generation_with_scope(mode, generation, SnapshotScope::NewProjectChat)
+    }
+
+    fn spawn_generation_with_scope(
+        mode: BackendMode,
+        generation: u64,
+        scope: SnapshotScope,
+    ) -> Self {
         let (command_tx, command_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
-        let worker = thread::spawn(move || run_worker(generation, mode, command_rx, event_tx));
+        let worker =
+            thread::spawn(move || run_worker(generation, mode, scope, command_rx, event_tx));
         Self {
             generation,
             commands: command_tx,
@@ -155,6 +185,7 @@ impl Drop for ChatController {
 fn run_worker(
     generation: u64,
     mode: BackendMode,
+    scope: SnapshotScope,
     commands: Receiver<ControllerCommand>,
     events: Sender<(u64, ControllerEvent)>,
 ) {
@@ -232,7 +263,12 @@ fn run_worker(
             }
         };
     let protocol_events = backend.subscribe();
-    if !send(snapshot(&*backend, provenance.clone())) {
+    let current_snapshot = || match scope {
+        SnapshotScope::Full => snapshot(&*backend, provenance.clone()),
+        SnapshotScope::ProjectsOnly => project_snapshot(&*backend, provenance.clone()),
+        SnapshotScope::NewProjectChat => new_project_chat_snapshot(&*backend, provenance.clone()),
+    };
+    if !send(current_snapshot()) {
         return;
     }
     let mut selected_thread = None;
@@ -259,7 +295,10 @@ fn run_worker(
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
         };
         let result = match command {
-            ControllerCommand::Refresh => send(snapshot(&*backend, provenance.clone()))
+            ControllerCommand::Refresh => send(current_snapshot())
+                .then_some(())
+                .ok_or_else(|| "UI disconnected".to_owned()),
+            ControllerCommand::LoadThreads => send(snapshot(&*backend, provenance.clone()))
                 .then_some(())
                 .ok_or_else(|| "UI disconnected".to_owned()),
             ControllerCommand::NewChat => next_new_thread_cwd(remote, &cwd).map(|workspace| {
@@ -274,21 +313,34 @@ fn run_worker(
                 active_turn = None;
                 Ok(())
             }
-            ControllerCommand::SelectThread(id) => backend
-                .resume_thread(id)
-                .map(|thread| {
-                    selected_thread = Some(thread.id.clone());
-                    let _ = send(ControllerEvent::ThreadSelected(thread));
-                })
-                .map_err(|error| error.to_string()),
-            ControllerCommand::Send(text) => {
+            ControllerCommand::SelectThread(id) => {
+                match verify_thread_is_resumable(&*backend, &id)
+                    .and_then(|()| backend.resume_thread(id))
+                {
+                    Ok(thread) => {
+                        selected_thread = Some(thread.id.clone());
+                        let _ = send(ControllerEvent::ThreadSelected(thread));
+                    }
+                    Err(error) => {
+                        let _ = send(ControllerEvent::OperationFailed(error.to_string()));
+                        let _ = send(snapshot(&*backend, provenance.clone()));
+                    }
+                }
+                Ok(())
+            }
+            ControllerCommand::Send {
+                text,
+                model,
+                reasoning_effort,
+            } => {
                 let thread = match selected_thread.clone() {
                     Some(id) => Ok(id),
                     None => backend
                         .start_thread(StartThread {
                             cwd: new_thread_cwd.clone(),
-                            model: None,
+                            model: model.clone(),
                             project_id: new_thread_project_id.clone(),
+                            reasoning_effort: reasoning_effort.clone(),
                         })
                         .map(|thread| {
                             selected_thread = Some(thread.id.clone());
@@ -297,8 +349,35 @@ fn run_worker(
                         }),
                 };
                 thread
-                    .and_then(|thread_id| backend.start_turn(StartTurn { thread_id, text }))
+                    .and_then(|thread_id| {
+                        backend.start_turn(StartTurn {
+                            thread_id,
+                            text,
+                            model,
+                            reasoning_effort,
+                        })
+                    })
                     .map(|turn| active_turn = Some(turn.id))
+                    .map_err(|error| error.to_string())
+            }
+            ControllerCommand::Shell(command) => {
+                let thread = match selected_thread.clone() {
+                    Some(id) => Ok(id),
+                    None => backend
+                        .start_thread(StartThread {
+                            cwd: new_thread_cwd.clone(),
+                            model: None,
+                            project_id: new_thread_project_id.clone(),
+                            reasoning_effort: None,
+                        })
+                        .map(|thread| {
+                            selected_thread = Some(thread.id.clone());
+                            let _ = send(ControllerEvent::ThreadCreated(thread.clone()));
+                            thread.id
+                        }),
+                };
+                thread
+                    .and_then(|thread_id| backend.shell_command(thread_id, command))
                     .map_err(|error| error.to_string())
             }
             ControllerCommand::Interrupt => match (selected_thread.clone(), active_turn.clone()) {
@@ -338,6 +417,26 @@ fn run_worker(
         {
             return;
         }
+    }
+}
+
+fn verify_thread_is_resumable(
+    backend: &dyn CodexBackend,
+    id: &ThreadId,
+) -> Result<(), nickel_codex::CodexError> {
+    let page = list_threads(backend)?;
+    let status = page.runtime.get(id).map(|runtime| &runtime.status);
+    if matches!(
+        status,
+        Some(nickel_codex::ThreadRuntimeStatus::Idle)
+            | Some(nickel_codex::ThreadRuntimeStatus::NotLoaded)
+    ) {
+        Ok(())
+    } else {
+        Err(nickel_codex::CodexError::Unavailable(format!(
+            "thread {} is not available for a writable resume",
+            id.0
+        )))
     }
 }
 
@@ -397,6 +496,91 @@ fn snapshot(backend: &dyn CodexBackend, provenance: String) -> ControllerEvent {
             thread_error,
         },
         Err(error) => ControllerEvent::Failure(error.to_string()),
+    }
+}
+
+fn project_snapshot(backend: &dyn CodexBackend, provenance: String) -> ControllerEvent {
+    match list_projects(backend) {
+        Ok(mut projects) => {
+            match backend.list_threads(ThreadPage {
+                cursor: None,
+                limit: Some(100),
+            }) {
+                Ok(page) => {
+                    sort_projects_by_recent_threads(&mut projects, &page.threads, &page.runtime);
+                    ControllerEvent::Ready {
+                        provenance,
+                        account: AccountState::default(),
+                        models: Vec::new(),
+                        projects,
+                        threads: page.threads,
+                        runtime: page.runtime,
+                        thread_error: None,
+                    }
+                }
+                Err(error) => ControllerEvent::Ready {
+                    provenance,
+                    account: AccountState::default(),
+                    models: Vec::new(),
+                    projects,
+                    threads: Vec::new(),
+                    runtime: HashMap::new(),
+                    thread_error: Some(error.to_string()),
+                },
+            }
+        }
+        Err(error) => ControllerEvent::Failure(error.to_string()),
+    }
+}
+
+fn sort_projects_by_recent_threads(
+    projects: &mut [Project],
+    threads: &[Thread],
+    runtime: &HashMap<ThreadId, nickel_codex::ThreadRuntime>,
+) {
+    let mut recency = HashMap::<String, i64>::new();
+    for thread in threads {
+        let Some(last_used_at) = thread.last_used_at else {
+            continue;
+        };
+        let project = runtime
+            .get(&thread.id)
+            .and_then(|runtime| runtime.project_id.as_deref())
+            .and_then(|project_id| projects.iter().find(|project| project.id == project_id))
+            .or_else(|| {
+                thread.cwd.as_ref().and_then(|cwd| {
+                    projects.iter().find(|project| {
+                        project
+                            .roots
+                            .iter()
+                            .any(|root| cwd == root || cwd.starts_with(root))
+                    })
+                })
+            });
+        if let Some(project) = project {
+            recency
+                .entry(project.id.clone())
+                .and_modify(|current| *current = (*current).max(last_used_at))
+                .or_insert(last_used_at);
+        }
+    }
+    projects.sort_by(|left, right| recency.get(&right.id).cmp(&recency.get(&left.id)));
+}
+
+fn new_project_chat_snapshot(backend: &dyn CodexBackend, provenance: String) -> ControllerEvent {
+    match (backend.account(), backend.models(), list_projects(backend)) {
+        (Ok(account), Ok(models), Ok(projects)) => ControllerEvent::Ready {
+            provenance,
+            account,
+            models,
+            projects,
+            threads: Vec::new(),
+            runtime: HashMap::new(),
+            thread_error: None,
+        },
+        (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => {
+            ControllerEvent::Failure(error.to_string())
+        }
     }
 }
 
@@ -492,9 +676,34 @@ fn list_projects(backend: &dyn CodexBackend) -> Result<Vec<Project>, nickel_code
 
 #[cfg(test)]
 mod tests {
-    use nickel_codex::{Project, ReplayBackend};
+    use std::{collections::HashMap, path::PathBuf};
 
-    use super::{ControllerEvent, create_managed_workspace_at, next_new_thread_cwd, snapshot};
+    use nickel_codex::{Project, ReplayBackend, Thread, ThreadId, ThreadRuntime};
+
+    use super::{
+        ControllerEvent, create_managed_workspace_at, next_new_thread_cwd, project_snapshot,
+        snapshot, sort_projects_by_recent_threads, verify_thread_is_resumable,
+    };
+
+    fn project(id: &str, root: &str) -> Project {
+        Project {
+            id: id.into(),
+            name: id.into(),
+            roots: vec![PathBuf::from(root)],
+        }
+    }
+
+    fn thread(id: &str, cwd: &str, last_used_at: i64) -> Thread {
+        Thread {
+            id: ThreadId(id.into()),
+            title: None,
+            cwd: Some(PathBuf::from(cwd)),
+            last_used_at: Some(last_used_at),
+            turns: Vec::new(),
+            model: None,
+            reasoning_effort: None,
+        }
+    }
 
     #[test]
     fn managed_workspaces_are_dated_unique_children_of_documents() {
@@ -565,6 +774,127 @@ mod tests {
         assert_eq!(
             thread_error.as_deref(),
             Some("Codex protocol error: duplicate thread id")
+        );
+    }
+
+    #[test]
+    fn project_menu_sorts_explicit_and_historical_threads_by_recency() {
+        let mut projects = vec![
+            project("older", "/projects/older"),
+            project("newer", "/projects/newer"),
+            project("middle", "/projects/middle"),
+        ];
+        let threads = vec![
+            thread("explicit", "/elsewhere", 300),
+            thread("cwd", "/projects/middle/subdirectory", 200),
+            thread("old", "/projects/older", 100),
+        ];
+        let runtime = HashMap::from([(
+            ThreadId("explicit".into()),
+            ThreadRuntime {
+                project_id: Some("newer".into()),
+                ..ThreadRuntime::default()
+            },
+        )]);
+
+        sort_projects_by_recent_threads(&mut projects, &threads, &runtime);
+
+        assert_eq!(
+            projects
+                .iter()
+                .map(|project| project.id.as_str())
+                .collect::<Vec<_>>(),
+            ["newer", "middle", "older"]
+        );
+    }
+
+    #[test]
+    fn projects_without_recency_keep_their_canonical_order() {
+        let mut projects = vec![
+            project("first", "/projects/first"),
+            project("second", "/projects/second"),
+            project("third", "/projects/third"),
+        ];
+
+        sort_projects_by_recent_threads(&mut projects, &[], &HashMap::new());
+
+        assert_eq!(
+            projects
+                .iter()
+                .map(|project| project.id.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "second", "third"]
+        );
+    }
+
+    #[test]
+    fn project_menu_ignores_thread_failure() {
+        let backend = ReplayBackend::from_json(
+            r#"{
+                "name":"project-menu-thread-error",
+                "projects":[{"id":"nickel","name":"Nickel","roots":["/projects/nickel"]}],
+                "thread_error":"duplicate thread id"
+            }"#,
+        )
+        .unwrap();
+
+        let ControllerEvent::Ready { projects, .. } =
+            project_snapshot(&backend, "Replay fixture".into())
+        else {
+            panic!("thread failure must not disconnect the project menu");
+        };
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].id, "nickel");
+        assert_eq!(projects[0].name, "Nickel");
+        assert_eq!(projects[0].roots, [PathBuf::from("/projects/nickel")]);
+    }
+
+    #[test]
+    fn writable_resume_rechecks_and_accepts_only_idle_or_not_loaded() {
+        for (status, expected) in [
+            ("Idle", true),
+            ("NotLoaded", true),
+            ("Active", false),
+            ("SystemError", false),
+            ("Unknown", false),
+        ] {
+            let backend = ReplayBackend::from_json(&format!(
+                r#"{{
+                    "name":"{status}",
+                    "threads":[{{"id":"thread","title":null,"cwd":"/work"}}],
+                    "thread_runtime":{{"thread":{{
+                        "project_id":null,
+                        "status":"{status}",
+                        "active_flags":[],
+                        "can_accept_direct_input":null
+                    }}}}
+                }}"#
+            ))
+            .unwrap();
+            let result = verify_thread_is_resumable(&backend, &ThreadId("thread".into()));
+            if expected {
+                assert!(result.is_ok(), "status {status} should be resumable");
+            } else {
+                assert_eq!(
+                    result.unwrap_err().to_string(),
+                    "Codex unavailable: thread thread is not available for a writable resume",
+                    "status {status} must explain why resume is refused"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn writable_resume_rejects_missing_availability() {
+        let backend = ReplayBackend::from_json(
+            r#"{"name":"missing","threads":[{"id":"thread","title":null,"cwd":"/work"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            verify_thread_is_resumable(&backend, &ThreadId("thread".into()))
+                .unwrap_err()
+                .to_string(),
+            "Codex unavailable: thread thread is not available for a writable resume"
         );
     }
 }

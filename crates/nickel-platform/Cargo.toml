@@ -8,12 +8,16 @@ rust-version.workspace = true
 [dependencies]
 image.workspace = true
 nickel-core = { path = "../nickel-core" }
+sdl3.workspace = true
 tracing.workspace = true
 winit.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 freedesktop-icons.workspace = true
 resvg.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { workspace = true, features = [

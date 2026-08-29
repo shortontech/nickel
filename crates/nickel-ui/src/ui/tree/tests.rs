@@ -31,6 +31,46 @@ fn image_presentations_resolve_deterministic_bounds_and_alignment() {
             .bounds(viewport, Size::new(40.0, 20.0)),
         Rect::new(170.0, 20.0, 40.0, 20.0)
     );
+    assert_eq!(
+        ImagePresentation::new(ImageFit::Span).bounds(viewport, source),
+        ImagePresentation::new(ImageFit::Cover).bounds(viewport, source)
+    );
+    assert_eq!(
+        ImagePresentation::new(ImageFit::Tile).bounds(viewport, Size::new(40.0, 20.0)),
+        Rect::new(90.0, 60.0, 40.0, 20.0)
+    );
+}
+
+#[test]
+fn tile_repeats_within_the_real_clip_and_high_density_is_renderer_owned() {
+    let source = Arc::new(RgbaImage::new(20, 20));
+    let two_x = Arc::new(RgbaImage::new(40, 40));
+    let tree = UiTree::<TestMessage>::layout(
+        Image::new(9, source.clone())
+            .high_density(two_x.clone())
+            .fit(ImageFit::Tile)
+            .width(50.0)
+            .height(50.0),
+        Rect::new(0.0, 0.0, 50.0, 50.0),
+    );
+    let tiles = tree
+        .commands()
+        .iter()
+        .filter(|command| matches!(command, PaintCommand::Image { id: 9, .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(tiles.len(), 9);
+    assert!(tiles.iter().all(|command| matches!(
+        command,
+        PaintCommand::Image { image, high_density: Some(high_density), .. }
+            if Arc::ptr_eq(image, &source) && Arc::ptr_eq(high_density, &two_x)
+    )));
+    assert!(
+        matches!(tree.commands().first(), Some(PaintCommand::PushClip(rect)) if *rect == Rect::new(0.0, 0.0, 50.0, 50.0))
+    );
+    assert!(matches!(
+        tree.commands().last(),
+        Some(PaintCommand::PopClip)
+    ));
 }
 
 #[test]
@@ -879,6 +919,30 @@ fn pointer_keyboard_controller_and_accessibility_share_typed_activation() {
         tree.handle_event(&mut state, UiEvent::AccessibilityActivate(id))
             .messages,
         vec![TestMessage::Option(7)]
+    );
+
+    let accessibility_id = tree
+        .id_for_message(&TestMessage::Option(7))
+        .unwrap()
+        .clone();
+    state.set_focus(None);
+    assert_eq!(
+        tree.handle_event(
+            &mut state,
+            UiEvent::AccessibilityFocus(accessibility_id.clone())
+        )
+        .invalidation,
+        Invalidation::Paint
+    );
+    assert_eq!(state.focused(), Some(&accessibility_id));
+    let mut focused_tree = tree.clone();
+    focused_tree.apply_interaction_state(&state);
+    assert!(
+        focused_tree
+            .resolved_layout()
+            .nodes
+            .iter()
+            .any(|node| node.id == accessibility_id && node.interaction.focused)
     );
 
     let controller_tree = || {

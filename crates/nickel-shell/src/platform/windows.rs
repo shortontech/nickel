@@ -2638,6 +2638,10 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
     }
 }
 
+pub fn register_session_shell() -> bool {
+    true
+}
+
 fn should_restore_on_activation(iconic: bool, covers_monitor: bool) -> bool {
     iconic && !covers_monitor
 }

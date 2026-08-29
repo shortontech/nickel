@@ -42,6 +42,57 @@ the native window, event and redraw loops, presentation, and the per-window `UiS
 application owns only domain state, typed messages, `update`, and `view`. See
 `examples/standalone.rs` for the complete counter application.
 
+## Semantic visual system
+
+`SemanticTheme` is the product-neutral visual contract. Applications supply light and dark
+`SemanticColors`; `ThemePreferences::resolve` combines the stored appearance with platform and
+accessibility preferences, and `SemanticTheme::resolve` produces typed surface, border, text,
+accent, spacing, radius, sizing, typography, and motion roles. High contrast strengthens borders,
+reduced transparency resolves opaque structural surfaces, and reduced motion removes durations
+without changing hierarchy.
+
+Use `Surface`, `Button::semantic`, `RadioButton::semantic`, `SelectionIndicator`, and `Switch`
+instead of restating palette values. Their ordinary, hover, pressed, keyboard-focus, controller-focus,
+selected, unavailable, and disabled presentations flow through the same transient-state and paint
+path as their typed actions. `Switch::with_state` represents mixed or disabled states without
+pretending they can activate.
+
+`Icon` treats supplied artwork as an alpha mask, applies a semantic tint, and requires the caller to
+choose accessible labeling with `label` or exclusion with `decorative`. Application identity artwork
+can continue to use `Image` without semantic recoloring. Button labels remain single-line by default;
+call `max_lines` when wrapping is intentional.
+
+## Settings composition
+
+`SettingsShell` combines independent navigation and content viewports. Use
+`SettingsShell::responsive` with `SettingsNarrowPane` when a narrow application needs a reversible
+navigation page; the owning application retains the selected destination and pane state. Locale
+direction can be passed to the directional constructor without reversing numerals or artwork.
+
+`SettingsSection`, `SettingsCard`, `SettingsListCard`, `SettingsRow`, `SliderField`, `SelectField`,
+`FieldGroup`, and `InlineButtonGroup` provide the shared hierarchy and form grammar. A row is not
+interactive by default; call `activate` only when activating the full row is identical to its
+trailing control. `SettingsStatus` exposes unavailable, validation, restart-required, and error
+states both visually and to accessibility adapters.
+
+`SettingsSearchEntry` stores localized page, section, and control labels plus a stable target.
+`search_settings` returns deterministic relevance order, while `disambiguated_label` ensures that
+identically named controls retain page and section context. Tabs expose their selected state and
+controlled panel identity through the backend-neutral accessibility record.
+
+## Start Menu composition
+
+`StartMenuShell` provides a bounded wide two-pane layout and a reversible single-pane narrow layout;
+the owning application chooses the active narrow pane. `SectionHeader`, `ShortcutRow`,
+`ProjectStatusRow`, `AccountSummaryRow`, `SessionActionRow`, `LauncherSearchField`, and
+`CompactIconTile` supply the product-neutral hierarchy used by desktop launchers without owning
+application, project, account, or session policy.
+
+Use `ReadingDirection` for semantic pane, leading/trailing, and chevron mirroring. Structural icons
+belong in the row's fixed optical slot, while application artwork remains caller-owned. Every
+actionable row emits the same typed message through pointer, keyboard, controller, and accessibility
+activation; unavailable or disabled rows keep their textual state but expose no action.
+
 Reusable components are ordinary typed functions. `#[component]` makes their named properties
 available to `ui!`, rejects unknown, duplicate, and missing properties at the invocation, permits
 property reordering, and treats `Option<T>` parameters as optional properties defaulting to

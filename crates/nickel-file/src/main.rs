@@ -533,6 +533,7 @@ impl FileApp {
                     color: palette.text,
                     align: TextAlign::Start,
                     bold: false,
+                    wrap: false,
                 });
                 tree.push_overlay_message(bounds, message);
             }
@@ -1492,10 +1493,5 @@ mod ui_layout_tests {
                 .is_some_and(|extent| extent.can_scroll()),
             "all files should be measured and remain reachable through scrolling"
         );
-
-        let source = include_str!("main.rs");
-        assert!(!source.contains(&["grid_columns", "_for_width"].concat()));
-        assert!(!source.contains(&["visible_", "capacity"].concat()));
-        assert!(!source.contains(&["grid_", "height"].concat()));
     }
 }

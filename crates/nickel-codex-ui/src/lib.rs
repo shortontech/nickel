@@ -1,18 +1,16 @@
 mod controller;
-mod lease;
 mod model;
 mod view;
 
 pub use controller::{
     BackendMode, ChatController, ControllerCommand, ControllerEvent, create_managed_workspace,
 };
-pub use lease::ThreadLease;
 pub use model::{ChatItem, ChatItemKind, ChatState, ConnectionStatus, PendingInteraction};
 pub use view::{ChatApplication, ChatMessage, ShellRequest};
 
 pub fn shell_application(
     cwd: std::path::PathBuf,
-    hub: bool,
+    project_menu: bool,
     thread: Option<nickel_codex::ThreadId>,
     project_id: Option<String>,
 ) -> Result<ChatApplication, String> {
@@ -28,8 +26,8 @@ pub fn shell_application(
         |host| BackendMode::Remote { host: host.clone() },
     );
     let mut application = ChatApplication::with_settings(mode, settings, Some(settings_path));
-    application = if hub {
-        application.as_shell_hub()
+    application = if project_menu {
+        application.as_shell_project_menu()
     } else {
         application.as_shell_chat(&cwd)
     };
@@ -47,8 +45,8 @@ mod tests {
     #[cfg(feature = "authenticated-live-tests")]
     use nickel_codex::BackendChoice;
     use nickel_codex::{
-        CodexEvent, CodexSettings, EventKind, ReplayBackend, ServerRequestId, Thread, ThreadId,
-        TurnId,
+        CodexBackend, CodexEvent, CodexSettings, EventKind, ReplayBackend, ServerRequestId, Thread,
+        ThreadId, TurnId,
     };
     use nickel_ui::{
         Application, DocumentSelection, PaintCommand, Point, Rect, SdlComponentRenderer,
@@ -84,6 +82,8 @@ mod tests {
                     turn_id: Some(TurnId("turn".into())),
                     item_id: "agent".into(),
                     item_type: "agentMessage".into(),
+                    command_actions: Vec::new(),
+                    initial_text: String::new(),
                 },
             ),
         );
@@ -137,6 +137,8 @@ mod tests {
                 cwd: None,
                 last_used_at: None,
                 turns: Vec::new(),
+                model: None,
+                reasoning_effort: None,
             }),
         );
         state.apply(
@@ -148,6 +150,8 @@ mod tests {
                     turn_id: Some(TurnId("turn".into())),
                     item_id: "server-user".into(),
                     item_type: "userMessage".into(),
+                    command_actions: Vec::new(),
+                    initial_text: String::new(),
                 },
             ),
         );
@@ -179,6 +183,8 @@ mod tests {
                     turn_id: None,
                     item_id: "empty-reasoning".into(),
                     item_type: "reasoning".into(),
+                    command_actions: Vec::new(),
+                    initial_text: String::new(),
                 },
             ),
         );
@@ -192,6 +198,137 @@ mod tests {
             ),
         );
         assert!(state.items.is_empty());
+    }
+
+    #[test]
+    fn repeated_reads_coalesce_into_one_per_turn_activity() {
+        let mut state = ChatState::default();
+        state.apply(
+            1,
+            event(
+                1,
+                EventKind::TurnStarted {
+                    thread_id: ThreadId("t".into()),
+                    turn_id: TurnId("turn".into()),
+                },
+            ),
+        );
+        for (sequence, item_id, path) in [
+            (2, "read-1", "/project/README.md"),
+            (3, "read-2", "/project/README.md"),
+            (4, "read-3", "/project/AGENTS.md"),
+        ] {
+            state.apply(
+                1,
+                event(
+                    sequence,
+                    EventKind::ItemStarted {
+                        thread_id: Some(ThreadId("t".into())),
+                        turn_id: Some(TurnId("turn".into())),
+                        item_id: item_id.into(),
+                        item_type: "commandExecution".into(),
+                        command_actions: vec![nickel_codex::CommandAction::Read {
+                            name: path.rsplit('/').next().unwrap().into(),
+                            path: path.into(),
+                        }],
+                        initial_text: String::new(),
+                    },
+                ),
+            );
+        }
+        assert_eq!(state.items.len(), 1);
+        assert_eq!(state.items[0].kind, ChatItemKind::Activity);
+        assert_eq!(state.items[0].text, "Exploring\nRead 2 files");
+
+        state.apply(
+            1,
+            event(
+                5,
+                EventKind::TurnCompleted {
+                    thread_id: ThreadId("t".into()),
+                    turn_id: TurnId("turn".into()),
+                    status: "completed".into(),
+                },
+            ),
+        );
+        assert_eq!(state.items[0].text, "Explored\nRead 2 files");
+    }
+
+    #[test]
+    fn adjacent_agent_items_in_one_turn_share_a_response_card() {
+        let mut state = ChatState::default();
+        state.apply(
+            1,
+            event(
+                1,
+                EventKind::TurnStarted {
+                    thread_id: ThreadId("t".into()),
+                    turn_id: TurnId("turn".into()),
+                },
+            ),
+        );
+        for (sequence, item_id, text) in [
+            (2, "progress", "I’ll read the README."),
+            (6, "final", "Read it completely."),
+        ] {
+            state.apply(
+                1,
+                event(
+                    sequence,
+                    EventKind::ItemStarted {
+                        thread_id: Some(ThreadId("t".into())),
+                        turn_id: Some(TurnId("turn".into())),
+                        item_id: item_id.into(),
+                        item_type: "agentMessage".into(),
+                        command_actions: Vec::new(),
+                        initial_text: String::new(),
+                    },
+                ),
+            );
+            state.apply(
+                1,
+                event(
+                    sequence + 1,
+                    EventKind::AgentMessageDelta {
+                        item_id: item_id.into(),
+                        delta: text.into(),
+                    },
+                ),
+            );
+            state.apply(
+                1,
+                event(
+                    sequence + 2,
+                    EventKind::ItemCompleted {
+                        item_id: item_id.into(),
+                    },
+                ),
+            );
+            if item_id == "progress" {
+                state.apply(
+                    1,
+                    event(
+                        5,
+                        EventKind::ItemStarted {
+                            thread_id: Some(ThreadId("t".into())),
+                            turn_id: Some(TurnId("turn".into())),
+                            item_id: "read".into(),
+                            item_type: "commandExecution".into(),
+                            command_actions: vec![nickel_codex::CommandAction::Read {
+                                name: "README.md".into(),
+                                path: "/project/README.md".into(),
+                            }],
+                            initial_text: String::new(),
+                        },
+                    ),
+                );
+            }
+        }
+        assert_eq!(state.items.len(), 2);
+        assert_eq!(
+            state.items[0].text,
+            "I’ll read the README.\n\nRead it completely."
+        );
     }
 
     #[test]
@@ -278,20 +415,26 @@ mod tests {
                             id: "user".into(),
                             item_type: "userMessage".into(),
                             text: "previous question".into(),
+                            command_actions: Vec::new(),
                         },
                         nickel_codex::ThreadHistoryItem {
                             id: "agent".into(),
                             item_type: "agentMessage".into(),
                             text: "previous answer".into(),
+                            command_actions: Vec::new(),
                         },
                     ],
                 }],
+                model: Some("fixture-model".into()),
+                reasoning_effort: Some("high".into()),
             }),
         );
         assert_eq!(state.selected_thread, Some(thread_id));
         assert_eq!(state.items.len(), 2);
         assert_eq!(state.items[0].kind, ChatItemKind::User);
         assert_eq!(state.items[1].text, "previous answer");
+        assert_eq!(state.selected_model.as_deref(), Some("fixture-model"));
+        assert_eq!(state.selected_reasoning_effort.as_deref(), Some("high"));
     }
 
     #[test]
@@ -346,7 +489,7 @@ mod tests {
     }
 
     #[test]
-    fn shell_hub_raster_shows_projects_new_actions_and_available_conversations() {
+    fn shell_project_menu_raster_shows_projects_without_conversations() {
         let mut state = ChatState::default();
         state.status = ConnectionStatus::Ready;
         state.projects = vec![nickel_codex::Project {
@@ -360,6 +503,8 @@ mod tests {
             cwd: Some("/projects/nickel".into()),
             last_used_at: Some(1),
             turns: Vec::new(),
+            model: None,
+            reasoning_effort: None,
         }];
         state.thread_runtime.insert(
             ThreadId("available".into()),
@@ -369,9 +514,36 @@ mod tests {
                 ..nickel_codex::ThreadRuntime::default()
             },
         );
-        let tree = UiTree::layout(
-            view::shell_hub_view(&state),
-            Rect::new(0.0, 0.0, 900.0, 640.0),
+        state.thread_error = Some("thread/list rejected".into());
+        for (width, height) in [(360.0, 420.0), (280.0, 320.0)] {
+            let mut ui_state = UiStateStore::default();
+            let tree = UiTree::layout_with_state(
+                view::shell_project_menu_view(&state),
+                Rect::new(0.0, 0.0, width, height),
+                &mut ui_state,
+            );
+            assert!(tree.resolved_layout().nodes().iter().all(|node| {
+                node.allocated.origin.x.is_finite()
+                    && node.allocated.origin.y.is_finite()
+                    && node.allocated.size.width.is_finite()
+                    && node.allocated.size.height.is_finite()
+                    && node.allocated.size.width >= 0.0
+                    && node.allocated.size.height >= 0.0
+            }));
+            assert!(
+                tree.message_rect(&ChatMessage::NewChatIn(
+                    "/projects/nickel".into(),
+                    "nickel".into(),
+                ))
+                .is_some()
+            );
+        }
+
+        let mut ui_state = UiStateStore::default();
+        let tree = UiTree::layout_with_state(
+            view::shell_project_menu_view(&state),
+            Rect::new(0.0, 0.0, 360.0, 420.0),
+            &mut ui_state,
         );
         assert!(
             tree.message_rect(&ChatMessage::NewChatIn(
@@ -382,16 +554,26 @@ mod tests {
         );
         assert!(
             tree.message_rect(&ChatMessage::SelectThread(ThreadId("available".into())))
-                .is_some()
+                .is_none()
+        );
+        tree.handle_event(&mut ui_state, UiEvent::FocusNext);
+        tree.handle_event(&mut ui_state, UiEvent::FocusNext);
+        assert_eq!(
+            tree.handle_event(&mut ui_state, UiEvent::KeyboardActivate)
+                .messages,
+            vec![ChatMessage::NewChatIn(
+                "/projects/nickel".into(),
+                "nickel".into(),
+            )]
         );
 
-        let mut renderer = SdlComponentRenderer::new(900, 640, 1.0);
+        let mut renderer = SdlComponentRenderer::new(360, 420, 1.0);
         renderer.render(tree.commands());
         let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/nickel-codex-snapshots/shell-hub.png");
+            .join("../../target/nickel-codex-snapshots/project-menu.png");
         std::fs::create_dir_all(output.parent().unwrap()).unwrap();
-        image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_fn(900, 640, |x, y| {
-            let pixel = renderer.pixels()[(y * 900 + x) as usize];
+        image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_fn(360, 420, |x, y| {
+            let pixel = renderer.pixels()[(y * 360 + x) as usize];
             image::Rgba([pixel.r, pixel.g, pixel.b, pixel.a])
         })
         .save(output)
@@ -399,7 +581,7 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_attributes_the_codex_cli_without_branding_nickel_as_codex() {
+    fn sidebarless_chat_attributes_the_codex_cli_without_branding_nickel_as_codex() {
         assert_eq!(
             controller::codex_attribution("codex-cli 0.149.0"),
             "powered by OpenAI Codex CLI v0.149.0."
@@ -408,9 +590,11 @@ mod tests {
         state.provenance = "powered by OpenAI Codex CLI v0.149.0.".into();
         let tree = UiTree::layout(view::chat_view(&state), Rect::new(0.0, 0.0, 900.0, 640.0));
         assert!(
-            tree.commands().iter().any(
-                |command| matches!(command, PaintCommand::Text { text, .. } if text == "Nickel")
-            )
+            !tree
+                .resolved_layout()
+                .nodes()
+                .iter()
+                .any(|node| node.id.as_str().ends_with("thread-sidebar"))
         );
         assert!(tree.commands().iter().any(
             |command| matches!(command, PaintCommand::Text { text, .. } if text == "powered by OpenAI Codex CLI v0.149.0.")
@@ -430,8 +614,12 @@ mod tests {
             &mut ui_state,
         );
         let toggle = closed
-            .message_rect(&ChatMessage::ToggleFileMenu)
-            .expect("File menu");
+            .resolved_layout()
+            .nodes()
+            .iter()
+            .find(|node| node.id.as_str().ends_with("file-menu"))
+            .expect("File menu")
+            .allocated;
         let point = Point {
             x: toggle.origin.x + 4.0,
             y: toggle.origin.y + 4.0,
@@ -496,238 +684,7 @@ mod tests {
     }
 
     #[test]
-    fn grouped_sidebar_scrolls_without_crushing_header_or_actions() {
-        let mut state = ChatState::default();
-        state.status = ConnectionStatus::Ready;
-        state.threads = (0..200)
-            .map(|index| Thread {
-                id: ThreadId(format!("thread-{index}")),
-                title: Some(format!("Task {index}")),
-                cwd: Some(
-                    if index % 2 == 0 {
-                        "/projects/nickel"
-                    } else {
-                        "/projects/sample-project"
-                    }
-                    .into(),
-                ),
-                last_used_at: Some(index as i64),
-                turns: Vec::new(),
-            })
-            .collect();
-        let mut ui_state = UiStateStore::default();
-        let tree = UiTree::layout_with_state(
-            view::chat_view(&state),
-            Rect::new(0.0, 0.0, 1120.0, 600.0),
-            &mut ui_state,
-        );
-        let menu_bar = tree
-            .resolved_layout()
-            .find(&nickel_ui::UiId::from("root/menu-bar"))
-            .expect("menu bar");
-        assert_eq!(menu_bar.allocated.size.height, 30.0);
-        let title = tree
-            .resolved_layout()
-            .find(&nickel_ui::UiId::from(
-                "root/#1/thread-sidebar/sidebar-title",
-            ))
-            .expect("sidebar title");
-        let actions = tree
-            .resolved_layout()
-            .find(&nickel_ui::UiId::from(
-                "root/#1/thread-sidebar/sidebar-actions",
-            ))
-            .expect("sidebar actions");
-        let projects = tree
-            .resolved_layout()
-            .find(&nickel_ui::UiId::from(
-                "root/#1/thread-sidebar/project-list",
-            ))
-            .expect("project list");
-        assert!(title.allocated.size.height > 10.0);
-        assert!(actions.allocated.size.height > 10.0);
-        assert!(projects.scroll.is_some_and(|extent| extent.can_scroll()));
-        let visible_tasks = tree
-            .commands()
-            .iter()
-            .filter(|command| {
-                matches!(command, PaintCommand::Text { text, .. } if text.starts_with("Task "))
-            })
-            .count();
-        assert!(visible_tasks < 20, "{visible_tasks} task titles emitted");
-
-        let message = ChatMessage::SelectThread(ThreadId("thread-199".into()));
-        let button = tree.message_rect(&message).expect("first task button");
-        let point = Point {
-            x: button.origin.x + 2.0,
-            y: button.origin.y + 2.0,
-        };
-        tree.handle_event(&mut ui_state, UiEvent::PointerPressed(point));
-        assert_eq!(
-            tree.handle_event(&mut ui_state, UiEvent::PointerReleased(point))
-                .messages,
-            vec![message]
-        );
-
-        state.expanded_projects.insert("/projects/nickel".into());
-        let expanded = UiTree::layout_with_state(
-            view::chat_view(&state),
-            Rect::new(0.0, 0.0, 1120.0, 600.0),
-            &mut ui_state,
-        );
-        expanded.handle_event(
-            &mut ui_state,
-            UiEvent::Scroll {
-                point: Point {
-                    x: projects.allocated.origin.x + 10.0,
-                    y: projects.allocated.origin.y + 10.0,
-                },
-                delta_y: 100_000.0,
-            },
-        );
-        let scrolled = UiTree::layout_with_state(
-            view::chat_view(&state),
-            Rect::new(0.0, 0.0, 1120.0, 600.0),
-            &mut ui_state,
-        );
-        assert!(
-            scrolled.commands().iter().any(
-                |command| matches!(command, PaintCommand::Text { text, .. } if text == "Task 0")
-            )
-        );
-    }
-
-    #[test]
-    fn project_disclosure_emits_toggle_and_changes_its_label() {
-        let mut state = ChatState::default();
-        state.status = ConnectionStatus::Ready;
-        state.threads = (0..11)
-            .map(|index| Thread {
-                id: ThreadId(format!("thread-{index}")),
-                title: Some(format!("Task {index}")),
-                cwd: Some("/projects/nickel".into()),
-                last_used_at: Some(index as i64),
-                turns: Vec::new(),
-            })
-            .collect();
-        let mut ui_state = UiStateStore::default();
-        let tree = UiTree::layout_with_state(
-            view::chat_view(&state),
-            Rect::new(0.0, 0.0, 1120.0, 900.0),
-            &mut ui_state,
-        );
-        assert!(tree.commands().iter().any(
-            |command| matches!(command, PaintCommand::Text { text, .. } if text == "Show 1 more")
-        ));
-        let toggle = ChatMessage::ToggleProject("/projects/nickel".into());
-        let rect = tree.message_rect(&toggle).expect("visible disclosure");
-        let point = Point {
-            x: rect.origin.x + 2.0,
-            y: rect.origin.y + 2.0,
-        };
-        tree.handle_event(&mut ui_state, UiEvent::PointerPressed(point));
-        assert_eq!(
-            tree.handle_event(&mut ui_state, UiEvent::PointerReleased(point))
-                .messages,
-            vec![toggle]
-        );
-
-        state.expanded_projects.insert("/projects/nickel".into());
-        let expanded = UiTree::layout_with_state(
-            view::chat_view(&state),
-            Rect::new(0.0, 0.0, 1120.0, 900.0),
-            &mut ui_state,
-        );
-        assert!(expanded.commands().iter().any(
-            |command| matches!(command, PaintCommand::Text { text, .. } if text == "Show less")
-        ));
-    }
-
-    #[test]
-    fn collapsed_project_keeps_its_header_and_hides_its_tasks() {
-        let mut state = ChatState::default();
-        state.threads = vec![Thread {
-            id: ThreadId("thread".into()),
-            title: Some("Visible task".into()),
-            cwd: Some("/projects/nickel-ui".into()),
-            last_used_at: Some(1),
-            turns: Vec::new(),
-        }];
-        let expanded = UiTree::layout(view::chat_view(&state), Rect::new(0.0, 0.0, 900.0, 640.0));
-        assert!(expanded.commands().iter().any(
-            |command| matches!(command, PaintCommand::Text { text, .. } if text == "▾  📁  Nickel UI")
-        ));
-        assert!(expanded.commands().iter().any(
-            |command| matches!(command, PaintCommand::Text { text, .. } if text == "Visible task")
-        ));
-        let header_x = expanded
-            .commands()
-            .iter()
-            .find_map(|command| match command {
-                PaintCommand::Text { bounds, text, .. } if text == "▾  📁  Nickel UI" => {
-                    Some(bounds.origin.x)
-                }
-                _ => None,
-            })
-            .expect("project header text");
-        let task_x = expanded
-            .commands()
-            .iter()
-            .find_map(|command| match command {
-                PaintCommand::Text { bounds, text, .. } if text == "Visible task" => {
-                    Some(bounds.origin.x)
-                }
-                _ => None,
-            })
-            .expect("task text");
-        assert!(task_x >= header_x + 20.0);
-
-        state
-            .collapsed_projects
-            .insert("/projects/nickel-ui".into());
-        let collapsed = UiTree::layout(view::chat_view(&state), Rect::new(0.0, 0.0, 900.0, 640.0));
-        assert!(collapsed.commands().iter().any(
-            |command| matches!(command, PaintCommand::Text { text, .. } if text == "▸  📁  Nickel UI")
-        ));
-        assert!(!collapsed.commands().iter().any(
-            |command| matches!(command, PaintCommand::Text { text, .. } if text == "Visible task")
-        ));
-    }
-
-    #[test]
-    fn long_project_names_stay_inside_a_single_header_line() {
-        let mut state = ChatState::default();
-        state.threads = vec![Thread {
-            id: ThreadId("thread".into()),
-            title: Some("Hidden task".into()),
-            cwd: Some("/projects/llama.cpp-turboquant-post20260629".into()),
-            last_used_at: Some(1),
-            turns: Vec::new(),
-        }];
-        state
-            .collapsed_projects
-            .insert("/projects/llama.cpp-turboquant-post20260629".into());
-
-        let tree = UiTree::layout(view::chat_view(&state), Rect::new(0.0, 0.0, 900.0, 640.0));
-        let header = tree
-            .commands()
-            .iter()
-            .find_map(|command| match command {
-                PaintCommand::Text { bounds, text, .. } if text.starts_with("▸  📁  Llama") => {
-                    Some((bounds, text))
-                }
-                _ => None,
-            })
-            .expect("long project header");
-        assert!(header.1.ends_with('…'));
-        assert!(header.0.size.height < 24.0);
-        assert!(!tree.commands().iter().any(
-            |command| matches!(command, PaintCommand::Text { text, .. } if text == "Hidden task")
-        ));
-    }
-
-    #[test]
-    fn long_transcript_cannot_crush_sidebar_or_composer() {
+    fn long_transcript_cannot_crush_sidebarless_composer() {
         let mut state = ChatState::default();
         state.status = ConnectionStatus::Ready;
         state.threads = (0..12)
@@ -737,6 +694,8 @@ mod tests {
                 cwd: None,
                 last_used_at: Some(index as i64),
                 turns: Vec::new(),
+                model: None,
+                reasoning_effort: None,
             })
             .collect();
         for index in 0..10 {
@@ -760,11 +719,9 @@ mod tests {
                     .find(|node| node.id.as_str().ends_with(suffix))
                     .expect("named chat layout node")
             };
-            let sidebar = find("thread-sidebar");
             let conversation = find("conversation");
             let composer = find("composer");
             let draft = find("chat-draft");
-            assert!(sidebar.allocated.size.width >= 259.0);
             assert!(composer.allocated.size.height >= 70.0);
             assert!(draft.allocated.size.height > 0.0);
             assert!(
@@ -876,6 +833,160 @@ mod tests {
     }
 
     #[test]
+    fn composer_commands_open_pickers_and_confirm_first_shell_execution() {
+        let backend = ReplayBackend::from_json(
+            r#"{"name":"commands","models":[{"id":"fixture","display_name":"Fixture","default_reasoning_effort":"medium","supported_reasoning_efforts":[{"reasoning_effort":"low","description":"Fast"},{"reasoning_effort":"high","description":"Deep"}]}],"events":[]}"#,
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = ChatApplication::new(BackendMode::Replay {
+            backend,
+            cwd: directory.path().into(),
+        });
+        app.state.status = ConnectionStatus::Ready;
+        app.poll_controller();
+
+        app.update(ChatMessage::ToggleCommandPicker);
+        assert!(app.command_picker_open);
+        app.update(ChatMessage::SelectCommand("/model".into()));
+        assert!(app.model_picker_open);
+        assert!(!app.command_picker_open);
+        app.update(ChatMessage::SelectReasoningEffort("high".into()));
+        assert_eq!(app.state.selected_reasoning_effort.as_deref(), Some("high"));
+
+        app.state.draft = "/model".into();
+        app.update(ChatMessage::Send);
+        assert!(app.model_picker_open);
+        assert!(app.state.draft.is_empty());
+
+        app.state.draft = "/resume".into();
+        app.update(ChatMessage::Send);
+        assert!(app.resume_picker_open);
+        assert!(!app.model_picker_open);
+
+        app.state.draft = "!printf hello".into();
+        app.update(ChatMessage::Send);
+        assert_eq!(app.pending_shell_command.as_deref(), Some("printf hello"));
+        assert!(app.state.items.is_empty());
+        app.update(ChatMessage::ConfirmShell);
+        assert!(app.pending_shell_command.is_none());
+        assert!(app.shell_warning_acknowledged);
+    }
+
+    #[test]
+    fn shell_hosted_resume_requests_the_shell_lease_before_controller_resume() {
+        let backend = ReplayBackend::from_json(r#"{"name":"resume","events":[]}"#).unwrap();
+        let mut app = ChatApplication::new(BackendMode::Replay {
+            backend,
+            cwd: "/projects/nickel".into(),
+        })
+        .as_shell_chat(std::path::Path::new("/projects/nickel"));
+        let thread = ThreadId("idle-thread".into());
+
+        app.update(ChatMessage::SelectThread(thread.clone()));
+
+        assert_eq!(
+            app.take_shell_requests(),
+            vec![ShellRequest::ResumeThread(thread)]
+        );
+        assert!(app.state.selected_thread.is_none());
+    }
+
+    #[test]
+    fn chat_overlays_expose_commands_reasoning_and_only_resumable_project_threads() {
+        let backend = ReplayBackend::from_json(
+            r#"{"name":"overlays","models":[{"id":"fixture","display_name":"Fixture","default_reasoning_effort":"medium","supported_reasoning_efforts":[{"reasoning_effort":"high","description":"Deep reasoning"}]}],"events":[]}"#,
+        )
+        .unwrap();
+        let mut app = ChatApplication::new(BackendMode::Replay {
+            backend,
+            cwd: "/projects/nickel".into(),
+        })
+        .as_shell_chat(std::path::Path::new("/projects/nickel"));
+        app.use_project("/projects/nickel".into(), "nickel".into());
+        app.state.status = ConnectionStatus::Ready;
+        app.state.models = ReplayBackend::from_json(
+            r#"{"name":"model","models":[{"id":"fixture","display_name":"Fixture","default_reasoning_effort":"medium","supported_reasoning_efforts":[{"reasoning_effort":"high","description":"Deep reasoning"}]}]}"#,
+        )
+        .unwrap()
+        .models()
+        .unwrap();
+        app.state.selected_model = Some("fixture".into());
+        app.state.selected_reasoning_effort = Some("medium".into());
+        for (id, cwd, project_id, status) in [
+            (
+                "eligible",
+                "/projects/nickel",
+                "nickel",
+                nickel_codex::ThreadRuntimeStatus::Idle,
+            ),
+            (
+                "active",
+                "/projects/nickel",
+                "nickel",
+                nickel_codex::ThreadRuntimeStatus::Active,
+            ),
+            (
+                "other",
+                "/projects/nickel",
+                "other",
+                nickel_codex::ThreadRuntimeStatus::Idle,
+            ),
+        ] {
+            let id = ThreadId(id.into());
+            app.state.threads.push(Thread {
+                id: id.clone(),
+                title: Some(id.0.clone()),
+                cwd: Some(cwd.into()),
+                last_used_at: Some(1),
+                turns: Vec::new(),
+                model: None,
+                reasoning_effort: None,
+            });
+            app.state.thread_runtime.insert(
+                id,
+                nickel_codex::ThreadRuntime {
+                    project_id: Some(project_id.into()),
+                    status,
+                    ..nickel_codex::ThreadRuntime::default()
+                },
+            );
+        }
+
+        app.update(ChatMessage::ToggleCommandPicker);
+        let commands = UiTree::layout(app.view(), Rect::new(0.0, 0.0, 900.0, 640.0));
+        assert!(commands.commands().iter().any(
+            |command| matches!(command, PaintCommand::Text { text, .. } if text.contains("/review — unavailable"))
+        ));
+
+        app.update(ChatMessage::ToggleCommandPicker);
+        app.update(ChatMessage::ToggleModelPicker);
+        let models = UiTree::layout(app.view(), Rect::new(0.0, 0.0, 900.0, 640.0));
+        assert!(models.commands().iter().any(
+            |command| matches!(command, PaintCommand::Text { text, .. } if text.contains("high — Deep reasoning"))
+        ));
+
+        app.update(ChatMessage::ToggleModelPicker);
+        app.update(ChatMessage::ToggleResumePicker);
+        let resume = UiTree::layout(app.view(), Rect::new(0.0, 0.0, 900.0, 640.0));
+        assert!(
+            resume
+                .message_rect(&ChatMessage::SelectThread(ThreadId("eligible".into())))
+                .is_some()
+        );
+        assert!(
+            resume
+                .message_rect(&ChatMessage::SelectThread(ThreadId("active".into())))
+                .is_none()
+        );
+        assert!(
+            resume
+                .message_rect(&ChatMessage::SelectThread(ThreadId("other".into())))
+                .is_none()
+        );
+    }
+
+    #[test]
     fn multiline_paste_normalizes_newlines_without_submitting() {
         let mut state = ChatState::default();
         state.status = ConnectionStatus::Ready;
@@ -920,7 +1031,9 @@ mod tests {
         );
         let composer_viewport = rebuilt
             .resolved_layout()
-            .find(&nickel_ui::UiId::from("root/#1/#1/composer/#0"))
+            .nodes()
+            .iter()
+            .find(|node| node.id.as_str().ends_with("composer/#0"))
             .expect("composer viewport");
         assert!(composer_viewport.allocated.size.height <= 140.0);
         let extent = composer_viewport.scroll.expect("multiline scroll extent");
@@ -974,22 +1087,66 @@ mod tests {
     }
 
     #[test]
-    fn embedded_hub_emits_shell_requests_without_starting_a_process() {
+    fn embedded_project_menu_emits_shell_requests_without_starting_a_process() {
         let backend = ReplayBackend::from_json(r#"{"name":"embedded","events":[]}"#).unwrap();
         let cwd = std::path::PathBuf::from("/projects/nickel");
         let mut app = ChatApplication::new(BackendMode::Replay {
             backend,
             cwd: cwd.clone(),
         })
-        .as_shell_hub();
+        .as_shell_project_menu();
         app.update(ChatMessage::NewChatIn(cwd.clone(), "project-1".into()));
         assert_eq!(
             app.take_shell_requests(),
             vec![ShellRequest::OpenProject {
                 cwd,
-                project_id: "project-1".into()
+                project_id: "project-1".into(),
+                name: "nickel".into(),
+                initial_thread: None,
             }]
         );
+    }
+
+    #[test]
+    fn project_menu_never_enters_the_thread_failure_domain() {
+        let backend = ReplayBackend::from_json(
+            r#"{
+                "name":"projects-only",
+                "projects":[{"id":"nickel","name":"Nickel","roots":["/projects/nickel"]}],
+                "thread_error":"duplicate thread id"
+            }"#,
+        )
+        .unwrap();
+        let mut app = ChatApplication::new(BackendMode::Replay {
+            backend,
+            cwd: "/projects/nickel".into(),
+        })
+        .as_shell_project_menu();
+        wait_until(&mut app, |state| state.status == ConnectionStatus::Ready);
+
+        assert_eq!(app.state.projects[0].id, "nickel");
+        assert!(app.state.thread_error.is_none());
+    }
+
+    #[test]
+    fn new_project_chat_never_enters_the_thread_failure_domain() {
+        let backend = ReplayBackend::from_json(
+            r#"{
+                "name":"new-project-chat",
+                "projects":[{"id":"sentrygist","name":"sentrygist","roots":["/work/sentrygist"]}],
+                "thread_error":"duplicate thread id"
+            }"#,
+        )
+        .unwrap();
+        let mut app = ChatApplication::new(BackendMode::Replay {
+            backend,
+            cwd: "/work/sentrygist".into(),
+        })
+        .as_shell_chat(std::path::Path::new("/work/sentrygist"));
+        wait_until(&mut app, |state| state.status == ConnectionStatus::Ready);
+
+        assert!(app.state.thread_error.is_none());
+        assert!(app.state.diagnostics.is_empty());
     }
 
     #[test]
@@ -1101,6 +1258,8 @@ mod tests {
                         turn_id: None,
                         item_id: format!("item-{sequence}"),
                         item_type: "agentMessage".into(),
+                        command_actions: Vec::new(),
+                        initial_text: String::new(),
                     },
                 ),
             );

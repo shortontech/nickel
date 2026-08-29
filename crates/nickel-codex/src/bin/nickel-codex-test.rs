@@ -214,12 +214,15 @@ fn backend_operation(
                 cwd,
                 model: option(args, "--model").map(Into::into),
                 project_id: None,
+                reasoning_effort: None,
             })?;
             if option(args, "--text").is_some() {
                 let text = turn_text(args)?;
                 let turn = backend.start_turn(StartTurn {
                     thread_id: thread.id.clone(),
                     text,
+                    model: None,
+                    reasoning_effort: None,
                 })?;
                 json_value(json!({"thread": thread, "turn": turn}))
             } else {
@@ -244,6 +247,8 @@ fn backend_operation(
                     backend.start_turn(StartTurn {
                         thread_id: ThreadId(id.clone()),
                         text,
+                        model: None,
+                        reasoning_effort: None,
                     })
                 })
                 .and_then(json_value)

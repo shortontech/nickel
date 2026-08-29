@@ -1,7 +1,15 @@
 {
   "name": "basic",
   "account": { "authenticated": false, "account_type": null, "email": null },
-  "models": [{ "id": "fixture-model", "display_name": "Fixture Model" }],
+  "models": [{
+    "id": "fixture-model",
+    "display_name": "Fixture Model",
+    "default_reasoning_effort": "medium",
+    "supported_reasoning_efforts": [
+      { "reasoning_effort": "low", "description": "Fast" },
+      { "reasoning_effort": "high", "description": "Deep reasoning" }
+    ]
+  }],
   "threads": [],
   "events": [
     { "sequence": 1, "kind": { "type": "connection", "state": "ready" } },

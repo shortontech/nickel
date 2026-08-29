@@ -10,6 +10,7 @@ default-run = "nickel-session"
 bitflags.workspace = true
 image.workspace = true
 nickel-core = { path = "../nickel-core" }
+nickel-session-protocol = { path = "../nickel-session-protocol" }
 resvg.workspace = true
 smithay.workspace = true
 thiserror.workspace = true

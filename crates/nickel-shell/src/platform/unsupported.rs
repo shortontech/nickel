@@ -125,6 +125,10 @@ pub fn send_shell_command(_: ShellCommand) -> bool {
     false
 }
 
+pub fn register_session_shell() -> bool {
+    true
+}
+
 pub struct WindowFeed;
 
 pub fn show_window_system_menu(_: WindowId) -> bool {

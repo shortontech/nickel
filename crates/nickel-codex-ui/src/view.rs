@@ -9,10 +9,8 @@ use nickel_ui::prelude::*;
 use crate::model::{item_label, item_markdown_document};
 use crate::{
     BackendMode, ChatController, ChatItem, ChatItemKind, ChatState, ConnectionStatus,
-    ControllerCommand, PendingInteraction, create_managed_workspace,
+    ControllerCommand, ControllerEvent, PendingInteraction, create_managed_workspace,
 };
-
-mod sidebar;
 
 const BACKGROUND: Color = 0x101318;
 const SIDEBAR: Color = 0x171b22;
@@ -34,12 +32,19 @@ static DEFAULT_CODEX_SETTINGS: std::sync::LazyLock<CodexSettings> =
 pub enum ChatMessage {
     DraftChanged(String),
     Send,
+    ConfirmShell,
+    CancelShell,
     NewChat,
     NewChatIn(PathBuf, String),
-    ShowHub,
     Refresh,
     Reconnect,
     SelectThread(nickel_codex::ThreadId),
+    ToggleModelPicker,
+    SelectModel(String),
+    SelectReasoningEffort(String),
+    ToggleCommandPicker,
+    SelectCommand(String),
+    ToggleResumePicker,
     Interrupt,
     Approve(ServerRequestId, String),
     Decline(ServerRequestId, String),
@@ -70,12 +75,11 @@ pub enum ShellRequest {
     OpenProject {
         cwd: PathBuf,
         project_id: String,
+        name: String,
+        initial_thread: Option<nickel_codex::ThreadId>,
     },
-    OpenThread {
-        cwd: PathBuf,
-        project_id: String,
-        thread: nickel_codex::ThreadId,
-    },
+    ResumeThread(nickel_codex::ThreadId),
+    ResumeFailed(nickel_codex::ThreadId),
 }
 
 fn draft_changed(value: String) -> ChatMessage {
@@ -115,12 +119,15 @@ fn transcript_heights(state: &ChatState) -> Vec<f32> {
 }
 
 fn project_window_title(path: &std::path::Path) -> String {
-    let name = path
-        .file_name()
+    format!("Codex — {}", project_window_name(path))
+}
+
+fn project_window_name(path: &std::path::Path) -> String {
+    path.file_name()
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty())
-        .unwrap_or("Project");
-    format!("Codex — {name}")
+        .unwrap_or("Project")
+        .to_owned()
 }
 
 pub struct ChatApplication {
@@ -133,12 +140,17 @@ pub struct ChatApplication {
     host_editor: Option<RemoteHostEditor>,
     settings_error: Option<String>,
     shell_host: bool,
-    sidebar_visible: bool,
     window_title: String,
-    hub_mode: bool,
-    thread_lease: Option<crate::ThreadLease>,
+    project_menu_mode: bool,
     shell_requests: Vec<ShellRequest>,
-    shell_project: Option<(PathBuf, String)>,
+    pending_initial_resume: Option<nickel_codex::ThreadId>,
+    shell_writer_thread: Option<nickel_codex::ThreadId>,
+    shell_project: Option<(PathBuf, Option<String>)>,
+    pub(crate) pending_shell_command: Option<String>,
+    pub(crate) shell_warning_acknowledged: bool,
+    pub(crate) model_picker_open: bool,
+    pub(crate) resume_picker_open: bool,
+    pub(crate) command_picker_open: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -149,6 +161,16 @@ struct RemoteHostEditor {
     endpoint: String,
     token_env: String,
     default_cwd: String,
+}
+
+#[derive(Clone, Copy, Default)]
+struct ChatOverlays<'a> {
+    pending_shell_command: Option<&'a str>,
+    model_picker_open: bool,
+    resume_picker_open: bool,
+    command_picker_open: bool,
+    project_root: Option<&'a std::path::Path>,
+    project_id: Option<&'a str>,
 }
 
 impl RemoteHostEditor {
@@ -205,61 +227,120 @@ impl ChatApplication {
             host_editor: None,
             settings_error: None,
             shell_host: false,
-            sidebar_visible: true,
             window_title: "Nickel".into(),
-            hub_mode: false,
-            thread_lease: None,
+            project_menu_mode: false,
             shell_requests: Vec::new(),
+            pending_initial_resume: None,
+            shell_writer_thread: None,
             shell_project: None,
+            pending_shell_command: None,
+            shell_warning_acknowledged: false,
+            model_picker_open: false,
+            resume_picker_open: false,
+            command_picker_open: false,
         }
     }
 
-    pub fn as_shell_hub(mut self) -> Self {
+    pub fn as_shell_project_menu(mut self) -> Self {
         self.shell_host = true;
-        self.sidebar_visible = true;
-        self.window_title = "Codex".into();
-        self.hub_mode = true;
+        self.window_title = "Nickel Codex Projects".into();
+        self.project_menu_mode = true;
+        self.state.generation = self.state.generation.saturating_add(1);
+        self.controller =
+            ChatController::spawn_project_menu(self.mode.clone(), self.state.generation);
         self
     }
 
     pub fn as_shell_chat(mut self, cwd: &std::path::Path) -> Self {
         self.shell_host = true;
-        self.sidebar_visible = false;
         self.window_title = project_window_title(cwd);
+        self.state.generation = self.state.generation.saturating_add(1);
+        self.controller =
+            ChatController::spawn_project_chat(self.mode.clone(), self.state.generation);
         self
     }
 
     pub fn resume_thread(&mut self, id: nickel_codex::ThreadId) -> Result<(), String> {
-        self.thread_lease = Some(crate::ThreadLease::acquire(&id.0)?);
+        self.pending_initial_resume = Some(id.clone());
+        self.shell_writer_thread = Some(id.clone());
         self.state.begin_thread_selection(id.clone());
-        self.controller.send(ControllerCommand::SelectThread(id));
-        Ok(())
+        if self.controller.send(ControllerCommand::SelectThread(id)) {
+            Ok(())
+        } else {
+            self.pending_initial_resume = None;
+            self.shell_writer_thread = None;
+            Err("Codex controller stopped before thread resume".into())
+        }
     }
 
     pub fn take_shell_requests(&mut self) -> Vec<ShellRequest> {
         std::mem::take(&mut self.shell_requests)
     }
 
+    pub fn report_resume_rejection(&mut self, message: impl Into<String>) {
+        self.pending_initial_resume = None;
+        self.state.report_diagnostic(message);
+    }
+
     pub fn use_project(&mut self, cwd: PathBuf, project_id: String) {
-        self.shell_project = Some((cwd.clone(), project_id.clone()));
+        self.shell_project = Some((cwd.clone(), Some(project_id.clone())));
         self.controller
             .send(ControllerCommand::NewChatIn(cwd, Some(project_id)));
+    }
+
+    pub fn use_project_root(&mut self, cwd: PathBuf) {
+        self.shell_project = Some((cwd.clone(), None));
+        self.controller
+            .send(ControllerCommand::NewChatIn(cwd, None));
     }
 
     pub fn poll_controller(&mut self) -> bool {
         let mut changed = false;
         while let Some((generation, event)) = self.controller.try_recv() {
-            if self.shell_host
-                && let crate::ControllerEvent::ThreadCreated(thread) = &event
-            {
-                match crate::ThreadLease::acquire(&thread.id.0) {
-                    Ok(lease) => self.thread_lease = Some(lease),
-                    Err(error) => self.settings_error = Some(error),
+            if generation == self.state.generation {
+                match &event {
+                    ControllerEvent::ThreadSelected(thread) => {
+                        if self.pending_initial_resume.as_ref() == Some(&thread.id) {
+                            self.pending_initial_resume = None;
+                        }
+                    }
+                    ControllerEvent::OperationFailed(_) => {
+                        if self.pending_initial_resume.take().is_some()
+                            && let Some(thread) = self.shell_writer_thread.take()
+                        {
+                            self.shell_requests.push(ShellRequest::ResumeFailed(thread));
+                        }
+                    }
+                    ControllerEvent::Failure(_) | ControllerEvent::Incompatible(_) => {
+                        self.pending_initial_resume = None;
+                        if let Some(thread) = self.shell_writer_thread.take() {
+                            self.shell_requests.push(ShellRequest::ResumeFailed(thread));
+                        }
+                    }
+                    _ => {}
                 }
             }
             changed |= self.state.apply(generation, event);
+            if self.project_menu_mode {
+                self.state.thread_error = None;
+            }
         }
         changed
+    }
+
+    fn reconnect_controller(&mut self) {
+        self.state.generation = self.state.generation.saturating_add(1);
+        self.state.status = ConnectionStatus::Loading;
+        self.state.diagnostics.clear();
+        self.state.active_turn = None;
+        self.state.interrupt_requested = false;
+        self.controller = if self.project_menu_mode {
+            ChatController::spawn_project_menu(self.mode.clone(), self.state.generation)
+        } else if self.shell_host {
+            ChatController::spawn_project_chat(self.mode.clone(), self.state.generation)
+        } else {
+            ChatController::spawn_generation(self.mode.clone(), self.state.generation)
+        };
     }
 
     fn save_settings(&mut self, settings: CodexSettings) -> bool {
@@ -308,7 +389,13 @@ impl ChatApplication {
         let mut state = ChatState::default();
         state.generation = generation;
         self.state = state;
-        self.controller = ChatController::spawn_generation(mode.clone(), generation);
+        self.controller = if self.project_menu_mode {
+            ChatController::spawn_project_menu(mode.clone(), generation)
+        } else if self.shell_host {
+            ChatController::spawn_project_chat(mode.clone(), generation)
+        } else {
+            ChatController::spawn_generation(mode.clone(), generation)
+        };
         self.mode = mode;
     }
 }
@@ -320,58 +407,138 @@ impl Application for ChatApplication {
         match message {
             ChatMessage::DraftChanged(value) => self.state.draft = value,
             ChatMessage::Send => {
-                if let Some(text) = self.state.begin_send() {
-                    self.controller.send(ControllerCommand::Send(text));
+                let command = self.state.draft.trim().to_owned();
+                if command == "/model" {
+                    self.state.draft.clear();
+                    self.update(ChatMessage::ToggleModelPicker);
+                } else if command == "/resume" {
+                    self.state.draft.clear();
+                    self.update(ChatMessage::ToggleResumePicker);
+                } else if matches!(command.as_str(), "/new" | "/clear") {
+                    self.state.draft.clear();
+                    self.update(ChatMessage::NewChat);
+                } else if command.starts_with('/') {
+                    self.settings_error = Some(format!(
+                        "{} is not supported in this build yet",
+                        command.split_whitespace().next().unwrap_or(&command)
+                    ));
+                } else if self.state.can_send() && self.state.draft.trim_start().starts_with('!') {
+                    let draft = std::mem::take(&mut self.state.draft);
+                    let command = draft.trim_start()[1..].trim().to_owned();
+                    if command.is_empty() {
+                        self.settings_error = Some("Enter a command after !".into());
+                    } else if self.shell_warning_acknowledged {
+                        self.controller.send(ControllerCommand::Shell(command));
+                    } else {
+                        self.pending_shell_command = Some(command);
+                    }
+                } else if let Some(text) = self.state.begin_send() {
+                    self.controller.send(ControllerCommand::Send {
+                        text,
+                        model: self.state.selected_model.clone(),
+                        reasoning_effort: self.state.selected_reasoning_effort.clone(),
+                    });
+                }
+            }
+            ChatMessage::ConfirmShell => {
+                if let Some(command) = self.pending_shell_command.take() {
+                    self.shell_warning_acknowledged = true;
+                    self.controller.send(ControllerCommand::Shell(command));
+                }
+            }
+            ChatMessage::CancelShell => self.pending_shell_command = None,
+            ChatMessage::ToggleModelPicker => {
+                self.model_picker_open = !self.model_picker_open;
+                self.resume_picker_open = false;
+                self.command_picker_open = false;
+            }
+            ChatMessage::SelectModel(model) => {
+                self.state.selected_model = Some(model);
+                self.state.selected_reasoning_effort = self
+                    .state
+                    .models
+                    .iter()
+                    .find(|candidate| {
+                        Some(candidate.id.as_str()) == self.state.selected_model.as_deref()
+                    })
+                    .and_then(|candidate| candidate.default_reasoning_effort.clone());
+                self.model_picker_open = false;
+            }
+            ChatMessage::SelectReasoningEffort(effort) => {
+                self.state.selected_reasoning_effort = Some(effort);
+                self.model_picker_open = false;
+            }
+            ChatMessage::ToggleCommandPicker => {
+                self.command_picker_open = !self.command_picker_open;
+                self.model_picker_open = false;
+                self.resume_picker_open = false;
+            }
+            ChatMessage::SelectCommand(command) => {
+                self.command_picker_open = false;
+                self.state.draft = command;
+                self.update(ChatMessage::Send);
+            }
+            ChatMessage::ToggleResumePicker => {
+                self.resume_picker_open = !self.resume_picker_open;
+                self.model_picker_open = false;
+                self.command_picker_open = false;
+                if self.resume_picker_open {
+                    self.controller.send(ControllerCommand::LoadThreads);
                 }
             }
             ChatMessage::NewChat => {
-                if self.hub_mode {
+                if self.project_menu_mode {
                     self.settings_error =
                         Some("Choose + beside a project for a new conversation".into());
                     return;
                 }
                 self.state.new_chat();
-                self.thread_lease = None;
                 if let Some((cwd, project_id)) = &self.shell_project {
                     self.controller.send(ControllerCommand::NewChatIn(
                         cwd.clone(),
-                        Some(project_id.clone()),
+                        project_id.clone(),
                     ));
                 } else {
                     self.controller.send(ControllerCommand::NewChat);
                 }
-                if self.shell_host {
-                    self.sidebar_visible = false;
-                }
             }
             ChatMessage::NewChatIn(cwd, project_id) => {
-                if self.hub_mode {
-                    self.shell_requests
-                        .push(ShellRequest::OpenProject { cwd, project_id });
+                if self.project_menu_mode {
+                    let name = self
+                        .state
+                        .projects
+                        .iter()
+                        .find(|project| project.id == project_id)
+                        .map(|project| project.name.clone())
+                        .unwrap_or_else(|| project_window_name(&cwd));
+                    self.shell_requests.push(ShellRequest::OpenProject {
+                        cwd,
+                        project_id,
+                        name,
+                        initial_thread: None,
+                    });
                     return;
                 }
                 self.state.new_chat();
-                self.thread_lease = None;
                 self.controller
                     .send(ControllerCommand::NewChatIn(cwd.clone(), Some(project_id)));
-                self.sidebar_visible = false;
                 self.window_title = project_window_title(&cwd);
             }
-            ChatMessage::ShowHub => {
-                self.sidebar_visible = true;
-            }
             ChatMessage::Refresh => {
-                self.controller.send(ControllerCommand::Refresh);
+                if matches!(
+                    self.state.status,
+                    ConnectionStatus::Disconnected | ConnectionStatus::Incompatible
+                ) {
+                    self.reconnect_controller();
+                } else {
+                    self.controller.send(ControllerCommand::Refresh);
+                }
             }
             ChatMessage::Reconnect => {
-                self.state.generation += 1;
-                self.state.status = ConnectionStatus::Loading;
-                self.state.active_turn = None;
-                self.state.interrupt_requested = false;
-                self.controller =
-                    ChatController::spawn_generation(self.mode.clone(), self.state.generation);
+                self.reconnect_controller();
             }
             ChatMessage::SelectThread(id) => {
+                self.resume_picker_open = false;
                 if self.shell_host
                     && self.state.thread_runtime.get(&id).is_some_and(|runtime| {
                         runtime.status == nickel_codex::ThreadRuntimeStatus::Active
@@ -379,57 +546,22 @@ impl Application for ChatApplication {
                 {
                     return;
                 }
-                if self.hub_mode {
-                    let result = self
-                        .state
-                        .thread_runtime
-                        .get(&id)
-                        .and_then(|runtime| runtime.project_id.as_deref())
-                        .and_then(|project_id| {
-                            self.state
-                                .projects
-                                .iter()
-                                .find(|project| project.id == project_id)
-                                .and_then(|project| {
-                                    project
-                                        .roots
-                                        .first()
-                                        .map(|root| (root.clone(), project.id.clone()))
-                                })
-                        })
-                        .ok_or_else(|| "conversation is not assigned to a project".to_owned());
-                    match result {
-                        Ok((cwd, project_id)) => {
-                            self.shell_requests.push(ShellRequest::OpenThread {
-                                cwd,
-                                project_id,
-                                thread: id,
-                            })
-                        }
-                        Err(error) => self.settings_error = Some(error),
-                    }
+                if self.project_menu_mode {
                     return;
                 }
                 if self.shell_host {
-                    match crate::ThreadLease::acquire(&id.0) {
-                        Ok(lease) => self.thread_lease = Some(lease),
-                        Err(error) => {
-                            self.settings_error = Some(error);
-                            return;
-                        }
-                    }
+                    self.shell_requests.push(ShellRequest::ResumeThread(id));
+                    return;
                 }
-                if self.shell_host {
-                    if let Some(cwd) = self
+                if self.shell_host
+                    && let Some(cwd) = self
                         .state
                         .threads
                         .iter()
                         .find(|thread| thread.id == id)
                         .and_then(|thread| thread.cwd.as_deref())
-                    {
-                        self.window_title = project_window_title(cwd);
-                    }
-                    self.sidebar_visible = false;
+                {
+                    self.window_title = project_window_title(cwd);
                 }
                 self.state.begin_thread_selection(id.clone());
                 self.controller.send(ControllerCommand::SelectThread(id));
@@ -685,15 +817,31 @@ impl Application for ChatApplication {
     }
 
     fn view(&self) -> impl View<Self::Message> {
-        configured_chat_view(
-            &self.state,
-            &self.settings,
-            self.managing_hosts,
-            self.host_editor.as_ref(),
-            self.settings_error.as_deref(),
-            self.sidebar_visible,
-            self.shell_host,
-        )
+        if self.project_menu_mode {
+            AnyView::new(project_menu_view(
+                &self.state,
+                self.settings_error.as_deref(),
+            ))
+        } else {
+            AnyView::new(configured_chat_view(
+                &self.state,
+                &self.settings,
+                self.managing_hosts,
+                self.host_editor.as_ref(),
+                self.settings_error.as_deref(),
+                ChatOverlays {
+                    pending_shell_command: self.pending_shell_command.as_deref(),
+                    model_picker_open: self.model_picker_open,
+                    resume_picker_open: self.resume_picker_open,
+                    command_picker_open: self.command_picker_open,
+                    project_root: self.shell_project.as_ref().map(|(root, _)| root.as_path()),
+                    project_id: self
+                        .shell_project
+                        .as_ref()
+                        .and_then(|(_, id)| id.as_deref()),
+                },
+            ))
+        }
     }
 
     fn title(&self) -> &str {
@@ -712,6 +860,7 @@ fn ItemCard(item: &ChatItem) -> impl View<ChatMessage> {
         ChatItemKind::Agent => (PANEL, TEXT),
         ChatItemKind::Reasoning => (0x252331, MUTED),
         ChatItemKind::Command => (0x242a24, TEXT),
+        ChatItemKind::Activity => (PANEL, MUTED),
         ChatItemKind::FileChange => (0x2c2920, TEXT),
         ChatItemKind::Plan => (0x202a35, TEXT),
         ChatItemKind::Error => (ERROR, TEXT),
@@ -877,22 +1026,13 @@ pub fn chat_view(state: &ChatState) -> impl View<ChatMessage> {
         false,
         None,
         None,
-        true,
-        false,
+        ChatOverlays::default(),
     )
 }
 
 #[cfg(test)]
-pub fn shell_hub_view(state: &ChatState) -> impl View<ChatMessage> {
-    configured_chat_view(
-        state,
-        &DEFAULT_CODEX_SETTINGS,
-        false,
-        None,
-        None,
-        true,
-        true,
-    )
+pub fn shell_project_menu_view(state: &ChatState) -> impl View<ChatMessage> {
+    project_menu_view(state, None)
 }
 
 fn connection_menu(settings: &CodexSettings) -> Menu<ChatMessage> {
@@ -921,15 +1061,64 @@ fn connection_menu(settings: &CodexSettings) -> Menu<ChatMessage> {
     Menu::new(ChatMessage::ToggleFileMenu, "Connection", items).id(id!(connection_menu))
 }
 
+fn project_menu_view(state: &ChatState, settings_error: Option<&str>) -> impl View<ChatMessage> {
+    let status = match state.status {
+        ConnectionStatus::Loading => "Loading projects…",
+        ConnectionStatus::Ready if state.projects.is_empty() => "No projects available",
+        ConnectionStatus::Ready => "Choose a project",
+        ConnectionStatus::Disconnected => "Codex is disconnected",
+        ConnectionStatus::Incompatible => "Codex is incompatible",
+    };
+    ui! {
+        <Column fill_width fill_height padding={Insets::all(14.0)} gap={10.0}
+            background={BACKGROUND} border={Border::new(BORDER, 1.0)}>
+            <Row fill_width shrink={0.0} gap={8.0}>
+                <Text scale={1.25} color={TEXT} grow={1.0}>{"Codex projects"}</Text>
+                <Button on_press={ChatMessage::Refresh} background={PANEL} color={TEXT}>{"Retry"}</Button>
+            </Row>
+            <Text color={MUTED} shrink={0.0}>{status}</Text>
+            {state.diagnostics.back().map(|diagnostic| ui! {
+                <Container fill_width padding={Insets::all(8.0)} background={ERROR} radius={6.0}>
+                    <Text color={TEXT} max_lines={3}>{diagnostic}</Text>
+                </Container>
+            })}
+            {settings_error.map(|error| ui! {
+                <Container fill_width padding={Insets::all(8.0)} background={ERROR} radius={6.0}>
+                    <Text color={TEXT}>{error}</Text>
+                </Container>
+            })}
+            <Column id={id!(project_menu_list)} grow={1.0} min_height={0.0}
+                overflow_y={Overflow::Auto} gap={6.0}>
+                {state.projects.iter().filter(|project| !project.roots.is_empty()).map(|project| {
+                    let root = project.roots[0].clone();
+                    ui! {
+                        <Button key={project.id.clone()} height={42.0}
+                            on_press={ChatMessage::NewChatIn(root, project.id.clone())}
+                            background={PANEL} color={TEXT} label_align={TextAlign::Start}
+                            padding={Insets::symmetric(12.0, 8.0)} fill_width>{&project.name}</Button>
+                    }
+                })}
+            </Column>
+        </Column>
+    }
+}
+
 fn configured_chat_view(
     state: &ChatState,
     settings: &CodexSettings,
     managing_hosts: bool,
     editor: Option<&RemoteHostEditor>,
     settings_error: Option<&str>,
-    sidebar_visible: bool,
-    shell_host: bool,
+    overlays: ChatOverlays<'_>,
 ) -> impl View<ChatMessage> {
+    let ChatOverlays {
+        pending_shell_command,
+        model_picker_open,
+        resume_picker_open,
+        command_picker_open,
+        project_root,
+        project_id,
+    } = overlays;
     let transcript_heights = transcript_heights(state);
     let transcript_offset = if state.conversation_pinned {
         f32::MAX
@@ -950,7 +1139,6 @@ fn configured_chat_view(
             <MenuBar id={id!(menu_bar)}>
                 <Menu id={id!(file_menu)} on_toggle={ChatMessage::ToggleFileMenu} label={"File"}>
                     <MenuItem label={"New conversation"} on_press={ChatMessage::NewChat} />
-                    <MenuItem label={"Projects and conversations"} on_press={ChatMessage::ShowHub} />
                     <MenuItem label={"Refresh"} on_press={ChatMessage::Refresh} />
                 </Menu>
                 {connection_menu(settings)}
@@ -958,9 +1146,7 @@ fn configured_chat_view(
             {if managing_hosts {
                 remote_hosts_panel(settings, editor, settings_error)
             } else { AnyView::new(ui! {
-            <Row fill_width grow={1.0} min_height={0.0}>
-                {if sidebar_visible { AnyView::new(sidebar::thread_sidebar(state, shell_host)) } else { AnyView::new(Spacer::new().width(0.0)) }}
-                <Column grow={1.0} min_width={0.0} fill_height padding={Insets::all(18.0)} gap={12.0}>
+            <Column grow={1.0} min_width={0.0} fill_height padding={Insets::all(18.0)} gap={12.0}>
                 <Column id={id!(conversation)} grow={1.0} fill_width gap={10.0}
                     overflow_y={Overflow::Auto} follow_scroll_end={state.conversation_pinned}
                     on_scroll={conversation_scrolled}>
@@ -989,8 +1175,100 @@ fn configured_chat_view(
                     }}
                 </Column>
                 <Column id={id!(composer)} fill_width shrink={0.0} gap={8.0}>
+                    {[()].into_iter().filter(|_| model_picker_open).map(|_| ui! {
+                        <Column fill_width max_height={240.0} overflow_y={Overflow::Auto}
+                            padding={Insets::all(8.0)} gap={4.0} background={PANEL}
+                            border={Border::new(BORDER, 1.0)} radius={8.0}>
+                            <Text color={MUTED}>{"Choose model"}</Text>
+                            {state.models.iter().map(|model| ui! {
+                                <Button key={model.id.clone()} label_align={TextAlign::Start} fill_width
+                                    on_press={ChatMessage::SelectModel(model.id.clone())}>
+                                    {if state.selected_model.as_deref() == Some(model.id.as_str()) {
+                                        format!("✓ {}", model.display_name)
+                                    } else { model.display_name.clone() }}
+                                </Button>
+                            })}
+                            <Text color={MUTED}>{"Reasoning effort"}</Text>
+                            {state.models.iter()
+                                .find(|model| Some(model.id.as_str()) == state.selected_model.as_deref())
+                                .into_iter()
+                                .flat_map(|model| model.supported_reasoning_efforts.iter())
+                                .map(|option| ui! {
+                                    <Button key={option.reasoning_effort.clone()}
+                                        label_align={TextAlign::Start} fill_width
+                                        on_press={ChatMessage::SelectReasoningEffort(option.reasoning_effort.clone())}>
+                                        {if state.selected_reasoning_effort.as_deref()
+                                            == Some(option.reasoning_effort.as_str()) {
+                                            format!("✓ {} — {}", option.reasoning_effort, option.description)
+                                        } else {
+                                            format!("{} — {}", option.reasoning_effort, option.description)
+                                        }}
+                                    </Button>
+                                })}
+                        </Column>
+                    })}
+                    {[()].into_iter().filter(|_| command_picker_open).map(|_| ui! {
+                        <Column fill_width max_height={280.0} overflow_y={Overflow::Auto}
+                            padding={Insets::all(8.0)} gap={4.0} background={PANEL}
+                            border={Border::new(BORDER, 1.0)} radius={8.0}>
+                            <Text color={MUTED}>{"Commands"}</Text>
+                            <Button label_align={TextAlign::Start} fill_width
+                                on_press={ChatMessage::SelectCommand("/model".into())}>{"/model — choose model and reasoning"}</Button>
+                            <Button label_align={TextAlign::Start} fill_width
+                                on_press={ChatMessage::SelectCommand("/resume".into())}>{"/resume — resume a project conversation"}</Button>
+                            <Button label_align={TextAlign::Start} fill_width
+                                on_press={ChatMessage::SelectCommand("/new".into())}>{"/new — start a new conversation"}</Button>
+                            <Button label_align={TextAlign::Start} fill_width
+                                on_press={ChatMessage::SelectCommand("/clear".into())}>{"/clear — clear into a new conversation"}</Button>
+                            <Text color={MUTED}>{"/review — unavailable: backend support not implemented"}</Text>
+                            <Text color={MUTED}>{"/compact — unavailable: backend support not implemented"}</Text>
+                            <Text color={MUTED}>{"/plan — unavailable: use a natural-language request"}</Text>
+                            <Text color={MUTED}>{"/status — unavailable: status is shown below the composer"}</Text>
+                            <Text color={MUTED}>{"/diff — unavailable: file changes appear inline"}</Text>
+                            <Text color={MUTED}>{"/mention — unavailable: file mention chooser not implemented"}</Text>
+                            <Text color={MUTED}>{"/permissions — unavailable: use approval prompts"}</Text>
+                            <Text color={MUTED}>{"/feedback — unavailable in this client"}</Text>
+                            <Text color={MUTED}>{"/logout — unavailable: manage the Codex CLI account externally"}</Text>
+                        </Column>
+                    })}
+                    {[()].into_iter().filter(|_| resume_picker_open).map(|_| ui! {
+                        <Column fill_width max_height={280.0} overflow_y={Overflow::Auto}
+                            padding={Insets::all(8.0)} gap={4.0} background={PANEL}
+                            border={Border::new(BORDER, 1.0)} radius={8.0}>
+                            <Text color={MUTED}>{"Resume conversation"}</Text>
+                            {state.threads.iter().filter(|thread| {
+                                state.thread_runtime.get(&thread.id).is_some_and(|runtime| {
+                                    let belongs_to_project = runtime.project_id.as_deref().map_or_else(
+                                        || project_root.is_none_or(|root| {
+                                            thread.cwd.as_deref().is_some_and(|cwd| cwd.starts_with(root))
+                                        }),
+                                        |thread_project| project_id == Some(thread_project),
+                                    );
+                                    belongs_to_project && matches!(runtime.status,
+                                        nickel_codex::ThreadRuntimeStatus::Idle
+                                            | nickel_codex::ThreadRuntimeStatus::NotLoaded)
+                                })
+                            }).map(|thread| ui! {
+                                <Button key={thread.id.0.clone()} label_align={TextAlign::Start} fill_width
+                                    on_press={ChatMessage::SelectThread(thread.id.clone())}>
+                                    {thread.title.clone().unwrap_or_else(|| "Untitled conversation".into())}
+                                </Button>
+                            })}
+                        </Column>
+                    })}
                     {state.pending.iter().map(|interaction| ui! {
                         <InteractionCard interaction={interaction} answer={&state.interaction_answer} />
+                    })}
+                    {pending_shell_command.map(|command| ui! {
+                        <Column fill_width padding={Insets::all(10.0)} gap={8.0}
+                            background={0x3b3020} radius={6.0}>
+                            <Text color={TEXT}>{"Run this command outside the Codex sandbox?"}</Text>
+                            <Text color={MUTED}>{format!("!{command}")}</Text>
+                            <Row gap={8.0}>
+                                <Button on_press={ChatMessage::CancelShell}>{"Cancel"}</Button>
+                                <Button on_press={ChatMessage::ConfirmShell} background={0x7a5220} color={TEXT}>{"Run unsandboxed"}</Button>
+                            </Row>
+                        </Column>
                     })}
                     {state.diagnostics.back().map(|diagnostic| ui! {
                         <Container fill_width padding={Insets::all(10.0)} background={ERROR} radius={6.0}>
@@ -1012,7 +1290,18 @@ fn configured_chat_view(
                             color={TEXT} wrap={true} />
                     </Container>
                     <Row shrink={0.0} gap={8.0}>
-                        <Text color={MUTED}>{if state.active_turn.is_some() { "Codex is working…" } else { "Explicit approval is always required" }}</Text>
+                        <Button on_press={ChatMessage::ToggleCommandPicker}>{"Commands"}</Button>
+                        <Button on_press={ChatMessage::ToggleResumePicker}>{"Resume"}</Button>
+                        <Button on_press={ChatMessage::ToggleModelPicker}>{state.models.iter()
+                            .find(|model| Some(model.id.as_str()) == state.selected_model.as_deref())
+                            .map(|model| match state.selected_reasoning_effort.as_deref() {
+                                Some(effort) => format!("{} · {effort}", model.display_name),
+                                None => model.display_name.clone(),
+                            }).unwrap_or_else(|| "Model".into())}</Button>
+                        <Column gap={2.0} grow={1.0}>
+                            <Text color={MUTED}>{if state.active_turn.is_some() { "Codex is working…" } else { "Explicit approval is always required" }}</Text>
+                            <Text color={MUTED} scale={0.72}>{&state.provenance}</Text>
+                        </Column>
                         <Spacer fill />
                         {if state.interrupt_requested {
                             ui! { <Text color={MUTED}>{"Interrupting…"}</Text> }
@@ -1025,8 +1314,7 @@ fn configured_chat_view(
                         }}
                     </Row>
                 </Column>
-                </Column>
-            </Row>
+            </Column>
             })} }
         </Column>
     }
@@ -1048,12 +1336,21 @@ mod tests {
             cwd: Some("/projects/nickel".into()),
             last_used_at: Some(index),
             turns: Vec::new(),
+            model: None,
+            reasoning_effort: None,
         }));
         let settings = CodexSettings::default();
         let mut ui_state = UiStateStore::default();
         let bounds = Rect::new(0.0, 0.0, 900.0, 640.0);
         let closed = UiTree::layout_with_state(
-            configured_chat_view(&state, &settings, false, None, None, true, false),
+            configured_chat_view(
+                &state,
+                &settings,
+                false,
+                None,
+                None,
+                ChatOverlays::default(),
+            ),
             bounds,
             &mut ui_state,
         );
@@ -1072,7 +1369,14 @@ mod tests {
         closed.handle_event(&mut ui_state, UiEvent::PointerReleased(header));
 
         let open = UiTree::layout_with_state(
-            configured_chat_view(&state, &settings, false, None, None, true, false),
+            configured_chat_view(
+                &state,
+                &settings,
+                false,
+                None,
+                None,
+                ChatOverlays::default(),
+            ),
             bounds,
             &mut ui_state,
         );
@@ -1085,7 +1389,14 @@ mod tests {
         };
         open.handle_event(&mut ui_state, UiEvent::PointerPressed(point));
         let rebuilt = UiTree::layout_with_state(
-            configured_chat_view(&state, &settings, false, None, None, true, false),
+            configured_chat_view(
+                &state,
+                &settings,
+                false,
+                None,
+                None,
+                ChatOverlays::default(),
+            ),
             bounds,
             &mut ui_state,
         );
@@ -1158,6 +1469,37 @@ mod tests {
     }
 
     #[test]
+    fn retry_replaces_a_stopped_controller_generation() {
+        let backend = ReplayBackend::from_json(r#"{"name":"retry","events":[]}"#).unwrap();
+        let mut app = ChatApplication::new(BackendMode::Replay {
+            backend,
+            cwd: PathBuf::from("/projects/nickel"),
+        });
+        app.state.status = ConnectionStatus::Disconnected;
+        let generation = app.state.generation;
+
+        app.update(ChatMessage::Refresh);
+
+        assert_eq!(app.state.status, ConnectionStatus::Loading);
+        assert_eq!(app.state.generation, generation + 1);
+        assert_eq!(app.controller.generation(), generation + 1);
+    }
+
+    #[test]
+    fn standalone_project_root_remains_fixed_for_new_conversations() {
+        let backend = ReplayBackend::from_json(r#"{"name":"fixed-root","events":[]}"#).unwrap();
+        let root = PathBuf::from("/projects/nickel");
+        let mut app = ChatApplication::new(BackendMode::Replay {
+            backend,
+            cwd: root.clone(),
+        });
+        app.use_project_root(root.clone());
+        app.update(ChatMessage::NewChat);
+
+        assert_eq!(app.shell_project, Some((root, None)));
+    }
+
+    #[test]
     fn selecting_a_persisted_remote_host_replaces_local_project_state() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("codex-hosts.toml");
@@ -1186,6 +1528,8 @@ mod tests {
             cwd: Some("/projects/local".into()),
             last_used_at: Some(1),
             turns: Vec::new(),
+            model: None,
+            reasoning_effort: None,
         });
 
         app.update(ChatMessage::SelectConnection("arm_host".into()));

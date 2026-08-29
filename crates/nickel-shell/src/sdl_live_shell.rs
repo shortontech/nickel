@@ -10,8 +10,11 @@ use nickel_core::{
 use nickel_ui::{PaintCommand, Point, Rect, TextAlign};
 
 use crate::{
-    launcher::Launcher,
-    model::{OpenWindow, TrayItem},
+    launcher::{
+        DashboardAccount, DashboardProject, DashboardSection, Launcher, LauncherInput,
+        LauncherInputOutcome, LauncherMode,
+    },
+    model::{Application, OpenWindow, TrayItem},
     notification::DesktopNotification,
     platform::{
         self, AudioStatus, BluetoothStatus, NetworkStatus, NotificationFeed, NotificationSource,
@@ -19,7 +22,8 @@ use crate::{
     },
     sdl_control_view::{ControlAction, ControlCenterFrame, ControlViewState, build_control_center},
     sdl_launcher_view::{
-        LauncherAction, LauncherFrame, LauncherIconCache, LauncherViewState, build_launcher_frame,
+        LauncherAction, LauncherFrame, LauncherIconCache, LauncherShellEffect, LauncherViewState,
+        build_launcher_frame, reduce_launcher_action,
     },
     sdl_shell::SurfaceRole,
 };
@@ -32,6 +36,34 @@ const PANEL_TRAY_WIDTH: f32 = 28.0;
 const PANEL_TRAY_ICON_SIZE: u32 = 18;
 const PANEL_CODEX_WIDTH: f32 = 36.0;
 const PANEL_CODEX_ICON_SIZE: f32 = 28.0;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PanelStatusLayout {
+    control_start: f32,
+    tray_start: f32,
+    codex_start: f32,
+}
+
+impl PanelStatusLayout {
+    fn codex_icon_bounds(self) -> Rect {
+        Rect::new(
+            self.codex_start + (PANEL_CODEX_WIDTH - PANEL_CODEX_ICON_SIZE) / 2.0,
+            (56.0 - PANEL_CODEX_ICON_SIZE) / 2.0,
+            PANEL_CODEX_ICON_SIZE,
+            PANEL_CODEX_ICON_SIZE,
+        )
+    }
+}
+
+fn panel_status_layout(width: u32, tray_count: usize) -> PanelStatusLayout {
+    let control_start = panel_control_start(width);
+    let tray_start = control_start - tray_count.min(4) as f32 * PANEL_TRAY_WIDTH;
+    PanelStatusLayout {
+        control_start,
+        tray_start,
+        codex_start: tray_start - PANEL_CODEX_WIDTH,
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PanelHover {
@@ -63,7 +95,7 @@ pub struct LiveShell {
     audio: AudioStatus,
     launcher_visible: bool,
     control_visible: bool,
-    codex_hub_visible: bool,
+    codex_project_menu_visible: bool,
     panel_hover: Option<PanelHover>,
     control_state: ControlViewState,
     launcher_view: LauncherViewState,
@@ -72,12 +104,38 @@ pub struct LiveShell {
     launcher_status: Option<String>,
     secure_storage_override: Option<String>,
     secure_storage_state: platform::SecureStorageState,
+    requested_codex_project: Option<String>,
 }
 
 impl LiveShell {
+    pub fn set_dashboard_projects(
+        &mut self,
+        projects: DashboardSection<Vec<DashboardProject>>,
+    ) -> bool {
+        self.launcher.set_dashboard_projects(projects)
+    }
+
+    pub fn take_requested_codex_project(&mut self) -> Option<String> {
+        self.requested_codex_project.take()
+    }
     pub fn new() -> Result<Self, String> {
         let mut launcher = Launcher::new(platform::applications());
         launcher.set_places(crate::places::applications());
+        let _ = launcher.set_dashboard_account(
+            std::env::var("USER")
+                .or_else(|_| std::env::var("USERNAME"))
+                .ok()
+                .filter(|name| !name.trim().is_empty())
+                .map_or_else(
+                    || DashboardSection::Unavailable("Local identity unavailable".into()),
+                    |display_name| {
+                        DashboardSection::Ready(DashboardAccount {
+                            display_name,
+                            supporting_text: "Local session".into(),
+                        })
+                    },
+                ),
+        );
         let wallpaper_settings = WallpaperSettings::load_default();
         let wallpaper_path = wallpaper_settings.image;
         let shell_settings = ShellSettings::load_default();
@@ -130,7 +188,7 @@ impl LiveShell {
             audio,
             launcher_visible: false,
             control_visible: false,
-            codex_hub_visible: false,
+            codex_project_menu_visible: false,
             panel_hover: None,
             control_state: ControlViewState::default(),
             launcher_view: LauncherViewState::default(),
@@ -139,10 +197,17 @@ impl LiveShell {
             launcher_status: None,
             secure_storage_override: None,
             secure_storage_state,
+            requested_codex_project: None,
         })
     }
 
     pub fn refresh(&mut self) -> bool {
+        let fast = self.refresh_fast();
+        let system = self.refresh_system();
+        fast || system
+    }
+
+    pub fn refresh_fast(&mut self) -> bool {
         let mut changed = false;
         #[cfg(target_os = "linux")]
         {
@@ -163,6 +228,32 @@ impl LiveShell {
         if self.launcher_visible || self.control_visible {
             return false;
         }
+        if let Some(windows) = self.window_feed.snapshot(&self.launcher)
+            && windows != self.windows
+        {
+            self.windows = windows;
+            changed = true;
+        }
+        let tray = self.tray_feed.snapshot();
+        if tray != self.tray {
+            self.tray = tray;
+            self.tray_icons = panel_tray_icons(&self.tray);
+            changed = true;
+        }
+        let notification = self.notification_feed.snapshot();
+        if notification != self.notification {
+            self.notification = notification;
+            changed = true;
+        }
+        changed
+    }
+
+    pub fn refresh_system(&mut self) -> bool {
+        #[cfg(target_os = "macos")]
+        if self.launcher_visible || self.control_visible {
+            return false;
+        }
+        let mut changed = false;
         let palette = ThemePalette::from_appearance(
             ShellSettings::load_default().resolve_appearance(Appearance::default()),
         );
@@ -180,23 +271,6 @@ impl LiveShell {
             ) {
                 self.codex_icon = Arc::new(tint_panel_icon(icon, palette.text));
             }
-            changed = true;
-        }
-        if let Some(windows) = self.window_feed.snapshot(&self.launcher)
-            && windows != self.windows
-        {
-            self.windows = windows;
-            changed = true;
-        }
-        let tray = self.tray_feed.snapshot();
-        if tray != self.tray {
-            self.tray = tray;
-            self.tray_icons = panel_tray_icons(&self.tray);
-            changed = true;
-        }
-        let notification = self.notification_feed.snapshot();
-        if notification != self.notification {
-            self.notification = notification;
             changed = true;
         }
         let network = platform::network_status();
@@ -224,7 +298,7 @@ impl LiveShell {
             SurfaceRole::Launcher => self.launcher_scene(width, height),
             SurfaceRole::ControlCenter => self.control_frame(width, height).commands,
             SurfaceRole::Notification => self.notification_scene(width, height),
-            SurfaceRole::CodexHub | SurfaceRole::CodexChat => Vec::new(),
+            SurfaceRole::CodexProjectMenu | SurfaceRole::CodexChat => Vec::new(),
         }
     }
 
@@ -234,7 +308,7 @@ impl LiveShell {
             SurfaceRole::Launcher => self.launcher_visible,
             SurfaceRole::ControlCenter => self.control_visible,
             SurfaceRole::Notification => self.notification.is_some(),
-            SurfaceRole::CodexHub => self.codex_hub_visible,
+            SurfaceRole::CodexProjectMenu => self.codex_project_menu_visible,
             SurfaceRole::CodexChat => true,
         }
     }
@@ -264,21 +338,24 @@ impl LiveShell {
             }
             return true;
         }
-        let control_start = panel_control_start(width);
+        let status = panel_status_layout(width, self.tray.len());
         #[cfg(not(target_os = "macos"))]
-        if x >= control_start {
+        if x >= status.control_start {
+            if self.launcher_visible {
+                self.set_launcher_visible(false);
+            }
             self.control_visible = !self.control_visible;
-            self.launcher_visible = false;
             return true;
         }
-        let tray_start = control_start - self.tray.len().min(4) as f32 * PANEL_TRAY_WIDTH;
-        let codex_start = tray_start - PANEL_CODEX_WIDTH;
-        if x >= codex_start && x < tray_start {
-            self.codex_hub_visible = !self.codex_hub_visible;
+        if x >= status.codex_start && x < status.tray_start {
+            if self.launcher_visible {
+                self.set_launcher_visible(false);
+            }
+            self.codex_project_menu_visible = !self.codex_project_menu_visible;
             return true;
         }
-        if x >= tray_start {
-            let index = ((x - tray_start) / PANEL_TRAY_WIDTH) as usize;
+        if x >= status.tray_start {
+            let index = ((x - status.tray_start) / PANEL_TRAY_WIDTH) as usize;
             if let Some(item) = visible_tray_item(&self.tray, index) {
                 self.tray_feed.activate(&item.id);
             }
@@ -305,11 +382,11 @@ impl LiveShell {
     pub fn global_shortcut(&mut self, shortcut: platform::GlobalShortcut) -> bool {
         match shortcut {
             platform::GlobalShortcut::ShowLauncher => {
-                self.set_launcher_visible(true);
+                self.apply_launcher_signal(true);
                 true
             }
             platform::GlobalShortcut::HideLauncher => {
-                self.set_launcher_visible(false);
+                self.apply_launcher_signal(false);
                 true
             }
             platform::GlobalShortcut::ShowRun => {
@@ -321,12 +398,7 @@ impl LiveShell {
     }
 
     fn set_launcher_visible(&mut self, visible: bool) {
-        self.launcher_visible = visible;
-        if visible {
-            self.control_visible = false;
-        } else {
-            self.launcher.clear();
-        }
+        self.apply_session_launcher_visibility(visible);
         let _ = platform::send_shell_command(if visible {
             ShellCommand::Show
         } else {
@@ -335,13 +407,31 @@ impl LiveShell {
         platform::launcher_visibility_applied(visible);
     }
 
+    fn apply_launcher_signal(&mut self, visible: bool) {
+        #[cfg(target_os = "linux")]
+        self.apply_session_launcher_visibility(visible);
+        #[cfg(not(target_os = "linux"))]
+        self.set_launcher_visible(visible);
+    }
+
+    fn apply_session_launcher_visibility(&mut self, visible: bool) {
+        self.launcher_visible = visible;
+        if visible {
+            self.control_visible = false;
+        } else {
+            self.launcher.clear();
+        }
+    }
+
     pub fn launcher_click(&mut self, x: f32, y: f32) -> bool {
-        let action = self
+        let Some(action) = self
             .launcher_frame
             .as_ref()
             .and_then(|frame| frame.action_at(Point { x, y }))
             .cloned()
-            .unwrap_or(LauncherAction::Dismiss);
+        else {
+            return false;
+        };
         self.apply_launcher_action(action);
         true
     }
@@ -358,7 +448,7 @@ impl LiveShell {
     pub fn hide_overlay(&mut self, role: SurfaceRole) -> bool {
         match role {
             SurfaceRole::Launcher if self.launcher_visible => {
-                self.launcher_visible = false;
+                self.apply_session_launcher_visibility(false);
                 let _ = platform::send_shell_command(ShellCommand::Hide);
                 true
             }
@@ -366,8 +456,8 @@ impl LiveShell {
                 self.control_visible = false;
                 true
             }
-            SurfaceRole::CodexHub if self.codex_hub_visible => {
-                self.codex_hub_visible = false;
+            SurfaceRole::CodexProjectMenu if self.codex_project_menu_visible => {
+                self.codex_project_menu_visible = false;
                 true
             }
             _ => false,
@@ -387,6 +477,18 @@ impl LiveShell {
         if let Some(LauncherAction::ActivateResult(index)) = hovered {
             changed |= self.launcher.selected_index() != index;
             self.launcher.select(index);
+        }
+        if self.launcher.mode() == LauncherMode::Dashboard
+            && let Some(action) = &hovered
+            && let Some(index) = self.launcher_frame.as_ref().and_then(|frame| {
+                frame
+                    .navigable_actions
+                    .iter()
+                    .position(|item| item == action)
+            })
+        {
+            changed |= self.launcher_view.dashboard_selected != index;
+            self.launcher_view.dashboard_selected = index;
         }
         self.launcher_view.hovered = hovered;
         changed
@@ -418,8 +520,31 @@ impl LiveShell {
         if !self.launcher_visible {
             return false;
         }
-        self.launcher.insert(value);
-        self.launcher_view.scroll_row = 0;
+        let previous = self.launcher.mode();
+        let _ = self
+            .launcher
+            .reduce_input(LauncherInput::Text(value.to_owned()));
+        self.launcher_view
+            .transition_mode(previous, self.launcher.mode());
+        self.launcher_view.reset_active_scroll(self.launcher.mode());
+        true
+    }
+
+    pub fn launcher_is_dashboard(&self) -> bool {
+        self.launcher.mode() == LauncherMode::Dashboard
+    }
+
+    pub fn set_launcher_preedit(&mut self, value: &str) -> bool {
+        if !self.launcher_visible {
+            return false;
+        }
+        let previous = self.launcher.mode();
+        let _ = self
+            .launcher
+            .reduce_input(LauncherInput::Preedit(value.to_owned()));
+        self.launcher_view
+            .transition_mode(previous, self.launcher.mode());
+        self.launcher_view.reset_active_scroll(self.launcher.mode());
         true
     }
 
@@ -433,9 +558,59 @@ impl LiveShell {
             .map(|frame| frame.columns)
             .unwrap_or(1)
             .max(1);
+        if self.launcher.mode() == LauncherMode::Dashboard {
+            let action_count = self
+                .launcher_frame
+                .as_ref()
+                .map_or(0, |frame| frame.navigable_actions.len());
+            match key {
+                Some(Keycode::Escape) => self.set_launcher_visible(false),
+                Some(Keycode::Tab) if modifiers.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD) => {
+                    self.launcher_view.select_dashboard_previous(action_count);
+                }
+                Some(Keycode::Down | Keycode::Right | Keycode::Tab) => {
+                    self.launcher_view.select_dashboard_next(action_count);
+                }
+                Some(Keycode::Up | Keycode::Left) => {
+                    self.launcher_view.select_dashboard_previous(action_count);
+                }
+                Some(Keycode::Return | Keycode::KpEnter) => {
+                    let action = self.launcher_frame.as_ref().and_then(|frame| {
+                        frame
+                            .navigable_actions
+                            .get(self.launcher_view.dashboard_selected)
+                            .cloned()
+                    });
+                    if let Some(action) = action {
+                        self.apply_launcher_action(action);
+                    }
+                }
+                Some(Keycode::Backspace) => {}
+                _ => return self.insert_launcher_key_text(key, modifiers),
+            }
+            return true;
+        }
         match key {
-            Some(Keycode::Escape) => self.launcher_visible = false,
-            Some(Keycode::Backspace) => self.launcher.backspace(),
+            Some(Keycode::Escape) => {
+                let previous = self.launcher.mode();
+                if self.launcher.reduce_input(LauncherInput::Escape)
+                    == LauncherInputOutcome::DismissRequested
+                {
+                    self.set_launcher_visible(false);
+                } else {
+                    self.launcher_view
+                        .transition_mode(previous, self.launcher.mode());
+                }
+            }
+            Some(Keycode::Backspace) => {
+                let previous = self.launcher.mode();
+                let _ = self.launcher.reduce_input(LauncherInput::Backspace);
+                self.launcher_view
+                    .transition_mode(previous, self.launcher.mode());
+                if self.launcher.mode() == LauncherMode::Search {
+                    self.launcher_view.reset_active_scroll(LauncherMode::Search);
+                }
+            }
             Some(Keycode::Down) => self.launcher.select_grid_down(columns),
             Some(Keycode::Up) => self.launcher.select_grid_up(columns),
             Some(Keycode::Left) => self.launcher.select_grid_left(columns),
@@ -444,56 +619,81 @@ impl LiveShell {
                 let index = self.launcher.selected_index();
                 self.launch_result(index);
             }
-            Some(key) => {
-                let control_modifier = Mod::LCTRLMOD
-                    | Mod::RCTRLMOD
-                    | Mod::LALTMOD
-                    | Mod::RALTMOD
-                    | Mod::LGUIMOD
-                    | Mod::RGUIMOD;
-                if modifiers.intersects(control_modifier) {
-                    return false;
-                }
-                #[cfg(target_os = "macos")]
-                {
-                    let _ = key;
-                    return false;
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    let name = key.name();
-                    let mut characters = name.chars();
-                    let Some(mut character) = characters.next() else {
-                        return false;
-                    };
-                    if characters.next().is_some() {
-                        if key == Keycode::Space {
-                            character = ' ';
-                        } else {
-                            return false;
-                        }
-                    } else if character.is_ascii_alphabetic() {
-                        let shifted = modifiers.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD);
-                        let caps = modifiers.contains(Mod::CAPSMOD);
-                        character = if shifted ^ caps {
-                            character.to_ascii_uppercase()
-                        } else {
-                            character.to_ascii_lowercase()
-                        };
-                    }
-                    self.launcher.insert(&character.to_string());
-                }
-            }
+            Some(_) => return self.insert_launcher_key_text(key, modifiers),
             None => return false,
         }
-        self.launcher_view.scroll_row = 0;
         true
+    }
+
+    fn insert_launcher_key_text(&mut self, key: Option<Keycode>, modifiers: Mod) -> bool {
+        let Some(key) = key else {
+            return false;
+        };
+        let control_modifier = Mod::LCTRLMOD
+            | Mod::RCTRLMOD
+            | Mod::LALTMOD
+            | Mod::RALTMOD
+            | Mod::LGUIMOD
+            | Mod::RGUIMOD;
+        if modifiers.intersects(control_modifier) {
+            return false;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let _ = key;
+            false
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let name = key.name();
+            let mut characters = name.chars();
+            let Some(mut character) = characters.next() else {
+                return false;
+            };
+            if characters.next().is_some() {
+                if key == Keycode::Space {
+                    character = ' ';
+                } else {
+                    return false;
+                }
+            } else if character.is_ascii_alphabetic() {
+                let shifted = modifiers.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD);
+                let caps = modifiers.contains(Mod::CAPSMOD);
+                character = if shifted ^ caps {
+                    character.to_ascii_uppercase()
+                } else {
+                    character.to_ascii_lowercase()
+                };
+            }
+            let previous = self.launcher.mode();
+            self.launcher.insert(&character.to_string());
+            self.launcher_view
+                .transition_mode(previous, self.launcher.mode());
+            self.launcher_view.reset_active_scroll(LauncherMode::Search);
+            true
+        }
     }
 
     fn launch_result(&mut self, index: usize) {
         let Some(application) = self.launcher.result_at(index).cloned() else {
             return;
         };
+        self.launch_application(application);
+    }
+
+    fn launch_application_by_id(&mut self, id: &str) {
+        let Some(application) = self
+            .launcher
+            .applications()
+            .find(|application| application.id() == id)
+            .cloned()
+        else {
+            return;
+        };
+        self.launch_application(application);
+    }
+
+    fn launch_application(&mut self, application: Application) {
         #[cfg(target_os = "linux")]
         if platform::application_requires_secure_storage(&application)
             && platform::secure_storage_state() != platform::SecureStorageState::Ready
@@ -510,9 +710,7 @@ impl LiveShell {
         self.secure_storage_override = None;
         self.launcher_status = None;
         let _ = platform::launch_application(&application);
-        self.launcher_visible = false;
-        let _ = platform::send_shell_command(ShellCommand::Hide);
-        self.launcher.clear();
+        self.set_launcher_visible(false);
     }
 
     fn desktop_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
@@ -527,6 +725,7 @@ impl LiveShell {
                 bounds,
                 id: 1,
                 image: wallpaper.clone(),
+                high_density: None,
             });
         }
         commands
@@ -637,6 +836,7 @@ impl LiveShell {
             bounds: Rect::new(12.0, 12.0, 32.0, 32.0),
             id: 2,
             image: Arc::clone(&self.panel_icon),
+            high_density: None,
         });
         let groups = self.launcher.group_windows(&self.windows);
         for (index, group) in groups.iter().take(12).enumerate() {
@@ -659,6 +859,13 @@ impl LiveShell {
                 .and_then(|id| self.launcher.application(id))
                 .and_then(|application| self.launcher_icons.resolve(application))
                 .or_else(|| {
+                    group
+                        .application_id
+                        .as_ref()
+                        .is_some_and(|id| id.as_str().starts_with("io.nickel.codex.project."))
+                        .then(|| (0x3002, Arc::clone(&self.codex_icon)))
+                })
+                .or_else(|| {
                     crate::icons::nickel_application(&group.application_name)
                         .map(|(id, image)| (id, Arc::new(image)))
                 });
@@ -667,6 +874,7 @@ impl LiveShell {
                     bounds: Rect::new(x + 10.0, 11.0, 32.0, 32.0),
                     id,
                     image,
+                    high_density: None,
                 });
             } else {
                 let initial = group
@@ -751,9 +959,9 @@ impl LiveShell {
                 false,
             ));
         }
+        let status = panel_status_layout(width, self.tray.len());
         for (index, _) in self.tray.iter().rev().take(4).rev().enumerate() {
-            let x = panel_control_start(width)
-                - (self.tray.len().min(4) - index) as f32 * PANEL_TRAY_WIDTH;
+            let x = status.tray_start + index as f32 * PANEL_TRAY_WIDTH;
             if self.panel_hover == Some(PanelHover::Tray(index)) {
                 commands.push(PaintCommand::RoundedFill {
                     rect: Rect::new(x + 1.0, 10.0, PANEL_TRAY_WIDTH - 2.0, 36.0),
@@ -766,12 +974,11 @@ impl LiveShell {
                     bounds: Rect::new(x + 5.0, 19.0, 18.0, 18.0),
                     id: 0x6000 + index as u16,
                     image: Arc::clone(image),
+                    high_density: None,
                 });
             }
         }
-        let tray_start =
-            panel_control_start(width) - self.tray.len().min(4) as f32 * PANEL_TRAY_WIDTH;
-        let codex_x = tray_start - PANEL_CODEX_WIDTH;
+        let codex_x = status.codex_start;
         if self.panel_hover == Some(PanelHover::Codex) {
             commands.push(PaintCommand::RoundedFill {
                 rect: Rect::new(codex_x + 2.0, 7.0, PANEL_CODEX_WIDTH - 4.0, 42.0),
@@ -780,14 +987,10 @@ impl LiveShell {
             });
         }
         commands.push(PaintCommand::Image {
-            bounds: Rect::new(
-                codex_x + (PANEL_CODEX_WIDTH - PANEL_CODEX_ICON_SIZE) / 2.0,
-                (56.0 - PANEL_CODEX_ICON_SIZE) / 2.0,
-                PANEL_CODEX_ICON_SIZE,
-                PANEL_CODEX_ICON_SIZE,
-            ),
+            bounds: status.codex_icon_bounds(),
             id: 0x5000,
             image: Arc::clone(&self.codex_icon),
+            high_density: None,
         });
         commands
     }
@@ -804,19 +1007,17 @@ impl LiveShell {
                 ((x - PANEL_ITEM_WIDTH) / PANEL_ITEM_WIDTH) as usize,
             ));
         }
-        let control_start = panel_control_start(width);
+        let status = panel_status_layout(width, self.tray.len());
         #[cfg(not(target_os = "macos"))]
-        if x >= control_start {
+        if x >= status.control_start {
             return Some(PanelHover::Control);
         }
-        let tray_count = self.tray.len().min(4);
-        let tray_start = control_start - tray_count as f32 * PANEL_TRAY_WIDTH;
-        if x >= tray_start {
+        if x >= status.tray_start {
             return Some(PanelHover::Tray(
-                ((x - tray_start) / PANEL_TRAY_WIDTH) as usize,
+                ((x - status.tray_start) / PANEL_TRAY_WIDTH) as usize,
             ));
         }
-        if x >= tray_start - PANEL_CODEX_WIDTH {
+        if x >= status.codex_start {
             return Some(PanelHover::Codex);
         }
         None
@@ -833,18 +1034,79 @@ impl LiveShell {
     }
 
     fn apply_launcher_action(&mut self, action: LauncherAction) {
-        match action {
-            LauncherAction::Dismiss => {
-                self.launcher_visible = false;
-                let _ = platform::send_shell_command(ShellCommand::Hide);
+        let Some(effect) =
+            reduce_launcher_action(&mut self.launcher, &mut self.launcher_view, action)
+        else {
+            return;
+        };
+        match effect {
+            LauncherShellEffect::Dismiss => {
+                self.set_launcher_visible(false);
             }
-            LauncherAction::FocusSearch => {}
-            LauncherAction::SetView(view) => {
-                self.launcher.set_view(view);
-                self.launcher_view.scroll_row = 0;
+            LauncherShellEffect::ActivateResult(index) => self.launch_result(index),
+            LauncherShellEffect::LaunchApplication(id) => self.launch_application_by_id(&id),
+            LauncherShellEffect::OpenProject(id) => {
+                self.set_launcher_visible(false);
+                self.requested_codex_project = Some(id);
             }
-            LauncherAction::ActivateResult(index) => self.launch_result(index),
-            LauncherAction::TogglePin(id) => self.launcher.toggle_pin(&id),
+            LauncherShellEffect::SeeAllProjects => {
+                self.set_launcher_visible(false);
+                self.codex_project_menu_visible = true;
+            }
+            LauncherShellEffect::OpenSettings(destination) => {
+                let preferred = match destination {
+                    crate::launcher::SettingsDestination::System => "System Settings",
+                    crate::launcher::SettingsDestination::Nickel
+                    | crate::launcher::SettingsDestination::KeyboardShortcuts
+                    | crate::launcher::SettingsDestination::About => "Nickel Settings",
+                };
+                let id = self
+                    .launcher
+                    .applications()
+                    .find(|application| application.name() == preferred)
+                    .map(|application| application.id().to_owned());
+                if let Some(id) = id {
+                    let application = self
+                        .launcher
+                        .applications()
+                        .find(|application| application.id() == id)
+                        .cloned();
+                    if let Some(application) = application {
+                        let screen = match destination {
+                            crate::launcher::SettingsDestination::System => None,
+                            crate::launcher::SettingsDestination::Nickel => Some("appearance"),
+                            crate::launcher::SettingsDestination::KeyboardShortcuts => {
+                                Some("keyboard-shortcuts")
+                            }
+                            crate::launcher::SettingsDestination::About => Some("about"),
+                        };
+                        let application = match (screen, application.launch_command()) {
+                            (Some(screen), Some(command)) => {
+                                let mut command = command.to_vec();
+                                command.extend(["--screen".into(), screen.into()]);
+                                Application::new(
+                                    application.id().to_owned(),
+                                    application.name().to_owned(),
+                                    application.icon().map(str::to_owned),
+                                    application.icon_path().map(std::path::Path::to_owned),
+                                    Some(command),
+                                )
+                            }
+                            _ => application,
+                        };
+                        self.launch_application(application);
+                    }
+                }
+            }
+            LauncherShellEffect::OpenAccount => {
+                self.set_launcher_visible(false);
+                self.control_visible = true;
+            }
+            LauncherShellEffect::RequestLogout => {
+                self.set_launcher_visible(false);
+                self.control_visible = true;
+                self.control_state.logout_confirmation = true;
+            }
         }
     }
 
@@ -963,46 +1225,50 @@ fn text(
         color,
         align,
         bold,
+        wrap: false,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use image::{Rgba, RgbaImage};
+    use nickel_ui::Rect;
 
     use super::{
-        PANEL_CLOCK_WIDTH, PANEL_CODEX_ICON_SIZE, PANEL_CODEX_WIDTH, PANEL_CONTROL_GAP,
-        PANEL_TRAY_ICON_SIZE, PANEL_TRAY_WIDTH, panel_control_start, panel_tray_icons,
-        platform::SecureStorageState, secure_storage_status_label, visible_tray_item,
+        panel_status_layout, panel_tray_icons, platform::SecureStorageState,
+        secure_storage_status_label, visible_tray_item,
     };
     use crate::model::TrayItem;
 
     #[test]
     fn launcher_exposes_every_non_ready_secure_storage_state() {
-        for state in [
-            SecureStorageState::Starting,
-            SecureStorageState::Locked,
-            SecureStorageState::PromptRequired,
-            SecureStorageState::Unavailable,
+        for (state, expected) in [
+            (SecureStorageState::Starting, "Secure storage is starting…"),
+            (SecureStorageState::Locked, "Secure storage is locked."),
+            (
+                SecureStorageState::PromptRequired,
+                "Secure storage is waiting for its unlock prompt.",
+            ),
+            (
+                SecureStorageState::Unavailable,
+                "Secure storage is unavailable.",
+            ),
         ] {
-            assert!(secure_storage_status_label(state).is_some());
+            assert_eq!(secure_storage_status_label(state), Some(expected));
         }
         assert_eq!(secure_storage_status_label(SecureStorageState::Ready), None);
     }
 
     #[test]
     fn right_panel_cluster_is_compact_and_grouped() {
-        let width = 1920;
-        let tray_count = 3.0;
-        let cluster_width = PANEL_CLOCK_WIDTH
-            + PANEL_CONTROL_GAP
-            + tray_count * PANEL_TRAY_WIDTH
-            + PANEL_CODEX_WIDTH;
-
-        assert_eq!(panel_control_start(width), 1816.0);
-        assert_eq!(cluster_width, 224.0);
-        assert!(cluster_width < 240.0);
-        assert!(PANEL_CODEX_ICON_SIZE > PANEL_TRAY_ICON_SIZE as f32);
+        let layout = panel_status_layout(1920, 3);
+        assert_eq!(layout.control_start, 1816.0);
+        assert_eq!(layout.tray_start, 1732.0);
+        assert_eq!(layout.codex_start, 1696.0);
+        assert_eq!(
+            layout.codex_icon_bounds(),
+            Rect::new(1700.0, 14.0, 28.0, 28.0)
+        );
     }
 
     #[test]
@@ -1015,10 +1281,7 @@ mod tests {
         let icons = panel_tray_icons(&[item]);
 
         assert_eq!(icons.len(), 1);
-        assert_eq!(
-            icons[0].dimensions(),
-            (PANEL_TRAY_ICON_SIZE, PANEL_TRAY_ICON_SIZE)
-        );
+        assert_eq!(icons[0].dimensions(), (18, 18));
         assert!(icons[0].pixels().any(|pixel| pixel.0[3] != 0));
     }
 

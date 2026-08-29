@@ -4,10 +4,10 @@ use thiserror::Error;
 
 #[cfg(feature = "backend-udev")]
 mod drm_scanner;
-mod output_layout;
+#[cfg(feature = "backend-udev")]
 mod session_activity;
 #[cfg(feature = "backend-udev")]
-pub use output_layout::OutputLayout;
+pub use nickel_core::output_layout::OutputLayout;
 #[cfg(feature = "backend-udev")]
 pub use session_activity::SessionActivity;
 

@@ -60,6 +60,9 @@ impl CompositorHandler for NickelSession {
                 render_visible,
             });
         }
+        if render_visible {
+            self.request_output_redraw();
+        }
     }
 }
 
@@ -81,12 +84,13 @@ mod tests {
     use super::commit_is_render_visible;
 
     #[test]
-    fn synchronized_subsurface_commit_waits_for_ancestor_commit() {
-        assert!(!commit_is_render_visible(true));
-    }
-
-    #[test]
-    fn root_or_desynchronized_commit_can_schedule_presentation() {
-        assert!(commit_is_render_visible(false));
+    fn commit_visibility_matches_subsurface_synchronization() {
+        for (synchronized_subsurface, expected_visible) in [(true, false), (false, true)] {
+            assert_eq!(
+                commit_is_render_visible(synchronized_subsurface),
+                expected_visible,
+                "synchronized={synchronized_subsurface}"
+            );
+        }
     }
 }

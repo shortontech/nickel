@@ -1,4 +1,5 @@
 mod compositor;
+mod xdg_activation;
 mod xdg_shell;
 
 use crate::NickelSession;
@@ -16,7 +17,7 @@ use smithay::wayland::selection::data_device::{
     ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
     set_data_device_focus,
 };
-use smithay::{delegate_data_device, delegate_output, delegate_seat};
+use smithay::{delegate_data_device, delegate_output, delegate_seat, delegate_text_input_manager};
 
 impl SeatHandler for NickelSession {
     type KeyboardFocus = WlSurface;
@@ -42,6 +43,7 @@ impl SeatHandler for NickelSession {
 }
 
 delegate_seat!(NickelSession);
+delegate_text_input_manager!(NickelSession);
 
 //
 // Wl Data Device

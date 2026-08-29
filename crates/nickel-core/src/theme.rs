@@ -147,7 +147,25 @@ pub fn accent_from_hue(hue: u16) -> [u8; 3] {
 
 #[cfg(test)]
 mod tests {
-    use super::{Appearance, ThemeMode, ThemePalette};
+    use super::{Appearance, ThemeMode, ThemePalette, accent_from_hue};
+
+    fn luminance(color: u32) -> f32 {
+        let channel = |shift: u32| {
+            let value = ((color >> shift) & 0xff_u32) as f32 / 255.0;
+            if value <= 0.04045 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
+    }
+
+    fn contrast(left: u32, right: u32) -> f32 {
+        let left = luminance(left);
+        let right = luminance(right);
+        (left.max(right) + 0.05) / (left.min(right) + 0.05)
+    }
 
     #[test]
     fn windows_blue_produces_distinct_semantic_colors() {
@@ -169,5 +187,25 @@ mod tests {
         });
         assert_ne!(dark.background, light.background);
         assert_ne!(dark.text, light.text);
+    }
+
+    #[test]
+    fn representative_hues_and_intensities_preserve_contrast_and_state_distinction() {
+        for mode in [ThemeMode::Light, ThemeMode::Dark] {
+            for hue in [0, 180, 359] {
+                for intensity in [0, 50, 100] {
+                    let palette = ThemePalette::from_appearance(Appearance {
+                        mode,
+                        accent: accent_from_hue(hue),
+                        intensity,
+                    });
+                    assert!(contrast(palette.text, palette.background) >= 4.5);
+                    assert!(contrast(palette.muted, palette.background) >= 3.0);
+                    assert_ne!(palette.surface, palette.surface_hover);
+                    assert_ne!(palette.accent, palette.accent_soft);
+                    assert_ne!(palette.accent, palette.complement);
+                }
+            }
+        }
     }
 }

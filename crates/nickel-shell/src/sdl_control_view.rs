@@ -625,6 +625,7 @@ fn text(bounds: Rect, value: &str, scale: f32, color: u32, bold: bool) -> PaintC
         color,
         align: TextAlign::Start,
         bold,
+        wrap: false,
     }
 }
 

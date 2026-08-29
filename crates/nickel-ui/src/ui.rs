@@ -32,6 +32,10 @@ pub enum ImageFit {
     Stretch,
     /// Keep the image at its intrinsic logical size.
     Center,
+    /// Repeat the image at its intrinsic logical size across the viewport.
+    Tile,
+    /// Fill one combined desktop viewport while preserving aspect ratio.
+    Span,
 }
 
 /// Alignment along one image-presentation axis.
@@ -92,7 +96,7 @@ impl ImagePresentation {
         let (width, height) = match self.fit {
             ImageFit::Stretch => (viewport_width, viewport_height),
             ImageFit::Center => (source.width, source.height),
-            ImageFit::Contain | ImageFit::Cover => {
+            ImageFit::Contain | ImageFit::Cover | ImageFit::Span => {
                 let horizontal_scale = viewport_width / source.width;
                 let vertical_scale = viewport_height / source.height;
                 let scale = if self.fit == ImageFit::Contain {
@@ -102,6 +106,7 @@ impl ImagePresentation {
                 };
                 (source.width * scale, source.height * scale)
             }
+            ImageFit::Tile => (source.width, source.height),
         };
         Rect::new(
             viewport.origin.x + (viewport_width - width) * self.horizontal.factor(),
@@ -166,8 +171,14 @@ pub enum UiEvent {
     PointerMoved(Point),
     PointerPressed(Point),
     PointerReleased(Point),
-    Scroll { point: Point, delta_y: f32 },
-    ScrollHorizontal { point: Point, delta_x: f32 },
+    Scroll {
+        point: Point,
+        delta_y: f32,
+    },
+    ScrollHorizontal {
+        point: Point,
+        delta_x: f32,
+    },
     FocusNext,
     FocusPrevious,
     ControllerNext,
@@ -175,20 +186,39 @@ pub enum UiEvent {
     ActivateFocused,
     KeyboardActivate,
     ControllerActivate,
+    /// Moves accessibility focus through the same production focus state used
+    /// by keyboard navigation, so the visible focus treatment cannot diverge.
+    AccessibilityFocus(UiId),
     AccessibilityActivate(UiId),
     TextInput(String),
     ImePreedit(String),
     TextBackspace,
     TextBackspaceWord,
     TextDelete,
-    TextMoveLeft { extend_selection: bool },
-    TextMoveRight { extend_selection: bool },
-    TextMoveWordLeft { extend_selection: bool },
-    TextMoveWordRight { extend_selection: bool },
-    TextMoveHome { extend_selection: bool },
-    TextMoveEnd { extend_selection: bool },
-    TextMoveDocumentHome { extend_selection: bool },
-    TextMoveDocumentEnd { extend_selection: bool },
+    TextMoveLeft {
+        extend_selection: bool,
+    },
+    TextMoveRight {
+        extend_selection: bool,
+    },
+    TextMoveWordLeft {
+        extend_selection: bool,
+    },
+    TextMoveWordRight {
+        extend_selection: bool,
+    },
+    TextMoveHome {
+        extend_selection: bool,
+    },
+    TextMoveEnd {
+        extend_selection: bool,
+    },
+    TextMoveDocumentHome {
+        extend_selection: bool,
+    },
+    TextMoveDocumentEnd {
+        extend_selection: bool,
+    },
     TextSelectAll,
     TextCopy,
     TextCut,
@@ -344,6 +374,7 @@ pub enum PaintCommand {
         color: Color,
         align: TextAlign,
         bold: bool,
+        wrap: bool,
     },
     StyledText {
         bounds: Rect,
@@ -357,6 +388,7 @@ pub enum PaintCommand {
         bounds: Rect,
         id: u16,
         image: Arc<RgbaImage>,
+        high_density: Option<Arc<RgbaImage>>,
     },
     PushClip(Rect),
     PopClip,
@@ -368,6 +400,12 @@ pub struct Style {
     pub border: Option<Color>,
     pub border_width: f32,
     pub foreground: Option<Color>,
+    /// Semantic background applied while an interactive element is hovered.
+    pub hover_background: Option<Background>,
+    /// Semantic background applied while an interactive element is pressed.
+    pub pressed_background: Option<Background>,
+    /// Semantic border applied for keyboard, controller, or accessibility focus.
+    pub focus_border: Option<Color>,
     pub text_align: TextAlign,
     pub padding: Insets,
     pub gap: f32,
@@ -387,6 +425,14 @@ pub struct Style {
     pub overflow_y: Overflow,
     /// Keep a vertical scroll region pinned while the user remains at its end.
     pub follow_scroll_end: bool,
+    pub accessibility_label: Option<String>,
+    pub accessibility_description: Option<String>,
+    /// Platform-neutral semantic role consumed by accessibility adapters.
+    pub accessibility_role: Option<String>,
+    pub accessibility_state: Option<String>,
+    /// Stable id of the surface controlled by this element, when applicable.
+    pub accessibility_controls: Option<UiId>,
+    pub accessibility_hidden: bool,
     #[doc(hidden)]
     pub scroll_offset_x: f32,
     #[doc(hidden)]
@@ -412,6 +458,9 @@ impl Default for Style {
             border: None,
             border_width: 1.0,
             foreground: None,
+            hover_background: None,
+            pressed_background: None,
+            focus_border: None,
             text_align: TextAlign::Start,
             padding: Insets::default(),
             gap: 0.0,
@@ -430,6 +479,12 @@ impl Default for Style {
             overflow_x: Overflow::Visible,
             overflow_y: Overflow::Visible,
             follow_scroll_end: false,
+            accessibility_label: None,
+            accessibility_description: None,
+            accessibility_role: None,
+            accessibility_state: None,
+            accessibility_controls: None,
+            accessibility_hidden: false,
             scroll_offset_x: 0.0,
             scroll_offset: 0.0,
             corner_radius: 0.0,
@@ -475,6 +530,7 @@ enum Kind {
     Image {
         id: u16,
         image: Arc<RgbaImage>,
+        high_density: Option<Arc<RgbaImage>>,
         presentation: ImagePresentation,
     },
     Slider {
@@ -647,6 +703,21 @@ impl<Message> Element<Message> {
         self
     }
 
+    pub fn interaction_backgrounds(
+        mut self,
+        hover: impl Into<Background>,
+        pressed: impl Into<Background>,
+    ) -> Self {
+        self.style.hover_background = Some(hover.into());
+        self.style.pressed_background = Some(pressed.into());
+        self
+    }
+
+    pub fn focus_border(mut self, color: Color) -> Self {
+        self.style.focus_border = Some(color);
+        self
+    }
+
     pub fn text_align(mut self, align: TextAlign) -> Self {
         self.style.text_align = align;
         self
@@ -770,6 +841,36 @@ impl<Message> Element<Message> {
 
     pub fn message(mut self, message: Message) -> Self {
         self.message = Some(message);
+        self
+    }
+
+    pub fn accessibility_label(mut self, label: impl Into<String>) -> Self {
+        self.style.accessibility_label = Some(label.into());
+        self
+    }
+
+    pub fn accessibility_description(mut self, description: impl Into<String>) -> Self {
+        self.style.accessibility_description = Some(description.into());
+        self
+    }
+
+    pub fn accessibility_role(mut self, role: impl Into<String>) -> Self {
+        self.style.accessibility_role = Some(role.into());
+        self
+    }
+
+    pub fn accessibility_state(mut self, state: impl Into<String>) -> Self {
+        self.style.accessibility_state = Some(state.into());
+        self
+    }
+
+    pub fn accessibility_controls(mut self, id: impl Into<UiId>) -> Self {
+        self.style.accessibility_controls = Some(id.into());
+        self
+    }
+
+    pub fn accessibility_hidden(mut self, hidden: bool) -> Self {
+        self.style.accessibility_hidden = hidden;
         self
     }
 
@@ -1074,6 +1175,30 @@ pub trait ComponentBuilderExt<Message>: Component<Message> + Sized {
         self.into_element().padding(padding)
     }
 
+    fn accessibility_label(self, label: impl Into<String>) -> Element<Message> {
+        self.into_element().accessibility_label(label)
+    }
+
+    fn accessibility_description(self, description: impl Into<String>) -> Element<Message> {
+        self.into_element().accessibility_description(description)
+    }
+
+    fn accessibility_role(self, role: impl Into<String>) -> Element<Message> {
+        self.into_element().accessibility_role(role)
+    }
+
+    fn accessibility_state(self, state: impl Into<String>) -> Element<Message> {
+        self.into_element().accessibility_state(state)
+    }
+
+    fn accessibility_controls(self, id: impl Into<UiId>) -> Element<Message> {
+        self.into_element().accessibility_controls(id)
+    }
+
+    fn accessibility_hidden(self, hidden: bool) -> Element<Message> {
+        self.into_element().accessibility_hidden(hidden)
+    }
+
     fn background(self, background: impl Into<Background>) -> Element<Message> {
         self.into_element().background(background)
     }
@@ -1209,6 +1334,13 @@ macro_rules! flex_component {
                 children: impl IntoIterator<Item = impl Component<Message>>,
             ) -> Self {
                 self.0 = self.0.children(children);
+                self
+            }
+
+            /// Reverse visual child order without changing the direction of
+            /// text or artwork inside the children.
+            pub fn reverse(mut self) -> Self {
+                self.0.children.reverse();
                 self
             }
 
@@ -1363,6 +1495,9 @@ pub use components::*;
 
 mod settings_components;
 pub use settings_components::*;
+
+mod start_menu_components;
+pub use start_menu_components::*;
 
 mod tree;
 pub use tree::*;

@@ -61,6 +61,8 @@ pub fn init_winit(
     let state = &mut data.state;
 
     let (mut backend, winit) = winit::init()?;
+    state.set_winit_redraw_window(backend.window());
+    let startup_frame_pump_until = Instant::now() + Duration::from_secs(3);
 
     let mode = Mode {
         size: backend.window_size(),
@@ -119,7 +121,12 @@ pub fn init_winit(
                 }
                 WinitEvent::Input(event) => {
                     let _ = state.process_input_event(event);
+                    backend.window().request_redraw();
                 }
+                WinitEvent::Focus(false) => {
+                    state.release_pressed_keys_on_host_focus_loss();
+                }
+                WinitEvent::Focus(true) => {}
                 WinitEvent::Redraw => {
                     backend
                         .window()
@@ -249,19 +256,52 @@ pub fn init_winit(
                                 .unwrap();
                             let _ = frame.finish().unwrap();
                         }
+
+                        if state.shell_recovery_visible() {
+                            let banner_width = size.w.clamp(1, 560);
+                            let banner_height = size.h.clamp(1, 112);
+                            let banner_buffer = SolidColorBuffer::new(
+                                (banner_width, banner_height),
+                                [0.45, 0.06, 0.08, 1.0],
+                            );
+                            let banner = SolidColorRenderElement::from_buffer(
+                                &banner_buffer,
+                                ((size.w - banner_width) / 2, (size.h - banner_height) / 2),
+                                1.0,
+                                1.0,
+                                Kind::Unspecified,
+                            );
+                            let mut frame = renderer
+                                .render(&mut framebuffer, size, output.current_transform())
+                                .unwrap();
+                            draw_render_elements::<GlesRenderer, _, _>(
+                                &mut frame,
+                                1.0,
+                                &[banner],
+                                &[damage],
+                            )
+                            .unwrap();
+                            let _ = frame.finish().unwrap();
+                        }
                     }
                     backend.submit(Some(&[damage])).unwrap();
 
-                    let capture_response = state
-                        .output_capture_path
-                        .take()
-                        .map(|path| capture_output(&mut backend, size, &path));
-
-                    if let Some(response) = capture_response
-                        && let Some(reply_path) = state.output_capture_reply_path.take()
-                        && let Ok(socket) = std::os::unix::net::UnixDatagram::unbound()
+                    if let Some(started) = state.launcher_show_requested_at.take()
+                        && std::env::var_os("NICKEL_PERF_METRICS").is_some()
                     {
-                        let _ = socket.send_to(response.as_bytes(), reply_path);
+                        eprintln!(
+                            "launcher_open_to_visible_ms={:.3}",
+                            started.elapsed().as_secs_f64() * 1_000.0
+                        );
+                    }
+
+                    let capture_response = state.output_capture_path.take().map(|path| {
+                        let result = capture_output(&mut backend, size, &path);
+                        (path, result)
+                    });
+
+                    if let Some((path, result)) = capture_response {
+                        state.complete_output_capture(&path, result);
                     }
 
                     if last_preview_capture.elapsed() >= Duration::from_millis(200) {
@@ -283,6 +323,7 @@ pub fn init_winit(
                         for (id, window) in windows {
                             if let Some(frame) = capture_preview(renderer, &window) {
                                 state.preview_frames.insert(id, frame);
+                                state.notify_preview_frame(id);
                             }
                         }
                         last_preview_capture = Instant::now();
@@ -301,13 +342,17 @@ pub fn init_winit(
                     state.popups.cleanup();
                     let _ = display.flush_clients();
 
-                    // Ask for redraw to schedule new frame.
-                    backend.window().request_redraw();
+                    // Keep a bounded bootstrap pump so the initial XDG
+                    // configure is flushed before clients can submit buffers.
+                    // After startup, commits and explicit state changes request
+                    // frames and an unchanged desktop stays idle.
+                    if Instant::now() < startup_frame_pump_until {
+                        backend.window().request_redraw();
+                    }
                 }
                 WinitEvent::CloseRequested => {
                     state.loop_signal.stop();
                 }
-                _ => (),
             };
         })?;
 
@@ -446,7 +491,7 @@ fn capture_output(
     backend: &mut winit::WinitGraphicsBackend<GlesRenderer>,
     size: smithay::utils::Size<i32, smithay::utils::Physical>,
     path: &Path,
-) -> String {
+) -> nickel_session_protocol::CaptureResult {
     let result = (|| -> Result<(), String> {
         let (renderer, framebuffer) = backend.bind().map_err(|error| error.to_string())?;
         let buffer_size = smithay::utils::Size::<i32, Buffer>::from((size.w, size.h));
@@ -470,8 +515,10 @@ fn capture_output(
         .map_err(|error| error.to_string())
     })();
     match result {
-        Ok(()) => "ok\tnested".to_owned(),
-        Err(error) => format!("error\t{error}"),
+        Ok(()) => nickel_session_protocol::CaptureResult::Saved {
+            backend: nickel_session_protocol::CaptureBackend::Nested,
+        },
+        Err(message) => nickel_session_protocol::CaptureResult::Failed { message },
     }
 }
 

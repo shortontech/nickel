@@ -36,6 +36,10 @@ fn parse_command(args: impl IntoIterator<Item = OsString>) -> Result<Command, St
 
 #[cfg(unix)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    use nickel_session_protocol::{
+        CaptureResult, ClientEnvelope, Command as SessionCommand, Event, Request, ServerEnvelope,
+        ServerMessage, decode, encode,
+    };
     use std::{
         env, fs,
         os::unix::net::UnixDatagram,
@@ -77,26 +81,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = fs::remove_file(&reply_path);
     let socket = UnixDatagram::bind(&reply_path)?;
     socket.set_read_timeout(Some(Duration::from_secs(15)))?;
-    socket.send_to(
-        format!("capture-output\t{}", output.display()).as_bytes(),
-        control,
-    )?;
+    let request_id = 1;
+    let request = ClientEnvelope {
+        token: env::var("NICKEL_SESSION_TOKEN").map_err(|_| "NICKEL_SESSION_TOKEN is not set")?,
+        request_id,
+        request: Request::Command(SessionCommand::CaptureOutput {
+            path: output.to_string_lossy().into_owned(),
+        }),
+    };
+    socket.send_to(&encode(&request)?, control)?;
 
-    let mut response = [0_u8; 4096];
+    let mut response = vec![0_u8; nickel_session_protocol::MAX_FRAME_BYTES];
     let length = socket.recv(&mut response)?;
-    let response = std::str::from_utf8(&response[..length])?;
+    let acknowledgement = decode::<ServerEnvelope>(&response[..length])?;
+    if acknowledgement.request_id != request_id {
+        return Err("capture acknowledgement had the wrong request id".into());
+    }
+    if let ServerMessage::Error { message, .. } = acknowledgement.message {
+        return Err(message.into());
+    }
+    if !matches!(acknowledgement.message, ServerMessage::Ack) {
+        return Err("capture request was not acknowledged".into());
+    }
+    let length = socket.recv(&mut response)?;
+    let completion = decode::<ServerEnvelope>(&response[..length])?;
     let _ = fs::remove_file(&reply_path);
-    if response == "ok" {
-        // Compatibility with the first asynchronous capture implementation,
-        // which returned OpenGL rows in the opposite orientation.
-        image::open(&output)?.flipv().save(&output)?;
-        println!("{}", output.display());
-        Ok(())
-    } else if matches!(response, "ok\tnative" | "ok\tnested") {
-        println!("{}", output.display());
-        Ok(())
-    } else {
-        Err(response.to_owned().into())
+    if completion.request_id != request_id {
+        return Err("capture completion had the wrong request id".into());
+    }
+    match completion.message {
+        ServerMessage::Event(Event::OutputCaptureCompleted {
+            path,
+            result: CaptureResult::Saved { .. },
+        }) if std::path::Path::new(&path) == output => {
+            println!("{}", output.display());
+            Ok(())
+        }
+        ServerMessage::Event(Event::OutputCaptureCompleted {
+            result: CaptureResult::Failed { message },
+            ..
+        }) => Err(message.into()),
+        _ => Err("unexpected capture completion response".into()),
     }
 }
 
@@ -118,19 +143,13 @@ mod tests {
     use super::{Command, parse_command};
 
     #[test]
-    fn recognizes_long_help() {
-        assert!(matches!(
-            parse_command(["--help".into()]).unwrap(),
-            Command::Help
-        ));
-    }
-
-    #[test]
-    fn recognizes_short_help() {
-        assert!(matches!(
-            parse_command(["-h".into()]).unwrap(),
-            Command::Help
-        ));
+    fn help_aliases_produce_the_same_command() {
+        for argument in ["--help", "-h"] {
+            assert!(
+                matches!(parse_command([argument.into()]).unwrap(), Command::Help),
+                "argument {argument:?}"
+            );
+        }
     }
 
     #[test]

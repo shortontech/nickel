@@ -39,6 +39,7 @@ fn real_stdio_process_supports_typed_lifecycle_and_streaming() {
             cwd: directory.path().into(),
             model: None,
             project_id: None,
+            reasoning_effort: None,
         })
         .unwrap();
     assert_eq!(
@@ -49,13 +50,58 @@ fn real_stdio_process_supports_typed_lifecycle_and_streaming() {
         .start_turn(StartTurn {
             thread_id: thread.id.clone(),
             text: "hello".into(),
+            model: None,
+            reasoning_effort: None,
         })
         .unwrap();
     assert_eq!(turn.id.0, "fixture-turn");
     let received: Vec<_> =
         std::iter::from_fn(|| events.recv_timeout(Duration::from_millis(50)).ok()).collect();
-    assert!(received.iter().any(|event| matches!(&event.kind, EventKind::ThreadStarted { thread_id } if thread_id.0 == "fixture-thread")));
-    assert!(received.iter().any(|event| matches!(&event.kind, EventKind::AgentMessageDelta { delta, .. } if delta == "hello")));
+    assert_eq!(received.len(), 7);
+    assert_eq!(
+        received
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        (2..=8).collect::<Vec<_>>()
+    );
+    assert!(matches!(
+        &received[0].kind,
+        EventKind::ThreadStarted { thread_id } if thread_id.0 == "fixture-thread"
+    ));
+    assert!(matches!(
+        &received[1].kind,
+        EventKind::TurnStarted { thread_id, turn_id }
+            if thread_id.0 == "fixture-thread" && turn_id.0 == "fixture-turn"
+    ));
+    assert!(matches!(
+        &received[2].kind,
+        EventKind::ItemStarted { item_id, item_type, .. }
+            if item_id == "message-1" && item_type == "agentMessage"
+    ));
+    assert!(matches!(
+        &received[3].kind,
+        EventKind::AgentMessageDelta { item_id, delta }
+            if item_id == "message-1" && delta == "hello"
+    ));
+    assert!(matches!(
+        &received[4].kind,
+        EventKind::ApprovalRequested { request_id, summary, .. }
+            if request_id.0 == "71" && summary.as_deref() == Some("fixture approval")
+    ));
+    assert!(matches!(
+        &received[5].kind,
+        EventKind::UserInputRequested {
+            request_id,
+            question_ids,
+            ..
+        } if request_id.0 == "input-1" && question_ids == &["q1"]
+    ));
+    assert!(matches!(
+        &received[6].kind,
+        EventKind::TurnCompleted { thread_id, turn_id, status }
+            if thread_id.0 == "fixture-thread" && turn_id.0 == "fixture-turn" && status == "completed"
+    ));
     assert_eq!(client.projection().active_turn, None);
     assert_eq!(client.projection().items["message-1"].text, "hello");
     assert!(
@@ -266,6 +312,8 @@ fn duplicate_terminal_notifications_are_idempotent() {
         .start_turn(StartTurn {
             thread_id: ThreadId("fixture-thread".into()),
             text: "duplicate".into(),
+            model: None,
+            reasoning_effort: None,
         })
         .unwrap();
     for _ in 0..20 {
@@ -301,6 +349,8 @@ fn explicit_interrupt_reaches_terminal_interrupted_state() {
         .start_turn(StartTurn {
             thread_id: ThreadId("fixture-thread".into()),
             text: "interrupt".into(),
+            model: None,
+            reasoning_effort: None,
         })
         .unwrap();
     client
@@ -361,6 +411,8 @@ fn slow_consumer_is_bounded_and_projected_state_remains_complete() {
         .start_turn(StartTurn {
             thread_id: ThreadId("fixture-thread".into()),
             text: "flood".into(),
+            model: None,
+            reasoning_effort: None,
         })
         .unwrap();
     for _ in 0..50 {

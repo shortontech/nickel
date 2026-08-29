@@ -4,10 +4,14 @@ use unic_langid::LanguageIdentifier;
 const DEFAULT_LOCALE: &str = "en-US";
 const EN_US: &str = include_str!("../locales/en-US/settings.ftl");
 const ES: &str = include_str!("../locales/es/settings.ftl");
+const DE: &str = include_str!("../locales/de/settings.ftl");
+const ZH: &str = include_str!("../locales/zh/settings.ftl");
+const AR: &str = include_str!("../locales/ar/settings.ftl");
 
 pub struct Localizer {
     selected: FluentBundle<FluentResource>,
     fallback: Option<FluentBundle<FluentResource>>,
+    right_to_left: bool,
 }
 
 impl Default for Localizer {
@@ -28,15 +32,24 @@ impl Localizer {
         let requested = locale
             .and_then(normalize_locale)
             .unwrap_or_else(default_language);
-        let (locale, source, fallback) = if requested.language.as_str() == "es" {
-            (requested, ES, Some(bundle(default_language(), EN_US)))
-        } else {
-            (default_language(), EN_US, None)
+        let language = requested.language.as_str();
+        let right_to_left = matches!(language, "ar" | "fa" | "he" | "ur");
+        let (locale, source, fallback) = match language {
+            "es" => (requested, ES, Some(bundle(default_language(), EN_US))),
+            "de" => (requested, DE, Some(bundle(default_language(), EN_US))),
+            "zh" => (requested, ZH, Some(bundle(default_language(), EN_US))),
+            "ar" => (requested, AR, Some(bundle(default_language(), EN_US))),
+            _ => (default_language(), EN_US, None),
         };
         Self {
             selected: bundle(locale, source),
             fallback,
+            right_to_left,
         }
+    }
+
+    pub fn is_right_to_left(&self) -> bool {
+        self.right_to_left
     }
 
     pub fn text(&self, id: &str) -> String {
@@ -147,5 +160,19 @@ mod tests {
             localizer.format("settings-bar-desktop-count", Some(&many)),
             "4 desktops"
         );
+    }
+
+    #[test]
+    fn appearance_fixture_locales_select_native_copy_and_direction() {
+        assert_eq!(
+            Localizer::for_locale(Some("de-DE")).text("settings-appearance-title"),
+            "Darstellung"
+        );
+        assert_eq!(
+            Localizer::for_locale(Some("zh-CN")).text("settings-appearance-title"),
+            "外观"
+        );
+        assert!(!Localizer::for_locale(Some("es-MX")).is_right_to_left());
+        assert!(Localizer::for_locale(Some("ar")).is_right_to_left());
     }
 }

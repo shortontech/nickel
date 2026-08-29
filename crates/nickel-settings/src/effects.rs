@@ -72,11 +72,26 @@ impl SettingsApp {
     }
 
     pub(crate) fn load_outputs(&mut self) {
-        let Ok(payload) = session_request("list-outputs") else {
+        let Ok(ServerMessage::Outputs(protocol_outputs)) =
+            session_request(SessionRequest::Query(SessionQuery::Outputs))
+        else {
             self.status = self.localizer.text("settings-status-using-mock-displays");
             return;
         };
-        let outputs: Vec<_> = payload.lines().filter_map(parse_output).collect();
+        let outputs: Vec<_> = protocol_outputs
+            .into_iter()
+            .map(|output| OutputSnapshot {
+                name: output.name,
+                model: output.model,
+                x: output.geometry.x,
+                y: output.geometry.y,
+                width: output.geometry.width,
+                height: output.geometry.height,
+                physical_width: output.physical_width_mm,
+                physical_height: output.physical_height_mm,
+                primary: output.primary,
+            })
+            .collect();
         if outputs.is_empty() {
             self.status = self.localizer.text("settings-status-using-mock-displays");
             return;
@@ -574,26 +589,34 @@ impl SettingsApp {
         }
 
         #[cfg(not(target_os = "windows"))]
-        let mut command = format!("apply-outputs\nprimary\t{primary}\n");
+        let layout = SessionOutputLayout {
+            primary: primary.to_owned(),
+            placements: self
+                .displays
+                .iter()
+                .zip(placements)
+                .map(|(display, (x, y))| SessionOutputPlacement {
+                    name: display.connector.clone(),
+                    x,
+                    y,
+                })
+                .collect(),
+        };
         #[cfg(not(target_os = "windows"))]
-        for (display, (x, y)) in self.displays.iter().zip(placements) {
-            command.push_str(&format!("{}\t{x}\t{y}\n", display.connector));
-        }
-        #[cfg(not(target_os = "windows"))]
-        match session_request(&command) {
-            Ok(response) if response == "ok" => {
+        match session_request(SessionRequest::Command(SessionCommand::ApplyOutputs {
+            layout,
+        })) {
+            Ok(ServerMessage::Ack) => {
                 self.applied = true;
                 self.status = self.localizer.text("settings-status-layout-applied");
             }
-            Ok(response) => {
+            Ok(ServerMessage::Error { message, .. }) => {
                 self.applied = false;
-                self.status = self.localizer.value(
-                    "settings-status-apply-failed",
-                    "error",
-                    response.strip_prefix("error\t").unwrap_or(&response),
-                );
+                self.status =
+                    self.localizer
+                        .value("settings-status-apply-failed", "error", &message);
             }
-            Err(_) => {
+            Ok(_) | Err(_) => {
                 self.applied = false;
                 self.status = self.localizer.text("settings-status-session-unavailable");
             }

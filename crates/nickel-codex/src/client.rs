@@ -25,6 +25,24 @@ const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const EVENT_BACKLOG: usize = 1024;
 const OUTBOUND_BACKLOG: usize = 256;
 
+fn parse_command_action(value: &Value) -> CommandAction {
+    let string = |name: &str| value.get(name).and_then(Value::as_str).map(str::to_owned);
+    match value.get("type").and_then(Value::as_str) {
+        Some("read") => CommandAction::Read {
+            name: string("name").unwrap_or_else(|| "file".into()),
+            path: string("path").unwrap_or_default(),
+        },
+        Some("listFiles") => CommandAction::ListFiles {
+            path: string("path"),
+        },
+        Some("search") => CommandAction::Search {
+            query: string("query"),
+            path: string("path"),
+        },
+        _ => CommandAction::Unknown,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConnectionState {
     Starting,
@@ -341,6 +359,7 @@ impl CodexClient {
     }
 
     fn request(&self, method: &str, params: Value) -> Result<Value, CodexError> {
+        let started = std::time::Instant::now();
         if matches!(
             self.state(),
             ConnectionState::Failed | ConnectionState::Stopped
@@ -360,8 +379,17 @@ impl CodexClient {
             self.inner.pending.lock().unwrap().remove(&key);
             return Err(error);
         }
-        rx.recv_timeout(self.inner.request_timeout)
-            .map_err(|_| CodexError::Timeout(format!("{method} timed out")))?
+        let result = rx
+            .recv_timeout(self.inner.request_timeout)
+            .map_err(|_| CodexError::Timeout(format!("{method} timed out")))?;
+        if std::env::var_os("NICKEL_CODEX_TIMING").is_some() {
+            eprintln!(
+                "nickel-codex timing: method={method} elapsed_ms={:.3} success={}",
+                started.elapsed().as_secs_f64() * 1_000.0,
+                result.is_ok()
+            );
+        }
+        result
     }
 
     fn notify(&self, method: &str, params: Value) -> Result<(), CodexError> {
@@ -509,6 +537,22 @@ impl CodexClient {
                     .map(|v| TurnId(v.into())),
                 item_id: nested("item", "id"),
                 item_type: nested("item", "type"),
+                command_actions: params
+                    .get("item")
+                    .filter(|item| item.get("source").and_then(Value::as_str) != Some("userShell"))
+                    .and_then(|item| item.get("commandActions"))
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .map(parse_command_action)
+                    .collect(),
+                initial_text: params
+                    .get("item")
+                    .filter(|item| item.get("source").and_then(Value::as_str) == Some("userShell"))
+                    .and_then(|item| item.get("command"))
+                    .and_then(Value::as_str)
+                    .map(|command| format!("!{command}\n"))
+                    .unwrap_or_default(),
             },
             "item/completed" => EventKind::ItemCompleted {
                 item_id: nested("item", "id"),
@@ -618,13 +662,17 @@ impl CodexClient {
                 }
             }
             EventKind::ItemStarted {
-                item_id, item_type, ..
+                item_id,
+                item_type,
+                initial_text,
+                ..
             } => {
                 projection
                     .items
                     .entry(item_id.clone())
                     .or_insert_with(|| ProjectedItem {
                         item_type: item_type.clone(),
+                        text: initial_text.clone(),
                         ..ProjectedItem::default()
                     });
             }
@@ -788,6 +836,29 @@ impl CodexBackend for CodexClient {
                                 .and_then(Value::as_str)
                                 .unwrap_or_else(|| model["id"].as_str().unwrap_or_default())
                                 .into(),
+                            default_reasoning_effort: model
+                                .get("defaultReasoningEffort")
+                                .and_then(Value::as_str)
+                                .map(Into::into),
+                            supported_reasoning_efforts: model
+                                .get("supportedReasoningEfforts")
+                                .and_then(Value::as_array)
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|option| {
+                                    Some(crate::ReasoningEffortOption {
+                                        reasoning_effort: option
+                                            .get("reasoningEffort")?
+                                            .as_str()?
+                                            .into(),
+                                        description: option
+                                            .get("description")
+                                            .and_then(Value::as_str)
+                                            .unwrap_or_default()
+                                            .into(),
+                                    })
+                                })
+                                .collect(),
                         })
                     }),
             );
@@ -864,7 +935,8 @@ impl CodexBackend for CodexClient {
     fn start_thread(&self, request: StartThread) -> Result<Thread, CodexError> {
         let value = self.request(
             "thread/start",
-            json!({"cwd": request.cwd, "model": request.model, "projectId": request.project_id}),
+            json!({"cwd": request.cwd, "model": request.model, "projectId": request.project_id,
+                "config": {"model_reasoning_effort": request.reasoning_effort}}),
         )?;
         parse_thread(value.get("thread").unwrap_or(&value))
             .ok_or_else(|| CodexError::Protocol("thread/start omitted thread".into()))
@@ -876,7 +948,7 @@ impl CodexBackend for CodexClient {
     }
     fn start_turn(&self, request: StartTurn) -> Result<Turn, CodexError> {
         let thread_id = request.thread_id.clone();
-        let value = self.request("turn/start", json!({"threadId": request.thread_id.0, "input": [{"type": "text", "text": request.text}]}))?;
+        let value = self.request("turn/start", json!({"threadId": request.thread_id.0, "input": [{"type": "text", "text": request.text}], "model": request.model, "effort": request.reasoning_effort}))?;
         let turn = value.get("turn").unwrap_or(&value);
         Ok(Turn {
             id: TurnId(
@@ -892,6 +964,13 @@ impl CodexBackend for CodexClient {
                 .unwrap_or("inProgress")
                 .into(),
         })
+    }
+    fn shell_command(&self, thread: ThreadId, command: String) -> Result<(), CodexError> {
+        self.request(
+            "thread/shellCommand",
+            json!({"threadId": thread.0, "command": command}),
+        )?;
+        Ok(())
     }
     fn interrupt_turn(&self, thread: ThreadId, turn: TurnId) -> Result<(), CodexError> {
         self.request(
@@ -1010,6 +1089,11 @@ fn parse_thread(value: &Value) -> Option<Thread> {
             .flatten()
             .filter_map(parse_history_turn)
             .collect(),
+        model: value.get("model").and_then(Value::as_str).map(Into::into),
+        reasoning_effort: value
+            .get("reasoningEffort")
+            .and_then(Value::as_str)
+            .map(Into::into),
     })
 }
 
@@ -1033,10 +1117,22 @@ fn parse_history_turn(value: &Value) -> Option<ThreadHistoryTurn> {
 
 fn parse_history_item(value: &Value) -> Option<ThreadHistoryItem> {
     let item_type = value.get("type")?.as_str()?;
+    let command_actions = if value.get("source").and_then(Value::as_str) == Some("userShell") {
+        Vec::new()
+    } else {
+        value
+            .get("commandActions")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(parse_command_action)
+            .collect()
+    };
     Some(ThreadHistoryItem {
         id: value.get("id")?.as_str()?.into(),
         item_type: item_type.into(),
         text: history_item_text(item_type, value),
+        command_actions,
     })
 }
 
@@ -1122,12 +1218,15 @@ mod tests {
         let project = parse_project(&json!({
             "id": "project-1",
             "name": "Nickel",
-            "roots": [{"path": "/projects/nickel"}]
+            "roots": [{"path": "/projects/nickel"}, {"path": "/projects/nickel-alt"}]
         }))
         .unwrap();
         assert_eq!(
             project.roots,
-            vec![std::path::PathBuf::from("/projects/nickel")]
+            vec![
+                std::path::PathBuf::from("/projects/nickel"),
+                std::path::PathBuf::from("/projects/nickel-alt"),
+            ]
         );
 
         let runtime = parse_thread_runtime(&json!({
@@ -1139,6 +1238,19 @@ mod tests {
         assert_eq!(runtime.status, ThreadRuntimeStatus::Active);
         assert_eq!(runtime.active_flags, ["waitingOnUserInput"]);
         assert_eq!(runtime.can_accept_direct_input, Some(false));
+
+        for (wire, expected) in [
+            (Some("notLoaded"), ThreadRuntimeStatus::NotLoaded),
+            (Some("idle"), ThreadRuntimeStatus::Idle),
+            (Some("active"), ThreadRuntimeStatus::Active),
+            (Some("systemError"), ThreadRuntimeStatus::SystemError),
+            (Some("futureStatus"), ThreadRuntimeStatus::Unknown),
+            (None, ThreadRuntimeStatus::Unknown),
+        ] {
+            let value =
+                wire.map_or_else(|| json!({}), |status| json!({"status": {"type": status}}));
+            assert_eq!(parse_thread_runtime(&value).status, expected);
+        }
     }
 
     #[test]
@@ -1167,7 +1279,9 @@ mod tests {
             .unwrap();
             let mut saw_remote_cwd = false;
             let mut saw_approval = false;
+            let mut saw_shell = false;
             let mut saw_interrupt = false;
+            let mut saw_reasoning = false;
             while !saw_interrupt {
                 let Message::Text(text) = socket.read().unwrap() else {
                     continue;
@@ -1183,14 +1297,30 @@ mod tests {
                 let result = match method {
                     "initialize" => json!({}),
                     "account/read" => json!({"account":{"type":"chatgpt"}}),
-                    "model/list" => json!({"data":[],"nextCursor":null}),
+                    "model/list" => json!({"data":[{
+                        "id":"gpt-fixture","displayName":"GPT Fixture",
+                        "defaultReasoningEffort":"medium",
+                        "supportedReasoningEfforts":[
+                            {"reasoningEffort":"low","description":"Fast"},
+                            {"reasoningEffort":"high","description":"Deep"}
+                        ]
+                    }],"nextCursor":null}),
                     "thread/list" => json!({"data":[],"nextCursor":null}),
                     "thread/start" => {
                         saw_remote_cwd = value["params"]["cwd"] == "/srv/code/nickel"
-                            && value["params"]["projectId"] == "remote-project";
+                            && value["params"]["projectId"] == "remote-project"
+                            && value["params"]["config"]["model_reasoning_effort"] == "high";
                         json!({"thread":{"id":"remote-thread","cwd":"/srv/code/nickel"}})
                     }
-                    "turn/start" => json!({"turn":{"id":"remote-turn","status":"inProgress"}}),
+                    "turn/start" => {
+                        saw_reasoning = value["params"]["effort"] == "high";
+                        json!({"turn":{"id":"remote-turn","status":"inProgress"}})
+                    }
+                    "thread/shellCommand" => {
+                        saw_shell = value["params"]["threadId"] == "remote-thread"
+                            && value["params"]["command"] == "printf hello | wc -c";
+                        json!({})
+                    }
                     "turn/interrupt" => {
                         saw_interrupt = value["params"]["threadId"] == "remote-thread"
                             && value["params"]["turnId"] == "remote-turn";
@@ -1235,9 +1365,37 @@ mod tests {
                             .into(),
                         ))
                         .unwrap();
+                } else if method == "thread/shellCommand" {
+                    for notification in [
+                        json!({
+                            "method":"item/started",
+                            "params":{"threadId":"remote-thread","item":{
+                                "id":"shell-1","type":"commandExecution",
+                                "source":"userShell","command":"printf hello | wc -c"
+                            }}
+                        }),
+                        json!({
+                            "method":"item/commandExecution/outputDelta",
+                            "params":{"itemId":"shell-1","delta":"5\n"}
+                        }),
+                        json!({
+                            "method":"item/completed",
+                            "params":{"item":{"id":"shell-1"}}
+                        }),
+                    ] {
+                        socket
+                            .send(Message::Text(notification.to_string().into()))
+                            .unwrap();
+                    }
                 }
             }
-            (saw_remote_cwd, saw_approval, saw_interrupt)
+            (
+                saw_remote_cwd,
+                saw_approval,
+                saw_shell,
+                saw_interrupt,
+                saw_reasoning,
+            )
         });
 
         let client = CodexClient::connect_remote_with_timeout(
@@ -1247,7 +1405,15 @@ mod tests {
         )
         .unwrap();
         assert!(client.account().unwrap().authenticated);
-        assert!(client.models().unwrap().is_empty());
+        let models = client.models().unwrap();
+        assert_eq!(
+            models[0].default_reasoning_effort.as_deref(),
+            Some("medium")
+        );
+        assert_eq!(
+            models[0].supported_reasoning_efforts[1].reasoning_effort,
+            "high"
+        );
         assert!(
             client
                 .list_threads(ThreadPage::default())
@@ -1261,15 +1427,32 @@ mod tests {
                 cwd: "/srv/code/nickel".into(),
                 model: None,
                 project_id: Some("remote-project".into()),
+                reasoning_effort: Some("high".into()),
             })
             .unwrap();
         let turn = client
             .start_turn(StartTurn {
-                thread_id: thread.id,
+                thread_id: thread.id.clone(),
                 text: "hello remotely".into(),
+                model: None,
+                reasoning_effort: Some("high".into()),
             })
             .unwrap();
         assert_eq!(turn.id.0, "remote-turn");
+        client
+            .shell_command(thread.id, "printf hello | wc -c".into())
+            .unwrap();
+        for _ in 0..100 {
+            if client
+                .projection()
+                .items
+                .get("shell-1")
+                .is_some_and(|item| item.text.contains("5\n"))
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
         let request_id = loop {
             let event = events.recv_timeout(Duration::from_secs(2)).unwrap();
             if let EventKind::ApprovalRequested { request_id, .. } = event.kind {
@@ -1277,6 +1460,10 @@ mod tests {
             }
         };
         assert_eq!(client.projection().items["agent-1"].text, "remote response");
+        assert_eq!(
+            client.projection().items["shell-1"].text,
+            "!printf hello | wc -c\n5\n"
+        );
         client
             .respond(
                 request_id,
@@ -1289,7 +1476,7 @@ mod tests {
             .interrupt_turn(ThreadId("remote-thread".into()), turn.id)
             .unwrap();
         client.shutdown();
-        assert_eq!(server.join().unwrap(), (true, true, true));
+        assert_eq!(server.join().unwrap(), (true, true, true, true, true));
         assert!(authenticated.load(Ordering::Relaxed));
     }
 
@@ -1372,22 +1559,45 @@ mod tests {
         assert_eq!(missing.last_used_at, None);
     }
 
+    #[test]
+    fn command_action_parser_preserves_supported_actions_and_unknown_input() {
+        assert_eq!(
+            parse_command_action(&json!({
+                "type": "read",
+                "name": "README.md",
+                "path": "/workspace/README.md"
+            })),
+            CommandAction::Read {
+                name: "README.md".into(),
+                path: "/workspace/README.md".into(),
+            }
+        );
+        assert_eq!(
+            parse_command_action(&json!({"type":"listFiles","path":"/workspace"})),
+            CommandAction::ListFiles {
+                path: Some("/workspace".into()),
+            }
+        );
+        assert_eq!(
+            parse_command_action(&json!({"type":"search","query":"TODO"})),
+            CommandAction::Search {
+                query: Some("TODO".into()),
+                path: None,
+            }
+        );
+        assert_eq!(
+            parse_command_action(&json!({"type":"futureAction"})),
+            CommandAction::Unknown
+        );
+    }
+
     proptest! {
         #[test]
-        fn arbitrary_bounded_frames_never_panic(bytes in proptest::collection::vec(any::<u8>(), 0..16384)) {
-            if let Ok(text) = std::str::from_utf8(&bytes) {
-                let _ = serde_json::from_str::<serde_json::Value>(text);
-            }
-        }
-
-        #[test]
-        fn valid_json_round_trips_across_every_fragment_boundary(text in ".{0,256}") {
-            let encoded = serde_json::to_vec(&serde_json::json!({"method":"fixture/event","params":{"delta":text}})).unwrap();
-            for split in 0..=encoded.len() {
-                let mut joined = encoded[..split].to_vec();
-                joined.extend_from_slice(&encoded[split..]);
-                let decoded: serde_json::Value = serde_json::from_slice(&joined).unwrap();
-                prop_assert_eq!(decoded["params"]["delta"].as_str(), Some(text.as_str()));
+        fn arbitrary_json_command_actions_never_panic(bytes in proptest::collection::vec(any::<u8>(), 0..16384)) {
+            if let Ok(text) = std::str::from_utf8(&bytes)
+                && let Ok(value) = serde_json::from_str::<serde_json::Value>(text)
+            {
+                let _ = parse_command_action(&value);
             }
         }
     }

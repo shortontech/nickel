@@ -1,20 +1,5 @@
 use super::*;
 
-pub(super) fn parse_output(line: &str) -> Option<OutputSnapshot> {
-    let mut fields = line.split('\t');
-    Some(OutputSnapshot {
-        name: fields.next()?.to_owned(),
-        model: fields.next()?.to_owned(),
-        x: fields.next()?.parse().ok()?,
-        y: fields.next()?.parse().ok()?,
-        width: fields.next()?.parse().ok()?,
-        height: fields.next()?.parse().ok()?,
-        physical_width: fields.next()?.parse().ok()?,
-        physical_height: fields.next()?.parse().ok()?,
-        primary: fields.next()? == "1",
-    })
-}
-
 #[cfg(target_os = "linux")]
 type BluezProperties = HashMap<String, OwnedValue>;
 #[cfg(target_os = "linux")]
@@ -484,7 +469,7 @@ pub(super) fn wide_text(buffer: &[u16]) -> String {
 }
 
 #[cfg(target_os = "linux")]
-pub(super) fn session_request(command: &str) -> std::io::Result<String> {
+pub(super) fn session_request(request: SessionRequest) -> std::io::Result<ServerMessage> {
     use std::{os::unix::net::UnixDatagram, path::PathBuf, time::Duration};
 
     let server = std::env::var_os("NICKEL_SESSION_CONTROL")
@@ -500,17 +485,27 @@ pub(super) fn session_request(command: &str) -> std::io::Result<String> {
     let socket = UnixDatagram::bind(&client)?;
     socket.set_read_timeout(Some(Duration::from_secs(1)))?;
     let result = (|| {
-        socket.send_to(command.as_bytes(), server)?;
-        let mut response = [0_u8; 4096];
+        let envelope = ClientEnvelope {
+            token: std::env::var("NICKEL_SESSION_TOKEN").map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Nickel session token")
+            })?,
+            request_id: 1,
+            request,
+        };
+        let frame = nickel_session_protocol::encode(&envelope).map_err(std::io::Error::other)?;
+        socket.send_to(&frame, server)?;
+        let mut response = vec![0_u8; nickel_session_protocol::MAX_FRAME_BYTES];
         let length = socket.recv(&mut response)?;
-        Ok(String::from_utf8_lossy(&response[..length]).into_owned())
+        nickel_session_protocol::decode::<ServerEnvelope>(&response[..length])
+            .map(|response| response.message)
+            .map_err(std::io::Error::other)
     })();
     let _ = std::fs::remove_file(client);
     result
 }
 
 #[cfg(not(target_os = "linux"))]
-pub(super) fn session_request(_command: &str) -> std::io::Result<String> {
+pub(super) fn session_request(_request: SessionRequest) -> std::io::Result<ServerMessage> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "live display settings are currently Linux-only",

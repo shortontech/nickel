@@ -5,11 +5,22 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicU8, Ordering},
+        atomic::{AtomicU8, AtomicU32, Ordering},
     },
 };
 
-use nickel_core::{hotkeys::HotkeyController, launcher::LauncherVisibility};
+use nickel_core::{
+    hotkeys::{HotkeyAction, HotkeyController},
+    launcher::{LauncherPointerTarget, LauncherVisibility},
+    task_switcher::{SwitchWindow, TaskSwitchEffect, TaskSwitcher},
+};
+use nickel_session_protocol::{
+    ClientEnvelope, Command as SessionCommand, ErrorCode, Event as SessionEvent,
+    Geometry as ProtocolGeometry, OutputSnapshot, PreviewFrame as ProtocolPreview, Query, Request,
+    SecureStorageState as ProtocolSecureStorage, ServerEnvelope, ServerMessage, ShellRole,
+    Snapshot as SessionSnapshot, WindowAction as ProtocolWindowAction,
+    WindowId as ProtocolWindowId, WindowSnapshot, decode, encode,
+};
 use smithay::{
     desktop::{PopupManager, Space, Window, WindowSurfaceType},
     input::{Seat, SeatState},
@@ -29,6 +40,7 @@ use smithay::{
         shell::xdg::{ToplevelSurface, XdgShellState, decoration::XdgDecorationState},
         shm::ShmState,
         socket::ListeningSocketSource,
+        xdg_activation::XdgActivationState,
     },
 };
 
@@ -39,61 +51,28 @@ use crate::{
 
 use crate::CalloopData;
 
-fn parse_geometry_command(value: &str) -> Option<(i32, i32, i32)> {
-    let mut fields = value.split('\t');
-    Some((
-        fields.next()?.parse().ok()?,
-        fields.next()?.parse().ok()?,
-        fields.next()?.parse().ok()?,
-    ))
+fn protocol_error(code: ErrorCode, message: impl Into<String>) -> ServerMessage {
+    ServerMessage::Error {
+        code,
+        message: message.into(),
+    }
 }
 
-#[derive(Debug, Eq, PartialEq)]
-struct OutputPlacement {
-    name: String,
-    x: i32,
-    y: i32,
+fn process_uid(pid: u32) -> Option<String> {
+    std::fs::read_to_string(format!("/proc/{pid}/status"))
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("Uid:\t"))
+        .and_then(|value| value.split_whitespace().next())
+        .map(str::to_owned)
 }
 
-fn parse_output_layout(message: &str) -> Result<(String, Vec<OutputPlacement>), &'static str> {
-    let mut lines = message.lines();
-    if lines.next() != Some("apply-outputs") {
-        return Err("invalid output command");
-    }
-    let primary = lines
-        .next()
-        .and_then(|line| line.strip_prefix("primary\t"))
-        .filter(|name| !name.is_empty())
-        .ok_or("missing primary output")?
-        .to_owned();
-    let mut placements = Vec::new();
-    for line in lines.filter(|line| !line.is_empty()) {
-        let mut fields = line.split('\t');
-        let name = fields
-            .next()
-            .filter(|name| !name.is_empty())
-            .ok_or("missing output name")?;
-        let x = fields
-            .next()
-            .and_then(|value| value.parse().ok())
-            .ok_or("invalid output x")?;
-        let y = fields
-            .next()
-            .and_then(|value| value.parse().ok())
-            .ok_or("invalid output y")?;
-        if fields.next().is_some() {
-            return Err("too many output fields");
-        }
-        placements.push(OutputPlacement {
-            name: name.to_owned(),
-            x,
-            y,
-        });
-    }
-    if placements.is_empty() {
-        return Err("output layout is empty");
-    }
-    Ok((primary, placements))
+fn same_session_user(pid: u32) -> bool {
+    process_uid(pid).is_some_and(|uid| process_uid(std::process::id()).as_deref() == Some(&uid))
+}
+
+fn shell_registration_allowed(expected_pid: u32, claimed_pid: u32) -> bool {
+    expected_pid != 0 && expected_pid == claimed_pid && same_session_user(claimed_pid)
 }
 
 pub struct NickelSession {
@@ -107,6 +86,7 @@ pub struct NickelSession {
     // Smithay State
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
+    pub activation_state: XdgActivationState,
     pub decoration_state: XdgDecorationState,
     pub shm_state: ShmState,
     pub output_manager_state: OutputManagerState,
@@ -120,6 +100,10 @@ pub struct NickelSession {
     pub launcher_window: Option<Window>,
     pub launcher_visibility: LauncherVisibility,
     launcher_subscribers: Vec<PathBuf>,
+    protocol_token: String,
+    authenticated_shell_pids: HashSet<u32>,
+    expected_shell_pid: Arc<AtomicU32>,
+    pub launcher_show_requested_at: Option<std::time::Instant>,
     pub desktop_windows: Vec<Window>,
     pub panel_windows: Vec<Window>,
     pub utility_windows: Vec<Window>,
@@ -129,8 +113,7 @@ pub struct NickelSession {
     pub preview_frames: HashMap<WindowId, PreviewFrame>,
     pub preview_requests: HashSet<WindowId>,
     pub hotkeys: HotkeyController,
-    pub alt_tab_order: Vec<WindowId>,
-    pub alt_tab_index: usize,
+    pub task_switcher: TaskSwitcher<WindowId>,
     pub preview_highlight: Option<WindowId>,
     pub minimized_windows: HashMap<WindowId, (Window, Point<i32, Logical>)>,
     maximized_restore: HashMap<ObjectId, Geometry>,
@@ -142,9 +125,13 @@ pub struct NickelSession {
     pub identify_outputs_until: Option<std::time::Instant>,
     pub output_capture_path: Option<PathBuf>,
     pub output_capture_reply_path: Option<PathBuf>,
+    pub output_capture_request_id: Option<u64>,
+    pub shell_failure_count: u8,
     control_socket_path: PathBuf,
     secure_storage_state: Arc<AtomicU8>,
     secure_storage_retry: Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(feature = "backend-winit")]
+    winit_redraw_window: Option<usize>,
 }
 
 #[derive(Clone)]
@@ -160,6 +147,11 @@ pub struct SurfaceBufferCommit {
 }
 
 impl NickelSession {
+    pub(crate) fn is_authenticated_shell_pid(&self, pid: u32) -> bool {
+        self.expected_shell_pid.load(Ordering::Acquire) == pid
+            && self.authenticated_shell_pids.contains(&pid)
+    }
+
     pub fn new(event_loop: &mut EventLoop<CalloopData>, display: Display<Self>) -> Self {
         let start_time = std::time::Instant::now();
 
@@ -167,9 +159,12 @@ impl NickelSession {
 
         let compositor_state = CompositorState::new::<Self>(&dh);
         let xdg_shell_state = XdgShellState::new::<Self>(&dh);
+        let activation_state = XdgActivationState::new::<Self>(&dh);
         let decoration_state = XdgDecorationState::new::<Self>(&dh);
         let shm_state = ShmState::new::<Self>(&dh, vec![]);
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&dh);
+        let _text_input_manager_state =
+            smithay::wayland::text_input::TextInputManagerState::new::<Self>(&dh);
         let mut seat_state = SeatState::new();
         let data_device_state = DataDeviceState::new::<Self>(&dh);
         let popups = PopupManager::default();
@@ -193,6 +188,16 @@ impl NickelSession {
         // Outputs become views of a part of the Space and can be rendered via Space::render_output.
         let space = Space::default();
 
+        let protocol_token = format!(
+            "{:x}-{:x}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        // SAFETY: session initialization is single-threaded and precedes shell launch.
+        unsafe { std::env::set_var("NICKEL_SESSION_TOKEN", &protocol_token) };
         let control_socket_path = Self::init_control_socket(event_loop);
         let secure_storage_state = Arc::new(AtomicU8::new(
             crate::login_services::SecureStorageState::Starting as u8,
@@ -214,6 +219,7 @@ impl NickelSession {
 
             compositor_state,
             xdg_shell_state,
+            activation_state,
             decoration_state,
             shm_state,
             output_manager_state,
@@ -226,6 +232,10 @@ impl NickelSession {
             launcher_window: None,
             launcher_visibility: LauncherVisibility::default(),
             launcher_subscribers: Vec::new(),
+            protocol_token,
+            authenticated_shell_pids: HashSet::new(),
+            expected_shell_pid: Arc::new(AtomicU32::new(0)),
+            launcher_show_requested_at: None,
             desktop_windows: Vec::new(),
             panel_windows: Vec::new(),
             utility_windows: Vec::new(),
@@ -235,8 +245,7 @@ impl NickelSession {
             preview_frames: HashMap::new(),
             preview_requests: HashSet::new(),
             hotkeys: HotkeyController::default(),
-            alt_tab_order: Vec::new(),
-            alt_tab_index: 0,
+            task_switcher: TaskSwitcher::default(),
             preview_highlight: None,
             minimized_windows: HashMap::new(),
             maximized_restore: HashMap::new(),
@@ -248,11 +257,34 @@ impl NickelSession {
             identify_outputs_until: None,
             output_capture_path: None,
             output_capture_reply_path: None,
+            output_capture_request_id: None,
+            shell_failure_count: 0,
             control_socket_path,
             secure_storage_state,
             secure_storage_retry,
+            #[cfg(feature = "backend-winit")]
+            winit_redraw_window: None,
         }
     }
+
+    #[cfg(feature = "backend-winit")]
+    pub fn set_winit_redraw_window(&mut self, window: &winit::window::Window) {
+        self.winit_redraw_window = Some(std::ptr::from_ref(window) as usize);
+    }
+
+    #[cfg(feature = "backend-winit")]
+    pub fn request_output_redraw(&self) {
+        let Some(address) = self.winit_redraw_window else {
+            return;
+        };
+        // SAFETY: Smithay owns this window in an Arc for exactly the lifetime
+        // of the winit backend and this session state. Moving the backend does
+        // not move the Arc allocation, and all calls occur on the event thread.
+        unsafe { &*(address as *const winit::window::Window) }.request_redraw();
+    }
+
+    #[cfg(not(feature = "backend-winit"))]
+    pub fn request_output_redraw(&self) {}
 
     pub fn secure_storage_state_handle(&self) -> Arc<AtomicU8> {
         Arc::clone(&self.secure_storage_state)
@@ -262,18 +294,12 @@ impl NickelSession {
         Arc::clone(&self.secure_storage_retry)
     }
 
-    fn secure_storage_state_payload(&self) -> &'static [u8] {
-        match self.secure_storage_state.load(Ordering::Acquire) {
-            value if value == crate::login_services::SecureStorageState::Starting as u8 => {
-                b"starting"
-            }
-            value if value == crate::login_services::SecureStorageState::Locked as u8 => b"locked",
-            value if value == crate::login_services::SecureStorageState::PromptRequired as u8 => {
-                b"prompt-required"
-            }
-            value if value == crate::login_services::SecureStorageState::Ready as u8 => b"ready",
-            _ => b"unavailable",
-        }
+    pub fn expected_shell_pid_handle(&self) -> Arc<AtomicU32> {
+        self.expected_shell_pid.clone()
+    }
+
+    pub fn shell_recovery_visible(&self) -> bool {
+        crate::shell_recovery_visible_for(self.shell_failure_count)
     }
 
     fn init_control_socket(event_loop: &mut EventLoop<CalloopData>) -> PathBuf {
@@ -297,161 +323,310 @@ impl NickelSession {
             .insert_source(
                 Generic::new(socket, Interest::READ, Mode::Level),
                 |_, socket, data| {
-                    let mut command = [0_u8; 4096];
-                    while let Ok((length, source)) = socket.as_ref().recv_from(&mut command) {
-                        let message = &command[..length];
-                        match message {
-                            b"subscribe-launcher" => {
-                                if let Some(path) = source.as_pathname() {
-                                    let path = path.to_path_buf();
-                                    if !data.state.launcher_subscribers.contains(&path) {
-                                        data.state.launcher_subscribers.push(path.clone());
-                                    }
-                                    let event = if data.state.launcher_visibility.is_visible() {
-                                        b"launcher-shown".as_slice()
-                                    } else {
-                                        b"launcher-hidden".as_slice()
-                                    };
-                                    let _ = socket.as_ref().send_to(event, path);
-                                }
+                    let mut frame = vec![0_u8; nickel_session_protocol::MAX_FRAME_BYTES];
+                    while let Ok((length, source)) = socket.as_ref().recv_from(&mut frame) {
+                        let request = decode::<ClientEnvelope>(&frame[..length]);
+                        let (request_id, message) = match request {
+                            Ok(envelope) => {
+                                let request_id = envelope.request_id;
+                                let message = data
+                                    .state
+                                    .handle_protocol_request(envelope, source.as_pathname());
+                                (request_id, message)
                             }
-                            b"toggle-launcher" => data.state.toggle_launcher(),
-                            b"hide-launcher" => data.state.set_launcher_visible(false),
-                            b"show-launcher" => data.state.set_launcher_visible(true),
-                            b"logout" => data.state.loop_signal.stop(),
-                            b"launcher-visible" => {
-                                if let Some(path) = source.as_pathname() {
-                                    let visible = if data.state.launcher_visibility.is_visible() {
-                                        b"1"
-                                    } else {
-                                        b"0"
-                                    };
-                                    let _ = socket.as_ref().send_to(visible, path);
-                                }
-                            }
-                            b"secure-storage-state" => {
-                                if let Some(path) = source.as_pathname() {
-                                    let state = data.state.secure_storage_state_payload();
-                                    let _ = socket.as_ref().send_to(state, path);
-                                }
-                            }
-                            b"retry-secure-storage" => data
-                                .state
-                                .secure_storage_retry
-                                .store(true, std::sync::atomic::Ordering::Release),
-                            b"hide-context-menu" => data.state.hide_context_menu(),
-                            b"list-windows" => {
-                                if let Some(path) = source.as_pathname() {
-                                    let snapshot = data.state.window_snapshot_payload();
-                                    let _ = socket.as_ref().send_to(snapshot.as_bytes(), path);
-                                }
-                            }
-                            b"list-outputs" => {
-                                if let Some(path) = source.as_pathname() {
-                                    let snapshot = data.state.output_snapshot_payload();
-                                    let _ = socket.as_ref().send_to(snapshot.as_bytes(), path);
-                                }
-                            }
-                            b"identify-outputs" => {
-                                data.state.identify_outputs_until = Some(
-                                    std::time::Instant::now() + std::time::Duration::from_secs(3),
-                                );
-                                #[cfg(feature = "backend-udev")]
-                                data.render_all_outputs();
-                                if let Some(path) = source.as_pathname() {
-                                    let _ = socket.as_ref().send_to(b"ok", path);
-                                }
-                            }
-                            _ => {
-                                if let Ok(message) = std::str::from_utf8(message)
-                                    && let Some(path) = message.strip_prefix("capture-output\t")
-                                    && !path.is_empty()
-                                {
-                                    data.state.output_capture_path = Some(PathBuf::from(path));
-                                    data.state.output_capture_reply_path =
-                                        source.as_pathname().map(PathBuf::from);
-                                    #[cfg(feature = "backend-udev")]
-                                    data.render_all_outputs();
-                                } else if let Ok(message) = std::str::from_utf8(message)
-                                    && message.starts_with("apply-outputs\n")
-                                {
-                                    let response = match data.state.apply_output_layout(message) {
-                                        Ok(()) => "ok".to_owned(),
-                                        Err(error) => format!("error\t{error}"),
-                                    };
-                                    if let Some(path) = source.as_pathname() {
-                                        let _ = socket.as_ref().send_to(response.as_bytes(), path);
-                                    }
-                                } else if let Ok(message) = std::str::from_utf8(message)
-                                    && let Some((x, width, height)) = message
-                                        .strip_prefix("show-context-menu\t")
-                                        .and_then(parse_geometry_command)
-                                {
-                                    data.state.show_context_menu(x, width, height, true);
-                                } else if let Ok(message) = std::str::from_utf8(message)
-                                    && let Some((x, width, height)) = message
-                                        .strip_prefix("show-preview\t")
-                                        .and_then(parse_geometry_command)
-                                {
-                                    data.state.show_context_menu(x, width, height, false);
-                                } else if let Ok(message) = std::str::from_utf8(message)
-                                    && let Some(id) = message
-                                        .strip_prefix("highlight-window\t")
-                                        .and_then(|value| value.parse().ok())
-                                {
-                                    data.state.preview_highlight = Some(WindowId(id));
-                                } else if message == b"clear-window-highlight" {
-                                    data.state.preview_highlight = None;
-                                } else if let Ok(message) = std::str::from_utf8(message)
-                                    && let Some(id) = message
-                                        .strip_prefix("get-preview\t")
-                                        .and_then(|value| value.parse().ok())
-                                {
-                                    data.state.preview_requests.insert(WindowId(id));
-                                    if let (Some(path), Some(frame)) = (
-                                        source.as_pathname(),
-                                        data.state.preview_frames.get(&WindowId(id)),
-                                    ) {
-                                        let mut payload = Vec::with_capacity(12 + frame.rgba.len());
-                                        payload.extend_from_slice(&id.to_le_bytes());
-                                        payload.extend_from_slice(&frame.width.to_le_bytes());
-                                        payload.extend_from_slice(&frame.height.to_le_bytes());
-                                        payload.extend_from_slice(&frame.rgba);
-                                        let _ = socket.as_ref().send_to(&payload, path);
-                                    }
-                                } else if let Ok(message) = std::str::from_utf8(message)
-                                    && let Some(id) = message
-                                        .strip_prefix("activate-window\t")
-                                        .and_then(|value| value.parse().ok())
-                                {
-                                    data.state.activate_window(WindowId(id));
-                                } else if let Ok(message) = std::str::from_utf8(message)
-                                    && let Some(id) = message
-                                        .strip_prefix("maximize-window\t")
-                                        .and_then(|value| value.parse().ok())
-                                {
-                                    data.state.maximize_window(WindowId(id));
-                                } else if let Ok(message) = std::str::from_utf8(message)
-                                    && let Some(id) = message
-                                        .strip_prefix("minimize-window\t")
-                                        .and_then(|value| value.parse().ok())
-                                {
-                                    data.state.minimize_window(WindowId(id));
-                                } else if let Ok(message) = std::str::from_utf8(message)
-                                    && let Some(id) = message
-                                        .strip_prefix("close-window\t")
-                                        .and_then(|value| value.parse().ok())
-                                {
-                                    data.state.close_window(WindowId(id));
-                                }
-                            }
+                            Err(error) => (
+                                0,
+                                ServerMessage::Error {
+                                    code: ErrorCode::IncompatibleVersion,
+                                    message: error.to_string(),
+                                },
+                            ),
+                        };
+                        if let Some(path) = source.as_pathname()
+                            && let Ok(response) = encode(&ServerEnvelope {
+                                request_id,
+                                message,
+                            })
+                        {
+                            let _ = socket.as_ref().send_to(&response, path);
                         }
+                        data.state.request_output_redraw();
                     }
                     Ok(PostAction::Continue)
                 },
             )
             .expect("failed to register Nickel session control socket");
         path
+    }
+
+    fn handle_protocol_request(
+        &mut self,
+        envelope: ClientEnvelope,
+        source: Option<&std::path::Path>,
+    ) -> ServerMessage {
+        if envelope.token != self.protocol_token {
+            return protocol_error(ErrorCode::Unauthorized, "invalid session capability");
+        }
+        match envelope.request {
+            Request::RegisterShell { pid } => {
+                if !shell_registration_allowed(self.expected_shell_pid.load(Ordering::Acquire), pid)
+                {
+                    return protocol_error(
+                        ErrorCode::Unauthorized,
+                        "shell process is outside the active user session",
+                    );
+                }
+                self.authenticated_shell_pids.insert(pid);
+                ServerMessage::Snapshot(self.protocol_snapshot())
+            }
+            Request::Subscribe => {
+                let Some(path) = source else {
+                    return protocol_error(ErrorCode::InvalidRequest, "subscriber has no path");
+                };
+                if !self.launcher_subscribers.iter().any(|entry| entry == path) {
+                    if self.launcher_subscribers.len() >= nickel_session_protocol::MAX_SUBSCRIBERS {
+                        return protocol_error(
+                            ErrorCode::ResourceLimit,
+                            "subscriber limit reached",
+                        );
+                    }
+                    self.launcher_subscribers.push(path.to_path_buf());
+                }
+                ServerMessage::Event(SessionEvent::Snapshot(self.protocol_snapshot()))
+            }
+            Request::Query(query) => self.handle_protocol_query(query),
+            Request::Command(command) => {
+                self.handle_protocol_command(command, source, envelope.request_id)
+            }
+        }
+    }
+
+    fn handle_protocol_query(&mut self, query: Query) -> ServerMessage {
+        match query {
+            Query::Snapshot => ServerMessage::Snapshot(self.protocol_snapshot()),
+            Query::Windows => ServerMessage::Windows(self.protocol_windows()),
+            Query::Outputs => ServerMessage::Outputs(self.protocol_outputs()),
+            Query::LauncherVisibility => ServerMessage::LauncherVisibility {
+                visible: self.launcher_visibility.is_visible(),
+            },
+            Query::SecureStorage => ServerMessage::SecureStorage {
+                state: self.protocol_secure_storage_state(),
+            },
+            Query::Preview { window } => {
+                let id = WindowId(window.0);
+                if !self.windows.snapshot().iter().any(|entry| entry.id == id) {
+                    return protocol_error(ErrorCode::InvalidWindow, "unknown window id");
+                }
+                self.preview_requests.insert(id);
+                let Some(frame) = self.preview_frames.get(&id) else {
+                    return protocol_error(ErrorCode::InvalidRequest, "preview is not ready");
+                };
+                let preview = ProtocolPreview {
+                    window,
+                    width: frame.width,
+                    height: frame.height,
+                    rgba: frame.rgba.clone(),
+                };
+                if preview.validate().is_err() {
+                    return protocol_error(ErrorCode::ResourceLimit, "preview exceeds bounds");
+                }
+                ServerMessage::Preview(preview)
+            }
+        }
+    }
+
+    fn handle_protocol_command(
+        &mut self,
+        command: SessionCommand,
+        source: Option<&std::path::Path>,
+        request_id: u64,
+    ) -> ServerMessage {
+        match command {
+            SessionCommand::ToggleLauncher => self.toggle_launcher(),
+            SessionCommand::SetLauncherVisible { visible } => self.set_launcher_visible(visible),
+            SessionCommand::LogOut => self.loop_signal.stop(),
+            SessionCommand::RetrySecureStorage => self
+                .secure_storage_retry
+                .store(true, std::sync::atomic::Ordering::Release),
+            SessionCommand::HideOverlay => self.hide_context_menu(),
+            SessionCommand::ShowOverlay { role, geometry } => match role {
+                ShellRole::ContextMenu => {
+                    self.show_context_menu(geometry.x, geometry.width, geometry.height, true)
+                }
+                ShellRole::Preview => {
+                    self.show_context_menu(geometry.x, geometry.width, geometry.height, false)
+                }
+                _ => {
+                    return protocol_error(
+                        ErrorCode::InvalidRequest,
+                        "role is not a transient overlay",
+                    );
+                }
+            },
+            SessionCommand::IdentifyOutputs => {
+                self.identify_outputs_until =
+                    Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
+            }
+            SessionCommand::CaptureOutput { path } => {
+                if path.is_empty() {
+                    return protocol_error(ErrorCode::InvalidRequest, "capture path is empty");
+                }
+                self.output_capture_path = Some(PathBuf::from(path));
+                self.output_capture_reply_path = source.map(PathBuf::from);
+                self.output_capture_request_id = Some(request_id);
+            }
+            SessionCommand::ApplyOutputs { layout } => {
+                if let Err(error) = self.apply_output_layout(layout) {
+                    return protocol_error(ErrorCode::InvalidRequest, error);
+                }
+            }
+            SessionCommand::HighlightWindow { window } => {
+                if let Some(window) = window
+                    && !self.window_exists(window)
+                {
+                    return protocol_error(ErrorCode::InvalidWindow, "unknown window id");
+                }
+                self.preview_highlight = window.map(|id| WindowId(id.0));
+            }
+            SessionCommand::WindowAction { window, action } => {
+                if !self.window_exists(window) {
+                    return protocol_error(ErrorCode::InvalidWindow, "unknown window id");
+                }
+                let id = WindowId(window.0);
+                match action {
+                    ProtocolWindowAction::Activate => self.activate_window(id),
+                    ProtocolWindowAction::Close => self.close_window(id),
+                    ProtocolWindowAction::Minimize => self.minimize_window(id),
+                    ProtocolWindowAction::MaximizeRestore => self.maximize_window(id),
+                }
+            }
+        }
+        ServerMessage::Ack
+    }
+
+    pub fn complete_output_capture(
+        &mut self,
+        path: &std::path::Path,
+        result: nickel_session_protocol::CaptureResult,
+    ) {
+        let Some(reply_path) = self.output_capture_reply_path.take() else {
+            return;
+        };
+        let request_id = self.output_capture_request_id.take().unwrap_or_default();
+        let message = ServerEnvelope {
+            request_id,
+            message: ServerMessage::Event(SessionEvent::OutputCaptureCompleted {
+                path: path.to_string_lossy().into_owned(),
+                result,
+            }),
+        };
+        if let Ok(frame) = encode(&message)
+            && let Ok(socket) = UnixDatagram::unbound()
+        {
+            let _ = socket.send_to(&frame, reply_path);
+        }
+    }
+
+    fn window_exists(&self, id: ProtocolWindowId) -> bool {
+        self.windows
+            .snapshot()
+            .iter()
+            .any(|window| window.id.0 == id.0)
+    }
+
+    fn protocol_windows(&self) -> Vec<WindowSnapshot> {
+        let shell_ids = self
+            .shell_windows()
+            .filter_map(|window| {
+                self.surface_windows
+                    .get(&window.toplevel()?.wl_surface().id())
+            })
+            .copied()
+            .collect::<HashSet<_>>();
+        self.windows
+            .snapshot()
+            .into_iter()
+            .filter(|window| !shell_ids.contains(&window.id))
+            .take(nickel_session_protocol::MAX_WINDOWS)
+            .map(|window| WindowSnapshot {
+                id: ProtocolWindowId(window.id.0),
+                application_id: window.app_id.clone(),
+                title: window.title.clone(),
+                active: window.active,
+                minimized: self.minimized_windows.contains_key(&window.id),
+                maximized: false,
+            })
+            .collect()
+    }
+
+    fn protocol_outputs(&self) -> Vec<OutputSnapshot> {
+        self.space
+            .outputs()
+            .filter_map(|output| {
+                let geometry = self.space.output_geometry(output)?;
+                let physical = output.physical_properties();
+                Some(OutputSnapshot {
+                    name: output.name(),
+                    model: physical.model,
+                    geometry: ProtocolGeometry {
+                        x: geometry.loc.x,
+                        y: geometry.loc.y,
+                        width: geometry.size.w,
+                        height: geometry.size.h,
+                    },
+                    work_area: {
+                        let area = shell_layout::work_area(Geometry {
+                            x: geometry.loc.x,
+                            y: geometry.loc.y,
+                            width: geometry.size.w,
+                            height: geometry.size.h,
+                        });
+                        ProtocolGeometry {
+                            x: area.x,
+                            y: area.y,
+                            width: area.width,
+                            height: area.height,
+                        }
+                    },
+                    physical_width_mm: physical.size.w,
+                    physical_height_mm: physical.size.h,
+                    primary: self.primary_output_name.as_deref() == Some(output.name().as_str()),
+                })
+            })
+            .take(nickel_session_protocol::MAX_OUTPUTS)
+            .collect()
+    }
+
+    fn protocol_snapshot(&self) -> SessionSnapshot {
+        let windows = self.protocol_windows();
+        SessionSnapshot {
+            focused: windows
+                .iter()
+                .find(|window| window.active)
+                .map(|window| window.id),
+            stacking_front_to_back: windows.iter().map(|window| window.id).collect(),
+            outputs: self.protocol_outputs(),
+            windows,
+            launcher_visible: self.launcher_visibility.is_visible(),
+        }
+    }
+
+    fn protocol_secure_storage_state(&self) -> ProtocolSecureStorage {
+        match self.secure_storage_state.load(Ordering::Acquire) {
+            value if value == crate::login_services::SecureStorageState::Starting as u8 => {
+                ProtocolSecureStorage::Starting
+            }
+            value if value == crate::login_services::SecureStorageState::Locked as u8 => {
+                ProtocolSecureStorage::Locked
+            }
+            value if value == crate::login_services::SecureStorageState::PromptRequired as u8 => {
+                ProtocolSecureStorage::PromptRequired
+            }
+            value if value == crate::login_services::SecureStorageState::Ready as u8 => {
+                ProtocolSecureStorage::Ready
+            }
+            _ => ProtocolSecureStorage::Unavailable,
+        }
     }
 
     pub fn toggle_launcher(&mut self) {
@@ -461,55 +636,18 @@ impl NickelSession {
         self.notify_launcher_visibility(visible);
     }
 
-    fn window_snapshot_payload(&self) -> String {
-        let shell_ids = self
-            .shell_windows()
-            .filter_map(|window| {
-                self.surface_windows
-                    .get(&window.toplevel()?.wl_surface().id())
-            })
-            .copied()
-            .collect::<Vec<_>>();
-        self.windows
-            .snapshot()
-            .into_iter()
-            .filter(|window| !shell_ids.contains(&window.id))
-            .map(|window| {
-                format!(
-                    "{}\t{}\t{}\t{}\n",
-                    window.id.0,
-                    u8::from(window.active),
-                    window.app_id.replace(['\t', '\n', '\r'], ""),
-                    window.title.replace(['\t', '\n', '\r'], " ")
-                )
-            })
-            .collect()
-    }
-
-    fn output_snapshot_payload(&self) -> String {
-        self.space
-            .outputs()
-            .filter_map(|output| {
-                let geometry = self.space.output_geometry(output)?;
-                let physical = output.physical_properties();
-                Some(format!(
-                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
-                    output.name(),
-                    physical.model.replace(['\t', '\n', '\r'], " "),
-                    geometry.loc.x,
-                    geometry.loc.y,
-                    geometry.size.w,
-                    geometry.size.h,
-                    physical.size.w,
-                    physical.size.h,
-                    u8::from(self.primary_output_name.as_deref() == Some(output.name().as_str()))
-                ))
-            })
-            .collect()
-    }
-
-    fn apply_output_layout(&mut self, message: &str) -> Result<(), &'static str> {
-        let (primary, mut placements) = parse_output_layout(message)?;
+    fn apply_output_layout(
+        &mut self,
+        layout: nickel_session_protocol::OutputLayout,
+    ) -> Result<(), &'static str> {
+        let primary = layout.primary;
+        let mut placements = layout.placements;
+        if primary.is_empty() {
+            return Err("missing primary output");
+        }
+        if placements.is_empty() {
+            return Err("output layout is empty");
+        }
         let connected: HashMap<_, _> = self
             .space
             .outputs()
@@ -568,6 +706,7 @@ impl NickelSession {
         self.primary_output_name = Some(primary);
         self.rescue_stranded_windows();
         self.relayout_shell_surfaces();
+        self.notify_protocol_snapshot();
         Ok(())
     }
 
@@ -600,6 +739,9 @@ impl NickelSession {
 
     pub fn set_launcher_visible(&mut self, visible: bool) {
         let changed = self.launcher_visibility.is_visible() != visible;
+        if changed && visible {
+            self.launcher_show_requested_at = Some(std::time::Instant::now());
+        }
         self.launcher_visibility.set(visible);
         self.hotkeys.launcher_visibility_applied(visible);
         self.apply_launcher_visibility(visible);
@@ -608,17 +750,67 @@ impl NickelSession {
         }
     }
 
+    pub fn launcher_pointer_press(&mut self, target: LauncherPointerTarget) {
+        if self.launcher_visibility.pointer_press(target) {
+            self.hotkeys.launcher_visibility_applied(false);
+            self.apply_launcher_visibility(false);
+            self.notify_launcher_visibility(false);
+        }
+    }
+
     fn notify_launcher_visibility(&mut self, visible: bool) {
-        let event = if visible {
-            b"launcher-shown".as_slice()
-        } else {
-            b"launcher-hidden".as_slice()
+        let Ok(event) = encode(&ServerEnvelope {
+            request_id: 0,
+            message: ServerMessage::Event(SessionEvent::LauncherVisibility { visible }),
+        }) else {
+            return;
         };
         let Ok(socket) = UnixDatagram::unbound() else {
             return;
         };
         self.launcher_subscribers
-            .retain(|path| socket.send_to(event, path).is_ok());
+            .retain(|path| socket.send_to(&event, path).is_ok());
+        self.notify_protocol_snapshot();
+    }
+
+    pub(crate) fn notify_protocol_snapshot(&mut self) {
+        let Ok(event) = encode(&ServerEnvelope {
+            request_id: 0,
+            message: ServerMessage::Event(SessionEvent::Snapshot(self.protocol_snapshot())),
+        }) else {
+            return;
+        };
+        let Ok(socket) = UnixDatagram::unbound() else {
+            return;
+        };
+        self.launcher_subscribers
+            .retain(|path| socket.send_to(&event, path).is_ok());
+    }
+
+    pub(crate) fn notify_preview_frame(&mut self, window: WindowId) {
+        let Some(frame) = self.preview_frames.get(&window) else {
+            return;
+        };
+        let preview = ProtocolPreview {
+            window: ProtocolWindowId(window.0),
+            width: frame.width,
+            height: frame.height,
+            rgba: frame.rgba.clone(),
+        };
+        if preview.validate().is_err() {
+            return;
+        }
+        let Ok(event) = encode(&ServerEnvelope {
+            request_id: 0,
+            message: ServerMessage::Event(SessionEvent::Preview(preview)),
+        }) else {
+            return;
+        };
+        let Ok(socket) = UnixDatagram::unbound() else {
+            return;
+        };
+        self.launcher_subscribers
+            .retain(|path| socket.send_to(&event, path).is_ok());
     }
 
     fn apply_launcher_visibility(&mut self, visible: bool) {
@@ -826,50 +1018,51 @@ impl NickelSession {
             window.toplevel().unwrap().send_pending_configure();
         });
         self.raise_panels();
+        self.notify_protocol_snapshot();
     }
 
     pub fn cycle_windows(&mut self, forward: bool) {
-        if self.alt_tab_order.is_empty() {
-            let shell_ids = self
-                .shell_windows()
-                .filter_map(|window| {
-                    self.surface_windows
-                        .get(&window.toplevel()?.wl_surface().id())
-                })
-                .copied()
-                .collect::<HashSet<_>>();
-            self.alt_tab_order = self
-                .windows
-                .snapshot()
-                .into_iter()
-                .rev()
-                .map(|window| window.id)
-                .filter(|id| !shell_ids.contains(id))
-                .collect();
-            self.preview_requests
-                .extend(self.alt_tab_order.iter().copied());
-            self.alt_tab_index = if forward {
-                usize::from(self.alt_tab_order.len() > 1)
-            } else {
-                self.alt_tab_order.len().saturating_sub(1)
-            };
-        } else if !self.alt_tab_order.is_empty() {
-            self.alt_tab_index = if forward {
-                (self.alt_tab_index + 1) % self.alt_tab_order.len()
-            } else {
-                self.alt_tab_index
-                    .checked_sub(1)
-                    .unwrap_or(self.alt_tab_order.len() - 1)
-            };
-        }
+        self.apply_task_switch_action(if forward {
+            HotkeyAction::SwitchNext
+        } else {
+            HotkeyAction::SwitchPrevious
+        });
     }
 
     pub fn commit_window_cycle(&mut self) {
-        let target = self.alt_tab_order.get(self.alt_tab_index).copied();
-        self.alt_tab_order.clear();
-        self.alt_tab_index = 0;
-        if let Some(id) = target {
-            self.activate_window(id);
+        self.apply_task_switch_action(HotkeyAction::CommitSwitch);
+    }
+
+    pub fn apply_task_switch_action(&mut self, action: HotkeyAction) {
+        let shell_ids = self
+            .shell_windows()
+            .filter_map(|window| {
+                self.surface_windows
+                    .get(&window.toplevel()?.wl_surface().id())
+            })
+            .copied()
+            .collect::<HashSet<_>>();
+        let windows = self
+            .windows
+            .snapshot()
+            .into_iter()
+            .rev()
+            .filter(|window| !shell_ids.contains(&window.id))
+            .map(|window| SwitchWindow {
+                id: window.id,
+                application_id: window.app_id.clone(),
+                active: window.active,
+            })
+            .collect::<Vec<_>>();
+        let effects = self.task_switcher.apply(action, &windows);
+        for effect in effects {
+            match effect {
+                TaskSwitchEffect::RequestPreviews(ids) => self.preview_requests.extend(ids),
+                TaskSwitchEffect::ActivateWindow(id) => self.activate_window(id),
+                TaskSwitchEffect::ShowFlip { .. }
+                | TaskSwitchEffect::SelectPreview(_)
+                | TaskSwitchEffect::HideFlip { .. } => {}
+            }
         }
     }
 
@@ -892,6 +1085,7 @@ impl NickelSession {
         self.space.unmap_elem(&window);
         self.minimized_windows.insert(id, (window, location));
         self.raise_panels();
+        self.notify_protocol_snapshot();
     }
 
     pub fn maximize_window(&mut self, id: WindowId) {
@@ -996,6 +1190,7 @@ impl NickelSession {
             .map_element(window, (geometry.x, geometry.y), true);
         self.raise_panels();
         surface.send_pending_configure();
+        self.notify_protocol_snapshot();
     }
 
     pub fn unmaximize_toplevel(&mut self, surface: &ToplevelSurface) {
@@ -1014,6 +1209,7 @@ impl NickelSession {
         }
         self.raise_panels();
         surface.send_pending_configure();
+        self.notify_protocol_snapshot();
     }
 
     pub fn fullscreen_toplevel(&mut self, surface: &ToplevelSurface) {
@@ -1173,17 +1369,23 @@ impl NickelSession {
 
     fn launcher_geometry(&self, launcher: &Window) -> Geometry {
         let requested = launcher.geometry().size;
-        let width = if requested.w > 1 { requested.w } else { 960 };
-        let height = if requested.h > 1 { requested.h } else { 640 };
-        shell_layout::centered_in(
-            shell_layout::work_area(self.output_geometry().unwrap_or(Geometry {
-                x: 0,
-                y: 0,
-                width,
-                height: height + shell_layout::PANEL_HEIGHT,
-            })),
-            (width, height),
-        )
+        let width = if requested.w > 1 {
+            requested.w.min(920)
+        } else {
+            920
+        };
+        let height = if requested.h > 1 {
+            requested.h.min(680)
+        } else {
+            680
+        };
+        let work_area = shell_layout::work_area(self.output_geometry().unwrap_or(Geometry {
+            x: 0,
+            y: 0,
+            width,
+            height: height + shell_layout::PANEL_HEIGHT + 8,
+        }));
+        shell_layout::bottom_left_in(work_area, (width, height), 18, 8)
     }
 
     fn configure_window(window: &Window, geometry: Geometry) {
@@ -1283,35 +1485,18 @@ impl ClientData for ClientState {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{OutputPlacement, parse_output_layout};
+mod protocol_tests {
+    use super::shell_registration_allowed;
 
     #[test]
-    fn output_layout_command_parses_atomically() {
-        let (primary, outputs) =
-            parse_output_layout("apply-outputs\nprimary\tDP-3\nDVI-I-1\t0\t0\nDP-3\t1920\t120\n")
-                .unwrap();
-
-        assert_eq!(primary, "DP-3");
-        assert_eq!(
-            outputs,
-            vec![
-                OutputPlacement {
-                    name: "DVI-I-1".into(),
-                    x: 0,
-                    y: 0,
-                },
-                OutputPlacement {
-                    name: "DP-3".into(),
-                    x: 1920,
-                    y: 120,
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn output_layout_command_rejects_missing_primary() {
-        assert!(parse_output_layout("apply-outputs\nDVI-I-1\t0\t0\n").is_err());
+    fn only_the_exact_supervised_shell_pid_can_register() {
+        let current = std::process::id();
+        assert!(shell_registration_allowed(current, current));
+        assert!(!shell_registration_allowed(0, current));
+        assert!(!shell_registration_allowed(
+            current.saturating_add(1),
+            current
+        ));
+        assert!(!shell_registration_allowed(current, u32::MAX));
     }
 }

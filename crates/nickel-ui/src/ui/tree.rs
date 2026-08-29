@@ -261,6 +261,11 @@ pub struct AccessibilityNode {
     pub component: &'static str,
     pub rect: Rect,
     pub interactive: bool,
+    pub label: Option<String>,
+    pub description: Option<String>,
+    pub role: Option<String>,
+    pub state: Option<String>,
+    pub controls: Option<UiId>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -314,6 +319,12 @@ pub struct ResolvedNode {
     pub grid_tracks: Vec<f32>,
     pub hit_stack: Option<usize>,
     pub interaction: InteractionState,
+    pub accessibility_label: Option<String>,
+    pub accessibility_description: Option<String>,
+    pub accessibility_role: Option<String>,
+    pub accessibility_state: Option<String>,
+    pub accessibility_controls: Option<UiId>,
+    pub accessibility_hidden: bool,
     pub children: Vec<usize>,
 }
 
@@ -1160,6 +1171,13 @@ impl<Message: Clone> UiTree<Message> {
                 }
                 Invalidation::None
             }
+            UiEvent::AccessibilityFocus(id) => {
+                if self.hits.iter().any(|hit| hit.id == id) {
+                    state.set_focus(Some(id))
+                } else {
+                    Invalidation::None
+                }
+            }
             UiEvent::AccessibilityActivate(id) => {
                 if let Some(message) = self.message_for_id(&id).cloned() {
                     outcome.messages.push(message);
@@ -1621,6 +1639,7 @@ impl<Message: Clone> UiTree<Message> {
                     color: 0xffffff,
                     align: TextAlign::Start,
                     bold: false,
+                    wrap: true,
                 });
             }
         }
@@ -1668,6 +1687,9 @@ impl<Message: Clone> UiTree<Message> {
             .nodes
             .iter()
             .filter_map(|node| {
+                if node.accessibility_hidden {
+                    return None;
+                }
                 let rect = node
                     .clip
                     .map(|clip| intersection(node.allocated, clip))
@@ -1677,6 +1699,11 @@ impl<Message: Clone> UiTree<Message> {
                     component: node.component,
                     rect,
                     interactive: node.interaction.interactive,
+                    label: node.accessibility_label.clone(),
+                    description: node.accessibility_description.clone(),
+                    role: node.accessibility_role.clone(),
+                    state: node.accessibility_state.clone(),
+                    controls: node.accessibility_controls.clone(),
                 })
             })
             .collect();
@@ -2366,6 +2393,7 @@ fn emit_element<Message: Clone>(
             value,
             scale,
             bold,
+            wrap,
             ellipsis,
             ..
         } => tree.commands.push(PaintCommand::Text {
@@ -2375,6 +2403,7 @@ fn emit_element<Message: Clone>(
             color: foreground.unwrap_or(0x00ff_ffff),
             align: element.style.text_align,
             bold: *bold,
+            wrap: *wrap,
         }),
         Kind::StyledText {
             value,
@@ -2427,13 +2456,46 @@ fn emit_element<Message: Clone>(
         Kind::Image {
             id,
             image,
+            high_density,
             presentation,
-        } => tree.commands.push(PaintCommand::Image {
-            bounds: presentation
-                .bounds(rect, Size::new(image.width() as f32, image.height() as f32)),
-            id: *id,
-            image: image.clone(),
-        }),
+        } => {
+            let source = Size::new(image.width() as f32, image.height() as f32);
+            let bounds = presentation.bounds(rect, source);
+            if presentation.fit == ImageFit::Tile
+                && bounds.size.width > 0.0
+                && bounds.size.height > 0.0
+            {
+                let mut y = bounds.origin.y;
+                while y > rect.origin.y {
+                    y -= bounds.size.height;
+                }
+                let mut count = 0usize;
+                while y < rect.origin.y + rect.size.height && count < 4096 {
+                    let mut x = bounds.origin.x;
+                    while x > rect.origin.x {
+                        x -= bounds.size.width;
+                    }
+                    while x < rect.origin.x + rect.size.width && count < 4096 {
+                        tree.commands.push(PaintCommand::Image {
+                            bounds: Rect::new(x, y, bounds.size.width, bounds.size.height),
+                            id: *id,
+                            image: image.clone(),
+                            high_density: high_density.clone(),
+                        });
+                        x += bounds.size.width;
+                        count += 1;
+                    }
+                    y += bounds.size.height;
+                }
+            } else {
+                tree.commands.push(PaintCommand::Image {
+                    bounds,
+                    id: *id,
+                    image: image.clone(),
+                    high_density: high_density.clone(),
+                });
+            }
+        }
         Kind::Slider {
             value,
             track,
@@ -2498,6 +2560,7 @@ fn emit_element<Message: Clone>(
                 color: *foreground,
                 align: TextAlign::Start,
                 bold: false,
+                wrap: false,
             });
             tree.commands.push(PaintCommand::Text {
                 bounds: Rect::new(
@@ -2511,6 +2574,7 @@ fn emit_element<Message: Clone>(
                 color: *foreground,
                 align: TextAlign::Center,
                 bold: false,
+                wrap: false,
             });
             if *expanded {
                 for (index, option) in options.iter().enumerate() {
@@ -2541,6 +2605,7 @@ fn emit_element<Message: Clone>(
                         color: *foreground,
                         align: TextAlign::Start,
                         bold: false,
+                        wrap: false,
                     });
                     let option_id = node.id.scoped(format!("option-{index}"));
                     let message = element.option_messages.get(index).cloned().flatten();
@@ -2626,6 +2691,12 @@ fn layout_element<Message: Clone>(
         grid_tracks: Vec::new(),
         hit_stack: None,
         interaction,
+        accessibility_label: element.style.accessibility_label.clone(),
+        accessibility_description: element.style.accessibility_description.clone(),
+        accessibility_role: element.style.accessibility_role.clone(),
+        accessibility_state: element.style.accessibility_state.clone(),
+        accessibility_controls: element.style.accessibility_controls.clone(),
+        accessibility_hidden: element.style.accessibility_hidden,
         children: Vec::new(),
     });
     if tree.diagnostics_enabled && !tree.seen_ids.insert(id.clone()) {
@@ -2689,6 +2760,7 @@ fn layout_element<Message: Clone>(
             value,
             scale,
             bold,
+            wrap,
             line_height,
             max_lines,
             ..
@@ -2696,12 +2768,18 @@ fn layout_element<Message: Clone>(
             value,
             *scale,
             *bold,
-            false,
+            *wrap,
             *line_height,
             *max_lines,
-            f32::INFINITY,
+            if *wrap {
+                rect.size.width.max(0.0)
+            } else {
+                f32::INFINITY
+            },
         )),
-        Kind::Image { image, .. } => Some(Size::new(image.width() as f32, image.height() as f32)),
+        // Images deliberately map intrinsic pixels through their presentation
+        // policy, so a different allocated size is not unsatisfied content.
+        Kind::Image { .. } => None,
         _ => None,
     };
     if unconstrained_content.is_some_and(|content| {
@@ -3134,6 +3212,21 @@ fn apply_transient_state<Message>(
             Kind::VerticalScroll { .. } | Kind::Dropdown { .. }
         );
     if owns_state {
+        if state.pressed() == Some(id) {
+            if let Some(background) = element.style.pressed_background {
+                element.style.background = Some(background);
+            }
+        } else if state.hovered() == Some(id)
+            && let Some(background) = element.style.hover_background
+        {
+            element.style.background = Some(background);
+        }
+        if (state.focused() == Some(id) || state.controller_selected() == Some(id))
+            && let Some(border) = element.style.focus_border
+        {
+            element.style.border = Some(border);
+            element.style.border_width = element.style.border_width.max(2.0);
+        }
         let (scroll_offset_x, scroll_offset, scroll_at_end, dropdown_open) = {
             let transient = state.touch(id.clone());
             (

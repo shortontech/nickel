@@ -65,6 +65,7 @@ struct TextCacheKey {
     height: u32,
     align: u8,
     bold: bool,
+    wrap: bool,
     color: Color,
 }
 
@@ -95,6 +96,7 @@ struct PhysicalTextKey {
     color: Color,
     align: u8,
     bold: bool,
+    wrap: bool,
 }
 
 struct CachedPhysicalText {
@@ -374,6 +376,7 @@ impl SdlCanvasPresenter {
                 color,
                 align,
                 bold,
+                wrap,
             } => self.direct_text(
                 physical_rect(*bounds, scale),
                 text,
@@ -381,6 +384,7 @@ impl SdlCanvasPresenter {
                 *color,
                 *align,
                 *bold,
+                *wrap,
                 clip,
             )?,
             PaintCommand::StyledText {
@@ -400,13 +404,22 @@ impl SdlCanvasPresenter {
                 clip,
             )?,
             PaintCommand::Image {
-                bounds, id, image, ..
-            } => self.direct_image(
-                physical_rect(*bounds, scale),
-                *id,
-                Arc::as_ptr(image) as usize,
+                bounds,
+                id,
                 image,
-            )?,
+                high_density,
+            } => {
+                let image = high_density
+                    .as_ref()
+                    .filter(|_| scale >= 1.5)
+                    .unwrap_or(image);
+                self.direct_image(
+                    physical_rect(*bounds, scale),
+                    *id,
+                    Arc::as_ptr(image) as usize,
+                    image,
+                )?
+            }
             PaintCommand::PushClip(rect) => {
                 let rect = physical_rect(*rect, scale);
                 clips.push(intersection(clip, rect).unwrap_or_default());
@@ -543,9 +556,10 @@ impl SdlCanvasPresenter {
         color: Color,
         align: TextAlign,
         bold: bool,
+        wrap: bool,
         parent_clip: Rect,
     ) -> Result<(), String> {
-        let key = physical_text_key(text, &[], bounds, size, color, align, bold);
+        let key = physical_text_key(text, &[], bounds, size, color, align, bold, wrap);
         let layout = if let Some(layout) = self.text_layouts.get(&key) {
             Arc::clone(layout)
         } else {
@@ -559,6 +573,7 @@ impl SdlCanvasPresenter {
                     color,
                     align,
                     bold,
+                    wrap,
                 ),
                 strikes: Vec::new(),
                 backgrounds: Vec::new(),
@@ -623,7 +638,7 @@ impl SdlCanvasPresenter {
         align: TextAlign,
         parent_clip: Rect,
     ) -> Result<(), String> {
-        let key = physical_text_key(text, spans, bounds, size, color, align, false);
+        let key = physical_text_key(text, spans, bounds, size, color, align, false, true);
         let layout = if let Some(layout) = self.text_layouts.get(&key) {
             Arc::clone(layout)
         } else {
@@ -986,7 +1001,16 @@ impl SdlComponentRenderer {
             }
             PaintCommand::Text { .. } => self.text(command, clip),
             PaintCommand::StyledText { .. } => self.styled_text(command, clip),
-            PaintCommand::Image { bounds, image, .. } => {
+            PaintCommand::Image {
+                bounds,
+                image,
+                high_density,
+                ..
+            } => {
+                let image = high_density
+                    .as_ref()
+                    .filter(|_| self.scale >= 1.5)
+                    .unwrap_or(image);
                 self.image(physical_rect(*bounds, self.scale), image, clip);
             }
             PaintCommand::PushClip(rect) => {
@@ -1078,6 +1102,7 @@ impl SdlComponentRenderer {
             color,
             align,
             bold,
+            wrap,
         } = command
         else {
             return;
@@ -1097,6 +1122,7 @@ impl SdlComponentRenderer {
                 TextAlign::End => 2,
             },
             bold: *bold,
+            wrap: *wrap,
             color: *color,
         };
         let glyph_pixels = if let Some(cached) = self.text_cache.get(&key) {
@@ -1111,6 +1137,7 @@ impl SdlComponentRenderer {
             if *bold {
                 attrs = attrs.weight(Weight::BOLD);
             }
+            buffer.set_wrap(if *wrap { Wrap::WordOrGlyph } else { Wrap::None });
             buffer.set_text(text, &attrs, Shaping::Advanced, None);
             for line in &mut buffer.lines {
                 line.set_align(Some(match align {
@@ -1408,6 +1435,7 @@ fn text_size(scale: f32) -> f32 {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn physical_text_key(
     text: &str,
     spans: &[StyledTextSpan],
@@ -1416,6 +1444,7 @@ fn physical_text_key(
     color: Color,
     align: TextAlign,
     bold: bool,
+    wrap: bool,
 ) -> PhysicalTextKey {
     PhysicalTextKey {
         text: text.to_owned(),
@@ -1430,6 +1459,7 @@ fn physical_text_key(
             TextAlign::End => 2,
         },
         bold,
+        wrap,
     }
 }
 
@@ -1444,6 +1474,7 @@ fn insert_bounded_text_layout(
     cache.insert(key, layout);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn shape_physical_glyphs(
     font_system: &mut FontSystem,
     text: &str,
@@ -1452,9 +1483,10 @@ fn shape_physical_glyphs(
     color: Color,
     align: TextAlign,
     bold: bool,
+    wrap: bool,
 ) -> Vec<(PhysicalGlyph, TextColor)> {
     let mut buffer = Buffer::new(font_system, Metrics::new(size, size * 1.3));
-    buffer.set_wrap(Wrap::WordOrGlyph);
+    buffer.set_wrap(if wrap { Wrap::WordOrGlyph } else { Wrap::None });
     buffer.set_size(
         Some(bounds.size.width.max(1.0)),
         Some(bounds.size.height.max(size * 1.3)),
@@ -1677,6 +1709,7 @@ mod tests {
             0xffffff,
             TextAlign::Start,
             false,
+            true,
         );
         let scrolled = physical_text_key(
             "Retained text",
@@ -1686,6 +1719,7 @@ mod tests {
             0xffffff,
             TextAlign::Start,
             false,
+            true,
         );
 
         assert_eq!(first, scrolled);
@@ -1701,6 +1735,7 @@ mod tests {
             color: 0xffffff,
             align: TextAlign::Start,
             bold: false,
+            wrap: true,
         };
         assert!(!command_intersects_clip(&text, 2.0, clip));
         assert!(command_intersects_clip(
@@ -1741,6 +1776,7 @@ mod tests {
             0xffffff,
             TextAlign::Start,
             false,
+            true,
         );
         let unique = glyphs
             .iter()
@@ -1761,6 +1797,7 @@ mod tests {
                 0xffffff,
                 TextAlign::Center,
                 false,
+                true,
             );
             assert!(!glyphs.is_empty());
             assert!(glyphs.iter().all(|(glyph, _)| {

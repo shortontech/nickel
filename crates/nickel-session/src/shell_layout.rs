@@ -49,6 +49,18 @@ pub fn centered_in(area: Geometry, requested: (i32, i32)) -> Geometry {
     }
 }
 
+pub fn bottom_left_in(
+    area: Geometry,
+    requested: (i32, i32),
+    left_inset: i32,
+    bottom_gap: i32,
+) -> Geometry {
+    let mut geometry = centered_in(area, requested);
+    geometry.x = area.x + left_inset.max(0).min((area.width - geometry.width).max(0));
+    geometry.y = area.y + (area.height - geometry.height - bottom_gap.max(0)).max(0);
+    geometry
+}
+
 pub fn initial_window(area: Geometry, cascade: i32) -> Geometry {
     let target_width = (area.width * 3 / 4).clamp(640, 1200);
     let target_height = (area.height * 3 / 4).clamp(480, 800);
@@ -63,7 +75,7 @@ pub fn initial_window(area: Geometry, cascade: i32) -> Geometry {
 #[cfg(test)]
 mod tests {
     use super::{
-        Geometry, PANEL_HEIGHT, centered_in, initial_window, output_for_window, panel, work_area,
+        Geometry, bottom_left_in, centered_in, initial_window, output_for_window, panel, work_area,
     };
 
     #[test]
@@ -78,12 +90,31 @@ mod tests {
             panel(output),
             Geometry {
                 x: 0,
-                y: 720 - PANEL_HEIGHT,
+                y: 664,
                 width: 1280,
-                height: PANEL_HEIGHT,
+                height: 56,
             }
         );
-        assert_eq!(work_area(output).height, 720 - PANEL_HEIGHT);
+        assert_eq!(work_area(output).height, 664);
+    }
+
+    #[test]
+    fn launcher_is_bottom_left_and_attached_above_the_panel() {
+        let output = Geometry {
+            x: 0,
+            y: 0,
+            width: 1280,
+            height: 800,
+        };
+        assert_eq!(
+            bottom_left_in(work_area(output), (920, 680), 18, 8),
+            Geometry {
+                x: 18,
+                y: 56,
+                width: 920,
+                height: 680,
+            }
+        );
     }
 
     #[test]

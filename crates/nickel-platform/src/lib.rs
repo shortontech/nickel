@@ -1,5 +1,46 @@
 //! Shared native platform adapters used by Nickel applications.
 
+mod media;
+
+pub use media::{DecodedPreview, PreviewDecodeError, decode_image_preview};
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FileDialogOutcome {
+    Selected(std::path::PathBuf),
+    Cancelled,
+    Failed(String),
+}
+
+/// Opens the platform-native image chooser through SDL's dialog adapter. On
+/// Linux SDL delegates to the desktop portal rather than a desktop-specific
+/// executable; Windows uses the native common dialog.
+pub fn choose_image_file(callback: Box<dyn Fn(FileDialogOutcome) + 'static>) -> Result<(), String> {
+    use sdl3::dialog::{DialogError, DialogFileFilter, show_open_file_dialog};
+
+    let filters = [DialogFileFilter {
+        name: "Images",
+        pattern: "png;jpg;jpeg;webp;bmp",
+    }];
+    show_open_file_dialog(
+        &filters,
+        None::<&std::path::Path>,
+        false,
+        None,
+        Box::new(move |result, _| {
+            callback(match result {
+                Ok(paths) => paths
+                    .into_iter()
+                    .next()
+                    .map(FileDialogOutcome::Selected)
+                    .unwrap_or(FileDialogOutcome::Cancelled),
+                Err(DialogError::Canceled) => FileDialogOutcome::Cancelled,
+                Err(error) => FileDialogOutcome::Failed(error.to_string()),
+            });
+        }),
+    )
+    .map_err(|error| error.to_string())
+}
+
 #[cfg(target_os = "windows")]
 mod windows;
 

@@ -272,6 +272,7 @@ fn scene(
             bounds: Rect::new(left_x, preview_y, preview_size, preview_size),
             id: 901,
             image: Arc::clone(&sample.left_eye_patch),
+            high_density: None,
         });
         commands.push(PaintCommand::Image {
             bounds: Rect::new(
@@ -282,6 +283,7 @@ fn scene(
             ),
             id: 902,
             image: Arc::clone(&sample.right_eye_patch),
+            high_density: None,
         });
         commands.push(text(
             Rect::new(left_x, 56.0, preview_size, 16.0),
@@ -326,6 +328,7 @@ fn scene(
                 },
                 align: TextAlign::Center,
                 bold: selected == Some((column, row)),
+                wrap: false,
             });
         }
     }
@@ -386,6 +389,7 @@ fn text(rect: Rect, value: &str, scale: f32, color: u32, bold: bool) -> PaintCom
         color,
         align: TextAlign::Start,
         bold,
+        wrap: false,
     }
 }
 

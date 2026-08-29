@@ -390,14 +390,16 @@ impl SettingsApp {
                 self.localizer.text("settings-appearance-light"),
                 self.shell_settings.theme == ThemePreference::Light,
                 preview(light_preview),
-            ),
+            )
+            .id("appearance-mode-light"),
             ChoiceCard::new(
                 theme,
                 SettingsMessage::AppearanceDark,
                 self.localizer.text("settings-appearance-dark"),
                 self.shell_settings.theme == ThemePreference::Dark,
                 preview(dark_preview),
-            ),
+            )
+            .id("appearance-mode-dark"),
             ChoiceCard::new(
                 theme,
                 SettingsMessage::AppearanceSystem,
@@ -413,7 +415,8 @@ impl SettingsApp {
                             <Container grow={1.0} background={dark_preview.background} radius={3.0} />
                         </Row>
                     }),
-            ),
+            )
+            .id("appearance-mode-system"),
         ];
         let preset_hues = [224_u16, 188, 154, 78, 38, 16, 340, 305];
         let swatches = preset_hues.into_iter().map(|preset| {
@@ -464,14 +467,17 @@ impl SettingsApp {
                     Image::new(1, image.clone())
                         .fit(ImageFit::Cover)
                         .width(124.0)
-                        .height(70.0),
+                        .height(96.0),
                 )
             })
             .unwrap_or_else(|| {
                 PreviewTile::unavailable(theme, self.localizer.text("settings-wallpaper-none"))
             })
             .width(124.0)
-            .height(70.0);
+            .height(96.0);
+        let wallpaper_dimensions = self
+            .wallpaper_dimensions
+            .map(|(width, height)| format!("{width} × {height}"));
         let mode_group = ChoiceCardGroup::new(mode_choices);
         let swatch_row = ui! {
             <Row height={44.0} gap={10.0} children={swatches}>
@@ -516,9 +522,11 @@ impl SettingsApp {
                 {wallpaper_preview}
                 <Column grow={1.0} gap={8.0}>
                     <Text color={palette.text}>{wallpaper_name}</Text>
+                    {wallpaper_dimensions.map(|dimensions| nickel_ui::Text::new(dimensions).color(palette.muted))}
                     <Row gap={10.0}>
                         {choose}{remove}
                     </Row>
+                    {self.wallpaper_status.as_ref().map(|status| SettingsStatus::new(theme, SettingsStatusKind::Error, status.clone()))}
                 </Column>
             </Row>
             }
@@ -538,11 +546,14 @@ impl SettingsApp {
             self.localizer
                 .text("settings-reduce-transparency-description"),
         )
-        .trailing(Switch::new(
-            self.shell_settings.reduce_transparency,
-            reduce_transparency_message,
-            theme,
-        ));
+        .trailing(
+            Switch::new(
+                self.shell_settings.reduce_transparency,
+                reduce_transparency_message,
+                theme,
+            )
+            .id("appearance-transparency"),
+        );
         let animation_label = self.localizer.text(match self.shell_settings.animations {
             AnimationLevel::Off => "settings-animations-off",
             AnimationLevel::Reduced => "settings-animations-reduced",
@@ -569,53 +580,104 @@ impl SettingsApp {
                 ),
             ],
             self.animation_select_expanded,
-        );
+        )
+        .id("appearance-animations");
         let interface_card = SettingsCard::titled(
             theme,
             self.localizer.text("settings-interface-settings"),
             "",
         )
-        .child(SliderField::new(
-            theme,
-            self.localizer.text("settings-appearance-starting-hue"),
-            self.localizer.text("settings-appearance-hue-description"),
-            self.localizer
-                .number("settings-appearance-hue-value", "degrees", i64::from(hue)),
-            f32::from(hue) / 359.0,
-            appearance_hue_message,
-        ))
-        .child(SliderField::new(
-            theme,
-            self.localizer.text("settings-appearance-color-intensity"),
-            self.localizer
-                .text("settings-appearance-intensity-description"),
-            self.localizer.number(
-                "settings-appearance-intensity-value",
-                "percent",
-                i64::from(intensity),
-            ),
-            f32::from(intensity) / 100.0,
-            appearance_intensity_message,
-        ))
+        .child(
+            SliderField::new(
+                theme,
+                self.localizer.text("settings-appearance-starting-hue"),
+                self.localizer.text("settings-appearance-hue-description"),
+                self.localizer
+                    .number("settings-appearance-hue-value", "degrees", i64::from(hue)),
+                f32::from(hue) / 359.0,
+                appearance_hue_message,
+            )
+            .id("appearance-hue"),
+        )
+        .child(
+            SliderField::new(
+                theme,
+                self.localizer.text("settings-appearance-color-intensity"),
+                self.localizer
+                    .text("settings-appearance-intensity-description"),
+                self.localizer.number(
+                    "settings-appearance-intensity-value",
+                    "percent",
+                    i64::from(intensity),
+                ),
+                f32::from(intensity) / 100.0,
+                appearance_intensity_message,
+            )
+            .id("appearance-intensity"),
+        )
         .child(transparency_row)
         .child(animation_row);
-        let general = ui! {
-            <Column gap={10.0}>
-                {mode_card}{accent_card}{wallpaper_card}{interface_card}
-            </Column>
-        };
+        let reset = Button::semantic(
+            theme,
+            SettingsMessage::AppearanceReset,
+            self.localizer.text("settings-appearance-reset"),
+            ButtonPresentation::Secondary,
+        )
+        .id("appearance-reset")
+        .width(220.0);
+        let appearance_notice = self.appearance_notice.as_ref().map(|notice| match notice {
+            AppearanceNotice::Confirmation(message) => SettingsStatus::<SettingsMessage>::new(
+                theme,
+                SettingsStatusKind::Validation,
+                message.clone(),
+            ),
+            AppearanceNotice::Error(message) => SettingsStatus::<SettingsMessage>::new(
+                theme,
+                SettingsStatusKind::Error,
+                message.clone(),
+            ),
+        });
+        let mut general = nickel_ui::Column::new()
+            .gap(10.0)
+            .child(mode_card)
+            .child(accent_card)
+            .child(wallpaper_card)
+            .child(interface_card)
+            .child(
+                nickel_ui::Row::new()
+                    .justify_content(nickel_ui::Justify::End)
+                    .child(reset),
+            );
+        if let Some(notice) = appearance_notice {
+            general = general.child(notice);
+        }
         let unavailable = SettingsCard::titled(
             theme,
             self.localizer.text("settings-appearance-tab-unavailable"),
             self.localizer
                 .text("settings-appearance-tab-unavailable-description"),
-        );
+        )
+        .child(SettingsStatus::new(
+            theme,
+            SettingsStatusKind::Unavailable,
+            self.localizer.text("settings-appearance-platform-managed"),
+        ))
+        .child(SettingsStatus::new(
+            theme,
+            SettingsStatusKind::RestartRequired,
+            self.localizer.text("settings-appearance-external-restart"),
+        ));
         let content = if self.appearance_tab == AppearanceTab::General {
             AnyView::new(general)
         } else {
             AnyView::new(unavailable)
         };
-        let tabs = TabList::new(
+        let panel_id = UiId::from("appearance-tab-panel");
+        let content = Container::new()
+            .id(panel_id.clone())
+            .child(content)
+            .accessibility_role("tab-panel");
+        let tabs = TabList::with_panel(
             theme,
             [
                 (
@@ -644,6 +706,7 @@ impl SettingsApp {
                     self.appearance_tab == AppearanceTab::Cursors,
                 ),
             ],
+            panel_id,
         );
         ui! {
             <Column grow={1.0} padding={Insets {
@@ -654,5 +717,61 @@ impl SettingsApp {
                     offset={self.transient_scroll(&SettingsMessage::AppearanceScroll)}>{content}</VerticalScroll>
             </Column>
         }
+    }
+
+    pub(super) fn keyboard_shortcuts_components(
+        &self,
+    ) -> impl nickel_ui::Component<SettingsMessage> {
+        let theme = self.ui_theme();
+        SettingsCard::titled(
+            theme,
+            self.localizer.text("settings-keyboard-card-title"),
+            self.localizer.text("settings-keyboard-card-description"),
+        )
+        .child(SettingsRow::new(
+            theme,
+            self.localizer.text("settings-keyboard-open-launcher"),
+            "Super",
+        ))
+        .child(SettingsRow::new(
+            theme,
+            self.localizer.text("settings-keyboard-search"),
+            self.localizer.text("settings-keyboard-search-value"),
+        ))
+        .child(SettingsRow::new(
+            theme,
+            self.localizer.text("settings-keyboard-navigate"),
+            "Arrow keys · Tab · Shift+Tab",
+        ))
+        .child(SettingsRow::new(
+            theme,
+            self.localizer.text("settings-keyboard-activate"),
+            "Enter",
+        ))
+        .child(SettingsRow::new(
+            theme,
+            self.localizer.text("settings-keyboard-back"),
+            "Escape",
+        ))
+    }
+
+    pub(super) fn about_components(&self) -> impl nickel_ui::Component<SettingsMessage> {
+        let theme = self.ui_theme();
+        let platform = format!("{} · {}", std::env::consts::OS, std::env::consts::ARCH);
+        SettingsCard::titled(
+            theme,
+            self.localizer.text("settings-about-card-title"),
+            self.localizer.text("settings-about-card-description"),
+        )
+        .child(SettingsRow::new(
+            theme,
+            self.localizer.text("settings-about-version"),
+            env!("CARGO_PKG_VERSION"),
+        ))
+        .child(SettingsRow::new(
+            theme,
+            self.localizer.text("settings-about-platform"),
+            platform,
+        ))
     }
 }

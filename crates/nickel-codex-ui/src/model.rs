@@ -5,7 +5,8 @@ use std::{
 };
 
 use nickel_codex::{
-    AccountState, CodexEvent, EventKind, Model, Project, ServerRequestId, Thread, ThreadId, TurnId,
+    AccountState, CodexEvent, CommandAction, EventKind, Model, Project, ServerRequestId, Thread,
+    ThreadId, TurnId,
 };
 use nickel_markdown::{MarkdownDocument, markdown_selection_runs};
 use nickel_ui::{SelectionDocument, SelectionRun};
@@ -31,6 +32,7 @@ pub enum ChatItemKind {
     Agent,
     Reasoning,
     Command,
+    Activity,
     FileChange,
     Plan,
     Error,
@@ -65,10 +67,13 @@ pub struct ChatState {
     pub provenance: String,
     pub account: AccountState,
     pub models: Vec<Model>,
+    pub selected_model: Option<String>,
+    pub selected_reasoning_effort: Option<String>,
     pub projects: Vec<Project>,
     pub threads: Vec<Thread>,
     pub thread_runtime: HashMap<ThreadId, nickel_codex::ThreadRuntime>,
     pub thread_error: Option<String>,
+    pub thread_snapshot_available: bool,
     pub selected_thread: Option<ThreadId>,
     pub active_turn: Option<TurnId>,
     pub interrupt_requested: bool,
@@ -83,6 +88,12 @@ pub struct ChatState {
     pub collapsed_projects: HashSet<String>,
     local_sequence: u64,
     item_indexes: HashMap<String, usize>,
+    turn_agent_index: Option<usize>,
+    exploration_index: Option<usize>,
+    exploration_item_ids: HashSet<String>,
+    exploration_reads: HashSet<String>,
+    exploration_lists: HashSet<String>,
+    exploration_searches: HashSet<String>,
     item_height_estimates: VecDeque<f32>,
     item_selection_runs: VecDeque<Vec<SelectionRun>>,
     selection_revision: u64,
@@ -97,10 +108,13 @@ impl Default for ChatState {
             provenance: "Locating OpenAI Codex CLI…".into(),
             account: AccountState::default(),
             models: Vec::new(),
+            selected_model: None,
+            selected_reasoning_effort: None,
             projects: Vec::new(),
             threads: Vec::new(),
             thread_runtime: HashMap::new(),
             thread_error: None,
+            thread_snapshot_available: false,
             selected_thread: None,
             active_turn: None,
             interrupt_requested: false,
@@ -115,6 +129,12 @@ impl Default for ChatState {
             collapsed_projects: HashSet::new(),
             local_sequence: 0,
             item_indexes: HashMap::new(),
+            turn_agent_index: None,
+            exploration_index: None,
+            exploration_item_ids: HashSet::new(),
+            exploration_reads: HashSet::new(),
+            exploration_lists: HashSet::new(),
+            exploration_searches: HashSet::new(),
             item_height_estimates: VecDeque::new(),
             item_selection_runs: VecDeque::new(),
             selection_revision: 0,
@@ -163,9 +183,20 @@ impl ChatState {
                 self.provenance = provenance;
                 self.account = account;
                 self.models = models.into_iter().take(100).collect();
+                if self.selected_model.is_none() {
+                    self.selected_model = self.models.first().map(|model| model.id.clone());
+                }
+                if self.selected_reasoning_effort.is_none() {
+                    self.selected_reasoning_effort = self
+                        .models
+                        .iter()
+                        .find(|model| Some(model.id.as_str()) == self.selected_model.as_deref())
+                        .and_then(|model| model.default_reasoning_effort.clone());
+                }
                 self.projects = projects.into_iter().take(100).collect();
                 self.threads = threads.into_iter().take(MAX_THREADS).collect();
                 self.thread_runtime = runtime;
+                self.thread_snapshot_available = thread_error.is_none();
                 self.thread_error = thread_error.map(|message| sanitize_diagnostic(&message));
             }
             ControllerEvent::ThreadCreated(thread) => {
@@ -211,6 +242,8 @@ impl ChatState {
         self.item_selection_runs.clear();
         self.selection_revision = self.selection_revision.wrapping_add(1);
         self.item_indexes.clear();
+        self.turn_agent_index = None;
+        self.clear_exploration();
         self.pending.clear();
         self.diagnostics.clear();
         self.interaction_answer.clear();
@@ -219,6 +252,13 @@ impl ChatState {
     }
 
     fn hydrate_thread(&mut self, thread: &Thread) {
+        if thread.model.is_some() {
+            self.selected_model.clone_from(&thread.model);
+        }
+        if thread.reasoning_effort.is_some() {
+            self.selected_reasoning_effort
+                .clone_from(&thread.reasoning_effort);
+        }
         self.items.clear();
         self.item_height_estimates.clear();
         self.item_selection_runs.clear();
@@ -230,13 +270,43 @@ impl ChatState {
         self.conversation_scroll = 0.0;
         self.conversation_pinned = true;
         for turn in &thread.turns {
+            self.clear_exploration();
+            let mut turn_agent_index = None;
             for item in &turn.items {
-                self.push_item(ChatItem {
-                    id: item.id.clone(),
-                    kind: chat_item_kind(&item.item_type),
-                    text: item.text.clone(),
-                    complete: true,
-                });
+                let kind = chat_item_kind(&item.item_type);
+                if kind == ChatItemKind::Command
+                    && !item.command_actions.is_empty()
+                    && item
+                        .command_actions
+                        .iter()
+                        .all(|action| !matches!(action, CommandAction::Unknown))
+                {
+                    self.upsert_exploration(&item.id, &item.command_actions);
+                } else if kind == ChatItemKind::Agent && turn_agent_index.is_some() {
+                    let index = turn_agent_index.expect("checked above");
+                    if !item.text.is_empty() {
+                        if !self.items[index].text.is_empty() {
+                            self.items[index].text.push_str("\n\n");
+                        }
+                        self.items[index].text.push_str(&item.text);
+                    }
+                    self.item_indexes.insert(item.id.clone(), index);
+                    self.refresh_item_projection(index);
+                } else {
+                    self.push_item(ChatItem {
+                        id: item.id.clone(),
+                        kind: kind.clone(),
+                        text: item.text.clone(),
+                        complete: true,
+                    });
+                    if kind == ChatItemKind::Agent {
+                        turn_agent_index = Some(self.items.len() - 1);
+                    }
+                }
+            }
+            if let Some(index) = self.exploration_index {
+                self.items[index].complete = true;
+                self.refresh_exploration_text();
             }
             if turn.status == "inProgress" {
                 self.active_turn = Some(turn.id.clone());
@@ -252,27 +322,68 @@ impl ChatState {
                 self.interrupt_requested = false;
             }
             EventKind::TurnStarted { turn_id, .. } => {
+                self.clear_exploration();
+                self.turn_agent_index = None;
                 self.active_turn = Some(turn_id);
                 self.interrupt_requested = false;
             }
             EventKind::TurnCompleted { .. } => {
+                if let Some(index) = self.exploration_index {
+                    self.items[index].complete = true;
+                    self.refresh_exploration_text();
+                }
                 self.active_turn = None;
+                self.turn_agent_index = None;
                 self.interrupt_requested = false;
             }
             EventKind::ItemStarted {
-                item_id, item_type, ..
+                item_id,
+                item_type,
+                turn_id,
+                command_actions,
+                initial_text,
+                ..
             } => {
                 let kind = chat_item_kind(&item_type);
+                if kind == ChatItemKind::Command
+                    && !command_actions.is_empty()
+                    && command_actions
+                        .iter()
+                        .all(|action| !matches!(action, CommandAction::Unknown))
+                {
+                    self.upsert_exploration(&item_id, &command_actions);
+                    return;
+                }
                 if kind != ChatItemKind::User || !self.reconcile_optimistic_user(&item_id) {
-                    self.push_item(ChatItem {
-                        id: item_id,
-                        kind,
-                        text: String::new(),
-                        complete: false,
-                    });
+                    let merge_agent_update = kind == ChatItemKind::Agent
+                        && turn_id.is_some()
+                        && turn_id.as_ref() == self.active_turn.as_ref()
+                        && self
+                            .turn_agent_index
+                            .is_some_and(|index| self.items[index].complete);
+                    if merge_agent_update {
+                        let index = self.turn_agent_index.expect("checked above");
+                        self.items[index].text.push_str("\n\n");
+                        self.items[index].complete = false;
+                        self.item_indexes.insert(item_id, index);
+                        self.refresh_item_projection(index);
+                    } else {
+                        self.push_item(ChatItem {
+                            id: item_id,
+                            kind: kind.clone(),
+                            text: initial_text,
+                            complete: false,
+                        });
+                        if kind == ChatItemKind::Agent {
+                            self.turn_agent_index = Some(self.items.len() - 1);
+                        }
+                    }
                 }
             }
             EventKind::ItemCompleted { item_id } => {
+                if self.exploration_item_ids.contains(&item_id) {
+                    return;
+                }
                 if let Some(index) = self.item_indexes.get(&item_id).copied() {
                     if self.items[index].text.is_empty() {
                         self.reconcile_height_estimates();
@@ -290,7 +401,9 @@ impl ChatState {
                 self.append_delta(item_id, delta, ChatItemKind::Agent)
             }
             EventKind::CommandOutputDelta { item_id, delta } => {
-                self.append_delta(item_id, delta, ChatItemKind::Command)
+                if !self.exploration_item_ids.contains(&item_id) {
+                    self.append_delta(item_id, delta, ChatItemKind::Command)
+                }
             }
             EventKind::FileChangeDelta { item_id, delta } => {
                 self.append_delta(item_id, delta, ChatItemKind::FileChange)
@@ -329,6 +442,89 @@ impl ChatState {
         }
     }
 
+    fn clear_exploration(&mut self) {
+        self.exploration_index = None;
+        self.exploration_item_ids.clear();
+        self.exploration_reads.clear();
+        self.exploration_lists.clear();
+        self.exploration_searches.clear();
+    }
+
+    fn upsert_exploration(&mut self, item_id: &str, actions: &[CommandAction]) {
+        for action in actions {
+            match action {
+                CommandAction::Read { name, path } => {
+                    self.exploration_reads.insert(if path.is_empty() {
+                        name.clone()
+                    } else {
+                        path.clone()
+                    });
+                }
+                CommandAction::ListFiles { path } => {
+                    self.exploration_lists
+                        .insert(path.clone().unwrap_or_else(|| ".".into()));
+                }
+                CommandAction::Search { query, path } => {
+                    self.exploration_searches.insert(format!(
+                        "{}\u{0}{}",
+                        query.as_deref().unwrap_or_default(),
+                        path.as_deref().unwrap_or_default()
+                    ));
+                }
+                CommandAction::Unknown => {}
+            }
+        }
+        self.exploration_item_ids.insert(item_id.to_owned());
+        let index = if let Some(index) = self.exploration_index {
+            index
+        } else {
+            self.push_item(ChatItem {
+                id: item_id.to_owned(),
+                kind: ChatItemKind::Activity,
+                text: String::new(),
+                complete: false,
+            });
+            let index = self.items.len() - 1;
+            self.exploration_index = Some(index);
+            index
+        };
+        self.item_indexes.insert(item_id.to_owned(), index);
+        self.refresh_exploration_text();
+    }
+
+    fn refresh_exploration_text(&mut self) {
+        let Some(index) = self.exploration_index else {
+            return;
+        };
+        let mut lines = vec![if self.items[index].complete {
+            "Explored".to_owned()
+        } else {
+            "Exploring".to_owned()
+        }];
+        let count_line = |verb: &str, count: usize, noun: &str| {
+            format!("{verb} {count} {noun}{}", if count == 1 { "" } else { "s" })
+        };
+        if !self.exploration_reads.is_empty() {
+            lines.push(count_line("Read", self.exploration_reads.len(), "file"));
+        }
+        if !self.exploration_lists.is_empty() {
+            lines.push(count_line(
+                "Listed",
+                self.exploration_lists.len(),
+                "location",
+            ));
+        }
+        if !self.exploration_searches.is_empty() {
+            lines.push(count_line(
+                "Searched",
+                self.exploration_searches.len(),
+                "query",
+            ));
+        }
+        self.items[index].text = lines.join("\n");
+        self.refresh_item_projection(index);
+    }
+
     fn push_item(&mut self, item: ChatItem) {
         self.reconcile_height_estimates();
         if self.items.len() == MAX_ITEMS {
@@ -343,6 +539,12 @@ impl ChatState {
         self.selection_revision = self.selection_revision.wrapping_add(1);
         self.items.push_back(item);
         self.reindex();
+    }
+
+    fn refresh_item_projection(&mut self, index: usize) {
+        self.item_height_estimates[index] = estimate_item_height(&self.items[index]);
+        self.item_selection_runs[index] = selection_runs_for_item(&self.items[index]);
+        self.selection_revision = self.selection_revision.wrapping_add(1);
     }
 
     fn record_selected_thread(&mut self, thread: Thread) {
@@ -488,6 +690,7 @@ pub(crate) fn item_label(kind: &ChatItemKind) -> &'static str {
         ChatItemKind::Agent => "Codex",
         ChatItemKind::Reasoning => "Reasoning summary",
         ChatItemKind::Command => "Command",
+        ChatItemKind::Activity => "Codex",
         ChatItemKind::FileChange => "File change",
         ChatItemKind::Plan => "Plan",
         ChatItemKind::Error => "Error",

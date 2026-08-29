@@ -15,12 +15,20 @@ pub(super) struct SettingsApp {
     pub(super) status: String,
     pub(super) page: SettingsPage,
     pub(super) sidebar_query: String,
+    pub(super) pending_focus: Option<nickel_ui::UiId>,
+    pub(super) narrow_navigation: bool,
     pub(super) appearance_tab: AppearanceTab,
+    pub(super) appearance_notice: Option<AppearanceNotice>,
+    pub(super) persistence_enabled: bool,
     pub(super) wallpaper_position_select_expanded: bool,
     pub(super) animation_select_expanded: bool,
     pub(super) shell_settings: ShellSettings,
     pub(super) wallpaper_settings: WallpaperSettings,
     pub(super) wallpaper_preview: Option<Arc<image::RgbaImage>>,
+    pub(super) wallpaper_dimensions: Option<(u32, u32)>,
+    pub(super) wallpaper_status: Option<String>,
+    pub(super) wallpaper_dialog_rx:
+        Option<std::sync::mpsc::Receiver<nickel_platform::FileDialogOutcome>>,
     pub(super) appearance_save_deadline: Option<Instant>,
     pub(super) resize_deadline: Option<Instant>,
     pub(super) frame_interval: Duration,
@@ -47,7 +55,16 @@ impl Default for SettingsApp {
         let localizer = Localizer::system();
         let status = localizer.text("settings-status-changes-not-applied");
         let wallpaper_settings = load_wallpaper_settings();
-        let wallpaper_preview = load_wallpaper_preview(&wallpaper_settings);
+        let (wallpaper_preview, wallpaper_dimensions, wallpaper_status) =
+            match load_wallpaper_preview(&wallpaper_settings) {
+                Ok(Some(preview)) => (
+                    Some(preview.image),
+                    Some((preview.source_width, preview.source_height)),
+                    None,
+                ),
+                Ok(None) => (None, None, None),
+                Err(error) => (None, None, Some(error.to_string())),
+            };
         Self {
             localizer,
             redraw_requested: Cell::new(true),
@@ -91,12 +108,19 @@ impl Default for SettingsApp {
             status,
             page: SettingsPage::Display,
             sidebar_query: String::new(),
+            pending_focus: None,
+            narrow_navigation: false,
             appearance_tab: AppearanceTab::General,
+            appearance_notice: None,
+            persistence_enabled: !cfg!(test),
             wallpaper_position_select_expanded: false,
             animation_select_expanded: false,
             shell_settings: load_shell_settings(),
             wallpaper_settings,
             wallpaper_preview,
+            wallpaper_dimensions,
+            wallpaper_status,
+            wallpaper_dialog_rx: None,
             appearance_save_deadline: None,
             resize_deadline: None,
             frame_interval: Duration::from_millis(16),
@@ -128,6 +152,46 @@ impl SettingsApp {
             ..Self::default()
         }
     }
+
+    pub(super) fn poll_wallpaper_dialog(&mut self) {
+        let Some(receiver) = self.wallpaper_dialog_rx.as_ref() else {
+            return;
+        };
+        let outcome = match receiver.try_recv() {
+            Ok(outcome) => outcome,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                nickel_platform::FileDialogOutcome::Failed(
+                    self.localizer.text("settings-wallpaper-picker-failed"),
+                )
+            }
+        };
+        self.wallpaper_dialog_rx = None;
+        match outcome {
+            nickel_platform::FileDialogOutcome::Cancelled => {
+                self.wallpaper_status = None;
+            }
+            nickel_platform::FileDialogOutcome::Failed(error) => {
+                self.wallpaper_status = Some(error);
+            }
+            nickel_platform::FileDialogOutcome::Selected(path) => {
+                match nickel_platform::decode_image_preview(&path) {
+                    Ok(preview) => {
+                        self.wallpaper_settings.image = Some(path);
+                        self.wallpaper_dimensions =
+                            Some((preview.source_width, preview.source_height));
+                        self.wallpaper_preview = Some(preview.image);
+                        self.wallpaper_status = None;
+                        self.persist_wallpaper();
+                    }
+                    Err(error) => {
+                        self.wallpaper_status = Some(error.to_string());
+                    }
+                }
+            }
+        }
+        self.redraw_requested.set(true);
+    }
 }
 
 #[cfg(test)]
@@ -140,5 +204,92 @@ mod tests {
 
         assert_eq!(app.page, SettingsPage::Appearance);
         assert_eq!(app.controller_page, SettingsPage::Appearance);
+    }
+
+    #[test]
+    fn cancelled_and_invalid_wallpaper_choices_preserve_the_current_selection() {
+        let mut app = SettingsApp::default();
+        let original_settings = app.wallpaper_settings.clone();
+        let original_dimensions = app.wallpaper_dimensions;
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        app.wallpaper_dialog_rx = Some(receiver);
+        sender
+            .send(nickel_platform::FileDialogOutcome::Cancelled)
+            .unwrap();
+        app.poll_wallpaper_dialog();
+        assert_eq!(app.wallpaper_settings, original_settings);
+        assert_eq!(app.wallpaper_dimensions, original_dimensions);
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        app.wallpaper_dialog_rx = Some(receiver);
+        sender
+            .send(nickel_platform::FileDialogOutcome::Selected(
+                std::path::PathBuf::from("/definitely/missing/wallpaper.png"),
+            ))
+            .unwrap();
+        app.poll_wallpaper_dialog();
+        assert_eq!(app.wallpaper_settings, original_settings);
+        assert_eq!(app.wallpaper_dimensions, original_dimensions);
+        assert!(app.wallpaper_status.is_some());
+    }
+
+    #[test]
+    fn appearance_preview_updates_immediately_and_persistence_is_debounced() {
+        let mut app = SettingsApp::default();
+        app.set_appearance_hue(123);
+        assert_eq!(app.shell_settings.accent_hue, Some(123));
+        assert!(app.appearance_save_deadline.is_some());
+        app.set_appearance_intensity(77);
+        assert_eq!(app.shell_settings.accent_intensity, Some(77));
+        assert!(app.appearance_save_deadline.is_some());
+    }
+
+    #[test]
+    fn appearance_persistence_failure_is_visible_without_reverting_session_state() {
+        let mut app = SettingsApp::default();
+        app.shell_settings.accent_hue = Some(211);
+        app.record_appearance_persistence(Err("read-only filesystem".into()));
+        assert_eq!(app.shell_settings.accent_hue, Some(211));
+        assert!(matches!(
+            app.appearance_notice,
+            Some(AppearanceNotice::Error(ref message)) if message.contains("read-only filesystem")
+        ));
+    }
+
+    #[test]
+    fn appearance_reset_has_documented_scope_and_preserves_unrelated_shell_choices() {
+        let mut app = SettingsApp::default();
+        app.shell_settings.bar_on_all_displays = false;
+        app.shell_settings.desktop_count = 7;
+        app.shell_settings.theme = ThemePreference::Dark;
+        app.shell_settings.accent_hue = Some(300);
+        app.shell_settings.accent_intensity = Some(20);
+        app.shell_settings.reduce_transparency = true;
+        app.shell_settings.animations = AnimationLevel::Off;
+        app.wallpaper_settings.image = Some("wallpaper.png".into());
+        app.reset_appearance_values();
+        assert!(!app.shell_settings.bar_on_all_displays);
+        assert_eq!(app.shell_settings.desktop_count, 7);
+        assert_eq!(app.shell_settings.theme, ThemePreference::System);
+        assert_eq!(app.shell_settings.accent_hue, None);
+        assert_eq!(app.shell_settings.accent_intensity, None);
+        assert!(!app.shell_settings.reduce_transparency);
+        assert_eq!(app.shell_settings.animations, AnimationLevel::Normal);
+        assert_eq!(app.wallpaper_settings, WallpaperSettings::default());
+    }
+
+    #[test]
+    fn automatic_mode_tracks_platform_mode_while_retaining_system_accent_defaults() {
+        let settings = ShellSettings {
+            theme: ThemePreference::System,
+            ..ShellSettings::default()
+        };
+        let system = Appearance {
+            mode: ThemeMode::Dark,
+            accent: [12, 34, 56],
+            intensity: 63,
+        };
+        assert_eq!(settings.resolve_appearance(system), system);
     }
 }

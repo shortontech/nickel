@@ -68,10 +68,15 @@ impl CodexBackend for ReplayBackend {
     fn models(&self) -> Result<Vec<Model>, CodexError> {
         Ok(self.scenario.models.clone())
     }
-    fn list_projects(&self, _: ProjectPage) -> Result<ProjectPageResult, CodexError> {
+    fn list_projects(&self, page: ProjectPage) -> Result<ProjectPageResult, CodexError> {
+        let (start, end, next_cursor) = page_bounds(
+            self.scenario.projects.len(),
+            page.cursor.as_deref(),
+            page.limit,
+        )?;
         Ok(ProjectPageResult {
-            projects: self.scenario.projects.clone(),
-            next_cursor: None,
+            projects: self.scenario.projects[start..end].to_vec(),
+            next_cursor,
         })
     }
     fn import_project(&self, project: crate::ImportProject) -> Result<Project, CodexError> {
@@ -81,14 +86,30 @@ impl CodexBackend for ReplayBackend {
             roots: project.roots,
         })
     }
-    fn list_threads(&self, _: ThreadPage) -> Result<ThreadPageResult, CodexError> {
+    fn list_threads(&self, page: ThreadPage) -> Result<ThreadPageResult, CodexError> {
         if let Some(message) = &self.scenario.thread_error {
             return Err(CodexError::Protocol(message.clone()));
         }
+        let (start, end, next_cursor) = page_bounds(
+            self.scenario.threads.len(),
+            page.cursor.as_deref(),
+            page.limit,
+        )?;
+        let threads = self.scenario.threads[start..end].to_vec();
+        let runtime = threads
+            .iter()
+            .filter_map(|thread| {
+                self.scenario
+                    .thread_runtime
+                    .get(&thread.id)
+                    .cloned()
+                    .map(|runtime| (thread.id.clone(), runtime))
+            })
+            .collect();
         Ok(ThreadPageResult {
-            threads: self.scenario.threads.clone(),
-            next_cursor: None,
-            runtime: self.scenario.thread_runtime.clone(),
+            threads,
+            next_cursor,
+            runtime,
         })
     }
     fn start_thread(&self, request: StartThread) -> Result<Thread, CodexError> {
@@ -98,6 +119,8 @@ impl CodexBackend for ReplayBackend {
             cwd: Some(request.cwd),
             last_used_at: None,
             turns: Vec::new(),
+            model: request.model,
+            reasoning_effort: request.reasoning_effort,
         })
     }
     fn resume_thread(&self, id: ThreadId) -> Result<Thread, CodexError> {
@@ -114,6 +137,21 @@ impl CodexBackend for ReplayBackend {
             thread_id: request.thread_id,
             status: "inProgress".into(),
         })
+    }
+    fn shell_command(&self, thread: ThreadId, command: String) -> Result<(), CodexError> {
+        if command.trim().is_empty() {
+            return Err(CodexError::Protocol("shell command is blank".into()));
+        }
+        if self
+            .scenario
+            .threads
+            .iter()
+            .any(|candidate| candidate.id == thread)
+        {
+            Ok(())
+        } else {
+            Err(CodexError::Protocol("thread is unavailable".into()))
+        }
     }
     fn interrupt_turn(&self, _: ThreadId, _: TurnId) -> Result<(), CodexError> {
         Ok(())
@@ -135,19 +173,45 @@ impl CodexBackend for ReplayBackend {
     }
 }
 
+fn page_bounds(
+    len: usize,
+    cursor: Option<&str>,
+    limit: Option<u32>,
+) -> Result<(usize, usize, Option<String>), CodexError> {
+    let start = cursor
+        .unwrap_or("0")
+        .parse::<usize>()
+        .map_err(|_| CodexError::Protocol("fixture cursor is invalid".into()))?
+        .min(len);
+    let limit = usize::try_from(limit.unwrap_or(100).max(1)).unwrap_or(usize::MAX);
+    let end = start.saturating_add(limit).min(len);
+    let next_cursor = (end < len).then(|| end.to_string());
+    Ok((start, end, next_cursor))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn replay_is_deterministic_and_double_response_fails() {
-        let backend = ReplayBackend::from_json(r#"{"name":"approval","events":[{"sequence":1,"kind":{"type":"approval_requested","request_id":"r1","approval_type":"command","summary":null}}]}"#).unwrap();
+        let backend = ReplayBackend::from_json(
+            r#"{"name":"approval","events":[{"sequence":1,"kind":{"type":"approval_requested","request_id":"r1","approval_type":"command","summary":null}}]}"#,
+        )
+        .unwrap();
         let first: Vec<_> = backend.subscribe().into_iter().collect();
         let second: Vec<_> = backend.subscribe().into_iter().collect();
         assert_eq!(
             serde_json::to_string(&first).unwrap(),
             serde_json::to_string(&second).unwrap()
         );
+        assert!(matches!(
+            first.as_slice(),
+            [CodexEvent {
+                sequence: 1,
+                kind: EventKind::ApprovalRequested { request_id, .. },
+            }] if request_id.0 == "r1"
+        ));
         backend
             .respond(
                 ServerRequestId("r1".into()),
@@ -166,5 +230,56 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn replay_projects_and_threads_are_cursor_paginated() {
+        let backend = ReplayBackend::from_json(
+            r#"{
+                "name":"pagination",
+                "projects":[
+                    {"id":"one","name":"One","roots":["/one"]},
+                    {"id":"two","name":"Two","roots":["/two"]}
+                ],
+                "threads":[
+                    {"id":"one","title":null,"cwd":"/one"},
+                    {"id":"two","title":null,"cwd":"/two"}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let first_projects = backend
+            .list_projects(ProjectPage {
+                cursor: None,
+                limit: Some(1),
+            })
+            .unwrap();
+        assert_eq!(first_projects.projects[0].id, "one");
+        assert_eq!(first_projects.next_cursor.as_deref(), Some("1"));
+        let second_projects = backend
+            .list_projects(ProjectPage {
+                cursor: first_projects.next_cursor,
+                limit: Some(1),
+            })
+            .unwrap();
+        assert_eq!(second_projects.projects[0].id, "two");
+        assert!(second_projects.next_cursor.is_none());
+
+        let first_threads = backend
+            .list_threads(ThreadPage {
+                cursor: None,
+                limit: Some(1),
+            })
+            .unwrap();
+        assert_eq!(first_threads.threads[0].id, ThreadId("one".into()));
+        assert_eq!(first_threads.next_cursor.as_deref(), Some("1"));
+        let second_threads = backend
+            .list_threads(ThreadPage {
+                cursor: first_threads.next_cursor,
+                limit: Some(1),
+            })
+            .unwrap();
+        assert_eq!(second_threads.threads[0].id, ThreadId("two".into()));
+        assert!(second_threads.next_cursor.is_none());
     }
 }

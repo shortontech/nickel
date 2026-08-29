@@ -7,10 +7,11 @@ fn help_is_bounded_and_does_not_start_the_ui() {
         .output()
         .unwrap();
     assert!(output.status.success());
-    assert!(
-        String::from_utf8(output.stdout)
-            .unwrap()
-            .contains("--replay SCENARIO")
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "nickel-codex-ui [--backend auto|installed|bundled|ABSOLUTE_PATH] [--cwd PATH] [--thread THREAD_ID]\n\
+nickel-codex-ui --replay SCENARIO [--cwd PATH] [--thread THREAD_ID]\n"
     );
 }
 
@@ -21,9 +22,10 @@ fn invalid_replay_fails_before_sdl_startup() {
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
     assert!(
         String::from_utf8(output.stderr)
             .unwrap()
-            .contains("cannot read replay scenario")
+            .starts_with("cannot read replay scenario: ")
     );
 }

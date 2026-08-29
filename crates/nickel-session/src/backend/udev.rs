@@ -607,14 +607,16 @@ impl CalloopData {
         let is_primary = node == native.primary_gpu;
         let positions = native.layout.connect(
             name.clone(),
-            wl_mode.size.to_logical(1),
+            wl_mode.size.w,
+            wl_mode.size.h,
             u8::from(!device.is_evdi),
         );
         let location = positions
             .iter()
             .find(|position| position.name == name)
             .expect("connected output should be in layout")
-            .location;
+            .to_owned();
+        let location = (location.x, location.y).into();
         output.set_preferred(wl_mode);
         output.change_current_state(Some(wl_mode), Some(Transform::Normal), None, Some(location));
         let global = output.create_global::<NickelSession>(&self.display_handle);
@@ -628,8 +630,9 @@ impl CalloopData {
                     .cloned()
             };
             if let Some(mapped) = mapped {
-                mapped.change_current_state(None, None, None, Some(position.location));
-                self.state.space.map_output(&mapped, position.location);
+                let location = (position.x, position.y).into();
+                mapped.change_current_state(None, None, None, Some(location));
+                self.state.space.map_output(&mapped, location);
             }
         }
         if is_primary {
@@ -715,8 +718,9 @@ impl CalloopData {
                 .find(|output| output.name() == position.name)
                 .cloned();
             if let Some(output) = output {
-                output.change_current_state(None, None, None, Some(position.location));
-                self.state.space.map_output(&output, position.location);
+                let location = (position.x, position.y).into();
+                output.change_current_state(None, None, None, Some(location));
+                self.state.space.map_output(&output, location);
             }
         }
         self.reflow_windows_to_connected_outputs();
@@ -749,8 +753,9 @@ impl CalloopData {
                 .find(|output| output.name() == position.name)
                 .cloned();
             if let Some(output) = output {
-                output.change_current_state(None, None, None, Some(position.location));
-                self.state.space.map_output(&output, position.location);
+                let location = (position.x, position.y).into();
+                output.change_current_state(None, None, None, Some(location));
+                self.state.space.map_output(&output, location);
             }
         }
         self.reflow_windows_to_connected_outputs();
@@ -936,6 +941,7 @@ impl CalloopData {
             for (id, window) in preview_windows {
                 if let Some(frame) = capture_preview(&mut renderer, &window) {
                     self.state.preview_frames.insert(id, frame);
+                    self.state.notify_preview_frame(id);
                 }
             }
             let mut elements: Vec<
@@ -1076,6 +1082,29 @@ impl CalloopData {
                     }
                 }
             }
+            if self.state.shell_recovery_visible() {
+                let recovery_size = output
+                    .current_mode()
+                    .map(|mode| mode.size)
+                    .unwrap_or_else(|| (1, 1).into());
+                let banner_width = recovery_size.w.clamp(1, 560);
+                let banner_height = recovery_size.h.clamp(1, 112);
+                let banner =
+                    SolidColorBuffer::new((banner_width, banner_height), [0.45, 0.06, 0.08, 1.0]);
+                elements.push(
+                    NativeCustomElement::from(SolidColorRenderElement::from_buffer(
+                        &banner,
+                        (
+                            (recovery_size.w - banner_width) / 2,
+                            (recovery_size.h - banner_height) / 2,
+                        ),
+                        1.0,
+                        1.0,
+                        Kind::Unspecified,
+                    ))
+                    .into(),
+                );
+            }
             elements.push(
                 NativeCustomElement::from(SolidColorRenderElement::from_buffer(
                     &background,
@@ -1162,17 +1191,15 @@ impl CalloopData {
                         capture_composited_output(&mut renderer, &elements, mode.size, &path)
                     });
                 let response = match result {
-                    Ok(()) => "ok\tnative".to_owned(),
+                    Ok(()) => nickel_session_protocol::CaptureResult::Saved {
+                        backend: nickel_session_protocol::CaptureBackend::Native,
+                    },
                     Err(error) => {
                         tracing::warn!(%error, path = %path.display(), "failed to capture output");
-                        format!("error\t{error}")
+                        nickel_session_protocol::CaptureResult::Failed { message: error }
                     }
                 };
-                if let Some(reply_path) = self.state.output_capture_reply_path.take()
-                    && let Ok(socket) = std::os::unix::net::UnixDatagram::unbound()
-                {
-                    let _ = socket.send_to(response.as_bytes(), reply_path);
-                }
+                self.state.complete_output_capture(&path, response);
             }
             let retry = match surface.drm.render_frame(
                 &mut renderer,
@@ -1541,10 +1568,12 @@ fn task_switcher_buffer(
     state: &NickelSession,
     output_size: smithay::utils::Size<i32, Physical>,
 ) -> Option<(MemoryRenderBuffer, smithay::utils::Size<i32, Physical>)> {
-    if state.alt_tab_order.len() < 2 {
+    let candidates = state.task_switcher.candidates();
+    let selected_index = state.task_switcher.selected_index();
+    if candidates.len() < 2 {
         return None;
     }
-    let range = switcher_visible_range(state.alt_tab_order.len(), state.alt_tab_index);
+    let range = switcher_visible_range(candidates.len(), selected_index);
     let count = range.len();
     let gap = 14_u32;
     let padding = 20_u32;
@@ -1562,7 +1591,7 @@ fn task_switcher_buffer(
 
     for (slot, index) in range.enumerate() {
         let x = padding + slot as u32 * (card_width + gap);
-        let selected = index == state.alt_tab_index;
+        let selected = index == selected_index;
         let border = if selected {
             image::Rgba([101, 184, 255, 255])
         } else {
@@ -1577,7 +1606,7 @@ fn task_switcher_buffer(
             card_height - 8,
             image::Rgba([43, 56, 82, 255]),
         );
-        let id = state.alt_tab_order[index];
+        let id = candidates[index];
         let Some(frame) = state.preview_frames.get(&id) else {
             continue;
         };

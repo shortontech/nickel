@@ -18,7 +18,7 @@ use std::{
     process::{Command, ExitStatus},
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU8, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering},
     },
     thread,
     time::{Duration, Instant},
@@ -62,6 +62,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         native: None,
     };
 
+    let (shell_health_tx, shell_health_rx) = smithay::reexports::calloop::channel::channel();
+    event_loop
+        .handle()
+        .insert_source(shell_health_rx, |event, _, data| {
+            let smithay::reexports::calloop::channel::Event::Msg(failures) = event else {
+                return;
+            };
+            data.state.shell_failure_count = failures;
+            data.state.request_output_redraw();
+            #[cfg(feature = "backend-udev")]
+            if data.native.is_some() {
+                data.render_all_outputs();
+            }
+        })?;
+
     match arguments.backend {
         backend::BackendKind::Winit => {
             #[cfg(feature = "backend-winit")]
@@ -93,6 +108,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             command_arguments,
             data.state.secure_storage_state_handle(),
             data.state.secure_storage_retry_handle(),
+            data.state.expected_shell_pid_handle(),
+            shell_health_tx,
         )?;
     }
 
@@ -132,6 +149,10 @@ fn import_runtime_environment() {
 const MAX_SHELL_RESTART_DELAY: Duration = Duration::from_secs(4);
 const STABLE_SHELL_RUNTIME: Duration = Duration::from_secs(30);
 
+pub(crate) fn shell_recovery_visible_for(failures: u8) -> bool {
+    failures >= 3
+}
+
 fn shell_restart_delay(consecutive_failures: usize) -> Duration {
     Duration::from_secs(
         consecutive_failures
@@ -145,6 +166,8 @@ fn spawn_supervised(
     arguments: Vec<OsString>,
     secure_storage_state: Arc<AtomicU8>,
     secure_storage_retry: Arc<AtomicBool>,
+    expected_shell_pid: Arc<AtomicU32>,
+    shell_health: smithay::reexports::calloop::channel::Sender<u8>,
 ) -> std::io::Result<()> {
     thread::Builder::new()
         .name("nickel-shell-supervisor".into())
@@ -154,6 +177,8 @@ fn spawn_supervised(
                 arguments,
                 secure_storage_state,
                 secure_storage_retry,
+                expected_shell_pid,
+                shell_health,
             )
         })
         .map(|_| ())
@@ -164,6 +189,8 @@ fn supervise_shell(
     arguments: Vec<OsString>,
     secure_storage_state: Arc<AtomicU8>,
     secure_storage_retry: Arc<AtomicBool>,
+    expected_shell_pid: Arc<AtomicU32>,
+    shell_health: smithay::reexports::calloop::channel::Sender<u8>,
 ) {
     if let Err(error) = thread::Builder::new()
         .name("nickel-login-services".into())
@@ -184,7 +211,15 @@ fn supervise_shell(
     let mut consecutive_failures = 0_usize;
     loop {
         let started = Instant::now();
-        let status = Command::new(&program).args(&arguments).status();
+        let status = match Command::new(&program).args(&arguments).spawn() {
+            Ok(mut child) => {
+                expected_shell_pid.store(child.id(), Ordering::Release);
+                let result = child.wait();
+                expected_shell_pid.store(0, Ordering::Release);
+                result
+            }
+            Err(error) => Err(error),
+        };
         let runtime = started.elapsed();
         if runtime >= STABLE_SHELL_RUNTIME || status.as_ref().is_ok_and(ExitStatus::success) {
             consecutive_failures = 0;
@@ -206,6 +241,7 @@ fn supervise_shell(
                 tracing::error!(%error, consecutive_failures, "failed to start Nickel shell");
             }
         }
+        let _ = shell_health.send(u8::try_from(consecutive_failures).unwrap_or(u8::MAX));
         thread::sleep(shell_restart_delay(consecutive_failures));
     }
 }
@@ -221,5 +257,11 @@ mod tests {
         assert_eq!(shell_restart_delay(1), Duration::from_secs(1));
         assert_eq!(shell_restart_delay(3), Duration::from_secs(3));
         assert_eq!(shell_restart_delay(99), Duration::from_secs(4));
+    }
+
+    #[test]
+    fn recovery_threshold_requires_repeated_failures() {
+        assert!(!super::shell_recovery_visible_for(2));
+        assert!(super::shell_recovery_visible_for(3));
     }
 }

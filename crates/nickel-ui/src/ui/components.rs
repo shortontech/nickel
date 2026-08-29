@@ -300,8 +300,20 @@ impl<Message> Grid<Message> {
         self
     }
 
+    pub fn direction(mut self, direction: ReadingDirection) -> Self {
+        if direction == ReadingDirection::RightToLeft {
+            self.0.children.reverse();
+        }
+        self
+    }
+
     pub fn id(mut self, id: impl Into<UiId>) -> Self {
         self.0 = self.0.id(id);
+        self
+    }
+
+    pub fn semantic_role(mut self, role: impl Into<String>) -> Self {
+        self.0 = self.0.accessibility_role(role);
         self
     }
 
@@ -762,6 +774,7 @@ impl<Message> Image<Message> {
             kind: Kind::Image {
                 id,
                 image,
+                high_density: None,
                 presentation: ImagePresentation::default(),
             },
             style: Style {
@@ -795,6 +808,14 @@ impl<Message> Image<Message> {
         self
     }
 
+    /// Supplies a 2x raster selected by the renderer on high-density outputs.
+    pub fn high_density(mut self, image: Arc<RgbaImage>) -> Self {
+        if let Kind::Image { high_density, .. } = &mut self.0.kind {
+            *high_density = Some(image);
+        }
+        self
+    }
+
     pub fn alignment(mut self, horizontal: ImageAlignment, vertical: ImageAlignment) -> Self {
         if let Kind::Image { presentation, .. } = &mut self.0.kind {
             presentation.horizontal = horizontal;
@@ -814,6 +835,57 @@ impl<Message> Image<Message> {
 impl<Message> Component<Message> for Image<Message> {
     fn into_element(self) -> Element<Message> {
         self.0
+    }
+}
+
+/// A semantic-tint icon with explicit accessible or decorative semantics.
+pub struct Icon<Message = String>(Image<Message>);
+
+impl<Message> Icon<Message> {
+    pub fn new(id: u16, source: Arc<RgbaImage>, tint: Color, size: f32) -> Self {
+        let red = ((tint >> 16) & 0xff) as u8;
+        let green = ((tint >> 8) & 0xff) as u8;
+        let blue = (tint & 0xff) as u8;
+        let encoded_alpha = ((tint >> 24) & 0xff) as u8;
+        let tint_alpha = if tint <= 0x00ff_ffff {
+            255
+        } else {
+            encoded_alpha
+        };
+        let mut image = (*source).clone();
+        for pixel in image.pixels_mut() {
+            pixel.0 = [
+                red,
+                green,
+                blue,
+                ((u16::from(pixel[3]) * u16::from(tint_alpha)) / 255) as u8,
+            ];
+        }
+        Self(
+            Image::new(id, Arc::new(image))
+                .width(size.max(1.0))
+                .height(size.max(1.0)),
+        )
+    }
+
+    pub fn label(mut self, label: impl Into<String>) -> Self {
+        self.0.0 = self
+            .0
+            .0
+            .accessibility_hidden(false)
+            .accessibility_label(label);
+        self
+    }
+
+    pub fn decorative(mut self) -> Self {
+        self.0.0 = self.0.0.accessibility_hidden(true);
+        self
+    }
+}
+
+impl<Message> Component<Message> for Icon<Message> {
+    fn into_element(self) -> Element<Message> {
+        self.0.into_element()
     }
 }
 
@@ -955,6 +1027,20 @@ impl<Message> Container<Message> {
         self
     }
 
+    pub fn interaction_backgrounds(
+        mut self,
+        hover: impl Into<Background>,
+        pressed: impl Into<Background>,
+    ) -> Self {
+        self.0 = self.0.interaction_backgrounds(hover, pressed);
+        self
+    }
+
+    pub fn focus_border(mut self, color: Color) -> Self {
+        self.0 = self.0.focus_border(color);
+        self
+    }
+
     pub fn border(mut self, color: Color, width: f32) -> Self {
         self.0 = self.0.border(color, width);
         self
@@ -1082,6 +1168,33 @@ impl<Message> Container<Message> {
 
     pub fn message(mut self, message: Message) -> Self {
         self.0 = self.0.message(message);
+        self
+    }
+
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        if !enabled {
+            self.0.message = None;
+        }
+        self
+    }
+
+    pub fn accessibility_label(mut self, label: impl Into<String>) -> Self {
+        self.0 = self.0.accessibility_label(label);
+        self
+    }
+
+    pub fn semantic_role(mut self, role: impl Into<String>) -> Self {
+        self.0 = self.0.accessibility_role(role);
+        self
+    }
+
+    pub fn accessibility_description(mut self, description: impl Into<String>) -> Self {
+        self.0 = self.0.accessibility_description(description);
+        self
+    }
+
+    pub fn accessibility_state(mut self, state: impl Into<String>) -> Self {
+        self.0 = self.0.accessibility_state(state);
         self
     }
 }
@@ -1393,7 +1506,10 @@ pub enum ButtonPresentation {
 
 impl<Message> Button<Message> {
     pub fn new(message: Message, label: impl Into<String>) -> Self {
-        Self::with_label(message, ButtonLabel::new(label))
+        let label = label.into();
+        let mut button = Self::with_label(message, ButtonLabel::new(&label));
+        button.0 = button.0.accessibility_label(label);
+        button
     }
 
     /// Creates a button whose appearance is resolved entirely from semantic
@@ -1439,6 +1555,15 @@ impl<Message> Button<Message> {
         self.0.0.style.border_width = theme.sizing.border;
         self.0.0.style.corner_radius = theme.radii.control;
         self.0.0.style.height = Length::Px(theme.sizing.control_height);
+        self.0.0.style.padding = Insets {
+            top: 8.0,
+            right: 12.0,
+            bottom: 7.0,
+            left: 12.0,
+        };
+        self.0.0.style.hover_background = Some(Background::Solid(theme.surfaces.hover));
+        self.0.0.style.pressed_background = Some(Background::Solid(theme.surfaces.pressed));
+        self.0.0.style.focus_border = Some(theme.borders.focus);
         if presentation == ButtonPresentation::Disabled {
             self.0.0.message = None;
         }
@@ -1581,7 +1706,7 @@ pub struct ButtonLabel<Message = String>(Text<Message>);
 
 impl<Message> ButtonLabel<Message> {
     pub fn new(value: impl Into<String>) -> Self {
-        Self(Text::new(value).align(TextAlign::Center))
+        Self(Text::new(value).wrap(false).align(TextAlign::Center))
     }
 
     pub fn scale(mut self, scale: f32) -> Self {
@@ -1671,6 +1796,9 @@ impl<Message> RadioButton<Message> {
             if selected { 0x68b8ff } else { 0x8792a8 },
             0xf4f7ff,
             0x10151e,
+            0x202936,
+            0x293545,
+            0x68b8ff,
         )
     }
 
@@ -1691,9 +1819,13 @@ impl<Message> RadioButton<Message> {
             },
             theme.text.primary,
             theme.surfaces.card,
+            theme.surfaces.hover,
+            theme.surfaces.pressed,
+            theme.borders.focus,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn with_colors(
         message: Message,
         label: impl Into<String>,
@@ -1701,15 +1833,23 @@ impl<Message> RadioButton<Message> {
         indicator: Color,
         label_color: Color,
         background: Color,
+        hover: Color,
+        pressed: Color,
+        focus: Color,
     ) -> Self {
         Self(
-            Container::new().height(34.0).message(message).child(
-                Row::new()
-                    .gap(10.0)
-                    .align_items(Align::Center)
-                    .child(SelectionIndicator::new(selected, indicator, background))
-                    .child(Text::new(label).scale(1.15).color(label_color)),
-            ),
+            Container::new()
+                .height(34.0)
+                .message(message)
+                .interaction_backgrounds(hover, pressed)
+                .focus_border(focus)
+                .child(
+                    Row::new()
+                        .gap(10.0)
+                        .align_items(Align::Center)
+                        .child(SelectionIndicator::new(selected, indicator, background))
+                        .child(Text::new(label).scale(1.15).color(label_color)),
+                ),
         )
     }
 
@@ -2034,7 +2174,7 @@ impl<Message> Component<Message> for MenuBar<Message> {
 #[cfg(test)]
 mod semantic_control_tests {
     use super::*;
-    use crate::{SemanticColors, UiTree};
+    use crate::{SemanticColors, UiStateStore, UiTree};
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     enum Message {
@@ -2055,6 +2195,208 @@ mod semantic_control_tests {
             accent_soft: 0x402060,
             positive: 0x50c080,
         })
+    }
+
+    fn light_theme() -> SemanticTheme {
+        SemanticTheme::new(SemanticColors {
+            window: 0xf4f5f7,
+            sidebar: 0xe7e9ed,
+            card: 0xffffff,
+            raised: 0xdfe3e8,
+            hover: 0xd4d9e0,
+            primary_text: 0x17191d,
+            secondary_text: 0x555b66,
+            accent: 0x7440bd,
+            accent_soft: 0xe5d8f7,
+            positive: 0x207a4b,
+        })
+    }
+
+    fn high_contrast_theme() -> SemanticTheme {
+        SemanticTheme::resolve(
+            light_theme().colors,
+            theme().colors,
+            crate::ResolvedThemePreferences {
+                appearance: crate::ResolvedAppearance::Dark,
+                high_contrast: true,
+                reduced_transparency: false,
+                reduced_motion: false,
+            },
+        )
+    }
+
+    fn state_sheet(theme: SemanticTheme) -> impl Component<Message> {
+        Column::new()
+            .id("semantic-state-sheet")
+            .gap(theme.spacing.content)
+            .padding(Insets::all(theme.spacing.section))
+            .background(theme.surfaces.window)
+            .child(
+                Text::new("Semantic controls")
+                    .scale(1.7)
+                    .color(theme.text.primary),
+            )
+            .child(
+                Row::new().gap(theme.spacing.control).children([
+                    Button::semantic(
+                        theme,
+                        Message::Activate,
+                        "Default",
+                        ButtonPresentation::Primary,
+                    )
+                    .id("button-default"),
+                    Button::semantic(
+                        theme,
+                        Message::Activate,
+                        "Hovered",
+                        ButtonPresentation::Secondary,
+                    )
+                    .id("button-hovered"),
+                    Button::semantic(
+                        theme,
+                        Message::Activate,
+                        "Pressed",
+                        ButtonPresentation::Secondary,
+                    )
+                    .id("button-pressed"),
+                    Button::semantic(
+                        theme,
+                        Message::Activate,
+                        "Focused",
+                        ButtonPresentation::Quiet,
+                    )
+                    .id("button-focused"),
+                    Button::semantic(
+                        theme,
+                        Message::Activate,
+                        "Disabled",
+                        ButtonPresentation::Disabled,
+                    )
+                    .id("button-disabled"),
+                ]),
+            )
+            .child(
+                Row::new().gap(theme.spacing.control).children([
+                    Button::semantic(
+                        theme,
+                        Message::Activate,
+                        "Destructive",
+                        ButtonPresentation::Destructive,
+                    )
+                    .id("button-destructive"),
+                    Button::semantic(
+                        theme,
+                        Message::Activate,
+                        "Controller focus",
+                        ButtonPresentation::Secondary,
+                    )
+                    .id("button-controller"),
+                ]),
+            )
+            .child(Row::new().gap(theme.spacing.section).children([
+                RadioButton::semantic(theme, Message::Select, "Selected", true),
+                RadioButton::semantic(theme, Message::Select, "Unselected", false),
+            ]))
+            .child(Row::new().gap(theme.spacing.section).children([
+                crate::Switch::with_state(
+                    crate::SwitchState::Off,
+                    Some(|_| Message::Activate),
+                    theme,
+                ),
+                crate::Switch::with_state(
+                    crate::SwitchState::On,
+                    Some(|_| Message::Activate),
+                    theme,
+                ),
+                crate::Switch::with_state(crate::SwitchState::MixedUnavailable, None, theme),
+                crate::Switch::with_state(crate::SwitchState::DisabledOn, None, theme),
+            ]))
+    }
+
+    #[test]
+    fn semantic_component_state_sheets_render_every_theme_and_scale() {
+        for (theme_name, theme) in [
+            ("dark", theme()),
+            ("light", light_theme()),
+            (
+                "automatic-dark",
+                SemanticTheme::resolve(
+                    light_theme().colors,
+                    theme().colors,
+                    crate::ResolvedThemePreferences {
+                        appearance: crate::ResolvedAppearance::Dark,
+                        high_contrast: false,
+                        reduced_transparency: false,
+                        reduced_motion: false,
+                    },
+                ),
+            ),
+            ("high-contrast", high_contrast_theme()),
+            (
+                "reduced-transparency",
+                SemanticTheme::resolve(
+                    light_theme().colors,
+                    theme().colors,
+                    crate::ResolvedThemePreferences {
+                        appearance: crate::ResolvedAppearance::Dark,
+                        high_contrast: false,
+                        reduced_transparency: true,
+                        reduced_motion: false,
+                    },
+                ),
+            ),
+            ("reduced-motion", theme().with_reduced_motion()),
+        ] {
+            let bounds = Rect::new(0.0, 0.0, 720.0, 360.0);
+            let mut state = UiStateStore::default();
+            let initial = UiTree::layout_with_state(state_sheet(theme), bounds, &mut state);
+            let id = |suffix: &str| {
+                initial
+                    .resolved_layout()
+                    .nodes()
+                    .iter()
+                    .find(|node| node.id.as_str().ends_with(suffix))
+                    .map(|node| node.id.clone())
+                    .expect("state-sheet control identity")
+            };
+            let _ = state.set_hovered(Some(id("button-hovered")));
+            let _ = state.set_pressed(Some(id("button-pressed")));
+            let _ = state.set_focus(Some(id("button-focused")));
+            let _ = state.set_controller_selected(Some(id("button-controller")));
+            let tree = UiTree::layout_with_state_and_diagnostics(
+                state_sheet(theme),
+                bounds,
+                &mut state,
+                true,
+            );
+            assert!(
+                tree.diagnostics().is_empty(),
+                "{theme_name} state sheet: {:#?}",
+                tree.diagnostics()
+            );
+
+            for scale in [1.0_f32, 1.25, 2.0] {
+                let width = (bounds.size.width * scale) as u32;
+                let height = (bounds.size.height * scale) as u32;
+                let mut renderer =
+                    crate::SdlComponentRenderer::new_pixel_buffer(width, height, scale);
+                assert!(!renderer.render(tree.commands()).is_empty());
+                assert!(renderer.pixels().iter().any(|pixel| pixel.a > 0));
+                let image = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_fn(
+                    width,
+                    height,
+                    |x, y| {
+                        let pixel = renderer.pixels()[(y * width + x) as usize];
+                        image::Rgba([pixel.r, pixel.g, pixel.b, pixel.a])
+                    },
+                );
+                let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../target/nickel-ui-snapshots")
+                    .join(format!("semantic-{theme_name}-{scale:.2}x.png"));
+                std::fs::create_dir_all(output.parent().expect("snapshot parent")).unwrap();
+                image.save(output).unwrap();
+            }
+        }
     }
 
     #[test]
@@ -2096,6 +2438,53 @@ mod semantic_control_tests {
     }
 
     #[test]
+    fn semantic_button_paints_hover_pressed_and_focus_from_transient_state() {
+        let theme = theme();
+        let view = || {
+            Button::semantic(
+                theme,
+                Message::Activate,
+                "Apply",
+                ButtonPresentation::Primary,
+            )
+            .id("apply")
+        };
+        let bounds = Rect::new(0.0, 0.0, 180.0, 60.0);
+        let mut state = UiStateStore::default();
+        let mut tree = UiTree::layout_with_state(view(), bounds, &mut state);
+        let target = tree
+            .message_rect(&Message::Activate)
+            .expect("semantic button has a hit region");
+        let point = Point {
+            x: target.origin.x + target.size.width / 2.0,
+            y: target.origin.y + target.size.height / 2.0,
+        };
+
+        let _ = tree.handle_event(&mut state, UiEvent::PointerMoved(point));
+        tree = UiTree::layout_with_state(view(), bounds, &mut state);
+        assert!(tree.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::RoundedFill { color, .. } if *color == theme.surfaces.hover
+        )));
+
+        let _ = tree.handle_event(&mut state, UiEvent::PointerPressed(point));
+        tree = UiTree::layout_with_state(view(), bounds, &mut state);
+        assert!(tree.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::RoundedFill { color, .. } if *color == theme.surfaces.pressed
+        )));
+
+        let _ = tree.handle_event(&mut state, UiEvent::PointerReleased(point));
+        let _ = tree.handle_event(&mut state, UiEvent::FocusNext);
+        tree = UiTree::layout_with_state(view(), bounds, &mut state);
+        assert!(tree.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::Stroke { color, width, .. }
+                if *color == theme.borders.focus && *width >= 2.0
+        )));
+    }
+
+    #[test]
     fn disabled_button_has_no_hit_region_or_message() {
         let theme = theme();
         let tree = UiTree::layout(
@@ -2116,6 +2505,32 @@ mod semantic_control_tests {
             .first()
             .expect("disabled button remains in layout");
         assert!(!node.interaction.interactive);
+    }
+
+    #[test]
+    fn semantic_icon_tints_alpha_and_excludes_decorative_nodes() {
+        let source = Arc::new(RgbaImage::from_pixel(2, 2, image::Rgba([10, 20, 30, 128])));
+        let labeled = UiTree::layout(
+            Icon::<Message>::new(7, Arc::clone(&source), 0x804020, 18.0).label("Settings"),
+            Rect::new(0.0, 0.0, 24.0, 24.0),
+        );
+        assert!(
+            labeled
+                .accessibility_nodes()
+                .iter()
+                .any(|node| { node.label.as_deref() == Some("Settings") })
+        );
+        assert!(labeled.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::Image { image, .. }
+                if image.get_pixel(0, 0).0 == [0x80, 0x40, 0x20, 128]
+        )));
+
+        let decorative = UiTree::layout(
+            Icon::<Message>::new(8, source, 0xffffff, 18.0).decorative(),
+            Rect::new(0.0, 0.0, 24.0, 24.0),
+        );
+        assert!(decorative.accessibility_nodes().is_empty());
     }
 
     #[test]

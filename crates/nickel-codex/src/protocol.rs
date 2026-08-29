@@ -44,6 +44,16 @@ pub struct AccountState {
 pub struct Model {
     pub id: String,
     pub display_name: String,
+    #[serde(default)]
+    pub default_reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub supported_reasoning_efforts: Vec<ReasoningEffortOption>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReasoningEffortOption {
+    pub reasoning_effort: String,
+    pub description: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,6 +90,10 @@ pub struct Thread {
     pub last_used_at: Option<i64>,
     #[serde(default)]
     pub turns: Vec<ThreadHistoryTurn>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -94,6 +108,24 @@ pub struct ThreadHistoryItem {
     pub id: String,
     pub item_type: String,
     pub text: String,
+    pub command_actions: Vec<CommandAction>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum CommandAction {
+    Read {
+        name: String,
+        path: String,
+    },
+    ListFiles {
+        path: Option<String>,
+    },
+    Search {
+        query: Option<String>,
+        path: Option<String>,
+    },
+    Unknown,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -164,12 +196,15 @@ pub struct StartThread {
     pub cwd: PathBuf,
     pub model: Option<String>,
     pub project_id: Option<String>,
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Clone, Debug)]
 pub struct StartTurn {
     pub thread_id: ThreadId,
     pub text: String,
+    pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -252,6 +287,8 @@ pub enum EventKind {
         turn_id: Option<TurnId>,
         item_id: String,
         item_type: String,
+        command_actions: Vec<CommandAction>,
+        initial_text: String,
     },
     ItemCompleted {
         item_id: String,
@@ -306,6 +343,7 @@ pub trait CodexBackend {
     fn start_thread(&self, request: StartThread) -> Result<Thread, CodexError>;
     fn resume_thread(&self, id: ThreadId) -> Result<Thread, CodexError>;
     fn start_turn(&self, request: StartTurn) -> Result<Turn, CodexError>;
+    fn shell_command(&self, thread: ThreadId, command: String) -> Result<(), CodexError>;
     fn interrupt_turn(&self, thread: ThreadId, turn: TurnId) -> Result<(), CodexError>;
     fn respond(
         &self,
