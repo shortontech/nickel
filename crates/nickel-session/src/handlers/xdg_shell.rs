@@ -107,6 +107,7 @@ impl XdgShellHandler for NickelSession {
         }
         if let Some(id) = self.surface_windows.remove(&surface.wl_surface().id()) {
             self.minimized_windows.remove(&id);
+            self.remove_window_from_switcher(id);
             self.windows.remove(id);
         }
         self.notify_protocol_snapshot();

@@ -220,7 +220,6 @@ fn stale_focus_loss_cannot_dismiss_a_reopened_launcher() {
 }
 
 #[test]
-#[ignore = "Spec 0093: lifecycle removal does not reconcile the selected candidate"]
 fn removing_selected_window_during_flip_does_not_activate_it() {
     scenario("removed selected window during flip")
         .window("current")
@@ -237,6 +236,8 @@ fn removing_selected_window_during_flip_does_not_activate_it() {
             TaskSwitchEffect::ShowFlip { session: 1 },
             TaskSwitchEffect::RequestPreviews(vec!["current".into(), "closing".into()]),
             TaskSwitchEffect::SelectPreview("closing".into()),
+            TaskSwitchEffect::RequestPreviews(vec!["current".into()]),
+            TaskSwitchEffect::SelectPreview("current".into()),
             TaskSwitchEffect::HideFlip { session: 1 },
             TaskSwitchEffect::ActivateWindow("current".into()),
         ])
@@ -245,7 +246,6 @@ fn removing_selected_window_during_flip_does_not_activate_it() {
 }
 
 #[test]
-#[ignore = "Spec 0093: lifecycle removal does not reconcile unselected candidates"]
 fn removing_unselected_window_during_flip_updates_preview_candidates() {
     scenario("removed unselected window leaves only live previews")
         .window("current")
@@ -263,8 +263,13 @@ fn removing_unselected_window_during_flip_updates_preview_candidates() {
         .expect_active("selected")
         .expect_effects(&[
             TaskSwitchEffect::ShowFlip { session: 1 },
-            TaskSwitchEffect::RequestPreviews(vec!["current".into(), "selected".into()]),
+            TaskSwitchEffect::RequestPreviews(vec![
+                "current".into(),
+                "selected".into(),
+                "closing".into(),
+            ]),
             TaskSwitchEffect::SelectPreview("selected".into()),
+            TaskSwitchEffect::RequestPreviews(vec!["current".into(), "selected".into()]),
             TaskSwitchEffect::HideFlip { session: 1 },
             TaskSwitchEffect::ActivateWindow("selected".into()),
         ])
@@ -272,7 +277,6 @@ fn removing_unselected_window_during_flip_updates_preview_candidates() {
 }
 
 #[test]
-#[ignore = "Spec 0093: lifecycle removal does not reconcile the active candidate list"]
 fn removing_current_window_during_flip_never_reactivates_it() {
     scenario("removed current window cannot remain a flip candidate")
         .window("current")
@@ -290,8 +294,13 @@ fn removing_current_window_during_flip_never_reactivates_it() {
         .expect_active("selected")
         .expect_effects(&[
             TaskSwitchEffect::ShowFlip { session: 1 },
-            TaskSwitchEffect::RequestPreviews(vec!["selected".into(), "other".into()]),
+            TaskSwitchEffect::RequestPreviews(vec![
+                "current".into(),
+                "selected".into(),
+                "other".into(),
+            ]),
             TaskSwitchEffect::SelectPreview("selected".into()),
+            TaskSwitchEffect::RequestPreviews(vec!["selected".into(), "other".into()]),
             TaskSwitchEffect::HideFlip { session: 1 },
             TaskSwitchEffect::ActivateWindow("selected".into()),
         ])
@@ -299,7 +308,6 @@ fn removing_current_window_during_flip_never_reactivates_it() {
 }
 
 #[test]
-#[ignore = "Spec 0093: removing every candidate still emits activation"]
 fn removing_all_flip_candidates_closes_without_activation() {
     scenario("empty flip after final window removal")
         .window("current")
@@ -317,6 +325,8 @@ fn removing_all_flip_candidates_closes_without_activation() {
             TaskSwitchEffect::ShowFlip { session: 1 },
             TaskSwitchEffect::RequestPreviews(vec!["current".into(), "closing".into()]),
             TaskSwitchEffect::SelectPreview("closing".into()),
+            TaskSwitchEffect::RequestPreviews(vec!["current".into()]),
+            TaskSwitchEffect::SelectPreview("current".into()),
             TaskSwitchEffect::HideFlip { session: 1 },
         ])
         .expect_flip_hidden();

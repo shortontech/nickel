@@ -1110,6 +1110,17 @@ impl NickelSession {
             })
             .collect::<Vec<_>>();
         let effects = self.task_switcher.apply(action, &windows);
+        self.apply_task_switch_effects(effects);
+    }
+
+    pub(crate) fn remove_window_from_switcher(&mut self, id: WindowId) {
+        self.preview_requests.remove(&id);
+        self.preview_frames.remove(&id);
+        let effects = self.task_switcher.remove_candidate(&id);
+        self.apply_task_switch_effects(effects);
+    }
+
+    fn apply_task_switch_effects(&mut self, effects: Vec<TaskSwitchEffect<WindowId>>) {
         for effect in effects {
             match effect {
                 TaskSwitchEffect::RequestPreviews(ids) => self.preview_requests.extend(ids),

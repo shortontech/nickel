@@ -359,6 +359,11 @@ impl Scenario {
             "scenario {:?} has no window {window:?}",
             self.name
         );
+        let effects = self.switcher.remove_candidate(&window.to_owned());
+        self.apply_task_effects(
+            effects,
+            format!("production window lifecycle removal {window:?} -> TaskSwitcher"),
+        );
         self
     }
 
@@ -605,6 +610,17 @@ impl Scenario {
         self.actions.push(action);
         let windows = self.production_window_facts();
         let effects = (self.task_reduce)(&mut self.switcher, action, &windows);
+        self.apply_task_effects(
+            effects,
+            format!("semantic key -> HotkeyController -> {action:?} -> TaskSwitcher"),
+        );
+    }
+
+    fn apply_task_effects(
+        &mut self,
+        effects: Vec<TaskSwitchEffect<String>>,
+        authority_path: String,
+    ) {
         for effect in effects {
             self.consumed_effects += 1;
             if matches!(
@@ -625,9 +641,7 @@ impl Scenario {
                     TaskSwitchEffect::ActivateWindow(_) => "window.active",
                 }
                 .into(),
-                path: format!(
-                    "semantic key -> HotkeyController -> {action:?} -> TaskSwitcher -> {effect:?} -> RecordingPlatform"
-                ),
+                path: format!("{authority_path} -> {effect:?} -> RecordingPlatform"),
             });
             self.platform.acknowledgements.push(EffectAcknowledgement {
                 effect: format!("{effect:?}"),

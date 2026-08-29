@@ -97,6 +97,39 @@ impl<Id: Clone + Eq> TaskSwitcher<Id> {
         }
     }
 
+    pub fn remove_candidate(&mut self, removed: &Id) -> Vec<TaskSwitchEffect<Id>> {
+        let Some(removed_index) = self
+            .candidates
+            .iter()
+            .position(|candidate| candidate == removed)
+        else {
+            return Vec::new();
+        };
+        let selected = self.selected().cloned();
+        self.candidates.remove(removed_index);
+
+        if self.candidates.is_empty() {
+            self.scope = None;
+            self.selected = 0;
+            return self
+                .session
+                .take()
+                .map(|session| vec![TaskSwitchEffect::HideFlip { session }])
+                .unwrap_or_default();
+        }
+
+        if removed_index < self.selected || self.selected >= self.candidates.len() {
+            self.selected = self.selected.saturating_sub(1);
+        }
+        let mut effects = vec![TaskSwitchEffect::RequestPreviews(self.candidates.clone())];
+        if self.selected() != selected.as_ref()
+            && let Some(selected) = self.selected().cloned()
+        {
+            effects.push(TaskSwitchEffect::SelectPreview(selected));
+        }
+        effects
+    }
+
     fn step(
         &mut self,
         windows_mru: &[SwitchWindow<Id>],
@@ -198,5 +231,34 @@ mod tests {
                 TaskSwitchEffect::ActivateWindow("chrome-a"),
             ]
         );
+    }
+
+    #[test]
+    fn candidate_removal_updates_previews_selection_and_empty_session() {
+        let windows = [
+            window("current", "editor", true),
+            window("selected", "browser", false),
+            window("other", "terminal", false),
+        ];
+        let mut switcher = TaskSwitcher::default();
+        let _ = switcher.apply(HotkeyAction::SwitchNext, &windows);
+
+        assert_eq!(
+            switcher.remove_candidate(&"selected"),
+            [
+                TaskSwitchEffect::RequestPreviews(vec!["current", "other"]),
+                TaskSwitchEffect::SelectPreview("other"),
+            ]
+        );
+        assert_eq!(
+            switcher.remove_candidate(&"current"),
+            [TaskSwitchEffect::RequestPreviews(vec!["other"])]
+        );
+        assert_eq!(
+            switcher.remove_candidate(&"other"),
+            [TaskSwitchEffect::HideFlip { session: 1 }]
+        );
+        assert_eq!(switcher.session(), None);
+        assert!(switcher.apply(HotkeyAction::CommitSwitch, &[]).is_empty());
     }
 }
