@@ -450,6 +450,28 @@ impl NickelSession {
             self.windows.update_metadata(id, title, app_id);
             if shell_role.is_some() {
                 self.workspaces.remove_window(&id);
+                // A hidden SDL role may recreate its wl_surface when shown.
+                // Registration happens before its trusted app ID arrives and
+                // temporarily marks that new registry entry active. Preserve
+                // the application that still owns keyboard focus without
+                // perturbing its compositor stacking order.
+                if self.windows.is_active(id)
+                    && let Some(focused) = self
+                        .seat
+                        .get_keyboard()
+                        .and_then(|keyboard| keyboard.current_focus())
+                        .and_then(|focus| match focus {
+                            KeyboardFocusTarget::Wayland(surface) => {
+                                self.surface_windows.get(&surface.id()).copied()
+                            }
+                            KeyboardFocusTarget::X11(surface) => {
+                                self.x11_windows.get(&surface.window_id()).copied()
+                            }
+                        })
+                        .filter(|focused| *focused != id)
+                {
+                    self.windows.set_active(focused);
+                }
             } else if self
                 .windows
                 .app_id(id)

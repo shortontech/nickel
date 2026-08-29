@@ -727,6 +727,21 @@ fn main() -> Result<(), String> {
             }
         })
         .map_err(|error| error.to_string())?;
+    #[cfg(target_os = "linux")]
+    {
+        let semantic_rx = platform::semantic_target_receiver();
+        let event_sender = shell.event_sender();
+        std::thread::Builder::new()
+            .name("nickel-semantic-target-events".into())
+            .spawn(move || {
+                while let Ok(request) = semantic_rx.recv() {
+                    if event_sender.push_custom_event(request).is_err() {
+                        break;
+                    }
+                }
+            })
+            .map_err(|error| error.to_string())?;
+    }
     sync_visibility(&mut shell, &state);
     render_all(&mut shell, &mut state)?;
     println!(
@@ -769,6 +784,11 @@ fn main() -> Result<(), String> {
             continue;
         }
         match event {
+            #[cfg(target_os = "linux")]
+            Some(ShellEvent::SemanticTarget(request)) => {
+                let target = state.resolve_semantic_target(&request.target);
+                platform::respond_semantic_target(request, target);
+            }
             Some(ShellEvent::GlobalShortcut(shortcut)) => {
                 if state.global_shortcut(shortcut) {
                     sync_visibility(&mut shell, &state);

@@ -9,7 +9,7 @@ use std::{
     collections::HashMap,
     env,
     hash::{DefaultHasher, Hash, Hasher},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicU64, Ordering},
@@ -115,6 +115,7 @@ mod desktop_entries;
 
 const SESSION_CONTROL_ENV: &str = "NICKEL_SESSION_CONTROL";
 const SESSION_TOKEN_ENV: &str = "NICKEL_SESSION_TOKEN";
+const SHELL_TEST_CONTROL_ENV: &str = "NICKEL_SHELL_TEST_CONTROL";
 static SESSION_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 const STATUS_NOTIFIER_WATCHER: &str = "org.kde.StatusNotifierWatcher";
 const STATUS_NOTIFIER_PATH: &str = "/StatusNotifierWatcher";
@@ -973,6 +974,124 @@ pub fn launcher_hotkey_receiver() -> mpsc::Receiver<GlobalShortcut> {
     receiver
 }
 
+pub fn semantic_target_receiver() -> mpsc::Receiver<super::SemanticTargetRequest> {
+    use std::os::unix::net::UnixDatagram;
+
+    let (sender, receiver) = mpsc::channel();
+    let Some(path) = env::var_os(SHELL_TEST_CONTROL_ENV).map(PathBuf::from) else {
+        return receiver;
+    };
+    let Ok(token) = env::var(SESSION_TOKEN_ENV) else {
+        return receiver;
+    };
+    let _ = std::fs::remove_file(&path);
+    let Ok(socket) = UnixDatagram::bind(&path) else {
+        return receiver;
+    };
+    thread::Builder::new()
+        .name("nickel-semantic-test-targets".into())
+        .spawn(move || {
+            let mut frame = vec![0_u8; nickel_session_protocol::MAX_FRAME_BYTES];
+            while let Ok((length, source)) = socket.recv_from(&mut frame) {
+                let Some(reply_path) = source.as_pathname().map(Path::to_path_buf) else {
+                    continue;
+                };
+                let request = decode_session::<ClientEnvelope>(&frame[..length]);
+                let (request_id, target) = match request {
+                    Ok(envelope) if envelope.token == token => match envelope.request {
+                        SessionRequest::Query(SessionQuery::ShellSemanticTarget { target }) => {
+                            (envelope.request_id, target)
+                        }
+                        _ => {
+                            respond_semantic_target_error(
+                                &reply_path,
+                                envelope.request_id,
+                                nickel_session_protocol::ErrorCode::InvalidRequest,
+                                "expected a shell_semantic_target query",
+                            );
+                            continue;
+                        }
+                    },
+                    Ok(envelope) => {
+                        respond_semantic_target_error(
+                            &reply_path,
+                            envelope.request_id,
+                            nickel_session_protocol::ErrorCode::Unauthorized,
+                            "invalid session capability token",
+                        );
+                        continue;
+                    }
+                    Err(error) => {
+                        respond_semantic_target_error(
+                            &reply_path,
+                            0,
+                            nickel_session_protocol::ErrorCode::InvalidRequest,
+                            &error.to_string(),
+                        );
+                        continue;
+                    }
+                };
+                if sender
+                    .send(super::SemanticTargetRequest {
+                        request_id,
+                        target,
+                        reply_path,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            let _ = std::fs::remove_file(path);
+        })
+        .expect("failed to start semantic test target listener");
+    receiver
+}
+
+pub fn respond_semantic_target(
+    request: super::SemanticTargetRequest,
+    target: Option<nickel_session_protocol::ResolvedShellTarget>,
+) {
+    let message = target.map_or_else(
+        || ServerMessage::Error {
+            code: nickel_session_protocol::ErrorCode::InvalidRequest,
+            message: "semantic target is not present in the live shell frame".into(),
+        },
+        ServerMessage::ShellSemanticTarget,
+    );
+    send_semantic_target_response(&request.reply_path, request.request_id, message);
+}
+
+fn respond_semantic_target_error(
+    path: &Path,
+    request_id: u64,
+    code: nickel_session_protocol::ErrorCode,
+    message: &str,
+) {
+    send_semantic_target_response(
+        path,
+        request_id,
+        ServerMessage::Error {
+            code,
+            message: message.to_owned(),
+        },
+    );
+}
+
+fn send_semantic_target_response(path: &Path, request_id: u64, message: ServerMessage) {
+    use std::os::unix::net::UnixDatagram;
+
+    let Ok(frame) = encode_session(&ServerEnvelope {
+        request_id,
+        message,
+    }) else {
+        return;
+    };
+    if let Ok(socket) = UnixDatagram::unbound() {
+        let _ = socket.send_to(&frame, path);
+    }
+}
+
 #[derive(Default)]
 struct SubscriptionState {
     locked: Option<bool>,
@@ -1024,7 +1143,8 @@ pub fn execute_run_command(command: &str) -> Result<(), super::LaunchError> {
     process.arg("-c").arg(command);
     process
         .env_remove(SESSION_CONTROL_ENV)
-        .env_remove(SESSION_TOKEN_ENV);
+        .env_remove(SESSION_TOKEN_ENV)
+        .env_remove(SHELL_TEST_CONTROL_ENV);
     if let Some(home) = std::env::var_os("HOME") {
         process.current_dir(home);
     }

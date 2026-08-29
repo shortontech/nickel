@@ -70,8 +70,7 @@ impl WindowPreviewFrame {
             .find_map(|(window, card, _)| contains(*card, point).then_some(*window))
     }
 
-    #[cfg(test)]
-    pub fn target_point(&self, action: PreviewAction) -> Point {
+    pub fn target_point(&self, action: PreviewAction) -> Option<Point> {
         let (window, close) = match action {
             PreviewAction::Activate(window) | PreviewAction::OpenMenu(window) => (window, false),
             PreviewAction::Close(window) => (window, true),
@@ -79,9 +78,8 @@ impl WindowPreviewFrame {
         let (_, card, close_bounds) = self
             .cards
             .iter()
-            .find(|(candidate, _, _)| *candidate == window)
-            .expect("preview target exists");
-        center(if close { *close_bounds } else { *card })
+            .find(|(candidate, _, _)| *candidate == window)?;
+        Some(center(if close { *close_bounds } else { *card }))
     }
 }
 
@@ -106,14 +104,12 @@ impl WindowMenuFrame {
             .find_map(|(row, action)| contains(*row, point).then_some(*action))
     }
 
-    #[cfg(test)]
-    pub fn target_point(&self, action: MenuAction) -> Point {
+    pub fn target_point(&self, action: MenuAction) -> Option<Point> {
         let (row, _) = self
             .rows
             .iter()
-            .find(|(_, candidate)| *candidate == action)
-            .expect("menu target exists");
-        center(*row)
+            .find(|(_, candidate)| *candidate == action)?;
+        Some(center(*row))
     }
 }
 
@@ -283,7 +279,6 @@ fn contains(rect: Rect, point: Point) -> bool {
         && point.y < rect.origin.y + rect.size.height
 }
 
-#[cfg(test)]
 fn center(rect: Rect) -> Point {
     Point {
         x: rect.origin.x + rect.size.width / 2.0,
@@ -347,7 +342,7 @@ mod tests {
             PreviewAction::Close(WindowId(9)),
             PreviewAction::OpenMenu(WindowId(9)),
         ] {
-            let point = frame.target_point(action);
+            let point = frame.target_point(action).expect("preview target exists");
             assert_eq!(
                 frame.action_at(point, matches!(action, PreviewAction::OpenMenu(_))),
                 Some(action)
@@ -388,7 +383,10 @@ mod tests {
             MenuAction::MoveToWorkspace(WindowId(9), 1),
             MenuAction::MoveToWorkspace(WindowId(9), 8),
         ] {
-            assert_eq!(frame.action_at(frame.target_point(action)), Some(action));
+            assert_eq!(
+                frame.action_at(frame.target_point(action).expect("menu target exists")),
+                Some(action)
+            );
         }
         assert_eq!(frame.action_count(), 5);
         assert_eq!(frame.action(0), Some(MenuAction::Close(WindowId(9))));

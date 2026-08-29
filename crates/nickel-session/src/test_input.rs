@@ -5,7 +5,9 @@
 
 use std::path::PathBuf;
 
-use nickel_session_protocol::{InputState, TestInput, TestKey, TestPointerButton};
+use nickel_session_protocol::{
+    InputState, PointerInteraction, ResolvedShellTarget, TestInput, TestKey, TestPointerButton,
+};
 use smithay::backend::input::{
     AbsolutePositionEvent, ButtonState, Device, DeviceCapability, Event, InputBackend, InputEvent,
     InputTime, KeyState, KeyboardKeyEvent, Keycode, PointerButtonEvent, PointerMotionAbsoluteEvent,
@@ -232,12 +234,72 @@ impl NickelSession {
                     state: button_state(state),
                 },
             },
+            TestInput::ShellPointer { target } => return self.inject_shell_pointer(target),
         };
         let _ = self.process_input_event::<TestInputBackend>(event);
         self.display_handle
             .flush_clients()
             .map_err(|error| format!("failed to flush injected input: {error}"))?;
         Ok(())
+    }
+
+    fn inject_shell_pointer(&mut self, target: ResolvedShellTarget) -> Result<(), String> {
+        let surface = self
+            .protocol_shell_surfaces()
+            .into_iter()
+            .find(|surface| {
+                surface.role == target.role
+                    && target
+                        .output
+                        .as_ref()
+                        .is_none_or(|output| surface.output.as_ref() == Some(output))
+            })
+            .ok_or_else(|| format!("shell surface {:?} is not mapped", target.role))?;
+        let geometry = surface
+            .geometry
+            .ok_or_else(|| format!("shell surface {:?} has no geometry", target.role))?;
+        if target.x < 0 || target.y < 0 || target.x >= geometry.width || target.y >= geometry.height
+        {
+            return Err(format!(
+                "shell-local target {},{} is outside {:?} geometry {}x{}",
+                target.x, target.y, target.role, geometry.width, geometry.height
+            ));
+        }
+        let x = geometry.x + target.x;
+        let y = geometry.y + target.y;
+        let current = self
+            .seat
+            .get_pointer()
+            .map(|pointer| pointer.current_location());
+        if geometry.width > 1
+            && current.is_some_and(|current| {
+                current.x.round() as i32 == x && current.y.round() as i32 == y
+            })
+        {
+            // An absolute backend may coalesce a move to its current point.
+            // Approach from another valid point on the same shell surface so
+            // repeated semantic hovers still traverse ordinary hit testing.
+            let approach_x = if target.x + 1 < geometry.width {
+                x + 1
+            } else {
+                x - 1
+            };
+            self.inject_test_input(TestInput::PointerMove { x: approach_x, y })?;
+        }
+        self.inject_test_input(TestInput::PointerMove { x, y })?;
+        let button = match target.interaction {
+            PointerInteraction::Hover => return Ok(()),
+            PointerInteraction::LeftClick => TestPointerButton::Left,
+            PointerInteraction::RightClick => TestPointerButton::Right,
+        };
+        self.inject_test_input(TestInput::PointerButton {
+            button,
+            state: InputState::Pressed,
+        })?;
+        self.inject_test_input(TestInput::PointerButton {
+            button,
+            state: InputState::Released,
+        })
     }
 
     fn point_is_on_an_output(&self, x: i32, y: i32) -> bool {

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-pub const PROTOCOL_VERSION: u16 = 7;
+pub const PROTOCOL_VERSION: u16 = 8;
 pub const MAX_FRAME_BYTES: usize = 196_608;
 pub const MAX_PREVIEW_WIDTH: u16 = 256;
 pub const MAX_PREVIEW_HEIGHT: u16 = 144;
@@ -46,7 +46,15 @@ pub enum Query {
     IdleInhibition,
     CacheDiagnostics,
     Workspaces,
-    Preview { window: WindowId },
+    Preview {
+        window: WindowId,
+    },
+    /// Resolve a semantic shell target through the live renderer records. This
+    /// query is served by the shell's capability-gated nested test endpoint,
+    /// not by the compositor control socket.
+    ShellSemanticTarget {
+        target: ShellSemanticTarget,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,7 +143,7 @@ pub enum SessionAction {
     PowerOff,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "input", rename_all = "snake_case")]
 pub enum TestInput {
     Key {
@@ -154,6 +162,63 @@ pub enum TestInput {
         button: TestPointerButton,
         state: InputState,
     },
+    /// Dispatch a renderer-resolved shell-local pointer interaction through
+    /// the compositor's ordinary absolute-motion and button paths.
+    ShellPointer {
+        target: ResolvedShellTarget,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "target", rename_all = "snake_case")]
+pub enum ShellSemanticTarget {
+    PanelApplication {
+        application_id: String,
+        output: Option<String>,
+        interaction: PointerInteraction,
+    },
+    PreviewWindow {
+        window: WindowId,
+        action: PreviewTargetAction,
+    },
+    WindowMenu {
+        window: WindowId,
+        action: WindowMenuTargetAction,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreviewTargetAction {
+    Hover,
+    Activate,
+    Close,
+    OpenMenu,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowMenuTargetAction {
+    Close,
+    MaximizeRestore,
+    Minimize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PointerInteraction {
+    Hover,
+    LeftClick,
+    RightClick,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedShellTarget {
+    pub role: ShellRole,
+    pub output: Option<String>,
+    pub x: i32,
+    pub y: i32,
+    pub interaction: PointerInteraction,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -210,6 +275,7 @@ pub enum ServerMessage {
     CacheDiagnostics(CacheDiagnostics),
     Workspaces(WorkspaceState),
     Preview(PreviewFrame),
+    ShellSemanticTarget(ResolvedShellTarget),
     Event(Event),
 }
 
@@ -596,6 +662,15 @@ mod tests {
                 button: TestPointerButton::Left,
                 state: InputState::Released,
             },
+            TestInput::ShellPointer {
+                target: ResolvedShellTarget {
+                    role: ShellRole::Preview,
+                    output: Some("DP-1".into()),
+                    x: 144,
+                    y: 96,
+                    interaction: PointerInteraction::RightClick,
+                },
+            },
         ] {
             let envelope = ClientEnvelope {
                 token: "test-capability".into(),
@@ -607,6 +682,37 @@ mod tests {
                 envelope
             );
         }
+    }
+
+    #[test]
+    fn semantic_shell_target_query_and_response_round_trip() {
+        let target = ShellSemanticTarget::PreviewWindow {
+            window: WindowId(11),
+            action: PreviewTargetAction::Close,
+        };
+        let request = ClientEnvelope {
+            token: "test-capability".into(),
+            request_id: 12,
+            request: Request::Query(Query::ShellSemanticTarget { target }),
+        };
+        assert_eq!(
+            decode::<ClientEnvelope>(&encode(&request).unwrap()).unwrap(),
+            request
+        );
+        let response = ServerEnvelope {
+            request_id: 12,
+            message: ServerMessage::ShellSemanticTarget(ResolvedShellTarget {
+                role: ShellRole::Preview,
+                output: None,
+                x: 24,
+                y: 32,
+                interaction: PointerInteraction::LeftClick,
+            }),
+        };
+        assert_eq!(
+            decode::<ServerEnvelope>(&encode(&response).unwrap()).unwrap(),
+            response
+        );
     }
 
     #[test]

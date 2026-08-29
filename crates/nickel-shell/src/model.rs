@@ -90,7 +90,8 @@ impl Application {
         // compositor. They must never cross into an ordinary application.
         command
             .env_remove("NICKEL_SESSION_CONTROL")
-            .env_remove("NICKEL_SESSION_TOKEN");
+            .env_remove("NICKEL_SESSION_TOKEN")
+            .env_remove("NICKEL_SHELL_TEST_CONTROL");
         if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
             command.current_dir(home);
         }
@@ -154,5 +155,6 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(removals.contains(&std::ffi::OsStr::new("NICKEL_SESSION_CONTROL")));
         assert!(removals.contains(&std::ffi::OsStr::new("NICKEL_SESSION_TOKEN")));
+        assert!(removals.contains(&std::ffi::OsStr::new("NICKEL_SHELL_TEST_CONTROL")));
     }
 }

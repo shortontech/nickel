@@ -1,5 +1,13 @@
 use crate::model::{TrayItem, WindowId};
 
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug, PartialEq)]
+pub struct SemanticTargetRequest {
+    pub request_id: u64,
+    pub target: nickel_session_protocol::ShellSemanticTarget,
+    pub reply_path: std::path::PathBuf,
+}
+
 pub fn surface_size(window: &sdl3::video::Window) -> (u32, u32) {
     #[cfg(target_os = "windows")]
     {
@@ -227,9 +235,10 @@ pub use linux::{
     execute_run_command, handle_focused_shortcut, launch_application,
     launcher_has_foreground_focus, launcher_hotkey_receiver, launcher_visibility_applied,
     network_status, paste_text_if_requested, register_session_shell, release_pointer,
-    request_secure_storage_retry, secure_storage_state, select_audio_device, send_shell_command,
-    set_audio_volume, set_bluetooth_discovery, set_bluetooth_powered, set_wifi_enabled,
-    show_window_system_menu, toggle_bluetooth_device, update_panel_fullscreen_state, wallpaper,
+    request_secure_storage_retry, respond_semantic_target, secure_storage_state,
+    select_audio_device, semantic_target_receiver, send_shell_command, set_audio_volume,
+    set_bluetooth_discovery, set_bluetooth_powered, set_wifi_enabled, show_window_system_menu,
+    toggle_bluetooth_device, update_panel_fullscreen_state, wallpaper,
 };
 
 #[cfg(target_os = "windows")]

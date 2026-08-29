@@ -11,6 +11,10 @@ use nickel_core::{
     theme::{Appearance, ThemePalette},
     wallpaper_settings::WallpaperSettings,
 };
+use nickel_session_protocol::{
+    PointerInteraction, PreviewTargetAction, ResolvedShellTarget, ShellRole, ShellSemanticTarget,
+    WindowMenuTargetAction,
+};
 use nickel_ui::{PaintCommand, Point, Rect, TextAlign};
 
 use crate::{
@@ -74,6 +78,15 @@ fn panel_status_layout(width: u32, tray_count: usize) -> PanelStatusLayout {
         tray_start,
         codex_start: tray_start - PANEL_CODEX_WIDTH,
     }
+}
+
+fn panel_task_bounds(index: usize) -> Rect {
+    Rect::new(
+        PANEL_ITEM_WIDTH + index as f32 * PANEL_ITEM_WIDTH,
+        0.0,
+        PANEL_ITEM_WIDTH,
+        56.0,
+    )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -540,6 +553,78 @@ impl LiveShell {
             return true;
         }
         false
+    }
+
+    /// Resolves a test/accessibility semantic target from the same live group
+    /// and renderer frame records used by pointer hit testing. The caller is
+    /// responsible for dispatching the returned point as ordinary input.
+    pub fn resolve_semantic_target(
+        &self,
+        target: &ShellSemanticTarget,
+    ) -> Option<ResolvedShellTarget> {
+        match target {
+            ShellSemanticTarget::PanelApplication {
+                application_id,
+                output,
+                interaction,
+            } => {
+                let groups = self.launcher.group_windows(&self.windows);
+                let index = groups.iter().take(12).position(|group| {
+                    group
+                        .application_id
+                        .as_ref()
+                        .is_some_and(|id| id.as_str() == application_id)
+                })?;
+                let bounds = panel_task_bounds(index);
+                Some(ResolvedShellTarget {
+                    role: ShellRole::Panel,
+                    output: output.clone(),
+                    x: (bounds.origin.x + bounds.size.width / 2.0).round() as i32,
+                    y: (bounds.origin.y + bounds.size.height / 2.0).round() as i32,
+                    interaction: *interaction,
+                })
+            }
+            ShellSemanticTarget::PreviewWindow { window, action } => {
+                let window = crate::model::WindowId(window.0);
+                let preview_action = match action {
+                    PreviewTargetAction::Hover | PreviewTargetAction::Activate => {
+                        PreviewAction::Activate(window)
+                    }
+                    PreviewTargetAction::Close => PreviewAction::Close(window),
+                    PreviewTargetAction::OpenMenu => PreviewAction::OpenMenu(window),
+                };
+                let point = self.preview_frame.as_ref()?.target_point(preview_action)?;
+                Some(ResolvedShellTarget {
+                    role: ShellRole::Preview,
+                    output: None,
+                    x: point.x.round() as i32,
+                    y: point.y.round() as i32,
+                    interaction: match action {
+                        PreviewTargetAction::Hover => PointerInteraction::Hover,
+                        PreviewTargetAction::OpenMenu => PointerInteraction::RightClick,
+                        PreviewTargetAction::Activate | PreviewTargetAction::Close => {
+                            PointerInteraction::LeftClick
+                        }
+                    },
+                })
+            }
+            ShellSemanticTarget::WindowMenu { window, action } => {
+                let window = crate::model::WindowId(window.0);
+                let menu_action = match action {
+                    WindowMenuTargetAction::Close => MenuAction::Close(window),
+                    WindowMenuTargetAction::MaximizeRestore => MenuAction::MaximizeRestore(window),
+                    WindowMenuTargetAction::Minimize => MenuAction::Minimize(window),
+                };
+                let point = self.window_menu_frame.as_ref()?.target_point(menu_action)?;
+                Some(ResolvedShellTarget {
+                    role: ShellRole::ContextMenu,
+                    output: None,
+                    x: point.x.round() as i32,
+                    y: point.y.round() as i32,
+                    interaction: PointerInteraction::LeftClick,
+                })
+            }
+        }
     }
 
     pub fn panel_pointer_moved(&mut self, x: f32, width: u32) -> bool {
@@ -1558,7 +1643,8 @@ impl LiveShell {
         });
         let groups = self.launcher.group_windows(&self.windows);
         for (index, group) in groups.iter().take(12).enumerate() {
-            let x = PANEL_ITEM_WIDTH + index as f32 * PANEL_ITEM_WIDTH;
+            let bounds = panel_task_bounds(index);
+            let x = bounds.origin.x;
             let hovered = self.panel_hover == Some(PanelHover::Task(index));
             if group.active() || hovered {
                 commands.push(PaintCommand::RoundedFill {
@@ -1970,6 +2056,10 @@ mod tests {
     use std::{cell::Cell, collections::HashMap};
 
     use image::{Rgba, RgbaImage};
+    use nickel_session_protocol::{
+        PointerInteraction, PreviewTargetAction, ShellRole, ShellSemanticTarget,
+        WindowMenuTargetAction,
+    };
     use nickel_ui::{Point, Rect};
     use sdl3::keyboard::Keycode;
 
@@ -1979,7 +2069,7 @@ mod tests {
         visible_tray_item,
     };
     use crate::{
-        model::{OpenWindow, TrayItem, WindowGroup, WindowId},
+        model::{ApplicationId, OpenWindow, TrayItem, WindowGroup, WindowId},
         notification::{NotificationAction, NotificationRequest, NotificationStore},
         sdl_window_preview::{build_menu_frame, build_preview_frame},
     };
@@ -2003,6 +2093,81 @@ mod tests {
             assert_eq!(secure_storage_status_label(state), Some(expected));
         }
         assert_eq!(secure_storage_status_label(SecureStorageState::Ready), None);
+    }
+
+    #[test]
+    fn semantic_shell_targets_come_from_live_group_preview_and_menu_records() {
+        let mut shell = LiveShell::new().unwrap();
+        let application_id = ApplicationId::new("org.kde.konsole");
+        shell.windows = vec![
+            OpenWindow {
+                id: WindowId(4),
+                application_id: Some(application_id.clone()),
+                active: true,
+                title: "one".into(),
+            },
+            OpenWindow {
+                id: WindowId(9),
+                application_id: Some(application_id),
+                active: false,
+                title: "two".into(),
+            },
+        ];
+        let panel = shell
+            .resolve_semantic_target(&ShellSemanticTarget::PanelApplication {
+                application_id: "org.kde.konsole".into(),
+                output: Some("DP-1".into()),
+                interaction: PointerInteraction::Hover,
+            })
+            .expect("live panel group resolves");
+        assert_eq!(panel.role, ShellRole::Panel);
+        assert_eq!(panel.output.as_deref(), Some("DP-1"));
+        assert_eq!(
+            shell.panel_hover_at(panel.x as f32, 1280),
+            Some(super::PanelHover::Task(0))
+        );
+
+        let group = shell.launcher.group_windows(&shell.windows).remove(0);
+        shell.preview_frame = Some(build_preview_frame(
+            &group,
+            &HashMap::new(),
+            None,
+            shell.palette,
+        ));
+        let preview = shell
+            .resolve_semantic_target(&ShellSemanticTarget::PreviewWindow {
+                window: nickel_session_protocol::WindowId(9),
+                action: PreviewTargetAction::Close,
+            })
+            .expect("live preview close target resolves");
+        assert_eq!(preview.role, ShellRole::Preview);
+        assert_eq!(preview.interaction, PointerInteraction::LeftClick);
+        assert_eq!(
+            shell.preview_frame.as_ref().unwrap().action_at(
+                Point {
+                    x: preview.x as f32,
+                    y: preview.y as f32,
+                },
+                false,
+            ),
+            Some(crate::sdl_window_preview::PreviewAction::Close(WindowId(9)))
+        );
+
+        shell.window_menu_frame = Some(build_menu_frame(WindowId(9), &[], Some(0), shell.palette));
+        let menu = shell
+            .resolve_semantic_target(&ShellSemanticTarget::WindowMenu {
+                window: nickel_session_protocol::WindowId(9),
+                action: WindowMenuTargetAction::Minimize,
+            })
+            .expect("live context-menu row resolves");
+        assert_eq!(menu.role, ShellRole::ContextMenu);
+        assert_eq!(
+            shell.window_menu_frame.as_ref().unwrap().action_at(Point {
+                x: menu.x as f32,
+                y: menu.y as f32,
+            }),
+            Some(crate::sdl_window_preview::MenuAction::Minimize(WindowId(9)))
+        );
     }
 
     #[test]

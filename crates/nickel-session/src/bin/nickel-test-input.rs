@@ -1,6 +1,9 @@
 use std::ffi::OsString;
 
-use nickel_session_protocol::{InputState, TestInput, TestKey, TestPointerButton};
+use nickel_session_protocol::{
+    InputState, PointerInteraction, PreviewTargetAction, ShellSemanticTarget, TestInput, TestKey,
+    TestPointerButton, WindowMenuTargetAction,
+};
 
 const HELP: &str = "\
 Inject one input event into a Nickel nested session started with --test-control.
@@ -20,6 +23,9 @@ Usage:
   nickel-test-input session restart-shell|lock|unlock|suspend|logout|reboot|power-off
   nickel-test-input idle-inhibition
   nickel-test-input caches
+  nickel-test-input semantic panel-app APPLICATION_ID hover|click [OUTPUT]
+  nickel-test-input semantic preview WINDOW_ID hover|activate|close|menu
+  nickel-test-input semantic menu WINDOW_ID close|maximize|minimize
   nickel-test-input move X Y
   nickel-test-input move-relative DX DY
   nickel-test-input button left|right pressed|released
@@ -28,6 +34,7 @@ Usage:
 
 enum Parsed {
     Input(TestInput),
+    Semantic(ShellSemanticTarget),
     Windows,
     Workspaces,
     Outputs,
@@ -145,6 +152,52 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, String> {
         }
         [command] if command == "idle-inhibition" => Ok(Parsed::IdleInhibition),
         [command] if command == "caches" => Ok(Parsed::Caches),
+        [command, kind, application_id, interaction]
+        | [command, kind, application_id, interaction, _]
+            if command == "semantic" && kind == "panel-app" =>
+        {
+            let output = args.get(4).cloned();
+            Ok(Parsed::Semantic(ShellSemanticTarget::PanelApplication {
+                application_id: application_id.clone(),
+                output,
+                interaction: match interaction.as_str() {
+                    "hover" => PointerInteraction::Hover,
+                    "click" => PointerInteraction::LeftClick,
+                    _ => return Err(format!("unknown panel interaction {interaction:?}")),
+                },
+            }))
+        }
+        [command, kind, window, action] if command == "semantic" && kind == "preview" => {
+            Ok(Parsed::Semantic(ShellSemanticTarget::PreviewWindow {
+                window: nickel_session_protocol::WindowId(
+                    window
+                        .parse()
+                        .map_err(|_| format!("invalid window ID {window:?}"))?,
+                ),
+                action: match action.as_str() {
+                    "hover" => PreviewTargetAction::Hover,
+                    "activate" => PreviewTargetAction::Activate,
+                    "close" => PreviewTargetAction::Close,
+                    "menu" => PreviewTargetAction::OpenMenu,
+                    _ => return Err(format!("unknown preview action {action:?}")),
+                },
+            }))
+        }
+        [command, kind, window, action] if command == "semantic" && kind == "menu" => {
+            Ok(Parsed::Semantic(ShellSemanticTarget::WindowMenu {
+                window: nickel_session_protocol::WindowId(
+                    window
+                        .parse()
+                        .map_err(|_| format!("invalid window ID {window:?}"))?,
+                ),
+                action: match action.as_str() {
+                    "close" => WindowMenuTargetAction::Close,
+                    "maximize" => WindowMenuTargetAction::MaximizeRestore,
+                    "minimize" => WindowMenuTargetAction::Minimize,
+                    _ => return Err(format!("unknown menu action {action:?}")),
+                },
+            }))
+        }
         [command, x, y] if command == "move" => Ok(Parsed::Input(TestInput::PointerMove {
             x: x.parse()
                 .map_err(|_| format!("invalid X coordinate {x:?}"))?,
@@ -211,57 +264,101 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     use std::{env, fs, os::unix::net::UnixDatagram, path::PathBuf, process, time::Duration};
 
-    let command = match parse(env::args_os().skip(1))? {
+    let (request, semantic) = match parse(env::args_os().skip(1))? {
         Parsed::Help => {
             print!("{HELP}");
             return Ok(());
         }
-        Parsed::Input(input) => Request::Command(Command::TestInput { input }),
-        Parsed::Windows => Request::Query(nickel_session_protocol::Query::Windows),
-        Parsed::Workspaces => Request::Query(nickel_session_protocol::Query::Workspaces),
-        Parsed::Outputs => Request::Query(nickel_session_protocol::Query::Outputs),
-        Parsed::Surfaces => Request::Query(nickel_session_protocol::Query::ShellSurfaces),
+        Parsed::Input(input) => (Some(Request::Command(Command::TestInput { input })), None),
+        Parsed::Semantic(target) => (None, Some(target)),
+        Parsed::Windows => (
+            Some(Request::Query(nickel_session_protocol::Query::Windows)),
+            None,
+        ),
+        Parsed::Workspaces => (
+            Some(Request::Query(nickel_session_protocol::Query::Workspaces)),
+            None,
+        ),
+        Parsed::Outputs => (
+            Some(Request::Query(nickel_session_protocol::Query::Outputs)),
+            None,
+        ),
+        Parsed::Surfaces => (
+            Some(Request::Query(
+                nickel_session_protocol::Query::ShellSurfaces,
+            )),
+            None,
+        ),
         Parsed::OutputConnect {
             name,
             width,
             height,
             scale_120,
             transform,
-        } => Request::Command(Command::TestOutput {
-            output: nickel_session_protocol::TestOutput::Connect {
-                name,
-                logical_width: width,
-                logical_height: height,
-                scale_120,
-                transform,
-            },
-        }),
-        Parsed::OutputDisconnect(name) => Request::Command(Command::TestOutput {
-            output: nickel_session_protocol::TestOutput::Disconnect { name },
-        }),
-        Parsed::WorkspaceCreate => Request::Command(Command::CreateWorkspace),
-        Parsed::WorkspaceSwitch(workspace) => Request::Command(Command::SwitchWorkspace {
-            workspace: nickel_session_protocol::WorkspaceId(workspace),
-            output: None,
-        }),
-        Parsed::WorkspaceRemove(workspace) => Request::Command(Command::RemoveWorkspace {
-            workspace: nickel_session_protocol::WorkspaceId(workspace),
-        }),
-        Parsed::WorkspaceMove { window, workspace } => {
-            Request::Command(Command::MoveWindowToWorkspace {
+        } => (
+            Some(Request::Command(Command::TestOutput {
+                output: nickel_session_protocol::TestOutput::Connect {
+                    name,
+                    logical_width: width,
+                    logical_height: height,
+                    scale_120,
+                    transform,
+                },
+            })),
+            None,
+        ),
+        Parsed::OutputDisconnect(name) => (
+            Some(Request::Command(Command::TestOutput {
+                output: nickel_session_protocol::TestOutput::Disconnect { name },
+            })),
+            None,
+        ),
+        Parsed::WorkspaceCreate => (Some(Request::Command(Command::CreateWorkspace)), None),
+        Parsed::WorkspaceSwitch(workspace) => (
+            Some(Request::Command(Command::SwitchWorkspace {
+                workspace: nickel_session_protocol::WorkspaceId(workspace),
+                output: None,
+            })),
+            None,
+        ),
+        Parsed::WorkspaceRemove(workspace) => (
+            Some(Request::Command(Command::RemoveWorkspace {
+                workspace: nickel_session_protocol::WorkspaceId(workspace),
+            })),
+            None,
+        ),
+        Parsed::WorkspaceMove { window, workspace } => (
+            Some(Request::Command(Command::MoveWindowToWorkspace {
                 window: nickel_session_protocol::WindowId(window),
                 workspace: nickel_session_protocol::WorkspaceId(workspace),
-            })
-        }
-        Parsed::WindowAction { window, action } => Request::Command(Command::WindowAction {
-            window: nickel_session_protocol::WindowId(window),
-            action,
-        }),
-        Parsed::SessionAction(Some(action)) => Request::Command(Command::SessionAction { action }),
-        Parsed::SessionAction(None) => Request::Command(Command::LogOut),
-        Parsed::Unlock => Request::Command(Command::Unlock),
-        Parsed::IdleInhibition => Request::Query(nickel_session_protocol::Query::IdleInhibition),
-        Parsed::Caches => Request::Query(nickel_session_protocol::Query::CacheDiagnostics),
+            })),
+            None,
+        ),
+        Parsed::WindowAction { window, action } => (
+            Some(Request::Command(Command::WindowAction {
+                window: nickel_session_protocol::WindowId(window),
+                action,
+            })),
+            None,
+        ),
+        Parsed::SessionAction(Some(action)) => (
+            Some(Request::Command(Command::SessionAction { action })),
+            None,
+        ),
+        Parsed::SessionAction(None) => (Some(Request::Command(Command::LogOut)), None),
+        Parsed::Unlock => (Some(Request::Command(Command::Unlock)), None),
+        Parsed::IdleInhibition => (
+            Some(Request::Query(
+                nickel_session_protocol::Query::IdleInhibition,
+            )),
+            None,
+        ),
+        Parsed::Caches => (
+            Some(Request::Query(
+                nickel_session_protocol::Query::CacheDiagnostics,
+            )),
+            None,
+        ),
     };
     let control = env::var_os("NICKEL_SESSION_CONTROL")
         .map(PathBuf::from)
@@ -273,16 +370,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = fs::remove_file(&reply_path);
     let socket = UnixDatagram::bind(&reply_path)?;
     socket.set_read_timeout(Some(Duration::from_secs(15)))?;
-    let envelope = ClientEnvelope {
-        token: env::var("NICKEL_SESSION_TOKEN")?,
-        request_id: 1,
-        request: command,
+    let token = env::var("NICKEL_SESSION_TOKEN")?;
+    let mut request_id = 1;
+    let (destination, request) = if let Some(target) = semantic {
+        let destination = env::var_os("NICKEL_SHELL_TEST_CONTROL")
+            .map(PathBuf::from)
+            .ok_or("NICKEL_SHELL_TEST_CONTROL is not set")?;
+        (
+            destination,
+            Request::Query(nickel_session_protocol::Query::ShellSemanticTarget { target }),
+        )
+    } else {
+        (
+            control.clone(),
+            request.expect("non-semantic request exists"),
+        )
     };
-    socket.send_to(&encode(&envelope)?, control)?;
+    let envelope = ClientEnvelope {
+        token: token.clone(),
+        request_id: 1,
+        request,
+    };
+    socket.send_to(&encode(&envelope)?, destination)?;
     let mut response = vec![0_u8; nickel_session_protocol::MAX_FRAME_BYTES];
-    let length = socket.recv(&mut response)?;
+    let mut length = socket.recv(&mut response)?;
+    let mut response_envelope = decode::<ServerEnvelope>(&response[..length])?;
+    if response_envelope.request_id != request_id {
+        return Err("test input response has the wrong request ID".into());
+    }
+    if let ServerMessage::ShellSemanticTarget(target) = response_envelope.message.clone() {
+        request_id += 1;
+        socket.send_to(
+            &encode(&ClientEnvelope {
+                token,
+                request_id,
+                request: Request::Command(Command::TestInput {
+                    input: TestInput::ShellPointer { target },
+                }),
+            })?,
+            control,
+        )?;
+        length = socket.recv(&mut response)?;
+        response_envelope = decode::<ServerEnvelope>(&response[..length])?;
+        if response_envelope.request_id != request_id {
+            return Err("test input response has the wrong request ID".into());
+        }
+    }
     let _ = fs::remove_file(&reply_path);
-    let response = decode::<ServerEnvelope>(&response[..length])?;
+    let response = response_envelope;
     match response.message {
         ServerMessage::Ack => Ok(()),
         ServerMessage::Windows(windows) => {
@@ -402,6 +537,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         Parsed::Input(_)
+        | Parsed::Semantic(_)
         | Parsed::Windows
         | Parsed::Workspaces
         | Parsed::Outputs
@@ -434,6 +570,32 @@ mod tests {
         assert!(matches!(
             parse(["workspaces".into()]),
             Ok(Parsed::Workspaces)
+        ));
+        assert!(matches!(
+            parse([
+                "semantic".into(),
+                "panel-app".into(),
+                "org.kde.konsole".into(),
+                "hover".into(),
+                "DP-1".into(),
+            ]),
+            Ok(Parsed::Semantic(ShellSemanticTarget::PanelApplication {
+                application_id,
+                output: Some(output),
+                interaction: PointerInteraction::Hover,
+            })) if application_id == "org.kde.konsole" && output == "DP-1"
+        ));
+        assert!(matches!(
+            parse([
+                "semantic".into(),
+                "preview".into(),
+                "9".into(),
+                "menu".into(),
+            ]),
+            Ok(Parsed::Semantic(ShellSemanticTarget::PreviewWindow {
+                window: nickel_session_protocol::WindowId(9),
+                action: PreviewTargetAction::OpenMenu,
+            }))
         ));
         assert!(matches!(
             parse([

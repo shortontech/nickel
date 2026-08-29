@@ -159,6 +159,23 @@ The same capability provides semantic workspace commands, nested output hotplug,
 acceptance without copied coordinates or private state mutation. It cannot invoke logout or power
 actions. Run `nickel-test-input --help` for the complete command set.
 
+Renderer-owned shell targets can be exercised without copying panel or overlay coordinates:
+
+```bash
+cargo run -p nickel-session --bin nickel-test-input -- \
+  semantic panel-app org.kde.konsole hover
+cargo run -p nickel-session --bin nickel-test-input -- \
+  semantic preview 10 menu
+cargo run -p nickel-session --bin nickel-test-input -- \
+  semantic menu 10 minimize
+```
+
+The shell resolves these names from its live grouping and preview/menu frame records. The compositor
+then translates the returned surface-local point through its authoritative shell-surface placement
+and injects normal pointer motion and button events. The capability endpoint is absent unless the
+nested session was started with `--test-control`, requires the session token, and is removed from
+ordinary application environments.
+
 The client does not mutate shell state directly: events still pass through the compositor's normal
 hit testing, focus handling, and input reducers.
 

@@ -59,6 +59,8 @@ pub struct DisplayGeometry {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ShellEvent {
     GlobalShortcut(crate::platform::GlobalShortcut),
+    #[cfg(target_os = "linux")]
+    SemanticTarget(crate::platform::SemanticTargetRequest),
     Quit,
     Shown(SurfaceId),
     Hidden(SurfaceId),
@@ -185,6 +187,11 @@ impl SdlShell {
         sdl.event()
             .map_err(|error| error.to_string())?
             .register_custom_event::<crate::platform::GlobalShortcut>()
+            .map_err(|error| error.to_string())?;
+        #[cfg(target_os = "linux")]
+        sdl.event()
+            .map_err(|error| error.to_string())?
+            .register_custom_event::<crate::platform::SemanticTargetRequest>()
             .map_err(|error| error.to_string())?;
         let events = sdl.event_pump().map_err(|error| error.to_string())?;
         tracing::info!(
@@ -606,6 +613,11 @@ impl SdlShell {
     fn translate_event(&mut self, event: Event) -> Option<ShellEvent> {
         if let Some(shortcut) = event.as_user_event_type::<crate::platform::GlobalShortcut>() {
             return Some(ShellEvent::GlobalShortcut(shortcut));
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(request) = event.as_user_event_type::<crate::platform::SemanticTargetRequest>()
+        {
+            return Some(ShellEvent::SemanticTarget(request));
         }
         let surface = event
             .get_window_id()

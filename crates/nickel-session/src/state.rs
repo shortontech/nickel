@@ -429,6 +429,15 @@ impl NickelSession {
         // SAFETY: session initialization is single-threaded and precedes shell launch.
         unsafe { std::env::set_var("NICKEL_SESSION_TOKEN", &protocol_token) };
         let control_socket_path = Self::init_control_socket(event_loop);
+        if test_control_enabled {
+            let shell_test_path = control_socket_path
+                .with_file_name(format!("nickel-shell-test-{}.sock", std::process::id()));
+            // SAFETY: session initialization is single-threaded and precedes shell launch.
+            unsafe { std::env::set_var("NICKEL_SHELL_TEST_CONTROL", shell_test_path) };
+        } else {
+            // SAFETY: session initialization is single-threaded and precedes shell launch.
+            unsafe { std::env::remove_var("NICKEL_SHELL_TEST_CONTROL") };
+        }
         let secure_storage_state = Arc::new(AtomicU8::new(
             crate::login_services::SecureStorageState::Starting as u8,
         ));
@@ -817,6 +826,10 @@ impl NickelSession {
                 }
                 ServerMessage::Preview(preview)
             }
+            Query::ShellSemanticTarget { .. } => protocol_error(
+                ErrorCode::InvalidRequest,
+                "shell semantic targets are resolved by the nested shell test endpoint",
+            ),
         }
     }
 
@@ -1313,7 +1326,7 @@ impl NickelSession {
             .collect()
     }
 
-    fn protocol_shell_surfaces(&self) -> Vec<ShellSurfaceSnapshot> {
+    pub(crate) fn protocol_shell_surfaces(&self) -> Vec<ShellSurfaceSnapshot> {
         let registry = self.windows.snapshot();
         self.shell_windows()
             .filter_map(|window| {
@@ -2354,7 +2367,10 @@ impl NickelSession {
                 height,
             },
         );
-        self.space.map_element(window.clone(), (x, y), true);
+        // Passive previews must not deactivate the current application merely
+        // because their shell surface became mapped. Explicit keyboard/menu
+        // focus remains authoritative through the `focus` argument.
+        self.space.map_element(window.clone(), (x, y), focus);
         if focus {
             self.seat.get_keyboard().unwrap().set_focus(
                 self,
@@ -2367,7 +2383,7 @@ impl NickelSession {
                 toplevel.send_pending_configure();
             }
         });
-        self.space.raise_element(&window, true);
+        self.space.raise_element(&window, focus);
         self.raise_panels();
         eprintln!("nickel-session: {label} shown at {x},{y}");
     }

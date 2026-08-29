@@ -69,6 +69,12 @@ impl WindowRegistry {
         }
     }
 
+    pub fn set_active(&mut self, id: WindowId) {
+        for window in self.windows.values_mut() {
+            window.active = window.id == id;
+        }
+    }
+
     pub fn remove(&mut self, id: WindowId) {
         self.windows.remove(&id);
         self.stacking_order.retain(|candidate| *candidate != id);
@@ -119,6 +125,16 @@ mod tests {
         assert!(!windows[0].active);
         assert!(windows[1].active);
         assert_eq!(windows[0].title, "Terminal");
+
+        registry.set_active(terminal);
+        let windows = registry.test_snapshot();
+        assert_eq!(
+            windows.iter().map(|window| window.id.0).collect::<Vec<_>>(),
+            [1, 2],
+            "active-state repair must not rewrite stacking order"
+        );
+        assert!(windows[0].active);
+        assert!(!windows[1].active);
 
         registry.raise(terminal);
         registry.remove(browser);
