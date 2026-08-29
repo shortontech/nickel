@@ -980,11 +980,20 @@ fn main() -> Result<(), String> {
                 let (width, height) = entry.window().size();
                 let changed = match role {
                     SurfaceRole::ControlCenter => state.control_key(key, width, height),
-                    _ => state.launcher_key(key, modifiers),
+                    SurfaceRole::WindowPreview => state.preview_key(key),
+                    SurfaceRole::WindowContextMenu => state.window_menu_key(key),
+                    SurfaceRole::Notification => state.notification_key(key),
+                    SurfaceRole::Panel => state.preview_key(key),
+                    SurfaceRole::Launcher => state.launcher_key(key, modifiers),
+                    _ => false,
                 };
                 if changed {
                     sync_visibility(&mut shell, &state);
                     render_role(&mut shell, &mut state, role)?;
+                    if matches!(role, SurfaceRole::Panel | SurfaceRole::WindowPreview) {
+                        render_role(&mut shell, &mut state, SurfaceRole::WindowPreview)?;
+                        render_role(&mut shell, &mut state, SurfaceRole::WindowContextMenu)?;
+                    }
                 }
             }
             Some(ShellEvent::PointerMoved { surface, x, y }) => {
@@ -1038,6 +1047,15 @@ fn main() -> Result<(), String> {
                 if state.panel_pointer_left() {
                     render_role(&mut shell, &mut state, SurfaceRole::Panel)?;
                 }
+            }
+            Some(ShellEvent::PointerEntered {
+                surface,
+                entered: true,
+            }) if shell
+                .surface(surface)
+                .is_some_and(|entry| entry.role() == SurfaceRole::Panel) =>
+            {
+                state.panel_pointer_entered();
             }
             Some(ShellEvent::PointerEntered { surface, entered })
                 if shell

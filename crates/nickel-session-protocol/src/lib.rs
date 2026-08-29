@@ -178,6 +178,11 @@ pub enum TestKey {
     LeftMeta,
     Left,
     Right,
+    Up,
+    Down,
+    Space,
+    Backspace,
+    Delete,
     F11,
     PrintScreen,
 }

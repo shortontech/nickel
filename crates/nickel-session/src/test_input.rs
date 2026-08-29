@@ -277,6 +277,11 @@ fn linux_key_code(key: TestKey) -> u32 {
         TestKey::LeftMeta => 125,
         TestKey::Left => 105,
         TestKey::Right => 106,
+        TestKey::Up => 103,
+        TestKey::Down => 108,
+        TestKey::Space => 57,
+        TestKey::Backspace => 14,
+        TestKey::Delete => 111,
         TestKey::F11 => 87,
         TestKey::PrintScreen => 99,
     }
@@ -307,6 +312,11 @@ mod tests {
         assert_eq!(linux_key_code(TestKey::LeftAlt), 56);
         assert_eq!(linux_key_code(TestKey::LeftShift), 42);
         assert_eq!(linux_key_code(TestKey::LeftMeta), 125);
+        assert_eq!(linux_key_code(TestKey::Up), 103);
+        assert_eq!(linux_key_code(TestKey::Down), 108);
+        assert_eq!(linux_key_code(TestKey::Space), 57);
+        assert_eq!(linux_key_code(TestKey::Backspace), 14);
+        assert_eq!(linux_key_code(TestKey::Delete), 111);
         assert_eq!(linux_key_code(TestKey::F11), 87);
         assert_eq!(linux_key_code(TestKey::PrintScreen), 99);
     }

@@ -40,6 +40,14 @@ pub struct WindowPreviewFrame {
 }
 
 impl WindowPreviewFrame {
+    pub fn window(&self, index: usize) -> Option<WindowId> {
+        self.cards.get(index).map(|(window, _, _)| *window)
+    }
+
+    pub fn window_count(&self) -> usize {
+        self.cards.len()
+    }
+
     pub fn action_at(&self, point: Point, right_click: bool) -> Option<PreviewAction> {
         self.cards.iter().find_map(|(window, card, close)| {
             if contains(*close, point) {
@@ -84,6 +92,14 @@ pub struct WindowMenuFrame {
 }
 
 impl WindowMenuFrame {
+    pub fn action(&self, index: usize) -> Option<MenuAction> {
+        self.rows.get(index).map(|(_, action)| *action)
+    }
+
+    pub fn action_count(&self) -> usize {
+        self.rows.len()
+    }
+
     pub fn action_at(&self, point: Point) -> Option<MenuAction> {
         self.rows
             .iter()
@@ -183,6 +199,7 @@ pub fn menu_height(workspaces: &[WorkspaceSummary]) -> f32 {
 pub fn build_menu_frame(
     window: WindowId,
     workspaces: &[WorkspaceSummary],
+    selected: Option<usize>,
     palette: ThemePalette,
 ) -> WindowMenuFrame {
     let mut entries = vec![
@@ -218,7 +235,14 @@ pub fn build_menu_frame(
         color: palette.panel,
         radius: 10.0,
     }];
-    for ((row, _), (label, _)) in rows.iter().zip(&entries) {
+    for (index, ((row, _), (label, _))) in rows.iter().zip(&entries).enumerate() {
+        if selected == Some(index) {
+            commands.push(PaintCommand::RoundedFill {
+                rect: *row,
+                color: palette.surface_hover,
+                radius: 7.0,
+            });
+        }
         commands.push(text(*row, label, 0.9, palette.text));
     }
     WindowMenuFrame { commands, rows }
@@ -329,6 +353,10 @@ mod tests {
                 Some(action)
             );
         }
+        assert_eq!(frame.window_count(), 2);
+        assert_eq!(frame.window(0), Some(WindowId(4)));
+        assert_eq!(frame.window(1), Some(WindowId(9)));
+        assert_eq!(frame.window(2), None);
     }
 
     #[test]
@@ -350,6 +378,7 @@ mod tests {
         let frame = build_menu_frame(
             WindowId(9),
             &workspaces,
+            None,
             ThemePalette::from_appearance(Appearance::default()),
         );
         for action in [
@@ -361,6 +390,13 @@ mod tests {
         ] {
             assert_eq!(frame.action_at(frame.target_point(action)), Some(action));
         }
+        assert_eq!(frame.action_count(), 5);
+        assert_eq!(frame.action(0), Some(MenuAction::Close(WindowId(9))));
+        assert_eq!(
+            frame.action(4),
+            Some(MenuAction::MoveToWorkspace(WindowId(9), 8))
+        );
+        assert_eq!(frame.action(5), None);
     }
 
     #[test]

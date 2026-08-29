@@ -20,6 +20,10 @@ and known limitations for that compatibility layer.
 All globals are available only through the per-user Wayland socket. Nickel does not expose a
 cross-user input method, clipboard, or test-control endpoint. Test input is separately capability
 authenticated, restricted to the nested backend, and disabled unless `--test-control` is explicit.
+Toplevels from the authenticated shell client remain outside the application registry while their
+app ID is still pending, preventing recreated previews and menus from briefly becoming taskbar
+applications. A non-shell identity such as a Codex project window is admitted once its app ID is
+known.
 
 ## Compatibility matrix
 

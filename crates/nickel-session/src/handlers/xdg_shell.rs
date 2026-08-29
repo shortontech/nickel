@@ -37,6 +37,10 @@ fn is_codex_project_chat(app_id: Option<&str>) -> bool {
     app_id.is_some_and(|app_id| app_id.starts_with("io.nickel.codex.project."))
 }
 
+fn shell_owned_window_is_application(app_id: &str, shell_role: Option<ShellRole>) -> bool {
+    !app_id.is_empty() && shell_role.is_none()
+}
+
 impl XdgShellHandler for NickelSession {
     fn xdg_shell_state(&mut self) -> &mut XdgShellState {
         &mut self.xdg_shell_state
@@ -44,20 +48,35 @@ impl XdgShellHandler for NickelSession {
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
         let surface_id = surface.wl_surface().id();
-        let is_shell_client = self.shell_windows().any(|window| {
-            window
-                .toplevel()
-                .unwrap()
-                .wl_surface()
-                .id()
-                .same_client_as(&surface_id)
-        });
+        let is_shell_client = surface
+            .wl_surface()
+            .client()
+            .and_then(|client| client.get_credentials(&self.display_handle).ok())
+            .and_then(|credentials| u32::try_from(credentials.pid).ok())
+            .is_some_and(|pid| self.is_authenticated_shell_pid(pid))
+            || self.shell_windows().any(|window| {
+                window
+                    .toplevel()
+                    .unwrap()
+                    .wl_surface()
+                    .id()
+                    .same_client_as(&surface_id)
+            });
         let cascade = i32::try_from(self.windows.len() % 8).unwrap_or(0) * 32;
         let id = self.windows.insert();
-        self.workspaces.add_window(id);
+        if is_shell_client {
+            self.shell_owned_windows.insert(id);
+        } else {
+            self.workspaces.add_window(id);
+        }
         self.surface_windows.insert(surface.wl_surface().id(), id);
-        let geometry = self
-            .output_geometry_for_shell()
+        // The authenticated shell creates role-sized SDL surfaces before the
+        // app ID arrives. Giving those provisional surfaces an ordinary app
+        // configure makes a hidden transient recreate as a full application
+        // window and temporarily steals pointer hit testing from the panel.
+        let geometry = (!is_shell_client)
+            .then(|| self.output_geometry_for_shell())
+            .flatten()
             .map(shell_layout::work_area)
             .map(|area| shell_layout::initial_window(area, cascade));
         if let Some(geometry) = geometry {
@@ -117,6 +136,7 @@ impl XdgShellHandler for NickelSession {
             self.preview_window = None;
         }
         if let Some(id) = self.surface_windows.remove(&surface.wl_surface().id()) {
+            self.shell_owned_windows.remove(&id);
             self.minimized_windows.remove(&id);
             self.workspace_hidden_windows.remove(&id);
             self.workspaces.remove_window(&id);
@@ -429,6 +449,13 @@ impl NickelSession {
             self.windows.update_metadata(id, title, app_id);
             if shell_role.is_some() {
                 self.workspaces.remove_window(&id);
+            } else if self
+                .windows
+                .app_id(id)
+                .is_some_and(|app_id| shell_owned_window_is_application(app_id, shell_role))
+                && self.shell_owned_windows.remove(&id)
+            {
+                self.workspaces.add_window(id);
             }
         }
         self.notify_protocol_snapshot();
@@ -566,7 +593,8 @@ impl NickelSession {
 
 #[cfg(test)]
 mod tests {
-    use super::is_codex_project_chat;
+    use super::{is_codex_project_chat, shell_owned_window_is_application};
+    use nickel_session_protocol::ShellRole;
 
     #[test]
     fn codex_project_chat_uses_canonical_application_identity() {
@@ -575,5 +603,18 @@ mod tests {
         )));
         assert!(!is_codex_project_chat(Some("Codex — sentrygist")));
         assert!(!is_codex_project_chat(Some("io.nickel.shell")));
+    }
+
+    #[test]
+    fn shell_client_stays_private_until_a_non_shell_identity_is_known() {
+        assert!(!shell_owned_window_is_application("", None));
+        assert!(!shell_owned_window_is_application(
+            ShellRole::Preview.application_id(),
+            Some(ShellRole::Preview)
+        ));
+        assert!(shell_owned_window_is_application(
+            "io.nickel.codex.project.bd247278c96614ec",
+            None
+        ));
     }
 }

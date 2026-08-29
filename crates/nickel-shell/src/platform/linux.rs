@@ -658,18 +658,27 @@ fn session_request_on(
     request: SessionRequest,
 ) -> Option<ServerMessage> {
     let server = env::var_os(SESSION_CONTROL_ENV)?;
+    let request_id = SESSION_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
     let envelope = ClientEnvelope {
         token: env::var(SESSION_TOKEN_ENV).ok()?,
-        request_id: SESSION_REQUEST_ID.fetch_add(1, Ordering::Relaxed),
+        request_id,
         request,
     };
     socket
         .send_to(&encode_session(&envelope).ok()?, server)
         .ok()?;
     let mut response = vec![0_u8; nickel_session_protocol::MAX_FRAME_BYTES];
-    let length = socket.recv(&mut response).ok()?;
-    let response = decode_session::<ServerEnvelope>(&response[..length]).ok()?;
-    Some(response.message)
+    loop {
+        let length = socket.recv(&mut response).ok()?;
+        let response = decode_session::<ServerEnvelope>(&response[..length]).ok()?;
+        if let Some(message) = response_for_request(response, request_id) {
+            return Some(message);
+        }
+    }
+}
+
+fn response_for_request(response: ServerEnvelope, request_id: u64) -> Option<ServerMessage> {
+    (response.request_id == request_id).then_some(response.message)
 }
 
 fn one_shot_session_request(request: SessionRequest) -> Option<ServerMessage> {
@@ -786,6 +795,12 @@ fn shell_command_payload(command: ShellCommand) -> SessionCommand {
         ShellCommand::FocusControlCenter => SessionCommand::FocusShellRole {
             role: SessionShellRole::ControlCenter,
         },
+        ShellCommand::FocusPreview => SessionCommand::FocusShellRole {
+            role: SessionShellRole::Preview,
+        },
+        ShellCommand::FocusContextMenu => SessionCommand::FocusShellRole {
+            role: SessionShellRole::ContextMenu,
+        },
         ShellCommand::RestoreApplicationFocus => SessionCommand::RestoreApplicationFocus,
         ShellCommand::HideContextMenu => SessionCommand::HideOverlay,
         ShellCommand::HighlightWindow(window) => SessionCommand::HighlightWindow {
@@ -833,7 +848,7 @@ impl WindowFeed {
         let _ = std::fs::remove_file(&path);
         let socket = std::os::unix::net::UnixDatagram::bind(&path).ok();
         if let Some(socket) = &socket {
-            let _ = socket.set_read_timeout(Some(Duration::from_millis(25)));
+            let _ = socket.set_read_timeout(Some(Duration::from_millis(100)));
         }
         Self { socket, path }
     }
@@ -1085,13 +1100,26 @@ mod tests {
     use super::{
         SubscriptionState, bounded_notification_text, notification_actions,
         notification_name_owned, parse_window, pixmap_to_rgba, resolve_application_id,
-        shell_command_payload, subscription_shortcut, tray_retry_delay,
+        response_for_request, shell_command_payload, subscription_shortcut, tray_retry_delay,
     };
 
     #[test]
     fn existing_notification_owner_does_not_block_shell_startup() {
         assert!(!notification_name_owned(Err(zbus::Error::NameTaken)).unwrap());
         assert!(notification_name_owned(Ok(zbus::fdo::RequestNameReply::PrimaryOwner)).unwrap());
+    }
+
+    #[test]
+    fn persistent_session_socket_discards_stale_responses() {
+        let response = nickel_session_protocol::ServerEnvelope {
+            request_id: 7,
+            message: nickel_session_protocol::ServerMessage::Ack,
+        };
+        assert!(response_for_request(response.clone(), 8).is_none());
+        assert!(matches!(
+            response_for_request(response, 7),
+            Some(nickel_session_protocol::ServerMessage::Ack)
+        ));
     }
 
     #[test]

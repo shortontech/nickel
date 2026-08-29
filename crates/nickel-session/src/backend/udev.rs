@@ -955,7 +955,6 @@ impl NickelSession {
             for (id, window) in preview_windows {
                 if let Some(frame) = capture_preview(&mut renderer, &window) {
                     self.preview_frames.insert(id, frame);
-                    self.notify_preview_frame(id);
                 }
             }
             let mut elements: Vec<

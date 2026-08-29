@@ -213,6 +213,7 @@ pub struct NickelSession {
     pub seat: Seat<Self>,
     pub windows: WindowRegistry,
     pub surface_windows: HashMap<ObjectId, WindowId>,
+    pub(crate) shell_owned_windows: HashSet<WindowId>,
     pub x11_windows: HashMap<u32, WindowId>,
     pub launcher_window: Option<Window>,
     pub launcher_visibility: LauncherVisibility,
@@ -489,6 +490,7 @@ impl NickelSession {
             seat,
             windows: WindowRegistry::default(),
             surface_windows: HashMap::new(),
+            shell_owned_windows: HashSet::new(),
             x11_windows: HashMap::new(),
             launcher_window: None,
             launcher_visibility: LauncherVisibility::default(),
@@ -1052,11 +1054,11 @@ impl NickelSession {
         self.windows
             .snapshot()
             .iter()
-            .any(|window| window.id.0 == id.0)
+            .any(|window| window.id.0 == id.0 && !self.shell_owned_windows.contains(&window.id))
     }
 
     fn protocol_windows(&self) -> Vec<WindowSnapshot> {
-        let shell_ids = self
+        let mut shell_ids = self
             .shell_windows()
             .filter_map(|window| {
                 self.surface_windows
@@ -1064,6 +1066,7 @@ impl NickelSession {
             })
             .copied()
             .collect::<HashSet<_>>();
+        shell_ids.extend(self.shell_owned_windows.iter().copied());
         self.windows
             .snapshot()
             .into_iter()
@@ -1906,32 +1909,6 @@ impl NickelSession {
         let Ok(event) = encode(&ServerEnvelope {
             request_id: 0,
             message: ServerMessage::Event(SessionEvent::Snapshot(self.protocol_snapshot())),
-        }) else {
-            return;
-        };
-        let Ok(socket) = UnixDatagram::unbound() else {
-            return;
-        };
-        self.launcher_subscribers
-            .retain(|path| socket.send_to(&event, path).is_ok());
-    }
-
-    pub(crate) fn notify_preview_frame(&mut self, window: WindowId) {
-        let Some(frame) = self.preview_frames.get(&window) else {
-            return;
-        };
-        let preview = ProtocolPreview {
-            window: ProtocolWindowId(window.0),
-            width: frame.width,
-            height: frame.height,
-            rgba: frame.rgba.clone(),
-        };
-        if preview.validate().is_err() {
-            return;
-        }
-        let Ok(event) = encode(&ServerEnvelope {
-            request_id: 0,
-            message: ServerMessage::Event(SessionEvent::Preview(preview)),
         }) else {
             return;
         };

@@ -380,7 +380,6 @@ pub fn init_winit(
                         for (id, window) in windows {
                             if let Some(frame) = capture_preview(renderer, &window) {
                                 state.preview_frames.insert(id, frame);
-                                state.notify_preview_frame(id);
                             }
                         }
                         last_preview_capture = Instant::now();

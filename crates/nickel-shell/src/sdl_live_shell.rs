@@ -46,6 +46,7 @@ const PANEL_TRAY_ICON_SIZE: u32 = 18;
 const PANEL_CODEX_WIDTH: f32 = 36.0;
 const PANEL_CODEX_ICON_SIZE: f32 = 28.0;
 const PREVIEW_LEAVE_DELAY: Duration = Duration::from_millis(500);
+const PREVIEW_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct PanelStatusLayout {
@@ -112,13 +113,19 @@ pub struct LiveShell {
     codex_project_menu_visible: bool,
     panel_hover: Option<PanelHover>,
     preview_group: Option<usize>,
+    preview_focus_requested: bool,
     preview_pointer_inside: bool,
     preview_leave_deadline: Option<Instant>,
     preview_hovered: Option<crate::model::WindowId>,
+    preview_selected: usize,
     preview_images: HashMap<crate::model::WindowId, Arc<image::RgbaImage>>,
+    preview_refresh_deadline: Option<Instant>,
     preview_frame: Option<WindowPreviewFrame>,
     window_menu: Option<crate::model::WindowId>,
     window_menu_frame: Option<WindowMenuFrame>,
+    window_menu_selected: usize,
+    notification_selected: usize,
+    notification_keyboard_active: bool,
     panel_origin_x: i32,
     control_state: ControlViewState,
     launcher_view: LauncherViewState,
@@ -158,6 +165,10 @@ fn contains_rect(rect: Rect, point: Point) -> bool {
         && point.y >= rect.origin.y
         && point.x < rect.origin.x + rect.size.width
         && point.y < rect.origin.y + rect.size.height
+}
+
+fn preview_refresh_due(deadline: Option<Instant>, now: Instant) -> bool {
+    deadline.is_none_or(|deadline| now >= deadline)
 }
 
 impl LiveShell {
@@ -249,13 +260,19 @@ impl LiveShell {
             codex_project_menu_visible: false,
             panel_hover: None,
             preview_group: None,
+            preview_focus_requested: false,
             preview_pointer_inside: false,
             preview_leave_deadline: None,
             preview_hovered: None,
+            preview_selected: 0,
             preview_images: HashMap::new(),
+            preview_refresh_deadline: None,
             preview_frame: None,
             window_menu: None,
             window_menu_frame: None,
+            window_menu_selected: 0,
+            notification_selected: 0,
+            notification_keyboard_active: false,
             panel_origin_x: 0,
             control_state: ControlViewState::default(),
             launcher_view: LauncherViewState::default(),
@@ -276,21 +293,6 @@ impl LiveShell {
 
     pub fn refresh_fast(&mut self) -> bool {
         let mut changed = false;
-        #[cfg(target_os = "linux")]
-        {
-            let secure_storage_state = platform::secure_storage_state();
-            if secure_storage_state != self.secure_storage_state {
-                self.secure_storage_state = secure_storage_state;
-                changed = true;
-            }
-            if self.launcher_status.is_some()
-                && secure_storage_state == platform::SecureStorageState::Ready
-            {
-                self.launcher_status = None;
-                self.secure_storage_override = None;
-                changed = true;
-            }
-        }
         #[cfg(target_os = "macos")]
         if self.launcher_visible || self.control_visible {
             return false;
@@ -321,7 +323,10 @@ impl LiveShell {
                 .get(index)
                 .cloned()
         });
-        if let Some(group) = preview_group {
+        let preview_refresh_now = Instant::now();
+        if let Some(group) = preview_group
+            && preview_refresh_due(self.preview_refresh_deadline, preview_refresh_now)
+        {
             for window in &group.windows {
                 if let Some(preview) = self.window_feed.preview(window.id) {
                     let image = Arc::new(preview.image);
@@ -335,6 +340,7 @@ impl LiveShell {
                     }
                 }
             }
+            self.preview_refresh_deadline = Some(preview_refresh_now + PREVIEW_REFRESH_INTERVAL);
         }
         let tray = self.tray_feed.snapshot();
         if tray != self.tray {
@@ -345,6 +351,8 @@ impl LiveShell {
         let notification = self.notification_feed.snapshot();
         if notification != self.notification {
             self.notification = notification;
+            self.notification_selected = 0;
+            self.notification_keyboard_active = false;
             changed = true;
         }
         changed
@@ -356,6 +364,21 @@ impl LiveShell {
             return false;
         }
         let mut changed = false;
+        #[cfg(target_os = "linux")]
+        {
+            let secure_storage_state = platform::secure_storage_state();
+            if secure_storage_state != self.secure_storage_state {
+                self.secure_storage_state = secure_storage_state;
+                changed = true;
+            }
+            if self.launcher_status.is_some()
+                && secure_storage_state == platform::SecureStorageState::Ready
+            {
+                self.launcher_status = None;
+                self.secure_storage_override = None;
+                changed = true;
+            }
+        }
         let palette = ThemePalette::from_appearance(
             ShellSettings::load_default().resolve_appearance(Appearance::default()),
         );
@@ -444,6 +467,31 @@ impl LiveShell {
         self.dismiss_notification()
     }
 
+    pub fn notification_key(&mut self, key: Option<Keycode>) -> bool {
+        let Some(notification) = self.notification.as_ref() else {
+            return false;
+        };
+        let count = notification.actions.len();
+        self.notification_keyboard_active = true;
+        match key {
+            Some(Keycode::Escape) => return self.dismiss_notification(),
+            Some(Keycode::Left | Keycode::Up) if count > 0 => {
+                self.notification_selected = (self.notification_selected + count - 1) % count;
+            }
+            Some(Keycode::Right | Keycode::Down | Keycode::Tab) if count > 0 => {
+                self.notification_selected = (self.notification_selected + 1) % count;
+            }
+            Some(Keycode::Return | Keycode::KpEnter | Keycode::Space) => {
+                if let Some(action) = notification.actions.get(self.notification_selected) {
+                    self.notification_feed.invoke(notification.id, &action.key);
+                }
+                return self.dismiss_notification();
+            }
+            _ => return false,
+        }
+        true
+    }
+
     pub fn panel_click(&mut self, x: f32, width: u32) -> bool {
         if x < PANEL_ITEM_WIDTH {
             self.set_launcher_visible(!self.launcher_visible);
@@ -458,6 +506,7 @@ impl LiveShell {
                 .is_some_and(|group| group.windows.len() > 1)
             {
                 self.open_window_preview(index);
+                self.preview_focus_requested = true;
             } else if let Some(window) = groups.get(index).and_then(|group| group.windows.first()) {
                 let _ = platform::send_shell_command(ShellCommand::WindowAction {
                     window: window.id,
@@ -521,6 +570,10 @@ impl LiveShell {
         true
     }
 
+    pub fn panel_pointer_entered(&mut self) -> bool {
+        self.preview_leave_deadline.take().is_some()
+    }
+
     pub fn preview_pointer_entered(&mut self, entered: bool) -> bool {
         if self.preview_pointer_inside == entered {
             return false;
@@ -572,8 +625,13 @@ impl LiveShell {
             }
             PreviewAction::OpenMenu(window) => {
                 self.window_menu = Some(window);
-                self.window_menu_frame =
-                    Some(build_menu_frame(window, &self.workspaces, self.palette));
+                self.window_menu_selected = 0;
+                self.window_menu_frame = Some(build_menu_frame(
+                    window,
+                    &self.workspaces,
+                    Some(0),
+                    self.palette,
+                ));
                 let x = self.panel_origin_x
                     + self.preview_group.map_or(0, |index| {
                         (PANEL_ITEM_WIDTH + index as f32 * PANEL_ITEM_WIDTH) as i32
@@ -583,7 +641,58 @@ impl LiveShell {
                     width: MENU_WIDTH as i32,
                     height: menu_height(&self.workspaces) as i32,
                 });
+                #[cfg(target_os = "linux")]
+                let _ = platform::send_shell_command(ShellCommand::FocusContextMenu);
             }
+        }
+        true
+    }
+
+    pub fn preview_key(&mut self, key: Option<Keycode>) -> bool {
+        if self.window_menu.is_some() {
+            return self.window_menu_key(key);
+        }
+        let Some(frame) = self.preview_frame.as_ref() else {
+            return false;
+        };
+        let count = frame.window_count();
+        if count == 0 {
+            return false;
+        }
+        self.preview_selected = self.preview_selected.min(count - 1);
+        match key {
+            Some(Keycode::Escape) => {
+                self.close_window_preview();
+                let _ = platform::send_shell_command(ShellCommand::RestoreApplicationFocus);
+            }
+            Some(Keycode::Left | Keycode::Up) => {
+                self.preview_selected = (self.preview_selected + count - 1) % count;
+                self.preview_hovered = frame.window(self.preview_selected);
+                if let Some(window) = self.preview_hovered {
+                    let _ = platform::send_shell_command(ShellCommand::HighlightWindow(window));
+                }
+            }
+            Some(Keycode::Right | Keycode::Down | Keycode::Tab) => {
+                self.preview_selected = (self.preview_selected + 1) % count;
+                self.preview_hovered = frame.window(self.preview_selected);
+                if let Some(window) = self.preview_hovered {
+                    let _ = platform::send_shell_command(ShellCommand::HighlightWindow(window));
+                }
+            }
+            Some(Keycode::Delete) => {
+                let Some(window) = frame.window(self.preview_selected) else {
+                    return false;
+                };
+                self.send_window_action(window, WindowAction::Close);
+            }
+            Some(Keycode::Return | Keycode::KpEnter | Keycode::Space) => {
+                let Some(window) = frame.window(self.preview_selected) else {
+                    return false;
+                };
+                self.send_window_action(window, WindowAction::Activate);
+                self.close_window_preview();
+            }
+            _ => return false,
         }
         true
     }
@@ -613,7 +722,55 @@ impl LiveShell {
         true
     }
 
-    pub fn sync_transient_overlays(&self) {
+    pub fn window_menu_key(&mut self, key: Option<Keycode>) -> bool {
+        let Some(frame) = self.window_menu_frame.as_ref() else {
+            return false;
+        };
+        let count = frame.action_count();
+        if count == 0 {
+            return false;
+        }
+        self.window_menu_selected = self.window_menu_selected.min(count - 1);
+        match key {
+            Some(Keycode::Escape) => {
+                self.close_window_preview();
+                let _ = platform::send_shell_command(ShellCommand::RestoreApplicationFocus);
+            }
+            Some(Keycode::Up | Keycode::Left) => {
+                self.window_menu_selected = (self.window_menu_selected + count - 1) % count;
+            }
+            Some(Keycode::Down | Keycode::Right | Keycode::Tab) => {
+                self.window_menu_selected = (self.window_menu_selected + 1) % count;
+            }
+            Some(Keycode::Return | Keycode::KpEnter | Keycode::Space) => {
+                let Some(action) = frame.action(self.window_menu_selected) else {
+                    return false;
+                };
+                match action {
+                    MenuAction::Close(window) => {
+                        self.send_window_action(window, WindowAction::Close)
+                    }
+                    MenuAction::MaximizeRestore(window) => {
+                        self.send_window_action(window, WindowAction::Maximize)
+                    }
+                    MenuAction::Minimize(window) => {
+                        self.send_window_action(window, WindowAction::Minimize)
+                    }
+                    MenuAction::MoveToWorkspace(window, workspace) => {
+                        let _ = platform::send_shell_command(ShellCommand::MoveWindowToWorkspace {
+                            window,
+                            workspace,
+                        });
+                    }
+                }
+                self.close_window_preview();
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    pub fn sync_transient_overlays(&mut self) {
         if let Some(index) = self.preview_group {
             let groups = self.launcher.group_windows(&self.windows);
             if let Some(group) = groups.get(index) {
@@ -632,6 +789,11 @@ impl LiveShell {
                     height: height as i32,
                     windows,
                 });
+                if self.preview_focus_requested {
+                    #[cfg(target_os = "linux")]
+                    let _ = platform::send_shell_command(ShellCommand::FocusPreview);
+                    self.preview_focus_requested = false;
+                }
             }
         }
         if self.window_menu.is_some() {
@@ -661,17 +823,22 @@ impl LiveShell {
         }
         self.preview_group = Some(index);
         self.preview_images.clear();
+        self.preview_refresh_deadline = None;
         self.preview_hovered = None;
+        self.preview_selected = 0;
         self.window_menu = None;
         self.window_menu_frame = None;
     }
 
     fn close_window_preview(&mut self) {
         self.preview_group = None;
+        self.preview_focus_requested = false;
         self.preview_pointer_inside = false;
         self.preview_leave_deadline = None;
         self.preview_hovered = None;
+        self.preview_selected = 0;
         self.preview_images.clear();
+        self.preview_refresh_deadline = None;
         self.preview_frame = None;
         self.window_menu = None;
         self.window_menu_frame = None;
@@ -1293,7 +1460,11 @@ impl LiveShell {
         for (index, rect) in notification_action_rects(notification.actions.len(), width, height) {
             commands.push(PaintCommand::RoundedFill {
                 rect,
-                color: self.palette.surface_hover,
+                color: if self.notification_keyboard_active && index == self.notification_selected {
+                    self.palette.accent_soft
+                } else {
+                    self.palette.surface_hover
+                },
                 radius: 7.0,
             });
             commands.push(text(
@@ -1335,7 +1506,12 @@ impl LiveShell {
             self.window_menu_frame = None;
             return Vec::new();
         };
-        let frame = build_menu_frame(window, &self.workspaces, self.palette);
+        let frame = build_menu_frame(
+            window,
+            &self.workspaces,
+            Some(self.window_menu_selected),
+            self.palette,
+        );
         let commands = frame.commands.clone();
         self.window_menu_frame = Some(frame);
         commands
@@ -1798,7 +1974,7 @@ fn text(
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::{cell::Cell, collections::HashMap};
 
     use image::{Rgba, RgbaImage};
     use nickel_ui::{Point, Rect};
@@ -1806,9 +1982,16 @@ mod tests {
 
     use super::{
         LiveShell, contains_rect, notification_action_rects, panel_status_layout, panel_tray_icons,
-        platform::SecureStorageState, secure_storage_status_label, visible_tray_item,
+        platform::SecureStorageState, preview_refresh_due, secure_storage_status_label,
+        visible_tray_item,
     };
-    use crate::model::TrayItem;
+    use crate::{
+        model::{OpenWindow, TrayItem, WindowGroup, WindowId},
+        notification::{NotificationAction, NotificationRequest, NotificationStore},
+        sdl_window_preview::{build_menu_frame, build_preview_frame},
+    };
+    use nickel_core::theme::Appearance;
+    use std::time::Instant;
 
     #[test]
     fn launcher_exposes_every_non_ready_secure_storage_state() {
@@ -1874,6 +2057,78 @@ mod tests {
     }
 
     #[test]
+    fn transient_keyboard_navigation_uses_production_frame_order() {
+        let mut shell = LiveShell::new().unwrap();
+        let palette = nickel_core::theme::ThemePalette::from_appearance(Appearance::default());
+        let group = WindowGroup {
+            application_id: None,
+            application_name: "Editor".into(),
+            windows: vec![
+                OpenWindow {
+                    id: WindowId(4),
+                    application_id: None,
+                    active: true,
+                    title: "one".into(),
+                },
+                OpenWindow {
+                    id: WindowId(9),
+                    application_id: None,
+                    active: false,
+                    title: "two".into(),
+                },
+            ],
+        };
+        shell.preview_group = Some(0);
+        shell.preview_frame = Some(build_preview_frame(&group, &HashMap::new(), None, palette));
+
+        assert!(shell.preview_key(Some(Keycode::Right)));
+        assert_eq!(shell.preview_selected, 1);
+        assert_eq!(shell.preview_hovered, Some(WindowId(9)));
+        assert!(shell.preview_key(Some(Keycode::Left)));
+        assert_eq!(shell.preview_selected, 0);
+
+        shell.window_menu = Some(WindowId(4));
+        shell.window_menu_frame = Some(build_menu_frame(WindowId(4), &[], Some(0), palette));
+        assert!(shell.preview_key(Some(Keycode::Down)));
+        assert_eq!(shell.window_menu_selected, 1);
+        assert!(shell.window_menu_key(Some(Keycode::Up)));
+        assert_eq!(shell.window_menu_selected, 0);
+    }
+
+    #[test]
+    fn notification_keyboard_selection_follows_action_order() {
+        let mut shell = LiveShell::new().unwrap();
+        let mut store = NotificationStore::default();
+        store.notify(
+            0,
+            NotificationRequest {
+                app_name: "Test".into(),
+                summary: "Ready".into(),
+                body: String::new(),
+                actions: vec![
+                    NotificationAction {
+                        key: "open".into(),
+                        label: "Open".into(),
+                    },
+                    NotificationAction {
+                        key: "dismiss".into(),
+                        label: "Dismiss".into(),
+                    },
+                ],
+                expire_timeout_ms: 0,
+            },
+            Instant::now(),
+        );
+        shell.notification = store.newest();
+
+        assert!(shell.notification_key(Some(Keycode::Right)));
+        assert_eq!(shell.notification_selected, 1);
+        assert!(shell.notification_keyboard_active);
+        assert!(shell.notification_key(Some(Keycode::Left)));
+        assert_eq!(shell.notification_selected, 0);
+    }
+
+    #[test]
     fn right_panel_cluster_is_compact_and_grouped() {
         let layout = panel_status_layout(1920, 3);
         assert_eq!(layout.control_start, 1816.0);
@@ -1883,6 +2138,27 @@ mod tests {
             layout.codex_icon_bounds(),
             Rect::new(1700.0, 14.0, 28.0, 28.0)
         );
+    }
+
+    #[test]
+    fn panel_reentry_cancels_a_stale_preview_leave_deadline() {
+        let mut shell = LiveShell::new().unwrap();
+        shell.preview_leave_deadline = Some(Instant::now());
+
+        assert!(shell.panel_pointer_entered());
+        assert!(shell.preview_leave_deadline.is_none());
+        assert!(!shell.panel_pointer_entered());
+    }
+
+    #[test]
+    fn preview_refresh_has_a_hard_temporal_bound() {
+        let now = Instant::now();
+        assert!(preview_refresh_due(None, now));
+        assert!(!preview_refresh_due(
+            Some(now + super::PREVIEW_REFRESH_INTERVAL),
+            now
+        ));
+        assert!(preview_refresh_due(Some(now), now));
     }
 
     #[test]

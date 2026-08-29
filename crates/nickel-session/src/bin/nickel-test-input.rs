@@ -23,7 +23,7 @@ Usage:
   nickel-test-input move X Y
   nickel-test-input move-relative DX DY
   nickel-test-input button left|right pressed|released
-  nickel-test-input key a|c|p|enter|escape|tab|alt|shift|control|meta|left|right|f11|print-screen pressed|released
+  nickel-test-input key a|c|p|enter|escape|tab|alt|shift|control|meta|left|right|up|down|space|backspace|delete|f11|print-screen pressed|released
 ";
 
 enum Parsed {
@@ -181,6 +181,11 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, String> {
                 "meta" => TestKey::LeftMeta,
                 "left" => TestKey::Left,
                 "right" => TestKey::Right,
+                "up" => TestKey::Up,
+                "down" => TestKey::Down,
+                "space" => TestKey::Space,
+                "backspace" => TestKey::Backspace,
+                "delete" => TestKey::Delete,
                 "f11" => TestKey::F11,
                 "print-screen" => TestKey::PrintScreen,
                 _ => return Err(format!("unknown key {key:?}")),
@@ -498,6 +503,6 @@ mod tests {
     #[test]
     fn rejects_unknown_inputs() {
         assert!(parse(["button".into(), "middle".into(), "pressed".into()]).is_err());
-        assert!(parse(["key".into(), "space".into(), "pressed".into()]).is_err());
+        assert!(parse(["key".into(), "home".into(), "pressed".into()]).is_err());
     }
 }

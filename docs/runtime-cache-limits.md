@@ -20,3 +20,8 @@ window titles, icons, scales, and preview targets cannot grow a desktop session 
 byte total for an explicitly test-controlled nested session. The shared asset and launcher cache APIs
 expose entry, capacity, and cumulative eviction counters to application diagnostics without exposing
 native handles or retaining duplicate semantic state.
+
+Visible grouped-window previews refresh at most twice per second. Preview frames are fetched by
+correlated request ID over the session socket; stale timed-out replies are discarded instead of
+being mistaken for the next query. The compositor does not broadcast RGBA frames to subscribers,
+so an open preview cannot fill unrelated control or input queues.

@@ -172,6 +172,10 @@ pub enum ShellCommand {
     #[cfg(target_os = "linux")]
     FocusControlCenter,
     #[cfg(target_os = "linux")]
+    FocusPreview,
+    #[cfg(target_os = "linux")]
+    FocusContextMenu,
+    #[cfg(target_os = "linux")]
     RestoreApplicationFocus,
     HideContextMenu,
     HighlightWindow(WindowId),
