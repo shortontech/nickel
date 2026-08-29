@@ -185,13 +185,21 @@ fn output_disconnect_and_reconnect_reflows_deterministically() {
 }
 
 #[test]
-#[ignore = "Spec 0092: Shift is dropped from PrintScreen action routing"]
 fn alt_shift_print_screen_routes_to_file_capture() {
     scenario("alt-shift-print-screen file capture")
         .key_edge(Hotkey::Alt, KeyEdge::Pressed)
         .key_edge(Hotkey::Shift, KeyEdge::Pressed)
         .key_edge(Hotkey::PrintScreen, KeyEdge::Pressed)
-        .expect_actions(&[HotkeyAction::CaptureActiveWindowToFile]);
+        .key_edge(Hotkey::PrintScreen, KeyEdge::Pressed)
+        .key_edge(Hotkey::PrintScreen, KeyEdge::Released)
+        .key_edge(Hotkey::Shift, KeyEdge::Released)
+        .key_edge(Hotkey::PrintScreen, KeyEdge::Pressed)
+        .key_edge(Hotkey::PrintScreen, KeyEdge::Released)
+        .key_edge(Hotkey::Alt, KeyEdge::Released)
+        .expect_actions(&[
+            HotkeyAction::CaptureActiveWindowToFile,
+            HotkeyAction::CaptureActiveWindow,
+        ]);
 }
 
 #[test]

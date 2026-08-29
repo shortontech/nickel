@@ -196,11 +196,14 @@ impl HotkeyController {
                 }
             }
             (Hotkey::PrintScreen, KeyEdge::Pressed) => {
-                let action = (!self.print_screen_held).then_some(if self.alt_held {
-                    HotkeyAction::CaptureActiveWindow
-                } else {
-                    HotkeyAction::ShowScreenshotTool
-                });
+                let action =
+                    (!self.print_screen_held).then_some(if self.alt_held && self.shift_held {
+                        HotkeyAction::CaptureActiveWindowToFile
+                    } else if self.alt_held {
+                        HotkeyAction::CaptureActiveWindow
+                    } else {
+                        HotkeyAction::ShowScreenshotTool
+                    });
                 self.print_screen_held = true;
                 HotkeyOutcome {
                     action,
@@ -422,6 +425,21 @@ mod tests {
             controller.handle(Hotkey::PrintScreen, KeyEdge::Released),
             HotkeyOutcome {
                 action: None,
+                suppress: true,
+            }
+        );
+    }
+
+    #[test]
+    fn alt_shift_print_screen_uses_the_file_capture_action() {
+        let mut controller = HotkeyController::default();
+        controller.handle(Hotkey::Alt, KeyEdge::Pressed);
+        controller.handle(Hotkey::Shift, KeyEdge::Pressed);
+
+        assert_eq!(
+            controller.handle(Hotkey::PrintScreen, KeyEdge::Pressed),
+            HotkeyOutcome {
+                action: Some(HotkeyAction::CaptureActiveWindowToFile),
                 suppress: true,
             }
         );
