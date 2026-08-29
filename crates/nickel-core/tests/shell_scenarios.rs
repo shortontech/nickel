@@ -55,6 +55,7 @@ fn alt_backtick_scopes_candidates_to_the_active_application() {
         .app("chrome")
         .press(Key::AltBacktick)
         .expect_active("chrome-old")
+        .expect_last_event_authority()
         .expect_actions(&[HotkeyAction::SwitchGroupNext, HotkeyAction::CommitSwitch])
         .expect_effects(&[
             TaskSwitchEffect::ShowFlip { session: 1 },
@@ -238,6 +239,7 @@ fn removing_selected_window_during_flip_does_not_activate_it() {
         .key_edge(Hotkey::Alt, KeyEdge::Pressed)
         .key_edge(Hotkey::Tab, KeyEdge::Pressed)
         .remove_window("closing")
+        .expect_last_event_authority()
         .key_edge(Hotkey::Tab, KeyEdge::Released)
         .key_edge(Hotkey::Alt, KeyEdge::Released)
         .expect_effects(&[
@@ -353,6 +355,7 @@ fn semantic_window_click_is_observed_through_production_effects() {
         .click(ClickTarget::PanelLauncher)
         .click_window("editor")
         .expect_active("editor")
+        .expect_last_event_authority()
         .expect_effects(&[TaskSwitchEffect::ActivateWindow("editor".into())])
         .expect_ordered_effects(&[
             RecordedEffect::Launcher(LauncherEffect::ShowSurface(SurfaceIdentity(1))),

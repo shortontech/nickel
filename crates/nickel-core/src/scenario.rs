@@ -15,7 +15,10 @@ use crate::{
     },
     workspaces::{WorkspaceDirection, WorkspaceId, WorkspaceTransition, Workspaces},
 };
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::{BTreeMap, HashMap},
+    time::Duration,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Key {
@@ -167,7 +170,8 @@ pub struct Scenario {
     workspaces: Workspaces<String>,
     workspace_names: HashMap<String, WorkspaceId>,
     authority: Vec<AuthorityRecord>,
-    state_before_event: String,
+    authority_before_event: usize,
+    state_before_event: BTreeMap<&'static str, String>,
 }
 
 type TaskReducer = fn(
@@ -223,7 +227,8 @@ pub fn scenario(name: impl Into<String>) -> Scenario {
         workspaces: Workspaces::default(),
         workspace_names: HashMap::from([("main".into(), WorkspaceId(1))]),
         authority: Vec::new(),
-        state_before_event: "initial scenario state".into(),
+        authority_before_event: 0,
+        state_before_event: BTreeMap::new(),
     }
 }
 
@@ -356,6 +361,15 @@ impl Scenario {
                         acknowledged: true,
                     });
                     self.platform.apply(effect);
+                    self.authority.push(AuthorityRecord {
+                        field: "effects.ordered".into(),
+                        path: "production pointer reducer -> RecordingPlatform".into(),
+                    });
+                    self.authority.push(AuthorityRecord {
+                        field: "effects.acknowledgements".into(),
+                        path: "production pointer reducer -> synchronous recording adapter acknowledgement"
+                            .into(),
+                    });
                 }
             }
         }
@@ -367,6 +381,10 @@ impl Scenario {
     pub fn remove_window(mut self, window: &str) -> Self {
         self.consume_event(format!("window removed {window:?}"));
         self.workspaces.remove_window(&window.to_owned());
+        self.authority.push(AuthorityRecord {
+            field: "workspaces".into(),
+            path: format!("production window lifecycle removal {window:?} -> Workspaces"),
+        });
         let before = self.windows.len();
         self.windows.retain(|candidate| candidate.name != window);
         assert_eq!(
@@ -414,6 +432,10 @@ impl Scenario {
     pub fn disconnect_output(mut self, output: &str) -> Self {
         self.consume_event(format!("output disconnected {output:?}"));
         self.outputs.disconnect(output);
+        self.authority.push(AuthorityRecord {
+            field: "outputs.layout".into(),
+            path: format!("semantic topology event -> OutputLayout::disconnect({output:?})"),
+        });
         self
     }
 
@@ -527,6 +549,12 @@ impl Scenario {
         self.consume_event("acknowledge current focus".into());
         if let Some(request) = self.focus.requested().cloned() {
             let _ = self.focus.acknowledge(&request);
+            self.authority.push(AuthorityRecord {
+                field: "focus.acknowledged".into(),
+                path: format!(
+                    "platform focus callback -> FocusTransactions::acknowledge({request:?})"
+                ),
+            });
         }
         self
     }
@@ -549,10 +577,16 @@ impl Scenario {
 
     pub fn lose_focus(mut self, request: FocusRequest<SurfaceIdentity>) -> Self {
         self.consume_event(format!("focus lost {:?}", request.transaction));
-        if self.focus.loses_current(&request)
-            && self.launcher.pointer_press(LauncherPointerTarget::Other)
-        {
-            self.hide_launcher(true);
+        if self.focus.loses_current(&request) {
+            self.authority.push(AuthorityRecord {
+                field: "focus.acknowledged".into(),
+                path: format!(
+                    "platform focus callback -> FocusTransactions::loses_current({request:?})"
+                ),
+            });
+            if self.launcher.pointer_press(LauncherPointerTarget::Other) {
+                self.hide_launcher(true);
+            }
         }
         self
     }
@@ -577,10 +611,16 @@ impl Scenario {
             )
         });
         self.consume_event(format!("focus lost {:?}", request.transaction));
-        if self.focus.loses_current(&request)
-            && self.launcher.pointer_press(LauncherPointerTarget::Other)
-        {
-            self.hide_launcher(true);
+        if self.focus.loses_current(&request) {
+            self.authority.push(AuthorityRecord {
+                field: "focus.acknowledged".into(),
+                path: format!(
+                    "platform focus callback -> FocusTransactions::loses_current({request:?})"
+                ),
+            });
+            if self.launcher.pointer_press(LauncherPointerTarget::Other) {
+                self.hide_launcher(true);
+            }
         }
         self
     }
@@ -626,21 +666,26 @@ impl Scenario {
     }
 
     pub fn expect_stable_for(mut self, duration: Duration) -> Self {
-        let launcher = self.launcher;
-        let task_session = self.switcher.session();
-        let launcher_effects = self.platform.launcher_effects.len();
-        let task_effects = self.platform.effects.len();
-        let redraws = self.redraws;
-        self.now += duration;
-        let stable = self.launcher == launcher
-            && self.switcher.session() == task_session
-            && self.platform.launcher_effects.len() == launcher_effects
-            && self.platform.effects.len() == task_effects
-            && self.redraws == redraws;
+        let before = self.stability_state();
+        self = self.advance(duration);
+        let after = self.stability_state();
         self.assert(
-            stable,
-            format!("state changed while stable for {duration:?}"),
+            before == after,
+            format!(
+                "state changed while stable for {duration:?}: {}",
+                diagnostic_diff(&before, &after)
+            ),
         )
+    }
+
+    pub fn advance(mut self, duration: Duration) -> Self {
+        self.consume_event(format!("advance virtual time by {duration:?}"));
+        self.now += duration;
+        self.authority.push(AuthorityRecord {
+            field: "virtual_time".into(),
+            path: format!("explicit scenario clock advance by {duration:?}"),
+        });
+        self
     }
 
     pub fn expect_active(self, window: &str) -> Self {
@@ -718,12 +763,32 @@ impl Scenario {
         )
     }
 
+    pub fn expect_last_event_authority(self) -> Self {
+        let after = self.diagnostic_state();
+        let missing = changed_fields(&self.state_before_event, &after)
+            .into_iter()
+            .filter(|field| {
+                !self.authority[self.authority_before_event..]
+                    .iter()
+                    .any(|record| record.field == *field)
+            })
+            .collect::<Vec<_>>();
+        self.assert(
+            missing.is_empty(),
+            format!("changed fields lack last-event authority records: {missing:?}"),
+        )
+    }
+
     pub fn platform(&self) -> &RecordingPlatform {
         &self.platform
     }
 
     fn apply_hotkey_action(&mut self, action: HotkeyAction) {
         self.actions.push(action);
+        self.authority.push(AuthorityRecord {
+            field: "input.actions".into(),
+            path: format!("semantic key -> HotkeyController -> {action:?}"),
+        });
         let workspace_transition = match action {
             HotkeyAction::SwitchWorkspacePrevious | HotkeyAction::SwitchWorkspaceNext => {
                 let direction = if action == HotkeyAction::SwitchWorkspacePrevious {
@@ -778,6 +843,12 @@ impl Scenario {
         transition: WorkspaceTransition<String>,
         authority: &str,
     ) {
+        for field in ["workspace.active", "workspace.output", "workspaces"] {
+            self.authority.push(AuthorityRecord {
+                field: field.into(),
+                path: format!("semantic workspace action -> {authority}"),
+            });
+        }
         let effects = transition
             .hide
             .into_iter()
@@ -807,6 +878,10 @@ impl Scenario {
             self.platform
                 .ordered_effects
                 .push(RecordedEffect::Workspace(effect));
+            self.authority.push(AuthorityRecord {
+                field: "effects.ordered".into(),
+                path: format!("semantic workspace action -> {authority} -> RecordingPlatform"),
+            });
         }
         self.check_budget();
     }
@@ -818,12 +893,13 @@ impl Scenario {
     ) {
         for effect in effects {
             self.consumed_effects += 1;
-            if matches!(
+            let redraw = matches!(
                 effect,
                 TaskSwitchEffect::ShowFlip { .. }
                     | TaskSwitchEffect::SelectPreview(_)
                     | TaskSwitchEffect::HideFlip { .. }
-            ) {
+            );
+            if redraw {
                 self.redraws += 1;
             }
             self.authority.push(AuthorityRecord {
@@ -838,11 +914,35 @@ impl Scenario {
                 .into(),
                 path: format!("{authority_path} -> {effect:?} -> RecordingPlatform"),
             });
+            if matches!(effect, TaskSwitchEffect::HideFlip { .. }) {
+                for field in ["surface.flip.previews", "surface.flip.selection"] {
+                    self.authority.push(AuthorityRecord {
+                        field: field.into(),
+                        path: format!(
+                            "{authority_path} -> {effect:?} -> TaskSwitcher session teardown"
+                        ),
+                    });
+                }
+            }
             self.platform.acknowledgements.push(EffectAcknowledgement {
                 effect: format!("{effect:?}"),
                 acknowledged: true,
             });
             self.platform.apply(effect);
+            self.authority.push(AuthorityRecord {
+                field: "effects.ordered".into(),
+                path: format!("{authority_path} -> RecordingPlatform"),
+            });
+            self.authority.push(AuthorityRecord {
+                field: "effects.acknowledgements".into(),
+                path: format!("{authority_path} -> synchronous recording adapter acknowledgement"),
+            });
+            if redraw {
+                self.authority.push(AuthorityRecord {
+                    field: "redraws".into(),
+                    path: format!("{authority_path} -> effect redraw policy"),
+                });
+            }
         }
         self.check_budget();
     }
@@ -863,6 +963,10 @@ impl Scenario {
         if transition == LauncherTransition::Shown {
             self.platform.visible_launcher = Some(self.launcher_identity);
             self.platform.launcher_output = output;
+            self.authority.push(AuthorityRecord {
+                field: "launcher.output".into(),
+                path: "semantic panel activation -> invoking output placement".into(),
+            });
             self.record_launcher_effect(LauncherEffect::ShowSurface(self.launcher_identity));
             let request = self.focus.request(self.launcher_identity);
             self.record_launcher_effect(LauncherEffect::RequestFocus(request));
@@ -874,6 +978,10 @@ impl Scenario {
     fn hide_launcher(&mut self, restore_window_focus: bool) {
         self.platform.visible_launcher = None;
         self.platform.launcher_output = None;
+        self.authority.push(AuthorityRecord {
+            field: "launcher.output".into(),
+            path: "LauncherVisibility hidden -> clear invoking output placement".into(),
+        });
         self.record_launcher_effect(LauncherEffect::HideSurface(self.launcher_identity));
         if restore_window_focus && let Some(window) = self.platform.active_window.clone() {
             self.record_launcher_effect(LauncherEffect::RestoreWindowFocus(window));
@@ -882,10 +990,11 @@ impl Scenario {
 
     fn record_launcher_effect(&mut self, effect: LauncherEffect) {
         self.consumed_effects += 1;
-        self.redraws += usize::from(matches!(
+        let redraw = matches!(
             effect,
             LauncherEffect::ShowSurface(_) | LauncherEffect::HideSurface(_)
-        ));
+        );
+        self.redraws += usize::from(redraw);
         self.authority.push(AuthorityRecord {
             field: match &effect {
                 LauncherEffect::ShowSurface(_) | LauncherEffect::HideSurface(_) => {
@@ -910,6 +1019,20 @@ impl Scenario {
             .ordered_effects
             .push(RecordedEffect::Launcher(effect.clone()));
         self.platform.launcher_effects.push(effect);
+        self.authority.push(AuthorityRecord {
+            field: "effects.ordered".into(),
+            path: "LauncherVisibility -> RecordingPlatform".into(),
+        });
+        self.authority.push(AuthorityRecord {
+            field: "effects.acknowledgements".into(),
+            path: "LauncherVisibility -> synchronous recording adapter acknowledgement".into(),
+        });
+        if redraw {
+            self.authority.push(AuthorityRecord {
+                field: "redraws".into(),
+                path: "LauncherVisibility -> launcher redraw policy".into(),
+            });
+        }
         self.check_budget();
     }
 
@@ -958,6 +1081,7 @@ impl Scenario {
 
     fn consume_event(&mut self, event: String) {
         self.state_before_event = self.diagnostic_state();
+        self.authority_before_event = self.authority.len();
         self.consumed_events += 1;
         self.trace.push(event);
         self.check_budget();
@@ -983,15 +1107,16 @@ impl Scenario {
         if !condition {
             self.trace.push(format!("assertion failed: {detail}"));
             panic!(
-                "scenario {:?} failed: {detail}\nconsumed events={}, effects={}, redraws={}\nbefore last event: {}\nafter: {}\ntrace:\n{}\nauthority:\n{}\nacknowledgements: {:#?}",
+                "scenario {:?} failed: {detail}\nconsumed events={}, effects={}, redraws={}\nstate diff: {}\ncurrent state: {:#?}\ntrace:\n{}\nauthority:\n{}\nlast authority by field:\n{}\nacknowledgements: {:#?}",
                 self.name,
                 self.consumed_events,
                 self.consumed_effects,
                 self.redraws,
-                self.state_before_event,
+                self.diagnostic_authority_diff(),
                 self.diagnostic_state(),
                 self.numbered_trace(),
                 self.authority_trace(),
+                self.last_authority_trace(),
                 self.platform.acknowledgements
             );
         }
@@ -1015,18 +1140,128 @@ impl Scenario {
             .join("\n")
     }
 
-    fn diagnostic_state(&self) -> String {
-        format!(
-            "active={:?}, visible_launcher={:?}, visible_flip={:?}, focus_requested={:?}, focus_acknowledged={:?}, launcher_output={:?}, virtual_time={:?}, pending_timers=[]",
-            self.platform.active_window,
-            self.platform.visible_launcher,
-            self.platform.visible_flip_session,
-            self.focus.requested(),
-            self.focus.acknowledged(),
-            self.platform.launcher_output,
-            self.now,
-        )
+    fn last_authority_trace(&self) -> String {
+        let mut fields = BTreeMap::new();
+        for record in &self.authority {
+            fields.insert(record.field.as_str(), record.path.as_str());
+        }
+        fields
+            .into_iter()
+            .map(|(field, path)| format!("{field} <- {path}"))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
+
+    fn diagnostic_authority_diff(&self) -> String {
+        let after = self.diagnostic_state();
+        self.state_before_event
+            .keys()
+            .chain(after.keys())
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .filter_map(|field| {
+                let before = self.state_before_event.get(field);
+                let after = after.get(field);
+                (before != after).then(|| {
+                    let authority = self.authority[self.authority_before_event..]
+                        .iter()
+                        .rev()
+                        .find(|record| record.field == field)
+                        .map_or("<missing authority>", |record| record.path.as_str());
+                    format!("{field}: {before:?} -> {after:?} [{authority}]")
+                })
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    fn stability_state(&self) -> BTreeMap<&'static str, String> {
+        let mut state = self.diagnostic_state();
+        state.remove("virtual_time");
+        state
+    }
+
+    fn diagnostic_state(&self) -> BTreeMap<&'static str, String> {
+        BTreeMap::from([
+            (
+                "window.active",
+                format!("{:?}", self.platform.active_window),
+            ),
+            (
+                "surface.launcher.visible",
+                format!("{:?}", self.platform.visible_launcher),
+            ),
+            (
+                "surface.flip.visible",
+                format!("{:?}", self.platform.visible_flip_session),
+            ),
+            (
+                "surface.flip.previews",
+                format!("{:?}", self.switcher.candidates()),
+            ),
+            (
+                "surface.flip.selection",
+                format!("{:?}", self.switcher.selected()),
+            ),
+            ("focus.requested", format!("{:?}", self.focus.requested())),
+            (
+                "focus.acknowledged",
+                format!("{:?}", self.focus.acknowledged()),
+            ),
+            (
+                "launcher.output",
+                format!("{:?}", self.platform.launcher_output),
+            ),
+            (
+                "workspace.active",
+                format!("{:?}", self.workspaces.active()),
+            ),
+            (
+                "workspace.output",
+                format!("{:?}", self.workspaces.active_output()),
+            ),
+            ("workspaces", format!("{:?}", self.workspaces.ordered())),
+            ("outputs.layout", format!("{:?}", self.outputs.outputs())),
+            ("input.actions", format!("{:?}", self.actions)),
+            (
+                "effects.ordered",
+                format!("{:?}", self.platform.ordered_effects),
+            ),
+            (
+                "effects.acknowledgements",
+                format!("{:?}", self.platform.acknowledgements),
+            ),
+            ("redraws", self.redraws.to_string()),
+            ("virtual_time", format!("{:?}", self.now)),
+            ("pending_timers", "[]".into()),
+        ])
+    }
+}
+
+fn diagnostic_diff(
+    before: &BTreeMap<&'static str, String>,
+    after: &BTreeMap<&'static str, String>,
+) -> String {
+    changed_fields(before, after)
+        .into_iter()
+        .map(|field| format!("{field}: {:?} -> {:?}", before.get(field), after.get(field)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn changed_fields(
+    before: &BTreeMap<&'static str, String>,
+    after: &BTreeMap<&'static str, String>,
+) -> Vec<&'static str> {
+    before
+        .keys()
+        .chain(after.keys())
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .filter(|field| before.get(field) != after.get(field))
+        .collect()
 }
 
 impl WindowCursor {
@@ -1214,6 +1449,7 @@ mod tests {
             .click(super::ClickTarget::PanelLauncher)
             .expect_stable_for(Duration::from_millis(250))
             .expect_visible(Surface::Launcher)
+            .expect_last_event_authority()
             .expect_within_budget();
     }
 
@@ -1276,8 +1512,10 @@ mod tests {
         assert!(message.contains("authority:"));
         assert!(message.contains("acknowledgements:"));
         assert!(message.contains("TaskSwitcher"));
-        assert!(message.contains("before last event:"));
-        assert!(message.contains("visible_flip="));
-        assert!(message.contains("pending_timers=[]"));
+        assert!(message.contains("state diff:"));
+        assert!(message.contains("surface.flip.visible"));
+        assert!(message.contains("pending_timers"));
+        assert!(message.contains("last authority by field:"));
+        assert!(!message.contains("<missing authority>"));
     }
 }

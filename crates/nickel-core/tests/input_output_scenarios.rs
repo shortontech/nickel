@@ -117,6 +117,7 @@ fn disconnecting_an_unknown_output_preserves_connected_positions() {
         .output("DP-1", 1920, 1080, 0)
         .output("HDMI-A-1", 2560, 1440, 1)
         .disconnect_output("missing")
+        .expect_last_event_authority()
         .expect_output_position("DP-1", 0, 0)
         .expect_output_position("HDMI-A-1", 1920, 0)
         .expect_within_budget();

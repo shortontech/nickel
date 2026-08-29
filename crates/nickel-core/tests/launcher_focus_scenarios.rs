@@ -71,6 +71,7 @@ fn acknowledged_launcher_focus_loss_hides_once_and_restores_previous_window_focu
         .lose_captured_focus("current")
         .expect_hidden(Surface::Launcher)
         .expect_active("editor")
+        .expect_last_event_authority()
         .expect_launcher_effects(&[
             LauncherEffect::ShowSurface(SurfaceIdentity(1)),
             LauncherEffect::RequestFocus(first_focus_request()),

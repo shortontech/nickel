@@ -44,6 +44,7 @@ fn workspace_switch_hides_shows_and_restores_focus_in_order() {
         .active()
         .switch_workspace("main", "DP-1")
         .expect_workspace("main")
+        .expect_last_event_authority()
         .expect_window_visible("browser", false)
         .expect_window_visible("editor", true)
         .expect_active("editor")
