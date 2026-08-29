@@ -459,7 +459,7 @@ impl NickelSession {
             }
         }
         self.notify_protocol_snapshot();
-        if is_launcher && self.launcher_window.is_none() {
+        if is_launcher {
             let launcher = self
                 .space
                 .elements()
@@ -489,7 +489,7 @@ impl NickelSession {
                 self.register_panel(panel);
             }
         }
-        if is_context_menu && self.context_menu_window.is_none() {
+        if is_context_menu {
             let menu = self
                 .space
                 .elements()
@@ -499,7 +499,7 @@ impl NickelSession {
                 self.register_context_menu(menu);
             }
         }
-        if is_preview && self.preview_window.is_none() {
+        if is_preview {
             let preview = self
                 .space
                 .elements()

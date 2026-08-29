@@ -40,7 +40,7 @@ use smithay::{
             protocol::wl_surface::WlSurface,
         },
     },
-    utils::{Logical, Point, SERIAL_COUNTER, Size, Transform},
+    utils::{IsAlive, Logical, Point, SERIAL_COUNTER, Size, Transform},
     wayland::{
         compositor::{CompositorClientState, CompositorState},
         idle_inhibit::IdleInhibitManagerState,
@@ -720,6 +720,9 @@ impl NickelSession {
                         ErrorCode::Unauthorized,
                         "shell process is outside the active user session",
                     );
+                }
+                if !self.authenticated_shell_pids.contains(&pid) {
+                    self.retire_shell_surface_roles();
                 }
                 self.authenticated_shell_pids.clear();
                 self.authenticated_shell_pids.insert(pid);
@@ -2043,10 +2046,21 @@ impl NickelSession {
         self.apply_launcher_visibility(self.launcher_visibility.is_visible());
     }
 
+    fn retire_shell_surface_roles(&mut self) {
+        self.launcher_window = None;
+        self.desktop_windows.clear();
+        self.panel_windows.clear();
+        self.lock_windows.clear();
+        self.utility_windows.clear();
+        self.context_menu_window = None;
+        self.preview_window = None;
+    }
+
     pub fn register_panel(&mut self, window: Window) {
         // Smithay's ordinary xdg windows use z-index 30. Keep the Nickel panel
         // in its top shell layer so later application maps cannot cover it.
         window.override_z_index(40);
+        self.panel_windows.retain(IsAlive::alive);
         if !self.panel_windows.contains(&window) {
             self.panel_windows.push(window);
         }
@@ -2055,6 +2069,7 @@ impl NickelSession {
 
     pub fn register_desktop(&mut self, window: Window) {
         window.override_z_index(0);
+        self.desktop_windows.retain(IsAlive::alive);
         if !self.desktop_windows.contains(&window) {
             self.desktop_windows.push(window);
         }
@@ -2103,9 +2118,11 @@ impl NickelSession {
             .chain(self.utility_windows.iter())
             .chain(self.context_menu_window.iter())
             .chain(self.preview_window.iter())
+            .filter(|window| window.alive())
     }
 
     pub fn register_utility_window(&mut self, window: Window) {
+        self.utility_windows.retain(IsAlive::alive);
         if !self.utility_windows.contains(&window) {
             self.utility_windows.push(window);
         }

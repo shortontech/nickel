@@ -16,3 +16,13 @@ XWayland is supervised separately. A failed XWayland process is torn down and re
 ending the Wayland compositor or its native clients. Optional login services publish explicit
 readiness states; failure is reported to the shell and retried without silently replacing the
 configured provider.
+
+## Recorded nested acceptance
+
+On 2026-08-29, a native Wayland KCalc client remained mapped while the supervised XWayland process
+was killed with `SIGKILL` and restarted on the same display number. Killing the shell preserved the
+same compositor and KCalc process. Three shell failures inside the 30-second health window produced
+the compositor-owned recovery panel over an opaque output; semantic Enter replaced the shell and
+cleared recovery without restarting the compositor. A second recovery run used semantic Escape;
+the compositor exited normally and reaped the replacement shell, XWayland, and native test client.
+This is development evidence only; the same failure matrix still requires an SDDM-launched session.
