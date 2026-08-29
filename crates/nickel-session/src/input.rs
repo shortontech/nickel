@@ -717,6 +717,12 @@ fn hotkey_from_keysym(sym: Keysym) -> Hotkey {
         }
         value if value == Keysym::new(keysyms::KEY_Tab) => Hotkey::Tab,
         value
+            if value == Keysym::new(keysyms::KEY_Print)
+                || value == Keysym::new(keysyms::KEY_Sys_Req) =>
+        {
+            Hotkey::PrintScreen
+        }
+        value
             if value == Keysym::new(keysyms::KEY_grave)
                 || value == Keysym::new(keysyms::KEY_asciitilde) =>
         {
@@ -804,6 +810,18 @@ mod tests {
         assert_eq!(
             vt_from_keysym(Keysym::new(keysyms::KEY_XF86Switch_VT_12)),
             Some(12)
+        );
+    }
+
+    #[test]
+    fn xkb_print_keysyms_map_to_the_screenshot_hotkey() {
+        assert_eq!(
+            super::hotkey_from_keysym(Keysym::new(keysyms::KEY_Print)),
+            nickel_core::hotkeys::Hotkey::PrintScreen
+        );
+        assert_eq!(
+            super::hotkey_from_keysym(Keysym::new(keysyms::KEY_Sys_Req)),
+            nickel_core::hotkeys::Hotkey::PrintScreen
         );
     }
 }

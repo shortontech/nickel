@@ -26,7 +26,7 @@ use smithay::{
     desktop::{PopupManager, Space, Window, WindowSurfaceType},
     input::{Seat, SeatState},
     reexports::{
-        calloop::{EventLoop, Interest, LoopSignal, Mode, PostAction, generic::Generic},
+        calloop::{EventLoop, Interest, LoopSignal, Mode, PostAction, channel, generic::Generic},
         wayland_server::{
             Display, DisplayHandle, Resource,
             backend::{ClientData, ClientId, DisconnectReason, ObjectId},
@@ -105,6 +105,7 @@ pub struct NickelSession {
     launcher_subscribers: Vec<PathBuf>,
     protocol_token: String,
     authenticated_shell_pids: HashSet<u32>,
+    test_control_enabled: bool,
     expected_shell_pid: Arc<AtomicU32>,
     pub launcher_show_requested_at: Option<std::time::Instant>,
     pub desktop_windows: Vec<Window>,
@@ -133,6 +134,7 @@ pub struct NickelSession {
     control_socket_path: PathBuf,
     secure_storage_state: Arc<AtomicU8>,
     secure_storage_retry: Arc<std::sync::atomic::AtomicBool>,
+    deferred_focus_restore: channel::Sender<WindowId>,
     #[cfg(feature = "backend-winit")]
     winit_redraw_window: Option<usize>,
 }
@@ -155,7 +157,11 @@ impl NickelSession {
             && self.authenticated_shell_pids.contains(&pid)
     }
 
-    pub fn new(event_loop: &mut EventLoop<CalloopData>, display: Display<Self>) -> Self {
+    pub fn new(
+        event_loop: &mut EventLoop<CalloopData>,
+        display: Display<Self>,
+        test_control_enabled: bool,
+    ) -> Self {
         let start_time = std::time::Instant::now();
 
         let dh = display.handle();
@@ -206,6 +212,16 @@ impl NickelSession {
             crate::login_services::SecureStorageState::Starting as u8,
         ));
         let secure_storage_retry = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (deferred_focus_restore, deferred_focus_restore_rx) = channel::channel();
+        event_loop
+            .handle()
+            .insert_source(deferred_focus_restore_rx, |event, _, data| {
+                if let channel::Event::Msg(window) = event {
+                    data.state.activate_window(window);
+                    data.state.request_output_redraw();
+                }
+            })
+            .expect("failed to register deferred focus restoration");
 
         let socket_name = Self::init_wayland_listener(display, event_loop);
 
@@ -239,6 +255,7 @@ impl NickelSession {
             launcher_subscribers: Vec::new(),
             protocol_token,
             authenticated_shell_pids: HashSet::new(),
+            test_control_enabled,
             expected_shell_pid: Arc::new(AtomicU32::new(0)),
             launcher_show_requested_at: None,
             desktop_windows: Vec::new(),
@@ -267,6 +284,7 @@ impl NickelSession {
             control_socket_path,
             secure_storage_state,
             secure_storage_retry,
+            deferred_focus_restore,
             #[cfg(feature = "backend-winit")]
             winit_redraw_window: None,
         }
@@ -503,6 +521,17 @@ impl NickelSession {
                     ProtocolWindowAction::Close => self.close_window(id),
                     ProtocolWindowAction::Minimize => self.minimize_window(id),
                     ProtocolWindowAction::MaximizeRestore => self.maximize_window(id),
+                }
+            }
+            SessionCommand::TestInput { input } => {
+                if !self.test_control_enabled {
+                    return protocol_error(
+                        ErrorCode::Unauthorized,
+                        "test input control is not enabled for this session",
+                    );
+                }
+                if let Err(error) = self.inject_test_input(input) {
+                    return protocol_error(ErrorCode::InvalidRequest, error);
                 }
             }
         }
@@ -794,7 +823,13 @@ impl NickelSession {
         };
         if self.launcher_visibility.is_visible() && self.launcher_focus.loses_current(&acknowledged)
         {
-            self.set_launcher_visible(false);
+            self.launcher_visibility.set(false);
+            self.hotkeys.launcher_visibility_applied(false);
+            self.apply_launcher_visibility(false);
+            if let Some(window) = self.launcher_restore_window.take() {
+                let _ = self.deferred_focus_restore.send(window);
+            }
+            self.notify_launcher_visibility(false);
         }
     }
 

@@ -8,6 +8,7 @@ mod input;
 mod login_services;
 mod shell_layout;
 mod state;
+mod test_input;
 mod window_frame;
 mod window_registry;
 #[cfg(feature = "backend-winit")]
@@ -51,7 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let display: Display<NickelSession> = Display::new()?;
     let display_handle = display.handle();
-    let state = NickelSession::new(&mut event_loop, display);
+    let state = NickelSession::new(&mut event_loop, display, arguments.test_control);
 
     let mut data = CalloopData {
         state,

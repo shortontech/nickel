@@ -136,6 +136,11 @@ Run Nickel inside an existing Linux desktop:
 cargo run -p nickel-session -- --backend winit --command target/debug/nickel
 ```
 
+Live compositor tests may add `--test-control` before `--command`. This explicitly enables the
+capability-authenticated `TestInput` protocol command for the nested backend, allowing tests to
+inject semantic keyboard and pointer events through the same Smithay input path as physical
+devices. The flag is rejected by the direct backend and is disabled by default.
+
 ### Linux Direct Session
 
 The direct backend requires DRM, GBM, libinput, udev, libseat, and EGL development packages. Build

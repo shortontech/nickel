@@ -49,8 +49,10 @@ pub enum BackendSelectionError {
     MissingValue,
 }
 
+#[derive(Debug)]
 pub struct SessionArguments {
     pub backend: BackendKind,
+    pub test_control: bool,
     pub command: Option<(OsString, Vec<OsString>)>,
 }
 
@@ -64,6 +66,7 @@ impl SessionArguments {
         } else {
             BackendKind::Udev
         };
+        let mut test_control = false;
         let mut command = None;
 
         while let Some(argument) = args.next() {
@@ -83,14 +86,19 @@ impl SessionArguments {
                     command = Some((program, args.collect()));
                     break;
                 }
+                Some("--test-control") => test_control = true,
                 _ => {
                     return Err(format!(
-                        "unexpected argument {}; usage: nickel-session [--backend winit|udev] [--command PROGRAM [ARG ...]]",
+                        "unexpected argument {}; usage: nickel-session [--backend winit|udev] [--test-control] [--command PROGRAM [ARG ...]]",
                         argument.to_string_lossy()
                     )
                     .into());
                 }
             }
+        }
+
+        if test_control && backend != BackendKind::Winit {
+            return Err("--test-control is available only with the nested backend".into());
         }
 
         if !backend.available() {
@@ -101,7 +109,11 @@ impl SessionArguments {
             return Err(BackendSelectionError::Unavailable(name).into());
         }
 
-        Ok(Self { backend, command })
+        Ok(Self {
+            backend,
+            test_control,
+            command,
+        })
     }
 }
 
@@ -117,6 +129,7 @@ mod tests {
             SessionArguments::parse([OsString::from("--backend"), OsString::from("nested")])
                 .expect("nested backend should be available in default tests");
         assert_eq!(arguments.backend, BackendKind::Winit);
+        assert!(!arguments.test_control);
     }
 
     #[test]
@@ -130,5 +143,24 @@ mod tests {
         let (program, arguments) = arguments.command.expect("command should be present");
         assert_eq!(program, "nickel");
         assert_eq!(arguments, [OsString::from("--example")]);
+    }
+
+    #[test]
+    fn test_control_is_explicit_and_nested_only() {
+        let arguments = SessionArguments::parse([
+            OsString::from("--backend"),
+            OsString::from("nested"),
+            OsString::from("--test-control"),
+        ])
+        .expect("nested test control should be accepted");
+        assert!(arguments.test_control);
+
+        let error = SessionArguments::parse([
+            OsString::from("--backend"),
+            OsString::from("udev"),
+            OsString::from("--test-control"),
+        ])
+        .expect_err("native test control must be rejected");
+        assert!(error.to_string().contains("only with the nested backend"));
     }
 }

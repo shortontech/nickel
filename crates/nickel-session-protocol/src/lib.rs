@@ -72,6 +72,54 @@ pub enum Command {
         window: WindowId,
         action: WindowAction,
     },
+    /// Inject an ordinary compositor input event when the nested session was
+    /// explicitly started with its test-control capability enabled.
+    TestInput {
+        input: TestInput,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "input", rename_all = "snake_case")]
+pub enum TestInput {
+    Key {
+        key: TestKey,
+        state: InputState,
+    },
+    PointerMove {
+        x: i32,
+        y: i32,
+    },
+    PointerButton {
+        button: TestPointerButton,
+        state: InputState,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputState {
+    Pressed,
+    Released,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TestKey {
+    A,
+    Tab,
+    LeftAlt,
+    LeftShift,
+    LeftMeta,
+    PrintScreen,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TestPointerButton {
+    Left,
+    Right,
+    Middle,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -379,6 +427,31 @@ mod tests {
             .validate(),
             Err(FrameError::LengthMismatch)
         );
+    }
+
+    #[test]
+    fn nested_test_input_commands_round_trip() {
+        for input in [
+            TestInput::Key {
+                key: TestKey::LeftAlt,
+                state: InputState::Pressed,
+            },
+            TestInput::PointerMove { x: 640, y: 360 },
+            TestInput::PointerButton {
+                button: TestPointerButton::Left,
+                state: InputState::Released,
+            },
+        ] {
+            let envelope = ClientEnvelope {
+                token: "test-capability".into(),
+                request_id: 9,
+                request: Request::Command(Command::TestInput { input }),
+            };
+            assert_eq!(
+                decode::<ClientEnvelope>(&encode(&envelope).unwrap()).unwrap(),
+                envelope
+            );
+        }
     }
 
     #[test]
