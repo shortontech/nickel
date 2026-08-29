@@ -20,6 +20,9 @@ winit = { workspace = true, optional = true }
 xcursor.workspace = true
 zbus.workspace = true
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [features]
 default = ["backend-winit"]
 backend-winit = ["smithay/backend_winit", "dep:winit"]

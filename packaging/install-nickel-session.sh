@@ -1,8 +1,9 @@
 #!/bin/sh
 set -eu
 
-repository=/projects/nickel
-release="$repository/target/release"
+script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repository=$(dirname -- "$script_directory")
+release=${NICKEL_RELEASE_DIR:-"$repository/target/release"}
 install_root=${NICKEL_INSTALL_ROOT:-}
 
 for executable in nickel-login nickel-session nickel nickel-settings; do

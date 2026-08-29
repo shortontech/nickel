@@ -188,6 +188,26 @@ Install the completed build as an SDDM Wayland session:
 sudo packaging/install-nickel-session.sh
 ```
 
+The installer resolves the checkout containing the script rather than assuming a fixed repository
+path. `NICKEL_RELEASE_DIR` may select another completed release directory, and
+`NICKEL_INSTALL_ROOT` stages the exact installed layout under a temporary packaging root.
+
+To remove the session, delete only the files installed by the script:
+
+```bash
+sudo rm /usr/share/wayland-sessions/nickel.desktop
+sudo rm /usr/share/applications/nickel-settings.desktop
+sudo rm /usr/share/icons/hicolor/512x512/apps/nickel-settings.png
+sudo rm /usr/local/bin/nickel-login /usr/local/bin/nickel-session
+sudo rm /usr/local/bin/nickel /usr/local/bin/nickel-settings
+```
+
+If a development build cannot start, select another desktop from SDDM's session chooser. From that
+desktop, inspect the previous boot with `journalctl -b -1 | rg 'nickel|sddm-helper'`, rebuild both
+the direct compositor and shell, and rerun the installer. A compositor startup failure exits back to
+the display manager; an intentional logout exits successfully. Do not replace the installed binaries
+with symlinks into `target/`: a later default-feature build can replace the direct-backend binary.
+
 Nickel asks the user D-Bus session for its configured `org.freedesktop.secrets` provider; it does not
 select or start a KWallet-, GNOME Keyring-, or KeePassXC-specific service. The operating system may
 use a provider-specific PAM module to unlock the wallet at login. Providers without PAM integration

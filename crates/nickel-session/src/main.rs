@@ -121,20 +121,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+const USER_SESSION_ENVIRONMENT: &[&str] = &[
+    "DBUS_SESSION_BUS_ADDRESS",
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "XDG_CACHE_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_CURRENT_DESKTOP",
+    "XDG_DATA_HOME",
+    "XDG_RUNTIME_DIR",
+    "XDG_SESSION_DESKTOP",
+    "XDG_SESSION_TYPE",
+    "XDG_STATE_HOME",
+];
+
 fn import_runtime_environment() {
     match Command::new("dbus-update-activation-environment")
-        .args([
-            "--systemd",
-            "DISPLAY",
-            "WAYLAND_DISPLAY",
-            "XDG_CACHE_HOME",
-            "XDG_CONFIG_HOME",
-            "XDG_CURRENT_DESKTOP",
-            "XDG_DATA_HOME",
-            "XDG_SESSION_DESKTOP",
-            "XDG_SESSION_TYPE",
-            "XDG_STATE_HOME",
-        ])
+        .arg("--systemd")
+        .args(USER_SESSION_ENVIRONMENT)
         .status()
     {
         Ok(status) if status.success() => {}
@@ -251,7 +255,7 @@ fn supervise_shell(
 mod tests {
     use std::time::Duration;
 
-    use super::shell_restart_delay;
+    use super::{USER_SESSION_ENVIRONMENT, shell_restart_delay};
 
     #[test]
     fn shell_restart_backoff_is_bounded_without_ending_the_session() {
@@ -264,5 +268,18 @@ mod tests {
     fn recovery_threshold_requires_repeated_failures() {
         assert!(!super::shell_recovery_visible_for(2));
         assert!(super::shell_recovery_visible_for(3));
+    }
+
+    #[test]
+    fn runtime_import_covers_display_bus_and_xdg_service_authority() {
+        for variable in [
+            "DBUS_SESSION_BUS_ADDRESS",
+            "WAYLAND_DISPLAY",
+            "XDG_CURRENT_DESKTOP",
+            "XDG_RUNTIME_DIR",
+            "XDG_SESSION_TYPE",
+        ] {
+            assert!(USER_SESSION_ENVIRONMENT.contains(&variable));
+        }
     }
 }
