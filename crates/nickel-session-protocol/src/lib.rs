@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 pub const MAX_FRAME_BYTES: usize = 196_608;
 pub const MAX_PREVIEW_WIDTH: u16 = 256;
 pub const MAX_PREVIEW_HEIGHT: u16 = 144;
@@ -57,6 +57,7 @@ pub enum Command {
     ShowOverlay {
         role: ShellRole,
         geometry: Geometry,
+        windows: Vec<WindowId>,
     },
     IdentifyOutputs,
     CaptureOutput {
@@ -123,7 +124,7 @@ pub enum TestPointerButton {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "response", rename_all = "snake_case")]
+#[serde(tag = "response", content = "data", rename_all = "snake_case")]
 pub enum ServerMessage {
     Ack,
     Error { code: ErrorCode, message: String },
@@ -148,7 +149,7 @@ pub enum ErrorCode {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "event", rename_all = "snake_case")]
+#[serde(tag = "event", content = "data", rename_all = "snake_case")]
 pub enum Event {
     Snapshot(Snapshot),
     LauncherVisibility { visible: bool },
@@ -302,7 +303,28 @@ pub struct PreviewFrame {
     pub window: WindowId,
     pub width: u16,
     pub height: u16,
+    #[serde(with = "base64_bytes")]
     pub rgba: Vec<u8>,
+}
+
+mod base64_bytes {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let encoded = String::deserialize(deserializer)?;
+        STANDARD.decode(encoded).map_err(serde::de::Error::custom)
+    }
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -516,5 +538,54 @@ mod tests {
         };
         let restored = decode::<ServerEnvelope>(&encode(&envelope).unwrap()).unwrap();
         assert_eq!(restored.message, ServerMessage::Snapshot(snapshot));
+    }
+
+    #[test]
+    fn sequence_response_and_event_variants_round_trip() {
+        let window = WindowSnapshot {
+            id: WindowId(7),
+            application_id: "org.example.Editor".into(),
+            title: "notes".into(),
+            active: true,
+            minimized: false,
+            maximized: false,
+        };
+        for message in [
+            ServerMessage::Windows(vec![window.clone()]),
+            ServerMessage::Event(Event::Windows(vec![window.clone()])),
+            ServerMessage::Event(Event::Stacking {
+                front_to_back: vec![window.id],
+            }),
+        ] {
+            let envelope = ServerEnvelope {
+                request_id: 3,
+                message: message.clone(),
+            };
+            assert_eq!(
+                decode::<ServerEnvelope>(&encode(&envelope).unwrap())
+                    .unwrap()
+                    .message,
+                message
+            );
+        }
+    }
+
+    #[test]
+    fn production_sized_preview_fits_the_wire_frame() {
+        let preview = PreviewFrame {
+            window: WindowId(11),
+            width: 240,
+            height: 135,
+            rgba: vec![0xab; 240 * 135 * 4],
+        };
+        let envelope = ServerEnvelope {
+            request_id: 7,
+            message: ServerMessage::Preview(preview.clone()),
+        };
+        let encoded = encode(&envelope).expect("production preview fits the protocol frame");
+        assert_eq!(
+            decode::<ServerEnvelope>(&encoded).unwrap().message,
+            ServerMessage::Preview(preview)
+        );
     }
 }

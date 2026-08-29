@@ -60,6 +60,8 @@ mod sdl_live_shell;
 #[path = "../sdl_shell.rs"]
 #[allow(dead_code)]
 mod sdl_shell;
+#[path = "../sdl_window_preview.rs"]
+mod sdl_window_preview;
 
 use sdl_live_shell::LiveShell;
 use sdl_shell::{SdlShell, ShellEvent, SurfaceId, SurfaceRole};
@@ -775,6 +777,37 @@ fn main() -> Result<(), String> {
             Some(ShellEvent::PointerButton {
                 surface,
                 pressed: true,
+                button,
+                x,
+                y,
+            }) if shell
+                .surface(surface)
+                .is_some_and(|entry| matches!(entry.role(), SurfaceRole::WindowPreview)) =>
+            {
+                if state.preview_click(x, y, button == MouseButton::Right) {
+                    sync_visibility(&mut shell, &state);
+                    state.sync_transient_overlays();
+                    render_role(&mut shell, &mut state, SurfaceRole::WindowPreview)?;
+                    render_role(&mut shell, &mut state, SurfaceRole::WindowContextMenu)?;
+                }
+            }
+            Some(ShellEvent::PointerButton {
+                surface,
+                pressed: true,
+                x,
+                y,
+                ..
+            }) if shell
+                .surface(surface)
+                .is_some_and(|entry| entry.role() == SurfaceRole::WindowContextMenu) =>
+            {
+                if state.window_menu_click(x, y) {
+                    sync_visibility(&mut shell, &state);
+                }
+            }
+            Some(ShellEvent::PointerButton {
+                surface,
+                pressed: true,
                 x,
                 ..
             }) if shell
@@ -787,11 +820,13 @@ fn main() -> Result<(), String> {
                     .unwrap_or_default();
                 if state.panel_click(x, width) {
                     sync_visibility(&mut shell, &state);
+                    state.sync_transient_overlays();
                     focus_visible_overlay(&mut shell, &state);
                     // The launcher owns a persistent accelerated presenter and a
                     // pre-rendered buffer. Showing it must not synchronously
                     // rebuild and submit the whole scene on the click path.
                     render_role(&mut shell, &mut state, SurfaceRole::ControlCenter)?;
+                    render_role(&mut shell, &mut state, SurfaceRole::WindowPreview)?;
                     if state.surface_visible(SurfaceRole::CodexProjectMenu) {
                         codex.present(&mut shell, codex.project_menu)?;
                     }
@@ -921,8 +956,20 @@ fn main() -> Result<(), String> {
                         .map(|entry| entry.window().size().0)
                         .unwrap_or_default();
                     if state.panel_pointer_moved(x, width) {
+                        sync_visibility(&mut shell, &state);
+                        state.sync_transient_overlays();
+                        render_role(&mut shell, &mut state, SurfaceRole::WindowPreview)?;
                         hover_repaint = Some((
                             SurfaceRole::Panel,
+                            Instant::now() + Duration::from_millis(24),
+                        ));
+                    }
+                    continue;
+                }
+                if role == Some(SurfaceRole::WindowPreview) {
+                    if state.preview_pointer_moved(x, y) {
+                        hover_repaint = Some((
+                            SurfaceRole::WindowPreview,
                             Instant::now() + Duration::from_millis(24),
                         ));
                     }
@@ -948,6 +995,15 @@ fn main() -> Result<(), String> {
             {
                 if state.panel_pointer_left() {
                     render_role(&mut shell, &mut state, SurfaceRole::Panel)?;
+                }
+            }
+            Some(ShellEvent::PointerEntered { surface, entered })
+                if shell
+                    .surface(surface)
+                    .is_some_and(|entry| entry.role() == SurfaceRole::WindowPreview) =>
+            {
+                if state.preview_pointer_entered(entered) {
+                    render_role(&mut shell, &mut state, SurfaceRole::WindowPreview)?;
                 }
             }
             Some(ShellEvent::PointerEntered { .. }) => {}
@@ -985,6 +1041,16 @@ fn main() -> Result<(), String> {
                     .map(|entry| entry.window().size())
                     .unwrap_or_default();
                 shell.present(surface, &state.scene(role, logical_width, logical_height))?;
+            }
+            Some(ShellEvent::Shown(surface)) => {
+                if shell.surface(surface).is_some_and(|entry| {
+                    matches!(
+                        entry.role(),
+                        SurfaceRole::WindowPreview | SurfaceRole::WindowContextMenu
+                    )
+                }) {
+                    state.sync_transient_overlays();
+                }
             }
             Some(ShellEvent::Redraw(surface)) if initial_exposures.insert(surface) => {
                 let Some(entry) = shell.surface(surface) else {

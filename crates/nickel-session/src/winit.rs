@@ -170,17 +170,9 @@ pub fn init_winit(
                             frame_icons.as_ref(),
                             &frame_palette,
                         );
-                        if !window_elements.is_empty() {
-                            let mut frame = renderer
-                                .render(&mut framebuffer, size, output.current_transform())
-                                .unwrap();
-                            draw_render_elements(&mut frame, 1.0, &window_elements, &[damage])
-                                .unwrap();
-                            let _ = frame.finish().unwrap();
-                        }
-
-                        if let Some(highlight) = state.preview_highlight
-                            && let Some(window) = state.space.elements().find(|window| {
+                        let mut overlay_elements = Vec::new();
+                        if let Some(window) = state.preview_highlight.and_then(|highlight| {
+                            state.space.elements().find(|window| {
                                 window
                                     .toplevel()
                                     .and_then(|surface| {
@@ -189,98 +181,96 @@ pub fn init_winit(
                                     .copied()
                                     == Some(highlight)
                             })
-                        {
-                            let dim_buffer =
-                                SolidColorBuffer::new(size.to_logical(1), [0.0, 0.0, 0.0, 0.62]);
-                            let dim = SolidColorRenderElement::from_buffer(
-                                &dim_buffer,
-                                (0, 0),
-                                1.0,
-                                1.0,
-                                Kind::Unspecified,
-                            );
-                            let mut frame = renderer
-                                .render(&mut framebuffer, size, output.current_transform())
-                                .unwrap();
-                            draw_render_elements::<GlesRenderer, _, _>(
-                                &mut frame,
-                                1.0,
-                                &[dim],
-                                &[damage],
-                            )
-                            .unwrap();
-                            let _ = frame.finish().unwrap();
-
-                            let location = state.space.element_location(window).unwrap_or_default();
-                            let selected = render_elements_from_surface_tree::<
-                                GlesRenderer,
-                                WaylandSurfaceRenderElement<GlesRenderer>,
-                            >(
-                                renderer,
-                                window.toplevel().unwrap().wl_surface(),
-                                location.to_physical(1),
-                                1.0,
-                                1.0,
-                                Kind::Unspecified,
-                            );
-                            let mut frame = renderer
-                                .render(&mut framebuffer, size, output.current_transform())
-                                .unwrap();
-                            draw_render_elements(&mut frame, 1.0, &selected, &[damage]).unwrap();
-                            let _ = frame.finish().unwrap();
-
-                            let mut shell_elements = Vec::new();
-                            for shell in state.shell_windows() {
+                        }) {
+                            let shell_surfaces = state
+                                .shell_windows()
+                                .filter_map(|shell| {
+                                    shell.toplevel().map(|surface| surface.wl_surface().id())
+                                })
+                                .collect::<Vec<_>>();
+                            let desktop_surfaces = state
+                                .desktop_windows
+                                .iter()
+                                .filter_map(|desktop| {
+                                    desktop.toplevel().map(|surface| surface.wl_surface().id())
+                                })
+                                .collect::<Vec<_>>();
+                            for shell in state.space.elements().rev().filter(|shell| {
+                                shell.toplevel().is_some_and(|surface| {
+                                    shell_surfaces.contains(&surface.wl_surface().id())
+                                        && !desktop_surfaces.contains(&surface.wl_surface().id())
+                                })
+                            }) {
                                 let Some(location) = state.space.element_location(shell) else {
                                     continue;
                                 };
-                                let Some(surface) = shell.toplevel() else {
-                                    continue;
-                                };
-                                shell_elements.extend(render_elements_from_surface_tree::<
-                                    GlesRenderer,
-                                    WaylandSurfaceRenderElement<GlesRenderer>,
-                                >(
-                                    renderer,
-                                    surface.wl_surface(),
-                                    location.to_physical(1),
+                                let render_location = location - shell.geometry().loc;
+                                overlay_elements.extend(
+                                    shell
+                                        .render_elements::<
+                                            WaylandSurfaceRenderElement<GlesRenderer>,
+                                        >(
+                                            renderer,
+                                            render_location.to_physical_precise_round(1),
+                                            Scale::from(1.0),
+                                            1.0,
+                                        )
+                                    .into_iter()
+                                    .map(WinitFrameElement::from),
+                                );
+                            }
+                            let location = state.space.element_location(window).unwrap_or_default();
+                            let render_location = location - window.geometry().loc;
+                            overlay_elements.extend(
+                                window
+                                    .render_elements::<WaylandSurfaceRenderElement<GlesRenderer>>(
+                                        renderer,
+                                        render_location.to_physical_precise_round(1),
+                                        Scale::from(1.0),
+                                        1.0,
+                                    )
+                                    .into_iter()
+                                    .map(WinitFrameElement::from),
+                            );
+                            let dim_buffer =
+                                SolidColorBuffer::new(size.to_logical(1), [0.0, 0.0, 0.0, 0.62]);
+                            overlay_elements.push(WinitFrameElement::from(
+                                SolidColorRenderElement::from_buffer(
+                                    &dim_buffer,
+                                    (0, 0),
                                     1.0,
                                     1.0,
                                     Kind::Unspecified,
-                                ));
-                            }
-                            let mut frame = renderer
-                                .render(&mut framebuffer, size, output.current_transform())
-                                .unwrap();
-                            draw_render_elements(&mut frame, 1.0, &shell_elements, &[damage])
-                                .unwrap();
-                            let _ = frame.finish().unwrap();
+                                ),
+                            ));
                         }
+                        overlay_elements.extend(window_elements);
 
-                        if state.shell_recovery_visible() {
+                        let recovery_banner = state.shell_recovery_visible().then(|| {
                             let banner_width = size.w.clamp(1, 560);
                             let banner_height = size.h.clamp(1, 112);
                             let banner_buffer = SolidColorBuffer::new(
                                 (banner_width, banner_height),
                                 [0.45, 0.06, 0.08, 1.0],
                             );
-                            let banner = SolidColorRenderElement::from_buffer(
+                            SolidColorRenderElement::from_buffer(
                                 &banner_buffer,
                                 ((size.w - banner_width) / 2, (size.h - banner_height) / 2),
                                 1.0,
                                 1.0,
                                 Kind::Unspecified,
-                            );
+                            )
+                        });
+
+                        if !overlay_elements.is_empty() || recovery_banner.is_some() {
+                            if let Some(banner) = recovery_banner {
+                                overlay_elements.insert(0, WinitFrameElement::from(banner));
+                            }
                             let mut frame = renderer
                                 .render(&mut framebuffer, size, output.current_transform())
                                 .unwrap();
-                            draw_render_elements::<GlesRenderer, _, _>(
-                                &mut frame,
-                                1.0,
-                                &[banner],
-                                &[damage],
-                            )
-                            .unwrap();
+                            draw_render_elements(&mut frame, 1.0, &overlay_elements, &[damage])
+                                .unwrap();
                             let _ = frame.finish().unwrap();
                         }
                     }

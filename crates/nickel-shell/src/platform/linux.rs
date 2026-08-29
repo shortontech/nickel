@@ -696,9 +696,13 @@ fn shell_command_payload(command: ShellCommand) -> SessionCommand {
                 width,
                 height,
             },
+            windows: Vec::new(),
         },
         ShellCommand::ShowPreview {
-            x, width, height, ..
+            x,
+            width,
+            height,
+            windows,
         } => SessionCommand::ShowOverlay {
             role: SessionShellRole::Preview,
             geometry: SessionGeometry {
@@ -707,6 +711,10 @@ fn shell_command_payload(command: ShellCommand) -> SessionCommand {
                 width,
                 height,
             },
+            windows: windows
+                .into_iter()
+                .map(|window| SessionWindowId(window.0))
+                .collect(),
         },
         ShellCommand::HideContextMenu => SessionCommand::HideOverlay,
         ShellCommand::HighlightWindow(window) => SessionCommand::HighlightWindow {
@@ -767,26 +775,25 @@ impl WindowFeed {
 
     pub fn preview(&self, window: WindowId) -> Option<WindowPreview> {
         let socket = self.socket.as_ref()?;
-        for _ in 0..4 {
-            if let Some(ServerMessage::Preview(preview)) = session_request_on(
-                socket,
-                SessionRequest::Query(SessionQuery::Preview {
-                    window: SessionWindowId(window.0),
-                }),
-            ) {
-                let image = image::RgbaImage::from_raw(
-                    u32::from(preview.width),
-                    u32::from(preview.height),
-                    preview.rgba,
-                )?;
-                return Some(WindowPreview { window, image });
-            }
-        }
-        None
+        let ServerMessage::Preview(preview) = session_request_on(
+            socket,
+            SessionRequest::Query(SessionQuery::Preview {
+                window: SessionWindowId(window.0),
+            }),
+        )?
+        else {
+            return None;
+        };
+        let image = image::RgbaImage::from_raw(
+            u32::from(preview.width),
+            u32::from(preview.height),
+            preview.rgba,
+        )?;
+        Some(WindowPreview { window, image })
     }
 
     pub fn supports_previews(&self) -> bool {
-        false
+        true
     }
 
     pub fn icon(&self, _: WindowId) -> Option<image::RgbaImage> {

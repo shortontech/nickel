@@ -2625,6 +2625,7 @@ dependencies = [
 name = "nickel-session-protocol"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "proptest",
  "serde",
  "serde_json",

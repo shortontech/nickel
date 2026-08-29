@@ -112,6 +112,7 @@ pub struct NickelSession {
     pub panel_windows: Vec<Window>,
     pub utility_windows: Vec<Window>,
     pub context_menu_window: Option<Window>,
+    pub preview_window: Option<Window>,
     pub server_decorated: HashSet<ObjectId>,
     pub primary_output_name: Option<String>,
     pub preview_frames: HashMap<WindowId, PreviewFrame>,
@@ -262,6 +263,7 @@ impl NickelSession {
             panel_windows: Vec::new(),
             utility_windows: Vec::new(),
             context_menu_window: None,
+            preview_window: None,
             server_decorated: HashSet::new(),
             primary_output_name: None,
             preview_frames: HashMap::new(),
@@ -365,13 +367,26 @@ impl NickelSession {
                                 },
                             ),
                         };
-                        if let Some(path) = source.as_pathname()
-                            && let Ok(response) = encode(&ServerEnvelope {
+                        if let Some(path) = source.as_pathname() {
+                            match encode(&ServerEnvelope {
                                 request_id,
                                 message,
-                            })
-                        {
-                            let _ = socket.as_ref().send_to(&response, path);
+                            }) {
+                                Ok(response) => {
+                                    if let Err(error) = socket.as_ref().send_to(&response, path) {
+                                        tracing::warn!(
+                                            ?error,
+                                            ?path,
+                                            "failed to reply on session control socket"
+                                        );
+                                    }
+                                }
+                                Err(error) => tracing::warn!(
+                                    ?error,
+                                    request_id,
+                                    "failed to encode session control response"
+                                ),
+                            }
                         }
                         data.state.request_output_redraw();
                     }
@@ -471,13 +486,36 @@ impl NickelSession {
             SessionCommand::RetrySecureStorage => self
                 .secure_storage_retry
                 .store(true, std::sync::atomic::Ordering::Release),
-            SessionCommand::HideOverlay => self.hide_context_menu(),
-            SessionCommand::ShowOverlay { role, geometry } => match role {
+            SessionCommand::HideOverlay => self.hide_overlays(),
+            SessionCommand::ShowOverlay {
+                role,
+                geometry,
+                windows,
+            } => match role {
                 ShellRole::ContextMenu => {
+                    if !windows.is_empty() {
+                        return protocol_error(
+                            ErrorCode::InvalidRequest,
+                            "context menu does not accept preview windows",
+                        );
+                    }
                     self.show_context_menu(geometry.x, geometry.width, geometry.height, true)
                 }
                 ShellRole::Preview => {
-                    self.show_context_menu(geometry.x, geometry.width, geometry.height, false)
+                    if windows.len() > nickel_session_protocol::MAX_WINDOWS {
+                        return protocol_error(
+                            ErrorCode::ResourceLimit,
+                            "too many preview windows",
+                        );
+                    }
+                    if windows.iter().any(|window| !self.window_exists(*window)) {
+                        return protocol_error(ErrorCode::InvalidWindow, "unknown preview window");
+                    }
+                    self.preview_requests =
+                        windows.iter().map(|window| WindowId(window.0)).collect();
+                    self.preview_frames
+                        .retain(|window, _| self.preview_requests.contains(window));
+                    self.show_preview(geometry.x, geometry.width, geometry.height)
                 }
                 _ => {
                     return protocol_error(
@@ -582,13 +620,20 @@ impl NickelSession {
             .into_iter()
             .filter(|window| !shell_ids.contains(&window.id))
             .take(nickel_session_protocol::MAX_WINDOWS)
-            .map(|window| WindowSnapshot {
-                id: ProtocolWindowId(window.id.0),
-                application_id: window.app_id.clone(),
-                title: window.title.clone(),
-                active: window.active,
-                minimized: self.minimized_windows.contains_key(&window.id),
-                maximized: false,
+            .map(|window| {
+                let surface = self
+                    .surface_windows
+                    .iter()
+                    .find_map(|(surface, id)| (*id == window.id).then_some(surface));
+                WindowSnapshot {
+                    id: ProtocolWindowId(window.id.0),
+                    application_id: window.app_id.clone(),
+                    title: window.title.clone(),
+                    active: window.active,
+                    minimized: self.minimized_windows.contains_key(&window.id),
+                    maximized: surface
+                        .is_some_and(|surface| self.maximized_restore.contains_key(surface)),
+                }
             })
             .collect()
     }
@@ -985,6 +1030,7 @@ impl NickelSession {
             .chain(self.panel_windows.iter())
             .chain(self.utility_windows.iter())
             .chain(self.context_menu_window.iter())
+            .chain(self.preview_window.iter())
     }
 
     pub fn register_utility_window(&mut self, window: Window) {
@@ -998,6 +1044,11 @@ impl NickelSession {
         self.context_menu_window = Some(window);
     }
 
+    pub fn register_preview(&mut self, window: Window) {
+        window.override_z_index(49);
+        self.preview_window = Some(window);
+    }
+
     pub fn show_context_menu(
         &mut self,
         x: i32,
@@ -1005,9 +1056,37 @@ impl NickelSession {
         requested_height: i32,
         focus: bool,
     ) {
-        let (Some(window), Some(output)) =
-            (self.context_menu_window.clone(), self.output_geometry())
-        else {
+        self.show_transient(
+            self.context_menu_window.clone(),
+            x,
+            requested_width,
+            requested_height,
+            focus,
+            "context menu",
+        );
+    }
+
+    pub fn show_preview(&mut self, x: i32, requested_width: i32, requested_height: i32) {
+        self.show_transient(
+            self.preview_window.clone(),
+            x,
+            requested_width,
+            requested_height,
+            false,
+            "preview",
+        );
+    }
+
+    fn show_transient(
+        &mut self,
+        window: Option<Window>,
+        x: i32,
+        requested_width: i32,
+        requested_height: i32,
+        focus: bool,
+        label: &str,
+    ) {
+        let (Some(window), Some(output)) = (window, self.output_geometry()) else {
             return;
         };
         let width = requested_width.clamp(120, output.width.max(120));
@@ -1032,12 +1111,12 @@ impl NickelSession {
                 SERIAL_COUNTER.next_serial(),
             );
         }
-        self.space.elements().for_each(|window| {
-            window.toplevel().unwrap().send_pending_configure();
+        self.space.elements().for_each(|element| {
+            element.toplevel().unwrap().send_pending_configure();
         });
         self.space.raise_element(&window, true);
         self.raise_panels();
-        eprintln!("nickel-session: context menu shown at {x},{y}");
+        eprintln!("nickel-session: {label} shown at {x},{y}");
     }
 
     pub fn hide_context_menu(&mut self) {
@@ -1046,6 +1125,19 @@ impl NickelSession {
         }
         self.preview_highlight = None;
         eprintln!("nickel-session: context menu hidden");
+    }
+
+    pub fn hide_overlays(&mut self) {
+        if let Some(window) = self.context_menu_window.clone() {
+            self.space.unmap_elem(&window);
+        }
+        if let Some(window) = self.preview_window.clone() {
+            self.space.unmap_elem(&window);
+        }
+        self.preview_highlight = None;
+        self.preview_requests.clear();
+        self.preview_frames.clear();
+        eprintln!("nickel-session: transient overlays hidden");
     }
 
     pub fn close_window(&mut self, id: WindowId) {

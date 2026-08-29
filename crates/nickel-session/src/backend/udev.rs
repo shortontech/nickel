@@ -952,6 +952,12 @@ impl CalloopData {
                 .shell_windows()
                 .filter_map(|window| window.toplevel().map(|surface| surface.wl_surface().id()))
                 .collect::<Vec<_>>();
+            let desktop_surfaces = self
+                .state
+                .desktop_windows
+                .iter()
+                .filter_map(|window| window.toplevel().map(|surface| surface.wl_surface().id()))
+                .collect::<Vec<_>>();
             let frame_palette = ThemePalette::from_appearance(
                 ShellSettings::load_default().resolve_appearance(Appearance::default()),
             );
@@ -1081,6 +1087,76 @@ impl CalloopData {
                         }
                     }
                 }
+            }
+            if let Some(highlighted) = self.state.preview_highlight.and_then(|highlight| {
+                self.state.space.elements().find(|window| {
+                    window
+                        .toplevel()
+                        .and_then(|surface| {
+                            self.state.surface_windows.get(&surface.wl_surface().id())
+                        })
+                        .copied()
+                        == Some(highlight)
+                })
+            }) && let Some(output_geometry) = self.state.space.output_geometry(&output)
+            {
+                // Peek is a single front-to-back composition: shell overlays
+                // remain legible, the selected client stays bright, the dim
+                // layer covers everything else, and the ordinary scene remains
+                // behind it. Multiple render passes are not equivalent on DRM
+                // because plane assignment and damage history can expose stale
+                // content between passes.
+                let mut peek_elements = Vec::new();
+                for shell in self.state.space.elements().rev().filter(|window| {
+                    window.toplevel().is_some_and(|surface| {
+                        shell_surfaces.contains(&surface.wl_surface().id())
+                            && !desktop_surfaces.contains(&surface.wl_surface().id())
+                    })
+                }) {
+                    let Some(location) = self.state.space.element_location(shell) else {
+                        continue;
+                    };
+                    let render_location = location - shell.geometry().loc - output_geometry.loc;
+                    peek_elements.extend(
+                        shell
+                            .render_elements::<WaylandSurfaceRenderElement<NativeRenderer<'_>>>(
+                                &mut renderer,
+                                render_location.to_physical_precise_round(Scale::from(1.0)),
+                                Scale::from(1.0),
+                                1.0,
+                            )
+                            .into_iter()
+                            .map(|element| NativeElement::from(NativeCustomElement::from(element))),
+                    );
+                }
+                if let Some(location) = self.state.space.element_location(highlighted) {
+                    let render_location =
+                        location - highlighted.geometry().loc - output_geometry.loc;
+                    peek_elements.extend(
+                        highlighted
+                            .render_elements::<WaylandSurfaceRenderElement<NativeRenderer<'_>>>(
+                                &mut renderer,
+                                render_location.to_physical_precise_round(Scale::from(1.0)),
+                                Scale::from(1.0),
+                                1.0,
+                            )
+                            .into_iter()
+                            .map(|element| NativeElement::from(NativeCustomElement::from(element))),
+                    );
+                }
+                let dim = SolidColorBuffer::new(output_geometry.size, [0.0, 0.0, 0.0, 0.62]);
+                peek_elements.push(
+                    NativeCustomElement::from(SolidColorRenderElement::from_buffer(
+                        &dim,
+                        (0, 0),
+                        1.0,
+                        1.0,
+                        Kind::Unspecified,
+                    ))
+                    .into(),
+                );
+                peek_elements.append(&mut elements);
+                elements = peek_elements;
             }
             if self.state.shell_recovery_visible() {
                 let recovery_size = output

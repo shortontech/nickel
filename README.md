@@ -141,6 +141,19 @@ capability-authenticated `TestInput` protocol command for the nested backend, al
 inject semantic keyboard and pointer events through the same Smithay input path as physical
 devices. The flag is rejected by the direct backend and is disabled by default.
 
+With the session-issued `NICKEL_SESSION_CONTROL` and `NICKEL_SESSION_TOKEN` environment variables,
+`nickel-test-input` can inspect registered windows and inject individual production input events:
+
+```bash
+cargo run -p nickel-session --bin nickel-test-input -- windows
+cargo run -p nickel-session --bin nickel-test-input -- move 64 700
+cargo run -p nickel-session --bin nickel-test-input -- button left pressed
+cargo run -p nickel-session --bin nickel-test-input -- button left released
+```
+
+The client does not mutate shell state directly: events still pass through the compositor's normal
+hit testing, focus handling, and input reducers.
+
 ### Linux Direct Session
 
 The direct backend requires DRM, GBM, libinput, udev, libseat, and EGL development packages. Build

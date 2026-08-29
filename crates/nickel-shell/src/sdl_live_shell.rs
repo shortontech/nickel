@@ -1,4 +1,8 @@
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 #[cfg(not(target_os = "macos"))]
 use jiff::Zoned;
@@ -26,6 +30,10 @@ use crate::{
         build_launcher_frame, reduce_launcher_action,
     },
     sdl_shell::SurfaceRole,
+    sdl_window_preview::{
+        MENU_HEIGHT, MENU_WIDTH, MenuAction, PreviewAction, WindowMenuFrame, WindowPreviewFrame,
+        build_menu_frame, build_preview_frame, preview_dimensions,
+    },
 };
 use sdl3::keyboard::{Keycode, Mod};
 
@@ -36,6 +44,7 @@ const PANEL_TRAY_WIDTH: f32 = 28.0;
 const PANEL_TRAY_ICON_SIZE: u32 = 18;
 const PANEL_CODEX_WIDTH: f32 = 36.0;
 const PANEL_CODEX_ICON_SIZE: f32 = 28.0;
+const PREVIEW_LEAVE_DELAY: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct PanelStatusLayout {
@@ -97,6 +106,14 @@ pub struct LiveShell {
     control_visible: bool,
     codex_project_menu_visible: bool,
     panel_hover: Option<PanelHover>,
+    preview_group: Option<usize>,
+    preview_pointer_inside: bool,
+    preview_leave_deadline: Option<Instant>,
+    preview_hovered: Option<crate::model::WindowId>,
+    preview_images: HashMap<crate::model::WindowId, Arc<image::RgbaImage>>,
+    preview_frame: Option<WindowPreviewFrame>,
+    window_menu: Option<crate::model::WindowId>,
+    window_menu_frame: Option<WindowMenuFrame>,
     control_state: ControlViewState,
     launcher_view: LauncherViewState,
     launcher_icons: LauncherIconCache,
@@ -190,6 +207,14 @@ impl LiveShell {
             control_visible: false,
             codex_project_menu_visible: false,
             panel_hover: None,
+            preview_group: None,
+            preview_pointer_inside: false,
+            preview_leave_deadline: None,
+            preview_hovered: None,
+            preview_images: HashMap::new(),
+            preview_frame: None,
+            window_menu: None,
+            window_menu_frame: None,
             control_state: ControlViewState::default(),
             launcher_view: LauncherViewState::default(),
             launcher_icons: LauncherIconCache::new(),
@@ -233,6 +258,34 @@ impl LiveShell {
         {
             self.windows = windows;
             changed = true;
+        }
+        if self
+            .preview_leave_deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            self.close_window_preview();
+            changed = true;
+        }
+        let preview_group = self.preview_group.and_then(|index| {
+            self.launcher
+                .group_windows(&self.windows)
+                .get(index)
+                .cloned()
+        });
+        if let Some(group) = preview_group {
+            for window in &group.windows {
+                if let Some(preview) = self.window_feed.preview(window.id) {
+                    let image = Arc::new(preview.image);
+                    if self
+                        .preview_images
+                        .get(&window.id)
+                        .is_none_or(|current| **current != *image)
+                    {
+                        self.preview_images.insert(window.id, image);
+                        changed = true;
+                    }
+                }
+            }
         }
         let tray = self.tray_feed.snapshot();
         if tray != self.tray {
@@ -298,6 +351,8 @@ impl LiveShell {
             SurfaceRole::Launcher => self.launcher_scene(width, height),
             SurfaceRole::ControlCenter => self.control_frame(width, height).commands,
             SurfaceRole::Notification => self.notification_scene(width, height),
+            SurfaceRole::WindowPreview => self.window_preview_scene(),
+            SurfaceRole::WindowContextMenu => self.window_menu_scene(),
             SurfaceRole::CodexProjectMenu | SurfaceRole::CodexChat => Vec::new(),
         }
     }
@@ -308,6 +363,8 @@ impl LiveShell {
             SurfaceRole::Launcher => self.launcher_visible,
             SurfaceRole::ControlCenter => self.control_visible,
             SurfaceRole::Notification => self.notification.is_some(),
+            SurfaceRole::WindowPreview => self.preview_group.is_some(),
+            SurfaceRole::WindowContextMenu => self.window_menu.is_some(),
             SurfaceRole::CodexProjectMenu => self.codex_project_menu_visible,
             SurfaceRole::CodexChat => true,
         }
@@ -330,11 +387,17 @@ impl LiveShell {
         let task_end = PANEL_ITEM_WIDTH + groups.len() as f32 * PANEL_ITEM_WIDTH;
         if x < task_end {
             let index = ((x - PANEL_ITEM_WIDTH) / PANEL_ITEM_WIDTH) as usize;
-            if let Some(window) = groups.get(index).and_then(|group| group.windows.first()) {
+            if groups
+                .get(index)
+                .is_some_and(|group| group.windows.len() > 1)
+            {
+                self.open_window_preview(index);
+            } else if let Some(window) = groups.get(index).and_then(|group| group.windows.first()) {
                 let _ = platform::send_shell_command(ShellCommand::WindowAction {
                     window: window.id,
                     action: WindowAction::Activate,
                 });
+                self.close_window_preview();
             }
             return true;
         }
@@ -368,6 +431,12 @@ impl LiveShell {
         let hovered = self.panel_hover_at(x, width);
         let changed = hovered != self.panel_hover;
         self.panel_hover = hovered;
+        if let Some(PanelHover::Task(index)) = hovered {
+            self.open_window_preview(index);
+            self.preview_leave_deadline = None;
+        } else if self.preview_group.is_some() && !self.preview_pointer_inside {
+            self.preview_leave_deadline = Some(Instant::now() + PREVIEW_LEAVE_DELAY);
+        }
         changed
     }
 
@@ -376,7 +445,159 @@ impl LiveShell {
             return false;
         }
         self.panel_hover = None;
+        if self.preview_group.is_some() && !self.preview_pointer_inside {
+            self.preview_leave_deadline = Some(Instant::now() + PREVIEW_LEAVE_DELAY);
+        }
         true
+    }
+
+    pub fn preview_pointer_entered(&mut self, entered: bool) -> bool {
+        if self.preview_pointer_inside == entered {
+            return false;
+        }
+        self.preview_pointer_inside = entered;
+        if entered {
+            self.preview_leave_deadline = None;
+        } else {
+            self.preview_leave_deadline = Some(Instant::now() + PREVIEW_LEAVE_DELAY);
+            if self.preview_hovered.take().is_some() {
+                let _ = platform::send_shell_command(ShellCommand::ClearWindowHighlight);
+            }
+        }
+        true
+    }
+
+    pub fn preview_pointer_moved(&mut self, x: f32, y: f32) -> bool {
+        let hovered = self
+            .preview_frame
+            .as_ref()
+            .and_then(|frame| frame.window_at(Point { x, y }));
+        if hovered == self.preview_hovered {
+            return false;
+        }
+        self.preview_hovered = hovered;
+        let command = hovered.map_or(
+            ShellCommand::ClearWindowHighlight,
+            ShellCommand::HighlightWindow,
+        );
+        let _ = platform::send_shell_command(command);
+        true
+    }
+
+    pub fn preview_click(&mut self, x: f32, y: f32, right_click: bool) -> bool {
+        let Some(action) = self
+            .preview_frame
+            .as_ref()
+            .and_then(|frame| frame.action_at(Point { x, y }, right_click))
+        else {
+            return false;
+        };
+        match action {
+            PreviewAction::Activate(window) => {
+                self.send_window_action(window, WindowAction::Activate);
+                self.close_window_preview();
+            }
+            PreviewAction::Close(window) => {
+                self.send_window_action(window, WindowAction::Close);
+            }
+            PreviewAction::OpenMenu(window) => {
+                self.window_menu = Some(window);
+                self.window_menu_frame = Some(build_menu_frame(window, self.palette));
+                let x = self.preview_group.map_or(0, |index| {
+                    (PANEL_ITEM_WIDTH + index as f32 * PANEL_ITEM_WIDTH) as i32
+                });
+                let _ = platform::send_shell_command(ShellCommand::ShowContextMenu {
+                    x,
+                    width: MENU_WIDTH as i32,
+                    height: MENU_HEIGHT as i32,
+                });
+            }
+        }
+        true
+    }
+
+    pub fn window_menu_click(&mut self, x: f32, y: f32) -> bool {
+        let Some(action) = self
+            .window_menu_frame
+            .as_ref()
+            .and_then(|frame| frame.action_at(Point { x, y }))
+        else {
+            return false;
+        };
+        match action {
+            MenuAction::Close(window) => self.send_window_action(window, WindowAction::Close),
+            MenuAction::MaximizeRestore(window) => {
+                self.send_window_action(window, WindowAction::Maximize)
+            }
+            MenuAction::Minimize(window) => self.send_window_action(window, WindowAction::Minimize),
+        }
+        self.close_window_preview();
+        true
+    }
+
+    pub fn sync_transient_overlays(&self) {
+        if let Some(index) = self.preview_group {
+            let groups = self.launcher.group_windows(&self.windows);
+            if let Some(group) = groups.get(index) {
+                let windows = group
+                    .windows
+                    .iter()
+                    .map(|window| window.id)
+                    .collect::<Vec<_>>();
+                let (width, height) = preview_dimensions(windows.len());
+                let x =
+                    (PANEL_ITEM_WIDTH + index as f32 * PANEL_ITEM_WIDTH + PANEL_ITEM_WIDTH / 2.0
+                        - width as f32 / 2.0) as i32;
+                let _ = platform::send_shell_command(ShellCommand::ShowPreview {
+                    x,
+                    width: width as i32,
+                    height: height as i32,
+                    windows,
+                });
+            }
+        }
+        if self.window_menu.is_some() {
+            let x = self.preview_group.map_or(0, |index| {
+                (PANEL_ITEM_WIDTH + index as f32 * PANEL_ITEM_WIDTH) as i32
+            });
+            let _ = platform::send_shell_command(ShellCommand::ShowContextMenu {
+                x,
+                width: MENU_WIDTH as i32,
+                height: MENU_HEIGHT as i32,
+            });
+        }
+    }
+
+    fn send_window_action(&self, window: crate::model::WindowId, action: WindowAction) {
+        let _ = platform::send_shell_command(ShellCommand::WindowAction { window, action });
+    }
+
+    fn open_window_preview(&mut self, index: usize) {
+        if self.preview_group == Some(index) {
+            return;
+        }
+        let groups = self.launcher.group_windows(&self.windows);
+        if groups.get(index).is_none() {
+            return;
+        }
+        self.preview_group = Some(index);
+        self.preview_images.clear();
+        self.preview_hovered = None;
+        self.window_menu = None;
+        self.window_menu_frame = None;
+    }
+
+    fn close_window_preview(&mut self) {
+        self.preview_group = None;
+        self.preview_pointer_inside = false;
+        self.preview_leave_deadline = None;
+        self.preview_hovered = None;
+        self.preview_images.clear();
+        self.preview_frame = None;
+        self.window_menu = None;
+        self.window_menu_frame = None;
+        let _ = platform::send_shell_command(ShellCommand::ClearWindowHighlight);
+        let _ = platform::send_shell_command(ShellCommand::HideContextMenu);
     }
 
     pub fn global_shortcut(&mut self, shortcut: platform::GlobalShortcut) -> bool {
@@ -790,6 +1011,39 @@ impl LiveShell {
                 false,
             ),
         ]
+    }
+
+    fn window_preview_scene(&mut self) -> Vec<PaintCommand> {
+        let group = self.preview_group.and_then(|index| {
+            self.launcher
+                .group_windows(&self.windows)
+                .get(index)
+                .cloned()
+        });
+        let Some(group) = group else {
+            self.preview_frame = None;
+            return Vec::new();
+        };
+        let frame = build_preview_frame(
+            &group,
+            &self.preview_images,
+            self.preview_hovered,
+            self.palette,
+        );
+        let commands = frame.commands.clone();
+        self.preview_frame = Some(frame);
+        commands
+    }
+
+    fn window_menu_scene(&mut self) -> Vec<PaintCommand> {
+        let Some(window) = self.window_menu else {
+            self.window_menu_frame = None;
+            return Vec::new();
+        };
+        let frame = build_menu_frame(window, self.palette);
+        let commands = frame.commands.clone();
+        self.window_menu_frame = Some(frame);
+        commands
     }
 
     fn launcher_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {

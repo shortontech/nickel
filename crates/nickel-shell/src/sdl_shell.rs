@@ -22,6 +22,8 @@ pub const PANEL_TITLE: &str = "Nickel Panel";
 pub const LAUNCHER_TITLE: &str = "Nickel Launcher";
 pub const CONTROL_CENTER_TITLE: &str = "Nickel Control Center";
 pub const NOTIFICATION_TITLE: &str = "Nickel Notification";
+pub const WINDOW_PREVIEW_TITLE: &str = "Nickel Window Preview";
+pub const WINDOW_CONTEXT_MENU_TITLE: &str = "Nickel Window Menu";
 pub const CODEX_PROJECT_MENU_TITLE: &str = "Nickel Codex Projects";
 pub const PANEL_HEIGHT: u32 = 56;
 
@@ -35,6 +37,8 @@ pub enum SurfaceRole {
     Launcher,
     ControlCenter,
     Notification,
+    WindowPreview,
+    WindowContextMenu,
     CodexProjectMenu,
     CodexChat,
 }
@@ -155,6 +159,7 @@ pub struct SdlShell {
 
 impl SdlShell {
     pub fn new(started: Instant) -> Result<Self, String> {
+        sdl3::hint::set("SDL_MOUSE_FOCUS_CLICKTHROUGH", "1");
         let sdl = sdl3::init().map_err(|error| error.to_string())?;
         let video = sdl.video().map_err(|error| error.to_string())?;
         sdl.event()
@@ -206,6 +211,8 @@ impl SdlShell {
         self.create_surface(SurfaceRole::Launcher, 0, primary)?;
         self.create_surface(SurfaceRole::ControlCenter, 0, primary)?;
         self.create_surface(SurfaceRole::Notification, 0, primary)?;
+        self.create_surface(SurfaceRole::WindowPreview, 0, primary)?;
+        self.create_surface(SurfaceRole::WindowContextMenu, 0, primary)?;
         self.create_surface(SurfaceRole::CodexProjectMenu, 0, primary)?;
         tracing::info!(
             elapsed_ms = self.started.elapsed().as_secs_f64() * 1_000.0,
@@ -230,7 +237,12 @@ impl SdlShell {
         }
 
         for surface in &mut self.surfaces {
-            if surface.role == SurfaceRole::CodexChat {
+            if matches!(
+                surface.role,
+                SurfaceRole::CodexChat
+                    | SurfaceRole::WindowPreview
+                    | SurfaceRole::WindowContextMenu
+            ) {
                 continue;
             }
             let Some(display) = displays.get(surface.display_index).copied() else {
@@ -449,6 +461,8 @@ impl SdlShell {
             SurfaceRole::Launcher => SessionShellRole::Launcher,
             SurfaceRole::ControlCenter => SessionShellRole::ControlCenter,
             SurfaceRole::Notification => SessionShellRole::Notification,
+            SurfaceRole::WindowPreview => SessionShellRole::Preview,
+            SurfaceRole::WindowContextMenu => SessionShellRole::ContextMenu,
             SurfaceRole::CodexProjectMenu => SessionShellRole::ProjectMenu,
             SurfaceRole::CodexChat => unreachable!("chat surfaces are dynamic"),
         };
@@ -457,7 +471,17 @@ impl SdlShell {
         let mut builder = self.video.window(title, width, height);
         builder.position(x, y).high_pixel_density();
         builder.borderless();
-        if hidden {
+        if matches!(
+            role,
+            SurfaceRole::WindowPreview | SurfaceRole::WindowContextMenu
+        ) {
+            builder.resizable();
+        }
+        // A hidden Wayland toplevel receives no initial configure, so SDL waits
+        // for its timeout before returning from window creation. Map Linux
+        // shell surfaces once, then `sync_visibility` immediately applies the
+        // production visibility state after every role has registered.
+        if hidden && cfg!(not(target_os = "linux")) {
             builder.hidden();
         }
         let window = builder.build().map_err(|error| error.to_string());
@@ -652,6 +676,22 @@ fn surface_geometry(
             geometry.y + 24,
             420.min(geometry.width),
             140.min(geometry.height),
+            true,
+        ),
+        SurfaceRole::WindowPreview => (
+            WINDOW_PREVIEW_TITLE,
+            geometry.x,
+            geometry.y,
+            300.min(geometry.width),
+            220.min(geometry.height),
+            true,
+        ),
+        SurfaceRole::WindowContextMenu => (
+            WINDOW_CONTEXT_MENU_TITLE,
+            geometry.x,
+            geometry.y,
+            220.min(geometry.width),
+            156.min(geometry.height),
             true,
         ),
         SurfaceRole::CodexProjectMenu => (

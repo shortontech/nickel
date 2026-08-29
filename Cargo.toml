@@ -33,6 +33,7 @@ license = "MIT OR Apache-2.0"
 rust-version = "1.94"
 
 [workspace.dependencies]
+base64 = "0.22.1"
 bytemuck = { version = "1.25.0", features = ["derive"] }
 bitflags = "2.11.0"
 ctrlc = "3.5.2"

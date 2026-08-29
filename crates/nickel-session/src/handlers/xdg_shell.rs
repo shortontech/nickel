@@ -105,6 +105,13 @@ impl XdgShellHandler for NickelSession {
         {
             self.context_menu_window = None;
         }
+        if self
+            .preview_window
+            .as_ref()
+            .is_some_and(|window| window.toplevel().unwrap().wl_surface() == surface.wl_surface())
+        {
+            self.preview_window = None;
+        }
         if let Some(id) = self.surface_windows.remove(&surface.wl_surface().id()) {
             self.minimized_windows.remove(&id);
             self.remove_window_from_switcher(id);
@@ -265,6 +272,17 @@ impl NickelSession {
         mode: smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode,
     ) {
         use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode;
+        // Nickel's authenticated shell surfaces are already borderless UI.
+        // Advertising server decorations makes SDL exclude a synthetic
+        // titlebar strip from xdg-window-geometry, leaving visible controls in
+        // that strip outside the compositor's pointer hit region.
+        let shell_client = toplevel
+            .wl_surface()
+            .client()
+            .and_then(|client| client.get_credentials(&self.display_handle).ok())
+            .and_then(|credentials| u32::try_from(credentials.pid).ok())
+            .is_some_and(|pid| self.is_authenticated_shell_pid(pid));
+        let mode = if shell_client { Mode::ClientSide } else { mode };
         match mode {
             Mode::ServerSide => {
                 self.server_decorated.insert(toplevel.wl_surface().id());
@@ -366,6 +384,7 @@ impl NickelSession {
         let is_desktop = shell_role == Some(ShellRole::Desktop);
         let is_panel = shell_role == Some(ShellRole::Panel);
         let is_context_menu = shell_role == Some(ShellRole::ContextMenu);
+        let is_preview = shell_role == Some(ShellRole::Preview);
         let is_notification = shell_role == Some(ShellRole::Notification);
         let is_codex_project_chat = is_codex_project_chat(app_id.as_deref());
         let is_utility = matches!(
@@ -374,8 +393,6 @@ impl NickelSession {
                 ShellRole::ControlCenter
                     | ShellRole::Notification
                     | ShellRole::ProjectMenu
-                    | ShellRole::ContextMenu
-                    | ShellRole::Preview
                     | ShellRole::Lock
                     | ShellRole::Recovery
             )
@@ -426,6 +443,16 @@ impl NickelSession {
                 .cloned();
             if let Some(menu) = menu {
                 self.register_context_menu(menu);
+            }
+        }
+        if is_preview && self.preview_window.is_none() {
+            let preview = self
+                .space
+                .elements()
+                .find(|window| window.toplevel().unwrap().wl_surface() == surface.wl_surface())
+                .cloned();
+            if let Some(preview) = preview {
+                self.register_preview(preview);
             }
         }
         if is_utility {
