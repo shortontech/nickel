@@ -116,12 +116,19 @@ impl NickelSession {
                                     | HotkeyAction::SwitchGroupPrevious
                                     | HotkeyAction::CommitSwitch),
                                 ) => session.apply_task_switch_action(action),
-                                Some(
-                                    HotkeyAction::ShowRun
-                                    | HotkeyAction::CaptureActiveWindow
-                                    | HotkeyAction::CaptureActiveWindowToFile
-                                    | HotkeyAction::ShowScreenshotTool,
-                                )
+                                Some(HotkeyAction::CaptureActiveWindow) => {
+                                    tracing::info!(
+                                        action = "capture_active_window",
+                                        "screenshot shortcut requested"
+                                    );
+                                }
+                                Some(HotkeyAction::CaptureActiveWindowToFile) => {
+                                    tracing::info!(
+                                        action = "capture_active_window_to_file",
+                                        "screenshot shortcut requested"
+                                    );
+                                }
+                                Some(HotkeyAction::ShowRun | HotkeyAction::ShowScreenshotTool)
                                 | None => {}
                             }
                             if outcome.suppress {
