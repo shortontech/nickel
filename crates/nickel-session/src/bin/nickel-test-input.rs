@@ -17,7 +17,7 @@ Usage:
   nickel-test-input workspace-remove ID
   nickel-test-input workspace-move WINDOW_ID WORKSPACE_ID
   nickel-test-input window activate|close|minimize|maximize|fullscreen WINDOW_ID
-  nickel-test-input session restart-shell|lock|suspend|logout|reboot|power-off
+  nickel-test-input session restart-shell|lock|unlock|suspend|logout|reboot|power-off
   nickel-test-input idle-inhibition
   nickel-test-input move X Y
   nickel-test-input move-relative DX DY
@@ -51,6 +51,7 @@ enum Parsed {
         action: nickel_session_protocol::WindowAction,
     },
     SessionAction(Option<nickel_session_protocol::SessionAction>),
+    Unlock,
     IdleInhibition,
     Help,
 }
@@ -127,6 +128,9 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, String> {
             },
         }),
         [command, action] if command == "session" => {
+            if action == "unlock" {
+                return Ok(Parsed::Unlock);
+            }
             Ok(Parsed::SessionAction(match action.as_str() {
                 "restart-shell" => Some(nickel_session_protocol::SessionAction::RestartShell),
                 "lock" => Some(nickel_session_protocol::SessionAction::Lock),
@@ -246,6 +250,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }),
         Parsed::SessionAction(Some(action)) => Request::Command(Command::SessionAction { action }),
         Parsed::SessionAction(None) => Request::Command(Command::LogOut),
+        Parsed::Unlock => Request::Command(Command::Unlock),
         Parsed::IdleInhibition => Request::Query(nickel_session_protocol::Query::IdleInhibition),
     };
     let control = env::var_os("NICKEL_SESSION_CONTROL")

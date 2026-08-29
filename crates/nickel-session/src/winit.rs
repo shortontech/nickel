@@ -177,15 +177,19 @@ pub fn init_winit(
                             &frame_palette,
                         );
                         let mut overlay_elements = Vec::new();
-                        if let Some(window) = state.preview_highlight.and_then(|highlight| {
-                            state.space.elements().find(|window| {
-                                window
-                                    .wl_surface()
-                                    .and_then(|surface| state.surface_windows.get(&surface.id()))
-                                    .copied()
-                                    == Some(highlight)
+                        if !state.locked
+                            && let Some(window) = state.preview_highlight.and_then(|highlight| {
+                                state.space.elements().find(|window| {
+                                    window
+                                        .wl_surface()
+                                        .and_then(|surface| {
+                                            state.surface_windows.get(&surface.id())
+                                        })
+                                        .copied()
+                                        == Some(highlight)
+                                })
                             })
-                        }) {
+                        {
                             let shell_surfaces = state
                                 .shell_windows()
                                 .filter_map(|shell| {
@@ -249,6 +253,24 @@ pub fn init_winit(
                             ));
                         }
                         overlay_elements.extend(window_elements);
+                        if state.locked {
+                            let cover = SolidColorBuffer::new(
+                                size.to_logical(1),
+                                [0.015, 0.02, 0.035, 1.0],
+                            );
+                            // Render elements are front-to-back. The lock
+                            // surface stays before this opaque cover; every
+                            // ordinary client remains behind it.
+                            overlay_elements.push(WinitFrameElement::from(
+                                SolidColorRenderElement::from_buffer(
+                                    &cover,
+                                    (0, 0),
+                                    1.0,
+                                    1.0,
+                                    Kind::Unspecified,
+                                ),
+                            ));
+                        }
 
                         let recovery_banner = state.shell_recovery_visible().then(|| {
                             let banner_width = size.w.clamp(1, 560);
@@ -298,7 +320,8 @@ pub fn init_winit(
                         state.complete_output_capture(&path, result);
                     }
 
-                    if last_preview_capture.elapsed() >= Duration::from_millis(200) {
+                    if !state.locked && last_preview_capture.elapsed() >= Duration::from_millis(200)
+                    {
                         let windows: Vec<_> = state
                             .space
                             .elements()
@@ -384,6 +407,9 @@ fn composited_window_elements(
         .collect::<Vec<_>>();
     let mut groups = Vec::new();
     for window in state.space.elements().rev() {
+        if state.locked && !state.lock_windows.contains(window) {
+            continue;
+        }
         let Some(bounds) = state.space.element_bbox(window) else {
             continue;
         };

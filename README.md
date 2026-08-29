@@ -154,8 +154,9 @@ cargo run -p nickel-session --bin nickel-test-input -- button left pressed
 cargo run -p nickel-session --bin nickel-test-input -- button left released
 ```
 
-The same capability provides semantic workspace commands and nested output hotplug without copied
-coordinates or private state mutation. Run `nickel-test-input --help` for the complete command set.
+The same capability provides semantic workspace commands, nested output hotplug, and lock-boundary
+acceptance without copied coordinates or private state mutation. It cannot invoke logout or power
+actions. Run `nickel-test-input --help` for the complete command set.
 
 The client does not mutate shell state directly: events still pass through the compositor's normal
 hit testing, focus handling, and input reducers.
@@ -164,6 +165,8 @@ hit testing, focus handling, and input reducers.
 
 Protocol policies, compatibility evidence, and known limitations are tracked in
 [`docs/linux-application-compatibility.md`](docs/linux-application-compatibility.md).
+The compositor lock authority, PAM boundary, and remaining native acceptance are documented in
+[`docs/session-locking.md`](docs/session-locking.md).
 
 The direct backend requires DRM, GBM, libinput, udev, libseat, and EGL development packages. Build
 it without the nested backend:

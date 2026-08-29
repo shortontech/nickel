@@ -75,6 +75,10 @@ impl Application {
     }
 
     pub fn launch(&self) -> io::Result<Child> {
+        self.process()?.spawn()
+    }
+
+    fn process(&self) -> io::Result<Command> {
         let (program, arguments) = self
             .launch_command
             .as_deref()
@@ -82,10 +86,15 @@ impl Application {
             .ok_or_else(|| io::Error::other("application has no launch command"))?;
         let mut command = Command::new(program);
         command.args(arguments);
+        // These capabilities authenticate the trusted Nickel shell to its
+        // compositor. They must never cross into an ordinary application.
+        command
+            .env_remove("NICKEL_SESSION_CONTROL")
+            .env_remove("NICKEL_SESSION_TOKEN");
         if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
             command.current_dir(home);
         }
-        command.spawn()
+        Ok(command)
     }
 }
 
@@ -121,11 +130,29 @@ impl WindowGroup {
 
 #[cfg(test)]
 mod tests {
-    use super::ApplicationId;
+    use super::{Application, ApplicationId};
 
     #[test]
     fn application_ids_are_opaque() {
         let id = ApplicationId::new("org.example.App.desktop");
         assert_eq!(id.as_str(), "org.example.App.desktop");
+    }
+
+    #[test]
+    fn launched_applications_do_not_inherit_session_capabilities() {
+        let application = Application::new(
+            "test".into(),
+            "Test".into(),
+            None,
+            None,
+            Some(vec!["true".into()]),
+        );
+        let command = application.process().unwrap();
+        let removals = command
+            .get_envs()
+            .filter_map(|(name, value)| value.is_none().then_some(name))
+            .collect::<Vec<_>>();
+        assert!(removals.contains(&std::ffi::OsStr::new("NICKEL_SESSION_CONTROL")));
+        assert!(removals.contains(&std::ffi::OsStr::new("NICKEL_SESSION_TOKEN")));
     }
 }

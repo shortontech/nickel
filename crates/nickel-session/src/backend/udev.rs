@@ -895,16 +895,19 @@ impl NickelSession {
             let identify_badge = identify_index
                 .and_then(|index| native.identify_badges.get(index))
                 .cloned();
-            let preview_windows = self
-                .space
-                .elements()
-                .filter_map(|window| {
-                    let id = self.surface_windows.get(&window.wl_surface()?.id())?;
-                    self.preview_requests
-                        .contains(id)
-                        .then(|| (*id, window.clone()))
-                })
-                .collect::<Vec<_>>();
+            let preview_windows = if self.locked {
+                Vec::new()
+            } else {
+                self.space
+                    .elements()
+                    .filter_map(|window| {
+                        let id = self.surface_windows.get(&window.wl_surface()?.id())?;
+                        self.preview_requests
+                            .contains(id)
+                            .then(|| (*id, window.clone()))
+                    })
+                    .collect::<Vec<_>>()
+            };
             if surface.invalidate_pending {
                 surface
                     .drm
@@ -975,6 +978,9 @@ impl NickelSession {
                 // frame together, front-to-back, so overlapping frames obey the
                 // same stacking order as their client surfaces.
                 for window in self.space.elements().rev() {
+                    if self.locked && !self.lock_windows.contains(window) {
+                        continue;
+                    }
                     let Some(bounds) = self.space.element_bbox(window) else {
                         continue;
                     };
@@ -1097,15 +1103,17 @@ impl NickelSession {
                     }
                 }
             }
-            if let Some(highlighted) = self.preview_highlight.and_then(|highlight| {
-                self.space.elements().find(|window| {
-                    window
-                        .wl_surface()
-                        .and_then(|surface| self.surface_windows.get(&surface.id()))
-                        .copied()
-                        == Some(highlight)
+            if !self.locked
+                && let Some(highlighted) = self.preview_highlight.and_then(|highlight| {
+                    self.space.elements().find(|window| {
+                        window
+                            .wl_surface()
+                            .and_then(|surface| self.surface_windows.get(&surface.id()))
+                            .copied()
+                            == Some(highlight)
+                    })
                 })
-            }) && let Some(output_geometry) = self.space.output_geometry(&output)
+                && let Some(output_geometry) = self.space.output_geometry(&output)
             {
                 // Peek is a single front-to-back composition: shell overlays
                 // remain legible, the selected client stays bright, the dim
@@ -1165,7 +1173,7 @@ impl NickelSession {
                 peek_elements.append(&mut elements);
                 elements = peek_elements;
             }
-            if self.shell_recovery_visible() {
+            if !self.locked && self.shell_recovery_visible() {
                 let recovery_size = output
                     .current_mode()
                     .map(|mode| mode.size)
@@ -1202,7 +1210,8 @@ impl NickelSession {
                 .primary_output_name
                 .as_deref()
                 .is_none_or(|name| name == output.name());
-            if is_primary
+            if !self.locked
+                && is_primary
                 && let Some(mode) = output.current_mode()
                 && let Some((switcher, switcher_size)) = task_switcher_buffer(self, mode.size)
             {

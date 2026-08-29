@@ -37,6 +37,9 @@ mod icons;
 #[path = "../launcher.rs"]
 #[allow(clippy::manual_is_multiple_of, dead_code)]
 mod launcher;
+#[cfg(target_os = "linux")]
+#[path = "../lock_auth.rs"]
+mod lock_auth;
 use launcher::{DashboardProject, DashboardSection, ProjectActivity, normalize_dashboard_projects};
 #[path = "../model.rs"]
 #[allow(dead_code)]
@@ -452,6 +455,7 @@ fn sync_visibility(shell: &mut SdlShell, state: &LiveShell) {
 
 fn focus_visible_overlay(shell: &mut SdlShell, state: &LiveShell) {
     for role in [
+        SurfaceRole::Lock,
         SurfaceRole::Launcher,
         SurfaceRole::ControlCenter,
         SurfaceRole::CodexProjectMenu,
@@ -771,6 +775,7 @@ fn main() -> Result<(), String> {
                     focus_visible_overlay(&mut shell, &state);
                     render_role(&mut shell, &mut state, SurfaceRole::Launcher)?;
                     render_role(&mut shell, &mut state, SurfaceRole::ControlCenter)?;
+                    render_role(&mut shell, &mut state, SurfaceRole::Lock)?;
                 }
             }
             Some(ShellEvent::Quit) | Some(ShellEvent::CloseRequested(_)) => break,
@@ -915,6 +920,15 @@ fn main() -> Result<(), String> {
                 }
             }
             Some(ShellEvent::Text { surface, value }) => {
+                if shell
+                    .surface(surface)
+                    .is_some_and(|entry| entry.role() == SurfaceRole::Lock)
+                {
+                    if state.insert_lock_text(&value) {
+                        render_role(&mut shell, &mut state, SurfaceRole::Lock)?;
+                    }
+                    continue;
+                }
                 let started = Instant::now();
                 let was_dashboard = state.launcher_is_dashboard();
                 if state.insert_launcher_text(&value)
@@ -945,6 +959,15 @@ fn main() -> Result<(), String> {
                 pressed: true,
                 ..
             }) => {
+                if shell
+                    .surface(surface)
+                    .is_some_and(|entry| entry.role() == SurfaceRole::Lock)
+                {
+                    if state.lock_key(key) {
+                        render_role(&mut shell, &mut state, SurfaceRole::Lock)?;
+                    }
+                    continue;
+                }
                 if state.launcher_key(key, modifiers)
                     && let Some(role) = shell.surface(surface).map(|entry| entry.role())
                 {
@@ -1034,6 +1057,7 @@ fn main() -> Result<(), String> {
             }
             Some(ShellEvent::DisplayTopologyChanged) => {
                 shell.sync_display_geometry()?;
+                sync_visibility(&mut shell, &state);
                 render_all(&mut shell, &mut state)?;
             }
             Some(
@@ -1050,8 +1074,11 @@ fn main() -> Result<(), String> {
             }
             Some(ShellEvent::Shown(surface)) => {
                 let role = shell.surface(surface).map(|entry| entry.role());
-                if let Some(role @ (SurfaceRole::WindowPreview | SurfaceRole::WindowContextMenu)) =
-                    role
+                if let Some(
+                    role @ (SurfaceRole::WindowPreview
+                    | SurfaceRole::WindowContextMenu
+                    | SurfaceRole::Lock),
+                ) = role
                 {
                     state.sync_transient_overlays();
                     // Wayland recreates the wl_surface when SDL shows one of

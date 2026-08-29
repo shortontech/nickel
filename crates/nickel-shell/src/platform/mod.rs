@@ -137,6 +137,7 @@ pub struct WorkspaceSummary {
 pub enum GlobalShortcut {
     ShowLauncher,
     HideLauncher,
+    LockState { locked: bool },
     ShowRun,
     SwitchNext,
     SwitchPrevious,
@@ -155,6 +156,7 @@ pub enum ShellCommand {
     Hide,
     LogOut,
     SessionAction(SessionAction),
+    Unlock,
     ShowContextMenu {
         x: i32,
         width: i32,

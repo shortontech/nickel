@@ -410,6 +410,7 @@ impl NickelSession {
         let is_context_menu = shell_role == Some(ShellRole::ContextMenu);
         let is_preview = shell_role == Some(ShellRole::Preview);
         let is_notification = shell_role == Some(ShellRole::Notification);
+        let is_lock = shell_role == Some(ShellRole::Lock);
         let is_codex_project_chat = is_codex_project_chat(app_id.as_deref());
         let is_utility = matches!(
             shell_role,
@@ -417,7 +418,6 @@ impl NickelSession {
                 ShellRole::ControlCenter
                     | ShellRole::Notification
                     | ShellRole::ProjectMenu
-                    | ShellRole::Lock
                     | ShellRole::Recovery
             )
         );
@@ -493,6 +493,16 @@ impl NickelSession {
                     utility.override_z_index(45);
                 }
                 self.register_utility_window(utility);
+            }
+        }
+        if is_lock {
+            let lock = self
+                .space
+                .elements()
+                .find(|window| window.wl_surface().as_deref() == Some(surface.wl_surface()))
+                .cloned();
+            if let Some(lock) = lock {
+                self.register_lock(lock);
             }
         }
         // The SDL shell and its dynamic Codex windows share one Wayland

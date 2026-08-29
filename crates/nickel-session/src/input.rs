@@ -45,6 +45,10 @@ impl NickelSession {
     }
 
     fn update_frame_cursor(&mut self, position: smithay::utils::Point<f64, Logical>) {
+        if self.locked {
+            self.frame_cursor = Default::default();
+            return;
+        }
         self.frame_cursor = self
             .space
             .elements()
@@ -87,6 +91,9 @@ impl NickelSession {
                         serial,
                         time,
                         move |session, modifiers, handle| {
+                            if session.locked {
+                                return FilterResult::Forward;
+                            }
                             let sym = handle.modified_sym();
                             if modifiers.ctrl
                                 && modifiers.alt
@@ -262,6 +269,7 @@ impl NickelSession {
 
                 if mouse_button == Some(MouseButton::Left)
                     && button_state == ButtonState::Pressed
+                    && !self.locked
                     && self.launcher_visibility.is_visible()
                 {
                     let target = self
@@ -282,6 +290,7 @@ impl NickelSession {
 
                 if mouse_button == Some(MouseButton::Left)
                     && button_state == ButtonState::Pressed
+                    && !self.locked
                     && !super_pressed
                 {
                     let location = pointer.current_location();

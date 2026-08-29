@@ -2719,6 +2719,7 @@ dependencies = [
  "ico",
  "image",
  "jiff",
+ "libloading",
  "nickel-codex",
  "nickel-codex-ui",
  "nickel-core",
@@ -2742,6 +2743,7 @@ dependencies = [
  "windows-core",
  "winresource",
  "zbus",
+ "zeroize",
 ]
 
 [[package]]
@@ -2770,6 +2772,7 @@ dependencies = [
  "cfg-if 1.0.4",
  "cfg_aliases",
  "libc",
+ "memoffset",
 ]
 
 [[package]]

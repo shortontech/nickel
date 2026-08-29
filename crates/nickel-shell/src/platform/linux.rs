@@ -706,6 +706,7 @@ fn shell_command_payload(command: ShellCommand) -> SessionCommand {
                 action: nickel_session_protocol::SessionAction::PowerOff,
             },
         },
+        ShellCommand::Unlock => SessionCommand::Unlock,
         ShellCommand::ShowContextMenu { x, width, height } => SessionCommand::ShowOverlay {
             role: SessionShellRole::ContextMenu,
             geometry: SessionGeometry {
@@ -886,27 +887,14 @@ pub fn launcher_hotkey_receiver() -> mpsc::Receiver<GlobalShortcut> {
         .name("nickel-launcher-events".into())
         .spawn(move || {
             let mut event = vec![0_u8; nickel_session_protocol::MAX_FRAME_BYTES];
+            let mut state = SubscriptionState::default();
             while let Ok(length) = socket.recv(&mut event) {
-                let shortcut = match decode_session::<ServerEnvelope>(&event[..length])
+                let Some(shortcut) = decode_session::<ServerEnvelope>(&event[..length])
                     .ok()
                     .map(|envelope| envelope.message)
-                {
-                    Some(ServerMessage::Event(SessionEvent::LauncherVisibility { visible }))
-                    | Some(ServerMessage::LauncherVisibility { visible }) => {
-                        if visible {
-                            GlobalShortcut::ShowLauncher
-                        } else {
-                            GlobalShortcut::HideLauncher
-                        }
-                    }
-                    Some(ServerMessage::Event(SessionEvent::Snapshot(snapshot))) => {
-                        if snapshot.launcher_visible {
-                            GlobalShortcut::ShowLauncher
-                        } else {
-                            GlobalShortcut::HideLauncher
-                        }
-                    }
-                    _ => continue,
+                    .and_then(|message| subscription_shortcut(message, &mut state))
+                else {
+                    continue;
                 };
                 if sender.send(shortcut).is_err() {
                     break;
@@ -918,11 +906,58 @@ pub fn launcher_hotkey_receiver() -> mpsc::Receiver<GlobalShortcut> {
     receiver
 }
 
+#[derive(Default)]
+struct SubscriptionState {
+    locked: Option<bool>,
+    launcher_visible: Option<bool>,
+}
+
+fn subscription_shortcut(
+    message: ServerMessage,
+    state: &mut SubscriptionState,
+) -> Option<GlobalShortcut> {
+    match message {
+        ServerMessage::Event(SessionEvent::LauncherVisibility { visible })
+        | ServerMessage::LauncherVisibility { visible } => {
+            if state.launcher_visible.replace(visible) == Some(visible) {
+                None
+            } else if visible {
+                Some(GlobalShortcut::ShowLauncher)
+            } else {
+                Some(GlobalShortcut::HideLauncher)
+            }
+        }
+        ServerMessage::Event(SessionEvent::LockState { locked }) => (state.locked.replace(locked)
+            != Some(locked))
+        .then_some(GlobalShortcut::LockState { locked }),
+        ServerMessage::Event(SessionEvent::Snapshot(snapshot)) => {
+            let lock_changed = state.locked.replace(snapshot.locked) != Some(snapshot.locked);
+            let launcher_changed = state.launcher_visible.replace(snapshot.launcher_visible)
+                != Some(snapshot.launcher_visible);
+            if lock_changed {
+                Some(GlobalShortcut::LockState {
+                    locked: snapshot.locked,
+                })
+            } else if launcher_changed && snapshot.launcher_visible {
+                Some(GlobalShortcut::ShowLauncher)
+            } else if launcher_changed {
+                Some(GlobalShortcut::HideLauncher)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 pub fn handle_focused_shortcut(_: nickel_core::hotkeys::Hotkey, _: nickel_core::hotkeys::KeyEdge) {}
 
 pub fn execute_run_command(command: &str) -> Result<(), super::LaunchError> {
     let mut process = std::process::Command::new("sh");
     process.arg("-c").arg(command);
+    process
+        .env_remove(SESSION_CONTROL_ENV)
+        .env_remove(SESSION_TOKEN_ENV);
     if let Some(home) = std::env::var_os("HOME") {
         process.current_dir(home);
     }
@@ -989,11 +1024,15 @@ fn resolve_application_id(native_app_id: &str, launcher: &Launcher) -> Option<Ap
 mod tests {
     use std::time::Duration;
 
-    use crate::{launcher::Launcher, model::Application, platform::ShellCommand};
+    use crate::{
+        launcher::Launcher,
+        model::Application,
+        platform::{GlobalShortcut, ShellCommand},
+    };
 
     use super::{
-        notification_name_owned, parse_window, pixmap_to_rgba, resolve_application_id,
-        shell_command_payload, tray_retry_delay,
+        SubscriptionState, notification_name_owned, parse_window, pixmap_to_rgba,
+        resolve_application_id, shell_command_payload, subscription_shortcut, tray_retry_delay,
     };
 
     #[test]
@@ -1007,6 +1046,33 @@ mod tests {
         assert_eq!(
             shell_command_payload(ShellCommand::LogOut),
             nickel_session_protocol::Command::LogOut
+        );
+    }
+
+    #[test]
+    fn subscription_state_deduplicates_lock_snapshots() {
+        let mut state = SubscriptionState::default();
+        let snapshot = nickel_session_protocol::Snapshot {
+            locked: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            subscription_shortcut(
+                nickel_session_protocol::ServerMessage::Event(
+                    nickel_session_protocol::Event::Snapshot(snapshot.clone()),
+                ),
+                &mut state,
+            ),
+            Some(GlobalShortcut::LockState { locked: true })
+        );
+        assert_eq!(
+            subscription_shortcut(
+                nickel_session_protocol::ServerMessage::Event(
+                    nickel_session_protocol::Event::Snapshot(snapshot),
+                ),
+                &mut state,
+            ),
+            None
         );
     }
 

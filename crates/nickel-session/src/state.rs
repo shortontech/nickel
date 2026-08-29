@@ -2,8 +2,9 @@ use std::{
     collections::{HashMap, HashSet},
     ffi::OsString,
     os::fd::AsFd,
+    os::fd::AsRawFd,
     os::unix::net::UnixDatagram,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicU8, AtomicU32, Ordering},
@@ -111,6 +112,56 @@ fn shell_registration_allowed(expected_pid: u32, claimed_pid: u32) -> bool {
     expected_pid != 0 && expected_pid == claimed_pid && same_session_user(claimed_pid)
 }
 
+fn command_requires_shell_identity(command: &SessionCommand) -> bool {
+    matches!(
+        command,
+        SessionCommand::LogOut | SessionCommand::Unlock | SessionCommand::SessionAction { .. }
+    )
+}
+
+fn test_control_may_invoke(command: &SessionCommand) -> bool {
+    matches!(
+        command,
+        SessionCommand::Unlock
+            | SessionCommand::SessionAction {
+                action: nickel_session_protocol::SessionAction::Lock
+            }
+    )
+}
+
+fn recv_control_frame(
+    socket: &UnixDatagram,
+    frame: &mut [u8],
+) -> Result<(usize, Option<PathBuf>, u32), nix::errno::Errno> {
+    use nix::sys::socket::{ControlMessageOwned, MsgFlags, UnixAddr, UnixCredentials, recvmsg};
+    use std::io::IoSliceMut;
+
+    let mut slices = [IoSliceMut::new(frame)];
+    let mut credentials = nix::cmsg_space!(UnixCredentials);
+    let message = recvmsg::<UnixAddr>(
+        socket.as_raw_fd(),
+        &mut slices,
+        Some(&mut credentials),
+        MsgFlags::MSG_DONTWAIT,
+    )?;
+    let length = message.bytes;
+    let source = message
+        .address
+        .as_ref()
+        .and_then(UnixAddr::path)
+        .map(Path::to_path_buf);
+    let peer_pid = message
+        .cmsgs()?
+        .find_map(|message| match message {
+            ControlMessageOwned::ScmCredentials(credentials) => {
+                u32::try_from(credentials.pid()).ok()
+            }
+            _ => None,
+        })
+        .ok_or(nix::errno::Errno::EACCES)?;
+    Ok((length, source, peer_pid))
+}
+
 pub struct NickelSession {
     pub start_time: std::time::Instant,
     pub socket_name: OsString,
@@ -161,6 +212,9 @@ pub struct NickelSession {
     pub launcher_show_requested_at: Option<std::time::Instant>,
     pub desktop_windows: Vec<Window>,
     pub panel_windows: Vec<Window>,
+    pub lock_windows: Vec<Window>,
+    pub locked: bool,
+    lock_restore_window: Option<WindowId>,
     pub utility_windows: Vec<Window>,
     pub context_menu_window: Option<Window>,
     pub preview_window: Option<Window>,
@@ -352,6 +406,9 @@ impl NickelSession {
             launcher_show_requested_at: None,
             desktop_windows: Vec::new(),
             panel_windows: Vec::new(),
+            lock_windows: Vec::new(),
+            locked: false,
+            lock_restore_window: None,
             utility_windows: Vec::new(),
             context_menu_window: None,
             preview_window: None,
@@ -447,6 +504,8 @@ impl NickelSession {
         socket
             .set_nonblocking(true)
             .expect("failed to make Nickel session control socket nonblocking");
+        nix::sys::socket::setsockopt(&socket, nix::sys::socket::sockopt::PassCred, &true)
+            .expect("failed to enable Nickel session peer credentials");
 
         // SAFETY: session initialization is single-threaded and happens before
         // the shell child is spawned.
@@ -458,13 +517,18 @@ impl NickelSession {
                 Generic::new(socket, Interest::READ, Mode::Level),
                 |_, socket, data| {
                     let mut frame = vec![0_u8; nickel_session_protocol::MAX_FRAME_BYTES];
-                    while let Ok((length, source)) = socket.as_ref().recv_from(&mut frame) {
+                    while let Ok((length, source, peer_pid)) =
+                        recv_control_frame(socket.as_ref(), &mut frame)
+                    {
                         let request = decode::<ClientEnvelope>(&frame[..length]);
                         let (request_id, message) = match request {
                             Ok(envelope) => {
                                 let request_id = envelope.request_id;
-                                let message =
-                                    data.handle_protocol_request(envelope, source.as_pathname());
+                                let message = data.handle_protocol_request(
+                                    envelope,
+                                    source.as_deref(),
+                                    peer_pid,
+                                );
                                 (request_id, message)
                             }
                             Err(error) => (
@@ -475,7 +539,7 @@ impl NickelSession {
                                 },
                             ),
                         };
-                        if let Some(path) = source.as_pathname() {
+                        if let Some(path) = source.as_deref() {
                             match encode(&ServerEnvelope {
                                 request_id,
                                 message,
@@ -509,19 +573,25 @@ impl NickelSession {
         &mut self,
         envelope: ClientEnvelope,
         source: Option<&std::path::Path>,
+        peer_pid: u32,
     ) -> ServerMessage {
         if envelope.token != self.protocol_token {
             return protocol_error(ErrorCode::Unauthorized, "invalid session capability");
         }
         match envelope.request {
             Request::RegisterShell { pid } => {
-                if !shell_registration_allowed(self.expected_shell_pid.load(Ordering::Acquire), pid)
+                if pid != peer_pid
+                    || !shell_registration_allowed(
+                        self.expected_shell_pid.load(Ordering::Acquire),
+                        pid,
+                    )
                 {
                     return protocol_error(
                         ErrorCode::Unauthorized,
                         "shell process is outside the active user session",
                     );
                 }
+                self.authenticated_shell_pids.clear();
                 self.authenticated_shell_pids.insert(pid);
                 ServerMessage::Snapshot(self.protocol_snapshot())
             }
@@ -542,6 +612,15 @@ impl NickelSession {
             }
             Request::Query(query) => self.handle_protocol_query(query),
             Request::Command(command) => {
+                if command_requires_shell_identity(&command)
+                    && !self.authenticated_shell_pids.contains(&peer_pid)
+                    && !(self.test_control_enabled && test_control_may_invoke(&command))
+                {
+                    return protocol_error(
+                        ErrorCode::Unauthorized,
+                        "command requires the authenticated Nickel shell process",
+                    );
+                }
                 self.handle_protocol_command(command, source, envelope.request_id)
             }
         }
@@ -620,10 +699,7 @@ impl NickelSession {
                     }
                 }
                 nickel_session_protocol::SessionAction::Lock => {
-                    return protocol_error(
-                        ErrorCode::InvalidRequest,
-                        "session locking is not implemented yet",
-                    );
+                    self.lock_session();
                 }
                 nickel_session_protocol::SessionAction::Suspend => {
                     crate::session_services::request(
@@ -639,6 +715,7 @@ impl NickelSession {
                     );
                 }
             },
+            SessionCommand::Unlock => self.unlock_session(),
             SessionCommand::RetrySecureStorage => self
                 .secure_storage_retry
                 .store(true, std::sync::atomic::Ordering::Release),
@@ -1128,6 +1205,7 @@ impl NickelSession {
             outputs: self.protocol_outputs(),
             windows,
             launcher_visible: self.launcher_visibility.is_visible(),
+            locked: self.locked,
             workspaces: self.protocol_workspaces(),
         }
     }
@@ -1809,6 +1887,7 @@ impl NickelSession {
             .iter()
             .chain(self.desktop_windows.iter())
             .chain(self.panel_windows.iter())
+            .chain(self.lock_windows.iter())
             .chain(self.utility_windows.iter())
             .chain(self.context_menu_window.iter())
             .chain(self.preview_window.iter())
@@ -1818,6 +1897,138 @@ impl NickelSession {
         if !self.utility_windows.contains(&window) {
             self.utility_windows.push(window);
         }
+    }
+
+    pub fn register_lock(&mut self, window: Window) {
+        window.override_z_index(100);
+        self.lock_windows
+            .retain(|candidate| self.space.elements().any(|mapped| mapped == candidate));
+        if !self.lock_windows.contains(&window) {
+            self.lock_windows.push(window.clone());
+        }
+        self.relayout_lock_surfaces();
+        if self.locked {
+            let focus = window
+                .wl_surface()
+                .map(|surface| crate::focus::KeyboardFocusTarget::Wayland(surface.into_owned()));
+            self.seat
+                .get_keyboard()
+                .unwrap()
+                .set_focus(self, focus, SERIAL_COUNTER.next_serial());
+            let pointer = self.seat.get_pointer().unwrap();
+            let location = pointer.current_location();
+            pointer.motion(
+                self,
+                self.pointer_surface_under(location),
+                &smithay::input::pointer::MotionEvent {
+                    location,
+                    serial: SERIAL_COUNTER.next_serial(),
+                    time: smithay::backend::input::InputTime::now(),
+                },
+            );
+            pointer.frame(self);
+        }
+    }
+
+    fn relayout_lock_surfaces(&mut self) {
+        let outputs = self.space.outputs().cloned().collect::<Vec<_>>();
+        for (lock, output) in self.lock_windows.clone().into_iter().zip(outputs) {
+            let Some(geometry) = self.space.output_geometry(&output) else {
+                continue;
+            };
+            Self::configure_window(
+                &lock,
+                Geometry {
+                    x: geometry.loc.x,
+                    y: geometry.loc.y,
+                    width: geometry.size.w,
+                    height: geometry.size.h,
+                },
+            );
+            if self.locked {
+                self.space.map_element(lock.clone(), geometry.loc, true);
+                self.space.raise_element(&lock, true);
+            } else {
+                self.space.unmap_elem(&lock);
+            }
+        }
+    }
+
+    fn lock_session(&mut self) {
+        if self.locked {
+            return;
+        }
+        self.locked = true;
+        let shell_ids = self
+            .shell_windows()
+            .filter_map(|window| self.surface_windows.get(&window.wl_surface()?.id()))
+            .copied()
+            .collect::<HashSet<_>>();
+        self.lock_restore_window = self
+            .windows
+            .snapshot()
+            .into_iter()
+            .find(|window| window.active && !shell_ids.contains(&window.id))
+            .map(|window| window.id);
+        self.hide_overlays();
+        self.relayout_lock_surfaces();
+        let pointer = self.seat.get_pointer().unwrap();
+        let pointer_location = pointer.current_location();
+        pointer.motion(
+            self,
+            self.pointer_surface_under(pointer_location),
+            &smithay::input::pointer::MotionEvent {
+                location: pointer_location,
+                serial: SERIAL_COUNTER.next_serial(),
+                time: smithay::backend::input::InputTime::now(),
+            },
+        );
+        pointer.frame(self);
+        self.seat.get_touch().unwrap().cancel(self);
+        let focus = self
+            .lock_windows
+            .first()
+            .and_then(Window::wl_surface)
+            .map(|surface| crate::focus::KeyboardFocusTarget::Wayland(surface.into_owned()));
+        self.seat
+            .get_keyboard()
+            .unwrap()
+            .set_focus(self, focus, SERIAL_COUNTER.next_serial());
+        self.notify_lock_state();
+    }
+
+    fn unlock_session(&mut self) {
+        if !self.locked {
+            return;
+        }
+        self.locked = false;
+        self.relayout_lock_surfaces();
+        if let Some(window) = self.lock_restore_window.take() {
+            self.activate_window(window);
+        } else {
+            self.seat
+                .get_keyboard()
+                .unwrap()
+                .set_focus(self, None, SERIAL_COUNTER.next_serial());
+        }
+        self.notify_lock_state();
+    }
+
+    fn notify_lock_state(&mut self) {
+        let Ok(event) = encode(&ServerEnvelope {
+            request_id: 0,
+            message: ServerMessage::Event(SessionEvent::LockState {
+                locked: self.locked,
+            }),
+        }) else {
+            return;
+        };
+        let Ok(socket) = UnixDatagram::unbound() else {
+            return;
+        };
+        self.launcher_subscribers
+            .retain(|path| socket.send_to(&event, path).is_ok());
+        self.notify_protocol_snapshot();
     }
 
     pub fn register_context_menu(&mut self, window: Window) {
@@ -2268,6 +2479,7 @@ impl NickelSession {
             self.raise_panels();
         }
         self.relayout_maximized_windows();
+        self.relayout_lock_surfaces();
     }
 
     pub fn maximize_toplevel(&mut self, surface: &ToplevelSurface) {
@@ -2692,6 +2904,7 @@ impl NickelSession {
     ) -> Option<(WlSurface, Point<f64, Logical>)> {
         self.space
             .element_under(pos)
+            .filter(|(window, _)| !self.locked || self.lock_windows.contains(window))
             .and_then(|(window, location)| {
                 window
                     .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
@@ -2705,6 +2918,7 @@ impl NickelSession {
     ) -> Option<(crate::focus::PointerFocusTarget, Point<f64, Logical>)> {
         self.space
             .element_under(pos)
+            .filter(|(window, _)| !self.locked || self.lock_windows.contains(window))
             .and_then(|(window, location)| {
                 window
                     .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
@@ -2749,8 +2963,12 @@ impl ClientData for ClientState {
 
 #[cfg(test)]
 mod protocol_tests {
-    use super::{clamp_window_location, shell_registration_allowed};
+    use super::{
+        clamp_window_location, command_requires_shell_identity, shell_registration_allowed,
+        test_control_may_invoke,
+    };
     use crate::shell_layout::Geometry;
+    use nickel_session_protocol::{Command, SessionAction};
 
     #[test]
     fn only_the_exact_supervised_shell_pid_can_register() {
@@ -2762,6 +2980,34 @@ mod protocol_tests {
             current
         ));
         assert!(!shell_registration_allowed(current, u32::MAX));
+    }
+
+    #[test]
+    fn destructive_and_unlock_commands_require_the_registered_shell_pid() {
+        for command in [
+            Command::LogOut,
+            Command::Unlock,
+            Command::SessionAction {
+                action: SessionAction::Lock,
+            },
+            Command::SessionAction {
+                action: SessionAction::PowerOff,
+            },
+        ] {
+            assert!(command_requires_shell_identity(&command));
+        }
+        assert!(!command_requires_shell_identity(&Command::ToggleLauncher));
+    }
+
+    #[test]
+    fn explicit_nested_test_control_can_only_cross_lock_boundaries() {
+        assert!(test_control_may_invoke(&Command::Unlock));
+        assert!(test_control_may_invoke(&Command::SessionAction {
+            action: SessionAction::Lock,
+        }));
+        assert!(!test_control_may_invoke(&Command::SessionAction {
+            action: SessionAction::PowerOff,
+        }));
     }
 
     #[test]

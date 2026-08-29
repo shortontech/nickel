@@ -59,6 +59,7 @@ pub enum Command {
     SessionAction {
         action: SessionAction,
     },
+    Unlock,
     RetrySecureStorage,
     HideOverlay,
     ShowOverlay {
@@ -224,6 +225,7 @@ pub enum Event {
     Preview(PreviewFrame),
     OutputCaptureCompleted { path: String, result: CaptureResult },
     Workspaces(WorkspaceState),
+    LockState { locked: bool },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -247,6 +249,7 @@ pub struct Snapshot {
     pub focused: Option<WindowId>,
     pub stacking_front_to_back: Vec<WindowId>,
     pub launcher_visible: bool,
+    pub locked: bool,
     pub workspaces: WorkspaceState,
 }
 
@@ -682,6 +685,15 @@ mod tests {
                 envelope
             );
         }
+        let envelope = ClientEnvelope {
+            token: "session-token".into(),
+            request_id: 15,
+            request: Request::Command(Command::Unlock),
+        };
+        assert_eq!(
+            decode::<ClientEnvelope>(&encode(&envelope).unwrap()).unwrap(),
+            envelope
+        );
     }
 
     #[test]
@@ -727,6 +739,7 @@ mod tests {
             focused: Some(WindowId(9)),
             stacking_front_to_back: vec![WindowId(9)],
             launcher_visible: false,
+            locked: false,
             workspaces: WorkspaceState {
                 active: WorkspaceId(1),
                 active_output: Some("DP-1".into()),

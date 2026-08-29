@@ -36,6 +36,7 @@ use crate::{
     },
 };
 use sdl3::keyboard::{Keycode, Mod};
+use zeroize::{Zeroize, Zeroizing};
 
 const PANEL_ITEM_WIDTH: f32 = 52.0;
 const PANEL_CLOCK_WIDTH: f32 = 96.0;
@@ -104,6 +105,9 @@ pub struct LiveShell {
     bluetooth: BluetoothStatus,
     audio: AudioStatus,
     launcher_visible: bool,
+    locked: bool,
+    lock_password: Zeroizing<String>,
+    lock_status: Option<String>,
     control_visible: bool,
     codex_project_menu_visible: bool,
     panel_hover: Option<PanelHover>,
@@ -208,6 +212,9 @@ impl LiveShell {
             bluetooth,
             audio,
             launcher_visible: false,
+            locked: false,
+            lock_password: Zeroizing::new(String::new()),
+            lock_status: None,
             control_visible: false,
             codex_project_menu_visible: false,
             panel_hover: None,
@@ -365,6 +372,7 @@ impl LiveShell {
             SurfaceRole::Notification => self.notification_scene(width, height),
             SurfaceRole::WindowPreview => self.window_preview_scene(),
             SurfaceRole::WindowContextMenu => self.window_menu_scene(),
+            SurfaceRole::Lock => self.lock_scene(width, height),
             SurfaceRole::CodexProjectMenu | SurfaceRole::CodexChat => Vec::new(),
         }
     }
@@ -378,6 +386,7 @@ impl LiveShell {
             SurfaceRole::WindowPreview => self.preview_group.is_some(),
             SurfaceRole::WindowContextMenu => self.window_menu.is_some(),
             SurfaceRole::CodexProjectMenu => self.codex_project_menu_visible,
+            SurfaceRole::Lock => self.locked,
             SurfaceRole::CodexChat => true,
         }
     }
@@ -633,6 +642,18 @@ impl LiveShell {
             }
             platform::GlobalShortcut::HideLauncher => {
                 self.apply_launcher_signal(false);
+                true
+            }
+            platform::GlobalShortcut::LockState { locked } => {
+                self.locked = locked;
+                self.lock_password.zeroize();
+                self.lock_status = None;
+                if locked {
+                    self.launcher_visible = false;
+                    self.control_visible = false;
+                    self.codex_project_menu_visible = false;
+                    self.close_window_preview();
+                }
                 true
             }
             platform::GlobalShortcut::ShowRun => {
@@ -975,6 +996,144 @@ impl LiveShell {
             });
         }
         commands
+    }
+
+    fn lock_scene(&self, width: u32, height: u32) -> Vec<PaintCommand> {
+        let width = width as f32;
+        let height = height as f32;
+        let masked = "•".repeat(self.lock_password.chars().count().min(32));
+        let username = std::env::var("USER").unwrap_or_else(|_| "Session locked".into());
+        let mut commands = vec![
+            PaintCommand::Fill {
+                rect: Rect::new(0.0, 0.0, width, height),
+                color: 0x080b12,
+            },
+            text(
+                Rect::new(0.0, height * 0.38, width, 48.0),
+                "Nickel",
+                30.0,
+                0xffffff,
+                TextAlign::Center,
+                true,
+            ),
+            text(
+                Rect::new(0.0, height * 0.38 + 56.0, width, 32.0),
+                &username,
+                18.0,
+                0xb8c0d4,
+                TextAlign::Center,
+                false,
+            ),
+            PaintCommand::RoundedFill {
+                rect: Rect::new(width * 0.5 - 170.0, height * 0.38 + 104.0, 340.0, 46.0),
+                color: 0x20283a,
+                radius: 10.0,
+            },
+            text(
+                Rect::new(width * 0.5 - 154.0, height * 0.38 + 114.0, 308.0, 28.0),
+                if masked.is_empty() {
+                    "Password"
+                } else {
+                    &masked
+                },
+                18.0,
+                if masked.is_empty() {
+                    0x8992a6
+                } else {
+                    0xffffff
+                },
+                TextAlign::Start,
+                false,
+            ),
+        ];
+        if let Some(status) = &self.lock_status {
+            commands.push(text(
+                Rect::new(0.0, height * 0.38 + 164.0, width, 28.0),
+                status,
+                15.0,
+                0xff9a9a,
+                TextAlign::Center,
+                false,
+            ));
+        }
+        commands
+    }
+
+    pub fn insert_lock_text(&mut self, value: &str) -> bool {
+        if !self.locked || self.lock_password.len() >= 1024 {
+            return false;
+        }
+        let before = self.lock_password.len();
+        for character in value.chars() {
+            if self.lock_password.len() + character.len_utf8() > 1024 {
+                break;
+            }
+            self.lock_password.push(character);
+        }
+        if self.lock_password.len() == before {
+            return false;
+        }
+        self.lock_status = None;
+        true
+    }
+
+    pub fn lock_key(&mut self, key: Option<Keycode>) -> bool {
+        self.lock_key_with(
+            key,
+            |username, password| {
+                #[cfg(target_os = "linux")]
+                {
+                    crate::lock_auth::authenticate(username, password)
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    let _ = (username, password);
+                    Err("system authentication is unavailable on this platform".into())
+                }
+            },
+            || platform::send_shell_command(ShellCommand::Unlock),
+        )
+    }
+
+    fn lock_key_with<A, U>(
+        &mut self,
+        key: Option<Keycode>,
+        authenticate: A,
+        request_unlock: U,
+    ) -> bool
+    where
+        A: FnOnce(&str, &Zeroizing<String>) -> Result<bool, String>,
+        U: FnOnce() -> bool,
+    {
+        if !self.locked {
+            return false;
+        }
+        match key {
+            Some(Keycode::Backspace) => {
+                self.lock_password.pop();
+                self.lock_status = None;
+                true
+            }
+            Some(Keycode::Return | Keycode::KpEnter) => {
+                let username = std::env::var("USER").unwrap_or_default();
+                let authenticated = authenticate(&username, &self.lock_password);
+                self.lock_password.zeroize();
+                match authenticated {
+                    Ok(true) => {
+                        if !request_unlock() {
+                            self.lock_status = Some("Could not contact the session".into());
+                        }
+                    }
+                    Ok(false) => self.lock_status = Some("Authentication failed".into()),
+                    Err(error) => {
+                        tracing::error!(%error, "lock authentication failed");
+                        self.lock_status = Some("Authentication service unavailable".into());
+                    }
+                }
+                true
+            }
+            _ => false,
+        }
     }
 
     fn load_wallpaper_for(&mut self, width: u32, height: u32) {
@@ -1528,11 +1687,14 @@ fn text(
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use image::{Rgba, RgbaImage};
     use nickel_ui::Rect;
+    use sdl3::keyboard::Keycode;
 
     use super::{
-        panel_status_layout, panel_tray_icons, platform::SecureStorageState,
+        LiveShell, panel_status_layout, panel_tray_icons, platform::SecureStorageState,
         secure_storage_status_label, visible_tray_item,
     };
     use crate::model::TrayItem;
@@ -1554,6 +1716,37 @@ mod tests {
             assert_eq!(secure_storage_status_label(state), Some(expected));
         }
         assert_eq!(secure_storage_status_label(SecureStorageState::Ready), None);
+    }
+
+    #[test]
+    fn lock_only_requests_unlock_after_successful_mocked_authentication() {
+        let mut shell = LiveShell::new().unwrap();
+        shell.locked = true;
+        shell.insert_lock_text("wrong");
+        let requested = Cell::new(false);
+        shell.lock_key_with(
+            Some(Keycode::Return),
+            |_, _| Ok(false),
+            || {
+                requested.set(true);
+                true
+            },
+        );
+        assert!(!requested.get());
+        assert!(shell.lock_password.is_empty());
+        assert_eq!(shell.lock_status.as_deref(), Some("Authentication failed"));
+
+        shell.insert_lock_text("correct");
+        shell.lock_key_with(
+            Some(Keycode::Return),
+            |_, _| Ok(true),
+            || {
+                requested.set(true);
+                true
+            },
+        );
+        assert!(requested.get());
+        assert!(shell.lock_password.is_empty());
     }
 
     #[test]

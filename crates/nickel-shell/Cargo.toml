@@ -23,12 +23,14 @@ resvg.workspace = true
 sdl3.workspace = true
 softbuffer.workspace = true
 tracing.workspace = true
+zeroize.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 freedesktop-desktop-entry.workspace = true
 freedesktop-icons.workspace = true
 shlex.workspace = true
 zbus.workspace = true
+libloading.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 nickel-platform = { path = "../nickel-platform" }

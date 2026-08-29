@@ -25,6 +25,7 @@ pub const NOTIFICATION_TITLE: &str = "Nickel Notification";
 pub const WINDOW_PREVIEW_TITLE: &str = "Nickel Window Preview";
 pub const WINDOW_CONTEXT_MENU_TITLE: &str = "Nickel Window Menu";
 pub const CODEX_PROJECT_MENU_TITLE: &str = "Nickel Codex Projects";
+pub const LOCK_TITLE: &str = "Nickel Lock";
 pub const PANEL_HEIGHT: u32 = 56;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -40,6 +41,7 @@ pub enum SurfaceRole {
     WindowPreview,
     WindowContextMenu,
     CodexProjectMenu,
+    Lock,
     CodexChat,
 }
 
@@ -207,6 +209,7 @@ impl SdlShell {
                 self.create_surface(SurfaceRole::Desktop, display_index, geometry)?;
             }
             self.create_surface(SurfaceRole::Panel, display_index, geometry)?;
+            self.create_surface(SurfaceRole::Lock, display_index, geometry)?;
         }
         let primary = displays[0];
         self.create_surface(SurfaceRole::Launcher, 0, primary)?;
@@ -232,8 +235,10 @@ impl SdlShell {
             .count();
         if panel_count != displays.len() {
             for surface in &mut self.surfaces {
-                if matches!(surface.role, SurfaceRole::Desktop | SurfaceRole::Panel)
-                    && surface.display_index >= displays.len()
+                if matches!(
+                    surface.role,
+                    SurfaceRole::Desktop | SurfaceRole::Panel | SurfaceRole::Lock
+                ) && surface.display_index >= displays.len()
                 {
                     surface.display_connected = false;
                     let _ = surface.window.hide();
@@ -252,7 +257,7 @@ impl SdlShell {
                 if has_panel {
                     continue;
                 }
-                for role in [SurfaceRole::Desktop, SurfaceRole::Panel] {
+                for role in [SurfaceRole::Desktop, SurfaceRole::Panel, SurfaceRole::Lock] {
                     if role == SurfaceRole::Desktop
                         && !crate::platform::renders_desktop_background()
                     {
@@ -530,6 +535,7 @@ impl SdlShell {
             SurfaceRole::WindowPreview => SessionShellRole::Preview,
             SurfaceRole::WindowContextMenu => SessionShellRole::ContextMenu,
             SurfaceRole::CodexProjectMenu => SessionShellRole::ProjectMenu,
+            SurfaceRole::Lock => SessionShellRole::Lock,
             SurfaceRole::CodexChat => unreachable!("chat surfaces are dynamic"),
         };
         let previous_app_id = sdl3::hint::get("SDL_APP_ID");
@@ -559,6 +565,9 @@ impl SdlShell {
             self.video.text_input().start(&window);
         }
         if role == SurfaceRole::Launcher {
+            self.video.text_input().start(&window);
+        }
+        if role == SurfaceRole::Lock {
             self.video.text_input().start(&window);
         }
         let id = SurfaceId(window.id());
@@ -767,6 +776,14 @@ fn surface_geometry(
             geometry.y + geometry.height.saturating_sub(476) as i32,
             360.min(geometry.width),
             420.min(geometry.height.saturating_sub(PANEL_HEIGHT)),
+            true,
+        ),
+        SurfaceRole::Lock => (
+            LOCK_TITLE,
+            geometry.x,
+            geometry.y,
+            geometry.width,
+            geometry.height,
             true,
         ),
         SurfaceRole::CodexChat => unreachable!("chat surfaces are created dynamically"),
