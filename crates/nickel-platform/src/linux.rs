@@ -1,6 +1,43 @@
-use std::{fs, path::Path};
+use std::{collections::HashMap, fs, path::Path, thread};
 
 use image::RgbaImage;
+
+#[zbus::proxy(
+    gen_async = false,
+    interface = "org.freedesktop.portal.OpenURI",
+    default_service = "org.freedesktop.portal.Desktop",
+    default_path = "/org/freedesktop/portal/desktop"
+)]
+trait OpenUriPortal {
+    fn open_uri(
+        &self,
+        parent_window: &str,
+        uri: &str,
+        options: HashMap<&str, zbus::zvariant::Value<'_>>,
+    ) -> zbus::Result<zbus::zvariant::OwnedObjectPath>;
+}
+
+pub fn open_external_url(url: &str) -> Result<(), String> {
+    let url = url.to_owned();
+    thread::Builder::new()
+        .name("nickel-portal-open-uri".into())
+        .spawn(move || {
+            if let Err(error) = request_open_uri(&url) {
+                tracing::warn!(%error, "XDG OpenURI request failed");
+            }
+        })
+        .map(|_| ())
+        .map_err(|error| format!("could not start the XDG OpenURI request: {error}"))
+}
+
+fn request_open_uri(uri: &str) -> Result<(), String> {
+    let connection = zbus::blocking::Connection::session().map_err(|error| error.to_string())?;
+    let portal = OpenUriPortalProxy::new(&connection).map_err(|error| error.to_string())?;
+    portal
+        .open_uri("", uri, HashMap::new())
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
 
 pub fn path_icon(path: &Path) -> Option<RgbaImage> {
     let name = icon_name(path);

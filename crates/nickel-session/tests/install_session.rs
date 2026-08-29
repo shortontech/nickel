@@ -57,4 +57,8 @@ fn installer_stages_self_contained_sddm_session_from_any_working_directory() {
     assert!(desktop.contains("Exec=/usr/local/bin/nickel-login"));
     assert!(desktop.contains("TryExec=/usr/local/bin/nickel-login"));
     assert!(desktop.contains("DesktopNames=Nickel"));
+    let portals = fs::read_to_string(root.join("usr/share/xdg-desktop-portal/nickel-portals.conf"))
+        .expect("installed portal preference");
+    assert!(portals.contains("default=gtk"));
+    assert!(portals.contains("org.freedesktop.impl.portal.Secret=kwallet"));
 }

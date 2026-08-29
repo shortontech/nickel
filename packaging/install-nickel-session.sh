@@ -21,6 +21,8 @@ install -Dm644 "$repository/packaging/nickel.desktop" \
     "$install_root/usr/share/wayland-sessions/nickel.desktop"
 install -Dm644 "$repository/packaging/nickel-settings.desktop" \
     "$install_root/usr/share/applications/nickel-settings.desktop"
+install -Dm644 "$repository/packaging/nickel-portals.conf" \
+    "$install_root/usr/share/xdg-desktop-portal/nickel-portals.conf"
 install -Dm644 "$repository/assets/icons/nickel-settings.png" \
     "$install_root/usr/share/icons/hicolor/512x512/apps/nickel-settings.png"
 

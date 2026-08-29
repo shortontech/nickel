@@ -15,6 +15,7 @@ winit.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 freedesktop-icons.workspace = true
 resvg.workspace = true
+zbus.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

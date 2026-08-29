@@ -21,6 +21,7 @@ pub fn choose_image_file(callback: Box<dyn Fn(FileDialogOutcome) + 'static>) -> 
         name: "Images",
         pattern: "png;jpg;jpeg;webp;bmp",
     }];
+    configure_file_dialog_backend();
     show_open_file_dialog(
         &filters,
         None::<&std::path::Path>,
@@ -39,6 +40,11 @@ pub fn choose_image_file(callback: Box<dyn Fn(FileDialogOutcome) + 'static>) -> 
         }),
     )
     .map_err(|error| error.to_string())
+}
+
+fn configure_file_dialog_backend() {
+    #[cfg(target_os = "linux")]
+    sdl3::hint::set("SDL_FILE_DIALOG_DRIVER", "portal");
 }
 
 #[cfg(target_os = "windows")]
@@ -134,17 +140,7 @@ pub fn open_external_url(url: &str) -> Result<(), String> {
 
 #[cfg(target_os = "linux")]
 pub fn open_external_url(url: &str) -> Result<(), String> {
-    external_url_command(url)
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| format!("could not start the system URL handler: {error}"))
-}
-
-#[cfg(target_os = "linux")]
-fn external_url_command(url: &str) -> std::process::Command {
-    let mut command = std::process::Command::new("xdg-open");
-    command.arg(url);
-    command
+    linux::open_external_url(url)
 }
 
 #[cfg(target_os = "macos")]
@@ -165,15 +161,14 @@ pub fn open_external_url(_url: &str) -> Result<(), String> {
 mod external_url_tests {
     use std::path::Path;
 
-    use super::{external_url_command, nickel_file_command};
+    use super::{configure_file_dialog_backend, nickel_file_command};
 
     #[test]
-    fn delegates_the_exact_url_to_the_desktop_default_handler() {
-        let command = external_url_command("https://example.com/a?b=c#d");
-        assert_eq!(command.get_program(), "xdg-open");
+    fn linux_file_dialogs_require_the_portal_backend() {
+        configure_file_dialog_backend();
         assert_eq!(
-            command.get_args().collect::<Vec<_>>(),
-            ["https://example.com/a?b=c#d"]
+            sdl3::hint::get("SDL_FILE_DIALOG_DRIVER").as_deref(),
+            Some("portal")
         );
     }
 
