@@ -7,12 +7,23 @@ use std::{
 };
 
 use image::RgbaImage;
-use nickel_ui::{PaintCommand, Rect, TextAlign};
+use nickel_ui::{
+    Align, Button, ButtonPresentation, Insets, PaintCommand, Point, Rect, Row, SemanticColors,
+    SemanticTheme, Spacer, Text, Tone, UiEvent, UiStateStore, UiTree,
+};
 
 use crate::platform;
 
 const TOOLBAR_HEIGHT: f32 = 70.0;
 const PREVIEW_PADDING: f32 = 20.0;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ToolbarAction {
+    Copy,
+    Save,
+    TemporaryPath,
+    Cancel,
+}
 
 pub struct ScreenshotTool {
     image: Option<Arc<RgbaImage>>,
@@ -26,6 +37,8 @@ pub struct ScreenshotTool {
     capture_deadline: Option<Instant>,
     save_after_confirmation: bool,
     viewport: Cell<Option<(u32, u32)>>,
+    toolbar: UiTree<ToolbarAction>,
+    toolbar_state: UiStateStore,
 }
 
 impl Default for ScreenshotTool {
@@ -42,6 +55,8 @@ impl Default for ScreenshotTool {
             capture_deadline: None,
             save_after_confirmation: false,
             viewport: Cell::new(None),
+            toolbar: UiTree::default(),
+            toolbar_state: UiStateStore::default(),
         }
     }
 }
@@ -99,6 +114,15 @@ impl ScreenshotTool {
 
     pub fn pointer_moved(&mut self, x: f32, y: f32, width: u32, height: u32) -> bool {
         self.cursor = (x, y);
+        if self.confirmed {
+            let outcome = self.toolbar.handle_event(
+                &mut self.toolbar_state,
+                UiEvent::PointerMoved(Point { x, y }),
+            );
+            if outcome.invalidation != nickel_ui::Invalidation::None {
+                return true;
+            }
+        }
         let Some(start) = self.drag_start else {
             return false;
         };
@@ -111,14 +135,15 @@ impl ScreenshotTool {
 
     pub fn pointer_pressed(&mut self, x: f32, y: f32, width: u32, height: u32) -> bool {
         self.cursor = (x, y);
-        if self.confirmed && self.cursor.1 <= TOOLBAR_HEIGHT {
-            match self.cursor.0 {
-                x if x < 170.0 => self.copy(width, height),
-                x if x < 340.0 => self.save(width, height),
-                x if x < 580.0 => self.temp(width, height),
-                _ => self.hide(),
+        if self.confirmed {
+            let point = Point { x, y };
+            let over_toolbar = self.toolbar.id_at(point).is_some();
+            let _ = self
+                .toolbar
+                .handle_event(&mut self.toolbar_state, UiEvent::PointerPressed(point));
+            if over_toolbar {
+                return true;
             }
-            return true;
         }
         let image_rect = self.image_rect(width, height);
         if !contains(image_rect, self.cursor) {
@@ -155,6 +180,19 @@ impl ScreenshotTool {
     }
 
     pub fn pointer_released(&mut self) -> bool {
+        if self.confirmed {
+            let outcome = self.toolbar.handle_event(
+                &mut self.toolbar_state,
+                UiEvent::PointerReleased(Point {
+                    x: self.cursor.0,
+                    y: self.cursor.1,
+                }),
+            );
+            if let Some(action) = outcome.messages.into_iter().next() {
+                self.apply_toolbar_action(action);
+                return true;
+            }
+        }
         let changed = self.drag_start.take().is_some();
         if changed {
             self.last_click = None;
@@ -200,18 +238,26 @@ impl ScreenshotTool {
                     PointerInteraction::LeftDoubleClick,
                 )
             }
-            ScreenshotTargetAction::CopyImage if self.confirmed => {
-                (85.0, TOOLBAR_HEIGHT / 2.0, PointerInteraction::LeftClick)
-            }
-            ScreenshotTargetAction::SaveImage if self.confirmed => {
-                (255.0, TOOLBAR_HEIGHT / 2.0, PointerInteraction::LeftClick)
-            }
-            ScreenshotTargetAction::CopyTemporaryPath if self.confirmed => {
-                (460.0, TOOLBAR_HEIGHT / 2.0, PointerInteraction::LeftClick)
-            }
-            ScreenshotTargetAction::Cancel if self.confirmed => {
-                (650.0, TOOLBAR_HEIGHT / 2.0, PointerInteraction::LeftClick)
-            }
+            ScreenshotTargetAction::CopyImage if self.confirmed => message_center(
+                &self.toolbar,
+                ToolbarAction::Copy,
+                PointerInteraction::LeftClick,
+            )?,
+            ScreenshotTargetAction::SaveImage if self.confirmed => message_center(
+                &self.toolbar,
+                ToolbarAction::Save,
+                PointerInteraction::LeftClick,
+            )?,
+            ScreenshotTargetAction::CopyTemporaryPath if self.confirmed => message_center(
+                &self.toolbar,
+                ToolbarAction::TemporaryPath,
+                PointerInteraction::LeftClick,
+            )?,
+            ScreenshotTargetAction::Cancel if self.confirmed => message_center(
+                &self.toolbar,
+                ToolbarAction::Cancel,
+                PointerInteraction::LeftClick,
+            )?,
             ScreenshotTargetAction::CopyImage
             | ScreenshotTargetAction::SaveImage
             | ScreenshotTargetAction::CopyTemporaryPath
@@ -221,7 +267,7 @@ impl ScreenshotTool {
     }
 
     pub fn scene(
-        &self,
+        &mut self,
         width: u32,
         height: u32,
         palette: nickel_core::theme::ThemePalette,
@@ -239,10 +285,6 @@ impl ScreenshotTool {
                 high_density: None,
             });
         }
-        commands.push(PaintCommand::Fill {
-            rect: Rect::new(0.0, 0.0, width as f32, TOOLBAR_HEIGHT),
-            color: palette.panel,
-        });
         if let Some(rect) = self.selection {
             commands.push(PaintCommand::OverlayStroke {
                 rect,
@@ -250,42 +292,8 @@ impl ScreenshotTool {
                 width: if self.confirmed { 5.0 } else { 3.0 },
             });
         }
-        let labels = if self.confirmed {
-            [
-                "⧉ COPY IMAGE",
-                "↓ SAVE IMAGE",
-                "⌗ COPY TEMPORARY FILENAME",
-                "× CANCEL",
-            ]
-        } else {
-            ["", "", "", ""]
-        };
-        for (index, label) in labels.iter().enumerate() {
-            let (x, item_width) = match index {
-                0 => (0.0, 170.0),
-                1 => (170.0, 170.0),
-                2 => (340.0, 240.0),
-                _ => (580.0, 140.0),
-            };
-            commands.push(PaintCommand::Text {
-                bounds: Rect::new(x, 18.0, item_width, 34.0),
-                text: (*label).into(),
-                scale: 1.0,
-                color: palette.text,
-                align: TextAlign::Center,
-                bold: false,
-                wrap: false,
-            });
-        }
-        commands.push(PaintCommand::Text {
-            bounds: Rect::new(730.0, 18.0, (width as f32 - 740.0).max(10.0), 34.0),
-            text: self.status.clone(),
-            scale: 1.0,
-            color: palette.muted,
-            align: TextAlign::Start,
-            bold: false,
-            wrap: false,
-        });
+        self.toolbar = screenshot_toolbar(width, palette, &self.status, self.confirmed);
+        commands.extend_from_slice(self.toolbar.commands());
         commands
     }
 
@@ -335,15 +343,32 @@ impl ScreenshotTool {
         )
     }
 
-    fn copy(&mut self, width: u32, height: u32) {
-        self.status = if self
+    fn copy(&mut self, width: u32, height: u32) -> bool {
+        let copied = self
             .cropped(width, height)
-            .is_some_and(|image| platform::copy_image_to_clipboard(&image).is_ok())
-        {
+            .is_some_and(|image| platform::copy_image_to_clipboard(&image).is_ok());
+        self.status = if copied {
             "IMAGE COPIED".into()
         } else {
             "COPY FAILED".into()
         };
+        copied
+    }
+
+    fn apply_toolbar_action(&mut self, action: ToolbarAction) {
+        let Some((width, height)) = self.viewport.get() else {
+            return;
+        };
+        match action {
+            ToolbarAction::Copy => {
+                if self.copy(width, height) {
+                    self.hide();
+                }
+            }
+            ToolbarAction::Save => self.save(width, height),
+            ToolbarAction::TemporaryPath => self.temp(width, height),
+            ToolbarAction::Cancel => self.hide(),
+        }
     }
 
     fn temp(&mut self, width: u32, height: u32) {
@@ -384,8 +409,94 @@ impl ScreenshotTool {
     }
 }
 
+fn screenshot_toolbar(
+    width: u32,
+    palette: nickel_core::theme::ThemePalette,
+    status: &str,
+    confirmed: bool,
+) -> UiTree<ToolbarAction> {
+    let theme = SemanticTheme::new(SemanticColors {
+        window: palette.background,
+        sidebar: palette.panel,
+        card: palette.surface,
+        raised: palette.surface_hover,
+        hover: palette.surface_hover,
+        primary_text: palette.text,
+        secondary_text: palette.muted,
+        accent: palette.accent,
+        accent_soft: palette.accent_soft,
+        positive: palette.complement,
+    });
+    let mut toolbar = Row::new()
+        .height(TOOLBAR_HEIGHT)
+        .padding(Insets {
+            top: 14.0,
+            right: 16.0,
+            bottom: 14.0,
+            left: 16.0,
+        })
+        .gap(8.0)
+        .align_items(Align::Center)
+        .background(palette.panel)
+        .child(Text::new(status).tone(Tone::Muted).ellipsis(true))
+        .child(Spacer::flex());
+    if confirmed {
+        toolbar = toolbar
+            .child(
+                Button::semantic(
+                    theme,
+                    ToolbarAction::Copy,
+                    "Copy",
+                    ButtonPresentation::Primary,
+                )
+                .width(112.0),
+            )
+            .child(
+                Button::semantic(
+                    theme,
+                    ToolbarAction::Save,
+                    "Save",
+                    ButtonPresentation::Secondary,
+                )
+                .width(104.0),
+            )
+            .child(
+                Button::semantic(
+                    theme,
+                    ToolbarAction::TemporaryPath,
+                    "Copy file path",
+                    ButtonPresentation::Secondary,
+                )
+                .width(158.0),
+            )
+            .child(
+                Button::semantic(
+                    theme,
+                    ToolbarAction::Cancel,
+                    "Cancel",
+                    ButtonPresentation::Quiet,
+                )
+                .width(96.0),
+            );
+    }
+    UiTree::layout(toolbar, Rect::new(0.0, 0.0, width as f32, TOOLBAR_HEIGHT))
+}
+
 fn instructions() -> String {
     "DRAG CORNER TO CORNER · DOUBLE-CLICK TO CONFIRM · ESC TO CANCEL".into()
+}
+
+fn message_center(
+    toolbar: &UiTree<ToolbarAction>,
+    action: ToolbarAction,
+    interaction: nickel_session_protocol::PointerInteraction,
+) -> Option<(f32, f32, nickel_session_protocol::PointerInteraction)> {
+    let bounds = toolbar.message_rect(&action)?;
+    Some((
+        bounds.origin.x + bounds.size.width / 2.0,
+        bounds.origin.y + bounds.size.height / 2.0,
+        interaction,
+    ))
 }
 
 fn normalized(a: (f32, f32), b: (f32, f32)) -> Rect {
@@ -419,7 +530,39 @@ fn clamp_to_rect(point: (f32, f32), rect: Rect) -> (f32, f32) {
 mod tests {
     use image::{Rgba, RgbaImage};
 
-    use super::{ScreenshotTool, normalized};
+    use super::{ScreenshotTool, ToolbarAction, normalized, screenshot_toolbar};
+
+    #[test]
+    fn toolbar_components_own_layout_hit_testing_and_messages() {
+        let toolbar = screenshot_toolbar(
+            1200,
+            nickel_core::theme::ThemePalette::from_appearance(Default::default()),
+            "SELECTION CONFIRMED",
+            true,
+        );
+        for action in [
+            ToolbarAction::Copy,
+            ToolbarAction::Save,
+            ToolbarAction::TemporaryPath,
+            ToolbarAction::Cancel,
+        ] {
+            let bounds = toolbar
+                .message_rect(&action)
+                .expect("button message rectangle");
+            let point = nickel_ui::Point {
+                x: bounds.origin.x + bounds.size.width / 2.0,
+                y: bounds.origin.y + bounds.size.height / 2.0,
+            };
+            let mut state = nickel_ui::UiStateStore::default();
+            let _ = toolbar.handle_event(&mut state, nickel_ui::UiEvent::PointerPressed(point));
+            assert_eq!(
+                toolbar
+                    .handle_event(&mut state, nickel_ui::UiEvent::PointerReleased(point))
+                    .messages,
+                vec![action]
+            );
+        }
+    }
 
     #[test]
     fn normalization_accepts_reverse_corner_drag() {
@@ -512,6 +655,11 @@ mod tests {
         assert!(tool.pointer_pressed(confirm_x as f32, confirm_y as f32, 800, 600));
         assert!(tool.pointer_pressed(confirm_x as f32, confirm_y as f32, 800, 600));
         assert!(tool.confirmed);
+        let _ = tool.scene(
+            800,
+            600,
+            nickel_core::theme::ThemePalette::from_appearance(Default::default()),
+        );
         assert!(
             tool.semantic_target(ScreenshotTargetAction::CopyImage)
                 .is_some()

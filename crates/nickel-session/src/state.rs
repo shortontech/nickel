@@ -263,6 +263,7 @@ pub struct NickelSession {
     shell_focus_restore_window: Option<WindowId>,
     pub(crate) pending_shell_focus_role: Option<ShellRole>,
     pub utility_windows: Vec<Window>,
+    screenshot_output_name: Option<String>,
     pub context_menu_window: Option<Window>,
     pub preview_window: Option<Window>,
     pub server_decorated: HashSet<ObjectId>,
@@ -562,6 +563,7 @@ impl NickelSession {
             shell_focus_restore_window: None,
             pending_shell_focus_role: None,
             utility_windows: Vec::new(),
+            screenshot_output_name: None,
             context_menu_window: None,
             preview_window: None,
             server_decorated: HashSet::new(),
@@ -2134,6 +2136,9 @@ impl NickelSession {
     }
 
     pub(crate) fn focus_shell_role(&mut self, role: ShellRole) -> bool {
+        if role == ShellRole::Screenshot {
+            self.screenshot_output_name = self.preferred_interaction_output_name();
+        }
         self.pending_shell_focus_role = Some(role);
         let registry = self.windows.snapshot();
         let target = self.shell_windows().find_map(|window| {
@@ -2180,6 +2185,9 @@ impl NickelSession {
                     .map(|window| window.id)
             });
         }
+        if role == ShellRole::Screenshot {
+            self.place_screenshot_surface(&target);
+        }
         self.space.raise_element(&target, true);
         self.seat.get_keyboard().unwrap().set_focus(
             self,
@@ -2195,6 +2203,9 @@ impl NickelSession {
     }
 
     fn restore_application_focus(&mut self) {
+        if self.pending_shell_focus_role == Some(ShellRole::Screenshot) {
+            self.screenshot_output_name = None;
+        }
         self.pending_shell_focus_role = None;
         if let Some(window) = self.shell_focus_restore_window.take() {
             self.activate_window(window);
@@ -2351,14 +2362,20 @@ impl NickelSession {
     }
 
     fn place_screenshot_surface(&mut self, window: &Window) {
-        let Some(output) = self
-            .preferred_interaction_output_name()
+        let output_name = self
+            .screenshot_output_name
+            .clone()
+            .or_else(|| self.preferred_interaction_output_name());
+        let Some(output) = output_name
             .as_deref()
             .and_then(|name| self.output_geometry_named(name))
             .or_else(|| self.output_geometry_for_shell())
         else {
             return;
         };
+        if self.screenshot_output_name.is_none() {
+            self.screenshot_output_name = output_name;
+        }
         let size = window.geometry().size;
         if size.w <= 0 || size.h <= 0 {
             return;
