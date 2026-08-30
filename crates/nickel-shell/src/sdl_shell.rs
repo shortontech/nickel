@@ -28,6 +28,7 @@ pub const WINDOW_PREVIEW_TITLE: &str = "Nickel Window Preview";
 pub const WINDOW_CONTEXT_MENU_TITLE: &str = "Nickel Window Menu";
 pub const CODEX_PROJECT_MENU_TITLE: &str = "Nickel Codex Projects";
 pub const LOCK_TITLE: &str = "Nickel Lock";
+pub const SCREENSHOT_TITLE: &str = "Nickel Screenshot";
 pub const PANEL_HEIGHT: u32 = 56;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -44,6 +45,7 @@ pub enum SurfaceRole {
     WindowContextMenu,
     CodexProjectMenu,
     Lock,
+    Screenshot,
     CodexChat,
 }
 
@@ -248,6 +250,8 @@ impl SdlShell {
         self.create_surface(SurfaceRole::WindowPreview, 0, primary)?;
         self.create_surface(SurfaceRole::WindowContextMenu, 0, primary)?;
         self.create_surface(SurfaceRole::CodexProjectMenu, 0, primary)?;
+        #[cfg(target_os = "windows")]
+        self.create_surface(SurfaceRole::Screenshot, 0, primary)?;
         tracing::info!(
             elapsed_ms = self.started.elapsed().as_secs_f64() * 1_000.0,
             surface_count = self.surfaces.len(),
@@ -556,26 +560,29 @@ impl SdlShell {
         geometry: DisplayGeometry,
     ) -> Result<(), String> {
         let (title, x, y, width, height, hidden) = surface_geometry(role, geometry);
-        let session_role = match role {
-            SurfaceRole::Desktop => SessionShellRole::Desktop,
-            SurfaceRole::Panel => SessionShellRole::Panel,
-            SurfaceRole::Launcher => SessionShellRole::Launcher,
-            SurfaceRole::ControlCenter => SessionShellRole::ControlCenter,
-            SurfaceRole::Notification => SessionShellRole::Notification,
-            SurfaceRole::WindowPreview => SessionShellRole::Preview,
-            SurfaceRole::WindowContextMenu => SessionShellRole::ContextMenu,
-            SurfaceRole::CodexProjectMenu => SessionShellRole::ProjectMenu,
-            SurfaceRole::Lock => SessionShellRole::Lock,
+        let application_id = match role {
+            SurfaceRole::Desktop => SessionShellRole::Desktop.application_id(),
+            SurfaceRole::Panel => SessionShellRole::Panel.application_id(),
+            SurfaceRole::Launcher => SessionShellRole::Launcher.application_id(),
+            SurfaceRole::ControlCenter => SessionShellRole::ControlCenter.application_id(),
+            SurfaceRole::Notification => SessionShellRole::Notification.application_id(),
+            SurfaceRole::WindowPreview => SessionShellRole::Preview.application_id(),
+            SurfaceRole::WindowContextMenu => SessionShellRole::ContextMenu.application_id(),
+            SurfaceRole::CodexProjectMenu => SessionShellRole::ProjectMenu.application_id(),
+            SurfaceRole::Lock => SessionShellRole::Lock.application_id(),
+            SurfaceRole::Screenshot => "io.nickel.screenshot",
             SurfaceRole::CodexChat => unreachable!("chat surfaces are dynamic"),
         };
         let previous_app_id = sdl3::hint::get("SDL_APP_ID");
-        sdl3::hint::set("SDL_APP_ID", session_role.application_id());
+        sdl3::hint::set("SDL_APP_ID", application_id);
         let mut builder = self.video.window(title, width, height);
         builder.position(x, y).high_pixel_density();
-        builder.borderless();
+        if role != SurfaceRole::Screenshot {
+            builder.borderless();
+        }
         if matches!(
             role,
-            SurfaceRole::WindowPreview | SurfaceRole::WindowContextMenu
+            SurfaceRole::WindowPreview | SurfaceRole::WindowContextMenu | SurfaceRole::Screenshot
         ) {
             builder.resizable();
         }
@@ -590,7 +597,16 @@ impl SdlShell {
         if let Some(previous_app_id) = previous_app_id {
             sdl3::hint::set("SDL_APP_ID", &previous_app_id);
         }
-        let window = window?;
+        let mut window = window?;
+        if role == SurfaceRole::Screenshot {
+            window
+                .set_minimum_size(720, 480)
+                .map_err(|error| error.to_string())?;
+            #[cfg(target_os = "windows")]
+            if !crate::platform::configure_screenshot_window(&window) {
+                tracing::warn!("failed to configure Nickel screenshot utility window");
+            }
+        }
         if role == SurfaceRole::CodexProjectMenu {
             self.video.text_input().start(&window);
         }
@@ -884,6 +900,14 @@ fn surface_geometry(
             geometry.y,
             geometry.width,
             geometry.height,
+            true,
+        ),
+        SurfaceRole::Screenshot => (
+            SCREENSHOT_TITLE,
+            geometry.x + (geometry.width.saturating_sub(1200) / 2) as i32,
+            geometry.y + (geometry.height.saturating_sub(760) / 2) as i32,
+            1200.min(geometry.width),
+            760.min(geometry.height),
             true,
         ),
         SurfaceRole::CodexChat => unreachable!("chat surfaces are created dynamically"),

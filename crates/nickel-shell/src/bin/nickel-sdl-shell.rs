@@ -60,6 +60,8 @@ mod sdl_gpu;
 mod sdl_launcher_view;
 #[path = "../sdl_live_shell.rs"]
 mod sdl_live_shell;
+#[path = "../sdl_screenshot.rs"]
+mod sdl_screenshot;
 #[path = "../sdl_shell.rs"]
 #[allow(dead_code)]
 mod sdl_shell;
@@ -456,6 +458,7 @@ fn sync_visibility(shell: &mut SdlShell, state: &LiveShell) {
 fn focus_visible_overlay(shell: &mut SdlShell, state: &LiveShell) {
     for role in [
         SurfaceRole::Lock,
+        SurfaceRole::Screenshot,
         SurfaceRole::Launcher,
         SurfaceRole::ControlCenter,
         SurfaceRole::CodexProjectMenu,
@@ -798,7 +801,46 @@ fn main() -> Result<(), String> {
                     render_role(&mut shell, &mut state, SurfaceRole::Lock)?;
                 }
             }
+            Some(ShellEvent::CloseRequested(surface))
+                if shell
+                    .surface(surface)
+                    .is_some_and(|entry| entry.role() == SurfaceRole::Screenshot) =>
+            {
+                state.hide_overlay(SurfaceRole::Screenshot);
+                sync_visibility(&mut shell, &state);
+            }
             Some(ShellEvent::Quit) | Some(ShellEvent::CloseRequested(_)) => break,
+            Some(ShellEvent::PointerButton {
+                surface,
+                pressed: true,
+                x,
+                y,
+                ..
+            }) if shell
+                .surface(surface)
+                .is_some_and(|entry| entry.role() == SurfaceRole::Screenshot) =>
+            {
+                let (width, height) = shell
+                    .surface(surface)
+                    .map(|entry| entry.window().size())
+                    .unwrap_or_default();
+                if state.screenshot_pointer_pressed(x, y, width, height) {
+                    sync_visibility(&mut shell, &state);
+                    render_role(&mut shell, &mut state, SurfaceRole::Screenshot)?;
+                }
+            }
+            Some(ShellEvent::PointerButton {
+                surface,
+                pressed: false,
+                ..
+            }) if shell
+                .surface(surface)
+                .is_some_and(|entry| entry.role() == SurfaceRole::Screenshot) =>
+            {
+                if state.screenshot_pointer_released() {
+                    render_role(&mut shell, &mut state, SurfaceRole::Screenshot)?;
+                }
+            }
             Some(ShellEvent::PointerButton {
                 surface,
                 pressed: true,
@@ -1011,6 +1053,7 @@ fn main() -> Result<(), String> {
                     SurfaceRole::Notification => state.notification_key(key),
                     SurfaceRole::Panel => state.preview_key(key),
                     SurfaceRole::Launcher => state.launcher_key(key, modifiers),
+                    SurfaceRole::Screenshot => state.screenshot_key(key),
                     _ => false,
                 };
                 if changed {
@@ -1024,6 +1067,16 @@ fn main() -> Result<(), String> {
             }
             Some(ShellEvent::PointerMoved { surface, x, y }) => {
                 let role = shell.surface(surface).map(|entry| entry.role());
+                if role == Some(SurfaceRole::Screenshot) {
+                    let (width, height) = shell
+                        .surface(surface)
+                        .map(|entry| entry.window().size())
+                        .unwrap_or_default();
+                    if state.screenshot_pointer_moved(x, y, width, height) {
+                        render_role(&mut shell, &mut state, SurfaceRole::Screenshot)?;
+                    }
+                    continue;
+                }
                 if role == Some(SurfaceRole::Panel) {
                     if let Some(display) = shell.surface_display_geometry(surface) {
                         state.set_panel_origin_x(display.x);
@@ -1160,6 +1213,11 @@ fn main() -> Result<(), String> {
         if let Some(project_id) = state.take_requested_codex_project() {
             codex.open_project_by_id(&mut shell, &project_id)?;
             sync_visibility(&mut shell, &state);
+        }
+        if state.screenshot_capture_ready() && state.capture_screenshot() {
+            sync_visibility(&mut shell, &state);
+            focus_visible_overlay(&mut shell, &state);
+            render_role(&mut shell, &mut state, SurfaceRole::Screenshot)?;
         }
         if hover_repaint.is_some_and(|(_, deadline)| Instant::now() >= deadline)
             && let Some((role, _)) = hover_repaint.take()

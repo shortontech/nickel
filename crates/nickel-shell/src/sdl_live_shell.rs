@@ -33,6 +33,7 @@ use crate::{
         LauncherAction, LauncherFrame, LauncherIconCache, LauncherShellEffect, LauncherViewState,
         build_launcher_frame, reduce_launcher_action, reduce_launcher_input,
     },
+    sdl_screenshot::ScreenshotTool,
     sdl_shell::SurfaceRole,
     sdl_window_preview::{
         MENU_WIDTH, MenuAction, PreviewAction, WindowMenuFrame, WindowPreviewFrame,
@@ -155,6 +156,7 @@ pub struct LiveShell {
     secure_storage_override: Option<String>,
     secure_storage_state: platform::SecureStorageState,
     requested_codex_project: Option<String>,
+    screenshot: ScreenshotTool,
 }
 
 fn notification_action_rects(action_count: usize, width: u32, height: u32) -> Vec<(usize, Rect)> {
@@ -313,6 +315,7 @@ impl LiveShell {
             secure_storage_override: None,
             secure_storage_state,
             requested_codex_project: None,
+            screenshot: ScreenshotTool::default(),
         })
     }
 
@@ -457,6 +460,7 @@ impl LiveShell {
             SurfaceRole::WindowPreview => self.window_preview_scene(),
             SurfaceRole::WindowContextMenu => self.window_menu_scene(),
             SurfaceRole::Lock => self.lock_scene(width, height),
+            SurfaceRole::Screenshot => self.screenshot.scene(width, height, self.palette),
             SurfaceRole::CodexProjectMenu | SurfaceRole::CodexChat => Vec::new(),
         }
     }
@@ -471,6 +475,7 @@ impl LiveShell {
             SurfaceRole::WindowContextMenu => self.window_menu.is_some(),
             SurfaceRole::CodexProjectMenu => self.codex_project_menu_visible,
             SurfaceRole::Lock => self.locked,
+            SurfaceRole::Screenshot => self.screenshot.visible(),
             SurfaceRole::CodexChat => true,
         }
     }
@@ -778,6 +783,7 @@ impl LiveShell {
         match key {
             Some(Keycode::Escape) => {
                 self.close_window_preview();
+                #[cfg(target_os = "linux")]
                 let _ = platform::send_shell_command(ShellCommand::RestoreApplicationFocus);
             }
             Some(Keycode::Left | Keycode::Up) => {
@@ -849,6 +855,7 @@ impl LiveShell {
         match key {
             Some(Keycode::Escape) => {
                 self.close_window_preview();
+                #[cfg(target_os = "linux")]
                 let _ = platform::send_shell_command(ShellCommand::RestoreApplicationFocus);
             }
             Some(Keycode::Up | Keycode::Left) => {
@@ -987,7 +994,61 @@ impl LiveShell {
                 tracing::warn!("Nickel Run is not implemented in the SDL shell yet");
                 false
             }
+            platform::GlobalShortcut::CaptureActiveWindow => {
+                if let Err(error) = platform::capture_active_window() {
+                    tracing::warn!(%error, "failed to copy active window screenshot");
+                }
+                false
+            }
+            platform::GlobalShortcut::CaptureActiveWindowToFile => {
+                if let Err(error) = platform::capture_active_window_to_file() {
+                    tracing::warn!(%error, "failed to capture active window to a temporary file");
+                }
+                false
+            }
+            platform::GlobalShortcut::ShowScreenshotTool => {
+                self.screenshot.request_capture();
+                true
+            }
             _ => false,
+        }
+    }
+
+    pub fn screenshot_capture_ready(&mut self) -> bool {
+        self.screenshot.capture_ready()
+    }
+
+    pub fn capture_screenshot(&mut self) -> bool {
+        match platform::capture_desktop() {
+            Ok(capture) => {
+                self.screenshot.show(capture.image);
+                true
+            }
+            Err(error) => {
+                tracing::warn!(%error, "failed to capture desktop");
+                false
+            }
+        }
+    }
+
+    pub fn screenshot_pointer_moved(&mut self, x: f32, y: f32, width: u32, height: u32) -> bool {
+        self.screenshot.pointer_moved(x, y, width, height)
+    }
+
+    pub fn screenshot_pointer_pressed(&mut self, x: f32, y: f32, width: u32, height: u32) -> bool {
+        self.screenshot.pointer_pressed(x, y, width, height)
+    }
+
+    pub fn screenshot_pointer_released(&mut self) -> bool {
+        self.screenshot.pointer_released()
+    }
+
+    pub fn screenshot_key(&mut self, key: Option<Keycode>) -> bool {
+        if key == Some(Keycode::Escape) && self.screenshot.visible() {
+            self.screenshot.hide();
+            true
+        } else {
+            false
         }
     }
 
@@ -1102,6 +1163,10 @@ impl LiveShell {
             }
             SurfaceRole::CodexProjectMenu if self.codex_project_menu_visible => {
                 self.codex_project_menu_visible = false;
+                true
+            }
+            SurfaceRole::Screenshot if self.screenshot.visible() => {
+                self.screenshot.hide();
                 true
             }
             _ => false,

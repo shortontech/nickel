@@ -1187,6 +1187,12 @@ fn send_hotkey_action(action: Option<HotkeyAction>) {
         Some(HotkeyAction::CaptureActiveWindow) => GlobalShortcut::CaptureActiveWindow,
         Some(HotkeyAction::CaptureActiveWindowToFile) => GlobalShortcut::CaptureActiveWindowToFile,
         Some(HotkeyAction::ShowScreenshotTool) => GlobalShortcut::ShowScreenshotTool,
+        Some(
+            HotkeyAction::SwitchWorkspacePrevious
+            | HotkeyAction::SwitchWorkspaceNext
+            | HotkeyAction::MoveWindowToPreviousWorkspace
+            | HotkeyAction::MoveWindowToNextWorkspace,
+        ) => return,
         None => return,
     };
     if let Some(sender) = SHORTCUT_SENDER.get() {
@@ -1693,6 +1699,32 @@ pub fn configure_context_menu_window(window: &sdl3::video::Window) -> bool {
     };
     CONTEXT_MENU_WINDOW_HANDLE.store(hwnd.0 as isize, Ordering::Relaxed);
     true
+}
+
+pub fn configure_screenshot_window(window: &sdl3::video::Window) -> bool {
+    let Some(hwnd) = window_hwnd(window) else {
+        return false;
+    };
+    // SAFETY: hwnd belongs to Nickel's live screenshot tool. TOOLWINDOW keeps the temporary
+    // utility out of the taskbar and Alt+Tab while preserving its ordinary decorated window.
+    unsafe {
+        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+        SetWindowLongPtrW(
+            hwnd,
+            GWL_EXSTYLE,
+            ((style | WS_EX_TOOLWINDOW.0) & !WS_EX_APPWINDOW.0) as isize,
+        );
+        SetWindowPos(
+            hwnd,
+            None,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        )
+        .is_ok()
+    }
 }
 
 pub fn show_window_system_menu(window: WindowId) -> bool {
