@@ -38,10 +38,25 @@ use smithay::reexports::{
 pub use state::NickelSession;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--available-backends")) {
+        if cfg!(feature = "backend-winit") {
+            println!("winit");
+        }
+        if cfg!(feature = "backend-udev") {
+            println!("udev");
+        }
+        return Ok(());
+    }
+
     if let Ok(env_filter) = tracing_subscriber::EnvFilter::try_from_default_env() {
-        tracing_subscriber::fmt().with_env_filter(env_filter).init();
+        tracing_subscriber::fmt()
+            .with_env_filter(env_filter)
+            .with_writer(std::io::stderr)
+            .init();
     } else {
-        tracing_subscriber::fmt().init();
+        tracing_subscriber::fmt()
+            .with_writer(std::io::stderr)
+            .init();
     }
 
     let arguments = backend::SessionArguments::parse(std::env::args_os().skip(1))?;
@@ -49,10 +64,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let display: Display<NickelSession> = Display::new()?;
     let mut state = NickelSession::new(&mut event_loop, display, arguments.test_control);
+    let secure_storage_required = arguments.backend == backend::BackendKind::Udev;
+    let secure_storage_may_start = Arc::new(AtomicBool::new(!secure_storage_required));
+    let secure_storage_started = Instant::now();
     event_loop.handle().insert_source(
         Timer::from_duration(Duration::from_secs(1)),
-        |_, _, state| {
+        move |_, _, state| {
             state.poll_idle_policy();
+            let storage_state = state.secure_storage_state();
+            if secure_storage_startup_timed_out(
+                secure_storage_required,
+                storage_state,
+                secure_storage_started.elapsed(),
+            ) {
+                tracing::error!(
+                    state = storage_state.as_str(),
+                    "secure storage startup deadline expired; returning to display manager"
+                );
+                if let Err(error) = session_services::return_to_display_manager() {
+                    tracing::error!(%error, "could not request the display-manager greeter");
+                }
+                state.loop_signal.stop();
+                return TimeoutAction::Drop;
+            }
             TimeoutAction::ToDuration(Duration::from_secs(1))
         },
     )?;
@@ -87,6 +121,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    if secure_storage_required {
+        // KWallet's PAM child deliberately pauses before constructing its Qt
+        // application until this handoff supplies the graphical environment.
+        // Run the handoff from the live compositor loop so the authorized
+        // client can immediately complete its Wayland connection.
+        let secure_storage_may_start = Arc::clone(&secure_storage_may_start);
+        event_loop.handle().insert_idle(move |_| {
+            login_services::hand_off_login_credentials();
+            secure_storage_may_start.store(true, Ordering::Release);
+        });
+    }
+
     state.start_xwayland();
 
     println!(
@@ -95,7 +141,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     if arguments.backend == backend::BackendKind::Udev {
-        login_services::hand_off_login_credentials();
         import_runtime_environment();
     }
 
@@ -105,11 +150,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(spawn_supervised(
             program,
             command_arguments,
-            state.secure_storage_state_handle(),
-            state.secure_storage_retry_handle(),
-            state.expected_shell_pid_handle(),
-            shell_health_tx,
-            supervisor_rx,
+            ShellSupervisorContext {
+                secure_storage_state: state.secure_storage_state_handle(),
+                secure_storage_retry: state.secure_storage_retry_handle(),
+                secure_storage_may_start,
+                expected_shell_pid: state.expected_shell_pid_handle(),
+                secure_storage_required,
+                shell_health: shell_health_tx,
+                commands: supervisor_rx,
+            },
         )?)
     } else {
         None
@@ -146,6 +195,7 @@ const USER_SESSION_ENVIRONMENT: &[&str] = &[
     "XDG_SESSION_TYPE",
     "XDG_STATE_HOME",
 ];
+const SECURE_STORAGE_STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 
 fn import_runtime_environment() {
     match Command::new("dbus-update-activation-environment")
@@ -163,8 +213,32 @@ fn import_runtime_environment() {
     }
 }
 
+fn secure_storage_startup_timed_out(
+    required: bool,
+    state: login_services::SecureStorageState,
+    elapsed: Duration,
+) -> bool {
+    required
+        && !matches!(
+            state,
+            login_services::SecureStorageState::Ready
+                | login_services::SecureStorageState::PromptRequired
+        )
+        && elapsed >= SECURE_STORAGE_STARTUP_TIMEOUT
+}
+
 const MAX_SHELL_RESTART_DELAY: Duration = Duration::from_secs(4);
 const STABLE_SHELL_RUNTIME: Duration = Duration::from_secs(30);
+
+struct ShellSupervisorContext {
+    secure_storage_state: Arc<AtomicU8>,
+    secure_storage_retry: Arc<AtomicBool>,
+    secure_storage_may_start: Arc<AtomicBool>,
+    expected_shell_pid: Arc<AtomicU32>,
+    secure_storage_required: bool,
+    shell_health: smithay::reexports::calloop::channel::Sender<u8>,
+    commands: mpsc::Receiver<ShellSupervisorCommand>,
+}
 
 pub(crate) fn shell_recovery_visible_for(failures: u8) -> bool {
     failures >= 3
@@ -181,42 +255,32 @@ fn shell_restart_delay(consecutive_failures: usize) -> Duration {
 fn spawn_supervised(
     program: OsString,
     arguments: Vec<OsString>,
-    secure_storage_state: Arc<AtomicU8>,
-    secure_storage_retry: Arc<AtomicBool>,
-    expected_shell_pid: Arc<AtomicU32>,
-    shell_health: smithay::reexports::calloop::channel::Sender<u8>,
-    supervisor: mpsc::Receiver<ShellSupervisorCommand>,
+    context: ShellSupervisorContext,
 ) -> std::io::Result<thread::JoinHandle<()>> {
     thread::Builder::new()
         .name("nickel-shell-supervisor".into())
-        .spawn(move || {
-            supervise_shell(
-                program,
-                arguments,
-                secure_storage_state,
-                secure_storage_retry,
-                expected_shell_pid,
-                shell_health,
-                supervisor,
-            )
-        })
+        .spawn(move || supervise_shell(program, arguments, context))
 }
 
-fn supervise_shell(
-    program: OsString,
-    arguments: Vec<OsString>,
-    secure_storage_state: Arc<AtomicU8>,
-    secure_storage_retry: Arc<AtomicBool>,
-    expected_shell_pid: Arc<AtomicU32>,
-    shell_health: smithay::reexports::calloop::channel::Sender<u8>,
-    supervisor: mpsc::Receiver<ShellSupervisorCommand>,
-) {
+fn supervise_shell(program: OsString, arguments: Vec<OsString>, context: ShellSupervisorContext) {
+    let ShellSupervisorContext {
+        secure_storage_state,
+        secure_storage_retry,
+        secure_storage_may_start,
+        expected_shell_pid,
+        secure_storage_required,
+        shell_health,
+        commands: supervisor,
+    } = context;
+    let monitor_secure_storage_state = Arc::clone(&secure_storage_state);
+    let monitor_secure_storage_retry = Arc::clone(&secure_storage_retry);
     if let Err(error) = thread::Builder::new()
         .name("nickel-login-services".into())
         .spawn(move || {
+            wait_for_secure_storage_start(&secure_storage_may_start);
             let mut previous = None;
-            login_services::monitor_secure_storage(secure_storage_retry, |state| {
-                secure_storage_state.store(state as u8, Ordering::Release);
+            login_services::monitor_secure_storage(monitor_secure_storage_retry, |state| {
+                monitor_secure_storage_state.store(state as u8, Ordering::Release);
                 if previous != Some(state) {
                     tracing::info!(state = state.as_str(), "secure storage state changed");
                     previous = Some(state);
@@ -229,11 +293,20 @@ fn supervise_shell(
 
     let mut consecutive_failures = 0_usize;
     loop {
+        if secure_storage_required
+            && !wait_for_secure_storage(&secure_storage_state, &secure_storage_retry, &supervisor)
+        {
+            return;
+        }
         let started = Instant::now();
         let status = match shell_command(&program, &arguments).spawn() {
             Ok(mut child) => {
                 expected_shell_pid.store(child.id(), Ordering::Release);
-                let result = wait_for_shell(&mut child, &supervisor);
+                let result = wait_for_shell(
+                    &mut child,
+                    &supervisor,
+                    secure_storage_required.then_some(secure_storage_state.as_ref()),
+                );
                 expected_shell_pid.store(0, Ordering::Release);
                 match result {
                     ShellWait::Exited(status) => status,
@@ -243,6 +316,11 @@ fn supervise_shell(
                         continue;
                     }
                     ShellWait::Stopped => return,
+                    ShellWait::SecureStorageLost => {
+                        consecutive_failures = 0;
+                        tracing::warn!("secure storage readiness revoked; Nickel shell stopped");
+                        continue;
+                    }
                 }
             }
             Err(error) => Err(error),
@@ -273,11 +351,42 @@ fn supervise_shell(
     }
 }
 
+fn wait_for_secure_storage_start(start: &AtomicBool) {
+    while !start.load(Ordering::Acquire) {
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn wait_for_secure_storage(
+    state: &AtomicU8,
+    retry: &AtomicBool,
+    supervisor: &mpsc::Receiver<ShellSupervisorCommand>,
+) -> bool {
+    loop {
+        if state.load(Ordering::Acquire) == login_services::SecureStorageState::Ready as u8 {
+            return true;
+        }
+        match supervisor.recv_timeout(Duration::from_millis(100)) {
+            Ok(ShellSupervisorCommand::Restart) => retry.store(true, Ordering::Release),
+            Ok(ShellSupervisorCommand::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return false;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+    }
+}
+
 fn shell_command(program: &OsString, arguments: &[OsString]) -> Command {
     use std::os::unix::process::CommandExt;
 
     let mut command = Command::new(program);
-    command.args(arguments).process_group(0);
+    command
+        .args(arguments)
+        // XWayland intentionally exports DISPLAY for ordinary applications.
+        // The shell itself must still connect as a native Wayland client on
+        // every supervisor start and restart.
+        .env("SDL_VIDEODRIVER", "wayland")
+        .process_group(0);
     command
 }
 
@@ -285,17 +394,25 @@ enum ShellWait {
     Exited(std::io::Result<ExitStatus>),
     Restarted,
     Stopped,
+    SecureStorageLost,
 }
 
 fn wait_for_shell(
     child: &mut std::process::Child,
     supervisor: &mpsc::Receiver<ShellSupervisorCommand>,
+    secure_storage_state: Option<&AtomicU8>,
 ) -> ShellWait {
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return ShellWait::Exited(Ok(status)),
             Ok(None) => {}
             Err(error) => return ShellWait::Exited(Err(error)),
+        }
+        if secure_storage_state.is_some_and(|state| {
+            state.load(Ordering::Acquire) != login_services::SecureStorageState::Ready as u8
+        }) {
+            terminate_shell_group(child);
+            return ShellWait::SecureStorageLost;
         }
         match supervisor.recv_timeout(Duration::from_millis(100)) {
             Ok(command) => {
@@ -335,11 +452,21 @@ fn terminate_shell_group(child: &mut std::process::Child) {
 
 #[cfg(test)]
 mod tests {
-    use std::{ffi::OsString, sync::mpsc, time::Duration};
+    use std::{
+        ffi::OsString,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicU8, Ordering},
+            mpsc,
+        },
+        thread,
+        time::Duration,
+    };
 
     use super::{
-        ShellSupervisorCommand, ShellWait, USER_SESSION_ENVIRONMENT, shell_command,
-        shell_restart_delay, wait_for_shell,
+        ShellSupervisorCommand, ShellWait, USER_SESSION_ENVIRONMENT,
+        secure_storage_startup_timed_out, shell_command, shell_restart_delay,
+        wait_for_secure_storage, wait_for_secure_storage_start, wait_for_shell,
     };
 
     #[test]
@@ -358,8 +485,63 @@ mod tests {
         sender.send(ShellSupervisorCommand::Stop).unwrap();
 
         assert!(matches!(
-            wait_for_shell(&mut child, &receiver),
+            wait_for_shell(&mut child, &receiver, None,),
             ShellWait::Stopped
+        ));
+        assert!(child.try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    fn shell_start_gate_waits_for_authoritative_secure_storage_readiness() {
+        let state = Arc::new(AtomicU8::new(
+            crate::login_services::SecureStorageState::Locked as u8,
+        ));
+        let retry = Arc::new(AtomicBool::new(false));
+        let (_sender, receiver) = mpsc::channel();
+        let gate_state = Arc::clone(&state);
+        let gate_retry = Arc::clone(&retry);
+        let gate =
+            thread::spawn(move || wait_for_secure_storage(&gate_state, &gate_retry, &receiver));
+
+        thread::sleep(Duration::from_millis(150));
+        assert!(
+            !gate.is_finished(),
+            "locked storage must hold the shell gate"
+        );
+        state.store(
+            crate::login_services::SecureStorageState::Ready as u8,
+            Ordering::Release,
+        );
+        assert!(gate.join().unwrap());
+    }
+
+    #[test]
+    fn login_services_wait_until_the_compositor_accepts_graphical_clients() {
+        let may_start = Arc::new(AtomicBool::new(false));
+        let waiting = Arc::clone(&may_start);
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            wait_for_secure_storage_start(&waiting);
+            finished_tx.send(()).unwrap();
+        });
+
+        assert!(finished_rx.recv_timeout(Duration::from_millis(30)).is_err());
+        may_start.store(true, Ordering::Release);
+        finished_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn running_shell_is_stopped_when_secure_storage_readiness_is_revoked() {
+        let mut child = shell_command(&OsString::from("sleep"), &[OsString::from("30")])
+            .spawn()
+            .unwrap();
+        let (_sender, receiver) = mpsc::channel();
+        let state = AtomicU8::new(crate::login_services::SecureStorageState::Locked as u8);
+
+        assert!(matches!(
+            wait_for_shell(&mut child, &receiver, Some(&state)),
+            ShellWait::SecureStorageLost
         ));
         assert!(child.try_wait().unwrap().is_some());
     }
@@ -381,5 +563,39 @@ mod tests {
         ] {
             assert!(USER_SESSION_ENVIRONMENT.contains(&variable));
         }
+    }
+
+    #[test]
+    fn supervised_shell_is_pinned_to_the_wayland_video_driver() {
+        let command = shell_command(&OsString::from("nickel"), &[]);
+        assert!(command.get_envs().any(|(name, value)| {
+            name == "SDL_VIDEODRIVER" && value.is_some_and(|value| value == "wayland")
+        }));
+    }
+
+    #[test]
+    fn native_storage_deadline_returns_to_sddm_but_preserves_provider_prompts() {
+        use crate::login_services::SecureStorageState;
+
+        assert!(!secure_storage_startup_timed_out(
+            true,
+            SecureStorageState::Locked,
+            Duration::from_secs(14)
+        ));
+        assert!(secure_storage_startup_timed_out(
+            true,
+            SecureStorageState::Locked,
+            Duration::from_secs(15)
+        ));
+        assert!(!secure_storage_startup_timed_out(
+            true,
+            SecureStorageState::PromptRequired,
+            Duration::from_secs(300)
+        ));
+        assert!(!secure_storage_startup_timed_out(
+            false,
+            SecureStorageState::Unavailable,
+            Duration::from_secs(300)
+        ));
     }
 }

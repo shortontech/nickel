@@ -13,7 +13,7 @@ use std::{
 
 use zbus::{
     blocking::{Connection, Proxy, connection::Builder, fdo::DBusProxy},
-    names::WellKnownName,
+    names::{BusName, WellKnownName},
     zvariant::{OwnedObjectPath, OwnedValue},
 };
 
@@ -26,6 +26,9 @@ const METHOD_TIMEOUT: Duration = Duration::from_secs(5);
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
 const RETRY_DELAY: Duration = Duration::from_secs(2);
 const READY_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+const AUTOMATIC_UNLOCK_SETTLE: Duration = Duration::from_secs(3);
+const PROVIDER_STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
+const PROVIDER_STARTUP_POLL: Duration = Duration::from_millis(50);
 const KWALLET_PAM_SOCKET: &str = "PAM_KWALLET5_LOGIN";
 const KWALLET_PAM_HELPER: &str = "/usr/share/libpam-kwallet-common/pam_kwallet_init";
 
@@ -38,7 +41,8 @@ pub fn hand_off_login_credentials() {
             tracing::warn!(?status, "KWallet PAM handoff failed");
         }
         Err(error) => tracing::warn!(%error, "KWallet PAM handoff failed"),
-        Ok(_) => {}
+        Ok(Some(status)) => tracing::info!(?status, "KWallet PAM handoff completed"),
+        Ok(None) => tracing::info!("KWallet PAM handoff was not present"),
     }
 }
 
@@ -77,6 +81,16 @@ impl SecureStorageState {
             Self::PromptRequired => "prompt-required",
             Self::Ready => "ready",
             Self::Unavailable => "unavailable",
+        }
+    }
+
+    pub const fn from_u8(value: u8) -> Self {
+        match value {
+            value if value == Self::Starting as u8 => Self::Starting,
+            value if value == Self::Locked as u8 => Self::Locked,
+            value if value == Self::PromptRequired as u8 => Self::PromptRequired,
+            value if value == Self::Ready as u8 => Self::Ready,
+            _ => Self::Unavailable,
         }
     }
 }
@@ -151,12 +165,38 @@ fn prepare_secure_storage(
     connection: &Connection,
     publish: &mut impl FnMut(SecureStorageState),
 ) -> Result<(), SecureStorageError> {
+    prepare_secure_storage_with_settle(connection, publish, AUTOMATIC_UNLOCK_SETTLE)
+}
+
+fn prepare_secure_storage_with_settle(
+    connection: &Connection,
+    publish: &mut impl FnMut(SecureStorageState),
+    settle: Duration,
+) -> Result<(), SecureStorageError> {
+    tracing::info!("activating configured Secret Service provider");
     activate_provider(connection)?;
     verify_provider_identity(connection, configured_provider()?.as_deref())?;
     let collection = default_collection(connection)?;
-    if collection_is_locked(connection, &collection)? {
+    let initially_locked = collection_is_locked(connection, &collection)?;
+    tracing::info!(
+        collection = collection.as_str(),
+        initially_locked,
+        "default Secret Service collection resolved"
+    );
+    if initially_locked {
         publish(SecureStorageState::Locked);
-        unlock_collection(connection, &collection, publish)?;
+        let deadline = std::time::Instant::now() + settle;
+        while collection_is_locked(connection, &collection)? && std::time::Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(100));
+        }
+        if collection_is_locked(connection, &collection)? {
+            tracing::info!(
+                collection = collection.as_str(),
+                "requesting standard Secret Service unlock"
+            );
+            unlock_collection(connection, &collection, publish)?;
+        }
     }
     if collection_is_locked(connection, &collection)? {
         return Err(SecureStorageError::RemainedLocked);
@@ -213,17 +253,37 @@ fn verify_provider_identity(
 }
 
 fn activate_provider(connection: &Connection) -> Result<(), SecureStorageError> {
+    activate_provider_with_timeout(connection, PROVIDER_STARTUP_TIMEOUT)
+}
+
+fn activate_provider_with_timeout(
+    connection: &Connection,
+    timeout: Duration,
+) -> Result<(), SecureStorageError> {
     let dbus = DBusProxy::new(connection)?;
-    if !dbus.name_has_owner(SERVICE.try_into().expect("valid bus name"))? {
-        dbus.start_service_by_name(
+    let service_name = BusName::try_from(SERVICE).expect("valid bus name");
+    if dbus.name_has_owner(service_name.clone())? {
+        return Ok(());
+    }
+
+    let activation_error = dbus
+        .start_service_by_name(
             WellKnownName::try_from(SERVICE).expect("valid well-known bus name"),
             0,
-        )?;
-    }
-    if dbus.name_has_owner(SERVICE.try_into().expect("valid bus name"))? {
-        Ok(())
-    } else {
-        Err(SecureStorageError::ProviderDisappeared)
+        )
+        .err();
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if dbus.name_has_owner(service_name.clone())? {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return match activation_error {
+                Some(error) => Err(error.into()),
+                None => Err(SecureStorageError::ProviderDisappeared),
+            };
+        }
+        thread::sleep(PROVIDER_STARTUP_POLL.min(timeout));
     }
 }
 
@@ -258,6 +318,12 @@ fn unlock_collection(
     let proxy = Proxy::new(connection, SERVICE, SERVICE_PATH, SERVICE_INTERFACE)?;
     let (unlocked, prompt): (Vec<OwnedObjectPath>, OwnedObjectPath) =
         proxy.call("Unlock", &(vec![collection.clone()],))?;
+    tracing::info!(
+        collection = collection.as_str(),
+        unlocked_immediately = unlocked.iter().any(|path| path == collection),
+        prompt = prompt.as_str(),
+        "Secret Service unlock request completed"
+    );
     if unlocked.iter().any(|path| path == collection) || prompt.as_str() == "/" {
         return Ok(());
     }
@@ -377,8 +443,8 @@ mod tests {
     };
 
     use super::{
-        SecureStorageError, SecureStorageState, hand_off_kwallet_pam_credentials,
-        prepare_secure_storage,
+        SecureStorageError, SecureStorageState, activate_provider_with_timeout,
+        hand_off_kwallet_pam_credentials, prepare_secure_storage_with_settle,
     };
 
     const COLLECTION_PATH: &str = "/org/freedesktop/secrets/collection/login";
@@ -585,7 +651,12 @@ mod tests {
         let (_bus, _service, client, _locked) =
             mock_connections(false, false, UnlockBehavior::Immediate);
         let mut states = Vec::new();
-        prepare_secure_storage(&client, &mut |state| states.push(state)).unwrap();
+        prepare_secure_storage_with_settle(
+            &client,
+            &mut |state| states.push(state),
+            Duration::ZERO,
+        )
+        .unwrap();
         assert_eq!(states, [SecureStorageState::Ready]);
     }
 
@@ -594,7 +665,37 @@ mod tests {
         let (_bus, _service, client, _locked) =
             mock_connections(true, false, UnlockBehavior::Immediate);
         let mut states = Vec::new();
-        prepare_secure_storage(&client, &mut |state| states.push(state)).unwrap();
+        prepare_secure_storage_with_settle(
+            &client,
+            &mut |state| states.push(state),
+            Duration::ZERO,
+        )
+        .unwrap();
+        assert_eq!(
+            states,
+            [SecureStorageState::Locked, SecureStorageState::Ready]
+        );
+    }
+
+    #[test]
+    fn asynchronous_login_unlock_settles_before_requesting_a_prompt() {
+        let (_bus, _service, client, locked) =
+            mock_connections(true, false, UnlockBehavior::PromptDismissed);
+        let unlock = Arc::clone(&locked);
+        let worker = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            unlock.store(false, Ordering::Release);
+        });
+        let mut states = Vec::new();
+
+        prepare_secure_storage_with_settle(
+            &client,
+            &mut |state| states.push(state),
+            Duration::from_millis(250),
+        )
+        .unwrap();
+        worker.join().unwrap();
+
         assert_eq!(
             states,
             [SecureStorageState::Locked, SecureStorageState::Ready]
@@ -606,7 +707,12 @@ mod tests {
         let (_bus, _service, client, _locked) =
             mock_connections(true, false, UnlockBehavior::PromptSuccess);
         let mut states = Vec::new();
-        prepare_secure_storage(&client, &mut |state| states.push(state)).unwrap();
+        prepare_secure_storage_with_settle(
+            &client,
+            &mut |state| states.push(state),
+            Duration::ZERO,
+        )
+        .unwrap();
         assert_eq!(
             states,
             [
@@ -622,7 +728,12 @@ mod tests {
         let (_bus, _service, client, _locked) =
             mock_connections(true, false, UnlockBehavior::PromptDismissed);
         let mut states = Vec::new();
-        let error = prepare_secure_storage(&client, &mut |state| states.push(state)).unwrap_err();
+        let error = prepare_secure_storage_with_settle(
+            &client,
+            &mut |state| states.push(state),
+            Duration::ZERO,
+        )
+        .unwrap_err();
         assert!(matches!(error, SecureStorageError::PromptDismissed));
         assert_eq!(
             states,
@@ -637,7 +748,8 @@ mod tests {
     fn missing_default_collection_is_not_created() {
         let (_bus, _service, client, _locked) =
             mock_connections(false, true, UnlockBehavior::Immediate);
-        let error = prepare_secure_storage(&client, &mut |_| {}).unwrap_err();
+        let error =
+            prepare_secure_storage_with_settle(&client, &mut |_| {}, Duration::ZERO).unwrap_err();
         assert!(matches!(
             error,
             SecureStorageError::MissingDefaultCollection
@@ -693,11 +805,37 @@ mod tests {
             .method_timeout(super::METHOD_TIMEOUT)
             .build()
             .unwrap();
-        let error = prepare_secure_storage(&client, &mut |_| {}).unwrap_err();
+        let error = activate_provider_with_timeout(&client, Duration::ZERO).unwrap_err();
         assert!(matches!(
             error,
             SecureStorageError::Bus(_) | SecureStorageError::ProviderDisappeared
         ));
+    }
+
+    #[test]
+    fn externally_launched_provider_can_register_after_activation_lookup() {
+        let bus = PrivateBus::start();
+        let client = Builder::address(bus.address.as_str())
+            .unwrap()
+            .method_timeout(super::METHOD_TIMEOUT)
+            .build()
+            .unwrap();
+        let address = bus.address.clone();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let provider = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            let _connection = Builder::address(address.as_str())
+                .unwrap()
+                .name(super::SERVICE)
+                .unwrap()
+                .build()
+                .unwrap();
+            release_rx.recv().unwrap();
+        });
+
+        activate_provider_with_timeout(&client, Duration::from_millis(500)).unwrap();
+        release_tx.send(()).unwrap();
+        provider.join().unwrap();
     }
 
     #[test]
@@ -717,7 +855,7 @@ mod tests {
             .build()
             .unwrap();
         let started = std::time::Instant::now();
-        assert!(prepare_secure_storage(&client, &mut |_| {}).is_err());
+        assert!(prepare_secure_storage_with_settle(&client, &mut |_| {}, Duration::ZERO).is_err());
         assert!(started.elapsed() < Duration::from_millis(175));
     }
 

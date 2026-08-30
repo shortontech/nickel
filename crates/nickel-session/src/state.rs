@@ -405,7 +405,9 @@ impl NickelSession {
 
         // Notify clients that we have a keyboard, for the sake of the example we assume that keyboard is always present.
         // You may want to track keyboard hot-plug in real compositor.
-        seat.add_keyboard(Default::default(), 200, 25).unwrap();
+        // Match ordinary desktop repeat behavior. A 200 ms delay caused normal
+        // key presses to enter repeat before users could release the key.
+        seat.add_keyboard(Default::default(), 600, 25).unwrap();
 
         // Notify clients that we have a pointer (mouse)
         // Here we assume that there is always pointer plugged in
@@ -589,6 +591,12 @@ impl NickelSession {
 
     pub fn secure_storage_retry_handle(&self) -> Arc<std::sync::atomic::AtomicBool> {
         Arc::clone(&self.secure_storage_retry)
+    }
+
+    pub(crate) fn secure_storage_state(&self) -> crate::login_services::SecureStorageState {
+        crate::login_services::SecureStorageState::from_u8(
+            self.secure_storage_state.load(Ordering::Acquire),
+        )
     }
 
     pub fn expected_shell_pid_handle(&self) -> Arc<AtomicU32> {
@@ -1425,20 +1433,16 @@ impl NickelSession {
     }
 
     fn protocol_secure_storage_state(&self) -> ProtocolSecureStorage {
-        match self.secure_storage_state.load(Ordering::Acquire) {
-            value if value == crate::login_services::SecureStorageState::Starting as u8 => {
-                ProtocolSecureStorage::Starting
-            }
-            value if value == crate::login_services::SecureStorageState::Locked as u8 => {
-                ProtocolSecureStorage::Locked
-            }
-            value if value == crate::login_services::SecureStorageState::PromptRequired as u8 => {
+        match self.secure_storage_state() {
+            crate::login_services::SecureStorageState::Starting => ProtocolSecureStorage::Starting,
+            crate::login_services::SecureStorageState::Locked => ProtocolSecureStorage::Locked,
+            crate::login_services::SecureStorageState::PromptRequired => {
                 ProtocolSecureStorage::PromptRequired
             }
-            value if value == crate::login_services::SecureStorageState::Ready as u8 => {
-                ProtocolSecureStorage::Ready
+            crate::login_services::SecureStorageState::Ready => ProtocolSecureStorage::Ready,
+            crate::login_services::SecureStorageState::Unavailable => {
+                ProtocolSecureStorage::Unavailable
             }
-            _ => ProtocolSecureStorage::Unavailable,
         }
     }
 

@@ -1196,7 +1196,7 @@ impl LiveShell {
                     }
                 }
                 Some(Keycode::Backspace) => {}
-                _ => return self.insert_launcher_key_text(key, modifiers),
+                _ => return false,
             }
             return true;
         }
@@ -1226,59 +1226,10 @@ impl LiveShell {
                 let index = self.launcher.selected_index();
                 self.launch_result(index);
             }
-            Some(_) => return self.insert_launcher_key_text(key, modifiers),
+            Some(_) => return false,
             None => return false,
         }
         true
-    }
-
-    fn insert_launcher_key_text(&mut self, key: Option<Keycode>, modifiers: Mod) -> bool {
-        let Some(key) = key else {
-            return false;
-        };
-        let control_modifier = Mod::LCTRLMOD
-            | Mod::RCTRLMOD
-            | Mod::LALTMOD
-            | Mod::RALTMOD
-            | Mod::LGUIMOD
-            | Mod::RGUIMOD;
-        if modifiers.intersects(control_modifier) {
-            return false;
-        }
-        #[cfg(target_os = "macos")]
-        {
-            let _ = key;
-            false
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let name = key.name();
-            let mut characters = name.chars();
-            let Some(mut character) = characters.next() else {
-                return false;
-            };
-            if characters.next().is_some() {
-                if key == Keycode::Space {
-                    character = ' ';
-                } else {
-                    return false;
-                }
-            } else if character.is_ascii_alphabetic() {
-                let shifted = modifiers.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD);
-                let caps = modifiers.contains(Mod::CAPSMOD);
-                character = if shifted ^ caps {
-                    character.to_ascii_uppercase()
-                } else {
-                    character.to_ascii_lowercase()
-                };
-            }
-            let _ = reduce_launcher_input(
-                &mut self.launcher,
-                &mut self.launcher_view,
-                LauncherInput::Text(character.to_string()),
-            );
-            true
-        }
     }
 
     fn launch_result(&mut self, index: usize) {
@@ -2061,7 +2012,7 @@ mod tests {
         WindowMenuTargetAction,
     };
     use nickel_ui::{Point, Rect};
-    use sdl3::keyboard::Keycode;
+    use sdl3::keyboard::{Keycode, Mod};
 
     use super::{
         LiveShell, contains_rect, notification_action_rects, panel_status_layout, panel_tray_icons,
@@ -2075,6 +2026,17 @@ mod tests {
     };
     use nickel_core::theme::Appearance;
     use std::time::Instant;
+
+    #[test]
+    fn launcher_character_keys_wait_for_text_input_instead_of_inserting_twice() {
+        let mut shell = LiveShell::new().unwrap();
+        shell.launcher_visible = true;
+
+        assert!(!shell.launcher_key(Some(Keycode::A), Mod::NOMOD));
+        assert_eq!(shell.launcher.query(), "");
+        assert!(shell.insert_launcher_text("a"));
+        assert_eq!(shell.launcher.query(), "a");
+    }
 
     #[test]
     fn launcher_exposes_every_non_ready_secure_storage_state() {

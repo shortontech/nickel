@@ -30,6 +30,37 @@ impl LoginManager for Logind {
     }
 }
 
+trait DisplayManagerSeat {
+    fn switch_to_greeter(&mut self) -> Result<(), String>;
+}
+
+struct SystemDisplayManagerSeat;
+
+impl DisplayManagerSeat for SystemDisplayManagerSeat {
+    fn switch_to_greeter(&mut self) -> Result<(), String> {
+        let connection = zbus::blocking::Connection::system().map_err(|error| error.to_string())?;
+        let proxy = zbus::blocking::Proxy::new(
+            &connection,
+            "org.freedesktop.DisplayManager",
+            "/org/freedesktop/DisplayManager/Seat0",
+            "org.freedesktop.DisplayManager.Seat",
+        )
+        .map_err(|error| error.to_string())?;
+        proxy
+            .call_method("SwitchToGreeter", &())
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+}
+
+pub(crate) fn return_to_display_manager() -> Result<(), String> {
+    return_to_display_manager_with(&mut SystemDisplayManagerSeat)
+}
+
+fn return_to_display_manager_with(seat: &mut impl DisplayManagerSeat) -> Result<(), String> {
+    seat.switch_to_greeter()
+}
+
 fn perform(action: SystemAction, manager: &mut impl LoginManager) -> Result<(), String> {
     let method = match action {
         SystemAction::Suspend => "Suspend",
@@ -63,11 +94,32 @@ impl SystemAction {
 
 #[cfg(test)]
 mod tests {
-    use super::{LoginManager, SystemAction, perform};
+    use super::{
+        DisplayManagerSeat, LoginManager, SystemAction, perform, return_to_display_manager_with,
+    };
 
     #[derive(Default)]
     struct RecordingManager {
         calls: Vec<(&'static str, bool)>,
+    }
+
+    #[derive(Default)]
+    struct RecordingDisplayManagerSeat {
+        switches: usize,
+    }
+
+    impl DisplayManagerSeat for RecordingDisplayManagerSeat {
+        fn switch_to_greeter(&mut self) -> Result<(), String> {
+            self.switches += 1;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn failed_session_returns_through_the_display_manager_seat() {
+        let mut seat = RecordingDisplayManagerSeat::default();
+        return_to_display_manager_with(&mut seat).unwrap();
+        assert_eq!(seat.switches, 1);
     }
 
     impl LoginManager for RecordingManager {
