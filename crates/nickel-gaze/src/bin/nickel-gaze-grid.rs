@@ -5,8 +5,9 @@ use nickel_gaze::{
     grid::{COLUMNS, GridLayout, GridObservation, GridTracker, ROWS},
     model::GazeModel,
 };
+use nickel_input::{InputEvent, KeyCode, KeyEdge, PhysicalKey, PointerEvent};
 use nickel_ui::{PaintCommand, Rect, SdlCanvasPresenter, TextAlign};
-use sdl3::{event::Event, keyboard::Keycode};
+use sdl3::event::Event;
 use std::{
     error::Error,
     sync::{
@@ -64,6 +65,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         .build()?;
     let mut presenter = SdlCanvasPresenter::new(window)?;
     let mut events = sdl.event_pump()?;
+    let mut input = nickel_input::sdl::Adapter::default();
     let started = Instant::now();
     let mut tracker = GridTracker::default();
     tracker.arm();
@@ -72,23 +74,29 @@ fn run() -> Result<(), Box<dyn Error>> {
 
     while running {
         for event in events.poll_iter() {
-            match event {
+            match &event {
                 Event::Quit { .. }
                 | Event::Window {
                     win_event: sdl3::event::WindowEvent::CloseRequested,
                     ..
                 } => running = false,
-                Event::KeyDown {
-                    keycode: Some(Keycode::Escape),
-                    ..
-                } => running = false,
-                Event::KeyDown {
-                    keycode: Some(Keycode::Space | Keycode::R),
-                    repeat: false,
-                    ..
-                } => tracker.arm(),
-                Event::MouseButtonDown { .. } => tracker.arm(),
                 _ => {}
+            }
+            if let Some(event) = input.normalize(&event) {
+                match event {
+                    InputEvent::Key(key) if key.edge == KeyEdge::Pressed && !key.repeat => {
+                        match key.physical {
+                            PhysicalKey::Code(KeyCode::Escape) => running = false,
+                            PhysicalKey::Code(KeyCode::Space | KeyCode::KeyR) => tracker.arm(),
+                            _ => {}
+                        }
+                    }
+                    InputEvent::Pointer(PointerEvent::Button {
+                        edge: KeyEdge::Pressed,
+                        ..
+                    }) => tracker.arm(),
+                    _ => {}
+                }
             }
         }
         while let Ok(observation) = receiver.try_recv() {

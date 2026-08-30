@@ -6,6 +6,7 @@ use nickel_session_protocol::{
     encode as encode_session,
 };
 use std::{
+    borrow::Cow,
     collections::HashMap,
     env,
     hash::{DefaultHasher, Hash, Hasher},
@@ -28,7 +29,10 @@ use crate::{
         ClosedNotification, DesktopNotification, MAX_NOTIFICATION_ACTIONS, NotificationAction,
         NotificationRequest, NotificationStore,
     },
-    platform::{GlobalShortcut, NotificationSource, ShellCommand, TraySource, WindowAction},
+    platform::{
+        GlobalShortcut, NotificationSource, ScreenshotAction, ShellCommand, TraySource,
+        WindowAction,
+    },
 };
 
 #[path = "linux_control.rs"]
@@ -43,23 +47,259 @@ pub fn paste_text_if_requested(_: &str) -> Option<String> {
 }
 
 pub fn capture_active_window() -> Result<(), String> {
-    Err("active-window capture is not implemented on Linux".into())
+    let image = capture_active_window_image()?;
+    copy_image_to_clipboard(&image)
 }
 
 pub fn capture_active_window_to_file() -> Result<(), String> {
-    Err("active-window capture is not implemented on Linux".into())
+    let image = capture_active_window_image()?;
+    copy_temp_image_path(&image).map(|_| ())
 }
 
 pub fn capture_desktop() -> Result<super::DesktopCapture, String> {
-    Err("desktop capture is not implemented on Linux".into())
+    capture_output(None)
 }
 
-pub fn copy_image_to_clipboard(_: &image::RgbaImage) -> Result<(), String> {
-    Err("image clipboard support is not implemented on Linux".into())
+fn capture_output(output: Option<&str>) -> Result<super::DesktopCapture, String> {
+    use std::os::unix::net::UnixDatagram;
+
+    let server = env::var_os(SESSION_CONTROL_ENV)
+        .ok_or_else(|| "Nickel session capture is unavailable".to_string())?;
+    let token = env::var(SESSION_TOKEN_ENV)
+        .map_err(|_| "Nickel session capture is not authorized".to_string())?;
+    let runtime = env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(env::temp_dir);
+    let sequence = SESSION_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+    let reply_path = runtime.join(format!(
+        "nickel-shell-capture-reply-{}-{sequence}.sock",
+        std::process::id()
+    ));
+    let image_path = runtime.join(format!(
+        "nickel-shell-capture-{}-{sequence}.png",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&reply_path);
+    let _ = std::fs::remove_file(&image_path);
+    let result = (|| {
+        let socket = UnixDatagram::bind(&reply_path)
+            .map_err(|error| format!("could not create capture reply socket: {error}"))?;
+        socket
+            .set_read_timeout(Some(Duration::from_secs(15)))
+            .map_err(|error| format!("could not configure capture timeout: {error}"))?;
+        let request_id = SESSION_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+        let request = ClientEnvelope {
+            token,
+            request_id,
+            request: SessionRequest::Command(SessionCommand::CaptureOutput {
+                path: image_path.to_string_lossy().into_owned(),
+                output: output.map(str::to_owned),
+            }),
+        };
+        socket
+            .send_to(
+                &encode_session(&request).map_err(|error| error.to_string())?,
+                server,
+            )
+            .map_err(|error| format!("could not request desktop capture: {error}"))?;
+        let mut response = vec![0_u8; nickel_session_protocol::MAX_FRAME_BYTES];
+        let acknowledgement = receive_capture_response(&socket, &mut response, request_id)?;
+        match acknowledgement {
+            ServerMessage::Ack => {}
+            ServerMessage::Error { message, .. } => return Err(message),
+            _ => return Err("session returned an invalid capture acknowledgement".into()),
+        }
+        let completion = receive_capture_response(&socket, &mut response, request_id)?;
+        match completion {
+            ServerMessage::Event(SessionEvent::OutputCaptureCompleted {
+                path,
+                result: nickel_session_protocol::CaptureResult::Saved { .. },
+            }) if Path::new(&path) == image_path => {}
+            ServerMessage::Event(SessionEvent::OutputCaptureCompleted {
+                result: nickel_session_protocol::CaptureResult::Failed { message },
+                ..
+            }) => return Err(message),
+            _ => return Err("session returned an invalid capture completion".into()),
+        }
+        let image = image::open(&image_path)
+            .map_err(|error| format!("could not read captured desktop pixels: {error}"))?
+            .into_rgba8();
+        Ok(super::DesktopCapture { image })
+    })();
+    let _ = std::fs::remove_file(reply_path);
+    let _ = std::fs::remove_file(image_path);
+    result
 }
 
-pub fn copy_temp_image_path(_: &image::RgbaImage) -> Result<PathBuf, String> {
-    Err("image clipboard support is not implemented on Linux".into())
+fn capture_active_window_image() -> Result<image::RgbaImage, String> {
+    let snapshot = session_snapshot()?;
+    let focused = snapshot
+        .focused
+        .ok_or_else(|| "Nickel has no focused application window".to_string())?;
+    let window = snapshot
+        .windows
+        .iter()
+        .find(|window| window.id == focused)
+        .ok_or_else(|| "the focused application is no longer available".to_string())?;
+    let geometry = window
+        .geometry
+        .ok_or_else(|| "the focused application has no capturable geometry".to_string())?;
+    let output = snapshot
+        .outputs
+        .iter()
+        .filter(|output| output.enabled)
+        .max_by_key(|output| intersection_area(geometry, output.geometry))
+        .filter(|output| intersection_area(geometry, output.geometry) > 0)
+        .ok_or_else(|| "the focused application is not on a capturable output".to_string())?;
+    let capture = capture_output(Some(&output.name))?;
+    crop_output_geometry(capture.image, output.geometry, geometry)
+}
+
+fn session_snapshot() -> Result<nickel_session_protocol::Snapshot, String> {
+    use std::os::unix::net::UnixDatagram;
+
+    let server = env::var_os(SESSION_CONTROL_ENV)
+        .ok_or_else(|| "Nickel session capture is unavailable".to_string())?;
+    let token = env::var(SESSION_TOKEN_ENV)
+        .map_err(|_| "Nickel session capture is not authorized".to_string())?;
+    let runtime = env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(env::temp_dir);
+    let sequence = SESSION_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+    let reply_path = runtime.join(format!(
+        "nickel-shell-snapshot-reply-{}-{sequence}.sock",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&reply_path);
+    let result = (|| {
+        let socket = UnixDatagram::bind(&reply_path)
+            .map_err(|error| format!("could not create snapshot reply socket: {error}"))?;
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .map_err(|error| format!("could not configure snapshot timeout: {error}"))?;
+        let request_id = SESSION_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+        let request = ClientEnvelope {
+            token,
+            request_id,
+            request: SessionRequest::Query(SessionQuery::Snapshot),
+        };
+        socket
+            .send_to(
+                &encode_session(&request).map_err(|error| error.to_string())?,
+                server,
+            )
+            .map_err(|error| format!("could not query active window: {error}"))?;
+        let mut response = vec![0_u8; nickel_session_protocol::MAX_FRAME_BYTES];
+        match receive_capture_response(&socket, &mut response, request_id)? {
+            ServerMessage::Snapshot(snapshot) => Ok(snapshot),
+            ServerMessage::Error { message, .. } => Err(message),
+            _ => Err("session returned an invalid snapshot response".into()),
+        }
+    })();
+    let _ = std::fs::remove_file(reply_path);
+    result
+}
+
+fn intersection_area(
+    left: nickel_session_protocol::Geometry,
+    right: nickel_session_protocol::Geometry,
+) -> i64 {
+    let width = (left.x + left.width).min(right.x + right.width) - left.x.max(right.x);
+    let height = (left.y + left.height).min(right.y + right.height) - left.y.max(right.y);
+    i64::from(width.max(0)) * i64::from(height.max(0))
+}
+
+fn crop_output_geometry(
+    image: image::RgbaImage,
+    output: nickel_session_protocol::Geometry,
+    window: nickel_session_protocol::Geometry,
+) -> Result<image::RgbaImage, String> {
+    if output.width <= 0 || output.height <= 0 {
+        return Err("capture output has invalid geometry".into());
+    }
+    let left = window.x.max(output.x);
+    let top = window.y.max(output.y);
+    let right = (window.x + window.width).min(output.x + output.width);
+    let bottom = (window.y + window.height).min(output.y + output.height);
+    if right <= left || bottom <= top {
+        return Err("focused application does not intersect its capture output".into());
+    }
+    let scale_x = image.width() as f64 / output.width as f64;
+    let scale_y = image.height() as f64 / output.height as f64;
+    let x = (((left - output.x) as f64 * scale_x).round() as u32).min(image.width() - 1);
+    let y = (((top - output.y) as f64 * scale_y).round() as u32).min(image.height() - 1);
+    let width = ((right - left) as f64 * scale_x).round().max(1.0) as u32;
+    let height = ((bottom - top) as f64 * scale_y).round().max(1.0) as u32;
+    Ok(image::imageops::crop_imm(
+        &image,
+        x,
+        y,
+        width.min(image.width().saturating_sub(x)),
+        height.min(image.height().saturating_sub(y)),
+    )
+    .to_image())
+}
+
+fn receive_capture_response(
+    socket: &std::os::unix::net::UnixDatagram,
+    buffer: &mut [u8],
+    request_id: u64,
+) -> Result<ServerMessage, String> {
+    loop {
+        let length = socket
+            .recv(buffer)
+            .map_err(|error| format!("desktop capture response failed: {error}"))?;
+        let response = decode_session::<ServerEnvelope>(&buffer[..length])
+            .map_err(|error| format!("desktop capture response was invalid: {error}"))?;
+        if response.request_id == request_id {
+            return Ok(response.message);
+        }
+    }
+}
+
+pub fn copy_image_to_clipboard(image: &image::RgbaImage) -> Result<(), String> {
+    let mut clipboard = wayland_clipboard()?;
+    clipboard
+        .set_image(arboard::ImageData {
+            width: image.width() as usize,
+            height: image.height() as usize,
+            bytes: Cow::Borrowed(image.as_raw()),
+        })
+        .map_err(|error| format!("could not copy screenshot pixels: {error}"))
+}
+
+pub fn copy_temp_image_path(image: &image::RgbaImage) -> Result<PathBuf, String> {
+    let runtime = env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(env::temp_dir);
+    let sequence = SESSION_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+    let path = runtime.join(format!(
+        "nickel-screenshot-{}-{sequence}.png",
+        std::process::id()
+    ));
+    image
+        .save(&path)
+        .map_err(|error| format!("could not save temporary screenshot: {error}"))?;
+    let mut clipboard = wayland_clipboard()?;
+    if let Err(error) = clipboard.set_text(path.to_string_lossy()) {
+        let _ = std::fs::remove_file(&path);
+        return Err(format!("could not copy temporary screenshot path: {error}"));
+    }
+    Ok(path)
+}
+
+fn wayland_clipboard() -> Result<std::sync::MutexGuard<'static, arboard::Clipboard>, String> {
+    static CLIPBOARD: OnceLock<Result<Mutex<arboard::Clipboard>, String>> = OnceLock::new();
+    let clipboard = CLIPBOARD.get_or_init(|| {
+        arboard::Clipboard::new()
+            .map(Mutex::new)
+            .map_err(|error| format!("could not connect to the Wayland clipboard: {error}"))
+    });
+    clipboard
+        .as_ref()
+        .map_err(Clone::clone)?
+        .lock()
+        .map_err(|_| "Wayland clipboard state is unavailable".into())
 }
 
 pub fn network_status() -> super::NetworkStatus {
@@ -802,6 +1042,9 @@ fn shell_command_payload(command: ShellCommand) -> SessionCommand {
         ShellCommand::FocusContextMenu => SessionCommand::FocusShellRole {
             role: SessionShellRole::ContextMenu,
         },
+        ShellCommand::FocusScreenshot => SessionCommand::FocusShellRole {
+            role: SessionShellRole::Screenshot,
+        },
         ShellCommand::RestoreApplicationFocus => SessionCommand::RestoreApplicationFocus,
         ShellCommand::HideContextMenu => SessionCommand::HideOverlay,
         ShellCommand::HighlightWindow(window) => SessionCommand::HighlightWindow {
@@ -921,12 +1164,18 @@ impl WindowFeed {
     }
 }
 
-pub fn launcher_hotkey_receiver() -> mpsc::Receiver<GlobalShortcut> {
+pub fn launcher_hotkey_receiver() -> super::GlobalShortcutFeed {
     use std::os::unix::net::UnixDatagram;
 
     let (sender, receiver) = mpsc::channel();
     let Some(session) = env::var_os(SESSION_CONTROL_ENV) else {
-        return receiver;
+        return super::GlobalShortcutFeed {
+            receiver,
+            ownership: nickel_input::global::ShortcutOwnership::Compositor,
+            capability: nickel_input::global::ShortcutCapability::Unavailable(
+                nickel_input::global::UnavailableReason::MissingRuntime,
+            ),
+        };
     };
     let path = env::temp_dir().join(format!(
         "nickel-{}-launcher-events.sock",
@@ -934,12 +1183,28 @@ pub fn launcher_hotkey_receiver() -> mpsc::Receiver<GlobalShortcut> {
     ));
     let _ = std::fs::remove_file(&path);
     let Ok(socket) = UnixDatagram::bind(&path) else {
-        return receiver;
+        return super::GlobalShortcutFeed {
+            receiver,
+            ownership: nickel_input::global::ShortcutOwnership::Compositor,
+            capability: nickel_input::global::ShortcutCapability::Unavailable(
+                nickel_input::global::UnavailableReason::Backend(
+                    "could not bind the session shortcut socket".into(),
+                ),
+            ),
+        };
     };
     let envelope = ClientEnvelope {
         token: match env::var(SESSION_TOKEN_ENV) {
             Ok(token) => token,
-            Err(_) => return receiver,
+            Err(_) => {
+                return super::GlobalShortcutFeed {
+                    receiver,
+                    ownership: nickel_input::global::ShortcutOwnership::Compositor,
+                    capability: nickel_input::global::ShortcutCapability::Unavailable(
+                        nickel_input::global::UnavailableReason::PermissionDenied,
+                    ),
+                };
+            }
         },
         request_id: SESSION_REQUEST_ID.fetch_add(1, Ordering::Relaxed),
         request: SessionRequest::Subscribe,
@@ -949,7 +1214,15 @@ pub fn launcher_hotkey_receiver() -> mpsc::Receiver<GlobalShortcut> {
         .is_err()
     {
         let _ = std::fs::remove_file(path);
-        return receiver;
+        return super::GlobalShortcutFeed {
+            receiver,
+            ownership: nickel_input::global::ShortcutOwnership::Compositor,
+            capability: nickel_input::global::ShortcutCapability::Unavailable(
+                nickel_input::global::UnavailableReason::Backend(
+                    "session shortcut subscription failed".into(),
+                ),
+            ),
+        };
     }
     thread::Builder::new()
         .name("nickel-launcher-events".into())
@@ -971,7 +1244,11 @@ pub fn launcher_hotkey_receiver() -> mpsc::Receiver<GlobalShortcut> {
             let _ = std::fs::remove_file(path);
         })
         .expect("failed to start Nickel launcher event listener");
-    receiver
+    super::GlobalShortcutFeed {
+        receiver,
+        ownership: nickel_input::global::ShortcutOwnership::Compositor,
+        capability: nickel_input::global::ShortcutCapability::Available,
+    }
 }
 
 pub fn semantic_target_receiver() -> mpsc::Receiver<super::SemanticTargetRequest> {
@@ -1116,6 +1393,18 @@ fn subscription_shortcut(
         ServerMessage::Event(SessionEvent::LockState { locked }) => (state.locked.replace(locked)
             != Some(locked))
         .then_some(GlobalShortcut::LockState { locked }),
+        ServerMessage::Event(SessionEvent::GlobalShortcut { action }) => Some(match action {
+            nickel_session_protocol::ShortcutAction::ShowRun => GlobalShortcut::ShowRun,
+            nickel_session_protocol::ShortcutAction::ShowScreenshotTool => {
+                GlobalShortcut::Screenshot(ScreenshotAction::InteractiveRegion)
+            }
+            nickel_session_protocol::ShortcutAction::CaptureActiveWindow => {
+                GlobalShortcut::Screenshot(ScreenshotAction::ActiveWindow)
+            }
+            nickel_session_protocol::ShortcutAction::CaptureActiveWindowToFile => {
+                GlobalShortcut::Screenshot(ScreenshotAction::ActiveWindowToFile)
+            }
+        }),
         ServerMessage::Event(SessionEvent::Snapshot(snapshot)) => {
             let lock_changed = state.locked.replace(snapshot.locked) != Some(snapshot.locked);
             let launcher_changed = state.launcher_visible.replace(snapshot.launcher_visible)
@@ -1136,7 +1425,8 @@ fn subscription_shortcut(
     }
 }
 
-pub fn handle_focused_shortcut(_: nickel_core::hotkeys::Hotkey, _: nickel_core::hotkeys::KeyEdge) {}
+pub fn handle_focused_shortcut(_: nickel_core::hotkeys::KeyCode, _: nickel_core::hotkeys::KeyEdge) {
+}
 
 pub fn execute_run_command(command: &str) -> Result<(), super::LaunchError> {
     let mut process = std::process::Command::new("sh");
@@ -1218,14 +1508,156 @@ mod tests {
     use crate::{
         launcher::Launcher,
         model::Application,
-        platform::{GlobalShortcut, ShellCommand},
+        platform::{GlobalShortcut, ScreenshotAction, ShellCommand},
     };
 
     use super::{
-        SubscriptionState, bounded_notification_text, notification_actions,
-        notification_name_owned, parse_window, pixmap_to_rgba, resolve_application_id,
-        response_for_request, shell_command_payload, subscription_shortcut, tray_retry_delay,
+        SubscriptionState, bounded_notification_text, capture_active_window,
+        capture_active_window_to_file, crop_output_geometry, intersection_area,
+        notification_actions, notification_name_owned, parse_window, pixmap_to_rgba,
+        resolve_application_id, response_for_request, shell_command_payload, subscription_shortcut,
+        tray_retry_delay,
     };
+
+    #[test]
+    #[ignore = "requires an explicitly selected live Nickel Wayland session"]
+    fn live_active_window_capture_reaches_image_clipboard() {
+        capture_active_window().expect("active-window capture should succeed");
+        let mut clipboard = arboard::Clipboard::new().expect("clipboard should be available");
+        let image = clipboard
+            .get_image()
+            .expect("clipboard should contain image pixels");
+        println!("clipboard_image={}x{}", image.width, image.height);
+        assert!(image.width > 0);
+        assert!(image.height > 0);
+    }
+
+    #[test]
+    #[ignore = "requires a preceding live screenshot shortcut"]
+    fn live_clipboard_contains_image_pixels_after_external_action() {
+        let mut clipboard = arboard::Clipboard::new().expect("clipboard should be available");
+        let image = clipboard
+            .get_image()
+            .expect("clipboard should contain image pixels");
+        println!("clipboard_image={}x{}", image.width, image.height);
+        assert!(image.width > 0);
+        assert!(image.height > 0);
+    }
+
+    #[test]
+    #[ignore = "requires an explicitly selected live Nickel Wayland session"]
+    fn live_active_window_file_capture_reaches_clipboard_and_reopens() {
+        capture_active_window_to_file().expect("active-window file capture should succeed");
+        let mut clipboard = arboard::Clipboard::new().expect("clipboard should be available");
+        let path = std::path::PathBuf::from(
+            clipboard
+                .get_text()
+                .expect("clipboard should contain the temporary image path"),
+        );
+        let image = image::open(&path).expect("temporary capture should reopen");
+        assert!(image.width() > 0);
+        assert!(image.height() > 0);
+        std::fs::remove_file(path).expect("temporary acceptance capture should be removable");
+    }
+
+    #[test]
+    #[ignore = "requires a preceding live screenshot-to-file shortcut"]
+    fn live_clipboard_path_from_external_action_reopens() {
+        let mut clipboard = arboard::Clipboard::new().expect("clipboard should be available");
+        let path = std::path::PathBuf::from(
+            clipboard
+                .get_text()
+                .expect("clipboard should contain the temporary image path"),
+        );
+        let image = image::open(&path).expect("temporary capture should reopen");
+        assert!(image.width() > 0);
+        assert!(image.height() > 0);
+        std::fs::remove_file(path).expect("temporary acceptance capture should be removable");
+    }
+
+    #[test]
+    fn active_window_output_selection_uses_intersection_area() {
+        use nickel_session_protocol::Geometry;
+
+        let window = Geometry {
+            x: 900,
+            y: 100,
+            width: 500,
+            height: 400,
+        };
+        let left = Geometry {
+            x: 0,
+            y: 0,
+            width: 1000,
+            height: 800,
+        };
+        let right = Geometry {
+            x: 1000,
+            y: 0,
+            width: 1000,
+            height: 800,
+        };
+        assert_eq!(intersection_area(window, left), 40_000);
+        assert_eq!(intersection_area(window, right), 160_000);
+    }
+
+    #[test]
+    fn session_screenshot_events_map_to_typed_consumer_actions() {
+        use nickel_session_protocol::{Event, ServerMessage, ShortcutAction};
+
+        let cases = [
+            (
+                ShortcutAction::ShowScreenshotTool,
+                ScreenshotAction::InteractiveRegion,
+            ),
+            (
+                ShortcutAction::CaptureActiveWindow,
+                ScreenshotAction::ActiveWindow,
+            ),
+            (
+                ShortcutAction::CaptureActiveWindowToFile,
+                ScreenshotAction::ActiveWindowToFile,
+            ),
+        ];
+        for (wire, expected) in cases {
+            let mut state = SubscriptionState::default();
+            assert_eq!(
+                subscription_shortcut(
+                    ServerMessage::Event(Event::GlobalShortcut { action: wire }),
+                    &mut state,
+                ),
+                Some(GlobalShortcut::Screenshot(expected))
+            );
+        }
+    }
+
+    #[test]
+    fn active_window_crop_maps_logical_geometry_to_scaled_pixels() {
+        use nickel_session_protocol::Geometry;
+
+        let mut source = image::RgbaImage::new(400, 200);
+        for (x, y, pixel) in source.enumerate_pixels_mut() {
+            *pixel = image::Rgba([x as u8, y as u8, 0, 255]);
+        }
+        let crop = crop_output_geometry(
+            source,
+            Geometry {
+                x: 100,
+                y: 50,
+                width: 200,
+                height: 100,
+            },
+            Geometry {
+                x: 150,
+                y: 75,
+                width: 50,
+                height: 25,
+            },
+        )
+        .unwrap();
+        assert_eq!(crop.dimensions(), (100, 50));
+        assert_eq!(crop.get_pixel(0, 0).0, [100, 50, 0, 255]);
+    }
 
     #[test]
     fn existing_notification_owner_does_not_block_shell_startup() {

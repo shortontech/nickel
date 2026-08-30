@@ -887,22 +887,22 @@ fn build_dashboard_frame_directional(
             direction,
         ));
     if narrow {
-        for (label, _supporting, icon_name, icon_bytes, action) in [
-            (
+        let mut shortcuts = vec![];
+        if launcher.codex_available() {
+            shortcuts.push((
                 "Projects",
-                "Recent Codex projects",
                 "project",
                 include_bytes!("../../../assets/icons/start-menu/project.svg").as_slice(),
                 LauncherAction::ShowNarrowProjects,
-            ),
-            (
-                "Settings",
-                "Nickel settings",
-                "settings",
-                include_bytes!("../../../assets/icons/start-menu/settings.svg").as_slice(),
-                LauncherAction::ShowNarrowSettings,
-            ),
-        ] {
+            ));
+        }
+        shortcuts.push((
+            "Settings",
+            "settings",
+            include_bytes!("../../../assets/icons/start-menu/settings.svg").as_slice(),
+            LauncherAction::ShowNarrowSettings,
+        ));
+        for (label, icon_name, icon_bytes, action) in shortcuts {
             primary = primary.child(ShortcutRow::new_directional(
                 theme,
                 structural_icon(icons, icon_name, icon_bytes, theme.text.secondary),
@@ -1079,12 +1079,17 @@ fn build_dashboard_frame_directional(
             .padding(Insets::all(theme.spacing.content))
             .child(back_row())
             .child(settings_section),
-        _ => Column::new()
-            .gap(theme.spacing.compact)
-            .padding(Insets::all(theme.spacing.content))
-            .child(projects_section)
-            .child(nickel_ui::Spacer::flex())
-            .child(settings_section),
+        _ => {
+            let mut detail = Column::new()
+                .gap(theme.spacing.compact)
+                .padding(Insets::all(theme.spacing.content));
+            if launcher.codex_available() {
+                detail = detail
+                    .child(projects_section)
+                    .child(nickel_ui::Spacer::flex());
+            }
+            detail.child(settings_section)
+        }
     };
     let detail_footer = LauncherSearchField::new_directional(
         theme,
@@ -1182,6 +1187,9 @@ fn dashboard_actions(
         actions
     };
     let projects = || {
+        if !launcher.codex_available() {
+            return Vec::new();
+        }
         let mut actions = vec![LauncherAction::SeeAllProjects];
         if let crate::launcher::DashboardSection::Ready(projects) = launcher.dashboard_projects() {
             actions.extend(
@@ -1207,14 +1215,14 @@ fn dashboard_actions(
             .chain(projects())
             .chain(settings())
             .collect(),
-        Some(DashboardNarrowPage::Primary) => primary_content()
-            .into_iter()
-            .chain([
-                LauncherAction::ShowNarrowProjects,
-                LauncherAction::ShowNarrowSettings,
-            ])
-            .chain(account_session())
-            .collect(),
+        Some(DashboardNarrowPage::Primary) => {
+            let mut actions = primary_content();
+            if launcher.codex_available() {
+                actions.push(LauncherAction::ShowNarrowProjects);
+            }
+            actions.push(LauncherAction::ShowNarrowSettings);
+            actions.into_iter().chain(account_session()).collect()
+        }
         Some(DashboardNarrowPage::Projects) => std::iter::once(LauncherAction::ShowNarrowPrimary)
             .chain(projects())
             .collect(),
@@ -1598,6 +1606,7 @@ mod tests {
     #[test]
     fn narrow_dashboard_keeps_every_typed_action_reachable() {
         let mut launcher = Launcher::default();
+        launcher.set_codex_available(true);
         launcher.set_dashboard_account(DashboardSection::Ready(DashboardAccount {
             display_name: "Steven".into(),
             supporting_text: "Local session".into(),
@@ -1676,7 +1685,8 @@ mod tests {
             ReadingDirection::LeftToRight
         );
 
-        let launcher = Launcher::default();
+        let mut launcher = Launcher::default();
+        launcher.set_codex_available(true);
         let mut state = LauncherViewState::default();
         let mut icons = LauncherIconCache::new();
         let frame = build_dashboard_frame_directional(

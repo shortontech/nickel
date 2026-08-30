@@ -40,7 +40,7 @@ use crate::{
         build_menu_frame, build_preview_frame, menu_height, preview_dimensions,
     },
 };
-use sdl3::keyboard::{Keycode, Mod};
+use nickel_input::{AggregateModifier, KeyCode, ModifierState};
 use zeroize::{Zeroize, Zeroizing};
 
 const PANEL_ITEM_WIDTH: f32 = 52.0;
@@ -50,15 +50,12 @@ const PANEL_TRAY_WIDTH: f32 = 28.0;
 const PANEL_TRAY_ICON_SIZE: u32 = 18;
 const PANEL_CODEX_WIDTH: f32 = 36.0;
 const PANEL_CODEX_ICON_SIZE: f32 = 28.0;
-const PANEL_SETTINGS_WIDTH: f32 = 36.0;
-const PANEL_SETTINGS_ICON_SIZE: f32 = 24.0;
 const PREVIEW_LEAVE_DELAY: Duration = Duration::from_millis(500);
 const PREVIEW_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct PanelStatusLayout {
     control_start: f32,
-    settings_start: f32,
     tray_start: f32,
     codex_start: f32,
 }
@@ -74,15 +71,18 @@ impl PanelStatusLayout {
     }
 }
 
-fn panel_status_layout(width: u32, tray_count: usize) -> PanelStatusLayout {
+fn panel_status_layout(width: u32, tray_count: usize, codex_available: bool) -> PanelStatusLayout {
     let control_start = panel_control_start(width);
-    let settings_start = control_start - PANEL_SETTINGS_WIDTH;
-    let tray_start = settings_start - tray_count.min(4) as f32 * PANEL_TRAY_WIDTH;
+    let tray_start = control_start - tray_count.min(4) as f32 * PANEL_TRAY_WIDTH;
     PanelStatusLayout {
         control_start,
-        settings_start,
         tray_start,
-        codex_start: tray_start - PANEL_CODEX_WIDTH,
+        codex_start: tray_start
+            - if codex_available {
+                PANEL_CODEX_WIDTH
+            } else {
+                0.0
+            },
     }
 }
 
@@ -100,7 +100,6 @@ enum PanelHover {
     Launcher,
     Task(usize),
     Codex,
-    Settings,
     Tray(usize),
     #[cfg(not(target_os = "macos"))]
     Control,
@@ -121,7 +120,6 @@ pub struct LiveShell {
     wallpaper_size: (u32, u32),
     panel_icon: Arc<image::RgbaImage>,
     codex_icon: Arc<image::RgbaImage>,
-    settings_icon: Arc<image::RgbaImage>,
     palette: ThemePalette,
     network: NetworkStatus,
     bluetooth: BluetoothStatus,
@@ -201,6 +199,13 @@ impl LiveShell {
         self.launcher.set_dashboard_projects(projects)
     }
 
+    pub fn set_codex_available(&mut self, available: bool) -> bool {
+        if !available {
+            self.codex_project_menu_visible = false;
+        }
+        self.launcher.set_codex_available(available)
+    }
+
     pub fn take_requested_codex_project(&mut self) -> Option<String> {
         self.requested_codex_project.take()
     }
@@ -241,16 +246,6 @@ impl LiveShell {
         .map(|icon| tint_panel_icon(icon, palette.text))
         .map(Arc::new)
         .expect("embedded Nickel chat icon remains valid");
-        let settings_icon = crate::icons::nickel_application("Nickel Settings")
-            .map(|(_, icon)| {
-                crate::icons::resized(
-                    &icon,
-                    PANEL_SETTINGS_ICON_SIZE as u32,
-                    PANEL_SETTINGS_ICON_SIZE as u32,
-                )
-            })
-            .map(Arc::new)
-            .expect("embedded Nickel Settings icon remains valid");
         let window_feed = WindowFeed::new();
         let tray_feed = TrayFeed::new();
         let notification_feed = NotificationFeed::new()?;
@@ -280,7 +275,6 @@ impl LiveShell {
             wallpaper_size: (0, 0),
             panel_icon,
             codex_icon,
-            settings_icon,
             palette,
             network,
             bluetooth,
@@ -503,21 +497,21 @@ impl LiveShell {
         self.dismiss_notification()
     }
 
-    pub fn notification_key(&mut self, key: Option<Keycode>) -> bool {
+    pub fn notification_key(&mut self, key: Option<KeyCode>) -> bool {
         let Some(notification) = self.notification.as_ref() else {
             return false;
         };
         let count = notification.actions.len();
         self.notification_keyboard_active = true;
         match key {
-            Some(Keycode::Escape) => return self.dismiss_notification(),
-            Some(Keycode::Left | Keycode::Up) if count > 0 => {
+            Some(KeyCode::Escape) => return self.dismiss_notification(),
+            Some(KeyCode::ArrowLeft | KeyCode::ArrowUp) if count > 0 => {
                 self.notification_selected = (self.notification_selected + count - 1) % count;
             }
-            Some(Keycode::Right | Keycode::Down | Keycode::Tab) if count > 0 => {
+            Some(KeyCode::ArrowRight | KeyCode::ArrowDown | KeyCode::Tab) if count > 0 => {
                 self.notification_selected = (self.notification_selected + 1) % count;
             }
-            Some(Keycode::Return | Keycode::KpEnter | Keycode::Space) => {
+            Some(KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space) => {
                 if let Some(action) = notification.actions.get(self.notification_selected) {
                     self.notification_feed.invoke(notification.id, &action.key);
                 }
@@ -552,7 +546,7 @@ impl LiveShell {
             }
             return true;
         }
-        let status = panel_status_layout(width, self.tray.len());
+        let status = panel_status_layout(width, self.tray.len(), self.launcher.codex_available());
         #[cfg(not(target_os = "macos"))]
         if x >= status.control_start {
             if self.launcher_visible {
@@ -561,23 +555,11 @@ impl LiveShell {
             self.set_control_visible(!self.control_visible);
             return true;
         }
-        if x >= status.codex_start && x < status.tray_start {
+        if self.launcher.codex_available() && x >= status.codex_start && x < status.tray_start {
             if self.launcher_visible {
                 self.set_launcher_visible(false);
             }
             self.codex_project_menu_visible = !self.codex_project_menu_visible;
-            return true;
-        }
-        if x >= status.settings_start && x < status.control_start {
-            let application = {
-                self.launcher
-                    .applications()
-                    .find(|application| application.name() == "Nickel Settings")
-                    .cloned()
-            };
-            if let Some(application) = application {
-                self.launch_application(application);
-            }
             return true;
         }
         if x >= status.tray_start {
@@ -657,6 +639,16 @@ impl LiveShell {
                     x: point.x.round() as i32,
                     y: point.y.round() as i32,
                     interaction: PointerInteraction::LeftClick,
+                })
+            }
+            ShellSemanticTarget::Screenshot { action } => {
+                let (x, y, interaction) = self.screenshot.semantic_target(*action)?;
+                Some(ResolvedShellTarget {
+                    role: ShellRole::Screenshot,
+                    output: None,
+                    x,
+                    y,
+                    interaction,
                 })
             }
         }
@@ -768,7 +760,7 @@ impl LiveShell {
         true
     }
 
-    pub fn preview_key(&mut self, key: Option<Keycode>) -> bool {
+    pub fn preview_key(&mut self, key: Option<KeyCode>) -> bool {
         if self.window_menu.is_some() {
             return self.window_menu_key(key);
         }
@@ -781,32 +773,32 @@ impl LiveShell {
         }
         self.preview_selected = self.preview_selected.min(count - 1);
         match key {
-            Some(Keycode::Escape) => {
+            Some(KeyCode::Escape) => {
                 self.close_window_preview();
                 #[cfg(target_os = "linux")]
                 let _ = platform::send_shell_command(ShellCommand::RestoreApplicationFocus);
             }
-            Some(Keycode::Left | Keycode::Up) => {
+            Some(KeyCode::ArrowLeft | KeyCode::ArrowUp) => {
                 self.preview_selected = (self.preview_selected + count - 1) % count;
                 self.preview_hovered = frame.window(self.preview_selected);
                 if let Some(window) = self.preview_hovered {
                     let _ = platform::send_shell_command(ShellCommand::HighlightWindow(window));
                 }
             }
-            Some(Keycode::Right | Keycode::Down | Keycode::Tab) => {
+            Some(KeyCode::ArrowRight | KeyCode::ArrowDown | KeyCode::Tab) => {
                 self.preview_selected = (self.preview_selected + 1) % count;
                 self.preview_hovered = frame.window(self.preview_selected);
                 if let Some(window) = self.preview_hovered {
                     let _ = platform::send_shell_command(ShellCommand::HighlightWindow(window));
                 }
             }
-            Some(Keycode::Delete) => {
+            Some(KeyCode::Delete) => {
                 let Some(window) = frame.window(self.preview_selected) else {
                     return false;
                 };
                 self.send_window_action(window, WindowAction::Close);
             }
-            Some(Keycode::Return | Keycode::KpEnter | Keycode::Space) => {
+            Some(KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space) => {
                 let Some(window) = frame.window(self.preview_selected) else {
                     return false;
                 };
@@ -843,7 +835,7 @@ impl LiveShell {
         true
     }
 
-    pub fn window_menu_key(&mut self, key: Option<Keycode>) -> bool {
+    pub fn window_menu_key(&mut self, key: Option<KeyCode>) -> bool {
         let Some(frame) = self.window_menu_frame.as_ref() else {
             return false;
         };
@@ -853,18 +845,18 @@ impl LiveShell {
         }
         self.window_menu_selected = self.window_menu_selected.min(count - 1);
         match key {
-            Some(Keycode::Escape) => {
+            Some(KeyCode::Escape) => {
                 self.close_window_preview();
                 #[cfg(target_os = "linux")]
                 let _ = platform::send_shell_command(ShellCommand::RestoreApplicationFocus);
             }
-            Some(Keycode::Up | Keycode::Left) => {
+            Some(KeyCode::ArrowUp | KeyCode::ArrowLeft) => {
                 self.window_menu_selected = (self.window_menu_selected + count - 1) % count;
             }
-            Some(Keycode::Down | Keycode::Right | Keycode::Tab) => {
+            Some(KeyCode::ArrowDown | KeyCode::ArrowRight | KeyCode::Tab) => {
                 self.window_menu_selected = (self.window_menu_selected + 1) % count;
             }
-            Some(Keycode::Return | Keycode::KpEnter | Keycode::Space) => {
+            Some(KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space) => {
                 let Some(action) = frame.action(self.window_menu_selected) else {
                     return false;
                 };
@@ -970,6 +962,10 @@ impl LiveShell {
 
     pub fn global_shortcut(&mut self, shortcut: platform::GlobalShortcut) -> bool {
         match shortcut {
+            platform::GlobalShortcut::ToggleLauncher => {
+                self.apply_launcher_signal(!self.launcher_visible);
+                true
+            }
             platform::GlobalShortcut::ShowLauncher => {
                 self.apply_launcher_signal(true);
                 true
@@ -994,20 +990,42 @@ impl LiveShell {
                 tracing::warn!("Nickel Run is not implemented in the SDL shell yet");
                 false
             }
-            platform::GlobalShortcut::CaptureActiveWindow => {
+            platform::GlobalShortcut::Screenshot(platform::ScreenshotAction::ActiveWindow) => {
                 if let Err(error) = platform::capture_active_window() {
                     tracing::warn!(%error, "failed to copy active window screenshot");
+                    self.screenshot.show_error(error);
+                    self.set_screenshot_focus(true);
+                    return true;
                 }
                 false
             }
-            platform::GlobalShortcut::CaptureActiveWindowToFile => {
+            platform::GlobalShortcut::Screenshot(
+                platform::ScreenshotAction::ActiveWindowToFile,
+            ) => {
                 if let Err(error) = platform::capture_active_window_to_file() {
                     tracing::warn!(%error, "failed to capture active window to a temporary file");
+                    self.screenshot.show_error(error);
+                    self.set_screenshot_focus(true);
+                    return true;
                 }
                 false
             }
-            platform::GlobalShortcut::ShowScreenshotTool => {
+            platform::GlobalShortcut::Screenshot(platform::ScreenshotAction::InteractiveRegion) => {
+                let was_visible = self.screenshot.visible();
                 self.screenshot.request_capture();
+                if was_visible {
+                    self.set_screenshot_focus(false);
+                }
+                true
+            }
+            platform::GlobalShortcut::Screenshot(
+                platform::ScreenshotAction::InteractiveRegionToFile,
+            ) => {
+                let was_visible = self.screenshot.visible();
+                self.screenshot.request_capture_to_file();
+                if was_visible {
+                    self.set_screenshot_focus(false);
+                }
                 true
             }
             _ => false,
@@ -1022,11 +1040,14 @@ impl LiveShell {
         match platform::capture_desktop() {
             Ok(capture) => {
                 self.screenshot.show(capture.image);
+                self.set_screenshot_focus(true);
                 true
             }
             Err(error) => {
                 tracing::warn!(%error, "failed to capture desktop");
-                false
+                self.screenshot.show_error(error);
+                self.set_screenshot_focus(true);
+                true
             }
         }
     }
@@ -1036,20 +1057,37 @@ impl LiveShell {
     }
 
     pub fn screenshot_pointer_pressed(&mut self, x: f32, y: f32, width: u32, height: u32) -> bool {
-        self.screenshot.pointer_pressed(x, y, width, height)
+        let was_visible = self.screenshot.visible();
+        let handled = self.screenshot.pointer_pressed(x, y, width, height);
+        if was_visible && !self.screenshot.visible() {
+            self.set_screenshot_focus(false);
+        }
+        handled
     }
 
     pub fn screenshot_pointer_released(&mut self) -> bool {
         self.screenshot.pointer_released()
     }
 
-    pub fn screenshot_key(&mut self, key: Option<Keycode>) -> bool {
-        if key == Some(Keycode::Escape) && self.screenshot.visible() {
+    pub fn screenshot_key(&mut self, key: Option<KeyCode>) -> bool {
+        if key == Some(KeyCode::Escape) && self.screenshot.visible() {
             self.screenshot.hide();
+            self.set_screenshot_focus(false);
             true
         } else {
             false
         }
+    }
+
+    fn set_screenshot_focus(&self, visible: bool) {
+        #[cfg(target_os = "linux")]
+        let _ = platform::send_shell_command(if visible {
+            ShellCommand::FocusScreenshot
+        } else {
+            ShellCommand::RestoreApplicationFocus
+        });
+        #[cfg(not(target_os = "linux"))]
+        let _ = visible;
     }
 
     fn set_launcher_visible(&mut self, visible: bool) {
@@ -1116,7 +1154,7 @@ impl LiveShell {
         true
     }
 
-    pub fn control_key(&mut self, key: Option<Keycode>, width: u32, height: u32) -> bool {
+    pub fn control_key(&mut self, key: Option<KeyCode>, width: u32, height: u32) -> bool {
         if !self.control_visible {
             return false;
         }
@@ -1126,16 +1164,16 @@ impl LiveShell {
             self.control_state.selected_action = self.control_state.selected_action.min(count - 1);
         }
         match key {
-            Some(Keycode::Escape) => self.set_control_visible(false),
-            Some(Keycode::Down | Keycode::Right | Keycode::Tab) if count > 0 => {
+            Some(KeyCode::Escape) => self.set_control_visible(false),
+            Some(KeyCode::ArrowDown | KeyCode::ArrowRight | KeyCode::Tab) if count > 0 => {
                 self.control_state.selected_action =
                     (self.control_state.selected_action + 1) % count;
             }
-            Some(Keycode::Up | Keycode::Left) if count > 0 => {
+            Some(KeyCode::ArrowUp | KeyCode::ArrowLeft) if count > 0 => {
                 self.control_state.selected_action =
                     (self.control_state.selected_action + count - 1) % count;
             }
-            Some(Keycode::Return | Keycode::KpEnter) => {
+            Some(KeyCode::Enter | KeyCode::NumpadEnter) => {
                 if let Some(action) = frame.action(self.control_state.selected_action) {
                     self.apply_control_action(action);
                 }
@@ -1167,6 +1205,7 @@ impl LiveShell {
             }
             SurfaceRole::Screenshot if self.screenshot.visible() => {
                 self.screenshot.hide();
+                self.set_screenshot_focus(false);
                 true
             }
             _ => false,
@@ -1253,7 +1292,7 @@ impl LiveShell {
         true
     }
 
-    pub fn launcher_key(&mut self, key: Option<Keycode>, modifiers: Mod) -> bool {
+    pub fn launcher_key(&mut self, key: Option<KeyCode>, modifiers: &ModifierState) -> bool {
         if !self.launcher_visible {
             return false;
         }
@@ -1269,17 +1308,17 @@ impl LiveShell {
                 .as_ref()
                 .map_or(0, |frame| frame.navigable_actions.len());
             match key {
-                Some(Keycode::Escape) => self.set_launcher_visible(false),
-                Some(Keycode::Tab) if modifiers.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD) => {
+                Some(KeyCode::Escape) => self.set_launcher_visible(false),
+                Some(KeyCode::Tab) if modifiers.aggregate(AggregateModifier::Shift) => {
                     self.launcher_view.select_dashboard_previous(action_count);
                 }
-                Some(Keycode::Down | Keycode::Right | Keycode::Tab) => {
+                Some(KeyCode::ArrowDown | KeyCode::ArrowRight | KeyCode::Tab) => {
                     self.launcher_view.select_dashboard_next(action_count);
                 }
-                Some(Keycode::Up | Keycode::Left) => {
+                Some(KeyCode::ArrowUp | KeyCode::ArrowLeft) => {
                     self.launcher_view.select_dashboard_previous(action_count);
                 }
-                Some(Keycode::Return | Keycode::KpEnter) => {
+                Some(KeyCode::Enter | KeyCode::NumpadEnter) => {
                     let action = self.launcher_frame.as_ref().and_then(|frame| {
                         frame
                             .navigable_actions
@@ -1290,13 +1329,13 @@ impl LiveShell {
                         self.apply_launcher_action(action);
                     }
                 }
-                Some(Keycode::Backspace) => {}
+                Some(KeyCode::Backspace) => {}
                 _ => return false,
             }
             return true;
         }
         match key {
-            Some(Keycode::Escape) => {
+            Some(KeyCode::Escape) => {
                 if reduce_launcher_input(
                     &mut self.launcher,
                     &mut self.launcher_view,
@@ -1306,18 +1345,18 @@ impl LiveShell {
                     self.set_launcher_visible(false);
                 }
             }
-            Some(Keycode::Backspace) => {
+            Some(KeyCode::Backspace) => {
                 let _ = reduce_launcher_input(
                     &mut self.launcher,
                     &mut self.launcher_view,
                     LauncherInput::Backspace,
                 );
             }
-            Some(Keycode::Down) => self.launcher.select_grid_down(columns),
-            Some(Keycode::Up) => self.launcher.select_grid_up(columns),
-            Some(Keycode::Left) => self.launcher.select_grid_left(columns),
-            Some(Keycode::Right) => self.launcher.select_grid_right(columns),
-            Some(Keycode::Return) => {
+            Some(KeyCode::ArrowDown) => self.launcher.select_grid_down(columns),
+            Some(KeyCode::ArrowUp) => self.launcher.select_grid_up(columns),
+            Some(KeyCode::ArrowLeft) => self.launcher.select_grid_left(columns),
+            Some(KeyCode::ArrowRight) => self.launcher.select_grid_right(columns),
+            Some(KeyCode::Enter) => {
                 let index = self.launcher.selected_index();
                 self.launch_result(index);
             }
@@ -1471,7 +1510,7 @@ impl LiveShell {
         true
     }
 
-    pub fn lock_key(&mut self, key: Option<Keycode>) -> bool {
+    pub fn lock_key(&mut self, key: Option<KeyCode>) -> bool {
         self.lock_key_with(
             key,
             |username, password| {
@@ -1491,7 +1530,7 @@ impl LiveShell {
 
     fn lock_key_with<A, U>(
         &mut self,
-        key: Option<Keycode>,
+        key: Option<KeyCode>,
         authenticate: A,
         request_unlock: U,
     ) -> bool
@@ -1503,12 +1542,12 @@ impl LiveShell {
             return false;
         }
         match key {
-            Some(Keycode::Backspace) => {
+            Some(KeyCode::Backspace) => {
                 self.lock_password.pop();
                 self.lock_status = None;
                 true
             }
-            Some(Keycode::Return | Keycode::KpEnter) => {
+            Some(KeyCode::Enter | KeyCode::NumpadEnter) => {
                 let username = std::env::var("USER").unwrap_or_default();
                 let authenticated = authenticate(&username, &self.lock_password);
                 self.lock_password.zeroize();
@@ -1817,30 +1856,7 @@ impl LiveShell {
                 false,
             ));
         }
-        let status = panel_status_layout(width, self.tray.len());
-        if self.panel_hover == Some(PanelHover::Settings) {
-            commands.push(PaintCommand::RoundedFill {
-                rect: Rect::new(
-                    status.settings_start + 2.0,
-                    7.0,
-                    PANEL_SETTINGS_WIDTH - 4.0,
-                    42.0,
-                ),
-                color: self.palette.surface_hover,
-                radius: 8.0,
-            });
-        }
-        commands.push(PaintCommand::Image {
-            bounds: Rect::new(
-                status.settings_start + (PANEL_SETTINGS_WIDTH - PANEL_SETTINGS_ICON_SIZE) / 2.0,
-                (56.0 - PANEL_SETTINGS_ICON_SIZE) / 2.0,
-                PANEL_SETTINGS_ICON_SIZE,
-                PANEL_SETTINGS_ICON_SIZE,
-            ),
-            id: 0x5001,
-            image: Arc::clone(&self.settings_icon),
-            high_density: None,
-        });
+        let status = panel_status_layout(width, self.tray.len(), self.launcher.codex_available());
         for (index, _) in self.tray.iter().rev().take(4).rev().enumerate() {
             let x = status.tray_start + index as f32 * PANEL_TRAY_WIDTH;
             if self.panel_hover == Some(PanelHover::Tray(index)) {
@@ -1860,19 +1876,21 @@ impl LiveShell {
             }
         }
         let codex_x = status.codex_start;
-        if self.panel_hover == Some(PanelHover::Codex) {
+        if self.launcher.codex_available() && self.panel_hover == Some(PanelHover::Codex) {
             commands.push(PaintCommand::RoundedFill {
                 rect: Rect::new(codex_x + 2.0, 7.0, PANEL_CODEX_WIDTH - 4.0, 42.0),
                 color: self.palette.surface_hover,
                 radius: 8.0,
             });
         }
-        commands.push(PaintCommand::Image {
-            bounds: status.codex_icon_bounds(),
-            id: 0x5000,
-            image: Arc::clone(&self.codex_icon),
-            high_density: None,
-        });
+        if self.launcher.codex_available() {
+            commands.push(PaintCommand::Image {
+                bounds: status.codex_icon_bounds(),
+                id: 0x5000,
+                image: Arc::clone(&self.codex_icon),
+                high_density: None,
+            });
+        }
         commands
     }
 
@@ -1888,20 +1906,17 @@ impl LiveShell {
                 ((x - PANEL_ITEM_WIDTH) / PANEL_ITEM_WIDTH) as usize,
             ));
         }
-        let status = panel_status_layout(width, self.tray.len());
+        let status = panel_status_layout(width, self.tray.len(), self.launcher.codex_available());
         #[cfg(not(target_os = "macos"))]
         if x >= status.control_start {
             return Some(PanelHover::Control);
-        }
-        if x >= status.settings_start {
-            return Some(PanelHover::Settings);
         }
         if x >= status.tray_start {
             return Some(PanelHover::Tray(
                 ((x - status.tray_start) / PANEL_TRAY_WIDTH) as usize,
             ));
         }
-        if x >= status.codex_start {
+        if self.launcher.codex_available() && x >= status.codex_start {
             return Some(PanelHover::Codex);
         }
         None
@@ -2134,12 +2149,12 @@ mod tests {
     use std::{cell::Cell, collections::HashMap};
 
     use image::{Rgba, RgbaImage};
+    use nickel_input::{KeyCode, ModifierState};
     use nickel_session_protocol::{
-        PointerInteraction, PreviewTargetAction, ShellRole, ShellSemanticTarget,
-        WindowMenuTargetAction,
+        PointerInteraction, PreviewTargetAction, ScreenshotTargetAction, ShellRole,
+        ShellSemanticTarget, WindowMenuTargetAction,
     };
     use nickel_ui::{Point, Rect};
-    use sdl3::keyboard::{Keycode, Mod};
 
     use super::{
         LiveShell, contains_rect, notification_action_rects, panel_status_layout, panel_tray_icons,
@@ -2149,6 +2164,7 @@ mod tests {
     use crate::{
         model::{ApplicationId, OpenWindow, TrayItem, WindowGroup, WindowId},
         notification::{NotificationAction, NotificationRequest, NotificationStore},
+        sdl_shell::SurfaceRole,
         sdl_window_preview::{build_menu_frame, build_preview_frame},
     };
     use nickel_core::theme::Appearance;
@@ -2159,7 +2175,7 @@ mod tests {
         let mut shell = LiveShell::new().unwrap();
         shell.launcher_visible = true;
 
-        assert!(!shell.launcher_key(Some(Keycode::A), Mod::NOMOD));
+        assert!(!shell.launcher_key(Some(KeyCode::KeyA), &ModifierState::default()));
         assert_eq!(shell.launcher.query(), "");
         assert!(shell.insert_launcher_text("a"));
         assert_eq!(shell.launcher.query(), "a");
@@ -2257,6 +2273,44 @@ mod tests {
             }),
             Some(crate::sdl_window_preview::MenuAction::Minimize(WindowId(9)))
         );
+
+        shell.screenshot.show(image::RgbaImage::new(400, 200));
+        let _ = shell.scene(SurfaceRole::Screenshot, 800, 600);
+        let selection_start = shell
+            .resolve_semantic_target(&ShellSemanticTarget::Screenshot {
+                action: ScreenshotTargetAction::SelectionStart,
+            })
+            .expect("live screenshot selection start resolves");
+        assert_eq!(selection_start.role, ShellRole::Screenshot);
+        assert_eq!(selection_start.interaction, PointerInteraction::LeftPress);
+        assert!(shell.screenshot_pointer_pressed(
+            selection_start.x as f32,
+            selection_start.y as f32,
+            800,
+            600,
+        ));
+
+        let selection_end = shell
+            .resolve_semantic_target(&ShellSemanticTarget::Screenshot {
+                action: ScreenshotTargetAction::SelectionEnd,
+            })
+            .expect("live screenshot selection end resolves");
+        assert_eq!(selection_end.role, ShellRole::Screenshot);
+        assert_eq!(selection_end.interaction, PointerInteraction::LeftRelease);
+        assert!(shell.screenshot_pointer_moved(
+            selection_end.x as f32,
+            selection_end.y as f32,
+            800,
+            600,
+        ));
+        assert!(shell.screenshot_pointer_released());
+        assert!(
+            shell
+                .resolve_semantic_target(&ShellSemanticTarget::Screenshot {
+                    action: ScreenshotTargetAction::Confirm,
+                })
+                .is_some()
+        );
     }
 
     #[test]
@@ -2266,7 +2320,7 @@ mod tests {
         shell.insert_lock_text("wrong");
         let requested = Cell::new(false);
         shell.lock_key_with(
-            Some(Keycode::Return),
+            Some(KeyCode::Enter),
             |_, _| Ok(false),
             || {
                 requested.set(true);
@@ -2279,7 +2333,7 @@ mod tests {
 
         shell.insert_lock_text("correct");
         shell.lock_key_with(
-            Some(Keycode::Return),
+            Some(KeyCode::Enter),
             |_, _| Ok(true),
             || {
                 requested.set(true);
@@ -2295,11 +2349,11 @@ mod tests {
         let mut shell = LiveShell::new().unwrap();
         shell.control_visible = true;
 
-        assert!(shell.control_key(Some(Keycode::Down), 420, 600));
+        assert!(shell.control_key(Some(KeyCode::ArrowDown), 420, 600));
         assert_eq!(shell.control_state.selected_action, 1);
-        assert!(shell.control_key(Some(Keycode::Up), 420, 600));
+        assert!(shell.control_key(Some(KeyCode::ArrowUp), 420, 600));
         assert_eq!(shell.control_state.selected_action, 0);
-        assert!(shell.control_key(Some(Keycode::Escape), 420, 600));
+        assert!(shell.control_key(Some(KeyCode::Escape), 420, 600));
         assert!(!shell.control_visible);
     }
 
@@ -2328,17 +2382,17 @@ mod tests {
         shell.preview_group = Some(0);
         shell.preview_frame = Some(build_preview_frame(&group, &HashMap::new(), None, palette));
 
-        assert!(shell.preview_key(Some(Keycode::Right)));
+        assert!(shell.preview_key(Some(KeyCode::ArrowRight)));
         assert_eq!(shell.preview_selected, 1);
         assert_eq!(shell.preview_hovered, Some(WindowId(9)));
-        assert!(shell.preview_key(Some(Keycode::Left)));
+        assert!(shell.preview_key(Some(KeyCode::ArrowLeft)));
         assert_eq!(shell.preview_selected, 0);
 
         shell.window_menu = Some(WindowId(4));
         shell.window_menu_frame = Some(build_menu_frame(WindowId(4), &[], Some(0), palette));
-        assert!(shell.preview_key(Some(Keycode::Down)));
+        assert!(shell.preview_key(Some(KeyCode::ArrowDown)));
         assert_eq!(shell.window_menu_selected, 1);
-        assert!(shell.window_menu_key(Some(Keycode::Up)));
+        assert!(shell.window_menu_key(Some(KeyCode::ArrowUp)));
         assert_eq!(shell.window_menu_selected, 0);
     }
 
@@ -2368,24 +2422,29 @@ mod tests {
         );
         shell.notification = store.newest();
 
-        assert!(shell.notification_key(Some(Keycode::Right)));
+        assert!(shell.notification_key(Some(KeyCode::ArrowRight)));
         assert_eq!(shell.notification_selected, 1);
         assert!(shell.notification_keyboard_active);
-        assert!(shell.notification_key(Some(Keycode::Left)));
+        assert!(shell.notification_key(Some(KeyCode::ArrowLeft)));
         assert_eq!(shell.notification_selected, 0);
     }
 
     #[test]
     fn right_panel_cluster_is_compact_and_grouped() {
-        let layout = panel_status_layout(1920, 3);
+        let layout = panel_status_layout(1920, 3, true);
         assert_eq!(layout.control_start, 1816.0);
-        assert_eq!(layout.settings_start, 1780.0);
-        assert_eq!(layout.tray_start, 1696.0);
-        assert_eq!(layout.codex_start, 1660.0);
+        assert_eq!(layout.tray_start, 1732.0);
+        assert_eq!(layout.codex_start, 1696.0);
         assert_eq!(
             layout.codex_icon_bounds(),
-            Rect::new(1664.0, 14.0, 28.0, 28.0)
+            Rect::new(1700.0, 14.0, 28.0, 28.0)
         );
+    }
+
+    #[test]
+    fn right_panel_omits_codex_space_until_codex_is_available() {
+        let layout = panel_status_layout(1920, 3, false);
+        assert_eq!(layout.codex_start, layout.tray_start);
     }
 
     #[test]

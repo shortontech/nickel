@@ -50,12 +50,14 @@ impl CompositorHandler for NickelSession {
             while let Some(parent) = get_parent(&root) {
                 root = parent;
             }
-            if let Some(window) = self
+            let committed_window = self
                 .space
                 .elements()
                 .find(|window| window.wl_surface().as_deref() == Some(&root))
-            {
+                .cloned();
+            if let Some(window) = committed_window {
                 window.on_commit();
+                self.relayout_committed_shell_window(&window);
             }
         };
 

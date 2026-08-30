@@ -1,4 +1,5 @@
 use crate::model::{TrayItem, WindowId};
+use nickel_input::global::{ShortcutCapability, ShortcutOwnership};
 
 #[cfg(target_os = "linux")]
 #[derive(Clone, Debug, PartialEq)]
@@ -143,7 +144,17 @@ pub struct WorkspaceSummary {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub enum ScreenshotAction {
+    InteractiveRegion,
+    ActiveWindow,
+    InteractiveRegionToFile,
+    ActiveWindowToFile,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub enum GlobalShortcut {
+    ToggleLauncher,
     ShowLauncher,
     HideLauncher,
     LockState { locked: bool },
@@ -153,10 +164,25 @@ pub enum GlobalShortcut {
     SwitchGroupNext,
     SwitchGroupPrevious,
     CommitSwitch,
-    CaptureActiveWindow,
-    CaptureActiveWindowToFile,
-    ShowScreenshotTool,
+    Screenshot(ScreenshotAction),
     AudioChanged { volume_percent: u8, muted: bool },
+}
+
+pub struct GlobalShortcutFeed {
+    pub receiver: std::sync::mpsc::Receiver<GlobalShortcut>,
+    pub ownership: ShortcutOwnership,
+    pub capability: ShortcutCapability,
+}
+
+impl GlobalShortcutFeed {
+    pub fn unavailable(reason: nickel_input::global::UnavailableReason) -> Self {
+        let (_sender, receiver) = std::sync::mpsc::channel();
+        Self {
+            receiver,
+            ownership: ShortcutOwnership::OperatingSystem,
+            capability: ShortcutCapability::Unavailable(reason),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -183,6 +209,8 @@ pub enum ShellCommand {
     FocusPreview,
     #[cfg(target_os = "linux")]
     FocusContextMenu,
+    #[cfg(target_os = "linux")]
+    FocusScreenshot,
     #[cfg(target_os = "linux")]
     RestoreApplicationFocus,
     HideContextMenu,

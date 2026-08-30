@@ -1,4 +1,4 @@
-use nickel_core::hotkeys::{Hotkey, HotkeyAction, KeyEdge};
+use nickel_core::hotkeys::{HotkeyAction, KeyCode, KeyEdge};
 use nickel_core::launcher::LauncherPointerTarget;
 use nickel_core::window_input::{
     PointerPosition, WindowGeometry, WindowPointerEffect, WindowSurface, hit_test,
@@ -234,19 +234,18 @@ impl NickelSession {
                                 }
                                 return FilterResult::Intercept(None);
                             }
-                            let key = hotkey_from_keysym(sym);
                             let edge = if state == KeyState::Pressed {
                                 KeyEdge::Pressed
                             } else {
                                 KeyEdge::Released
                             };
-                            let outcome = session.hotkeys.handle(key, edge);
+                            let outcome = match key_code_from_keysym(sym) {
+                                Some(key) => session.hotkeys.handle(key, edge),
+                                None => session.hotkeys.handle_unmapped(edge),
+                            };
                             match outcome.action {
-                                Some(HotkeyAction::ShowLauncher) => {
-                                    session.set_launcher_visible(true)
-                                }
-                                Some(HotkeyAction::HideLauncher) => {
-                                    session.set_launcher_visible(false)
+                                Some(HotkeyAction::ToggleLauncher) => {
+                                    session.toggle_launcher_visibility()
                                 }
                                 Some(
                                     action @ (HotkeyAction::SwitchNext
@@ -272,19 +271,24 @@ impl NickelSession {
                                         nickel_core::workspaces::WorkspaceDirection::Next,
                                     ),
                                 Some(HotkeyAction::CaptureActiveWindow) => {
-                                    tracing::info!(
-                                        action = "capture_active_window",
-                                        "screenshot shortcut requested"
+                                    session.notify_global_shortcut(
+                                        nickel_session_protocol::ShortcutAction::CaptureActiveWindow,
                                     );
                                 }
                                 Some(HotkeyAction::CaptureActiveWindowToFile) => {
-                                    tracing::info!(
-                                        action = "capture_active_window_to_file",
-                                        "screenshot shortcut requested"
+                                    session.notify_global_shortcut(
+                                        nickel_session_protocol::ShortcutAction::CaptureActiveWindowToFile,
                                     );
                                 }
-                                Some(HotkeyAction::ShowRun | HotkeyAction::ShowScreenshotTool)
-                                | None => {}
+                                Some(HotkeyAction::ShowRun) => session.notify_global_shortcut(
+                                    nickel_session_protocol::ShortcutAction::ShowRun,
+                                ),
+                                Some(HotkeyAction::ShowScreenshotTool) => {
+                                    session.notify_global_shortcut(
+                                        nickel_session_protocol::ShortcutAction::ShowScreenshotTool,
+                                    );
+                                }
+                                None => {}
                             }
                             if outcome.suppress {
                                 return FilterResult::Intercept(None);
@@ -948,48 +952,33 @@ fn resize_edges_at(
     }
 }
 
-fn hotkey_from_keysym(sym: Keysym) -> Hotkey {
+fn key_code_from_keysym(sym: Keysym) -> Option<KeyCode> {
     match sym {
-        value
-            if value == Keysym::new(keysyms::KEY_Super_L)
-                || value == Keysym::new(keysyms::KEY_Super_R) =>
-        {
-            Hotkey::Super
-        }
-        value
-            if value == Keysym::new(keysyms::KEY_Alt_L)
-                || value == Keysym::new(keysyms::KEY_Alt_R) =>
-        {
-            Hotkey::Alt
-        }
-        value
-            if value == Keysym::new(keysyms::KEY_Shift_L)
-                || value == Keysym::new(keysyms::KEY_Shift_R) =>
-        {
-            Hotkey::Shift
-        }
-        value
-            if value == Keysym::new(keysyms::KEY_Control_L)
-                || value == Keysym::new(keysyms::KEY_Control_R) =>
-        {
-            Hotkey::Control
-        }
-        value if value == Keysym::new(keysyms::KEY_Left) => Hotkey::Left,
-        value if value == Keysym::new(keysyms::KEY_Right) => Hotkey::Right,
-        value if value == Keysym::new(keysyms::KEY_Tab) => Hotkey::Tab,
+        value if value == Keysym::new(keysyms::KEY_Super_L) => Some(KeyCode::SuperLeft),
+        value if value == Keysym::new(keysyms::KEY_Super_R) => Some(KeyCode::SuperRight),
+        value if value == Keysym::new(keysyms::KEY_Alt_L) => Some(KeyCode::AltLeft),
+        value if value == Keysym::new(keysyms::KEY_Alt_R) => Some(KeyCode::AltRight),
+        value if value == Keysym::new(keysyms::KEY_Shift_L) => Some(KeyCode::ShiftLeft),
+        value if value == Keysym::new(keysyms::KEY_Shift_R) => Some(KeyCode::ShiftRight),
+        value if value == Keysym::new(keysyms::KEY_Control_L) => Some(KeyCode::ControlLeft),
+        value if value == Keysym::new(keysyms::KEY_Control_R) => Some(KeyCode::ControlRight),
+        value if value == Keysym::new(keysyms::KEY_Left) => Some(KeyCode::ArrowLeft),
+        value if value == Keysym::new(keysyms::KEY_Right) => Some(KeyCode::ArrowRight),
+        value if value == Keysym::new(keysyms::KEY_Tab) => Some(KeyCode::Tab),
         value
             if value == Keysym::new(keysyms::KEY_Print)
                 || value == Keysym::new(keysyms::KEY_Sys_Req) =>
         {
-            Hotkey::PrintScreen
+            Some(KeyCode::PrintScreen)
         }
         value
             if value == Keysym::new(keysyms::KEY_grave)
                 || value == Keysym::new(keysyms::KEY_asciitilde) =>
         {
-            Hotkey::Grave
+            Some(KeyCode::Backquote)
         }
-        _ => Hotkey::Other,
+        value if value == Keysym::new(keysyms::KEY_r) => Some(KeyCode::KeyR),
+        _ => None,
     }
 }
 
@@ -1086,12 +1075,12 @@ mod tests {
     #[test]
     fn xkb_print_keysyms_map_to_the_screenshot_hotkey() {
         assert_eq!(
-            super::hotkey_from_keysym(Keysym::new(keysyms::KEY_Print)),
-            nickel_core::hotkeys::Hotkey::PrintScreen
+            super::key_code_from_keysym(Keysym::new(keysyms::KEY_Print)),
+            Some(nickel_core::hotkeys::KeyCode::PrintScreen)
         );
         assert_eq!(
-            super::hotkey_from_keysym(Keysym::new(keysyms::KEY_Sys_Req)),
-            nickel_core::hotkeys::Hotkey::PrintScreen
+            super::key_code_from_keysym(Keysym::new(keysyms::KEY_Sys_Req)),
+            Some(nickel_core::hotkeys::KeyCode::PrintScreen)
         );
     }
 

@@ -4,17 +4,19 @@
 //! [`SurfaceId`] values and can attach either a software surface or an
 //! accelerated backend without owning the application event pump.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 use std::time::Instant;
 
+use nickel_input::controller::{
+    ControllerEvent, ControllerIdentity, ControllerNormalizer, ControllerSignal,
+};
+use nickel_input::{InputEvent, NativeCode};
 use nickel_session_protocol::ShellRole as SessionShellRole;
 use nickel_ui::{DamageRegion, PaintCommand};
 use sdl3::GamepadSubsystem;
 use sdl3::event::{Event, WindowEvent};
-use sdl3::gamepad::{Button as GamepadButton, Gamepad};
-use sdl3::keyboard::{Keycode, Mod};
-use sdl3::mouse::MouseButton;
+use sdl3::gamepad::Gamepad;
 use sdl3::video::{Window, WindowPos};
 
 use crate::sdl_gpu::{SdlGpuPresenter, SharedSdlGraphics};
@@ -64,6 +66,11 @@ pub enum ShellEvent {
     #[cfg(target_os = "linux")]
     SemanticTarget(crate::platform::SemanticTargetRequest),
     Quit,
+    Controller(ControllerSignal),
+    Input {
+        surface: SurfaceId,
+        event: InputEvent,
+    },
     Shown(SurfaceId),
     Hidden(SurfaceId),
     CloseRequested(SurfaceId),
@@ -74,38 +81,6 @@ pub enum ShellEvent {
     PointerEntered {
         surface: SurfaceId,
         entered: bool,
-    },
-    PointerMoved {
-        surface: SurfaceId,
-        x: f32,
-        y: f32,
-    },
-    PointerButton {
-        surface: SurfaceId,
-        button: MouseButton,
-        pressed: bool,
-        x: f32,
-        y: f32,
-    },
-    MouseWheel {
-        surface: SurfaceId,
-        x: f32,
-        y: f32,
-    },
-    Key {
-        surface: SurfaceId,
-        key: Option<Keycode>,
-        modifiers: Mod,
-        pressed: bool,
-        repeat: bool,
-    },
-    Text {
-        surface: SurfaceId,
-        value: String,
-    },
-    Ime {
-        surface: SurfaceId,
-        value: String,
     },
     LogicalResize {
         surface: SurfaceId,
@@ -162,6 +137,9 @@ pub struct SdlShell {
     surface_indices: HashMap<u32, usize>,
     events: sdl3::EventPump,
     gamepads: HashMap<u32, Gamepad>,
+    controller_normalizer: ControllerNormalizer,
+    pending_events: VecDeque<ShellEvent>,
+    input_adapter: nickel_input::sdl::Adapter,
     gamepad: GamepadSubsystem,
     video: sdl3::VideoSubsystem,
     _sdl: sdl3::Sdl,
@@ -178,7 +156,7 @@ impl SdlShell {
         // so its shell must never globally inhibit the compositor.
         video.enable_screen_saver();
         let gamepad = sdl.gamepad().map_err(|error| error.to_string())?;
-        let gamepads = gamepad
+        let gamepads: HashMap<u32, Gamepad> = gamepad
             .gamepads()
             .map_err(|error| error.to_string())?
             .into_iter()
@@ -190,6 +168,20 @@ impl SdlShell {
                 }
             })
             .collect();
+        let mut controller_normalizer = ControllerNormalizer::default();
+        for (id, opened) in &gamepads {
+            controller_normalizer.handle(
+                ControllerEvent::Connected {
+                    id: nickel_input::controller::ControllerId(*id as u64),
+                    identity: ControllerIdentity {
+                        backend: "sdl".into(),
+                        native: NativeCode::Numeric(*id as u64),
+                        fingerprint: opened.serial_number(),
+                    },
+                },
+                0,
+            );
+        }
         sdl.event()
             .map_err(|error| error.to_string())?
             .register_custom_event::<crate::platform::GlobalShortcut>()
@@ -218,6 +210,9 @@ impl SdlShell {
             surface_indices: HashMap::new(),
             events,
             gamepads,
+            controller_normalizer,
+            pending_events: VecDeque::new(),
+            input_adapter: nickel_input::sdl::Adapter::default(),
             gamepad,
             video,
             _sdl: sdl,
@@ -250,7 +245,6 @@ impl SdlShell {
         self.create_surface(SurfaceRole::WindowPreview, 0, primary)?;
         self.create_surface(SurfaceRole::WindowContextMenu, 0, primary)?;
         self.create_surface(SurfaceRole::CodexProjectMenu, 0, primary)?;
-        #[cfg(target_os = "windows")]
         self.create_surface(SurfaceRole::Screenshot, 0, primary)?;
         tracing::info!(
             elapsed_ms = self.started.elapsed().as_secs_f64() * 1_000.0,
@@ -505,14 +499,24 @@ impl SdlShell {
     }
 
     pub fn poll_events(&mut self) -> Vec<ShellEvent> {
+        self.queue_controller_repeats();
+        let mut translated = self.pending_events.drain(..).collect::<Vec<_>>();
         let raw = self.events.poll_iter().collect::<Vec<_>>();
-        raw.into_iter()
-            .filter_map(|event| self.translate_event(event))
-            .collect()
+        for event in raw {
+            if let Some(event) = self.translate_event(event) {
+                translated.push(event);
+            }
+            translated.extend(self.pending_events.drain(..));
+        }
+        translated
     }
 
     pub fn wait_event(&mut self) -> Option<ShellEvent> {
         loop {
+            self.queue_controller_repeats();
+            if let Some(event) = self.pending_events.pop_front() {
+                return Some(event);
+            }
             let event = self.events.wait_event();
             if let Some(event) = self.translate_event(event) {
                 return Some(event);
@@ -521,6 +525,10 @@ impl SdlShell {
     }
 
     pub fn wait_event_timeout(&mut self, timeout: Duration) -> Option<ShellEvent> {
+        self.queue_controller_repeats();
+        if let Some(event) = self.pending_events.pop_front() {
+            return Some(event);
+        }
         let deadline = Instant::now() + timeout;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -529,9 +537,23 @@ impl SdlShell {
                 return Some(event);
             }
             if Instant::now() >= deadline {
+                self.queue_controller_repeats();
+                if let Some(event) = self.pending_events.pop_front() {
+                    return Some(event);
+                }
                 return None;
             }
         }
+    }
+
+    fn queue_controller_repeats(&mut self) {
+        let now_ms = self.started.elapsed().as_millis() as u64;
+        self.pending_events.extend(
+            self.controller_normalizer
+                .tick(now_ms)
+                .into_iter()
+                .map(ShellEvent::Controller),
+        );
     }
 
     pub fn display_geometries(&self) -> Result<Vec<DisplayGeometry>, String> {
@@ -570,14 +592,14 @@ impl SdlShell {
             SurfaceRole::WindowContextMenu => SessionShellRole::ContextMenu.application_id(),
             SurfaceRole::CodexProjectMenu => SessionShellRole::ProjectMenu.application_id(),
             SurfaceRole::Lock => SessionShellRole::Lock.application_id(),
-            SurfaceRole::Screenshot => "io.nickel.screenshot",
+            SurfaceRole::Screenshot => SessionShellRole::Screenshot.application_id(),
             SurfaceRole::CodexChat => unreachable!("chat surfaces are dynamic"),
         };
         let previous_app_id = sdl3::hint::get("SDL_APP_ID");
         sdl3::hint::set("SDL_APP_ID", application_id);
         let mut builder = self.video.window(title, width, height);
         builder.position(x, y).high_pixel_density();
-        if role != SurfaceRole::Screenshot {
+        if surface_is_borderless(role) {
             builder.borderless();
         }
         if matches!(
@@ -639,16 +661,56 @@ impl SdlShell {
         {
             return Some(ShellEvent::SemanticTarget(request));
         }
+        let controller_fingerprint = if let Event::ControllerDeviceAdded { which, .. } = &event {
+            let id = sdl3::sys::joystick::SDL_JoystickID(*which);
+            match self.gamepad.open(id) {
+                Ok(gamepad) => {
+                    let fingerprint = gamepad.serial_number();
+                    self.gamepads.insert(*which, gamepad);
+                    fingerprint
+                }
+                Err(error) => {
+                    tracing::warn!(id = *which, %error, "could not open SDL gamepad");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        if let Event::ControllerDeviceRemoved { which, .. } = &event {
+            self.gamepads.remove(which);
+        }
+        if let Some(event) = nickel_input::sdl::controller_event(&event, controller_fingerprint) {
+            let now_ms = self.started.elapsed().as_millis() as u64;
+            self.pending_events.extend(
+                self.controller_normalizer
+                    .handle(event, now_ms)
+                    .into_iter()
+                    .map(ShellEvent::Controller),
+            );
+            return self.pending_events.pop_front();
+        }
         let surface = event
             .get_window_id()
             .map(SurfaceId)
             .filter(|id| self.surface_indices.contains_key(&id.0));
-        let focused_surface = || {
-            self.surfaces
-                .iter()
-                .find(|surface| surface.window().has_input_focus())
-                .map(|surface| surface.id())
-        };
+        if matches!(
+            event,
+            Event::Window {
+                win_event: WindowEvent::FocusLost,
+                ..
+            }
+        ) {
+            let _ = self.input_adapter.normalize(&event);
+        } else if !matches!(event, Event::Window { .. })
+            && let Some(input) = self.input_adapter.normalize(&event)
+        {
+            let surface = surface?;
+            return Some(ShellEvent::Input {
+                surface,
+                event: input,
+            });
+        }
         match event {
             Event::Quit { .. } => Some(ShellEvent::Quit),
             Event::Display { .. } => Some(ShellEvent::DisplayTopologyChanged),
@@ -657,104 +719,6 @@ impl SdlShell {
                 window_id,
                 ..
             } => self.translate_window_event(SurfaceId(window_id), win_event),
-            Event::MouseMotion { x, y, .. } => Some(ShellEvent::PointerMoved {
-                surface: surface?,
-                x,
-                y,
-            }),
-            Event::MouseButtonDown {
-                mouse_btn, x, y, ..
-            } => Some(ShellEvent::PointerButton {
-                surface: surface?,
-                button: mouse_btn,
-                pressed: true,
-                x,
-                y,
-            }),
-            Event::MouseButtonUp {
-                mouse_btn, x, y, ..
-            } => Some(ShellEvent::PointerButton {
-                surface: surface?,
-                button: mouse_btn,
-                pressed: false,
-                x,
-                y,
-            }),
-            Event::MouseWheel { x, y, .. } => Some(ShellEvent::MouseWheel {
-                surface: surface?,
-                x,
-                y,
-            }),
-            Event::KeyDown {
-                keycode,
-                keymod,
-                repeat,
-                ..
-            } => Some(ShellEvent::Key {
-                surface: surface?,
-                key: keycode,
-                modifiers: keymod,
-                pressed: true,
-                repeat,
-            }),
-            Event::KeyUp {
-                keycode,
-                keymod,
-                repeat,
-                ..
-            } => Some(ShellEvent::Key {
-                surface: surface?,
-                key: keycode,
-                modifiers: keymod,
-                pressed: false,
-                repeat,
-            }),
-            Event::ControllerDeviceAdded { which, .. } => {
-                let id = sdl3::sys::joystick::SDL_JoystickID(which);
-                match self.gamepad.open(id) {
-                    Ok(gamepad) => {
-                        self.gamepads.insert(which, gamepad);
-                    }
-                    Err(error) => tracing::warn!(id = which, %error, "could not open SDL gamepad"),
-                }
-                None
-            }
-            Event::ControllerDeviceRemoved { which, .. } => {
-                self.gamepads.remove(&which);
-                None
-            }
-            Event::ControllerButtonDown {
-                button: GamepadButton::Guide,
-                ..
-            } => Some(ShellEvent::GlobalShortcut(
-                crate::platform::GlobalShortcut::ShowLauncher,
-            )),
-            Event::ControllerButtonDown { button, .. } => controller_key(button)
-                .zip(focused_surface())
-                .map(|(key, surface)| ShellEvent::Key {
-                    surface,
-                    key: Some(key),
-                    modifiers: Mod::NOMOD,
-                    pressed: true,
-                    repeat: false,
-                }),
-            Event::ControllerButtonUp { button, .. } => controller_key(button)
-                .zip(focused_surface())
-                .map(|(key, surface)| ShellEvent::Key {
-                    surface,
-                    key: Some(key),
-                    modifiers: Mod::NOMOD,
-                    pressed: false,
-                    repeat: false,
-                }),
-            Event::TextInput { text, .. } => Some(ShellEvent::Text {
-                surface: surface?,
-                value: text,
-            }),
-            Event::TextEditing { text, .. } => Some(ShellEvent::Ime {
-                surface: surface?,
-                value: text,
-            }),
             _ => None,
         }
     }
@@ -811,18 +775,6 @@ fn configure_input_hints() {
     // therefore applies production hit testing and reducers identically for
     // mouse and single-touch activation, without a second geometry model.
     sdl3::hint::set("SDL_TOUCH_MOUSE_EVENTS", "1");
-}
-
-fn controller_key(button: GamepadButton) -> Option<Keycode> {
-    match button {
-        GamepadButton::DPadUp => Some(Keycode::Up),
-        GamepadButton::DPadDown => Some(Keycode::Down),
-        GamepadButton::DPadLeft => Some(Keycode::Left),
-        GamepadButton::DPadRight => Some(Keycode::Right),
-        GamepadButton::South => Some(Keycode::Return),
-        GamepadButton::East | GamepadButton::Back => Some(Keycode::Escape),
-        _ => None,
-    }
 }
 
 fn surface_geometry(
@@ -922,11 +874,26 @@ fn require_displays(displays: Vec<DisplayGeometry>) -> Result<Vec<DisplayGeometr
     }
 }
 
+fn surface_is_borderless(role: SurfaceRole) -> bool {
+    // Linux shell roles are compositor-owned chrome. In particular, allowing SDL to decorate the
+    // screenshot utility adds client-side shadow/titlebar extents to its Wayland geometry, so the
+    // compositor can no longer translate renderer-owned local input targets correctly. Windows
+    // intentionally keeps the screenshot utility as a conventional decorated tool window.
+    role != SurfaceRole::Screenshot || cfg!(target_os = "linux")
+}
+
 #[cfg(test)]
 mod tests {
-    use sdl3::{gamepad::Button as GamepadButton, keyboard::Keycode};
+    use super::{
+        DisplayGeometry, SurfaceRole, require_displays, surface_geometry, surface_is_borderless,
+    };
 
-    use super::{DisplayGeometry, SurfaceRole, controller_key, require_displays, surface_geometry};
+    #[test]
+    fn linux_screenshot_shell_surface_has_no_client_decoration_extents() {
+        if cfg!(target_os = "linux") {
+            assert!(surface_is_borderless(SurfaceRole::Screenshot));
+        }
+    }
 
     #[test]
     fn primary_touch_uses_the_production_pointer_path() {
@@ -944,22 +911,6 @@ mod tests {
             sdl3::hint::get("SDL_VIDEO_ALLOW_SCREENSAVER").as_deref(),
             Some("1")
         );
-    }
-
-    #[test]
-    fn standard_gamepad_navigation_enters_the_keyboard_navigation_path() {
-        assert_eq!(controller_key(GamepadButton::DPadUp), Some(Keycode::Up));
-        assert_eq!(controller_key(GamepadButton::DPadDown), Some(Keycode::Down));
-        assert_eq!(controller_key(GamepadButton::DPadLeft), Some(Keycode::Left));
-        assert_eq!(
-            controller_key(GamepadButton::DPadRight),
-            Some(Keycode::Right)
-        );
-        assert_eq!(controller_key(GamepadButton::South), Some(Keycode::Return));
-        assert_eq!(controller_key(GamepadButton::East), Some(Keycode::Escape));
-        assert_eq!(controller_key(GamepadButton::Back), Some(Keycode::Escape));
-        assert_eq!(controller_key(GamepadButton::North), None);
-        assert_eq!(controller_key(GamepadButton::Guide), None);
     }
 
     #[test]

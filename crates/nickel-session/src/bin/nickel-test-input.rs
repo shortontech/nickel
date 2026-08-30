@@ -1,8 +1,9 @@
 use std::ffi::OsString;
 
 use nickel_session_protocol::{
-    InputState, PointerInteraction, PreviewTargetAction, RecoveryTargetAction, ShellSemanticTarget,
-    TestInput, TestKey, TestPointerButton, WindowMenuTargetAction,
+    InputState, PointerInteraction, PreviewTargetAction, RecoveryTargetAction,
+    ScreenshotTargetAction, ShellSemanticTarget, TestInput, TestKey, TestPointerButton,
+    WindowMenuTargetAction,
 };
 
 const HELP: &str = "\
@@ -26,13 +27,15 @@ Usage:
   nickel-test-input semantic panel-app APPLICATION_ID hover|click [OUTPUT]
   nickel-test-input semantic preview WINDOW_ID hover|activate|close|menu
   nickel-test-input semantic menu WINDOW_ID close|maximize|minimize
+  nickel-test-input semantic screenshot selection-start|selection-end|confirm|copy|save|temp|cancel
   nickel-test-input semantic recovery retry|exit [OUTPUT]
   nickel-test-input semantic window WINDOW_ID hover|click|right-click
   nickel-test-input scenario grouped-windows APPLICATION_ID
   nickel-test-input move X Y
   nickel-test-input move-relative DX DY
+  nickel-test-input wheel HORIZONTAL_V120 VERTICAL_V120
   nickel-test-input button left|right pressed|released
-  nickel-test-input key a|c|p|enter|escape|tab|alt|shift|control|meta|left|right|up|down|space|backspace|delete|f11|print-screen pressed|released
+  nickel-test-input key a|c|p|v|x|enter|escape|tab|alt|shift|control|meta|left|right|up|down|space|backspace|delete|f11|print-screen pressed|released
 ";
 
 enum Parsed {
@@ -229,6 +232,20 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, String> {
                 },
             }))
         }
+        [command, kind, action] if command == "semantic" && kind == "screenshot" => {
+            Ok(Parsed::Semantic(ShellSemanticTarget::Screenshot {
+                action: match action.as_str() {
+                    "selection-start" => ScreenshotTargetAction::SelectionStart,
+                    "selection-end" => ScreenshotTargetAction::SelectionEnd,
+                    "confirm" => ScreenshotTargetAction::Confirm,
+                    "copy" => ScreenshotTargetAction::CopyImage,
+                    "save" => ScreenshotTargetAction::SaveImage,
+                    "temp" => ScreenshotTargetAction::CopyTemporaryPath,
+                    "cancel" => ScreenshotTargetAction::Cancel,
+                    _ => return Err(format!("unknown screenshot action {action:?}")),
+                },
+            }))
+        }
         [command, scenario, application_id]
             if command == "scenario" && scenario == "grouped-windows" =>
         {
@@ -246,6 +263,16 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, String> {
                 dy: dy.parse().map_err(|_| format!("invalid Y delta {dy:?}"))?,
             }))
         }
+        [command, horizontal_v120, vertical_v120] if command == "wheel" => {
+            Ok(Parsed::Input(TestInput::PointerAxis {
+                horizontal_v120: horizontal_v120
+                    .parse()
+                    .map_err(|_| format!("invalid horizontal wheel delta {horizontal_v120:?}"))?,
+                vertical_v120: vertical_v120
+                    .parse()
+                    .map_err(|_| format!("invalid vertical wheel delta {vertical_v120:?}"))?,
+            }))
+        }
         [command, button, state] if command == "button" => {
             Ok(Parsed::Input(TestInput::PointerButton {
                 button: match button.as_str() {
@@ -261,6 +288,8 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, String> {
                 "a" => TestKey::A,
                 "c" => TestKey::C,
                 "p" => TestKey::P,
+                "v" => TestKey::V,
+                "x" => TestKey::X,
                 "enter" => TestKey::Enter,
                 "escape" => TestKey::Escape,
                 "tab" => TestKey::Tab,
@@ -874,6 +903,16 @@ mod tests {
         assert!(matches!(
             parse([
                 "semantic".into(),
+                "screenshot".into(),
+                "selection-start".into(),
+            ]),
+            Ok(Parsed::Semantic(ShellSemanticTarget::Screenshot {
+                action: ScreenshotTargetAction::SelectionStart,
+            }))
+        ));
+        assert!(matches!(
+            parse([
+                "semantic".into(),
                 "recovery".into(),
                 "exit".into(),
                 "DP-1".into(),
@@ -942,6 +981,13 @@ mod tests {
             }))
         ));
         assert!(matches!(
+            parse(["wheel".into(), "120".into(), "-240".into()]),
+            Ok(Parsed::Input(TestInput::PointerAxis {
+                horizontal_v120: 120,
+                vertical_v120: -240
+            }))
+        ));
+        assert!(matches!(
             parse(["button".into(), "right".into(), "pressed".into()]),
             Ok(Parsed::Input(TestInput::PointerButton {
                 button: TestPointerButton::Right,
@@ -955,11 +1001,26 @@ mod tests {
                 state: InputState::Released
             }))
         ));
+        assert!(matches!(
+            parse(["key".into(), "v".into(), "pressed".into()]),
+            Ok(Parsed::Input(TestInput::Key {
+                key: TestKey::V,
+                state: InputState::Pressed
+            }))
+        ));
+        assert!(matches!(
+            parse(["key".into(), "x".into(), "released".into()]),
+            Ok(Parsed::Input(TestInput::Key {
+                key: TestKey::X,
+                state: InputState::Released
+            }))
+        ));
     }
 
     #[test]
     fn rejects_unknown_inputs() {
         assert!(parse(["button".into(), "middle".into(), "pressed".into()]).is_err());
         assert!(parse(["key".into(), "home".into(), "pressed".into()]).is_err());
+        assert!(parse(["wheel".into(), "sideways".into(), "120".into()]).is_err());
     }
 }

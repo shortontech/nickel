@@ -344,7 +344,7 @@ pub fn register_session_shell() -> bool {
     true
 }
 
-pub fn launcher_hotkey_receiver() -> Receiver<GlobalShortcut> {
+pub fn launcher_hotkey_receiver() -> super::GlobalShortcutFeed {
     let (sender, receiver) = mpsc::channel();
     let _ = SHORTCUT_SENDER.set(sender.clone());
     if let Err(error) = thread::Builder::new()
@@ -353,14 +353,21 @@ pub fn launcher_hotkey_receiver() -> Receiver<GlobalShortcut> {
     {
         tracing::warn!(%error, "failed to start macOS hotkey listener");
     }
-    receiver
+    super::GlobalShortcutFeed {
+        receiver,
+        ownership: nickel_input::global::ShortcutOwnership::OperatingSystem,
+        capability: nickel_input::global::ShortcutCapability::Unavailable(
+            nickel_input::global::UnavailableReason::UnsupportedPlatform,
+        ),
+    }
 }
 
 pub fn launcher_visibility_applied(visible: bool) {
     LAUNCHER_VISIBLE.store(visible, Ordering::Release);
 }
 
-pub fn handle_focused_shortcut(_: nickel_core::hotkeys::Hotkey, _: nickel_core::hotkeys::KeyEdge) {}
+pub fn handle_focused_shortcut(_: nickel_core::hotkeys::KeyCode, _: nickel_core::hotkeys::KeyEdge) {
+}
 
 fn run_hotkey_loop(_sender: Sender<GlobalShortcut>) {
     let target = unsafe { GetApplicationEventTarget() };

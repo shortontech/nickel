@@ -15,14 +15,15 @@ use nickel_core::{
     theme::{ThemeMode, ThemePalette},
 };
 use nickel_file::{DirectoryBrowser, FileEntry};
+use nickel_input::{
+    AggregateModifier, InputEvent, KeyCode, KeyEdge, PhysicalKey, PointerButton, PointerEvent,
+};
 use nickel_ui::{
     AnyView, Component, Insets, LinearGradient, PaintCommand, Point, Rect, SdlCanvasPresenter,
     TextAlign, UiStateStore, UiTree, ui,
 };
 use sdl3::{
     event::{Event, WindowEvent},
-    keyboard::{Keycode, Mod},
-    mouse::MouseButton,
     pixels::PixelFormat,
     surface::Surface,
     video::Window,
@@ -78,6 +79,7 @@ enum FileMessage {
 }
 
 struct FileApp {
+    input: nickel_input::sdl::Adapter,
     presenter: Option<SdlCanvasPresenter>,
     dirty: bool,
     browser: DirectoryBrowser,
@@ -168,6 +170,7 @@ impl FileApp {
             }
         };
         let mut app = Self {
+            input: nickel_input::sdl::Adapter::default(),
             presenter: None,
             dirty: true,
             browser,
@@ -922,6 +925,10 @@ impl FileApp {
     }
 
     fn handle_event(&mut self, event: Event) -> bool {
+        if let Some(event) = self.input.normalize(&event) {
+            self.handle_input(event);
+            return !self.exit_requested;
+        }
         match event {
             Event::Quit { .. }
             | Event::Window {
@@ -942,11 +949,64 @@ impl FileApp {
             } => {
                 self.resize_deadline = Some(Instant::now() + Duration::from_millis(24));
             }
-            Event::MouseMotion { x, y, .. } => {
-                self.cursor = Point { x, y };
+            _ => {}
+        }
+        true
+    }
+
+    fn handle_input(&mut self, event: InputEvent) {
+        match event {
+            InputEvent::Key(key) => {
+                self.control_down = key.modifiers.aggregate(AggregateModifier::Control);
+                self.shift_down = key.modifiers.aggregate(AggregateModifier::Shift);
+                if key.edge != KeyEdge::Pressed || key.repeat {
+                    return;
+                }
+                let PhysicalKey::Code(key) = key.physical else {
+                    return;
+                };
+                match key {
+                    KeyCode::ArrowDown => {
+                        self.select_relative(self.resolved_grid_columns() as isize)
+                    }
+                    KeyCode::ArrowUp => {
+                        self.select_relative(-(self.resolved_grid_columns() as isize))
+                    }
+                    KeyCode::ArrowRight => self.select_relative(1),
+                    KeyCode::ArrowLeft => self.select_relative(-1),
+                    KeyCode::Enter | KeyCode::NumpadEnter => self.activate_selected(),
+                    KeyCode::Backspace => self.go_back(),
+                    KeyCode::Escape => {
+                        self.selected = None;
+                        self.selected_entries.clear();
+                        self.selection_anchor = None;
+                        self.request_redraw();
+                    }
+                    KeyCode::KeyA if self.control_down => {
+                        self.selected_entries = (0..self.browser.entries().len()).collect();
+                        self.selected = self
+                            .selected
+                            .or_else(|| (!self.browser.entries().is_empty()).then_some(0));
+                        self.selection_anchor = self.selected;
+                        self.request_redraw();
+                    }
+                    KeyCode::F5 => {
+                        if let Err(error) = self.browser.refresh() {
+                            self.status = format!("Could not refresh: {error}");
+                        }
+                        self.request_redraw();
+                    }
+                    _ => {}
+                }
+            }
+            InputEvent::Pointer(PointerEvent::Motion { position, .. }) => {
+                self.cursor = Point {
+                    x: position.x as f32,
+                    y: position.y as f32,
+                };
                 if let Some(start) = self.selection_drag {
                     let selection = rect_between(start, self.cursor);
-                    let entries = self
+                    self.selected_entries = self
                         .ui
                         .messages_intersecting(selection)
                         .into_iter()
@@ -954,8 +1014,7 @@ impl FileApp {
                             FileMessage::Entry(index) => Some(*index),
                             _ => None,
                         })
-                        .collect::<HashSet<_>>();
-                    self.selected_entries = entries;
+                        .collect();
                     self.selected = self.selected_entries.iter().copied().min();
                     self.request_redraw();
                 }
@@ -964,33 +1023,28 @@ impl FileApp {
                     self.ensure_selection_visible();
                     self.request_redraw();
                 }
-                let invalidation = self
+                if self
                     .ui_state
-                    .set_hovered(self.ui.id_at(self.cursor).cloned());
-                if invalidation != nickel_ui::Invalidation::None {
+                    .set_hovered(self.ui.id_at(self.cursor).cloned())
+                    != nickel_ui::Invalidation::None
+                {
                     self.request_redraw();
                 }
             }
-            Event::Window {
-                win_event: WindowEvent::MouseLeave,
-                ..
-            } => {
+            InputEvent::Pointer(PointerEvent::Leave { .. }) => {
                 self.ui_state.set_hovered(None);
                 self.request_redraw();
             }
-            Event::MouseButtonDown {
-                mouse_btn: MouseButton::Left,
+            InputEvent::Pointer(PointerEvent::Button {
+                button: PointerButton::Primary,
+                edge: KeyEdge::Pressed,
                 ..
-            } => {
-                self.pointer_pressed();
-                if self.exit_requested {
-                    return false;
-                }
-            }
-            Event::MouseButtonDown {
-                mouse_btn: MouseButton::Right,
+            }) => self.pointer_pressed(),
+            InputEvent::Pointer(PointerEvent::Button {
+                button: PointerButton::Secondary,
+                edge: KeyEdge::Pressed,
                 ..
-            } => {
+            }) => {
                 let entry = self
                     .ui
                     .message_at(self.cursor)
@@ -1010,75 +1064,40 @@ impl FileApp {
                 self.selection_drag = None;
                 self.request_redraw();
             }
-            Event::MouseButtonUp {
-                mouse_btn: MouseButton::Left,
+            InputEvent::Pointer(PointerEvent::Button {
+                button: PointerButton::Primary,
+                edge: KeyEdge::Released,
                 ..
-            } => {
+            }) => {
                 self.ui_state.set_pressed(None);
                 self.ui_state.set_capture(None);
                 self.selection_drag = None;
                 self.request_redraw();
             }
-            Event::MouseWheel { y, .. } => {
+            InputEvent::Pointer(PointerEvent::Axis { delta, .. }) => {
+                let y = delta.y as f32;
                 if self.control_down {
-                    let direction = y.signum();
                     self.tile_width =
-                        (self.tile_width + direction * 12.0).clamp(MIN_TILE_WIDTH, MAX_TILE_WIDTH);
+                        (self.tile_width + y.signum() * 12.0).clamp(MIN_TILE_WIDTH, MAX_TILE_WIDTH);
                     self.ensure_selection_visible();
                     self.request_redraw();
-                    return true;
-                }
-                self.scroll(-y * 80.0);
-            }
-            Event::KeyDown {
-                keycode, keymod, ..
-            } => {
-                self.control_down = keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD);
-                self.shift_down = keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD);
-                match keycode {
-                    Some(Keycode::Down) => {
-                        self.select_relative(self.resolved_grid_columns() as isize)
-                    }
-                    Some(Keycode::Up) => {
-                        self.select_relative(-(self.resolved_grid_columns() as isize))
-                    }
-                    Some(Keycode::Right) => self.select_relative(1),
-                    Some(Keycode::Left) => self.select_relative(-1),
-                    Some(Keycode::Return | Keycode::Return2) => self.activate_selected(),
-                    Some(Keycode::Backspace) => self.go_back(),
-                    Some(Keycode::Escape) => {
-                        self.selected = None;
-                        self.selected_entries.clear();
-                        self.selection_anchor = None;
-                        self.request_redraw();
-                    }
-                    Some(Keycode::A) if self.control_down => {
-                        self.selected_entries = (0..self.browser.entries().len()).collect();
-                        self.selected = self
-                            .selected
-                            .or_else(|| (!self.browser.entries().is_empty()).then_some(0));
-                        self.selection_anchor = self.selected;
-                        self.request_redraw();
-                    }
-                    Some(Keycode::F5) => {
-                        if let Err(error) = self.browser.refresh() {
-                            self.status = format!("Could not refresh: {error}");
-                        }
-                        self.request_redraw();
-                    }
-                    _ => {}
+                } else {
+                    self.scroll(-y * 80.0);
                 }
             }
-            Event::KeyUp { keymod, .. } => {
-                self.control_down = keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD);
-                self.shift_down = keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD);
+            InputEvent::FocusLost { .. } | InputEvent::DeviceRemoved { .. } => {
+                self.control_down = false;
+                self.shift_down = false;
+                self.ui_state.set_pressed(None);
+                self.ui_state.set_capture(None);
+                self.selection_drag = None;
             }
-            // SDL keeps text input and IME composition in the event stream. Nickel File
-            // currently has no editable field, so these remain intentionally unconsumed.
-            Event::TextInput { .. } | Event::TextEditing { .. } => {}
-            _ => {}
+            InputEvent::FocusGained { .. }
+            | InputEvent::Text(_)
+            | InputEvent::Touch(_)
+            | InputEvent::Pointer(PointerEvent::Enter { .. })
+            | InputEvent::Pointer(PointerEvent::Button { .. }) => {}
         }
-        true
     }
 }
 

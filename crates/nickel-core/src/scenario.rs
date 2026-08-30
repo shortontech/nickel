@@ -2,7 +2,7 @@
 
 use crate::{
     focus::{FocusRequest, FocusTransactions},
-    hotkeys::{Hotkey, HotkeyAction, HotkeyController, KeyEdge},
+    hotkeys::{HotkeyAction, HotkeyController, KeyCode, KeyEdge},
     launcher::{
         LauncherActivation, LauncherActivationSource, LauncherPointerTarget,
         LauncherSemanticTarget, LauncherTransition, LauncherVisibility,
@@ -57,6 +57,14 @@ pub enum RecordedEffect {
     Launcher(LauncherEffect),
     Task(TaskSwitchEffect<String>),
     Workspace(WorkspaceEffect),
+    Screenshot(ScreenshotEffect),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScreenshotEffect {
+    RequestInteractiveRegionCapture,
+    CaptureActiveWindowToClipboard,
+    CaptureActiveWindowToFile,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -96,6 +104,8 @@ pub struct RecordingPlatform {
     launcher_output: Option<String>,
     acknowledgements: Vec<EffectAcknowledgement>,
     ordered_effects: Vec<RecordedEffect>,
+    screenshot_effects: Vec<ScreenshotEffect>,
+    screenshot_overlay_requested: bool,
 }
 
 impl RecordingPlatform {
@@ -126,6 +136,10 @@ impl RecordingPlatform {
 
     pub fn launcher_effects(&self) -> &[LauncherEffect] {
         &self.launcher_effects
+    }
+
+    pub fn screenshot_effects(&self) -> &[ScreenshotEffect] {
+        &self.screenshot_effects
     }
 }
 
@@ -267,34 +281,34 @@ impl Scenario {
 
     pub fn press(mut self, key: Key) -> Self {
         self.trace.push(format!("press {key:?}"));
-        let sequence: &[(Hotkey, KeyEdge)] = match key {
+        let sequence: &[(KeyCode, KeyEdge)] = match key {
             Key::AltTab => &[
-                (Hotkey::Alt, KeyEdge::Pressed),
-                (Hotkey::Tab, KeyEdge::Pressed),
-                (Hotkey::Tab, KeyEdge::Released),
-                (Hotkey::Alt, KeyEdge::Released),
+                (KeyCode::AltLeft, KeyEdge::Pressed),
+                (KeyCode::Tab, KeyEdge::Pressed),
+                (KeyCode::Tab, KeyEdge::Released),
+                (KeyCode::AltLeft, KeyEdge::Released),
             ],
             Key::AltShiftTab => &[
-                (Hotkey::Alt, KeyEdge::Pressed),
-                (Hotkey::Shift, KeyEdge::Pressed),
-                (Hotkey::Tab, KeyEdge::Pressed),
-                (Hotkey::Tab, KeyEdge::Released),
-                (Hotkey::Shift, KeyEdge::Released),
-                (Hotkey::Alt, KeyEdge::Released),
+                (KeyCode::AltLeft, KeyEdge::Pressed),
+                (KeyCode::ShiftLeft, KeyEdge::Pressed),
+                (KeyCode::Tab, KeyEdge::Pressed),
+                (KeyCode::Tab, KeyEdge::Released),
+                (KeyCode::ShiftLeft, KeyEdge::Released),
+                (KeyCode::AltLeft, KeyEdge::Released),
             ],
             Key::AltBacktick => &[
-                (Hotkey::Alt, KeyEdge::Pressed),
-                (Hotkey::Grave, KeyEdge::Pressed),
-                (Hotkey::Grave, KeyEdge::Released),
-                (Hotkey::Alt, KeyEdge::Released),
+                (KeyCode::AltLeft, KeyEdge::Pressed),
+                (KeyCode::Backquote, KeyEdge::Pressed),
+                (KeyCode::Backquote, KeyEdge::Released),
+                (KeyCode::AltLeft, KeyEdge::Released),
             ],
             Key::AltShiftBacktick => &[
-                (Hotkey::Alt, KeyEdge::Pressed),
-                (Hotkey::Shift, KeyEdge::Pressed),
-                (Hotkey::Grave, KeyEdge::Pressed),
-                (Hotkey::Grave, KeyEdge::Released),
-                (Hotkey::Shift, KeyEdge::Released),
-                (Hotkey::Alt, KeyEdge::Released),
+                (KeyCode::AltLeft, KeyEdge::Pressed),
+                (KeyCode::ShiftLeft, KeyEdge::Pressed),
+                (KeyCode::Backquote, KeyEdge::Pressed),
+                (KeyCode::Backquote, KeyEdge::Released),
+                (KeyCode::ShiftLeft, KeyEdge::Released),
+                (KeyCode::AltLeft, KeyEdge::Released),
             ],
         };
         for (key, edge) in sequence {
@@ -307,7 +321,7 @@ impl Scenario {
         self
     }
 
-    pub fn key_edge(mut self, key: Hotkey, edge: KeyEdge) -> Self {
+    pub fn key_edge(mut self, key: KeyCode, edge: KeyEdge) -> Self {
         self.consume_event(format!("{key:?} {edge:?}"));
         let outcome = self.hotkeys.handle(key, edge);
         if let Some(action) = outcome.action {
@@ -724,6 +738,23 @@ impl Scenario {
         self.assert(condition, detail)
     }
 
+    pub fn expect_screenshot_effects(self, expected: &[ScreenshotEffect]) -> Self {
+        let condition = self.platform.screenshot_effects == expected;
+        let detail = format!(
+            "screenshot effect sequence differed\nexpected: {expected:#?}\nactual: {:#?}",
+            self.platform.screenshot_effects
+        );
+        self.assert(condition, detail)
+    }
+
+    pub fn expect_screenshot_overlay_requested(self) -> Self {
+        let requested = self.platform.screenshot_overlay_requested;
+        self.assert(
+            requested,
+            "expected screenshot overlay capture request".into(),
+        )
+    }
+
     pub fn expect_launcher_effects(self, expected: &[LauncherEffect]) -> Self {
         let condition = self.platform.launcher_effects == expected;
         let detail = format!(
@@ -828,6 +859,34 @@ impl Scenario {
                 transition.expect("directional workspace target must remain valid"),
                 "HotkeyController -> Workspaces directional reducer",
             );
+            return;
+        }
+        let screenshot_effect = match action {
+            HotkeyAction::ShowScreenshotTool => {
+                Some(ScreenshotEffect::RequestInteractiveRegionCapture)
+            }
+            HotkeyAction::CaptureActiveWindow => {
+                Some(ScreenshotEffect::CaptureActiveWindowToClipboard)
+            }
+            HotkeyAction::CaptureActiveWindowToFile => {
+                Some(ScreenshotEffect::CaptureActiveWindowToFile)
+            }
+            _ => None,
+        };
+        if let Some(effect) = screenshot_effect {
+            self.platform.screenshot_overlay_requested =
+                effect == ScreenshotEffect::RequestInteractiveRegionCapture;
+            self.platform.screenshot_effects.push(effect);
+            self.platform
+                .ordered_effects
+                .push(RecordedEffect::Screenshot(effect));
+            self.consumed_effects += 1;
+            self.authority.push(AuthorityRecord {
+                field: "screenshot.effect".into(),
+                path: format!(
+                    "semantic key -> HotkeyController -> {action:?} -> ScreenshotEffect::{effect:?}"
+                ),
+            });
             return;
         }
         let windows = self.production_window_facts();
@@ -1310,7 +1369,7 @@ impl WindowCursor {
         self.scenario.press(key)
     }
 
-    pub fn key_edge(self, key: Hotkey, edge: KeyEdge) -> Scenario {
+    pub fn key_edge(self, key: KeyCode, edge: KeyEdge) -> Scenario {
         self.scenario.key_edge(key, edge)
     }
 
@@ -1344,7 +1403,7 @@ mod tests {
     use std::time::Duration;
 
     use super::{Key, ScenarioBudget, Surface, scenario};
-    use crate::hotkeys::{Hotkey, HotkeyAction, KeyEdge};
+    use crate::hotkeys::{HotkeyAction, KeyCode, KeyEdge};
     use crate::task_switcher::TaskSwitchEffect;
     use crate::task_switcher::{SwitchWindow, TaskSwitcher};
     use crate::window_input::{PointerPosition, WindowSurface};
@@ -1357,12 +1416,12 @@ mod tests {
             .active()
             .window("b")
             .app("two")
-            .key_edge(Hotkey::Alt, KeyEdge::Pressed)
-            .key_edge(Hotkey::Tab, KeyEdge::Pressed)
+            .key_edge(KeyCode::AltLeft, KeyEdge::Pressed)
+            .key_edge(KeyCode::Tab, KeyEdge::Pressed)
             .capture_surface("first", Surface::Flip)
             .expect_visible(Surface::Flip)
-            .key_edge(Hotkey::Tab, KeyEdge::Released)
-            .key_edge(Hotkey::Alt, KeyEdge::Released);
+            .key_edge(KeyCode::Tab, KeyEdge::Released)
+            .key_edge(KeyCode::AltLeft, KeyEdge::Released);
 
         let second = first
             .expect_actions(&[HotkeyAction::SwitchNext, HotkeyAction::CommitSwitch])
@@ -1375,11 +1434,11 @@ mod tests {
             ])
             .expect_active("b")
             .expect_hidden(Surface::Flip)
-            .key_edge(Hotkey::Alt, KeyEdge::Pressed)
-            .key_edge(Hotkey::Tab, KeyEdge::Pressed)
+            .key_edge(KeyCode::AltLeft, KeyEdge::Pressed)
+            .key_edge(KeyCode::Tab, KeyEdge::Pressed)
             .expect_new_surface("first", Surface::Flip)
-            .key_edge(Hotkey::Tab, KeyEdge::Released)
-            .key_edge(Hotkey::Alt, KeyEdge::Released);
+            .key_edge(KeyCode::Tab, KeyEdge::Released)
+            .key_edge(KeyCode::AltLeft, KeyEdge::Released);
 
         second
             .expect_actions(&[
@@ -1508,7 +1567,7 @@ mod tests {
             .or_else(|| failure.downcast_ref::<&str>().copied())
             .expect("panic has textual diagnostic");
         assert!(message.contains("diagnostic oracle"));
-        assert!(message.contains("Alt Pressed"));
+        assert!(message.contains("AltLeft Pressed"));
         assert!(message.contains("authority:"));
         assert!(message.contains("acknowledgements:"));
         assert!(message.contains("TaskSwitcher"));

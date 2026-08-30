@@ -69,12 +69,14 @@ pub fn applications() -> Vec<Application> {
     Vec::new()
 }
 
-pub fn launcher_hotkey_receiver() -> std::sync::mpsc::Receiver<GlobalShortcut> {
-    let (_sender, receiver) = std::sync::mpsc::channel();
-    receiver
+pub fn launcher_hotkey_receiver() -> super::GlobalShortcutFeed {
+    super::GlobalShortcutFeed::unavailable(
+        nickel_input::global::UnavailableReason::UnsupportedPlatform,
+    )
 }
 
-pub fn handle_focused_shortcut(_: nickel_core::hotkeys::Hotkey, _: nickel_core::hotkeys::KeyEdge) {}
+pub fn handle_focused_shortcut(_: nickel_core::hotkeys::KeyCode, _: nickel_core::hotkeys::KeyEdge) {
+}
 
 pub fn execute_run_command(_: &str) -> Result<(), super::LaunchError> {
     Err(super::LaunchError::Platform(String::new()))

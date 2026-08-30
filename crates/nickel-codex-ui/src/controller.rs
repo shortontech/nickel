@@ -500,8 +500,8 @@ fn snapshot(backend: &dyn CodexBackend, provenance: String) -> ControllerEvent {
 }
 
 fn project_snapshot(backend: &dyn CodexBackend, provenance: String) -> ControllerEvent {
-    match list_projects(backend) {
-        Ok(mut projects) => {
+    match (backend.account(), list_projects(backend)) {
+        (Ok(account), Ok(mut projects)) => {
             match backend.list_threads(ThreadPage {
                 cursor: None,
                 limit: Some(100),
@@ -510,7 +510,7 @@ fn project_snapshot(backend: &dyn CodexBackend, provenance: String) -> Controlle
                     sort_projects_by_recent_threads(&mut projects, &page.threads, &page.runtime);
                     ControllerEvent::Ready {
                         provenance,
-                        account: AccountState::default(),
+                        account,
                         models: Vec::new(),
                         projects,
                         threads: page.threads,
@@ -520,7 +520,7 @@ fn project_snapshot(backend: &dyn CodexBackend, provenance: String) -> Controlle
                 }
                 Err(error) => ControllerEvent::Ready {
                     provenance,
-                    account: AccountState::default(),
+                    account,
                     models: Vec::new(),
                     projects,
                     threads: Vec::new(),
@@ -529,7 +529,7 @@ fn project_snapshot(backend: &dyn CodexBackend, provenance: String) -> Controlle
                 },
             }
         }
-        Err(error) => ControllerEvent::Failure(error.to_string()),
+        (Err(error), _) | (_, Err(error)) => ControllerEvent::Failure(error.to_string()),
     }
 }
 
@@ -832,17 +832,20 @@ mod tests {
         let backend = ReplayBackend::from_json(
             r#"{
                 "name":"project-menu-thread-error",
+                "account":{"authenticated":true,"account_type":"chatgpt","email":null},
                 "projects":[{"id":"nickel","name":"Nickel","roots":["/projects/nickel"]}],
                 "thread_error":"duplicate thread id"
             }"#,
         )
         .unwrap();
 
-        let ControllerEvent::Ready { projects, .. } =
-            project_snapshot(&backend, "Replay fixture".into())
+        let ControllerEvent::Ready {
+            account, projects, ..
+        } = project_snapshot(&backend, "Replay fixture".into())
         else {
             panic!("thread failure must not disconnect the project menu");
         };
+        assert!(account.authenticated);
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].id, "nickel");
         assert_eq!(projects[0].name, "Nickel");

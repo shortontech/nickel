@@ -5,11 +5,13 @@ use std::{
 
 use sdl3::{
     event::{Event, WindowEvent},
-    keyboard::{Keycode, Mod},
-    mouse::{Cursor as MouseCursor, MouseButton, SystemCursor},
+    mouse::{Cursor as MouseCursor, SystemCursor},
 };
 
-use crate::{Point, PointerIcon, Rect, SdlCanvasPresenter, UiEvent, UiStateStore, UiTree, View};
+use crate::{
+    FocusedInputDispatcher, InputCommand, InputContext, PointerIcon, Rect, SdlCanvasPresenter,
+    UiEvent, UiStateStore, UiTree, View,
+};
 
 #[derive(Debug, Default)]
 struct FrameScheduler {
@@ -70,8 +72,10 @@ pub struct ApplicationHost<A: Application> {
     state: UiStateStore,
     tree: UiTree<A::Message>,
     bounds: Rect,
+    input_dispatcher: FocusedInputDispatcher,
 }
 
+#[derive(Default)]
 pub struct HostEventOutcome {
     pub changed: bool,
     pub clipboard_text: Option<String>,
@@ -87,6 +91,7 @@ impl<A: Application> ApplicationHost<A> {
             state,
             tree,
             bounds,
+            input_dispatcher: FocusedInputDispatcher::default(),
         }
     }
 
@@ -96,6 +101,17 @@ impl<A: Application> ApplicationHost<A> {
 
     pub fn commands(&self) -> &[crate::PaintCommand] {
         self.tree.commands()
+    }
+
+    pub fn input_context(&self) -> crate::InputContext {
+        crate::InputContext {
+            text_focused: self.state.focused().is_some(),
+            selection_owned: self.state.selection_owner().is_some(),
+        }
+    }
+
+    pub fn selected_text(&self) -> Option<String> {
+        self.tree.selected_text(&self.state)
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -136,6 +152,44 @@ impl<A: Application> ApplicationHost<A> {
         true
     }
 
+    /// Dispatch a normalized event through the same focused-input contract used by standalone
+    /// Nickel UI applications. Embedded hosts provide clipboard text only when paste is allowed;
+    /// copy and cut return replacement clipboard text in the outcome.
+    pub fn handle_input(
+        &mut self,
+        input: &nickel_input::InputEvent,
+        clipboard_text: Option<&str>,
+    ) -> HostEventOutcome {
+        let context = self.input_context();
+        let commands = self.input_dispatcher.dispatch_with_context(input, context);
+        let mut combined = HostEventOutcome::default();
+        for command in commands {
+            let event = match command {
+                InputCommand::Ui(event) => Some(event),
+                InputCommand::Application { shortcut, fallback } => {
+                    if self.shortcut(shortcut) {
+                        combined.changed = true;
+                        None
+                    } else {
+                        fallback
+                    }
+                }
+                InputCommand::Copy => Some(UiEvent::TextCopy),
+                InputCommand::Cut => Some(UiEvent::TextCut),
+                InputCommand::Paste => clipboard_text.map(|text| UiEvent::TextPaste(text.into())),
+            };
+            let Some(event) = event else {
+                continue;
+            };
+            let outcome = self.handle_event(event);
+            combined.changed |= outcome.changed;
+            if outcome.clipboard_text.is_some() {
+                combined.clipboard_text = outcome.clipboard_text;
+            }
+        }
+        combined
+    }
+
     fn rebuild(&mut self) {
         self.tree =
             UiTree::layout_with_state(self.application.view(), self.bounds, &mut self.state);
@@ -158,7 +212,6 @@ pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
     let text_input = video.text_input();
     text_input.start(presenter.window());
     let mut state = UiStateStore::default();
-    let mut cursor = Point::default();
     let default_cursor = MouseCursor::from_system(SystemCursor::Arrow).ok();
     let hand_cursor = MouseCursor::from_system(SystemCursor::Hand).ok();
     let text_cursor = MouseCursor::from_system(SystemCursor::IBeam).ok();
@@ -174,6 +227,8 @@ pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
     );
     presenter.present_accelerated(tree.commands(), scale)?;
     let mut scheduler = FrameScheduler::default();
+    let mut input_adapter = nickel_input::sdl::Adapter::default();
+    let mut input_dispatcher = FocusedInputDispatcher::default();
     let mut next_caret_blink = Instant::now() + Duration::from_millis(500);
 
     while running {
@@ -205,7 +260,7 @@ pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
         let mut pending = vec![event];
         pending.extend(events.poll_iter());
         for event in pending {
-            let event = match event {
+            match &event {
                 Event::Quit { .. }
                 | Event::Window {
                     win_event: WindowEvent::CloseRequested,
@@ -221,12 +276,51 @@ pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
                     scheduler.invalidate();
                     continue;
                 }
-                Event::Window {
-                    win_event: WindowEvent::FocusLost,
-                    ..
-                } => UiEvent::FocusLost,
-                Event::MouseMotion { x, y, .. } => {
-                    cursor = Point { x, y };
+                _ => {}
+            }
+            let Some(normalized) = input_adapter.normalize(&event) else {
+                continue;
+            };
+            let context = InputContext {
+                text_focused: state.focused().is_some(),
+                selection_owned: state.selection_owner().is_some(),
+            };
+            let commands = input_dispatcher.dispatch_with_context(&normalized, context);
+            for command in commands {
+                let event = match command {
+                    InputCommand::Ui(event) => event,
+                    InputCommand::Application { shortcut, fallback } => {
+                        if application.shortcut(shortcut) {
+                            scheduler.invalidate();
+                            continue;
+                        }
+                        let Some(fallback) = fallback else {
+                            continue;
+                        };
+                        fallback
+                    }
+                    InputCommand::Copy => UiEvent::TextCopy,
+                    InputCommand::Cut => {
+                        let Some(selected) = tree.selected_text(&state) else {
+                            continue;
+                        };
+                        if clipboard.set_clipboard_text(&selected).is_err() {
+                            continue;
+                        }
+                        UiEvent::TextCut
+                    }
+                    InputCommand::Paste => {
+                        let Ok(text) = clipboard.clipboard_text() else {
+                            continue;
+                        };
+                        UiEvent::TextPaste(text)
+                    }
+                };
+                if let UiEvent::PointerMoved(point)
+                | UiEvent::PointerPressed(point)
+                | UiEvent::PointerReleased(point) = event
+                {
+                    let cursor = point;
                     let next_icon = tree.pointer_icon_at(cursor);
                     if next_icon != pointer_icon {
                         if let Some(cursor) = match next_icon {
@@ -238,273 +332,40 @@ pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
                         }
                         pointer_icon = next_icon;
                     }
-                    UiEvent::PointerMoved(cursor)
                 }
-                Event::MouseButtonDown {
-                    mouse_btn: MouseButton::Left,
-                    x,
-                    y,
-                    ..
-                } => {
-                    cursor = Point { x, y };
-                    UiEvent::PointerPressed(cursor)
+                let resets_caret = matches!(
+                    &event,
+                    UiEvent::PointerPressed(_)
+                        | UiEvent::PointerMoved(_)
+                        | UiEvent::TextInput(_)
+                        | UiEvent::TextBackspace
+                        | UiEvent::TextBackspaceWord
+                        | UiEvent::TextDelete
+                        | UiEvent::TextMoveLeft { .. }
+                        | UiEvent::TextMoveRight { .. }
+                        | UiEvent::TextMoveWordLeft { .. }
+                        | UiEvent::TextMoveWordRight { .. }
+                        | UiEvent::TextMoveHome { .. }
+                        | UiEvent::TextMoveEnd { .. }
+                        | UiEvent::TextMoveDocumentHome { .. }
+                        | UiEvent::TextMoveDocumentEnd { .. }
+                        | UiEvent::TextSelectAll
+                        | UiEvent::TextCut
+                        | UiEvent::TextPaste(_)
+                );
+                let outcome = tree.handle_event(&mut state, event);
+                if resets_caret {
+                    next_caret_blink = Instant::now() + Duration::from_millis(500);
                 }
-                Event::MouseButtonUp {
-                    mouse_btn: MouseButton::Left,
-                    x,
-                    y,
-                    ..
-                } => {
-                    cursor = Point { x, y };
-                    UiEvent::PointerReleased(cursor)
+                for message in outcome.messages {
+                    application.update(message);
                 }
-                Event::MouseWheel { x, y, .. } if x.abs() > y.abs() => UiEvent::ScrollHorizontal {
-                    point: cursor,
-                    delta_x: -x * 42.0,
-                },
-                Event::MouseWheel { y, .. } => UiEvent::Scroll {
-                    point: cursor,
-                    delta_y: -y * 42.0,
-                },
-                Event::KeyDown {
-                    keycode: Some(Keycode::R),
-                    keymod,
-                    ..
-                } if command_modifier(keymod) && application.shortcut(Shortcut::Reload) => {
+                if let Some(text) = outcome.clipboard_text {
+                    let _ = clipboard.set_clipboard_text(&text);
+                }
+                if outcome.invalidation != crate::Invalidation::None {
                     scheduler.invalidate();
-                    continue;
                 }
-                Event::KeyDown {
-                    keycode: Some(Keycode::Left),
-                    keymod,
-                    ..
-                } if keymod.intersects(Mod::LALTMOD | Mod::RALTMOD)
-                    && application.shortcut(Shortcut::Back) =>
-                {
-                    scheduler.invalidate();
-                    continue;
-                }
-                Event::KeyDown {
-                    keycode: Some(Keycode::Right),
-                    keymod,
-                    ..
-                } if keymod.intersects(Mod::LALTMOD | Mod::RALTMOD)
-                    && application.shortcut(Shortcut::Forward) =>
-                {
-                    scheduler.invalidate();
-                    continue;
-                }
-                Event::KeyDown {
-                    keycode: Some(Keycode::Home),
-                    ..
-                } if application.shortcut(Shortcut::DocumentStart) => {
-                    scheduler.invalidate();
-                    continue;
-                }
-                Event::KeyDown {
-                    keycode: Some(Keycode::End),
-                    ..
-                } if application.shortcut(Shortcut::DocumentEnd) => {
-                    scheduler.invalidate();
-                    continue;
-                }
-                Event::KeyDown {
-                    keycode: Some(Keycode::Return),
-                    keymod,
-                    ..
-                } if keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD) => {
-                    if state.focused().is_some() {
-                        UiEvent::TextInput("\n".into())
-                    } else if application.shortcut(Shortcut::Newline) {
-                        scheduler.invalidate();
-                        continue;
-                    } else {
-                        UiEvent::KeyboardActivate
-                    }
-                }
-                Event::KeyDown {
-                    keycode: Some(Keycode::Return),
-                    ..
-                } => {
-                    if application.shortcut(Shortcut::Submit) {
-                        scheduler.invalidate();
-                        continue;
-                    }
-                    UiEvent::KeyboardActivate
-                }
-                Event::KeyDown {
-                    keycode: Some(Keycode::Escape),
-                    ..
-                } => {
-                    if state.selection_owner().is_some() {
-                        UiEvent::SelectionClear
-                    } else {
-                        if application.shortcut(Shortcut::Escape) {
-                            scheduler.invalidate();
-                            continue;
-                        }
-                        UiEvent::Dismiss
-                    }
-                }
-                Event::KeyDown {
-                    keycode: Some(Keycode::Tab),
-                    keymod,
-                    ..
-                } if keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD) => UiEvent::FocusPrevious,
-                Event::KeyDown {
-                    keycode: Some(Keycode::Tab),
-                    ..
-                } => UiEvent::FocusNext,
-                Event::KeyDown {
-                    keycode: Some(Keycode::A),
-                    keymod,
-                    ..
-                } if command_modifier(keymod) => UiEvent::TextSelectAll,
-                Event::KeyDown {
-                    keycode: Some(Keycode::C),
-                    keymod,
-                    ..
-                } if command_modifier(keymod) => UiEvent::TextCopy,
-                Event::KeyDown {
-                    keycode: Some(Keycode::X),
-                    keymod,
-                    ..
-                } if command_modifier(keymod) => {
-                    let Some(selected) = tree.selected_text(&state) else {
-                        continue;
-                    };
-                    if clipboard.set_clipboard_text(&selected).is_err() {
-                        continue;
-                    }
-                    UiEvent::TextCut
-                }
-                Event::KeyDown {
-                    keycode: Some(Keycode::V),
-                    keymod,
-                    ..
-                } if command_modifier(keymod) => {
-                    let Ok(text) = clipboard.clipboard_text() else {
-                        continue;
-                    };
-                    UiEvent::TextPaste(text)
-                }
-                Event::KeyDown {
-                    keycode: Some(Keycode::Backspace),
-                    keymod,
-                    ..
-                } if keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD) => UiEvent::TextBackspaceWord,
-                Event::KeyDown {
-                    keycode: Some(Keycode::Backspace),
-                    ..
-                } => UiEvent::TextBackspace,
-                Event::KeyDown {
-                    keycode: Some(Keycode::Delete),
-                    ..
-                } => UiEvent::TextDelete,
-                Event::KeyDown {
-                    keycode: Some(Keycode::Left),
-                    keymod,
-                    ..
-                } if keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD) => {
-                    UiEvent::TextMoveWordLeft {
-                        extend_selection: keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD),
-                    }
-                }
-                Event::KeyDown {
-                    keycode: Some(Keycode::Left),
-                    keymod,
-                    ..
-                } => UiEvent::TextMoveLeft {
-                    extend_selection: keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD),
-                },
-                Event::KeyDown {
-                    keycode: Some(Keycode::Right),
-                    keymod,
-                    ..
-                } if keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD) => {
-                    UiEvent::TextMoveWordRight {
-                        extend_selection: keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD),
-                    }
-                }
-                Event::KeyDown {
-                    keycode: Some(Keycode::Right),
-                    keymod,
-                    ..
-                } => UiEvent::TextMoveRight {
-                    extend_selection: keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD),
-                },
-                Event::KeyDown {
-                    keycode: Some(Keycode::Home),
-                    keymod,
-                    ..
-                } if keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD) => {
-                    UiEvent::TextMoveDocumentHome {
-                        extend_selection: keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD),
-                    }
-                }
-                Event::KeyDown {
-                    keycode: Some(Keycode::Home),
-                    keymod,
-                    ..
-                } => UiEvent::TextMoveHome {
-                    extend_selection: keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD),
-                },
-                Event::KeyDown {
-                    keycode: Some(Keycode::End),
-                    keymod,
-                    ..
-                } if keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD) => {
-                    UiEvent::TextMoveDocumentEnd {
-                        extend_selection: keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD),
-                    }
-                }
-                Event::KeyDown {
-                    keycode: Some(Keycode::End),
-                    keymod,
-                    ..
-                } => UiEvent::TextMoveEnd {
-                    extend_selection: keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD),
-                },
-                Event::KeyDown {
-                    keycode: Some(Keycode::Space),
-                    ..
-                } => UiEvent::KeyboardActivate,
-                Event::TextInput { text, .. } => UiEvent::TextInput(text),
-                Event::TextEditing { text, .. } => UiEvent::ImePreedit(text),
-                _ => continue,
-            };
-            let resets_caret = matches!(
-                &event,
-                UiEvent::PointerPressed(_)
-                    | UiEvent::PointerMoved(_)
-                    | UiEvent::TextInput(_)
-                    | UiEvent::TextBackspace
-                    | UiEvent::TextBackspaceWord
-                    | UiEvent::TextDelete
-                    | UiEvent::TextMoveLeft { .. }
-                    | UiEvent::TextMoveRight { .. }
-                    | UiEvent::TextMoveWordLeft { .. }
-                    | UiEvent::TextMoveWordRight { .. }
-                    | UiEvent::TextMoveHome { .. }
-                    | UiEvent::TextMoveEnd { .. }
-                    | UiEvent::TextMoveDocumentHome { .. }
-                    | UiEvent::TextMoveDocumentEnd { .. }
-                    | UiEvent::TextSelectAll
-                    | UiEvent::TextCut
-                    | UiEvent::TextPaste(_)
-            );
-            let outcome = tree.handle_event(&mut state, event);
-            if resets_caret {
-                next_caret_blink = Instant::now() + Duration::from_millis(500);
-            }
-            for message in outcome.messages {
-                application.update(message);
-            }
-            if let Some(text) = outcome.clipboard_text {
-                let _ = clipboard.set_clipboard_text(&text);
-            }
-            if outcome.invalidation != crate::Invalidation::None {
-                scheduler.invalidate();
             }
         }
     }
@@ -513,14 +374,85 @@ pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn command_modifier(keymod: Mod) -> bool {
-    keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD | Mod::LGUIMOD | Mod::RGUIMOD)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::FrameScheduler;
-    use crate::{Invalidation, UiStateStore};
+    use nickel_input::{
+        DeviceId, EventOrder, InputEvent, KeyCode, KeyEdge, KeyEvent, KeyLocation, LogicalKey,
+        Modifier, ModifierState, NamedKey, PhysicalKey, Point, PointerButton, PointerEvent,
+        TextEvent,
+    };
+
+    use super::{Application, ApplicationHost, FrameScheduler, Shortcut};
+    use crate::{Invalidation, TextField, UiStateStore};
+
+    #[derive(Clone)]
+    enum Message {
+        Changed(String),
+    }
+
+    #[derive(Default)]
+    struct InputApplication {
+        text: String,
+        submits: usize,
+    }
+
+    impl Application for InputApplication {
+        type Message = Message;
+
+        fn update(&mut self, message: Self::Message) {
+            match message {
+                Message::Changed(text) => self.text = text,
+            }
+        }
+
+        fn view(&self) -> impl crate::View<Self::Message> {
+            TextField::on_change(&self.text, Message::Changed)
+        }
+
+        fn shortcut(&mut self, shortcut: Shortcut) -> bool {
+            if shortcut != Shortcut::Submit {
+                return false;
+            }
+            self.submits += 1;
+            true
+        }
+    }
+
+    fn key(order: u64, repeat: bool) -> InputEvent {
+        InputEvent::Key(KeyEvent {
+            device: DeviceId(1),
+            order: EventOrder(order),
+            physical: PhysicalKey::Code(KeyCode::Enter),
+            logical: LogicalKey::Named(NamedKey::Enter),
+            location: KeyLocation::Standard,
+            edge: KeyEdge::Pressed,
+            repeat,
+            modifiers: ModifierState::default(),
+        })
+    }
+
+    fn command_key(order: u64, physical: KeyCode, logical: &str) -> InputEvent {
+        InputEvent::Key(KeyEvent {
+            device: DeviceId(1),
+            order: EventOrder(order),
+            physical: PhysicalKey::Code(physical),
+            logical: LogicalKey::Character(logical.into()),
+            location: KeyLocation::Standard,
+            edge: KeyEdge::Pressed,
+            repeat: false,
+            modifiers: ModifierState::from_sides([Modifier::ControlLeft]),
+        })
+    }
+
+    fn focus_event() -> InputEvent {
+        InputEvent::Pointer(PointerEvent::Button {
+            device: DeviceId(2),
+            order: EventOrder(1),
+            button: PointerButton::Primary,
+            edge: KeyEdge::Pressed,
+            position: Some(Point { x: 4.0, y: 4.0 }),
+        })
+    }
 
     #[test]
     fn idle_frames_do_not_rebuild_and_event_batches_coalesce() {
@@ -538,5 +470,74 @@ mod tests {
         let mut state = UiStateStore::default();
 
         assert_eq!(state.toggle_caret(), Invalidation::None);
+    }
+
+    #[test]
+    fn embedded_host_dispatches_normalized_text_ime_and_submit_once() {
+        let mut host = ApplicationHost::new(InputApplication::default(), 320, 48);
+        assert!(host.handle_input(&focus_event(), None).changed);
+        assert!(host.input_context().text_focused);
+        assert!(
+            !host
+                .handle_input(
+                    &InputEvent::FocusGained {
+                        order: EventOrder(2),
+                    },
+                    None,
+                )
+                .changed
+        );
+        assert!(host.input_context().text_focused);
+
+        let preedit = InputEvent::Text(TextEvent::Preedit {
+            device: DeviceId(1),
+            order: EventOrder(3),
+            text: "世".into(),
+            selection: Some((0, 3)),
+        });
+        assert!(host.handle_input(&preedit, None).changed);
+        assert!(host.application_mut().text.is_empty());
+
+        let commit = InputEvent::Text(TextEvent::Commit {
+            device: DeviceId(1),
+            order: EventOrder(4),
+            text: "世界".into(),
+        });
+        assert!(host.handle_input(&commit, None).changed);
+        assert_eq!(host.application_mut().text, "世界");
+
+        assert!(host.handle_input(&key(5, false), None).changed);
+        assert_eq!(host.application_mut().submits, 1);
+        assert!(!host.handle_input(&key(6, true), None).changed);
+        assert_eq!(host.application_mut().submits, 1);
+    }
+
+    #[test]
+    fn embedded_host_owns_one_clipboard_command_path() {
+        let mut host = ApplicationHost::new(InputApplication::default(), 320, 48);
+        host.handle_input(&focus_event(), None);
+        host.handle_input(
+            &InputEvent::Text(TextEvent::Commit {
+                device: DeviceId(1),
+                order: EventOrder(2),
+                text: "copy me".into(),
+            }),
+            None,
+        );
+        host.handle_input(&command_key(3, KeyCode::KeyA, "a"), None);
+
+        let copied = host.handle_input(&command_key(4, KeyCode::KeyC, "c"), None);
+        assert_eq!(copied.clipboard_text.as_deref(), Some("copy me"));
+        assert_eq!(host.application_mut().text, "copy me");
+
+        let cut = host.handle_input(&command_key(5, KeyCode::KeyX, "x"), None);
+        assert_eq!(cut.clipboard_text.as_deref(), Some("copy me"));
+        assert!(host.application_mut().text.is_empty());
+
+        assert!(
+            host.handle_input(&command_key(6, KeyCode::KeyV, "v"), Some("pasted"))
+                .changed
+        );
+        assert_eq!(host.application_mut().text, "pasted");
     }
 }

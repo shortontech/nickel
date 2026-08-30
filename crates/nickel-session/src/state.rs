@@ -13,7 +13,7 @@ use std::{
 
 use nickel_core::{
     focus::FocusTransactions,
-    hotkeys::{HotkeyAction, HotkeyController},
+    hotkeys::{CompositorShortcutAdapter, HotkeyAction},
     idle::{IdleController, IdleEffect, IdlePolicy},
     launcher::{LauncherPointerTarget, LauncherVisibility},
     shell_settings::ShellSettings,
@@ -154,6 +154,17 @@ fn test_control_may_invoke(command: &SessionCommand) -> bool {
     )
 }
 
+fn shell_role_accepts_ordinary_focus(role: ShellRole) -> bool {
+    matches!(
+        role,
+        ShellRole::ControlCenter
+            | ShellRole::ProjectMenu
+            | ShellRole::Preview
+            | ShellRole::ContextMenu
+            | ShellRole::Screenshot
+    )
+}
+
 fn recv_control_frame(
     socket: &UnixDatagram,
     frame: &mut [u8],
@@ -259,7 +270,7 @@ pub struct NickelSession {
     virtual_test_outputs: HashMap<String, (Output, GlobalId)>,
     pub preview_frames: HashMap<WindowId, PreviewFrame>,
     pub preview_requests: HashSet<WindowId>,
-    pub hotkeys: HotkeyController,
+    pub hotkeys: CompositorShortcutAdapter,
     pub task_switcher: TaskSwitcher<WindowId>,
     pub workspaces: Workspaces<WindowId>,
     pub workspace_hidden_windows: HashMap<WindowId, (Window, Point<i32, Logical>)>,
@@ -280,6 +291,7 @@ pub struct NickelSession {
     pub buffer_commit_tx: Option<smithay::reexports::calloop::channel::Sender<SurfaceBufferCommit>>,
     pub identify_outputs_until: Option<std::time::Instant>,
     pub output_capture_path: Option<PathBuf>,
+    pub output_capture_name: Option<String>,
     pub output_capture_reply_path: Option<PathBuf>,
     pub output_capture_request_id: Option<u64>,
     pub shell_failure_count: u8,
@@ -557,7 +569,7 @@ impl NickelSession {
             virtual_test_outputs: HashMap::new(),
             preview_frames: HashMap::new(),
             preview_requests: HashSet::new(),
-            hotkeys: HotkeyController::default(),
+            hotkeys: CompositorShortcutAdapter::default(),
             task_switcher: TaskSwitcher::default(),
             workspaces: Workspaces::default(),
             workspace_hidden_windows: HashMap::new(),
@@ -578,6 +590,7 @@ impl NickelSession {
             buffer_commit_tx: None,
             identify_outputs_until: None,
             output_capture_path: None,
+            output_capture_name: None,
             output_capture_reply_path: None,
             output_capture_request_id: None,
             shell_failure_count: 0,
@@ -960,13 +973,7 @@ impl NickelSession {
                 }
             },
             SessionCommand::FocusShellRole { role } => {
-                if !matches!(
-                    role,
-                    ShellRole::ControlCenter
-                        | ShellRole::ProjectMenu
-                        | ShellRole::Preview
-                        | ShellRole::ContextMenu
-                ) {
+                if !shell_role_accepts_ordinary_focus(role) {
                     return protocol_error(
                         ErrorCode::InvalidRequest,
                         "role does not accept ordinary shell focus",
@@ -979,11 +986,23 @@ impl NickelSession {
                 self.identify_outputs_until =
                     Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
             }
-            SessionCommand::CaptureOutput { path } => {
+            SessionCommand::CaptureOutput { path, output } => {
                 if path.is_empty() {
                     return protocol_error(ErrorCode::InvalidRequest, "capture path is empty");
                 }
+                if let Some(name) = output.as_deref()
+                    && !self
+                        .protocol_outputs()
+                        .iter()
+                        .any(|candidate| candidate.enabled && candidate.name == name)
+                {
+                    return protocol_error(
+                        ErrorCode::InvalidRequest,
+                        "capture output was not found",
+                    );
+                }
                 self.output_capture_path = Some(PathBuf::from(path));
+                self.output_capture_name = output;
                 self.output_capture_reply_path = source.map(PathBuf::from);
                 self.output_capture_request_id = Some(request_id);
             }
@@ -1962,6 +1981,10 @@ impl NickelSession {
         }
     }
 
+    pub fn toggle_launcher_visibility(&mut self) {
+        self.set_launcher_visible(!self.launcher_visibility.is_visible());
+    }
+
     pub fn launcher_pointer_press(
         &mut self,
         target: LauncherPointerTarget,
@@ -2024,6 +2047,24 @@ impl NickelSession {
         let Ok(event) = encode(&ServerEnvelope {
             request_id: 0,
             message: ServerMessage::Event(SessionEvent::Workspaces(self.protocol_workspaces())),
+        }) else {
+            return;
+        };
+        let Ok(socket) = UnixDatagram::unbound() else {
+            return;
+        };
+        self.launcher_subscribers
+            .retain(|path| socket.send_to(&event, path).is_ok());
+    }
+
+    pub(crate) fn notify_global_shortcut(
+        &mut self,
+        action: nickel_session_protocol::ShortcutAction,
+    ) {
+        tracing::info!(?action, "global shortcut activated");
+        let Ok(event) = encode(&ServerEnvelope {
+            request_id: 0,
+            message: ServerMessage::Event(SessionEvent::GlobalShortcut { action }),
         }) else {
             return;
         };
@@ -2247,10 +2288,49 @@ impl NickelSession {
             .filter(|window| window.alive())
     }
 
-    pub fn register_utility_window(&mut self, window: Window) {
+    pub fn register_utility_window(&mut self, window: Window, role: ShellRole) {
         self.utility_windows.retain(IsAlive::alive);
         if !self.utility_windows.contains(&window) {
-            self.utility_windows.push(window);
+            self.utility_windows.push(window.clone());
+        }
+        if role == ShellRole::Screenshot {
+            self.place_screenshot_surface(&window);
+        }
+    }
+
+    fn place_screenshot_surface(&mut self, window: &Window) {
+        let Some(output) = self
+            .preferred_interaction_output_name()
+            .as_deref()
+            .and_then(|name| self.output_geometry_named(name))
+            .or_else(|| self.output_geometry_for_shell())
+        else {
+            return;
+        };
+        let size = window.geometry().size;
+        if size.w <= 0 || size.h <= 0 {
+            return;
+        }
+        let target = shell_layout::centered_in(output, (size.w, size.h));
+        if size.w != target.width || size.h != target.height {
+            Self::configure_window(window, target);
+        }
+        let location = Self::shell_surface_location(window, target);
+        self.space.map_element(window.clone(), location, true);
+    }
+
+    pub(crate) fn relayout_committed_shell_window(&mut self, window: &Window) {
+        let is_screenshot = {
+            let registry = self.windows.snapshot();
+            window
+                .wl_surface()
+                .and_then(|surface| self.surface_windows.get(&surface.id()))
+                .and_then(|id| registry.iter().find(|entry| entry.id == *id))
+                .and_then(|entry| ShellRole::from_application_id(&entry.app_id))
+                == Some(ShellRole::Screenshot)
+        };
+        if is_screenshot {
+            self.place_screenshot_surface(window);
         }
     }
 
@@ -2841,6 +2921,25 @@ impl NickelSession {
             self.space.map_element(launcher, location, true);
             self.raise_panels();
         }
+        let screenshot_utilities = {
+            let registry = self.windows.snapshot();
+            self.utility_windows
+                .iter()
+                .filter(|utility| self.space.elements().any(|mapped| mapped == *utility))
+                .filter(|utility| {
+                    utility
+                        .wl_surface()
+                        .and_then(|surface| self.surface_windows.get(&surface.id()))
+                        .and_then(|id| registry.iter().find(|entry| entry.id == *id))
+                        .and_then(|entry| ShellRole::from_application_id(&entry.app_id))
+                        == Some(ShellRole::Screenshot)
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        for utility in screenshot_utilities {
+            self.place_screenshot_surface(&utility);
+        }
         self.relayout_maximized_windows();
         self.relayout_lock_surfaces();
     }
@@ -3374,7 +3473,8 @@ impl ClientData for ClientState {
 mod protocol_tests {
     use super::{
         clamp_window_location, command_requires_shell_identity, drag_icon_location,
-        retain_live_idle_inhibitors, shell_registration_allowed, test_control_may_invoke,
+        retain_live_idle_inhibitors, shell_registration_allowed, shell_role_accepts_ordinary_focus,
+        test_control_may_invoke,
     };
     use crate::shell_layout::Geometry;
     use nickel_session_protocol::{Command, SessionAction, ShellRole};
@@ -3411,6 +3511,28 @@ mod protocol_tests {
             assert!(command_requires_shell_identity(&command));
         }
         assert!(!command_requires_shell_identity(&Command::ToggleLauncher));
+    }
+
+    #[test]
+    fn ordinary_shell_focus_includes_the_interactive_screenshot_overlay() {
+        for role in [
+            ShellRole::ControlCenter,
+            ShellRole::ProjectMenu,
+            ShellRole::Preview,
+            ShellRole::ContextMenu,
+            ShellRole::Screenshot,
+        ] {
+            assert!(shell_role_accepts_ordinary_focus(role));
+        }
+        for role in [
+            ShellRole::Desktop,
+            ShellRole::Panel,
+            ShellRole::Launcher,
+            ShellRole::Lock,
+            ShellRole::Notification,
+        ] {
+            assert!(!shell_role_accepts_ordinary_focus(role));
+        }
     }
 
     #[test]

@@ -10,6 +10,7 @@ default-run = "nickel-session"
 bitflags.workspace = true
 image.workspace = true
 nickel-core = { path = "../nickel-core" }
+nickel-input = { path = "../nickel-input" }
 nickel-session-protocol = { path = "../nickel-session-protocol" }
 nix.workspace = true
 resvg.workspace = true
@@ -27,7 +28,7 @@ tempfile.workspace = true
 
 [features]
 default = ["backend-winit"]
-backend-winit = ["smithay/backend_winit", "dep:winit"]
+backend-winit = ["smithay/backend_winit", "dep:winit", "nickel-input/winit"]
 backend-udev = [
     "smithay/backend_drm",
     "smithay/backend_egl",

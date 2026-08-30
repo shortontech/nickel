@@ -8,7 +8,7 @@ fn main() {
 mod windows_harness {
     use std::sync::{Mutex, OnceLock};
 
-    use nickel_core::hotkeys::{Hotkey, HotkeyAction, HotkeyController, KeyEdge};
+    use nickel_core::hotkeys::{KeyCode, HotkeyAction, HotkeyController, KeyEdge};
     use windows::Win32::{
         Foundation::{LPARAM, LRESULT, WPARAM},
         UI::WindowsAndMessaging::{
@@ -50,26 +50,26 @@ mod windows_harness {
             return LRESULT(1);
         };
         let key = match event.vkCode {
-            VK_LWIN | VK_RWIN => Hotkey::Super,
-            VK_R => Hotkey::Run,
-            _ => Hotkey::Other,
+            VK_LWIN | VK_RWIN => KeyCode::SuperLeft,
+            VK_R => KeyCode::KeyR,
+            _ => KeyCode::KeyA,
         };
 
         if let Ok(mut state) = STATE.get_or_init(Default::default).lock() {
             let outcome = state.controller.handle(key, edge);
             let index = state.seen;
             let expected = [
-                (Hotkey::Super, KeyEdge::Pressed, None, true),
+                (KeyCode::SuperLeft, KeyEdge::Pressed, None, true),
                 (
-                    Hotkey::Run,
+                    KeyCode::KeyR,
                     KeyEdge::Pressed,
                     Some(HotkeyAction::ShowRun),
                     true,
                 ),
-                (Hotkey::Run, KeyEdge::Released, None, true),
-                (Hotkey::Super, KeyEdge::Released, None, true),
-                (Hotkey::Run, KeyEdge::Pressed, None, false),
-                (Hotkey::Run, KeyEdge::Released, None, false),
+                (KeyCode::KeyR, KeyEdge::Released, None, true),
+                (KeyCode::SuperLeft, KeyEdge::Released, None, true),
+                (KeyCode::KeyR, KeyEdge::Pressed, None, false),
+                (KeyCode::KeyR, KeyEdge::Released, None, false),
             ][index.min(EXPECTED_EVENTS - 1)];
             if (key, edge, outcome.action, outcome.suppress) != expected {
                 state.failures.push(format!(

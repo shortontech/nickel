@@ -226,6 +226,7 @@ pub enum UiEvent {
     SelectionClear,
     Dismiss,
     CaretBlink,
+    FocusGained,
     FocusLost,
     Suspended,
     DeviceRemoved,

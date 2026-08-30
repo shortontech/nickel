@@ -49,6 +49,8 @@ pub(super) struct SettingsApp {
     pub(super) controller: ControllerInput,
     pub(super) navigation: PaneNavigation,
     pub(super) controller_page: SettingsPage,
+    pub(super) input_adapter: nickel_input::sdl::Adapter,
+    pub(super) input_dispatcher: FocusedInputDispatcher,
 }
 
 impl Default for SettingsApp {
@@ -144,6 +146,8 @@ impl Default for SettingsApp {
             controller: ControllerInput::new(),
             navigation: PaneNavigation::default(),
             controller_page: SettingsPage::Display,
+            input_adapter: nickel_input::sdl::Adapter::default(),
+            input_dispatcher: FocusedInputDispatcher::default(),
         }
     }
 }

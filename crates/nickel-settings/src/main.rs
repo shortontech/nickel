@@ -37,21 +37,18 @@ use nickel_core::{
     wallpaper_settings::{WallpaperPosition, WallpaperSettings},
 };
 use nickel_i18n::Localizer;
+use nickel_input::{InputEvent, KeyEdge, LogicalKey, NamedKey, PointerButton, PointerEvent};
 use nickel_ui::{
     AnyView, Button, ButtonPresentation, ChoiceCard, ChoiceCardGroup, ColorSwatch,
-    ComponentBuilderExt, Container, ControllerAction, ControllerInput, Image, ImageFit, Insets,
-    NavigationItem, NavigationPane, PageHeader, PaintCommand, PaneNavigation, Point as UiPoint,
-    PreviewTile, ReadingDirection, Rect as UiRect, SdlCanvasPresenter, SelectField, SemanticColors,
-    SemanticTheme, SettingsCard, SettingsNarrowPane, SettingsNavigation, SettingsRow,
-    SettingsSearchEntry, SettingsSearchField, SettingsShell, SettingsStatus, SettingsStatusKind,
-    SliderField, Surface, SurfaceRole, Switch, TabList, TextAlign, UiEvent, UiId, UiStateStore,
-    UiTree, search_settings, ui,
+    ComponentBuilderExt, Container, ControllerAction, ControllerInput, FocusedInputDispatcher,
+    Image, ImageFit, InputCommand, InputContext, Insets, NavigationItem, NavigationPane,
+    PageHeader, PaintCommand, PaneNavigation, Point as UiPoint, PreviewTile, ReadingDirection,
+    Rect as UiRect, SdlCanvasPresenter, SelectField, SemanticColors, SemanticTheme, SettingsCard,
+    SettingsNarrowPane, SettingsNavigation, SettingsRow, SettingsSearchEntry, SettingsSearchField,
+    SettingsShell, SettingsStatus, SettingsStatusKind, SliderField, Surface, SurfaceRole, Switch,
+    TabList, TextAlign, UiEvent, UiId, UiStateStore, UiTree, search_settings, ui,
 };
-use sdl3::{
-    event::{Event, WindowEvent},
-    keyboard::{Keycode, Mod},
-    mouse::{MouseButton, MouseWheelDirection},
-};
+use sdl3::event::{Event, WindowEvent};
 
 const SIDEBAR_WIDTH: i32 = 280;
 const DISPLAY_PLANE: Rect = Rect {
@@ -965,78 +962,12 @@ impl SettingsApp {
     }
 
     fn handle_event(&mut self, event: Event) {
-        match event {
+        match &event {
             Event::Quit { .. }
             | Event::Window {
                 win_event: WindowEvent::CloseRequested,
                 ..
             } => self.running = false,
-            Event::KeyDown {
-                keycode: Some(Keycode::Escape),
-                ..
-            } => {
-                if self.ui_state.focused().is_some() {
-                    self.ui_state.set_focus(None);
-                    self.sidebar_query.clear();
-                    self.request_redraw();
-                } else {
-                    self.running = false;
-                }
-            }
-            Event::KeyDown {
-                keycode: Some(Keycode::Backspace),
-                ..
-            } => self.dispatch_ui_event(UiEvent::TextBackspace),
-            Event::KeyDown {
-                keycode: Some(Keycode::Tab),
-                keymod,
-                ..
-            } if keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD) => {
-                self.dispatch_ui_event(UiEvent::FocusPrevious)
-            }
-            Event::KeyDown {
-                keycode: Some(Keycode::Tab),
-                ..
-            } => self.dispatch_ui_event(UiEvent::FocusNext),
-            Event::KeyDown {
-                keycode: Some(Keycode::Return | Keycode::Space),
-                ..
-            } => self.dispatch_ui_event(UiEvent::KeyboardActivate),
-            Event::KeyDown {
-                keycode: Some(Keycode::Up),
-                ..
-            } => self.dispatch_ui_event(UiEvent::FocusPrevious),
-            Event::KeyDown {
-                keycode: Some(Keycode::Down),
-                ..
-            } => self.dispatch_ui_event(UiEvent::FocusNext),
-            Event::KeyDown {
-                keycode: Some(Keycode::Left),
-                keymod,
-                ..
-            } => self.dispatch_ui_event(if self.focused_role() == Some("tab") {
-                UiEvent::FocusPrevious
-            } else {
-                UiEvent::TextMoveLeft {
-                    extend_selection: keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD),
-                }
-            }),
-            Event::KeyDown {
-                keycode: Some(Keycode::Right),
-                keymod,
-                ..
-            } => self.dispatch_ui_event(if self.focused_role() == Some("tab") {
-                UiEvent::FocusNext
-            } else {
-                UiEvent::TextMoveRight {
-                    extend_selection: keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD),
-                }
-            }),
-            Event::KeyDown {
-                keycode: Some(Keycode::Delete),
-                ..
-            } => self.dispatch_ui_event(UiEvent::TextDelete),
-            Event::TextInput { text, .. } => self.dispatch_ui_event(UiEvent::TextInput(text)),
             Event::Window {
                 win_event: WindowEvent::Exposed,
                 ..
@@ -1055,42 +986,118 @@ impl SettingsApp {
             } => {
                 self.resize_deadline = Some(Instant::now() + Duration::from_millis(24));
             }
-            Event::MouseMotion { x, y, .. } => self.pointer_moved(x, y),
-            Event::MouseButtonDown {
-                mouse_btn: MouseButton::Left,
-                x,
-                y,
-                ..
-            } => {
-                self.pointer_moved(x, y);
-                self.pointer_pressed();
-            }
-            Event::MouseButtonUp {
-                mouse_btn: MouseButton::Left,
-                x,
-                y,
-                ..
-            } => {
-                self.pointer_moved(x, y);
-                self.dispatch_ui_event(UiEvent::PointerReleased(UiPoint { x, y }));
-                self.finish_drag();
-            }
-            Event::MouseWheel {
-                y,
-                direction,
-                mouse_x,
-                mouse_y,
-                ..
-            } => {
-                self.pointer_moved(mouse_x, mouse_y);
-                let wheel_y = if direction == MouseWheelDirection::Flipped {
-                    -y
-                } else {
-                    y
-                };
-                self.scroll_settings(wheel_y);
-            }
             _ => {}
+        }
+        if !self.running {
+            return;
+        }
+        let Some(input) = self.input_adapter.normalize(&event) else {
+            return;
+        };
+        self.dispatch_normalized_input(input);
+    }
+
+    fn dispatch_normalized_input(&mut self, input: InputEvent) {
+        if self.handle_settings_input(&input) {
+            return;
+        }
+        let context = InputContext {
+            text_focused: self.ui_state.focused().is_some(),
+            selection_owned: self.ui_state.selection_owner().is_some(),
+        };
+        for command in self.input_dispatcher.dispatch_with_context(&input, context) {
+            match command {
+                InputCommand::Ui(event) => self.dispatch_ui_event(event),
+                InputCommand::Application { fallback, .. } => {
+                    if let Some(event) = fallback {
+                        self.dispatch_ui_event(event);
+                    }
+                }
+                InputCommand::Copy | InputCommand::Cut | InputCommand::Paste => {}
+            }
+        }
+    }
+
+    fn handle_settings_input(&mut self, input: &InputEvent) -> bool {
+        match input {
+            InputEvent::Key(key)
+                if key.edge == KeyEdge::Pressed
+                    && key.logical == LogicalKey::Named(NamedKey::Escape) =>
+            {
+                if self.ui_state.focused().is_some() {
+                    self.ui_state.set_focus(None);
+                    self.sidebar_query.clear();
+                    self.request_redraw();
+                } else {
+                    self.running = false;
+                }
+                true
+            }
+            InputEvent::Key(key)
+                if key.edge == KeyEdge::Pressed
+                    && matches!(
+                        key.logical,
+                        LogicalKey::Named(NamedKey::ArrowUp | NamedKey::ArrowDown)
+                    ) =>
+            {
+                self.dispatch_ui_event(if key.logical == LogicalKey::Named(NamedKey::ArrowUp) {
+                    UiEvent::FocusPrevious
+                } else {
+                    UiEvent::FocusNext
+                });
+                true
+            }
+            InputEvent::Key(key)
+                if key.edge == KeyEdge::Pressed
+                    && self.focused_role() == Some("tab")
+                    && matches!(
+                        key.logical,
+                        LogicalKey::Named(NamedKey::ArrowLeft | NamedKey::ArrowRight)
+                    ) =>
+            {
+                self.dispatch_ui_event(if key.logical == LogicalKey::Named(NamedKey::ArrowLeft) {
+                    UiEvent::FocusPrevious
+                } else {
+                    UiEvent::FocusNext
+                });
+                true
+            }
+            InputEvent::Pointer(PointerEvent::Motion { position, .. }) => {
+                self.pointer_moved(position.x as f32, position.y as f32);
+                true
+            }
+            InputEvent::Pointer(PointerEvent::Button {
+                button: PointerButton::Primary,
+                edge,
+                position,
+                ..
+            }) => {
+                if let Some(position) = position {
+                    self.pointer_moved(position.x as f32, position.y as f32);
+                }
+                match edge {
+                    KeyEdge::Pressed => self.pointer_pressed(),
+                    KeyEdge::Released => {
+                        let (x, y) = self.cursor;
+                        self.dispatch_ui_event(UiEvent::PointerReleased(UiPoint {
+                            x: x as f32,
+                            y: y as f32,
+                        }));
+                        self.finish_drag();
+                    }
+                }
+                true
+            }
+            InputEvent::Pointer(PointerEvent::Axis {
+                delta, position, ..
+            }) => {
+                if let Some(position) = position {
+                    self.pointer_moved(position.x as f32, position.y as f32);
+                }
+                self.scroll_settings(delta.y as f32);
+                true
+            }
+            _ => false,
         }
     }
 
@@ -1456,11 +1463,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
+    use nickel_input::{
+        DeviceId, EventOrder, InputEvent, KeyCode, KeyEdge, KeyEvent, KeyLocation, LogicalKey,
+        ModifierState, NamedKey, PhysicalKey, Point, PointerButton, PointerEvent,
+    };
+
     use super::{
         BluetoothDevice, NetworkAdapter, PaintCommand, Rect, SIDEBAR_WIDTH, SettingsApp,
         SettingsMessage, SettingsPage, ThemePreference, UiEvent, UiPoint, WallpaperSettings,
         attach_rect_centered, constrain_center, snap_rect,
     };
+
+    fn enter_event() -> InputEvent {
+        InputEvent::Key(KeyEvent {
+            device: DeviceId(1),
+            order: EventOrder(1),
+            physical: PhysicalKey::Code(KeyCode::Enter),
+            logical: LogicalKey::Named(NamedKey::Enter),
+            location: KeyLocation::Standard,
+            edge: KeyEdge::Pressed,
+            repeat: false,
+            modifiers: ModifierState::default(),
+        })
+    }
+
+    fn primary_event(order: u64, edge: KeyEdge, x: f64, y: f64) -> InputEvent {
+        InputEvent::Pointer(PointerEvent::Button {
+            device: DeviceId(2),
+            order: EventOrder(order),
+            button: PointerButton::Primary,
+            edge,
+            position: Some(Point { x, y }),
+        })
+    }
 
     #[test]
     fn display_remains_completely_inside_plane() {
@@ -1991,6 +2026,29 @@ mod tests {
             }
             assert_eq!(app.page, SettingsPage::Appearance, "{modality}");
         }
+    }
+
+    #[test]
+    fn normalized_keyboard_and_pointer_reach_production_navigation_once() {
+        let destination = SettingsMessage::Navigate(SettingsPage::Appearance);
+
+        let mut keyboard = SettingsApp::with_initial_page(SettingsPage::Display);
+        keyboard.ui = keyboard.build_ui(850.0, 580.0);
+        keyboard.ui.reconcile_state(&mut keyboard.ui_state);
+        let id = keyboard.ui.id_for_message(&destination).unwrap().clone();
+        keyboard.ui_state.set_focus(Some(id));
+        keyboard.dispatch_normalized_input(enter_event());
+        assert_eq!(keyboard.page, SettingsPage::Appearance);
+
+        let mut pointer = SettingsApp::with_initial_page(SettingsPage::Display);
+        pointer.ui = pointer.build_ui(850.0, 580.0);
+        pointer.ui.reconcile_state(&mut pointer.ui_state);
+        let bounds = pointer.ui.message_rect(&destination).unwrap();
+        let x = f64::from(bounds.origin.x + bounds.size.width / 2.0);
+        let y = f64::from(bounds.origin.y + bounds.size.height / 2.0);
+        pointer.dispatch_normalized_input(primary_event(1, KeyEdge::Pressed, x, y));
+        pointer.dispatch_normalized_input(primary_event(2, KeyEdge::Released, x, y));
+        assert_eq!(pointer.page, SettingsPage::Appearance);
     }
 
     #[test]

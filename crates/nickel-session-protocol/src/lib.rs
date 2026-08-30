@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-pub const PROTOCOL_VERSION: u16 = 10;
+pub const PROTOCOL_VERSION: u16 = 12;
 pub const MAX_FRAME_BYTES: usize = 196_608;
 pub const MAX_PREVIEW_WIDTH: u16 = 256;
 pub const MAX_PREVIEW_HEIGHT: u16 = 144;
@@ -83,6 +83,7 @@ pub enum Command {
     IdentifyOutputs,
     CaptureOutput {
         path: String,
+        output: Option<String>,
     },
     ApplyOutputs {
         layout: OutputLayout,
@@ -162,6 +163,10 @@ pub enum TestInput {
         button: TestPointerButton,
         state: InputState,
     },
+    PointerAxis {
+        horizontal_v120: i32,
+        vertical_v120: i32,
+    },
     /// Dispatch a renderer-resolved shell-local pointer interaction through
     /// the compositor's ordinary absolute-motion and button paths.
     ShellPointer {
@@ -204,6 +209,21 @@ pub enum ShellSemanticTarget {
         window: WindowId,
         action: WindowMenuTargetAction,
     },
+    Screenshot {
+        action: ScreenshotTargetAction,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScreenshotTargetAction {
+    SelectionStart,
+    SelectionEnd,
+    Confirm,
+    CopyImage,
+    SaveImage,
+    CopyTemporaryPath,
+    Cancel,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -229,6 +249,9 @@ pub enum PointerInteraction {
     Hover,
     LeftClick,
     RightClick,
+    LeftPress,
+    LeftRelease,
+    LeftDoubleClick,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -253,6 +276,8 @@ pub enum TestKey {
     A,
     C,
     P,
+    V,
+    X,
     Enter,
     Escape,
     Tab,
@@ -330,6 +355,16 @@ pub enum Event {
     OutputCaptureCompleted { path: String, result: CaptureResult },
     Workspaces(WorkspaceState),
     LockState { locked: bool },
+    GlobalShortcut { action: ShortcutAction },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShortcutAction {
+    ShowRun,
+    ShowScreenshotTool,
+    CaptureActiveWindow,
+    CaptureActiveWindowToFile,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -460,6 +495,7 @@ pub enum ShellRole {
     Notification,
     ProjectMenu,
     Lock,
+    Screenshot,
     Recovery,
 }
 
@@ -475,6 +511,7 @@ impl ShellRole {
             Self::Notification => "io.nickel.shell.notification",
             Self::ProjectMenu => "io.nickel.shell.project-menu",
             Self::Lock => "io.nickel.shell.lock",
+            Self::Screenshot => "io.nickel.shell.screenshot",
             Self::Recovery => "io.nickel.shell.recovery",
         }
     }
@@ -490,6 +527,7 @@ impl ShellRole {
             Self::Notification,
             Self::ProjectMenu,
             Self::Lock,
+            Self::Screenshot,
             Self::Recovery,
         ]
         .into_iter()
@@ -677,19 +715,31 @@ mod tests {
                 key: TestKey::LeftAlt,
                 state: InputState::Pressed,
             },
+            TestInput::Key {
+                key: TestKey::V,
+                state: InputState::Released,
+            },
+            TestInput::Key {
+                key: TestKey::X,
+                state: InputState::Pressed,
+            },
             TestInput::PointerMove { x: 640, y: 360 },
             TestInput::PointerMoveRelative { dx: 12, dy: -7 },
             TestInput::PointerButton {
                 button: TestPointerButton::Left,
                 state: InputState::Released,
             },
+            TestInput::PointerAxis {
+                horizontal_v120: 120,
+                vertical_v120: -240,
+            },
             TestInput::ShellPointer {
                 target: ResolvedShellTarget {
-                    role: ShellRole::Preview,
-                    output: Some("DP-1".into()),
+                    role: ShellRole::Screenshot,
+                    output: None,
                     x: 144,
                     y: 96,
-                    interaction: PointerInteraction::RightClick,
+                    interaction: PointerInteraction::LeftPress,
                 },
             },
             TestInput::RecoveryPointer {
@@ -698,7 +748,7 @@ mod tests {
             },
             TestInput::WindowPointer {
                 window: WindowId(7),
-                interaction: PointerInteraction::LeftClick,
+                interaction: PointerInteraction::LeftDoubleClick,
             },
         ] {
             let envelope = ClientEnvelope {
@@ -741,6 +791,20 @@ mod tests {
         assert_eq!(
             decode::<ServerEnvelope>(&encode(&response).unwrap()).unwrap(),
             response
+        );
+
+        let screenshot = ClientEnvelope {
+            token: "test-capability".into(),
+            request_id: 13,
+            request: Request::Query(Query::ShellSemanticTarget {
+                target: ShellSemanticTarget::Screenshot {
+                    action: ScreenshotTargetAction::SelectionStart,
+                },
+            }),
+        };
+        assert_eq!(
+            decode::<ClientEnvelope>(&encode(&screenshot).unwrap()).unwrap(),
+            screenshot
         );
     }
 
@@ -810,6 +874,7 @@ mod tests {
             ShellRole::Notification,
             ShellRole::ProjectMenu,
             ShellRole::Lock,
+            ShellRole::Screenshot,
             ShellRole::Recovery,
         ] {
             assert_eq!(

@@ -10,10 +10,12 @@ use nickel_session_protocol::{
     TestPointerButton,
 };
 use smithay::backend::input::{
-    AbsolutePositionEvent, ButtonState, Device, DeviceCapability, Event, InputBackend, InputEvent,
-    InputTime, KeyState, KeyboardKeyEvent, Keycode, PointerButtonEvent, PointerMotionAbsoluteEvent,
-    PointerMotionEvent, UnusedEvent,
+    AbsolutePositionEvent, Axis, AxisRelativeDirection, AxisSource, ButtonState, Device,
+    DeviceCapability, Event, InputBackend, InputEvent, InputTime, KeyState, KeyboardKeyEvent,
+    Keycode, PointerAxisEvent, PointerButtonEvent, PointerMotionAbsoluteEvent, PointerMotionEvent,
+    UnusedEvent,
 };
+use smithay::utils::{Logical, Rectangle};
 
 use crate::state::NickelSession;
 
@@ -158,6 +160,36 @@ struct TestPointerButtonEvent {
     state: ButtonState,
 }
 
+fn visible_point_in(
+    geometry: Rectangle<i32, Logical>,
+    mut owns_point: impl FnMut(i32, i32) -> bool,
+) -> Option<(i32, i32)> {
+    if geometry.size.w <= 0 || geometry.size.h <= 0 {
+        return None;
+    }
+    fn samples(length: i32) -> Vec<i32> {
+        let center = length / 2;
+        let mut samples = (0..length).step_by(8).collect::<Vec<_>>();
+        if samples.last().copied() != Some(length - 1) {
+            samples.push(length - 1);
+        }
+        samples.sort_unstable_by_key(|sample| (sample - center).abs());
+        samples
+    }
+    let xs = samples(geometry.size.w);
+    let ys = samples(geometry.size.h);
+    for local_y in ys {
+        for &local_x in &xs {
+            let x = geometry.loc.x + local_x;
+            let y = geometry.loc.y + local_y;
+            if owns_point(x, y) {
+                return Some((x, y));
+            }
+        }
+    }
+    None
+}
+
 impl Event<TestInputBackend> for TestPointerButtonEvent {
     fn time(&self) -> InputTime {
         self.time
@@ -178,10 +210,48 @@ impl PointerButtonEvent<TestInputBackend> for TestPointerButtonEvent {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct TestPointerAxisEvent {
+    time: InputTime,
+    horizontal_v120: i32,
+    vertical_v120: i32,
+}
+
+impl Event<TestInputBackend> for TestPointerAxisEvent {
+    fn time(&self) -> InputTime {
+        self.time
+    }
+
+    fn device(&self) -> TestInputDevice {
+        TestInputDevice
+    }
+}
+
+impl PointerAxisEvent<TestInputBackend> for TestPointerAxisEvent {
+    fn amount(&self, _axis: Axis) -> Option<f64> {
+        None
+    }
+
+    fn amount_v120(&self, axis: Axis) -> Option<f64> {
+        Some(f64::from(match axis {
+            Axis::Horizontal => self.horizontal_v120,
+            Axis::Vertical => self.vertical_v120,
+        }))
+    }
+
+    fn source(&self) -> AxisSource {
+        AxisSource::Wheel
+    }
+
+    fn relative_direction(&self, _axis: Axis) -> AxisRelativeDirection {
+        AxisRelativeDirection::Identical
+    }
+}
+
 impl InputBackend for TestInputBackend {
     type Device = TestInputDevice;
     type KeyboardKeyEvent = TestKeyEvent;
-    type PointerAxisEvent = UnusedEvent;
+    type PointerAxisEvent = TestPointerAxisEvent;
     type PointerButtonEvent = TestPointerButtonEvent;
     type PointerMotionEvent = TestPointerRelativeMotionEvent;
     type PointerMotionAbsoluteEvent = TestPointerMotionEvent;
@@ -233,6 +303,16 @@ impl NickelSession {
                     time,
                     button_code: pointer_button_code(button),
                     state: button_state(state),
+                },
+            },
+            TestInput::PointerAxis {
+                horizontal_v120,
+                vertical_v120,
+            } => InputEvent::PointerAxis {
+                event: TestPointerAxisEvent {
+                    time,
+                    horizontal_v120,
+                    vertical_v120,
                 },
             },
             TestInput::ShellPointer { target } => return self.inject_shell_pointer(target),
@@ -295,19 +375,35 @@ impl NickelSession {
             self.inject_test_input(TestInput::PointerMove { x: approach_x, y })?;
         }
         self.inject_test_input(TestInput::PointerMove { x, y })?;
-        let button = match target.interaction {
+        let (button, click_count) = match target.interaction {
             PointerInteraction::Hover => return Ok(()),
-            PointerInteraction::LeftClick => TestPointerButton::Left,
-            PointerInteraction::RightClick => TestPointerButton::Right,
+            PointerInteraction::LeftClick => (TestPointerButton::Left, 1),
+            PointerInteraction::LeftDoubleClick => (TestPointerButton::Left, 2),
+            PointerInteraction::RightClick => (TestPointerButton::Right, 1),
+            PointerInteraction::LeftPress => {
+                return self.inject_test_input(TestInput::PointerButton {
+                    button: TestPointerButton::Left,
+                    state: InputState::Pressed,
+                });
+            }
+            PointerInteraction::LeftRelease => {
+                return self.inject_test_input(TestInput::PointerButton {
+                    button: TestPointerButton::Left,
+                    state: InputState::Released,
+                });
+            }
         };
-        self.inject_test_input(TestInput::PointerButton {
-            button,
-            state: InputState::Pressed,
-        })?;
-        self.inject_test_input(TestInput::PointerButton {
-            button,
-            state: InputState::Released,
-        })
+        for _ in 0..click_count {
+            self.inject_test_input(TestInput::PointerButton {
+                button,
+                state: InputState::Pressed,
+            })?;
+            self.inject_test_input(TestInput::PointerButton {
+                button,
+                state: InputState::Released,
+            })?;
+        }
+        Ok(())
     }
 
     fn inject_recovery_pointer(
@@ -365,22 +461,42 @@ impl NickelSession {
             .space
             .element_bbox(&window)
             .ok_or("managed window has no production geometry")?;
-        let x = geometry.loc.x + geometry.size.w / 2;
-        let y = geometry.loc.y + geometry.size.h / 2;
-        self.inject_test_input(TestInput::PointerMove { x, y })?;
-        let button = match interaction {
-            PointerInteraction::Hover => return Ok(()),
-            PointerInteraction::LeftClick => TestPointerButton::Left,
-            PointerInteraction::RightClick => TestPointerButton::Right,
-        };
-        self.inject_test_input(TestInput::PointerButton {
-            button,
-            state: InputState::Pressed,
-        })?;
-        self.inject_test_input(TestInput::PointerButton {
-            button,
-            state: InputState::Released,
+        let (x, y) = visible_point_in(geometry, |x, y| {
+            self.space
+                .element_under((f64::from(x), f64::from(y)))
+                .is_some_and(|(candidate, _)| candidate == &window)
         })
+        .ok_or("managed window has no visible production input point")?;
+        self.inject_test_input(TestInput::PointerMove { x, y })?;
+        let (button, click_count) = match interaction {
+            PointerInteraction::Hover => return Ok(()),
+            PointerInteraction::LeftClick => (TestPointerButton::Left, 1),
+            PointerInteraction::LeftDoubleClick => (TestPointerButton::Left, 2),
+            PointerInteraction::RightClick => (TestPointerButton::Right, 1),
+            PointerInteraction::LeftPress => {
+                return self.inject_test_input(TestInput::PointerButton {
+                    button: TestPointerButton::Left,
+                    state: InputState::Pressed,
+                });
+            }
+            PointerInteraction::LeftRelease => {
+                return self.inject_test_input(TestInput::PointerButton {
+                    button: TestPointerButton::Left,
+                    state: InputState::Released,
+                });
+            }
+        };
+        for _ in 0..click_count {
+            self.inject_test_input(TestInput::PointerButton {
+                button,
+                state: InputState::Pressed,
+            })?;
+            self.inject_test_input(TestInput::PointerButton {
+                button,
+                state: InputState::Released,
+            })?;
+        }
+        Ok(())
     }
 
     fn point_is_on_an_output(&self, x: i32, y: i32) -> bool {
@@ -411,6 +527,8 @@ fn linux_key_code(key: TestKey) -> u32 {
         TestKey::A => 30,
         TestKey::C => 46,
         TestKey::P => 25,
+        TestKey::V => 47,
+        TestKey::X => 45,
         TestKey::Enter => 28,
         TestKey::Escape => 1,
         TestKey::Tab => 15,
@@ -441,14 +559,21 @@ fn pointer_button_code(button: TestPointerButton) -> u32 {
 #[cfg(test)]
 mod tests {
     use nickel_session_protocol::{TestKey, TestPointerButton};
+    use smithay::backend::input::{Axis, AxisRelativeDirection, AxisSource, PointerAxisEvent};
+    use smithay::utils::Rectangle;
 
-    use super::{linux_key_code, pointer_button_code};
+    use super::{
+        TestInputBackend, TestPointerAxisEvent, linux_key_code, pointer_button_code,
+        visible_point_in,
+    };
 
     #[test]
     fn semantic_keys_map_to_linux_input_codes_at_the_backend_boundary() {
         assert_eq!(linux_key_code(TestKey::A), 30);
         assert_eq!(linux_key_code(TestKey::C), 46);
         assert_eq!(linux_key_code(TestKey::P), 25);
+        assert_eq!(linux_key_code(TestKey::V), 47);
+        assert_eq!(linux_key_code(TestKey::X), 45);
         assert_eq!(linux_key_code(TestKey::Enter), 28);
         assert_eq!(linux_key_code(TestKey::Escape), 1);
         assert_eq!(linux_key_code(TestKey::Tab), 15);
@@ -469,5 +594,41 @@ mod tests {
         assert_eq!(pointer_button_code(TestPointerButton::Left), 0x110);
         assert_eq!(pointer_button_code(TestPointerButton::Right), 0x111);
         assert_eq!(pointer_button_code(TestPointerButton::Middle), 0x112);
+    }
+
+    #[test]
+    fn wheel_deltas_map_to_v120_axes_at_the_backend_boundary() {
+        let event = TestPointerAxisEvent {
+            time: smithay::backend::input::InputTime::now(),
+            horizontal_v120: 120,
+            vertical_v120: -240,
+        };
+        assert_eq!(
+            <TestPointerAxisEvent as PointerAxisEvent<TestInputBackend>>::amount_v120(
+                &event,
+                Axis::Horizontal
+            ),
+            Some(120.0)
+        );
+        assert_eq!(
+            <TestPointerAxisEvent as PointerAxisEvent<TestInputBackend>>::amount_v120(
+                &event,
+                Axis::Vertical
+            ),
+            Some(-240.0)
+        );
+        assert_eq!(event.source(), AxisSource::Wheel);
+        assert_eq!(
+            event.relative_direction(Axis::Vertical),
+            AxisRelativeDirection::Identical
+        );
+    }
+
+    #[test]
+    fn semantic_window_point_selects_a_visible_sliver_instead_of_an_occluded_center() {
+        let geometry = Rectangle::new((100, 200).into(), (100, 80).into());
+        let point = visible_point_in(geometry, |x, _| x < 108);
+        assert!(point.is_some_and(|(x, y)| (100..108).contains(&x) && (200..280).contains(&y)));
+        assert_eq!(visible_point_in(geometry, |_, _| false), None);
     }
 }

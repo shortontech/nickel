@@ -40,6 +40,7 @@ pub struct Launcher {
     search_selected: usize,
     dashboard_projects: DashboardSection<Vec<DashboardProject>>,
     dashboard_account: DashboardSection<DashboardAccount>,
+    codex_available: bool,
     logout_available: bool,
 }
 
@@ -237,6 +238,7 @@ impl Launcher {
             search_selected: 0,
             dashboard_projects: DashboardSection::Loading,
             dashboard_account: DashboardSection::Loading,
+            codex_available: false,
             logout_available: true,
         };
         launcher.refresh();
@@ -333,6 +335,18 @@ impl Launcher {
 
     pub fn dashboard_projects(&self) -> &DashboardSection<Vec<DashboardProject>> {
         &self.dashboard_projects
+    }
+
+    pub fn codex_available(&self) -> bool {
+        self.codex_available
+    }
+
+    pub fn set_codex_available(&mut self, available: bool) -> bool {
+        if self.codex_available == available {
+            return false;
+        }
+        self.codex_available = available;
+        true
     }
 
     pub fn set_dashboard_projects(

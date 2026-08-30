@@ -1,5 +1,5 @@
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -16,7 +16,7 @@ use smithay::{
                 surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
                 utils::{ConstrainAlign, ConstrainScaleBehavior, constrain_render_elements},
             },
-            gles::{GlesRenderer, GlesTexture},
+            gles::{GlesRenderer, GlesTarget, GlesTexture},
             utils::draw_render_elements,
         },
         winit::{self, WinitEvent},
@@ -45,6 +45,16 @@ smithay::backend::renderer::element::render_elements! {
 struct WindowRenderGroup<E> {
     client: Vec<E>,
     frame: Vec<E>,
+}
+
+fn advance_output_capture(
+    pending: &mut Option<PathBuf>,
+    requested: Option<PathBuf>,
+) -> (Option<PathBuf>, bool) {
+    let ready = pending.take();
+    let request_another_frame = requested.is_some();
+    *pending = requested;
+    (ready, request_another_frame)
 }
 
 fn flatten_window_groups<E>(groups: Vec<WindowRenderGroup<E>>) -> Vec<E> {
@@ -95,6 +105,7 @@ pub fn init_winit(
     let mut damage_tracker = OutputDamageTracker::from_output(&output);
     let mut last_preview_capture = Instant::now() - Duration::from_secs(1);
     let mut last_preview_highlight = None;
+    let mut pending_output_capture = None;
     let frame_icons = crate::window_frame::FrameIcons::load();
 
     // SAFETY: startup is single-threaded and no child process is spawned until
@@ -145,8 +156,32 @@ pub fn init_winit(
                         damage_tracker = OutputDamageTracker::from_output(&output);
                     }
                     last_preview_highlight = state.preview_highlight;
+                    let image_copy_requested = state.has_pending_image_copy_frames(&output);
+                    let requested_output_capture = state.output_capture_path.take();
+                    if requested_output_capture.is_some() {
+                        state.output_capture_name = None;
+                    }
+                    let (output_capture_path, request_another_frame) =
+                        advance_output_capture(
+                            &mut pending_output_capture,
+                            requested_output_capture,
+                        );
+                    if request_another_frame {
+                        // Capture the following fully rendered frame. This prevents a surface
+                        // commit queued beside the capture request (notably an overlay unmap)
+                        // from exposing a compositor transition buffer to the screenshot.
+                        backend.window().request_redraw();
+                    }
+                    let capture_requested = image_copy_requested || output_capture_path.is_some();
+                    if capture_requested {
+                        // Buffer-age preservation is sufficient for presentation, but capture
+                        // reads the current backbuffer before it becomes the frontbuffer. Force a
+                        // complete repaint so undefined regions from a newly selected backbuffer
+                        // can never leak into screenshots or portal frames.
+                        damage_tracker = OutputDamageTracker::from_output(&output);
+                    }
 
-                    {
+                    let captured_frame = {
                         let (renderer, mut framebuffer) = backend.bind().unwrap();
                         smithay::desktop::space::render_output::<
                             _,
@@ -352,14 +387,83 @@ pub fn init_winit(
                                 .unwrap();
                             let _ = frame.finish().unwrap();
                         }
-                    }
+                        capture_requested.then(|| {
+                            let captured = (|| {
+                                let mut texture = Offscreen::<GlesTexture>::create_buffer(
+                                    renderer,
+                                    Fourcc::Abgr8888,
+                                    (size.w, size.h).into(),
+                                )
+                                .map_err(|error| error.to_string())?;
+                                let mut capture_framebuffer = renderer
+                                    .bind(&mut texture)
+                                    .map_err(|error| error.to_string())?;
+                                let mut capture_damage = OutputDamageTracker::from_output(&output);
+                                smithay::desktop::space::render_output::<
+                                    _,
+                                    WaylandSurfaceRenderElement<GlesRenderer>,
+                                    _,
+                                    _,
+                                >(
+                                    &output,
+                                    renderer,
+                                    &mut capture_framebuffer,
+                                    1.0,
+                                    0,
+                                    [&state.space],
+                                    &[],
+                                    &mut capture_damage,
+                                    [0.1, 0.1, 0.1, 1.0],
+                                )
+                                .map_err(|error| error.to_string())?;
+                                if !overlay_elements.is_empty() {
+                                    let mut frame = renderer
+                                        .render(
+                                            &mut capture_framebuffer,
+                                            size,
+                                            output.current_transform(),
+                                        )
+                                        .map_err(|error| error.to_string())?;
+                                    draw_render_elements(
+                                        &mut frame,
+                                        1.0,
+                                        &overlay_elements,
+                                        &[damage],
+                                    )
+                                    .map_err(|error| error.to_string())?;
+                                    frame
+                                        .finish()
+                                        .map_err(|error| error.to_string())?
+                                        .wait()
+                                        .map_err(|error| error.to_string())?;
+                                }
+                                capture_bound_framebuffer_rgba(
+                                    renderer,
+                                    &capture_framebuffer,
+                                    size,
+                                )
+                            })();
+                            // Offscreen capture and mapping leave EGL on another target. Re-enter
+                            // a frame on the window surface before the backend swaps it.
+                            let rebind = renderer
+                                .render(&mut framebuffer, size, output.current_transform())
+                                .and_then(|frame| frame.finish());
+                            if let Err(error) = rebind {
+                                return Err(error.to_string());
+                            }
+                            captured
+                        })
+                    };
                     backend.submit(Some(&[damage])).unwrap();
 
-                    if state.has_pending_image_copy_frames(&output) {
-                        match capture_output_rgba(&mut backend, size) {
+                    if image_copy_requested {
+                        match captured_frame
+                            .as_ref()
+                            .expect("requested capture has a framebuffer result")
+                        {
                             Ok(rgba) => state.complete_image_copy_frames(
                                 &output,
-                                &rgba,
+                                rgba,
                                 size.w as usize,
                                 size.h as usize,
                             ),
@@ -382,12 +486,18 @@ pub fn init_winit(
                         );
                     }
 
-                    let capture_response = state.output_capture_path.take().map(|path| {
-                        let result = capture_output(&mut backend, size, &path);
-                        (path, result)
-                    });
-
-                    if let Some((path, result)) = capture_response {
+                    if let Some(path) = output_capture_path {
+                        let captured_frame = captured_frame
+                            .as_ref()
+                            .expect("requested capture has a framebuffer result");
+                        let result = save_output_capture(
+                            captured_frame
+                                .as_ref()
+                                .map(Vec::as_slice)
+                                .map_err(String::as_str),
+                            size,
+                            &path,
+                        );
                         state.complete_output_capture(&path, result);
                     }
 
@@ -584,16 +694,16 @@ fn composited_window_elements(
     flatten_window_groups(groups)
 }
 
-fn capture_output(
-    backend: &mut winit::WinitGraphicsBackend<GlesRenderer>,
+fn save_output_capture(
+    rgba: Result<&[u8], &str>,
     size: smithay::utils::Size<i32, smithay::utils::Physical>,
     path: &Path,
 ) -> nickel_session_protocol::CaptureResult {
     let result = (|| -> Result<(), String> {
-        let rgba = capture_output_rgba(backend, size)?;
+        let rgba = rgba.map_err(str::to_owned)?;
         image::save_buffer(
             path,
-            &rgba,
+            rgba,
             size.w as u32,
             size.h as u32,
             image::ColorType::Rgba8,
@@ -608,18 +718,18 @@ fn capture_output(
     }
 }
 
-fn capture_output_rgba(
-    backend: &mut winit::WinitGraphicsBackend<GlesRenderer>,
+fn capture_bound_framebuffer_rgba(
+    renderer: &mut GlesRenderer,
+    framebuffer: &GlesTarget<'_>,
     size: smithay::utils::Size<i32, smithay::utils::Physical>,
 ) -> Result<Vec<u8>, String> {
     if size.w <= 0 || size.h <= 0 {
         return Err("output has no drawable size".into());
     }
-    let (renderer, framebuffer) = backend.bind().map_err(|error| error.to_string())?;
     let buffer_size = smithay::utils::Size::<i32, Buffer>::from((size.w, size.h));
     let region = Rectangle::<i32, Buffer>::from_size(buffer_size);
     let mapping = renderer
-        .copy_framebuffer(&framebuffer, region, Fourcc::Abgr8888)
+        .copy_framebuffer(framebuffer, region, Fourcc::Abgr8888)
         .map_err(|error| error.to_string())?;
     let mapped = renderer
         .map_texture(&mapping)
@@ -712,7 +822,9 @@ fn normalize_capture_rows(
 
 #[cfg(test)]
 mod tests {
-    use super::{WindowRenderGroup, flatten_window_groups};
+    use std::path::PathBuf;
+
+    use super::{WindowRenderGroup, advance_output_capture, flatten_window_groups};
 
     #[test]
     fn window_frames_stay_with_their_clients_in_stacking_order() {
@@ -736,5 +848,21 @@ mod tests {
                 "background-frame",
             ]
         );
+    }
+
+    #[test]
+    fn output_capture_waits_for_the_frame_after_its_request() {
+        let mut pending = None;
+        let request = PathBuf::from("capture.png");
+        assert_eq!(
+            advance_output_capture(&mut pending, Some(request.clone())),
+            (None, true)
+        );
+        assert_eq!(pending, Some(request.clone()));
+        assert_eq!(
+            advance_output_capture(&mut pending, None),
+            (Some(request), false)
+        );
+        assert_eq!(pending, None);
     }
 }

@@ -151,6 +151,7 @@ cargo run -p nickel-session --bin nickel-test-input -- outputs
 cargo run -p nickel-session --bin nickel-test-input -- surfaces
 cargo run -p nickel-session --bin nickel-test-input -- caches
 cargo run -p nickel-session --bin nickel-test-input -- move 64 700
+cargo run -p nickel-session --bin nickel-test-input -- wheel 0 -120
 cargo run -p nickel-session --bin nickel-test-input -- button left pressed
 cargo run -p nickel-session --bin nickel-test-input -- button left released
 ```

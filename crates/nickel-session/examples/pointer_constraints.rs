@@ -6,12 +6,12 @@
 
 use std::{num::NonZeroU32, rc::Rc};
 
+use nickel_input::{InputEvent, KeyCode, KeyEdge, PhysicalKey, PointerEvent};
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
-    event::{DeviceEvent, DeviceId, ElementState, WindowEvent},
+    event::{DeviceEvent, DeviceId, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop, OwnedDisplayHandle},
-    keyboard::{KeyCode, PhysicalKey},
     window::{CursorGrabMode, Window, WindowAttributes, WindowId},
 };
 
@@ -20,6 +20,7 @@ struct PointerConstraintProbe {
     window: Option<Rc<Window>>,
     surface: Option<softbuffer::Surface<OwnedDisplayHandle, Rc<Window>>>,
     constraint: ProbeConstraint,
+    input: nickel_input::winit::Adapter,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -37,6 +38,7 @@ impl PointerConstraintProbe {
             window: None,
             surface: None,
             constraint: ProbeConstraint::None,
+            input: nickel_input::winit::Adapter::default(),
         }
     }
 
@@ -97,6 +99,28 @@ impl ApplicationHandler for PointerConstraintProbe {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        for input in self.input.normalize(nickel_input::DeviceId(0), &event) {
+            match input {
+                InputEvent::Key(key) if key.edge == KeyEdge::Pressed && !key.repeat => {
+                    match key.physical {
+                        PhysicalKey::Code(KeyCode::Escape) => event_loop.exit(),
+                        PhysicalKey::Code(KeyCode::KeyP) => {
+                            let next = match self.constraint {
+                                ProbeConstraint::Locked => ProbeConstraint::Confined,
+                                ProbeConstraint::Confined => ProbeConstraint::None,
+                                ProbeConstraint::None => ProbeConstraint::Locked,
+                            };
+                            self.set_constraint(next);
+                        }
+                        _ => {}
+                    }
+                }
+                InputEvent::Pointer(PointerEvent::Axis {
+                    delta, discrete, ..
+                }) => println!("wheel dx={} dy={} discrete={discrete:?}", delta.x, delta.y),
+                _ => {}
+            }
+        }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Focused(true) if self.constraint == ProbeConstraint::None => {
@@ -129,22 +153,8 @@ impl ApplicationHandler for PointerConstraintProbe {
             WindowEvent::CursorMoved { position, .. } => {
                 println!("cursor x={} y={}", position.x, position.y);
             }
-            WindowEvent::KeyboardInput { event, .. }
-                if event.state == ElementState::Pressed
-                    && event.physical_key == PhysicalKey::Code(KeyCode::Escape) =>
-            {
-                event_loop.exit();
-            }
-            WindowEvent::KeyboardInput { event, .. }
-                if event.state == ElementState::Pressed
-                    && event.physical_key == PhysicalKey::Code(KeyCode::KeyP) =>
-            {
-                let next = match self.constraint {
-                    ProbeConstraint::Locked => ProbeConstraint::Confined,
-                    ProbeConstraint::Confined => ProbeConstraint::None,
-                    ProbeConstraint::None => ProbeConstraint::Locked,
-                };
-                self.set_constraint(next);
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                self.input.set_scale_factor(scale_factor);
             }
             _ => {}
         }

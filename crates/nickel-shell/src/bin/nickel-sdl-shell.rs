@@ -1,12 +1,12 @@
 use nickel_codex::ThreadId;
 use nickel_codex_ui::{ChatApplication, ConnectionStatus, ShellRequest, shell_application};
-use nickel_ui::{ApplicationHost, Point, Shortcut, UiEvent};
-use sdl3::{
-    keyboard::{Keycode, Mod},
-    mouse::MouseButton,
+use nickel_input::{
+    InputEvent, KeyCode, KeyEdge, LogicalKey, ModifierState, NamedKey, PointerButton, PointerEvent,
+    controller::{AxisDirection, ControllerButton, ControllerSignal},
 };
+use nickel_ui::{ApplicationHost, UiEvent};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     path::{Component, Path},
     time::{Duration, Instant},
 };
@@ -77,7 +77,6 @@ struct CodexSurfaces {
     project_menu_host: Option<ApplicationHost<ChatApplication>>,
     chats: Vec<CodexChatSurface>,
     writer_leases: WriterLeases,
-    cursors: HashMap<SurfaceId, Point>,
 }
 
 struct CodexChatSurface {
@@ -144,7 +143,6 @@ impl CodexSurfaces {
             project_menu_host: None,
             chats: Vec::new(),
             writer_leases: WriterLeases::default(),
-            cursors: HashMap::new(),
         })
     }
 
@@ -193,7 +191,6 @@ impl CodexSurfaces {
             if let Some(thread) = self.chats.remove(index).thread_id {
                 self.writer_leases.release(&thread);
             }
-            self.cursors.remove(&surface);
             shell.destroy_surface(surface);
         }
     }
@@ -480,12 +477,7 @@ fn handle_codex_event(
     event: &ShellEvent,
 ) -> Result<bool, String> {
     let surface = match event {
-        ShellEvent::PointerMoved { surface, .. }
-        | ShellEvent::PointerButton { surface, .. }
-        | ShellEvent::MouseWheel { surface, .. }
-        | ShellEvent::Key { surface, .. }
-        | ShellEvent::Text { surface, .. }
-        | ShellEvent::Ime { surface, .. }
+        ShellEvent::Input { surface, .. }
         | ShellEvent::FocusChanged { surface, .. }
         | ShellEvent::LogicalResize { surface, .. }
         | ShellEvent::PixelResize { surface, .. }
@@ -504,9 +496,12 @@ fn handle_codex_event(
     if matches!(
         event,
         ShellEvent::FocusChanged { focused: true, .. }
-            | ShellEvent::PointerButton {
-                button: MouseButton::Left,
-                pressed: true,
+            | ShellEvent::Input {
+                event: InputEvent::Pointer(PointerEvent::Button {
+                    button: PointerButton::Primary,
+                    edge: KeyEdge::Pressed,
+                    ..
+                }),
                 ..
             }
     ) {
@@ -528,11 +523,11 @@ fn handle_codex_event(
         && (matches!(event, ShellEvent::FocusChanged { focused: false, .. })
             || matches!(
                 event,
-                ShellEvent::Key {
-                    key: Some(Keycode::Escape),
-                    pressed: true,
+                ShellEvent::Input {
+                    event: InputEvent::Key(key),
                     ..
-                }
+                } if key.edge == KeyEdge::Pressed
+                    && key.logical == LogicalKey::Named(NamedKey::Escape)
             ))
     {
         state.hide_overlay(SurfaceRole::CodexProjectMenu);
@@ -553,150 +548,25 @@ fn handle_codex_event(
         }
         return Ok(true);
     }
-    let shortcut = match event {
-        ShellEvent::Key {
-            key: Some(Keycode::Return),
-            modifiers,
-            pressed: true,
-            ..
-        } if !modifiers.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD) => Some(Shortcut::Submit),
-        ShellEvent::Key {
-            key: Some(Keycode::Escape),
-            pressed: true,
-            ..
-        } => Some(Shortcut::Escape),
-        _ => None,
-    };
-    if let Some(shortcut) = shortcut
-        && codex
-            .host_mut(surface)
-            .is_some_and(|host| host.shortcut(shortcut))
-    {
-        codex.present(shell, surface)?;
-        return Ok(true);
-    }
-    let command = |modifiers: &Mod| {
-        modifiers.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD | Mod::LGUIMOD | Mod::RGUIMOD)
-    };
-    let ui_event = match event {
-        ShellEvent::PointerMoved { x, y, .. } => {
-            let point = Point { x: *x, y: *y };
-            codex.cursors.insert(surface, point);
-            Some(UiEvent::PointerMoved(point))
+    let outcome = match event {
+        ShellEvent::Input { event, .. } => {
+            let clipboard_text = shell.clipboard_text();
+            codex
+                .host_mut(surface)
+                .expect("Codex host exists")
+                .handle_input(event, clipboard_text.as_deref())
         }
-        ShellEvent::PointerButton {
-            button: MouseButton::Left,
-            pressed: true,
-            x,
-            y,
-            ..
-        } => Some(UiEvent::PointerPressed(Point { x: *x, y: *y })),
-        ShellEvent::PointerButton {
-            button: MouseButton::Left,
-            pressed: false,
-            x,
-            y,
-            ..
-        } => Some(UiEvent::PointerReleased(Point { x: *x, y: *y })),
-        ShellEvent::MouseWheel { x, y, .. } if x.abs() > y.abs() => {
-            Some(UiEvent::ScrollHorizontal {
-                point: codex.cursors.get(&surface).copied().unwrap_or_default(),
-                delta_x: -*x * 42.0,
-            })
-        }
-        ShellEvent::MouseWheel { y, .. } => Some(UiEvent::Scroll {
-            point: codex.cursors.get(&surface).copied().unwrap_or_default(),
-            delta_y: -*y * 42.0,
-        }),
-        ShellEvent::Text { value, .. } => Some(UiEvent::TextInput(value.clone())),
-        ShellEvent::Ime { value, .. } => Some(UiEvent::ImePreedit(value.clone())),
-        ShellEvent::FocusChanged { focused: false, .. } => Some(UiEvent::FocusLost),
-        ShellEvent::Key {
-            key: Some(Keycode::Return),
-            modifiers,
-            pressed: true,
-            ..
-        } if modifiers.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD) => {
-            Some(UiEvent::TextInput("\n".into()))
-        }
-        ShellEvent::Key {
-            key: Some(Keycode::Return),
-            pressed: true,
-            ..
-        } => Some(UiEvent::KeyboardActivate),
-        ShellEvent::Key {
-            key: Some(Keycode::Escape),
-            pressed: true,
-            ..
-        } => Some(UiEvent::Dismiss),
-        ShellEvent::Key {
-            key: Some(Keycode::Backspace),
-            pressed: true,
-            ..
-        } => Some(UiEvent::TextBackspace),
-        ShellEvent::Key {
-            key: Some(Keycode::Delete),
-            pressed: true,
-            ..
-        } => Some(UiEvent::TextDelete),
-        ShellEvent::Key {
-            key: Some(Keycode::Tab),
-            modifiers,
-            pressed: true,
-            ..
-        } if modifiers.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD) => Some(UiEvent::FocusPrevious),
-        ShellEvent::Key {
-            key: Some(Keycode::Tab),
-            pressed: true,
-            ..
-        } => Some(UiEvent::FocusNext),
-        ShellEvent::Key {
-            key: Some(Keycode::A),
-            modifiers,
-            pressed: true,
-            ..
-        } if command(modifiers) => Some(UiEvent::TextSelectAll),
-        ShellEvent::Key {
-            key: Some(Keycode::C),
-            modifiers,
-            pressed: true,
-            ..
-        } if command(modifiers) => Some(UiEvent::TextCopy),
-        ShellEvent::Key {
-            key: Some(Keycode::V),
-            modifiers,
-            pressed: true,
-            ..
-        } if command(modifiers) => shell.clipboard_text().map(UiEvent::TextPaste),
-        ShellEvent::Key {
-            key: Some(Keycode::Left),
-            modifiers,
-            pressed: true,
-            ..
-        } => Some(UiEvent::TextMoveLeft {
-            extend_selection: modifiers.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD),
-        }),
-        ShellEvent::Key {
-            key: Some(Keycode::Right),
-            modifiers,
-            pressed: true,
-            ..
-        } => Some(UiEvent::TextMoveRight {
-            extend_selection: modifiers.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD),
-        }),
-        _ => None,
-    };
-    if let Some(ui_event) = ui_event {
-        let outcome = codex
+        ShellEvent::FocusChanged { focused: false, .. } => codex
             .host_mut(surface)
             .expect("Codex host exists")
-            .handle_event(ui_event);
-        if let Some(text) = outcome.clipboard_text {
-            shell.set_clipboard_text(&text);
-        }
-        if outcome.changed {
-            codex.present(shell, surface)?;
-        }
+            .handle_event(UiEvent::FocusLost),
+        _ => nickel_ui::HostEventOutcome::default(),
+    };
+    if let Some(text) = outcome.clipboard_text {
+        shell.set_clipboard_text(&text);
+    }
+    if outcome.changed {
+        codex.present(shell, surface)?;
     }
     if codex.open_requests(shell)? {
         state.hide_overlay(SurfaceRole::CodexProjectMenu);
@@ -705,6 +575,241 @@ fn handle_codex_event(
     codex.resume_requests();
     codex.release_failed_resumes();
     Ok(true)
+}
+
+fn handle_shell_input(
+    shell: &mut SdlShell,
+    state: &mut LiveShell,
+    codex: &mut CodexSurfaces,
+    surface: SurfaceId,
+    event: InputEvent,
+    hover_repaint: &mut Option<(SurfaceRole, Instant)>,
+) -> Result<(), String> {
+    let Some(role) = shell.surface(surface).map(|entry| entry.role()) else {
+        return Ok(());
+    };
+    match event {
+        InputEvent::Text(nickel_input::TextEvent::Commit { text, .. }) => {
+            if role == SurfaceRole::Lock {
+                if state.insert_lock_text(&text) {
+                    render_role(shell, state, SurfaceRole::Lock)?;
+                }
+                return Ok(());
+            }
+            let started = Instant::now();
+            let was_dashboard = state.launcher_is_dashboard();
+            if state.insert_launcher_text(&text) {
+                render_role(shell, state, role)?;
+                if was_dashboard && std::env::var_os("NICKEL_PERF_METRICS").is_some() {
+                    eprintln!(
+                        "launcher_first_character_ms={:.3}",
+                        started.elapsed().as_secs_f64() * 1_000.0
+                    );
+                }
+            }
+        }
+        InputEvent::Text(nickel_input::TextEvent::Preedit { text, .. }) => {
+            if role == SurfaceRole::Launcher && state.set_launcher_preedit(&text) {
+                render_role(shell, state, SurfaceRole::Launcher)?;
+            }
+        }
+        InputEvent::Key(key) if key.edge == KeyEdge::Pressed => {
+            let keycode = match key.physical {
+                nickel_input::PhysicalKey::Code(key) => Some(key),
+                nickel_input::PhysicalKey::Native(_) => None,
+            };
+            let (width, height) = shell
+                .surface(surface)
+                .map(|entry| entry.window().size())
+                .unwrap_or_default();
+            let changed = match role {
+                SurfaceRole::Lock => state.lock_key(keycode),
+                SurfaceRole::ControlCenter => state.control_key(keycode, width, height),
+                SurfaceRole::WindowPreview => state.preview_key(keycode),
+                SurfaceRole::WindowContextMenu => state.window_menu_key(keycode),
+                SurfaceRole::Notification => state.notification_key(keycode),
+                SurfaceRole::Panel => state.preview_key(keycode),
+                SurfaceRole::Launcher => state.launcher_key(keycode, &key.modifiers),
+                SurfaceRole::Screenshot => state.screenshot_key(keycode),
+                _ => false,
+            };
+            if changed {
+                sync_visibility(shell, state);
+                render_role(shell, state, role)?;
+                if matches!(role, SurfaceRole::Panel | SurfaceRole::WindowPreview) {
+                    render_role(shell, state, SurfaceRole::WindowPreview)?;
+                    render_role(shell, state, SurfaceRole::WindowContextMenu)?;
+                }
+            }
+        }
+        InputEvent::Pointer(PointerEvent::Button {
+            button,
+            edge,
+            position: Some(position),
+            ..
+        }) => {
+            let x = position.x as f32;
+            let y = position.y as f32;
+            if role == SurfaceRole::Screenshot {
+                let (width, height) = shell
+                    .surface(surface)
+                    .map(|entry| entry.window().size())
+                    .unwrap_or_default();
+                let changed = match edge {
+                    KeyEdge::Pressed => state.screenshot_pointer_pressed(x, y, width, height),
+                    KeyEdge::Released => state.screenshot_pointer_released(),
+                };
+                if changed {
+                    sync_visibility(shell, state);
+                    render_role(shell, state, SurfaceRole::Screenshot)?;
+                }
+            } else if edge == KeyEdge::Pressed && role == SurfaceRole::WindowPreview {
+                if state.preview_click(x, y, button == PointerButton::Secondary) {
+                    sync_visibility(shell, state);
+                    state.sync_transient_overlays();
+                    render_role(shell, state, SurfaceRole::WindowPreview)?;
+                    render_role(shell, state, SurfaceRole::WindowContextMenu)?;
+                }
+            } else if edge == KeyEdge::Pressed && role == SurfaceRole::WindowContextMenu {
+                if state.window_menu_click(x, y) {
+                    sync_visibility(shell, state);
+                }
+            } else if edge == KeyEdge::Pressed && role == SurfaceRole::Panel {
+                if let Some(display) = shell.surface_display_geometry(surface) {
+                    state.set_panel_origin_x(display.x);
+                }
+                let width = shell
+                    .surface(surface)
+                    .map(|entry| entry.window().size().0)
+                    .unwrap_or_default();
+                if state.panel_click(x, width) {
+                    sync_visibility(shell, state);
+                    state.sync_transient_overlays();
+                    focus_visible_overlay(shell, state);
+                    render_role(shell, state, SurfaceRole::ControlCenter)?;
+                    render_role(shell, state, SurfaceRole::WindowPreview)?;
+                    if state.surface_visible(SurfaceRole::CodexProjectMenu) {
+                        codex.present(shell, codex.project_menu)?;
+                    }
+                }
+            } else if edge == KeyEdge::Pressed && role == SurfaceRole::Notification {
+                let (width, height) = shell
+                    .surface(surface)
+                    .map(|entry| entry.window().size())
+                    .unwrap_or_default();
+                if state.notification_click(x, y, width, height) {
+                    sync_visibility(shell, state);
+                }
+            } else if edge == KeyEdge::Pressed
+                && matches!(role, SurfaceRole::Launcher | SurfaceRole::ControlCenter)
+            {
+                let (width, height) = shell
+                    .surface(surface)
+                    .map(|entry| entry.window().size())
+                    .unwrap_or_default();
+                let changed = match role {
+                    SurfaceRole::Launcher => state.launcher_click(x, y),
+                    SurfaceRole::ControlCenter => state.control_click(x, y, width, height),
+                    _ => false,
+                };
+                if changed {
+                    sync_visibility(shell, state);
+                    render_role(shell, state, role)?;
+                }
+            }
+        }
+        InputEvent::Pointer(PointerEvent::Motion { position, .. }) => {
+            let x = position.x as f32;
+            let y = position.y as f32;
+            if role == SurfaceRole::Screenshot {
+                let (width, height) = shell
+                    .surface(surface)
+                    .map(|entry| entry.window().size())
+                    .unwrap_or_default();
+                if state.screenshot_pointer_moved(x, y, width, height) {
+                    render_role(shell, state, SurfaceRole::Screenshot)?;
+                }
+            } else if role == SurfaceRole::Panel {
+                if let Some(display) = shell.surface_display_geometry(surface) {
+                    state.set_panel_origin_x(display.x);
+                }
+                let width = shell
+                    .surface(surface)
+                    .map(|entry| entry.window().size().0)
+                    .unwrap_or_default();
+                if state.panel_pointer_moved(x, width) {
+                    sync_visibility(shell, state);
+                    state.sync_transient_overlays();
+                    render_role(shell, state, SurfaceRole::WindowPreview)?;
+                    *hover_repaint = Some((
+                        SurfaceRole::Panel,
+                        Instant::now() + Duration::from_millis(24),
+                    ));
+                }
+            } else if role == SurfaceRole::WindowPreview {
+                if state.preview_pointer_moved(x, y) {
+                    *hover_repaint = Some((
+                        SurfaceRole::WindowPreview,
+                        Instant::now() + Duration::from_millis(24),
+                    ));
+                }
+            } else if matches!(role, SurfaceRole::Launcher | SurfaceRole::ControlCenter)
+                && state.pointer_moved(x, y)
+            {
+                *hover_repaint = Some((role, Instant::now() + Duration::from_millis(24)));
+            }
+        }
+        InputEvent::Pointer(PointerEvent::Axis { delta, .. }) => {
+            if matches!(role, SurfaceRole::Launcher | SurfaceRole::ControlCenter) {
+                let started = Instant::now();
+                if state.scroll(delta.y as f32) {
+                    render_role(shell, state, role)?;
+                    if std::env::var_os("NICKEL_PERF_METRICS").is_some() {
+                        eprintln!(
+                            "launcher_scroll_frame_ms={:.3}",
+                            started.elapsed().as_secs_f64() * 1_000.0
+                        );
+                    }
+                }
+            }
+        }
+        InputEvent::FocusGained { .. }
+        | InputEvent::FocusLost { .. }
+        | InputEvent::DeviceRemoved { .. }
+        | InputEvent::Key(_)
+        | InputEvent::Pointer(_)
+        | InputEvent::Touch(_) => {}
+    }
+    Ok(())
+}
+
+fn controller_navigation_key(signal: &ControllerSignal) -> Option<KeyCode> {
+    match signal {
+        ControllerSignal::Button {
+            button,
+            edge: KeyEdge::Pressed,
+            ..
+        } => Some(match button {
+            ControllerButton::DPadUp => KeyCode::ArrowUp,
+            ControllerButton::DPadDown => KeyCode::ArrowDown,
+            ControllerButton::DPadLeft => KeyCode::ArrowLeft,
+            ControllerButton::DPadRight => KeyCode::ArrowRight,
+            ControllerButton::South => KeyCode::Enter,
+            ControllerButton::East | ControllerButton::Select => KeyCode::Escape,
+            _ => return None,
+        }),
+        ControllerSignal::Direction {
+            direction,
+            edge: KeyEdge::Pressed,
+            ..
+        } => Some(match direction {
+            AxisDirection::Up => KeyCode::ArrowUp,
+            AxisDirection::Down => KeyCode::ArrowDown,
+            AxisDirection::Left => KeyCode::ArrowLeft,
+            AxisDirection::Right => KeyCode::ArrowRight,
+        }),
+        _ => None,
+    }
 }
 
 fn main() -> Result<(), String> {
@@ -717,8 +822,13 @@ fn main() -> Result<(), String> {
     shell.create_shell_surfaces()?;
     let mut state = LiveShell::new()?;
     let mut codex = CodexSurfaces::new(&shell)?;
-    codex.ensure_project_menu(&shell)?;
-    let hotkey_rx = platform::launcher_hotkey_receiver();
+    let hotkey_feed = platform::launcher_hotkey_receiver();
+    tracing::info!(
+        ownership = ?hotkey_feed.ownership,
+        capability = ?hotkey_feed.capability,
+        "global shortcut adapter initialized"
+    );
+    let hotkey_rx = hotkey_feed.receiver;
     let event_sender = shell.event_sender();
     std::thread::Builder::new()
         .name("nickel-shortcut-events".into())
@@ -762,6 +872,9 @@ fn main() -> Result<(), String> {
         elapsed_ms = launcher_warm_started.elapsed().as_secs_f64() * 1_000.0,
         "SDL launcher presenter and frame prewarmed"
     );
+    if let Err(error) = codex.ensure_project_menu(&shell) {
+        tracing::warn!(%error, "Codex integration is unavailable");
+    }
     let mut refresh_deadline = Instant::now() + REFRESH_INTERVAL;
     let mut system_refresh_deadline = Instant::now() + SYSTEM_REFRESH_INTERVAL;
     let mut hover_repaint: Option<(SurfaceRole, Instant)> = None;
@@ -799,7 +912,68 @@ fn main() -> Result<(), String> {
                     render_role(&mut shell, &mut state, SurfaceRole::Launcher)?;
                     render_role(&mut shell, &mut state, SurfaceRole::ControlCenter)?;
                     render_role(&mut shell, &mut state, SurfaceRole::Lock)?;
+                    render_role(&mut shell, &mut state, SurfaceRole::Screenshot)?;
                 }
+            }
+            Some(ShellEvent::Controller(signal)) => {
+                if matches!(
+                    signal,
+                    ControllerSignal::Button {
+                        button: ControllerButton::Guide,
+                        edge: KeyEdge::Pressed,
+                        repeat: false,
+                        ..
+                    }
+                ) {
+                    if state.global_shortcut(platform::GlobalShortcut::ShowLauncher) {
+                        sync_visibility(&mut shell, &state);
+                        focus_visible_overlay(&mut shell, &state);
+                        render_role(&mut shell, &mut state, SurfaceRole::Launcher)?;
+                    }
+                    continue;
+                }
+                let Some(key) = controller_navigation_key(&signal) else {
+                    continue;
+                };
+                let Some(surface) = shell
+                    .surfaces()
+                    .find(|surface| surface.window().has_input_focus())
+                    .map(|surface| surface.id())
+                else {
+                    continue;
+                };
+                let Some(entry) = shell.surface(surface) else {
+                    continue;
+                };
+                let role = entry.role();
+                let (width, height) = entry.window().size();
+                let changed = match role {
+                    SurfaceRole::Lock => state.lock_key(Some(key)),
+                    SurfaceRole::ControlCenter => state.control_key(Some(key), width, height),
+                    SurfaceRole::WindowPreview => state.preview_key(Some(key)),
+                    SurfaceRole::WindowContextMenu => state.window_menu_key(Some(key)),
+                    SurfaceRole::Notification => state.notification_key(Some(key)),
+                    SurfaceRole::Panel => state.preview_key(Some(key)),
+                    SurfaceRole::Launcher => {
+                        state.launcher_key(Some(key), &ModifierState::default())
+                    }
+                    SurfaceRole::Screenshot => state.screenshot_key(Some(key)),
+                    _ => false,
+                };
+                if changed {
+                    sync_visibility(&mut shell, &state);
+                    render_role(&mut shell, &mut state, role)?;
+                }
+            }
+            Some(ShellEvent::Input { surface, event }) => {
+                handle_shell_input(
+                    &mut shell,
+                    &mut state,
+                    &mut codex,
+                    surface,
+                    event,
+                    &mut hover_repaint,
+                )?;
             }
             Some(ShellEvent::CloseRequested(surface))
                 if shell
@@ -810,147 +984,6 @@ fn main() -> Result<(), String> {
                 sync_visibility(&mut shell, &state);
             }
             Some(ShellEvent::Quit) | Some(ShellEvent::CloseRequested(_)) => break,
-            Some(ShellEvent::PointerButton {
-                surface,
-                pressed: true,
-                x,
-                y,
-                ..
-            }) if shell
-                .surface(surface)
-                .is_some_and(|entry| entry.role() == SurfaceRole::Screenshot) =>
-            {
-                let (width, height) = shell
-                    .surface(surface)
-                    .map(|entry| entry.window().size())
-                    .unwrap_or_default();
-                if state.screenshot_pointer_pressed(x, y, width, height) {
-                    sync_visibility(&mut shell, &state);
-                    render_role(&mut shell, &mut state, SurfaceRole::Screenshot)?;
-                }
-            }
-            Some(ShellEvent::PointerButton {
-                surface,
-                pressed: false,
-                ..
-            }) if shell
-                .surface(surface)
-                .is_some_and(|entry| entry.role() == SurfaceRole::Screenshot) =>
-            {
-                if state.screenshot_pointer_released() {
-                    render_role(&mut shell, &mut state, SurfaceRole::Screenshot)?;
-                }
-            }
-            Some(ShellEvent::PointerButton {
-                surface,
-                pressed: true,
-                button,
-                x,
-                y,
-            }) if shell
-                .surface(surface)
-                .is_some_and(|entry| matches!(entry.role(), SurfaceRole::WindowPreview)) =>
-            {
-                if state.preview_click(x, y, button == MouseButton::Right) {
-                    sync_visibility(&mut shell, &state);
-                    state.sync_transient_overlays();
-                    render_role(&mut shell, &mut state, SurfaceRole::WindowPreview)?;
-                    render_role(&mut shell, &mut state, SurfaceRole::WindowContextMenu)?;
-                }
-            }
-            Some(ShellEvent::PointerButton {
-                surface,
-                pressed: true,
-                x,
-                y,
-                ..
-            }) if shell
-                .surface(surface)
-                .is_some_and(|entry| entry.role() == SurfaceRole::WindowContextMenu) =>
-            {
-                if state.window_menu_click(x, y) {
-                    sync_visibility(&mut shell, &state);
-                }
-            }
-            Some(ShellEvent::PointerButton {
-                surface,
-                pressed: true,
-                x,
-                ..
-            }) if shell
-                .surface(surface)
-                .is_some_and(|entry| entry.role() == SurfaceRole::Panel) =>
-            {
-                if let Some(display) = shell.surface_display_geometry(surface) {
-                    state.set_panel_origin_x(display.x);
-                }
-                let width = shell
-                    .surface(surface)
-                    .map(|entry| entry.window().size().0)
-                    .unwrap_or_default();
-                if state.panel_click(x, width) {
-                    sync_visibility(&mut shell, &state);
-                    state.sync_transient_overlays();
-                    focus_visible_overlay(&mut shell, &state);
-                    // The launcher owns a persistent accelerated presenter and a
-                    // pre-rendered buffer. Showing it must not synchronously
-                    // rebuild and submit the whole scene on the click path.
-                    render_role(&mut shell, &mut state, SurfaceRole::ControlCenter)?;
-                    render_role(&mut shell, &mut state, SurfaceRole::WindowPreview)?;
-                    if state.surface_visible(SurfaceRole::CodexProjectMenu) {
-                        codex.present(&mut shell, codex.project_menu)?;
-                    }
-                }
-            }
-            Some(ShellEvent::PointerButton {
-                surface,
-                pressed: true,
-                x,
-                y,
-                ..
-            }) if shell
-                .surface(surface)
-                .is_some_and(|entry| entry.role() == SurfaceRole::Notification) =>
-            {
-                let (width, height) = shell
-                    .surface(surface)
-                    .map(|entry| entry.window().size())
-                    .unwrap_or_default();
-                if state.notification_click(x, y, width, height) {
-                    sync_visibility(&mut shell, &state);
-                }
-            }
-            Some(ShellEvent::PointerButton {
-                surface,
-                pressed: true,
-                x,
-                y,
-                ..
-            }) if shell.surface(surface).is_some_and(|entry| {
-                matches!(
-                    entry.role(),
-                    SurfaceRole::Launcher | SurfaceRole::ControlCenter
-                )
-            }) =>
-            {
-                let role = shell
-                    .surface(surface)
-                    .map(|entry| entry.role())
-                    .unwrap_or(SurfaceRole::Desktop);
-                let (width, height) = shell
-                    .surface(surface)
-                    .map(|entry| entry.window().size())
-                    .unwrap_or_default();
-                let changed = match role {
-                    SurfaceRole::Launcher => state.launcher_click(x, y),
-                    SurfaceRole::ControlCenter => state.control_click(x, y, width, height),
-                    _ => false,
-                };
-                if changed {
-                    sync_visibility(&mut shell, &state);
-                    render_role(&mut shell, &mut state, role)?;
-                }
-            }
             // SDL reports an initial focus loss while a newly shown Wayland
             // surface is waiting for the compositor's focus configure. Hiding
             // an overlay here races its first frame and leaves a brief blank
@@ -992,130 +1025,6 @@ fn main() -> Result<(), String> {
                     overlay_focus_loss = None;
                 }
             }
-            Some(ShellEvent::Text { surface, value }) => {
-                if shell
-                    .surface(surface)
-                    .is_some_and(|entry| entry.role() == SurfaceRole::Lock)
-                {
-                    if state.insert_lock_text(&value) {
-                        render_role(&mut shell, &mut state, SurfaceRole::Lock)?;
-                    }
-                    continue;
-                }
-                let started = Instant::now();
-                let was_dashboard = state.launcher_is_dashboard();
-                if state.insert_launcher_text(&value)
-                    && let Some(role) = shell.surface(surface).map(|entry| entry.role())
-                {
-                    render_role(&mut shell, &mut state, role)?;
-                    if was_dashboard && std::env::var_os("NICKEL_PERF_METRICS").is_some() {
-                        eprintln!(
-                            "launcher_first_character_ms={:.3}",
-                            started.elapsed().as_secs_f64() * 1_000.0
-                        );
-                    }
-                }
-            }
-            Some(ShellEvent::Ime { surface, value }) => {
-                if shell
-                    .surface(surface)
-                    .is_some_and(|entry| entry.role() == SurfaceRole::Launcher)
-                    && state.set_launcher_preedit(&value)
-                {
-                    render_role(&mut shell, &mut state, SurfaceRole::Launcher)?;
-                }
-            }
-            Some(ShellEvent::Key {
-                surface,
-                key,
-                modifiers,
-                pressed: true,
-                ..
-            }) => {
-                if shell
-                    .surface(surface)
-                    .is_some_and(|entry| entry.role() == SurfaceRole::Lock)
-                {
-                    if state.lock_key(key) {
-                        render_role(&mut shell, &mut state, SurfaceRole::Lock)?;
-                    }
-                    continue;
-                }
-                let Some(entry) = shell.surface(surface) else {
-                    continue;
-                };
-                let role = entry.role();
-                let (width, height) = entry.window().size();
-                let changed = match role {
-                    SurfaceRole::ControlCenter => state.control_key(key, width, height),
-                    SurfaceRole::WindowPreview => state.preview_key(key),
-                    SurfaceRole::WindowContextMenu => state.window_menu_key(key),
-                    SurfaceRole::Notification => state.notification_key(key),
-                    SurfaceRole::Panel => state.preview_key(key),
-                    SurfaceRole::Launcher => state.launcher_key(key, modifiers),
-                    SurfaceRole::Screenshot => state.screenshot_key(key),
-                    _ => false,
-                };
-                if changed {
-                    sync_visibility(&mut shell, &state);
-                    render_role(&mut shell, &mut state, role)?;
-                    if matches!(role, SurfaceRole::Panel | SurfaceRole::WindowPreview) {
-                        render_role(&mut shell, &mut state, SurfaceRole::WindowPreview)?;
-                        render_role(&mut shell, &mut state, SurfaceRole::WindowContextMenu)?;
-                    }
-                }
-            }
-            Some(ShellEvent::PointerMoved { surface, x, y }) => {
-                let role = shell.surface(surface).map(|entry| entry.role());
-                if role == Some(SurfaceRole::Screenshot) {
-                    let (width, height) = shell
-                        .surface(surface)
-                        .map(|entry| entry.window().size())
-                        .unwrap_or_default();
-                    if state.screenshot_pointer_moved(x, y, width, height) {
-                        render_role(&mut shell, &mut state, SurfaceRole::Screenshot)?;
-                    }
-                    continue;
-                }
-                if role == Some(SurfaceRole::Panel) {
-                    if let Some(display) = shell.surface_display_geometry(surface) {
-                        state.set_panel_origin_x(display.x);
-                    }
-                    let width = shell
-                        .surface(surface)
-                        .map(|entry| entry.window().size().0)
-                        .unwrap_or_default();
-                    if state.panel_pointer_moved(x, width) {
-                        sync_visibility(&mut shell, &state);
-                        state.sync_transient_overlays();
-                        render_role(&mut shell, &mut state, SurfaceRole::WindowPreview)?;
-                        hover_repaint = Some((
-                            SurfaceRole::Panel,
-                            Instant::now() + Duration::from_millis(24),
-                        ));
-                    }
-                    continue;
-                }
-                if role == Some(SurfaceRole::WindowPreview) {
-                    if state.preview_pointer_moved(x, y) {
-                        hover_repaint = Some((
-                            SurfaceRole::WindowPreview,
-                            Instant::now() + Duration::from_millis(24),
-                        ));
-                    }
-                    continue;
-                }
-                if !matches!(
-                    role,
-                    Some(SurfaceRole::Launcher | SurfaceRole::ControlCenter)
-                ) {
-                    continue;
-                }
-                if state.pointer_moved(x, y) {
-                    hover_repaint =
-                        Some((role.unwrap(), Instant::now() + Duration::from_millis(24)));
-                }
-            }
             Some(ShellEvent::PointerEntered {
                 surface,
                 entered: false,
@@ -1146,25 +1055,6 @@ fn main() -> Result<(), String> {
                 }
             }
             Some(ShellEvent::PointerEntered { .. }) => {}
-            Some(ShellEvent::MouseWheel { surface, y, .. }) => {
-                let started = Instant::now();
-                let role = shell.surface(surface).map(|entry| entry.role());
-                if !matches!(
-                    role,
-                    Some(SurfaceRole::Launcher | SurfaceRole::ControlCenter)
-                ) {
-                    continue;
-                }
-                if state.scroll(y) {
-                    render_role(&mut shell, &mut state, role.unwrap_or(SurfaceRole::Desktop))?;
-                    if std::env::var_os("NICKEL_PERF_METRICS").is_some() {
-                        eprintln!(
-                            "launcher_scroll_frame_ms={:.3}",
-                            started.elapsed().as_secs_f64() * 1_000.0
-                        );
-                    }
-                }
-            }
             Some(ShellEvent::DisplayTopologyChanged) => {
                 shell.sync_display_geometry()?;
                 sync_visibility(&mut shell, &state);
@@ -1233,15 +1123,27 @@ fn main() -> Result<(), String> {
         }
         if Instant::now() >= refresh_deadline {
             let mut codex_redraw = Vec::new();
-            if codex
+            let project_menu_changed = codex
                 .project_menu_host
                 .as_mut()
-                .is_some_and(|host| host.poll())
-            {
+                .is_some_and(|host| host.poll());
+            if project_menu_changed {
                 codex_redraw.push(codex.project_menu);
+                if let Some(host) = codex.project_menu_host.as_mut() {
+                    let snapshot = &host.application_mut().state;
+                    tracing::info!(
+                        status = ?snapshot.status,
+                        authenticated = snapshot.account.authenticated,
+                        project_count = snapshot.projects.len(),
+                        "Codex project discovery changed"
+                    );
+                }
             }
             if let Some(host) = codex.project_menu_host.as_mut() {
                 let snapshot = &host.application_mut().state;
+                let codex_available =
+                    snapshot.status == ConnectionStatus::Ready && snapshot.account.authenticated;
+                let availability_changed = state.set_codex_available(codex_available);
                 let projects = match snapshot.status {
                     ConnectionStatus::Loading => DashboardSection::Loading,
                     ConnectionStatus::Ready if snapshot.thread_snapshot_available => {
@@ -1283,6 +1185,10 @@ fn main() -> Result<(), String> {
                     && state.surface_visible(SurfaceRole::Launcher)
                 {
                     render_role(&mut shell, &mut state, SurfaceRole::Launcher)?;
+                }
+                if availability_changed {
+                    sync_visibility(&mut shell, &state);
+                    render_all(&mut shell, &mut state)?;
                 }
             }
             for chat in &mut codex.chats {

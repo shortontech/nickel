@@ -2,15 +2,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use nickel_input::{DeviceId, InputEvent, KeyCode, KeyEdge, PhysicalKey};
 use nickel_shapes_test::{
     Lod, Mesh, OrganismMeshCache, OrganismRecipe, creature_state, generate_sculpt_experiment,
     render,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, KeyEvent, WindowEvent};
+use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowAttributes, WindowId};
 
 mod gpu;
@@ -215,6 +215,7 @@ struct ShapesApp {
     sculpt_mesh: Option<Mesh>,
     started: Instant,
     last_angle: f32,
+    input: nickel_input::winit::Adapter,
 }
 
 impl ShapesApp {
@@ -228,6 +229,7 @@ impl ShapesApp {
             sculpt_mesh: None,
             started: Instant::now(),
             last_angle: 0.0,
+            input: nickel_input::winit::Adapter::default(),
         }
     }
 
@@ -257,11 +259,14 @@ impl ShapesApp {
         }
     }
 
-    fn handle_key(&mut self, event_loop: &ActiveEventLoop, event: KeyEvent) {
-        if event.state != ElementState::Pressed || event.repeat {
+    fn handle_input(&mut self, event_loop: &ActiveEventLoop, event: InputEvent) {
+        let InputEvent::Key(event) = event else {
+            return;
+        };
+        if event.edge != KeyEdge::Pressed || event.repeat {
             return;
         }
-        match event.physical_key {
+        match event.physical {
             PhysicalKey::Code(KeyCode::Escape) => event_loop.exit(),
             PhysicalKey::Code(KeyCode::Digit1) => self.set_lod(Lod::Distant),
             PhysicalKey::Code(KeyCode::Digit2) => self.set_lod(Lod::Gameplay),
@@ -333,9 +338,11 @@ impl ApplicationHandler for ShapesApp {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        for input in self.input.normalize(DeviceId(0), &event) {
+            self.handle_input(event_loop, input);
+        }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::KeyboardInput { event, .. } => self.handle_key(event_loop, event),
             WindowEvent::RedrawRequested => self.draw(),
             WindowEvent::Resized(size) => {
                 if let Some(preview) = &mut self.preview {
@@ -344,6 +351,9 @@ impl ApplicationHandler for ShapesApp {
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
+            }
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                self.input.set_scale_factor(scale_factor);
             }
             _ => {}
         }

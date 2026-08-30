@@ -1,9 +1,10 @@
 //! Cross-policy semantic shell scenarios found during the test-authority audit.
 
 use nickel_core::focus::{FocusRequest, FocusTransaction};
-use nickel_core::hotkeys::{Hotkey, HotkeyAction, KeyEdge};
+use nickel_core::hotkeys::{HotkeyAction, KeyCode, KeyEdge};
 use nickel_core::scenario::{
-    ClickTarget, Key, LauncherEffect, RecordedEffect, Surface, SurfaceIdentity, scenario,
+    ClickTarget, Key, LauncherEffect, RecordedEffect, ScreenshotEffect, Surface, SurfaceIdentity,
+    scenario,
 };
 use nickel_core::task_switcher::TaskSwitchEffect;
 
@@ -17,12 +18,12 @@ fn repeated_alt_tab_edges_cycle_once_per_press() {
         .app("browser")
         .window("terminal")
         .app("terminal")
-        .key_edge(Hotkey::Alt, KeyEdge::Pressed)
-        .key_edge(Hotkey::Tab, KeyEdge::Pressed)
-        .key_edge(Hotkey::Tab, KeyEdge::Released)
-        .key_edge(Hotkey::Tab, KeyEdge::Pressed)
-        .key_edge(Hotkey::Tab, KeyEdge::Released)
-        .key_edge(Hotkey::Alt, KeyEdge::Released)
+        .key_edge(KeyCode::AltLeft, KeyEdge::Pressed)
+        .key_edge(KeyCode::Tab, KeyEdge::Pressed)
+        .key_edge(KeyCode::Tab, KeyEdge::Released)
+        .key_edge(KeyCode::Tab, KeyEdge::Pressed)
+        .key_edge(KeyCode::Tab, KeyEdge::Released)
+        .key_edge(KeyCode::AltLeft, KeyEdge::Released)
         .expect_active("terminal")
         .expect_actions(&[
             HotkeyAction::SwitchNext,
@@ -131,8 +132,8 @@ fn alt_without_a_switch_is_a_noop() {
         .active()
         .window("other")
         .app("browser")
-        .key_edge(Hotkey::Alt, KeyEdge::Pressed)
-        .key_edge(Hotkey::Alt, KeyEdge::Released)
+        .key_edge(KeyCode::AltLeft, KeyEdge::Pressed)
+        .key_edge(KeyCode::AltLeft, KeyEdge::Released)
         .expect_active("current")
         .expect_actions(&[])
         .expect_effects(&[])
@@ -142,10 +143,10 @@ fn alt_without_a_switch_is_a_noop() {
 #[test]
 fn switching_with_no_windows_records_input_but_emits_no_platform_effects() {
     scenario("empty window inventory is a switcher no-op")
-        .key_edge(Hotkey::Alt, KeyEdge::Pressed)
-        .key_edge(Hotkey::Tab, KeyEdge::Pressed)
-        .key_edge(Hotkey::Tab, KeyEdge::Released)
-        .key_edge(Hotkey::Alt, KeyEdge::Released)
+        .key_edge(KeyCode::AltLeft, KeyEdge::Pressed)
+        .key_edge(KeyCode::Tab, KeyEdge::Pressed)
+        .key_edge(KeyCode::Tab, KeyEdge::Released)
+        .key_edge(KeyCode::AltLeft, KeyEdge::Released)
         .expect_actions(&[HotkeyAction::SwitchNext, HotkeyAction::CommitSwitch])
         .expect_effects(&[])
         .expect_flip_hidden();
@@ -188,18 +189,22 @@ fn output_disconnect_and_reconnect_reflows_deterministically() {
 #[test]
 fn alt_shift_print_screen_routes_to_file_capture() {
     scenario("alt-shift-print-screen file capture")
-        .key_edge(Hotkey::Alt, KeyEdge::Pressed)
-        .key_edge(Hotkey::Shift, KeyEdge::Pressed)
-        .key_edge(Hotkey::PrintScreen, KeyEdge::Pressed)
-        .key_edge(Hotkey::PrintScreen, KeyEdge::Pressed)
-        .key_edge(Hotkey::PrintScreen, KeyEdge::Released)
-        .key_edge(Hotkey::Shift, KeyEdge::Released)
-        .key_edge(Hotkey::PrintScreen, KeyEdge::Pressed)
-        .key_edge(Hotkey::PrintScreen, KeyEdge::Released)
-        .key_edge(Hotkey::Alt, KeyEdge::Released)
+        .key_edge(KeyCode::AltLeft, KeyEdge::Pressed)
+        .key_edge(KeyCode::ShiftLeft, KeyEdge::Pressed)
+        .key_edge(KeyCode::PrintScreen, KeyEdge::Pressed)
+        .key_edge(KeyCode::PrintScreen, KeyEdge::Pressed)
+        .key_edge(KeyCode::PrintScreen, KeyEdge::Released)
+        .key_edge(KeyCode::ShiftLeft, KeyEdge::Released)
+        .key_edge(KeyCode::PrintScreen, KeyEdge::Pressed)
+        .key_edge(KeyCode::PrintScreen, KeyEdge::Released)
+        .key_edge(KeyCode::AltLeft, KeyEdge::Released)
         .expect_actions(&[
             HotkeyAction::CaptureActiveWindowToFile,
             HotkeyAction::CaptureActiveWindow,
+        ])
+        .expect_screenshot_effects(&[
+            ScreenshotEffect::CaptureActiveWindowToFile,
+            ScreenshotEffect::CaptureActiveWindowToClipboard,
         ]);
 }
 
@@ -236,12 +241,12 @@ fn removing_selected_window_during_flip_does_not_activate_it() {
         .active()
         .window("closing")
         .app("browser")
-        .key_edge(Hotkey::Alt, KeyEdge::Pressed)
-        .key_edge(Hotkey::Tab, KeyEdge::Pressed)
+        .key_edge(KeyCode::AltLeft, KeyEdge::Pressed)
+        .key_edge(KeyCode::Tab, KeyEdge::Pressed)
         .remove_window("closing")
         .expect_last_event_authority()
-        .key_edge(Hotkey::Tab, KeyEdge::Released)
-        .key_edge(Hotkey::Alt, KeyEdge::Released)
+        .key_edge(KeyCode::Tab, KeyEdge::Released)
+        .key_edge(KeyCode::AltLeft, KeyEdge::Released)
         .expect_effects(&[
             TaskSwitchEffect::ShowFlip { session: 1 },
             TaskSwitchEffect::RequestPreviews(vec!["current".into(), "closing".into()]),
@@ -265,11 +270,11 @@ fn removing_unselected_window_during_flip_updates_preview_candidates() {
         .app("browser")
         .window("closing")
         .app("terminal")
-        .key_edge(Hotkey::Alt, KeyEdge::Pressed)
-        .key_edge(Hotkey::Tab, KeyEdge::Pressed)
+        .key_edge(KeyCode::AltLeft, KeyEdge::Pressed)
+        .key_edge(KeyCode::Tab, KeyEdge::Pressed)
         .remove_window("closing")
-        .key_edge(Hotkey::Tab, KeyEdge::Released)
-        .key_edge(Hotkey::Alt, KeyEdge::Released)
+        .key_edge(KeyCode::Tab, KeyEdge::Released)
+        .key_edge(KeyCode::AltLeft, KeyEdge::Released)
         .expect_active("selected")
         .expect_effects(&[
             TaskSwitchEffect::ShowFlip { session: 1 },
@@ -296,11 +301,11 @@ fn removing_current_window_during_flip_never_reactivates_it() {
         .app("browser")
         .window("other")
         .app("terminal")
-        .key_edge(Hotkey::Alt, KeyEdge::Pressed)
-        .key_edge(Hotkey::Tab, KeyEdge::Pressed)
+        .key_edge(KeyCode::AltLeft, KeyEdge::Pressed)
+        .key_edge(KeyCode::Tab, KeyEdge::Pressed)
         .remove_window("current")
-        .key_edge(Hotkey::Tab, KeyEdge::Released)
-        .key_edge(Hotkey::Alt, KeyEdge::Released)
+        .key_edge(KeyCode::Tab, KeyEdge::Released)
+        .key_edge(KeyCode::AltLeft, KeyEdge::Released)
         .expect_active("selected")
         .expect_effects(&[
             TaskSwitchEffect::ShowFlip { session: 1 },
@@ -325,12 +330,12 @@ fn removing_all_flip_candidates_closes_without_activation() {
         .active()
         .window("closing")
         .app("browser")
-        .key_edge(Hotkey::Alt, KeyEdge::Pressed)
-        .key_edge(Hotkey::Tab, KeyEdge::Pressed)
+        .key_edge(KeyCode::AltLeft, KeyEdge::Pressed)
+        .key_edge(KeyCode::Tab, KeyEdge::Pressed)
         .remove_window("closing")
         .remove_window("current")
-        .key_edge(Hotkey::Tab, KeyEdge::Released)
-        .key_edge(Hotkey::Alt, KeyEdge::Released)
+        .key_edge(KeyCode::Tab, KeyEdge::Released)
+        .key_edge(KeyCode::AltLeft, KeyEdge::Released)
         .expect_effects(&[
             TaskSwitchEffect::ShowFlip { session: 1 },
             TaskSwitchEffect::RequestPreviews(vec!["current".into(), "closing".into()]),

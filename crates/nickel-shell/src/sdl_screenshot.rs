@@ -1,4 +1,5 @@
 use std::{
+    cell::Cell,
     env, fs,
     path::PathBuf,
     sync::Arc,
@@ -21,7 +22,10 @@ pub struct ScreenshotTool {
     confirmed: bool,
     last_click: Option<(Instant, f32, f32)>,
     status: String,
+    error_visible: bool,
     capture_deadline: Option<Instant>,
+    save_after_confirmation: bool,
+    viewport: Cell<Option<(u32, u32)>>,
 }
 
 impl Default for ScreenshotTool {
@@ -34,7 +38,10 @@ impl Default for ScreenshotTool {
             confirmed: false,
             last_click: None,
             status: instructions(),
+            error_visible: false,
             capture_deadline: None,
+            save_after_confirmation: false,
+            viewport: Cell::new(None),
         }
     }
 }
@@ -42,6 +49,13 @@ impl Default for ScreenshotTool {
 impl ScreenshotTool {
     pub fn request_capture(&mut self) {
         self.hide();
+        self.save_after_confirmation = false;
+        self.capture_deadline = Some(Instant::now() + Duration::from_millis(75));
+    }
+
+    pub fn request_capture_to_file(&mut self) {
+        self.hide();
+        self.save_after_confirmation = true;
         self.capture_deadline = Some(Instant::now() + Duration::from_millis(75));
     }
 
@@ -60,10 +74,17 @@ impl ScreenshotTool {
     pub fn show(&mut self, image: RgbaImage) {
         self.image = Some(Arc::new(image));
         self.status = instructions();
+        self.error_visible = false;
+    }
+
+    pub fn show_error(&mut self, error: impl Into<String>) {
+        self.hide();
+        self.status = format!("SCREENSHOT FAILED · {} · ESC TO CLOSE", error.into());
+        self.error_visible = true;
     }
 
     pub fn visible(&self) -> bool {
-        self.image.is_some()
+        self.image.is_some() || self.error_visible
     }
 
     pub fn hide(&mut self) {
@@ -72,6 +93,8 @@ impl ScreenshotTool {
         self.selection = None;
         self.confirmed = false;
         self.last_click = None;
+        self.error_visible = false;
+        self.save_after_confirmation = false;
     }
 
     pub fn pointer_moved(&mut self, x: f32, y: f32, width: u32, height: u32) -> bool {
@@ -113,7 +136,11 @@ impl ScreenshotTool {
                 self.confirmed = true;
                 self.drag_start = None;
                 self.last_click = None;
-                self.status = "SELECTION CONFIRMED".into();
+                if self.save_after_confirmation {
+                    self.save(width, height);
+                } else {
+                    self.status = "SELECTION CONFIRMED".into();
+                }
             } else {
                 self.last_click = Some((Instant::now(), self.cursor.0, self.cursor.1));
             }
@@ -141,27 +168,81 @@ impl ScreenshotTool {
         changed
     }
 
+    pub fn semantic_target(
+        &self,
+        action: nickel_session_protocol::ScreenshotTargetAction,
+    ) -> Option<(i32, i32, nickel_session_protocol::PointerInteraction)> {
+        use nickel_session_protocol::{PointerInteraction, ScreenshotTargetAction};
+
+        let (width, height) = self.viewport.get()?;
+        let point = match action {
+            ScreenshotTargetAction::SelectionStart => {
+                let preview = self.image_rect(width, height);
+                (
+                    preview.origin.x + preview.size.width * 0.25,
+                    preview.origin.y + preview.size.height * 0.25,
+                    PointerInteraction::LeftPress,
+                )
+            }
+            ScreenshotTargetAction::SelectionEnd => {
+                let preview = self.image_rect(width, height);
+                (
+                    preview.origin.x + preview.size.width * 0.75,
+                    preview.origin.y + preview.size.height * 0.75,
+                    PointerInteraction::LeftRelease,
+                )
+            }
+            ScreenshotTargetAction::Confirm => {
+                let selection = self.selection?;
+                (
+                    selection.origin.x + selection.size.width / 2.0,
+                    selection.origin.y + selection.size.height / 2.0,
+                    PointerInteraction::LeftDoubleClick,
+                )
+            }
+            ScreenshotTargetAction::CopyImage if self.confirmed => {
+                (85.0, TOOLBAR_HEIGHT / 2.0, PointerInteraction::LeftClick)
+            }
+            ScreenshotTargetAction::SaveImage if self.confirmed => {
+                (255.0, TOOLBAR_HEIGHT / 2.0, PointerInteraction::LeftClick)
+            }
+            ScreenshotTargetAction::CopyTemporaryPath if self.confirmed => {
+                (460.0, TOOLBAR_HEIGHT / 2.0, PointerInteraction::LeftClick)
+            }
+            ScreenshotTargetAction::Cancel if self.confirmed => {
+                (650.0, TOOLBAR_HEIGHT / 2.0, PointerInteraction::LeftClick)
+            }
+            ScreenshotTargetAction::CopyImage
+            | ScreenshotTargetAction::SaveImage
+            | ScreenshotTargetAction::CopyTemporaryPath
+            | ScreenshotTargetAction::Cancel => return None,
+        };
+        Some((point.0.round() as i32, point.1.round() as i32, point.2))
+    }
+
     pub fn scene(
         &self,
         width: u32,
         height: u32,
         palette: nickel_core::theme::ThemePalette,
     ) -> Vec<PaintCommand> {
-        let Some(image) = &self.image else {
-            return Vec::new();
-        };
-        let mut commands = vec![
-            PaintCommand::Image {
+        self.viewport.set(Some((width, height)));
+        let mut commands = vec![PaintCommand::Fill {
+            rect: Rect::new(0.0, 0.0, width as f32, height as f32),
+            color: palette.background,
+        }];
+        if let Some(image) = &self.image {
+            commands.push(PaintCommand::Image {
                 bounds: self.image_rect(width, height),
                 id: 65_000,
                 image: image.clone(),
                 high_density: None,
-            },
-            PaintCommand::Fill {
-                rect: Rect::new(0.0, 0.0, width as f32, TOOLBAR_HEIGHT),
-                color: palette.panel,
-            },
-        ];
+            });
+        }
+        commands.push(PaintCommand::Fill {
+            rect: Rect::new(0.0, 0.0, width as f32, TOOLBAR_HEIGHT),
+            color: palette.panel,
+        });
         if let Some(rect) = self.selection {
             commands.push(PaintCommand::OverlayStroke {
                 rect,
@@ -371,5 +452,69 @@ mod tests {
         assert_eq!(crop.dimensions(), (2, 2));
         assert_eq!(crop.get_pixel(0, 0).0, [1, 0, 0, 255]);
         assert_eq!(crop.get_pixel(1, 1).0, [2, 1, 0, 255]);
+    }
+
+    #[test]
+    fn capture_failure_is_visible_and_escape_can_clear_it() {
+        let mut tool = ScreenshotTool::default();
+        tool.show_error("permission denied");
+        assert!(tool.visible());
+        assert!(tool.status.contains("permission denied"));
+        assert!(
+            !tool
+                .scene(
+                    800,
+                    600,
+                    nickel_core::theme::ThemePalette::from_appearance(Default::default()),
+                )
+                .is_empty()
+        );
+        tool.hide();
+        assert!(!tool.visible());
+    }
+
+    #[test]
+    fn interactive_file_capture_is_an_explicit_mode() {
+        let mut tool = ScreenshotTool::default();
+        tool.request_capture_to_file();
+        assert!(tool.save_after_confirmation);
+        assert!(tool.capture_deadline.is_some());
+        tool.request_capture();
+        assert!(!tool.save_after_confirmation);
+    }
+
+    #[test]
+    fn semantic_selection_targets_drive_production_hit_testing() {
+        use nickel_session_protocol::{PointerInteraction, ScreenshotTargetAction};
+
+        let mut tool = ScreenshotTool::default();
+        tool.show(RgbaImage::new(400, 200));
+        let _ = tool.scene(
+            800,
+            600,
+            nickel_core::theme::ThemePalette::from_appearance(Default::default()),
+        );
+        let (start_x, start_y, start_edge) = tool
+            .semantic_target(ScreenshotTargetAction::SelectionStart)
+            .unwrap();
+        assert_eq!(start_edge, PointerInteraction::LeftPress);
+        assert!(tool.pointer_pressed(start_x as f32, start_y as f32, 800, 600));
+        let (end_x, end_y, end_edge) = tool
+            .semantic_target(ScreenshotTargetAction::SelectionEnd)
+            .unwrap();
+        assert_eq!(end_edge, PointerInteraction::LeftRelease);
+        assert!(tool.pointer_moved(end_x as f32, end_y as f32, 800, 600));
+        assert!(tool.pointer_released());
+        let (confirm_x, confirm_y, confirm_edge) = tool
+            .semantic_target(ScreenshotTargetAction::Confirm)
+            .unwrap();
+        assert_eq!(confirm_edge, PointerInteraction::LeftDoubleClick);
+        assert!(tool.pointer_pressed(confirm_x as f32, confirm_y as f32, 800, 600));
+        assert!(tool.pointer_pressed(confirm_x as f32, confirm_y as f32, 800, 600));
+        assert!(tool.confirmed);
+        assert!(
+            tool.semantic_target(ScreenshotTargetAction::CopyImage)
+                .is_some()
+        );
     }
 }

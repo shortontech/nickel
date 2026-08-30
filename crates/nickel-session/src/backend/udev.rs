@@ -1429,7 +1429,12 @@ impl NickelSession {
                     }
                 }
             }
-            if is_primary && let Some(path) = self.output_capture_path.take() {
+            let capture_this_output = self
+                .output_capture_name
+                .as_deref()
+                .map_or(is_primary, |name| name == output.name());
+            if capture_this_output && let Some(path) = self.output_capture_path.take() {
+                self.output_capture_name = None;
                 let result = output
                     .current_mode()
                     .ok_or_else(|| "output has no active mode".to_owned())
@@ -1550,7 +1555,9 @@ impl NickelSession {
         if let Err(error) = surface.drm.frame_submitted() {
             tracing::warn!(%node, ?crtc, ?error, "failed to complete DRM frame");
         }
-        self.schedule_render(node, Duration::ZERO);
+        // Surface commits, input, output changes, and explicit capture requests schedule their own
+        // renders. Scheduling unconditionally at every vblank turns a static desktop into a
+        // permanent full-refresh loop, which is especially destructive on llvmpipe.
     }
 }
 

@@ -1,6 +1,7 @@
 //! Semantic input and output contracts driven through production reducers.
 
-use nickel_core::hotkeys::{Hotkey, HotkeyAction, KeyEdge};
+use nickel_core::hotkeys::{HotkeyAction, KeyCode, KeyEdge};
+use nickel_core::scenario::ScreenshotEffect;
 use nickel_core::scenario::scenario;
 use nickel_core::task_switcher::TaskSwitchEffect;
 
@@ -12,10 +13,10 @@ fn alt_release_commits_pending_switch_before_tab_release() {
         .active()
         .window("next")
         .app("browser")
-        .key_edge(Hotkey::Alt, KeyEdge::Pressed)
-        .key_edge(Hotkey::Tab, KeyEdge::Pressed)
-        .key_edge(Hotkey::Alt, KeyEdge::Released)
-        .key_edge(Hotkey::Tab, KeyEdge::Released)
+        .key_edge(KeyCode::AltLeft, KeyEdge::Pressed)
+        .key_edge(KeyCode::Tab, KeyEdge::Pressed)
+        .key_edge(KeyCode::AltLeft, KeyEdge::Released)
+        .key_edge(KeyCode::Tab, KeyEdge::Released)
         .expect_actions(&[HotkeyAction::SwitchNext, HotkeyAction::CommitSwitch])
         .expect_effects(&[
             TaskSwitchEffect::ShowFlip { session: 1 },
@@ -38,11 +39,11 @@ fn tab_repeat_while_held_emits_one_switch_action() {
         .app("browser")
         .window("last")
         .app("terminal")
-        .key_edge(Hotkey::Alt, KeyEdge::Pressed)
-        .key_edge(Hotkey::Tab, KeyEdge::Pressed)
-        .key_edge(Hotkey::Tab, KeyEdge::Pressed)
-        .key_edge(Hotkey::Tab, KeyEdge::Released)
-        .key_edge(Hotkey::Alt, KeyEdge::Released)
+        .key_edge(KeyCode::AltLeft, KeyEdge::Pressed)
+        .key_edge(KeyCode::Tab, KeyEdge::Pressed)
+        .key_edge(KeyCode::Tab, KeyEdge::Pressed)
+        .key_edge(KeyCode::Tab, KeyEdge::Released)
+        .key_edge(KeyCode::AltLeft, KeyEdge::Released)
         .expect_actions(&[HotkeyAction::SwitchNext, HotkeyAction::CommitSwitch])
         .expect_effects(&[
             TaskSwitchEffect::ShowFlip { session: 1 },
@@ -58,15 +59,20 @@ fn tab_repeat_while_held_emits_one_switch_action() {
 #[test]
 fn print_screen_repeats_are_one_action_per_physical_press() {
     scenario("screenshot shortcut repeats only after release")
-        .key_edge(Hotkey::PrintScreen, KeyEdge::Pressed)
-        .key_edge(Hotkey::PrintScreen, KeyEdge::Pressed)
-        .key_edge(Hotkey::PrintScreen, KeyEdge::Released)
-        .key_edge(Hotkey::PrintScreen, KeyEdge::Pressed)
-        .key_edge(Hotkey::PrintScreen, KeyEdge::Released)
+        .key_edge(KeyCode::PrintScreen, KeyEdge::Pressed)
+        .key_edge(KeyCode::PrintScreen, KeyEdge::Pressed)
+        .key_edge(KeyCode::PrintScreen, KeyEdge::Released)
+        .key_edge(KeyCode::PrintScreen, KeyEdge::Pressed)
+        .key_edge(KeyCode::PrintScreen, KeyEdge::Released)
         .expect_actions(&[
             HotkeyAction::ShowScreenshotTool,
             HotkeyAction::ShowScreenshotTool,
         ])
+        .expect_screenshot_effects(&[
+            ScreenshotEffect::RequestInteractiveRegionCapture,
+            ScreenshotEffect::RequestInteractiveRegionCapture,
+        ])
+        .expect_screenshot_overlay_requested()
         .expect_effects(&[]);
 }
 
@@ -76,11 +82,12 @@ fn alt_print_screen_captures_the_active_window_without_switch_effects() {
         .window("editor")
         .app("editor")
         .active()
-        .key_edge(Hotkey::Alt, KeyEdge::Pressed)
-        .key_edge(Hotkey::PrintScreen, KeyEdge::Pressed)
-        .key_edge(Hotkey::PrintScreen, KeyEdge::Released)
-        .key_edge(Hotkey::Alt, KeyEdge::Released)
+        .key_edge(KeyCode::AltLeft, KeyEdge::Pressed)
+        .key_edge(KeyCode::PrintScreen, KeyEdge::Pressed)
+        .key_edge(KeyCode::PrintScreen, KeyEdge::Released)
+        .key_edge(KeyCode::AltLeft, KeyEdge::Released)
         .expect_actions(&[HotkeyAction::CaptureActiveWindow])
+        .expect_screenshot_effects(&[ScreenshotEffect::CaptureActiveWindowToClipboard])
         .expect_effects(&[])
         .expect_active("editor");
 }
@@ -131,8 +138,8 @@ fn switch_key_without_alt_does_not_create_a_task_switch() {
         .active()
         .window("other")
         .app("browser")
-        .key_edge(Hotkey::Tab, KeyEdge::Pressed)
-        .key_edge(Hotkey::Tab, KeyEdge::Released)
+        .key_edge(KeyCode::Tab, KeyEdge::Pressed)
+        .key_edge(KeyCode::Tab, KeyEdge::Released)
         .expect_actions(&[])
         .expect_effects(&[])
         .expect_active("current")

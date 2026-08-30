@@ -5,6 +5,7 @@ extern crate self as nickel_ui;
 pub mod controller;
 pub mod document_selection;
 pub mod gpu;
+pub mod input;
 pub mod layout;
 mod runtime;
 pub mod state;
@@ -18,6 +19,7 @@ pub use document_selection::{
     TextBoundary,
 };
 pub use gpu::{ComponentGpu, DamageRegion, Pixel, SdlCanvasPresenter, SdlComponentRenderer};
+pub use input::{FocusedInputDispatcher, InputCommand, InputContext};
 pub use layout::{
     Align, Axis, Constraints, FlexItem, Insets, Justify, Length, Overflow, Point, Rect, Size,
     Track, layout_flex,

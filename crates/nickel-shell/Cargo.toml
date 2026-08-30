@@ -15,6 +15,7 @@ nickel-core = { path = "../nickel-core" }
 nickel-codex = { path = "../nickel-codex" }
 nickel-codex-ui = { path = "../nickel-codex-ui" }
 nickel-i18n = { path = "../nickel-i18n" }
+nickel-input = { path = "../nickel-input", features = ["sdl"] }
 nickel-logging = { path = "../nickel-logging" }
 nickel-session-protocol = { path = "../nickel-session-protocol" }
 nucleo-matcher.workspace = true
@@ -26,6 +27,7 @@ tracing.workspace = true
 zeroize.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
+arboard = { version = "3.6.1", default-features = false, features = ["image-data", "wayland-data-control"] }
 freedesktop-desktop-entry.workspace = true
 freedesktop-icons.workspace = true
 shlex.workspace = true

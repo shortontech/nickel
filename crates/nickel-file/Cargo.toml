@@ -9,6 +9,7 @@ rust-version.workspace = true
 image.workspace = true
 nickel-ui = { path = "../nickel-ui" }
 nickel-core = { path = "../nickel-core" }
+nickel-input = { path = "../nickel-input", features = ["sdl"] }
 nickel-logging = { path = "../nickel-logging" }
 nickel-platform = { path = "../nickel-platform" }
 tracing.workspace = true

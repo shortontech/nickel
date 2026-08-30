@@ -1,7 +1,7 @@
 //! Workspace behavior through the production model and scenario effect recorder.
 
 use nickel_core::{
-    hotkeys::{Hotkey, HotkeyAction, KeyEdge},
+    hotkeys::{HotkeyAction, KeyCode, KeyEdge},
     scenario::{Key, RecordedEffect, WorkspaceEffect, scenario},
     task_switcher::TaskSwitchEffect,
 };
@@ -14,12 +14,12 @@ fn workspace_keyboard_chords_reach_the_workspace_reducer() {
         .app("editor")
         .active()
         .create_workspace("second")
-        .key_edge(Hotkey::Control, KeyEdge::Pressed)
-        .key_edge(Hotkey::Super, KeyEdge::Pressed)
-        .key_edge(Hotkey::Right, KeyEdge::Pressed)
-        .key_edge(Hotkey::Right, KeyEdge::Released)
-        .key_edge(Hotkey::Super, KeyEdge::Released)
-        .key_edge(Hotkey::Control, KeyEdge::Released)
+        .key_edge(KeyCode::ControlLeft, KeyEdge::Pressed)
+        .key_edge(KeyCode::SuperLeft, KeyEdge::Pressed)
+        .key_edge(KeyCode::ArrowRight, KeyEdge::Pressed)
+        .key_edge(KeyCode::ArrowRight, KeyEdge::Released)
+        .key_edge(KeyCode::SuperLeft, KeyEdge::Released)
+        .key_edge(KeyCode::ControlLeft, KeyEdge::Released)
         .expect_actions(&[HotkeyAction::SwitchWorkspaceNext])
         .expect_workspace("second")
         .expect_authority_path(

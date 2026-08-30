@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 ctrlc.workspace = true
 image.workspace = true
+nickel-input = { path = "../nickel-input", features = ["sdl"] }
 nickel-ui = { path = "../nickel-ui" }
 ort.workspace = true
 serde.workspace = true

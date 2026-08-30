@@ -1346,6 +1346,7 @@ impl<Message: Clone> UiTree<Message> {
                     invalidation.merge(state.set_dropdown_open(node.id.clone(), false))
                 }),
             UiEvent::CaretBlink => state.toggle_caret(),
+            UiEvent::FocusGained => Invalidation::None,
             UiEvent::FocusLost => state.focus_lost(),
             UiEvent::Suspended => state.suspended(),
             UiEvent::DeviceRemoved => state.device_removed(),

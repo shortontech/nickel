@@ -87,6 +87,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         request_id,
         request: Request::Command(SessionCommand::CaptureOutput {
             path: output.to_string_lossy().into_owned(),
+            output: None,
         }),
     };
     socket.send_to(&encode(&request)?, control)?;

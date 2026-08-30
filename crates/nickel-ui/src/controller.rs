@@ -1,10 +1,13 @@
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use gilrs::{Axis, Button, EventType, Gilrs};
-
-const STICK_DEAD_ZONE: f32 = 0.55;
-const INITIAL_REPEAT_DELAY: Duration = Duration::from_millis(350);
-const REPEAT_INTERVAL: Duration = Duration::from_millis(100);
+use gilrs::Gilrs;
+use nickel_input::{
+    NativeCode,
+    controller::{
+        AxisDirection, ControllerButton, ControllerEvent, ControllerId, ControllerIdentity,
+        ControllerNormalizer, ControllerSignal,
+    },
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ControllerAction {
@@ -49,7 +52,8 @@ impl PaneNavigation {
 
 pub struct ControllerInput {
     gilrs: Option<Gilrs>,
-    stick: StickRepeater,
+    normalizer: ControllerNormalizer,
+    epoch: Instant,
     connected: bool,
 }
 
@@ -61,9 +65,29 @@ impl ControllerInput {
         let connected = gilrs
             .as_ref()
             .is_some_and(|gilrs| gilrs.gamepads().any(|(_, gamepad)| gamepad.is_connected()));
+        let mut normalizer = ControllerNormalizer::default();
+        if let Some(gilrs) = &gilrs {
+            for (id, gamepad) in gilrs
+                .gamepads()
+                .filter(|(_, gamepad)| gamepad.is_connected())
+            {
+                normalizer.handle(
+                    ControllerEvent::Connected {
+                        id: ControllerId(usize::from(id) as u64),
+                        identity: ControllerIdentity {
+                            backend: "gilrs".into(),
+                            native: NativeCode::Numeric(usize::from(id) as u64),
+                            fingerprint: Some(uuid_fingerprint(gamepad.uuid())),
+                        },
+                    },
+                    0,
+                );
+            }
+        }
         Self {
             gilrs,
-            stick: StickRepeater::default(),
+            normalizer,
+            epoch: Instant::now(),
             connected,
         }
     }
@@ -78,30 +102,44 @@ impl ControllerInput {
             return actions;
         };
         while let Some(event) = gilrs.next_event() {
-            match event.event {
-                EventType::Connected => self.connected = true,
-                EventType::Disconnected => {
-                    self.connected = gilrs.gamepads().any(|(_, gamepad)| gamepad.is_connected());
+            let identity = matches!(event.event, gilrs::EventType::Connected).then(|| {
+                let gamepad = gilrs.gamepad(event.id);
+                ControllerIdentity {
+                    backend: "gilrs".into(),
+                    native: NativeCode::Numeric(usize::from(event.id) as u64),
+                    fingerprint: Some(uuid_fingerprint(gamepad.uuid())),
                 }
-                EventType::ButtonPressed(button, _) | EventType::ButtonRepeated(button, _) => {
-                    if let Some(action) = button_action(button) {
-                        actions.push(action);
-                    }
-                }
-                EventType::AxisChanged(Axis::LeftStickX, value, _) => {
-                    actions.extend(self.stick.set_x(value, now));
-                }
-                EventType::AxisChanged(Axis::LeftStickY, value, _) => {
-                    actions.extend(self.stick.set_y(value, now));
-                }
-                _ => {}
+            });
+            if let Some(event) = nickel_input::gilrs::event(&event, identity) {
+                let now_ms = now.saturating_duration_since(self.epoch).as_millis() as u64;
+                actions.extend(
+                    self.normalizer
+                        .handle(event, now_ms)
+                        .into_iter()
+                        .filter_map(signal_action),
+                );
             }
         }
-        if let Some(action) = self.stick.repeat(now) {
-            actions.push(action);
-        }
+        self.connected = gilrs.gamepads().any(|(_, gamepad)| gamepad.is_connected());
+        let now_ms = now.saturating_duration_since(self.epoch).as_millis() as u64;
+        actions.extend(
+            self.normalizer
+                .tick(now_ms)
+                .into_iter()
+                .filter_map(signal_action),
+        );
         actions
     }
+}
+
+fn uuid_fingerprint(uuid: [u8; 16]) -> String {
+    use std::fmt::Write;
+
+    let mut result = String::with_capacity(32);
+    for byte in uuid {
+        let _ = write!(result, "{byte:02x}");
+    }
+    result
 }
 
 impl Default for ControllerInput {
@@ -110,82 +148,45 @@ impl Default for ControllerInput {
     }
 }
 
-fn button_action(button: Button) -> Option<ControllerAction> {
+fn button_action(button: &ControllerButton) -> Option<ControllerAction> {
     match button {
-        Button::DPadUp => Some(ControllerAction::Up),
-        Button::DPadDown => Some(ControllerAction::Down),
-        Button::DPadLeft => Some(ControllerAction::Left),
-        Button::DPadRight => Some(ControllerAction::Right),
-        Button::South => Some(ControllerAction::Confirm),
-        Button::East => Some(ControllerAction::Cancel),
-        Button::LeftTrigger => Some(ControllerAction::PreviousPane),
-        Button::RightTrigger => Some(ControllerAction::NextPane),
+        ControllerButton::DPadUp => Some(ControllerAction::Up),
+        ControllerButton::DPadDown => Some(ControllerAction::Down),
+        ControllerButton::DPadLeft => Some(ControllerAction::Left),
+        ControllerButton::DPadRight => Some(ControllerAction::Right),
+        ControllerButton::South => Some(ControllerAction::Confirm),
+        ControllerButton::East => Some(ControllerAction::Cancel),
+        ControllerButton::LeftShoulder => Some(ControllerAction::PreviousPane),
+        ControllerButton::RightShoulder => Some(ControllerAction::NextPane),
         _ => None,
     }
 }
 
-#[derive(Default)]
-struct StickRepeater {
-    x: f32,
-    y: f32,
-    direction: Option<ControllerAction>,
-    next_repeat: Option<Instant>,
-}
-
-impl StickRepeater {
-    fn set_x(&mut self, value: f32, now: Instant) -> Option<ControllerAction> {
-        self.x = value;
-        self.reconcile(now)
-    }
-
-    fn set_y(&mut self, value: f32, now: Instant) -> Option<ControllerAction> {
-        self.y = value;
-        self.reconcile(now)
-    }
-
-    fn reconcile(&mut self, now: Instant) -> Option<ControllerAction> {
-        let direction = stick_direction(self.x, self.y);
-        if direction == self.direction {
-            return None;
-        }
-        self.direction = direction;
-        self.next_repeat = direction.map(|_| now + INITIAL_REPEAT_DELAY);
-        direction
-    }
-
-    fn repeat(&mut self, now: Instant) -> Option<ControllerAction> {
-        let direction = self.direction?;
-        let deadline = self.next_repeat?;
-        if now < deadline {
-            return None;
-        }
-        self.next_repeat = Some(now + REPEAT_INTERVAL);
-        Some(direction)
-    }
-}
-
-fn stick_direction(x: f32, y: f32) -> Option<ControllerAction> {
-    if x.abs().max(y.abs()) < STICK_DEAD_ZONE {
-        return None;
-    }
-    if x.abs() > y.abs() {
-        Some(if x.is_sign_negative() {
-            ControllerAction::Left
-        } else {
-            ControllerAction::Right
-        })
-    } else {
-        Some(if y.is_sign_negative() {
-            ControllerAction::Down
-        } else {
-            ControllerAction::Up
-        })
+fn signal_action(signal: ControllerSignal) -> Option<ControllerAction> {
+    match signal {
+        ControllerSignal::Button {
+            button,
+            edge: nickel_input::KeyEdge::Pressed,
+            ..
+        } => button_action(&button),
+        ControllerSignal::Direction {
+            direction,
+            edge: nickel_input::KeyEdge::Pressed,
+            ..
+        } => Some(match direction {
+            AxisDirection::Up => ControllerAction::Up,
+            AxisDirection::Down => ControllerAction::Down,
+            AxisDirection::Left => ControllerAction::Left,
+            AxisDirection::Right => ControllerAction::Right,
+        }),
+        _ => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ControllerAction, NavigationPane, PaneNavigation, stick_direction};
+    use super::{ControllerAction, NavigationPane, PaneNavigation, signal_action};
+    use nickel_input::controller::{AxisDirection, ControllerId, ControllerSignal};
 
     #[test]
     fn shoulder_actions_select_panes() {
@@ -198,9 +199,15 @@ mod tests {
     }
 
     #[test]
-    fn stick_uses_dead_zone_and_dominant_axis() {
-        assert_eq!(stick_direction(0.2, 0.3), None);
-        assert_eq!(stick_direction(0.8, 0.6), Some(ControllerAction::Right));
-        assert_eq!(stick_direction(0.2, -0.9), Some(ControllerAction::Down));
+    fn normalized_directions_remain_consumer_owned_actions() {
+        assert_eq!(
+            signal_action(ControllerSignal::Direction {
+                id: ControllerId(1),
+                direction: AxisDirection::Right,
+                edge: nickel_input::KeyEdge::Pressed,
+                repeat: false,
+            }),
+            Some(ControllerAction::Right)
+        );
     }
 }

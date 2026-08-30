@@ -467,6 +467,7 @@ impl NickelSession {
                 ShellRole::ControlCenter
                     | ShellRole::Notification
                     | ShellRole::ProjectMenu
+                    | ShellRole::Screenshot
                     | ShellRole::Recovery
             )
         );
@@ -570,7 +571,7 @@ impl NickelSession {
                 if is_notification {
                     utility.override_z_index(45);
                 }
-                self.register_utility_window(utility);
+                self.register_utility_window(utility, shell_role.expect("utility has shell role"));
             }
         }
         if is_lock {
@@ -674,6 +675,10 @@ mod tests {
         assert!(!shell_owned_window_is_application(
             ShellRole::Preview.application_id(),
             Some(ShellRole::Preview)
+        ));
+        assert!(!shell_owned_window_is_application(
+            ShellRole::Screenshot.application_id(),
+            Some(ShellRole::Screenshot)
         ));
         assert!(shell_owned_window_is_application(
             "io.nickel.codex.project.bd247278c96614ec",
