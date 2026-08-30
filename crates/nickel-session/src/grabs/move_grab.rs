@@ -14,6 +14,7 @@ pub struct MoveSurfaceGrab {
     pub start_data: PointerGrabStartData<NickelSession>,
     pub window: Window,
     pub initial_window_location: Point<i32, Logical>,
+    pub restored_from_maximized: bool,
 }
 
 impl PointerGrab<NickelSession> for MoveSurfaceGrab {
@@ -27,10 +28,20 @@ impl PointerGrab<NickelSession> for MoveSurfaceGrab {
         // While the grab is active, no client has pointer focus
         handle.motion(data, None, event);
 
+        let drag_delta = event.location - self.start_data.location;
+        if !self.restored_from_maximized
+            && (drag_delta.x.abs() >= 1.0 || drag_delta.y.abs() >= 1.0)
+            && let Some(location) =
+                data.restore_maximized_window_for_drag(&self.window, event.location)
+        {
+            self.initial_window_location = location;
+            self.start_data.location = event.location;
+            self.restored_from_maximized = true;
+        }
+
         let delta = event.location - self.start_data.location;
         let new_location = self.initial_window_location.to_f64() + delta;
-        data.space
-            .map_element(self.window.clone(), new_location.to_i32_round(), true);
+        data.map_compositor_moved_window(self.window.clone(), new_location.to_i32_round(), true);
     }
 
     fn relative_motion(

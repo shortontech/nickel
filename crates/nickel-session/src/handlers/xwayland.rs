@@ -47,6 +47,20 @@ fn x11_pointer_button(button: u32) -> Option<u32> {
     }
 }
 
+fn x11_map_geometry(
+    mut surface_geometry: Rectangle<i32, Logical>,
+    last_configure: Rectangle<i32, Logical>,
+    override_redirect: bool,
+) -> Rectangle<i32, Logical> {
+    if override_redirect {
+        // Override-redirect windows (menus, tooltips, and similar popups) are
+        // positioned directly by the X11 client. `geometry()` is local to the
+        // surface and therefore does not contain that global position.
+        surface_geometry.loc = last_configure.loc;
+    }
+    surface_geometry
+}
+
 impl NickelSession {
     pub(crate) fn start_xwayland(&mut self) {
         self.xwayland_restart_pending = false;
@@ -157,10 +171,21 @@ impl NickelSession {
         if self.x11_window(&surface).is_some() {
             return;
         }
-        let mut geometry = surface.geometry();
+        let mut geometry = x11_map_geometry(
+            surface.geometry(),
+            surface.last_configure(),
+            surface.is_override_redirect(),
+        );
         if geometry.size.w <= 1 || geometry.size.h <= 1 {
             geometry.size = Size::from((DEFAULT_X11_WIDTH, DEFAULT_X11_HEIGHT));
             let _ = surface.configure(geometry);
+        }
+        if managed {
+            let clamped = self.clamp_initial_managed_x11_geometry(geometry);
+            if clamped != geometry {
+                geometry = clamped;
+                let _ = surface.configure(geometry);
+            }
         }
         let window = Window::new_x11_window(surface.clone());
         self.space.map_element(window.clone(), geometry.loc, true);
@@ -179,10 +204,13 @@ impl NickelSession {
             self.raise_x11_surface(&surface);
             self.seat.get_keyboard().unwrap().set_focus(
                 self,
-                Some(KeyboardFocusTarget::X11(surface)),
+                Some(KeyboardFocusTarget::X11(surface.clone())),
                 smithay::utils::SERIAL_COUNTER.next_serial(),
             );
             self.workspaces.focused(&id);
+            if surface.is_maximized() {
+                self.apply_maximized_x11_geometry(&window, &surface, true);
+            }
             self.space.elements().for_each(|candidate| {
                 if let Some(toplevel) = candidate.toplevel() {
                     toplevel.send_pending_configure();
@@ -211,6 +239,33 @@ impl NickelSession {
         }
         self.request_output_redraw();
         self.notify_protocol_snapshot();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn override_redirect_windows_use_the_client_configured_location() {
+        let surface_geometry = Rectangle::new((7, 0).into(), (320, 240).into());
+        let last_configure = Rectangle::new((843, 612).into(), (300, 200).into());
+
+        let mapped = x11_map_geometry(surface_geometry, last_configure, true);
+
+        assert_eq!(mapped.loc, (843, 612).into());
+        assert_eq!(mapped.size, (320, 240).into());
+    }
+
+    #[test]
+    fn managed_windows_keep_their_surface_geometry() {
+        let surface_geometry = Rectangle::new((7, 11).into(), (320, 240).into());
+        let last_configure = Rectangle::new((843, 612).into(), (300, 200).into());
+
+        assert_eq!(
+            x11_map_geometry(surface_geometry, last_configure, false),
+            surface_geometry
+        );
     }
 }
 
@@ -272,6 +327,13 @@ impl XwmHandler for NickelSession {
         height: Option<u32>,
         _reorder: Option<Reorder>,
     ) {
+        if let Some(mapped) = self.x11_window(&window)
+            && self.is_maximized_window(&mapped)
+        {
+            self.apply_maximized_x11_geometry(&mapped, &window, false);
+            self.request_output_redraw();
+            return;
+        }
         let old = window.geometry();
         let geometry = Rectangle::new(
             (x.unwrap_or(old.loc.x), y.unwrap_or(old.loc.y)).into(),
@@ -411,6 +473,7 @@ impl XwmHandler for NickelSession {
                 start_data,
                 window: mapped,
                 initial_window_location,
+                restored_from_maximized: false,
             },
             smithay::utils::SERIAL_COUNTER.next_serial(),
             smithay::input::pointer::Focus::Clear,

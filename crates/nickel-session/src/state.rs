@@ -1684,7 +1684,7 @@ impl NickelSession {
             .cloned()
             .collect();
         for window in stranded {
-            self.space.map_element(window, fallback, false);
+            self.map_compositor_moved_window(window, fallback.into(), false);
         }
     }
 
@@ -1757,7 +1757,7 @@ impl NickelSession {
                 size,
                 fallback_geometry,
             );
-            self.space.map_element(window, rescue_location, false);
+            self.map_compositor_moved_window(window, rescue_location, false);
             displaced.push(DisplacedWindow {
                 id,
                 relative_location,
@@ -1872,7 +1872,7 @@ impl NickelSession {
                 && self.space.element_location(&window) == Some(displaced.rescue_location)
             {
                 let location = clamp_window_location(desired, window.geometry().size, work_area);
-                self.space.map_element(window, location, false);
+                self.map_compositor_moved_window(window, location, false);
             }
         }
         self.relayout_maximized_windows();
@@ -2274,6 +2274,58 @@ impl NickelSession {
             || window
                 .toplevel()
                 .is_some_and(|surface| self.server_decorated.contains(&surface.wl_surface().id()))
+    }
+
+    pub(crate) fn clamp_initial_managed_x11_geometry(
+        &self,
+        geometry: Rectangle<i32, Logical>,
+    ) -> Rectangle<i32, Logical> {
+        let content = Geometry {
+            x: geometry.loc.x,
+            y: geometry.loc.y,
+            width: geometry.size.w.max(1),
+            height: geometry.size.h.max(1),
+        };
+        let outputs = self
+            .space
+            .outputs()
+            .filter_map(|output| self.space.output_geometry(output))
+            .map(|output| Geometry {
+                x: output.loc.x,
+                y: output.loc.y,
+                width: output.size.w,
+                height: output.size.h,
+            })
+            .collect::<Vec<_>>();
+        let Some(output) = shell_layout::output_for_window(content, &outputs) else {
+            return geometry;
+        };
+        let content =
+            clamp_decorated_content_to_work_area(content, self.work_area_for_output(output));
+        Rectangle::new(
+            (content.x, content.y).into(),
+            (content.width, content.height).into(),
+        )
+    }
+
+    pub(crate) fn map_compositor_moved_window(
+        &mut self,
+        window: Window,
+        location: Point<i32, Logical>,
+        activate: bool,
+    ) {
+        if let Some(surface) = window.x11_surface()
+            && self.x11_windows.contains_key(&surface.window_id())
+        {
+            let configured = surface.last_configure();
+            let size = if configured.size.w > 0 && configured.size.h > 0 {
+                configured.size
+            } else {
+                window.geometry().size
+            };
+            let _ = surface.configure(Rectangle::new(location, size));
+        }
+        self.space.map_element(window, location, activate);
     }
 
     pub fn shell_windows(&self) -> impl Iterator<Item = &Window> {
@@ -2818,16 +2870,11 @@ impl NickelSession {
         let x11_window = self.window_for_registry_id(id);
         if let Some(window) = x11_window
             && let Some(surface) = window.x11_surface()
-            && let Some(output) = self.space.outputs_for_element(&window).first()
-            && let Some(geometry) = self.space.output_geometry(output)
         {
             let maximize = !surface.is_maximized();
             let _ = surface.set_maximized(maximize);
             if maximize {
-                self.x11_maximized_restore
-                    .insert(surface.window_id(), surface.geometry());
-                let _ = surface.configure(geometry);
-                self.space.map_element(window, geometry.loc, true);
+                self.apply_maximized_x11_geometry(&window, surface, true);
             } else if let Some(restore) = self.x11_maximized_restore.remove(&surface.window_id()) {
                 let _ = surface.configure(restore);
                 self.space.map_element(window, restore.loc, true);
@@ -2965,11 +3012,10 @@ impl NickelSession {
             });
 
         let work_area = self.work_area_for_output(output);
-        let geometry = if self.server_decorated.contains(&surface.wl_surface().id()) {
-            decorated_content_geometry(work_area)
-        } else {
-            work_area
-        };
+        let geometry = maximized_content_geometry(
+            work_area,
+            self.server_decorated.contains(&surface.wl_surface().id()),
+        );
         surface.with_pending_state(|state| {
             state
                 .states
@@ -3134,17 +3180,133 @@ impl NickelSession {
                 continue;
             };
             let work_area = self.work_area_for_output(output);
-            let geometry = if self.server_decorated.contains(&surface.wl_surface().id()) {
-                decorated_content_geometry(work_area)
-            } else {
-                work_area
-            };
+            let geometry = maximized_content_geometry(
+                work_area,
+                self.server_decorated.contains(&surface.wl_surface().id()),
+            );
             Self::configure_window(&window, geometry);
             self.space
                 .map_element(window, (geometry.x, geometry.y), true);
             surface.send_pending_configure();
         }
+        let maximized_x11 = self
+            .space
+            .elements()
+            .filter_map(|window| {
+                let surface = window.x11_surface()?;
+                self.x11_maximized_restore
+                    .contains_key(&surface.window_id())
+                    .then_some((window.clone(), surface.clone()))
+            })
+            .collect::<Vec<_>>();
+        for (window, surface) in maximized_x11 {
+            self.apply_maximized_x11_geometry(&window, &surface, false);
+        }
         self.raise_panels();
+    }
+
+    pub(crate) fn apply_maximized_x11_geometry(
+        &mut self,
+        window: &Window,
+        surface: &smithay::xwayland::X11Surface,
+        preserve_restore: bool,
+    ) {
+        let Some(output) = self.output_geometry_for_window(window) else {
+            return;
+        };
+        if preserve_restore {
+            let location = self.space.element_location(window).unwrap_or_default();
+            let size = window.geometry().size;
+            self.x11_maximized_restore
+                .entry(surface.window_id())
+                .or_insert_with(|| {
+                    smithay::utils::Rectangle::new(location, (size.w.max(1), size.h.max(1)).into())
+                });
+        }
+        let geometry = maximized_content_geometry(
+            self.work_area_for_output(output),
+            self.is_server_decorated(window),
+        );
+        let geometry = smithay::utils::Rectangle::new(
+            (geometry.x, geometry.y).into(),
+            (geometry.width, geometry.height).into(),
+        );
+        let _ = surface.configure(geometry);
+        self.space.map_element(window.clone(), geometry.loc, true);
+    }
+
+    pub(crate) fn restore_maximized_window_for_drag(
+        &mut self,
+        window: &Window,
+        pointer: Point<f64, Logical>,
+    ) -> Option<Point<i32, Logical>> {
+        let current_location = self.space.element_location(window)?;
+        let current_size = window.geometry().size;
+        let current = Geometry {
+            x: current_location.x,
+            y: current_location.y,
+            width: current_size.w.max(1),
+            height: current_size.h.max(1),
+        };
+        let output = self.space.outputs().find_map(|output| {
+            self.space
+                .output_geometry(output)
+                .filter(|geometry| geometry.to_f64().contains(pointer))
+                .map(|geometry| Geometry {
+                    x: geometry.loc.x,
+                    y: geometry.loc.y,
+                    width: geometry.size.w,
+                    height: geometry.size.h,
+                })
+        })?;
+        let decorated = self.is_server_decorated(window);
+
+        if let Some(surface) = window.x11_surface() {
+            let restore = self.x11_maximized_restore.remove(&surface.window_id())?;
+            let restore = Geometry {
+                x: restore.loc.x,
+                y: restore.loc.y,
+                width: restore.size.w,
+                height: restore.size.h,
+            };
+            let geometry = restored_drag_content_geometry(
+                current,
+                restore,
+                pointer,
+                decorated,
+                self.work_area_for_output(output),
+            );
+            let rectangle = Rectangle::new(
+                (geometry.x, geometry.y).into(),
+                (geometry.width, geometry.height).into(),
+            );
+            let _ = surface.set_maximized(false);
+            let _ = surface.configure(rectangle);
+            self.space.map_element(window.clone(), rectangle.loc, true);
+            self.notify_protocol_snapshot();
+            return Some(rectangle.loc);
+        }
+
+        let surface = window.toplevel()?.clone();
+        let restore = self.maximized_restore.remove(&surface.wl_surface().id())?;
+        let geometry = restored_drag_content_geometry(
+            current,
+            restore,
+            pointer,
+            decorated,
+            self.work_area_for_output(output),
+        );
+        surface.with_pending_state(|state| {
+            state
+                .states
+                .unset(smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Maximized);
+            state.size = Some((geometry.width, geometry.height).into());
+        });
+        self.space
+            .map_element(window.clone(), (geometry.x, geometry.y), true);
+        surface.send_pending_configure();
+        self.notify_protocol_snapshot();
+        Some((geometry.x, geometry.y).into())
     }
 
     pub(crate) fn relayout_fullscreen_windows(&mut self) {
@@ -3440,15 +3602,91 @@ impl NickelSession {
     }
 }
 
-fn decorated_content_geometry(frame: Geometry) -> Geometry {
+fn maximized_content_geometry(frame: Geometry, server_decorated: bool) -> Geometry {
+    if server_decorated {
+        Geometry {
+            x: frame.x + crate::window_frame::RESIZE_BORDER,
+            y: frame.y + crate::window_frame::TITLEBAR_HEIGHT + crate::window_frame::RESIZE_BORDER,
+            width: (frame.width - crate::window_frame::RESIZE_BORDER * 2).max(1),
+            height: (frame.height
+                - crate::window_frame::TITLEBAR_HEIGHT
+                - crate::window_frame::RESIZE_BORDER * 2)
+                .max(1),
+        }
+    } else {
+        frame
+    }
+}
+
+fn clamp_decorated_content_to_work_area(content: Geometry, work_area: Geometry) -> Geometry {
+    let outer = crate::window_frame::outer_geometry(content);
+    let location = clamp_window_location(
+        (outer.x, outer.y).into(),
+        (outer.width, outer.height).into(),
+        work_area,
+    );
     Geometry {
-        x: frame.x + crate::window_frame::RESIZE_BORDER,
-        y: frame.y + crate::window_frame::TITLEBAR_HEIGHT + crate::window_frame::RESIZE_BORDER,
-        width: (frame.width - crate::window_frame::RESIZE_BORDER * 2).max(1),
-        height: (frame.height
-            - crate::window_frame::TITLEBAR_HEIGHT
-            - crate::window_frame::RESIZE_BORDER * 2)
-            .max(1),
+        x: location.x + (content.x - outer.x),
+        y: location.y + (content.y - outer.y),
+        ..content
+    }
+}
+
+fn restored_drag_content_geometry(
+    current_content: Geometry,
+    restore_content: Geometry,
+    pointer: Point<f64, Logical>,
+    server_decorated: bool,
+    work_area: Geometry,
+) -> Geometry {
+    let current_outer = if server_decorated {
+        crate::window_frame::outer_geometry(current_content)
+    } else {
+        current_content
+    };
+    let restored_outer_size = if server_decorated {
+        crate::window_frame::outer_geometry(Geometry {
+            x: 0,
+            y: 0,
+            ..restore_content
+        })
+    } else {
+        Geometry {
+            x: 0,
+            y: 0,
+            ..restore_content
+        }
+    };
+    let horizontal = ((pointer.x - f64::from(current_outer.x))
+        / f64::from(current_outer.width.max(1)))
+    .clamp(0.0, 1.0);
+    let titlebar_offset = (pointer.y - f64::from(current_outer.y))
+        .clamp(0.0, f64::from(crate::window_frame::TITLEBAR_HEIGHT.max(1)));
+    let minimum_visible = 32.min(restored_outer_size.width.max(1));
+    let outer_x = (pointer.x - horizontal * f64::from(restored_outer_size.width)).round() as i32;
+    let outer_y = (pointer.y - titlebar_offset).round() as i32;
+    let outer_x = outer_x.clamp(
+        work_area.x - restored_outer_size.width + minimum_visible,
+        work_area.x + work_area.width - minimum_visible,
+    );
+    let outer_y = outer_y.clamp(
+        work_area.y,
+        work_area.y + work_area.height - crate::window_frame::TITLEBAR_HEIGHT.max(1),
+    );
+
+    if server_decorated {
+        Geometry {
+            x: outer_x + crate::window_frame::RESIZE_BORDER,
+            y: outer_y + crate::window_frame::TITLEBAR_HEIGHT + crate::window_frame::RESIZE_BORDER,
+            width: restore_content.width,
+            height: restore_content.height,
+        }
+    } else {
+        Geometry {
+            x: outer_x,
+            y: outer_y,
+            ..restore_content
+        }
     }
 }
 
@@ -3472,12 +3710,14 @@ impl ClientData for ClientState {
 #[cfg(test)]
 mod protocol_tests {
     use super::{
-        clamp_window_location, command_requires_shell_identity, drag_icon_location,
-        retain_live_idle_inhibitors, shell_registration_allowed, shell_role_accepts_ordinary_focus,
-        test_control_may_invoke,
+        clamp_decorated_content_to_work_area, clamp_window_location,
+        command_requires_shell_identity, drag_icon_location, maximized_content_geometry,
+        restored_drag_content_geometry, retain_live_idle_inhibitors, shell_registration_allowed,
+        shell_role_accepts_ordinary_focus, test_control_may_invoke,
     };
     use crate::shell_layout::Geometry;
     use nickel_session_protocol::{Command, SessionAction, ShellRole};
+    use smithay::utils::Point;
     use std::collections::HashMap;
 
     #[test]
@@ -3569,6 +3809,151 @@ mod protocol_tests {
             clamp_window_location((-20, -30).into(), (300, 200).into(), work_area),
             (100, 40).into()
         );
+    }
+
+    #[test]
+    fn maximized_server_frame_exactly_fits_the_work_area() {
+        let work_area = Geometry {
+            x: -1920,
+            y: 30,
+            width: 1920,
+            height: 1010,
+        };
+
+        let content = maximized_content_geometry(work_area, true);
+
+        assert_eq!(crate::window_frame::outer_geometry(content), work_area);
+    }
+
+    #[test]
+    fn initial_managed_x11_content_keeps_its_frame_inside_the_work_area() {
+        let work_area = Geometry {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1024,
+        };
+        let content = clamp_decorated_content_to_work_area(
+            Geometry {
+                x: 0,
+                y: 0,
+                width: 1200,
+                height: 800,
+            },
+            work_area,
+        );
+
+        let outer = crate::window_frame::outer_geometry(content);
+        assert_eq!(outer.x, work_area.x);
+        assert_eq!(outer.y, work_area.y);
+        assert_eq!(content.width, 1200);
+        assert_eq!(content.height, 800);
+    }
+
+    #[test]
+    fn maximized_client_decorated_window_receives_the_whole_work_area() {
+        let work_area = Geometry {
+            x: 1920,
+            y: -200,
+            width: 1280,
+            height: 700,
+        };
+
+        assert_eq!(maximized_content_geometry(work_area, false), work_area);
+    }
+
+    #[test]
+    fn maximized_content_geometry_clamps_undersized_work_areas() {
+        let work_area = Geometry {
+            x: 7,
+            y: 11,
+            width: 1,
+            height: 1,
+        };
+
+        let content = maximized_content_geometry(work_area, true);
+
+        assert_eq!(content.width, 1);
+        assert_eq!(content.height, 1);
+    }
+
+    #[test]
+    fn restored_drag_preserves_horizontal_pointer_proportion() {
+        let current = maximized_content_geometry(
+            Geometry {
+                x: 0,
+                y: 0,
+                width: 1200,
+                height: 700,
+            },
+            true,
+        );
+        let restore = Geometry {
+            x: 80,
+            y: 90,
+            width: 600,
+            height: 400,
+        };
+        let work_area = Geometry {
+            x: 0,
+            y: 0,
+            width: 1200,
+            height: 700,
+        };
+
+        let left = restored_drag_content_geometry(
+            current,
+            restore,
+            Point::from((120.0, 18.0)),
+            true,
+            work_area,
+        );
+        let center = restored_drag_content_geometry(
+            current,
+            restore,
+            Point::from((600.0, 18.0)),
+            true,
+            work_area,
+        );
+        let right = restored_drag_content_geometry(
+            current,
+            restore,
+            Point::from((1080.0, 18.0)),
+            true,
+            work_area,
+        );
+
+        assert!(left.x < center.x);
+        assert!(center.x < right.x);
+        assert_eq!(left.width, restore.width);
+        assert_eq!(center.height, restore.height);
+    }
+
+    #[test]
+    fn restored_drag_keeps_titlebar_reachable_on_negative_output() {
+        let work_area = Geometry {
+            x: -1920,
+            y: -200,
+            width: 1920,
+            height: 1000,
+        };
+        let geometry = restored_drag_content_geometry(
+            maximized_content_geometry(work_area, true),
+            Geometry {
+                x: 10,
+                y: 10,
+                width: 900,
+                height: 700,
+            },
+            Point::from((-1910.0, -195.0)),
+            true,
+            work_area,
+        );
+        let outer = crate::window_frame::outer_geometry(geometry);
+
+        assert!(outer.x + outer.width >= work_area.x + 32);
+        assert!(outer.y >= work_area.y);
+        assert!(outer.y < work_area.y + work_area.height);
     }
 
     #[test]

@@ -243,6 +243,7 @@ impl XdgShellHandler for NickelSession {
                 start_data,
                 window,
                 initial_window_location,
+                restored_from_maximized: false,
             };
 
             pointer.set_grab(self, grab, serial, Focus::Clear);
