@@ -33,15 +33,15 @@ entry selected in SDDM. Nested runs are development evidence, not display-manage
 | Class | Representative client | Nested result | SDDM result |
 | --- | --- | --- | --- |
 | Protocol discovery | `wayland-info` | Required public globals advertised and client exits normally; `xwayland_shell_v1` remains correctly private to the supervised XWayland client | Pending |
-| Native toolkit | KCalc with `QT_QPA_PLATFORM=wayland` | Native Wayland mapping and survival across XWayland restart verified | Pending |
-| Legacy X11 | XTerm | Mapping, identity, focus, semantic keyboard input, and same-display XWayland restart verified | Pending |
-| Chromium | Google Chrome with `--ozone-platform=wayland` | Native Wayland mapping and stable `google-chrome` identity verified | Pending |
-| Electron | Visual Studio Code with `--ozone-platform=wayland` | Native Wayland mapping and stable `code` identity verified | Pending |
+| Native toolkit | KCalc with `QT_QPA_PLATFORM=wayland` | Native Wayland mapping and survival across XWayland restart verified | Konsole remained alive, mapped, and active while the supervised XWayland process was replaced |
+| Legacy X11 | XTerm | Mapping, identity, focus, semantic keyboard input, and same-display XWayland restart verified | A new XTerm mapped, focused, retained `StartupWMClass` identity, and closed cleanly through Nickel after XWayland replacement |
+| Chromium | Google Chrome with `--ozone-platform=wayland` | Native Wayland mapping and stable `google-chrome` identity verified | Native Wayland Chrome mapped and remained usable in the SDDM session |
+| Electron | Visual Studio Code with `--ozone-platform=wayland` | Native Wayland mapping and stable `code` identity verified | Discord/Chromium-class Electron clients mapped and remained usable in the SDDM session |
 | Activation | Two SCTK native Wayland clients | A focused source's fresh pointer serial produced a token that activated the mapped target; a token without a seat serial was consumed and rejected while source focus remained unchanged | Pending |
 | Game/relative pointer | `vkcube --wsi wayland`, Chromium pointer lock, and the SCTK relative-pointer probe | Native Vulkan client mapped and remained alive across forced XWayland restart; Chromium entered pointer lock; persistent confinement, region confinement, lock activation, and exact accelerated/unaccelerated relative deltas verified through production input dispatch | Pending |
 | Idle inhibition | Raw Wayland idle-inhibit client | Authoritative inhibited-surface count transitioned `0 → 1 → 0` across inhibitor creation and destruction | Pending |
-| Clipboard | Two Wayland clients, then Wayland and XWayland | Exact clipboard and primary-selection payloads verified Wayland-to-Wayland and in both Wayland/XWayland directions | Pending |
-| Drag-and-drop | Two Wayland clients, then Wayland and XWayland | Copy negotiation, drop completion, and exact payloads verified Wayland-to-Wayland and in both Wayland/XWayland directions | Pending |
+| Clipboard | Two Wayland clients, then Wayland and XWayland | Exact clipboard and primary-selection payloads verified Wayland-to-Wayland and in both Wayland/XWayland directions | Clipboard paste and primary-selection paste were observed between native clients; the explicit Wayland/XWayland direction matrix remains pending |
+| Drag-and-drop | Two Wayland clients, then Wayland and XWayland | Copy negotiation, drop completion, and exact payloads verified Wayland-to-Wayland and in both Wayland/XWayland directions | Dolphin-to-Konsole payload delivery and the compositor-rendered drag icon were observed; the reverse and explicit Wayland/XWayland matrix remains pending |
 | Composition | Chromium text area plus a raw `zwp_input_method_v2` client | The input method received activation and surrounding-text state, sent a live `é漢` preedit, and committed the exact payload; Chromium reported `compositionend:é漢` | Pending |
 | Decorations | SCTK server-decoration client and raw client-decoration client | Wire-level configure events verified server-side mode `2`, then an explicit transition from the server default to client-side mode | Pending |
 
