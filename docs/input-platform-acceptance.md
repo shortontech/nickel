@@ -60,6 +60,14 @@ rustc/cargo 1.94.1. Commands are run from the workspace root unless a row says o
 - `cargo build --release -p nickel-session --no-default-features --features backend-udev` and
   `cargo build --release -p nickel-shell --bin nickel`: pass. These are native optimized build
   results, not installed-session interaction acceptance.
+- Host availability probe on 2026-08-30 found no `ID_INPUT_JOYSTICK=1` input device and no Wine,
+  QEMU, libvirt, or VirtualBox runtime. The Windows GNU compilation target is installed, but that is
+  not a Windows acceptance runner. Controller and Windows live rows therefore remain explicitly
+  untested rather than inheriting build or fixture results.
+- The running installed Nickel compositor still referenced its previous deleted executable image;
+  its executable bytes differed from the newly built `target/release/nickel-session`. Installed
+  capture acceptance therefore remains pending a coordinated session restart and is not inferred
+  from the nested results.
 - Explicitly test-controlled nested Smithay: bare Print Screen mapped the real screenshot surface and
   displayed compositor-captured pixels; Alt+Print Screen placed the focused Shapes window pixels on
   the clipboard; Alt+Shift+Print Screen produced a clipboard path whose PNG reopened successfully.
