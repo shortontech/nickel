@@ -1875,7 +1875,6 @@ impl LiveShell {
             }
             LauncherShellEffect::OpenSettings(destination) => {
                 let preferred = match destination {
-                    crate::launcher::SettingsDestination::System => "System Settings",
                     crate::launcher::SettingsDestination::Nickel
                     | crate::launcher::SettingsDestination::KeyboardShortcuts
                     | crate::launcher::SettingsDestination::About => "Nickel Settings",
@@ -1893,7 +1892,6 @@ impl LiveShell {
                         .cloned();
                     if let Some(application) = application {
                         let screen = match destination {
-                            crate::launcher::SettingsDestination::System => None,
                             crate::launcher::SettingsDestination::Nickel => Some("appearance"),
                             crate::launcher::SettingsDestination::KeyboardShortcuts => {
                                 Some("keyboard-shortcuts")

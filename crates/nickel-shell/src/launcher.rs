@@ -90,7 +90,6 @@ pub struct DashboardAccount {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SettingsDestination {
-    System,
     Nickel,
     KeyboardShortcuts,
     About,

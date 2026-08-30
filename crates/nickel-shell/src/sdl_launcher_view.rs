@@ -897,7 +897,7 @@ fn build_dashboard_frame_directional(
             ),
             (
                 "Settings",
-                "System and Nickel settings",
+                "Nickel settings",
                 "settings",
                 include_bytes!("../../../assets/icons/start-menu/settings.svg").as_slice(),
                 LauncherAction::ShowNarrowSettings,
@@ -1005,20 +1005,6 @@ fn build_dashboard_frame_directional(
     let settings_section = Column::new()
         .gap(theme.spacing.compact)
         .child(SectionHeader::new(theme, "SETTINGS").direction(direction))
-        .child(ShortcutRow::new_directional(
-            theme,
-            structural_icon(
-                icons,
-                "system-settings",
-                include_bytes!("../../../assets/icons/start-menu/settings.svg"),
-                theme.text.secondary,
-            ),
-            "System Settings",
-            "Display, sound, network, power",
-            Some(LauncherAction::OpenSettings(SettingsDestination::System)),
-            row_state(&LauncherAction::OpenSettings(SettingsDestination::System)),
-            direction,
-        ))
         .child(ShortcutRow::new_directional(
             theme,
             structural_icon(
@@ -1209,7 +1195,6 @@ fn dashboard_actions(
     };
     let settings = || {
         vec![
-            LauncherAction::OpenSettings(SettingsDestination::System),
             LauncherAction::OpenSettings(SettingsDestination::Nickel),
             LauncherAction::OpenSettings(SettingsDestination::KeyboardShortcuts),
             LauncherAction::OpenSettings(SettingsDestination::About),
