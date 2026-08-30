@@ -2062,8 +2062,8 @@ impl NickelSession {
                     .map(|window| window.id);
             }
             let geometry = self.launcher_geometry(&window);
-            self.space
-                .map_element(window.clone(), (geometry.x, geometry.y), true);
+            let location = Self::shell_surface_location(&window, geometry);
+            self.space.map_element(window.clone(), location, true);
             let surface = window.toplevel().unwrap().wl_surface().clone();
             let _request = self.launcher_focus.request(surface.id());
             self.seat.get_keyboard().unwrap().set_focus(
@@ -2814,8 +2814,8 @@ impl NickelSession {
                 height: geometry.size.h,
             };
             Self::configure_window(&desktop, geometry);
-            self.space
-                .map_element(desktop, (geometry.x, geometry.y), false);
+            let location = Self::shell_surface_location(&desktop, geometry);
+            self.space.map_element(desktop, location, false);
         }
         for (panel, output) in self.panel_windows.clone().into_iter().zip(outputs) {
             let Some(output) = self.space.output_geometry(&output) else {
@@ -2829,16 +2829,16 @@ impl NickelSession {
             };
             let geometry = shell_layout::panel(output);
             Self::configure_window(&panel, geometry);
-            self.space
-                .map_element(panel.clone(), (geometry.x, geometry.y), false);
+            let location = Self::shell_surface_location(&panel, geometry);
+            self.space.map_element(panel.clone(), location, false);
             self.space.raise_element(&panel, false);
         }
         if self.launcher_visibility.is_visible()
             && let Some(launcher) = self.launcher_window.clone()
         {
             let geometry = self.launcher_geometry(&launcher);
-            self.space
-                .map_element(launcher, (geometry.x, geometry.y), true);
+            let location = Self::shell_surface_location(&launcher, geometry);
+            self.space.map_element(launcher, location, true);
             self.raise_panels();
         }
         self.relayout_maximized_windows();
@@ -3208,6 +3208,19 @@ impl NickelSession {
             });
             toplevel.send_pending_configure();
         }
+    }
+
+    fn shell_surface_location(window: &Window, target: Geometry) -> (i32, i32) {
+        let surface = window.geometry();
+        shell_layout::space_location_for_bounds(
+            target,
+            Geometry {
+                x: surface.loc.x,
+                y: surface.loc.y,
+                width: surface.size.w,
+                height: surface.size.h,
+            },
+        )
     }
 
     fn init_wayland_listener(

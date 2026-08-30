@@ -927,20 +927,26 @@ fn main() -> Result<(), String> {
                 }
             }
             Some(ShellEvent::FocusChanged {
-                surface: _surface,
+                surface,
                 focused: true,
             }) => {
+                if shell
+                    .surface(surface)
+                    .is_some_and(|entry| entry.role() == SurfaceRole::Launcher)
+                {
+                    shell.start_text_input(surface);
+                }
                 #[cfg(not(target_os = "linux"))]
-                if shell.surface(_surface).is_some_and(|entry| {
+                if shell.surface(surface).is_some_and(|entry| {
                     matches!(
                         entry.role(),
                         SurfaceRole::Launcher | SurfaceRole::ControlCenter
                     )
                 }) {
-                    focused_overlays.insert(_surface);
+                    focused_overlays.insert(surface);
                 }
                 #[cfg(not(target_os = "linux"))]
-                if overlay_focus_loss.is_some_and(|(pending, _, _)| pending == _surface) {
+                if overlay_focus_loss.is_some_and(|(pending, _, _)| pending == surface) {
                     overlay_focus_loss = None;
                 }
             }

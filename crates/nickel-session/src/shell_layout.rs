@@ -72,10 +72,15 @@ pub fn initial_window(area: Geometry, cascade: i32) -> Geometry {
     geometry
 }
 
+pub fn space_location_for_bounds(target: Geometry, surface_geometry: Geometry) -> (i32, i32) {
+    (target.x - surface_geometry.x, target.y - surface_geometry.y)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        Geometry, bottom_left_in, centered_in, initial_window, output_for_window, panel, work_area,
+        Geometry, bottom_left_in, centered_in, initial_window, output_for_window, panel,
+        space_location_for_bounds, work_area,
     };
 
     #[test]
@@ -188,5 +193,22 @@ mod tests {
         };
 
         assert_eq!(output_for_window(window, &[left, right]), Some(right));
+    }
+
+    #[test]
+    fn shell_bounds_cancel_client_internal_offsets() {
+        let target = Geometry {
+            x: 1920,
+            y: 1024,
+            width: 1920,
+            height: 56,
+        };
+        let surface = Geometry {
+            x: 456,
+            y: 224,
+            width: 1920,
+            height: 56,
+        };
+        assert_eq!(space_location_for_bounds(target, surface), (1464, 800));
     }
 }
