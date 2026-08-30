@@ -42,11 +42,6 @@ smithay::backend::renderer::element::render_elements! {
     Solid=SolidColorRenderElement,
 }
 
-struct WindowRenderGroup<E> {
-    client: Vec<E>,
-    frame: Vec<E>,
-}
-
 fn advance_output_capture(
     pending: &mut Option<PathBuf>,
     requested: Option<PathBuf>,
@@ -57,11 +52,8 @@ fn advance_output_capture(
     (ready, request_another_frame)
 }
 
-fn flatten_window_groups<E>(groups: Vec<WindowRenderGroup<E>>) -> Vec<E> {
-    groups
-        .into_iter()
-        .flat_map(|group| group.client.into_iter().chain(group.frame))
-        .collect()
+fn flatten_frame_groups<E>(groups: Vec<Vec<E>>) -> Vec<E> {
+    groups.into_iter().flatten().collect()
 }
 
 pub fn init_winit(
@@ -204,7 +196,7 @@ pub fn init_winit(
                         let frame_palette = ThemePalette::from_appearance(
                             ShellSettings::load_default().resolve_appearance(Appearance::default()),
                         );
-                        let window_elements = composited_window_elements(
+                        let window_elements = window_frame_elements(
                             state,
                             renderer,
                             &output,
@@ -385,66 +377,39 @@ pub fn init_winit(
                                 .unwrap();
                             draw_render_elements(&mut frame, 1.0, &overlay_elements, &[damage])
                                 .unwrap();
-                            let _ = frame.finish().unwrap();
+                            let sync = frame.finish().unwrap();
+                            if capture_requested {
+                                sync.wait().unwrap();
+                            }
                         }
                         capture_requested.then(|| {
-                            let captured = (|| {
-                                let mut texture = Offscreen::<GlesTexture>::create_buffer(
+                            let space_elements =
+                                smithay::desktop::space::space_render_elements(
                                     renderer,
-                                    Fourcc::Abgr8888,
-                                    (size.w, size.h).into(),
-                                )
-                                .map_err(|error| error.to_string())?;
-                                let mut capture_framebuffer = renderer
-                                    .bind(&mut texture)
-                                    .map_err(|error| error.to_string())?;
-                                let mut capture_damage = OutputDamageTracker::from_output(&output);
-                                smithay::desktop::space::render_output::<
-                                    _,
-                                    WaylandSurfaceRenderElement<GlesRenderer>,
-                                    _,
-                                    _,
-                                >(
-                                    &output,
-                                    renderer,
-                                    &mut capture_framebuffer,
-                                    1.0,
-                                    0,
                                     [&state.space],
-                                    &[],
-                                    &mut capture_damage,
-                                    [0.1, 0.1, 0.1, 1.0],
+                                    &output,
+                                    1.0,
                                 )
                                 .map_err(|error| error.to_string())?;
-                                if !overlay_elements.is_empty() {
-                                    let mut frame = renderer
-                                        .render(
-                                            &mut capture_framebuffer,
-                                            size,
-                                            output.current_transform(),
-                                        )
-                                        .map_err(|error| error.to_string())?;
-                                    draw_render_elements(
-                                        &mut frame,
-                                        1.0,
-                                        &overlay_elements,
-                                        &[damage],
-                                    )
-                                    .map_err(|error| error.to_string())?;
-                                    frame
-                                        .finish()
-                                        .map_err(|error| error.to_string())?
-                                        .wait()
-                                        .map_err(|error| error.to_string())?;
-                                }
-                                capture_bound_framebuffer_rgba(
-                                    renderer,
-                                    &capture_framebuffer,
-                                    size,
-                                )
-                            })();
-                            // Offscreen capture and mapping leave EGL on another target. Re-enter
-                            // a frame on the window surface before the backend swaps it.
+                            let mut frame = renderer
+                                .render(&mut framebuffer, size, output.current_transform())
+                                .map_err(|error| error.to_string())?;
+                            frame
+                                .clear([0.1, 0.1, 0.1, 1.0].into(), &[damage])
+                                .map_err(|error| error.to_string())?;
+                            draw_render_elements(&mut frame, 1.0, &space_elements, &[damage])
+                                .map_err(|error| error.to_string())?;
+                            draw_render_elements(&mut frame, 1.0, &overlay_elements, &[damage])
+                                .map_err(|error| error.to_string())?;
+                            frame
+                                .finish()
+                                .map_err(|error| error.to_string())?
+                                .wait()
+                                .map_err(|error| error.to_string())?;
+                            let captured =
+                                capture_bound_framebuffer_rgba(renderer, &framebuffer, size);
+                            // Mapping a GLES framebuffer changes the active EGL target. Restore
+                            // the presentation target before the winit backend swaps it.
                             let rebind = renderer
                                 .render(&mut framebuffer, size, output.current_transform())
                                 .and_then(|frame| frame.finish());
@@ -580,7 +545,7 @@ fn frame_cursor_icon(cursor: crate::window_frame::FrameCursor) -> ::winit::windo
     }
 }
 
-fn composited_window_elements(
+fn window_frame_elements(
     state: &NickelSession,
     renderer: &mut GlesRenderer,
     output: &Output,
@@ -609,29 +574,25 @@ fn composited_window_elements(
             continue;
         };
         let render_location = location - window.geometry().loc - output_geometry.loc;
-        let client = window
+        let has_client = !window
             .render_elements::<WaylandSurfaceRenderElement<GlesRenderer>>(
                 renderer,
                 render_location.to_physical_precise_round(1),
                 Scale::from(1.0),
                 1.0,
             )
-            .into_iter()
-            .map(WinitFrameElement::from)
-            .collect::<Vec<_>>();
-        if client.is_empty() {
+            .is_empty();
+        if !has_client {
             continue;
         }
         let mut frame = Vec::new();
         let Some(surface) = window.wl_surface() else {
-            groups.push(WindowRenderGroup { client, frame });
             continue;
         };
         if shell_surfaces.contains(&surface.id())
             || state.is_fullscreen_window(window)
             || !state.is_server_decorated(window)
         {
-            groups.push(WindowRenderGroup { client, frame });
             continue;
         }
         let registry_id = state.surface_windows.get(&surface.id()).copied();
@@ -689,9 +650,9 @@ fn composited_window_elements(
                 }
             }
         }
-        groups.push(WindowRenderGroup { client, frame });
+        groups.push(frame);
     }
-    flatten_window_groups(groups)
+    flatten_frame_groups(groups)
 }
 
 fn save_output_capture(
@@ -824,28 +785,22 @@ fn normalize_capture_rows(
 mod tests {
     use std::path::PathBuf;
 
-    use super::{WindowRenderGroup, advance_output_capture, flatten_window_groups};
+    use super::{advance_output_capture, flatten_frame_groups};
 
     #[test]
-    fn window_frames_stay_with_their_clients_in_stacking_order() {
-        let elements = flatten_window_groups(vec![
-            WindowRenderGroup {
-                client: vec!["foreground-client"],
-                frame: vec!["foreground-frame"],
-            },
-            WindowRenderGroup {
-                client: vec!["background-client"],
-                frame: vec!["background-frame"],
-            },
+    fn window_frames_preserve_front_to_back_stacking_order() {
+        let elements = flatten_frame_groups(vec![
+            vec!["foreground-titlebar", "foreground-icons"],
+            vec!["background-titlebar", "background-icons"],
         ]);
 
         assert_eq!(
             elements,
             [
-                "foreground-client",
-                "foreground-frame",
-                "background-client",
-                "background-frame",
+                "foreground-titlebar",
+                "foreground-icons",
+                "background-titlebar",
+                "background-icons",
             ]
         );
     }

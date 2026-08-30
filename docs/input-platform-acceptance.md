@@ -13,7 +13,7 @@ rustc/cargo 1.94.1. Commands are run from the workspace root unless a row says o
 
 | OS | Runtime | Architecture | Layout | Outputs / scale | Device | Capability | Automated | Native build | Nested live | Installed live | Evidence date |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Linux | Smithay nested winit backend | x86_64 | host default | 1200x768, scale 120/120, Flipped180 | keyboard / pointer | focused keys, text, IME, pointer, wheel, focus reset | pass | pass | partial | not applicable | 2026-08-30 |
+| Linux | Smithay nested winit backend | x86_64 | host default | 1200x768, scale 120/120, Flipped180 | keyboard / pointer | focused keys, text, IME, pointer, wheel, focus reset | pass | pass | pass | not applicable | 2026-08-30 |
 | Linux | Smithay nested winit backend | x86_64 | host default | 1200x768, scale 120/120, Flipped180 | keyboard | bare, Alt, and Alt+Shift Print Screen | pass | pass | pass | not applicable | 2026-08-30 |
 | Linux | Smithay nested winit backend | x86_64 | host default | 1200x768 at 120/120 plus virtual 800x600 at 180/120 | keyboard | active-window capture on secondary mixed-scale output | pass | pass | pass (960x614 clipboard image) | not applicable | 2026-08-30 |
 | Linux | Nickel Smithay session | x86_64 | host default | two outputs, scale values not yet recorded | keyboard / pointer / touch | compositor shortcuts, lock/focus transitions, screenshot actions | pass | pass | not applicable | untested | 2026-08-30 |
@@ -72,6 +72,13 @@ rustc/cargo 1.94.1. Commands are run from the workspace root unless a row says o
   frame, and focused Escape to the Rust pointer probe. Its shared winit adapter observed normalized
   wheel `dx=-1 dy=2 discrete=Some((-1, 2))`; Escape closed the focused probe. No typed text was
   retained.
+- A development-only Rust input-method client bound `zwp_input_method_v2` on the selected nested
+  session while the focused winit probe enabled `zwp_text_input_v3`. The probe's shared winit adapter
+  observed normalized preedit `"ime-preedit"` with cursor `(11,11)`, the protocol preedit clear, and
+  committed text `"ime-commit"` in order. The fixed markers were discarded and no screenshot was
+  retained. Reproduce with `cargo build -p nickel-session --example input_method_acceptance
+  --example pointer_constraints`, start the input-method example first on the nested
+  `WAYLAND_DISPLAY`, then start the pointer-constraints example.
 - In the nested Settings application, production pointer hit testing focused Search, normalized text
   input changed the visible result set, Escape cleared it, and a `120,-240` v120 wheel frame visibly
   scrolled the Appearance screen. In the fixture-backed embedded Codex UI, normalized text and
@@ -89,11 +96,17 @@ rustc/cargo 1.94.1. Commands are run from the workspace root unless a row says o
   complete 1200x768 scene rather than only damaged regions. Bare Print Screen then mapped Screenshot
   at `0,4 1200x760`, transferred compositor keyboard focus to it, and one focused Escape unmapped it
   and restored Settings as the active ordinary window. No screenshot was retained.
+- Nested compositor capture was repeated against an idle desktop, one Settings window, and two
+  overlapping Settings windows. Each 1200x768 frame contained the complete wallpaper, panel,
+  client contents, and compositor titlebars; the two immediate repeat captures were byte-identical,
+  and the compositor remained live after every framebuffer read. This specifically exercises a
+  forced full redraw without rendering mapped client surfaces twice. Temporary PNGs were deleted
+  after visual inspection.
 
 ## Evidence still required
 
-- Live Wayland IME preedit/commit. Persistent nested-Smithay focused text, ordinary clipboard
-  shortcuts, Settings, fixture-backed embedded Codex UI, context-menu keyboard focus, launcher focus
+- Persistent nested-Smithay focused text, IME preedit/commit, ordinary clipboard shortcuts,
+  Settings, fixture-backed embedded Codex UI, context-menu keyboard focus, launcher focus
   isolation/restoration, pointer/wheel normalization, focus-loss reset, and screenshot focus transfer
   now have live evidence. All three Print Screen bindings have live nested evidence; screenshot
   selection/confirmation/cancel also has complete nested semantic-path evidence.

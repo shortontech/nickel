@@ -6,10 +6,10 @@
 
 use std::{num::NonZeroU32, rc::Rc};
 
-use nickel_input::{InputEvent, KeyCode, KeyEdge, PhysicalKey, PointerEvent};
+use nickel_input::{InputEvent, KeyCode, KeyEdge, PhysicalKey, PointerEvent, TextEvent};
 use winit::{
     application::ApplicationHandler,
-    dpi::LogicalSize,
+    dpi::{LogicalPosition, LogicalSize},
     event::{DeviceEvent, DeviceId, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop, OwnedDisplayHandle},
     window::{CursorGrabMode, Window, WindowAttributes, WindowId},
@@ -74,6 +74,8 @@ impl ApplicationHandler for PointerConstraintProbe {
         ) {
             Ok(window) => {
                 let window = Rc::new(window);
+                window.set_ime_allowed(true);
+                window.set_ime_cursor_area(LogicalPosition::new(24, 24), LogicalSize::new(1, 24));
                 match softbuffer::Surface::new(&self.graphics, window.clone()) {
                     Ok(surface) => {
                         window.request_redraw();
@@ -118,6 +120,14 @@ impl ApplicationHandler for PointerConstraintProbe {
                 InputEvent::Pointer(PointerEvent::Axis {
                     delta, discrete, ..
                 }) => println!("wheel dx={} dy={} discrete={discrete:?}", delta.x, delta.y),
+                InputEvent::Text(TextEvent::Preedit {
+                    text, selection, ..
+                }) => {
+                    println!("ime-preedit text={text:?} selection={selection:?}")
+                }
+                InputEvent::Text(TextEvent::Commit { text, .. }) => {
+                    println!("ime-commit text={text:?}")
+                }
                 _ => {}
             }
         }
