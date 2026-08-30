@@ -13,7 +13,7 @@ use smithay::{
                 AsRenderElements, Kind,
                 memory::MemoryRenderBufferRenderElement,
                 solid::{SolidColorBuffer, SolidColorRenderElement},
-                surface::WaylandSurfaceRenderElement,
+                surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
                 utils::{ConstrainAlign, ConstrainScaleBehavior, constrain_render_elements},
             },
             gles::{GlesRenderer, GlesTexture},
@@ -286,6 +286,32 @@ pub fn init_winit(
                             ));
                         }
 
+                        if !state.locked
+                            && let Some(icon) = state.dnd_icon.as_ref()
+                        {
+                            let pointer = state.seat.get_pointer().unwrap().current_location();
+                            let location = crate::state::drag_icon_location(
+                                pointer,
+                                Rectangle::from_size(size.to_logical(1)),
+                            )
+                            .expect("nested pointer remains inside its only output")
+                            .to_physical(1);
+                            let icon_elements = render_elements_from_surface_tree::<
+                                _,
+                                WaylandSurfaceRenderElement<GlesRenderer>,
+                            >(
+                                renderer,
+                                icon,
+                                location,
+                                Scale::from(1.0),
+                                1.0,
+                                Kind::Cursor,
+                            )
+                            .into_iter()
+                            .map(WinitFrameElement::from);
+                            overlay_elements.splice(0..0, icon_elements);
+                        }
+
                         let recovery_banner = state
                             .shell_recovery_visible()
                             .then(crate::window_frame::render_recovery_panel)
@@ -393,6 +419,15 @@ pub fn init_winit(
                             |_, _| Some(output.clone()),
                         )
                     });
+                    if let Some(icon) = state.dnd_icon.as_ref() {
+                        smithay::desktop::utils::send_frames_surface_tree(
+                            icon,
+                            &output,
+                            state.start_time.elapsed(),
+                            Some(Duration::ZERO),
+                            |_, _| Some(output.clone()),
+                        );
+                    }
 
                     state.space.refresh();
                     state.popups.cleanup();

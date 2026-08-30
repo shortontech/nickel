@@ -150,6 +150,7 @@ impl WaylandDndGrabHandler for NickelSession {
         grab_type: GrabType,
     ) {
         self.dnd_icon = icon;
+        self.request_output_redraw();
         match grab_type {
             GrabType::Pointer => {
                 let pointer = seat.get_pointer().expect("pointer drag requires a pointer");
@@ -189,6 +190,7 @@ impl DndGrabHandler for NickelSession {
         _location: Point<f64, Logical>,
     ) {
         self.dnd_icon = None;
+        self.request_output_redraw();
     }
 }
 

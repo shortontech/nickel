@@ -26,7 +26,7 @@ use smithay::{
                 AsRenderElements, Kind,
                 memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
                 solid::{SolidColorBuffer, SolidColorRenderElement},
-                surface::WaylandSurfaceRenderElement,
+                surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
                 utils::{ConstrainAlign, ConstrainScaleBehavior, constrain_render_elements},
             },
             gles::{GlesRenderer, GlesTexture},
@@ -1271,6 +1271,29 @@ impl NickelSession {
                     Err(error) => tracing::warn!(?error, "failed to upload identify badge"),
                 }
             }
+            if !self.locked
+                && let Some(icon) = self.dnd_icon.as_ref()
+                && let Some(geometry) = self.space.output_geometry(&output)
+            {
+                let pointer = self.seat.get_pointer().unwrap().current_location();
+                if let Some(location) = crate::state::drag_icon_location(pointer, geometry) {
+                    let location = location.to_physical(1);
+                    let icon_elements = render_elements_from_surface_tree::<
+                        _,
+                        WaylandSurfaceRenderElement<NativeRenderer<'_>>,
+                    >(
+                        &mut renderer,
+                        icon,
+                        location,
+                        Scale::from(1.0),
+                        1.0,
+                        Kind::Cursor,
+                    )
+                    .into_iter()
+                    .map(|element| NativeElement::from(NativeCustomElement::from(element)));
+                    elements.splice(0..0, icon_elements);
+                }
+            }
             if let Some(geometry) = self.space.output_geometry(&output) {
                 let pointer = self.seat.get_pointer().unwrap().current_location();
                 if geometry.to_f64().contains(pointer) {
@@ -1381,6 +1404,21 @@ impl NickelSession {
                 |_, _| Some(output.clone()),
             );
         });
+        if let Some(icon) = self.dnd_icon.as_ref()
+            && self.space.output_geometry(&output).is_some_and(|geometry| {
+                geometry
+                    .to_f64()
+                    .contains(self.seat.get_pointer().unwrap().current_location())
+            })
+        {
+            smithay::desktop::utils::send_frames_surface_tree(
+                icon,
+                &output,
+                self.start_time.elapsed(),
+                Some(Duration::ZERO),
+                |_, _| Some(output.clone()),
+            );
+        }
         self.space.refresh();
         self.popups.cleanup();
         let _ = self.display_handle.flush_clients();

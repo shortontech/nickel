@@ -40,7 +40,7 @@ use smithay::{
             protocol::wl_surface::WlSurface,
         },
     },
-    utils::{IsAlive, Logical, Point, SERIAL_COUNTER, Size, Transform},
+    utils::{IsAlive, Logical, Point, Rectangle, SERIAL_COUNTER, Size, Transform},
     wayland::{
         compositor::{CompositorClientState, CompositorState},
         idle_inhibit::IdleInhibitManagerState,
@@ -97,6 +97,16 @@ fn clamp_window_location(
         ),
     )
         .into()
+}
+
+pub(crate) fn drag_icon_location(
+    pointer: Point<f64, Logical>,
+    output: Rectangle<i32, Logical>,
+) -> Option<Point<i32, Logical>> {
+    output
+        .to_f64()
+        .contains(pointer)
+        .then(|| (pointer - output.loc.to_f64()).to_i32_round())
 }
 
 fn process_uid(pid: u32) -> Option<String> {
@@ -3265,8 +3275,8 @@ impl ClientData for ClientState {
 #[cfg(test)]
 mod protocol_tests {
     use super::{
-        clamp_window_location, command_requires_shell_identity, shell_registration_allowed,
-        test_control_may_invoke,
+        clamp_window_location, command_requires_shell_identity, drag_icon_location,
+        shell_registration_allowed, test_control_may_invoke,
     };
     use crate::shell_layout::Geometry;
     use nickel_session_protocol::{Command, SessionAction, ShellRole};
@@ -3331,5 +3341,15 @@ mod protocol_tests {
             clamp_window_location((-20, -30).into(), (300, 200).into(), work_area),
             (100, 40).into()
         );
+    }
+
+    #[test]
+    fn drag_icon_uses_pointer_output_and_output_local_coordinates() {
+        let left = smithay::utils::Rectangle::new((0, 0).into(), (1920, 1080).into());
+        let right = smithay::utils::Rectangle::new((1920, 0).into(), (1920, 1080).into());
+        let pointer = smithay::utils::Point::from((2012.4, 84.6));
+
+        assert_eq!(drag_icon_location(pointer, left), None);
+        assert_eq!(drag_icon_location(pointer, right), Some((92, 85).into()));
     }
 }
