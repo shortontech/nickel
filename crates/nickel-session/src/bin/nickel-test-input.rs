@@ -268,7 +268,6 @@ fn parse_state(value: &str) -> Result<InputState, String> {
 #[derive(Clone, Debug)]
 struct LiveWindowState {
     id: u64,
-    application_id: String,
     active: bool,
     minimized: bool,
     maximized: bool,
@@ -293,13 +292,11 @@ fn live_windows() -> Result<Vec<LiveWindowState>, Box<dyn std::error::Error>> {
                 .first()
                 .ok_or("window snapshot is missing an ID")?
                 .parse()?;
-            let application_id = fields
+            let _application_id = fields
                 .get(1)
-                .ok_or("window snapshot is missing an application ID")?
-                .to_string();
+                .ok_or("window snapshot is missing an application ID")?;
             Ok(LiveWindowState {
                 id,
-                application_id,
                 active: fields.contains(&"active"),
                 minimized: fields.contains(&"minimized"),
                 maximized: fields.contains(&"maximized"),
@@ -362,19 +359,43 @@ fn wait_for_live_state(
 
 #[cfg(unix)]
 fn run_grouped_windows_scenario(application_id: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let initial = wait_for_live_state("two grouped fixture windows", |windows| {
-        windows
+    let panel_hover = || {
+        run_live_command_when_ready(&[
+            "semantic".into(),
+            "panel-app".into(),
+            application_id.into(),
+            "hover".into(),
+        ])
+    };
+    let fixture_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let fixtures = loop {
+        panel_hover()?;
+        let windows = live_windows()?;
+        let fixtures = windows
             .iter()
-            .filter(|window| window.application_id == application_id)
-            .count()
-            >= 2
-    })?;
-    let fixtures = initial
-        .iter()
-        .filter(|window| window.application_id == application_id)
-        .take(2)
-        .cloned()
-        .collect::<Vec<_>>();
+            .filter(|window| {
+                run_live_command(&[
+                    "semantic".into(),
+                    "preview".into(),
+                    window.id.to_string(),
+                    "hover".into(),
+                ])
+                .is_ok()
+            })
+            .take(2)
+            .cloned()
+            .collect::<Vec<_>>();
+        if fixtures.len() == 2 {
+            break fixtures;
+        }
+        if std::time::Instant::now() >= fixture_deadline {
+            return Err(format!(
+                "timed out waiting for two renderer-owned preview targets in panel group {application_id:?}; last windows: {windows:?}"
+            )
+            .into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    };
     let initial_active = fixtures
         .iter()
         .find(|window| window.active)
@@ -386,14 +407,6 @@ fn run_grouped_windows_scenario(application_id: &str) -> Result<(), Box<dyn std:
         .map(|window| window.id)
         .ok_or("two distinct grouped fixture windows are required")?;
 
-    let panel_hover = || {
-        run_live_command_when_ready(&[
-            "semantic".into(),
-            "panel-app".into(),
-            application_id.into(),
-            "hover".into(),
-        ])
-    };
     let semantic = |kind: &str, window: u64, action: &str| {
         run_live_command_when_ready(&[
             "semantic".into(),

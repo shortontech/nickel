@@ -27,6 +27,7 @@ impl ApplicationId {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Application {
     id: ApplicationId,
+    identity_aliases: Vec<String>,
     name: String,
     icon: Option<String>,
     icon_path: Option<PathBuf>,
@@ -43,6 +44,7 @@ impl Application {
     ) -> Self {
         Self {
             id: ApplicationId::new(id),
+            identity_aliases: Vec::new(),
             name,
             icon,
             icon_path,
@@ -56,6 +58,25 @@ impl Application {
 
     pub fn application_id(&self) -> &ApplicationId {
         &self.id
+    }
+
+    pub fn with_identity_alias(mut self, alias: impl Into<String>) -> Self {
+        let alias = alias.into();
+        if !alias.is_empty() && !self.identity_aliases.iter().any(|known| known == &alias) {
+            self.identity_aliases.push(alias);
+        }
+        self
+    }
+
+    pub fn matches_native_id(&self, native_id: &str) -> bool {
+        let native_id = native_id.trim_end_matches(".desktop");
+        std::iter::once(self.id())
+            .chain(self.identity_aliases.iter().map(String::as_str))
+            .any(|candidate| {
+                candidate
+                    .trim_end_matches(".desktop")
+                    .eq_ignore_ascii_case(native_id)
+            })
     }
 
     pub fn name(&self) -> &str {

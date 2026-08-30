@@ -61,13 +61,17 @@ fn application_from_entry(
     let icon_path = icon
         .as_deref()
         .and_then(|name| resolve_icon(name, icon_theme));
-    Some(Application::new(
+    let mut application = Application::new(
         entry.id().to_owned(),
         name,
         icon,
         icon_path,
         entry.exec().and_then(parse_exec),
-    ))
+    );
+    if let Some(startup_wm_class) = entry.startup_wm_class() {
+        application = application.with_identity_alias(startup_wm_class);
+    }
+    Some(application)
 }
 
 fn parse_exec(exec: &str) -> Option<Vec<String>> {
@@ -174,13 +178,14 @@ mod tests {
     #[test]
     fn extracts_application_and_icon_metadata() {
         let entry = parse(
-            "[Desktop Entry]\nType=Application\nName=Test App\nIcon=test-icon\nExec=test-app --label \"two words\" %U\n",
+            "[Desktop Entry]\nType=Application\nName=Test App\nIcon=test-icon\nExec=test-app --label \"two words\" %U\nStartupWMClass=TestAppWindow\n",
         );
         let application =
             application_from_entry(&entry, &["en_US".into()], &["kde".into()], "hicolor")
                 .expect("visible application");
         assert_eq!(application.name(), "Test App");
         assert_eq!(application.icon(), Some("test-icon"));
+        assert!(application.matches_native_id("TestAppWindow"));
         assert_eq!(
             application.launch_command(),
             Some(

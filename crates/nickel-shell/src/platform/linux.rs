@@ -1207,12 +1207,7 @@ fn resolve_application_id(native_app_id: &str, launcher: &Launcher) -> Option<Ap
     }
     launcher
         .applications()
-        .find(|application| {
-            application
-                .id()
-                .trim_end_matches(".desktop")
-                .eq_ignore_ascii_case(native_app_id)
-        })
+        .find(|application| application.matches_native_id(native_app_id))
         .map(|application| application.application_id().clone())
 }
 

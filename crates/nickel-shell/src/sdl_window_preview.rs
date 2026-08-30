@@ -133,8 +133,10 @@ pub fn build_preview_frame(
         color: palette.panel,
         radius: 14.0,
     }];
-    let mut cards = Vec::with_capacity(group.windows.len());
-    for (index, window) in group.windows.iter().enumerate() {
+    let mut windows = group.windows.iter().collect::<Vec<_>>();
+    windows.sort_by_key(|window| window.id.0);
+    let mut cards = Vec::with_capacity(windows.len());
+    for (index, window) in windows.into_iter().enumerate() {
         let x = PADDING + index as f32 * (CARD_WIDTH + GAP);
         let card = Rect::new(x, PADDING, CARD_WIDTH, PREVIEW_HEIGHT - PADDING * 2.0);
         let close = Rect::new(
@@ -352,6 +354,23 @@ mod tests {
         assert_eq!(frame.window(0), Some(WindowId(4)));
         assert_eq!(frame.window(1), Some(WindowId(9)));
         assert_eq!(frame.window(2), None);
+    }
+
+    #[test]
+    fn preview_targets_do_not_move_when_stacking_order_changes() {
+        let palette = ThemePalette::from_appearance(Appearance::default());
+        let original = group();
+        let mut reordered = original.clone();
+        reordered.windows.reverse();
+        let first = build_preview_frame(&original, &HashMap::new(), None, palette);
+        let second = build_preview_frame(&reordered, &HashMap::new(), None, palette);
+
+        for window in [WindowId(4), WindowId(9)] {
+            assert_eq!(
+                first.target_point(PreviewAction::Close(window)),
+                second.target_point(PreviewAction::Close(window))
+            );
+        }
     }
 
     #[test]

@@ -1114,22 +1114,14 @@ impl NickelSession {
                     .surface_windows
                     .iter()
                     .find_map(|(surface, id)| (*id == window.id).then_some(surface));
-                let geometry = surface
-                    .and_then(|surface| {
-                        self.space
-                            .elements()
-                            .find(|candidate| {
-                                candidate
-                                    .wl_surface()
-                                    .is_some_and(|candidate| candidate.id() == *surface)
-                            })
-                            .and_then(|candidate| self.space.element_bbox(candidate))
-                            .map(|bounds| ProtocolGeometry {
-                                x: bounds.loc.x,
-                                y: bounds.loc.y,
-                                width: bounds.size.w,
-                                height: bounds.size.h,
-                            })
+                let geometry = self
+                    .window_for_registry_id(window.id)
+                    .and_then(|candidate| self.space.element_bbox(&candidate))
+                    .map(|bounds| ProtocolGeometry {
+                        x: bounds.loc.x,
+                        y: bounds.loc.y,
+                        width: bounds.size.w,
+                        height: bounds.size.h,
                     })
                     .or_else(|| {
                         self.workspace_hidden_windows
@@ -2566,23 +2558,7 @@ impl NickelSession {
             }
             self.space.map_element(window, location, true);
         }
-        let Some(surface_id) = self
-            .surface_windows
-            .iter()
-            .find_map(|(surface, window)| (*window == id).then_some(surface.clone()))
-        else {
-            return;
-        };
-        let Some(window) = self
-            .space
-            .elements()
-            .find(|window| {
-                window
-                    .wl_surface()
-                    .is_some_and(|surface| surface.id() == surface_id)
-            })
-            .cloned()
-        else {
+        let Some(window) = self.window_for_registry_id(id) else {
             return;
         };
         self.space.raise_element(&window, true);
@@ -2740,17 +2716,7 @@ impl NickelSession {
 
     pub fn maximize_window(&mut self, id: WindowId) {
         self.activate_window(id);
-        let x11_window = self
-            .space
-            .elements()
-            .find(|window| {
-                window
-                    .wl_surface()
-                    .and_then(|surface| self.surface_windows.get(&surface.id()))
-                    .copied()
-                    == Some(id)
-            })
-            .cloned();
+        let x11_window = self.window_for_registry_id(id);
         if let Some(window) = x11_window
             && let Some(surface) = window.x11_surface()
             && let Some(output) = self.space.outputs_for_element(&window).first()
@@ -2785,14 +2751,8 @@ impl NickelSession {
 
     pub fn toggle_fullscreen_window(&mut self, id: WindowId) {
         self.activate_window(id);
-        let window = self.space.elements().find(|window| {
-            window
-                .wl_surface()
-                .and_then(|surface| self.surface_windows.get(&surface.id()))
-                .copied()
-                == Some(id)
-        });
-        if let Some(surface) = window.and_then(Window::x11_surface).cloned() {
+        let window = self.window_for_registry_id(id);
+        if let Some(surface) = window.as_ref().and_then(Window::x11_surface).cloned() {
             if self
                 .x11_fullscreen_restore
                 .contains_key(&surface.window_id())
@@ -2803,7 +2763,7 @@ impl NickelSession {
             }
             return;
         }
-        let surface = window.and_then(Window::toplevel).cloned();
+        let surface = window.as_ref().and_then(Window::toplevel).cloned();
         if let Some(surface) = surface {
             if self
                 .fullscreen_restore
@@ -3105,6 +3065,24 @@ impl NickelSession {
         self.space
             .elements()
             .find(|window| window.wl_surface().as_deref() == Some(surface))
+            .cloned()
+    }
+
+    fn window_for_registry_id(&self, id: WindowId) -> Option<Window> {
+        self.space
+            .elements()
+            .find(|window| {
+                window
+                    .wl_surface()
+                    .and_then(|surface| self.surface_windows.get(&surface.id()))
+                    .copied()
+                    == Some(id)
+                    || window
+                        .x11_surface()
+                        .and_then(|surface| self.x11_windows.get(&surface.window_id()))
+                        .copied()
+                        == Some(id)
+            })
             .cloned()
     }
 
