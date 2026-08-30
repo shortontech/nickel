@@ -10,6 +10,7 @@ use smithay::{
         InputTime, KeyState, KeyboardKeyEvent, MouseButton, PointerAxisEvent, PointerButtonEvent,
         PointerMotionEvent, TouchEvent,
     },
+    desktop::WindowSurfaceType,
     input::{
         keyboard::{FilterResult, Keysym, keysyms},
         pointer::{AxisFrame, ButtonEvent, Focus, GrabStartData, MotionEvent, RelativeMotionEvent},
@@ -76,15 +77,14 @@ impl NickelSession {
             self.frame_cursor = Default::default();
             return;
         }
-        self.frame_cursor = self
-            .space
-            .elements()
-            .filter(|window| {
-                !self.shell_windows().any(|shell| shell == *window)
-                    && !self.is_fullscreen_window(window)
-                    && self.is_server_decorated(window)
-            })
-            .filter_map(|window| {
+        self.frame_cursor =
+            window_frame::topmost_frame_target(self.space.elements().rev().filter_map(|window| {
+                let surface_accepts_input =
+                    self.space.element_location(window).is_some_and(|loc| {
+                        window
+                            .surface_under(position - loc.to_f64(), WindowSurfaceType::ALL)
+                            .is_some()
+                    });
                 let bounds = self.space.element_bbox(window)?;
                 let geometry = crate::shell_layout::Geometry {
                     x: bounds.loc.x,
@@ -92,14 +92,20 @@ impl NickelSession {
                     width: bounds.size.w,
                     height: bounds.size.h,
                 };
-                window_frame::hit_test(
-                    geometry,
-                    position.x.round() as i32,
-                    position.y.round() as i32,
-                )
-            })
-            .next_back()
-            .map(FramePart::cursor)
+                let frame_part = (!self.shell_windows().any(|shell| shell == window)
+                    && !self.is_fullscreen_window(window)
+                    && self.is_server_decorated(window))
+                .then(|| {
+                    window_frame::hit_test(
+                        geometry,
+                        position.x.round() as i32,
+                        position.y.round() as i32,
+                    )
+                })
+                .flatten();
+                Some(((), surface_accepts_input, frame_part))
+            }))
+            .map(|(_, part)| part.cursor())
             .unwrap_or_default();
     }
 
@@ -462,15 +468,17 @@ impl NickelSession {
                     && !super_pressed
                 {
                     let location = pointer.current_location();
-                    let frame_target = self
-                        .space
-                        .elements()
-                        .filter(|window| {
-                            !self.shell_windows().any(|shell| shell == *window)
-                                && !self.is_fullscreen_window(window)
-                                && self.is_server_decorated(window)
-                        })
-                        .filter_map(|window| {
+                    let frame_target = window_frame::topmost_frame_target(
+                        self.space.elements().rev().filter_map(|window| {
+                            let surface_accepts_input =
+                                self.space.element_location(window).is_some_and(|loc| {
+                                    window
+                                        .surface_under(
+                                            location - loc.to_f64(),
+                                            WindowSurfaceType::ALL,
+                                        )
+                                        .is_some()
+                                });
                             let bounds = self.space.element_bbox(window)?;
                             let geometry = crate::shell_layout::Geometry {
                                 x: bounds.loc.x,
@@ -478,14 +486,20 @@ impl NickelSession {
                                 width: bounds.size.w,
                                 height: bounds.size.h,
                             };
-                            window_frame::hit_test(
-                                geometry,
-                                location.x.round() as i32,
-                                location.y.round() as i32,
-                            )
-                            .map(|part| (window.clone(), part))
-                        })
-                        .next_back();
+                            let frame_part = (!self.shell_windows().any(|shell| shell == window)
+                                && !self.is_fullscreen_window(window)
+                                && self.is_server_decorated(window))
+                            .then(|| {
+                                window_frame::hit_test(
+                                    geometry,
+                                    location.x.round() as i32,
+                                    location.y.round() as i32,
+                                )
+                            })
+                            .flatten();
+                            Some((window.clone(), surface_accepts_input, frame_part))
+                        }),
+                    );
 
                     if let Some((window, part)) = frame_target {
                         let surface = window.wl_surface().map(std::borrow::Cow::into_owned)?;

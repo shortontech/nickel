@@ -311,6 +311,20 @@ impl FramePart {
     }
 }
 
+pub fn topmost_frame_target<T>(
+    candidates: impl IntoIterator<Item = (T, bool, Option<FramePart>)>,
+) -> Option<(T, FramePart)> {
+    for (target, surface_accepts_input, frame_part) in candidates {
+        if surface_accepts_input {
+            return None;
+        }
+        if let Some(frame_part) = frame_part {
+            return Some((target, frame_part));
+        }
+    }
+    None
+}
+
 pub fn outer_geometry(content: Geometry) -> Geometry {
     Geometry {
         x: content.x - RESIZE_BORDER,
@@ -359,7 +373,7 @@ pub fn hit_test(content: Geometry, x: i32, y: i32) -> Option<FramePart> {
 mod tests {
     use super::{
         FramePart, RecoveryAction, hit_test, outer_geometry, recovery_action_at, recovery_layout,
-        render_recovery_panel,
+        render_recovery_panel, topmost_frame_target,
     };
     use crate::shell_layout::Geometry;
 
@@ -389,6 +403,42 @@ mod tests {
         assert_eq!(hit_test(CONTENT, 550, 120), Some(FramePart::Maximize));
         assert_eq!(hit_test(CONTENT, 500, 120), Some(FramePart::Minimize));
         assert_eq!(hit_test(CONTENT, 200, 120), Some(FramePart::Titlebar));
+    }
+
+    #[test]
+    fn visible_surface_blocks_a_lower_window_frame() {
+        let candidates = [
+            ("foreground", true, None),
+            ("background", false, Some(FramePart::ResizeSouth)),
+        ];
+
+        assert_eq!(topmost_frame_target(candidates), None);
+    }
+
+    #[test]
+    fn input_region_pass_through_reaches_an_exposed_lower_frame() {
+        let candidates = [
+            ("foreground", false, None),
+            ("background", false, Some(FramePart::ResizeSouth)),
+        ];
+
+        assert_eq!(
+            topmost_frame_target(candidates),
+            Some(("background", FramePart::ResizeSouth))
+        );
+    }
+
+    #[test]
+    fn topmost_exposed_frame_wins_over_lower_surfaces() {
+        let candidates = [
+            ("foreground", false, Some(FramePart::Titlebar)),
+            ("background", true, None),
+        ];
+
+        assert_eq!(
+            topmost_frame_target(candidates),
+            Some(("foreground", FramePart::Titlebar))
+        );
     }
 
     #[test]
