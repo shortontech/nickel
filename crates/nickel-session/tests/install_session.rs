@@ -21,6 +21,11 @@ fn installer_stages_self_contained_sddm_session_from_any_working_directory() {
     ] {
         executable(&release.join(binary));
     }
+    fs::write(
+        release.join("nickel-session"),
+        b"#!/bin/sh\n[ \"$1\" = --available-backends ] && echo udev\n",
+    )
+    .expect("write fixture session executable");
 
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -42,7 +47,12 @@ fn installer_stages_self_contained_sddm_session_from_any_working_directory() {
         "nickel-settings",
     ] {
         let installed = root.join("usr/local/bin").join(binary);
-        assert_eq!(fs::read(&installed).expect("installed binary"), b"fixture");
+        let expected: &[u8] = if binary == "nickel-session" {
+            b"#!/bin/sh\n[ \"$1\" = --available-backends ] && echo udev\n"
+        } else {
+            b"fixture"
+        };
+        assert_eq!(fs::read(&installed).expect("installed binary"), expected);
         assert_ne!(
             fs::metadata(installed)
                 .expect("installed metadata")
@@ -63,4 +73,35 @@ fn installer_stages_self_contained_sddm_session_from_any_working_directory() {
     assert!(portals.contains("org.freedesktop.impl.portal.Secret=kwallet"));
     assert!(portals.contains("org.freedesktop.impl.portal.ScreenCast=wlr"));
     assert!(portals.contains("org.freedesktop.impl.portal.Screenshot=wlr"));
+}
+
+#[test]
+fn installer_rejects_session_without_native_backend() {
+    let fixture = tempfile::tempdir().expect("fixture directory");
+    let release = fixture.path().join("release");
+    let root = fixture.path().join("root");
+    fs::create_dir(&release).expect("release directory");
+    for binary in [
+        "nickel-login",
+        "nickel-session",
+        "nickel",
+        "nickel-settings",
+    ] {
+        executable(&release.join(binary));
+    }
+    fs::write(release.join("nickel-session"), b"#!/bin/sh\nexit 0\n")
+        .expect("write fixture session executable");
+
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let status = Command::new(repository.join("packaging/install-nickel-session.sh"))
+        .env("NICKEL_RELEASE_DIR", &release)
+        .env("NICKEL_INSTALL_ROOT", &root)
+        .status()
+        .expect("run installer");
+
+    assert!(!status.success());
+    assert!(!root.join("usr/local/bin/nickel-session").exists());
 }
