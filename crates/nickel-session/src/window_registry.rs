@@ -24,6 +24,12 @@ impl WindowRegistry {
     }
 
     pub fn insert(&mut self) -> WindowId {
+        let id = self.insert_inactive();
+        self.set_active(id);
+        id
+    }
+
+    pub fn insert_inactive(&mut self) -> WindowId {
         self.next_id += 1;
         let id = WindowId(self.next_id);
         self.windows.insert(
@@ -35,7 +41,7 @@ impl WindowRegistry {
                 active: false,
             },
         );
-        self.raise(id);
+        self.stacking_order.push(id);
         eprintln!("nickel-session: mapped window {}", id.0);
         id
     }
@@ -143,5 +149,22 @@ mod tests {
         assert_eq!(windows[0].id, terminal);
         assert!(windows[0].active);
         assert_eq!(registry.len(), 1);
+    }
+
+    #[test]
+    fn inactive_insertion_preserves_existing_activation() {
+        let mut registry = WindowRegistry::default();
+        let focused = registry.insert();
+        let background = registry.insert_inactive();
+        assert!(registry.is_active(focused));
+        assert!(!registry.is_active(background));
+        assert_eq!(
+            registry
+                .test_snapshot()
+                .into_iter()
+                .map(|window| window.id)
+                .collect::<Vec<_>>(),
+            [focused, background]
+        );
     }
 }

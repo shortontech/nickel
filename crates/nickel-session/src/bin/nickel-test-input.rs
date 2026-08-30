@@ -27,6 +27,7 @@ Usage:
   nickel-test-input semantic preview WINDOW_ID hover|activate|close|menu
   nickel-test-input semantic menu WINDOW_ID close|maximize|minimize
   nickel-test-input semantic recovery retry|exit [OUTPUT]
+  nickel-test-input semantic window WINDOW_ID hover|click|right-click
   nickel-test-input scenario grouped-windows APPLICATION_ID
   nickel-test-input move X Y
   nickel-test-input move-relative DX DY
@@ -165,6 +166,21 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, String> {
                     _ => return Err(format!("unknown recovery action {action:?}")),
                 },
                 output: args.get(3).cloned(),
+            }))
+        }
+        [command, kind, window, interaction] if command == "semantic" && kind == "window" => {
+            Ok(Parsed::Input(TestInput::WindowPointer {
+                window: nickel_session_protocol::WindowId(
+                    window
+                        .parse()
+                        .map_err(|_| format!("invalid window ID {window:?}"))?,
+                ),
+                interaction: match interaction.as_str() {
+                    "hover" => PointerInteraction::Hover,
+                    "click" => PointerInteraction::LeftClick,
+                    "right-click" => PointerInteraction::RightClick,
+                    _ => return Err(format!("unknown window interaction {interaction:?}")),
+                },
             }))
         }
         [command, kind, application_id, interaction]
@@ -811,6 +827,18 @@ mod tests {
         assert!(matches!(
             parse(["idle-inhibition".into()]),
             Ok(Parsed::IdleInhibition)
+        ));
+        assert!(matches!(
+            parse([
+                "semantic".into(),
+                "window".into(),
+                "12".into(),
+                "click".into(),
+            ]),
+            Ok(Parsed::Input(TestInput::WindowPointer {
+                window: nickel_session_protocol::WindowId(12),
+                interaction: PointerInteraction::LeftClick,
+            }))
         ));
         assert!(matches!(parse(["caches".into()]), Ok(Parsed::Caches)));
         assert!(matches!(

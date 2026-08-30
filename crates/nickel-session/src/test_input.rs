@@ -239,6 +239,10 @@ impl NickelSession {
             TestInput::RecoveryPointer { action, output } => {
                 return self.inject_recovery_pointer(action, output.as_deref());
             }
+            TestInput::WindowPointer {
+                window,
+                interaction,
+            } => return self.inject_window_pointer(window, interaction),
         };
         let _ = self.process_input_event::<TestInputBackend>(event);
         self.display_handle
@@ -345,6 +349,36 @@ impl NickelSession {
         })?;
         self.inject_test_input(TestInput::PointerButton {
             button: TestPointerButton::Left,
+            state: InputState::Released,
+        })
+    }
+
+    fn inject_window_pointer(
+        &mut self,
+        window: nickel_session_protocol::WindowId,
+        interaction: PointerInteraction,
+    ) -> Result<(), String> {
+        let window = self
+            .window_for_registry_id(crate::window_registry::WindowId(window.0))
+            .ok_or("managed window is not mapped")?;
+        let geometry = self
+            .space
+            .element_bbox(&window)
+            .ok_or("managed window has no production geometry")?;
+        let x = geometry.loc.x + geometry.size.w / 2;
+        let y = geometry.loc.y + geometry.size.h / 2;
+        self.inject_test_input(TestInput::PointerMove { x, y })?;
+        let button = match interaction {
+            PointerInteraction::Hover => return Ok(()),
+            PointerInteraction::LeftClick => TestPointerButton::Left,
+            PointerInteraction::RightClick => TestPointerButton::Right,
+        };
+        self.inject_test_input(TestInput::PointerButton {
+            button,
+            state: InputState::Pressed,
+        })?;
+        self.inject_test_input(TestInput::PointerButton {
+            button,
             state: InputState::Released,
         })
     }

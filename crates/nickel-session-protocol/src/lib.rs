@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-pub const PROTOCOL_VERSION: u16 = 9;
+pub const PROTOCOL_VERSION: u16 = 10;
 pub const MAX_FRAME_BYTES: usize = 196_608;
 pub const MAX_PREVIEW_WIDTH: u16 = 256;
 pub const MAX_PREVIEW_HEIGHT: u16 = 144;
@@ -172,6 +172,12 @@ pub enum TestInput {
     RecoveryPointer {
         action: RecoveryTargetAction,
         output: Option<String>,
+    },
+    /// Resolve a managed window through the compositor's live registry and
+    /// geometry, then dispatch an ordinary pointer interaction.
+    WindowPointer {
+        window: WindowId,
+        interaction: PointerInteraction,
     },
 }
 
@@ -689,6 +695,10 @@ mod tests {
             TestInput::RecoveryPointer {
                 action: RecoveryTargetAction::Retry,
                 output: Some("DP-1".into()),
+            },
+            TestInput::WindowPointer {
+                window: WindowId(7),
+                interaction: PointerInteraction::LeftClick,
             },
         ] {
             let envelope = ClientEnvelope {

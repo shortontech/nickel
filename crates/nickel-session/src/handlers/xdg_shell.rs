@@ -41,6 +41,10 @@ fn shell_owned_window_is_application(app_id: &str, shell_role: Option<ShellRole>
     !app_id.is_empty() && shell_role.is_none()
 }
 
+fn new_toplevel_may_focus(current_focus_is_shell: Option<bool>) -> bool {
+    current_focus_is_shell.unwrap_or(true)
+}
+
 impl XdgShellHandler for NickelSession {
     fn xdg_shell_state(&mut self) -> &mut XdgShellState {
         &mut self.xdg_shell_state
@@ -63,7 +67,7 @@ impl XdgShellHandler for NickelSession {
                     .same_client_as(&surface_id)
             });
         let cascade = i32::try_from(self.windows.len() % 8).unwrap_or(0) * 32;
-        let id = self.windows.insert();
+        let id = self.windows.insert_inactive();
         if is_shell_client {
             self.shell_owned_windows.insert(id);
         } else {
@@ -94,8 +98,27 @@ impl XdgShellHandler for NickelSession {
         let location = geometry
             .map(|geometry| (geometry.x, geometry.y))
             .unwrap_or((cascade, cascade));
-        self.space.map_element(window, location, true);
-        if !is_shell_client && self.launcher_window.is_some() {
+        self.space.map_element(window.clone(), location, true);
+        let current_focus_is_shell =
+            self.seat
+                .get_keyboard()
+                .unwrap()
+                .current_focus()
+                .map(|focus| {
+                    focus.wl_surface().is_some_and(|focused| {
+                        self.shell_windows()
+                            .filter_map(Window::wl_surface)
+                            .any(|shell| shell.as_ref() == focused.as_ref())
+                    })
+                });
+        if !is_shell_client
+            && self.launcher_window.is_some()
+            && new_toplevel_may_focus(current_focus_is_shell)
+        {
+            self.windows.raise(id);
+            self.space.elements().for_each(|candidate| {
+                candidate.set_activated(candidate == &window);
+            });
             self.seat.get_keyboard().unwrap().set_focus(
                 self,
                 Some(KeyboardFocusTarget::Wayland(wl_surface)),
@@ -571,18 +594,23 @@ impl NickelSession {
         // focus while starting. Once metadata identifies an ordinary Codex
         // project window, complete the deferred focus handoff.
         if is_codex_project_chat {
-            self.seat.get_keyboard().unwrap().set_focus(
-                self,
-                Some(KeyboardFocusTarget::Wayland(surface.wl_surface().clone())),
-                smithay::utils::SERIAL_COUNTER.next_serial(),
-            );
             if let Some(id) = self
                 .surface_windows
                 .get(&surface.wl_surface().id())
                 .copied()
             {
+                self.windows.raise(id);
                 self.workspaces.focused(&id);
             }
+            self.space.elements().for_each(|candidate| {
+                candidate
+                    .set_activated(candidate.wl_surface().as_deref() == Some(surface.wl_surface()));
+            });
+            self.seat.get_keyboard().unwrap().set_focus(
+                self,
+                Some(KeyboardFocusTarget::Wayland(surface.wl_surface().clone())),
+                smithay::utils::SERIAL_COUNTER.next_serial(),
+            );
             self.space.elements().for_each(|window| {
                 if let Some(toplevel) = window.toplevel() {
                     toplevel.send_pending_configure();
@@ -621,7 +649,7 @@ impl NickelSession {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_codex_project_chat, shell_owned_window_is_application};
+    use super::{is_codex_project_chat, new_toplevel_may_focus, shell_owned_window_is_application};
     use nickel_session_protocol::ShellRole;
 
     #[test]
@@ -631,6 +659,13 @@ mod tests {
         )));
         assert!(!is_codex_project_chat(Some("Codex — sentrygist")));
         assert!(!is_codex_project_chat(Some("io.nickel.shell")));
+    }
+
+    #[test]
+    fn background_toplevel_cannot_replace_application_focus() {
+        assert!(new_toplevel_may_focus(None));
+        assert!(new_toplevel_may_focus(Some(true)));
+        assert!(!new_toplevel_may_focus(Some(false)));
     }
 
     #[test]

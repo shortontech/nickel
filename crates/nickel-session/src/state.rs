@@ -3087,7 +3087,7 @@ impl NickelSession {
             .cloned()
     }
 
-    fn window_for_registry_id(&self, id: WindowId) -> Option<Window> {
+    pub(crate) fn window_for_registry_id(&self, id: WindowId) -> Option<Window> {
         self.space
             .elements()
             .find(|window| {
