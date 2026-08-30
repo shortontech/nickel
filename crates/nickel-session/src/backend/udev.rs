@@ -13,7 +13,7 @@ use smithay::{
         },
         drm::{
             DrmDevice, DrmDeviceFd, DrmEvent, DrmNode,
-            compositor::FrameFlags,
+            compositor::{FrameFlags, PrimaryPlaneElement},
             exporter::gbm::GbmFramebufferExporter,
             output::{DrmOutput, DrmOutputManager, DrmOutputRenderElements},
         },
@@ -1478,7 +1478,24 @@ impl NickelSession {
                 frame_flags,
             ) {
                 Ok(frame) if !frame.is_empty => {
-                    if let Err(error) = surface.drm.queue_frame(()) {
+                    let synchronized = if frame.needs_sync()
+                        && let PrimaryPlaneElement::Swapchain(element) = frame.primary_element
+                    {
+                        element.sync.wait().map_err(|error| {
+                            tracing::warn!(
+                                output = %output.name(),
+                                render_gpu = %native.primary_gpu,
+                                target_gpu = %target_gpu,
+                                ?error,
+                                "failed to synchronize rendered DRM frame"
+                            );
+                        })
+                    } else {
+                        Ok(())
+                    };
+                    if synchronized.is_err() {
+                        true
+                    } else if let Err(error) = surface.drm.queue_frame(()) {
                         tracing::warn!(
                             output = %output.name(),
                             render_gpu = %native.primary_gpu,
