@@ -171,6 +171,10 @@ impl SdlShell {
         configure_input_hints();
         let sdl = sdl3::init().map_err(|error| error.to_string())?;
         let video = sdl.video().map_err(|error| error.to_string())?;
+        // SDL disables the screen saver by default and creates one Wayland
+        // idle inhibitor per shell surface. Nickel owns idle policy itself,
+        // so its shell must never globally inhibit the compositor.
+        video.enable_screen_saver();
         let gamepad = sdl.gamepad().map_err(|error| error.to_string())?;
         let gamepads = gamepad
             .gamepads()
@@ -785,6 +789,7 @@ impl SdlShell {
 }
 
 fn configure_input_hints() {
+    sdl3::hint::set("SDL_VIDEO_ALLOW_SCREENSAVER", "1");
     sdl3::hint::set("SDL_MOUSE_FOCUS_CLICKTHROUGH", "1");
     // SDL translates a primary finger into the ordinary pointer path. Nickel
     // therefore applies production hit testing and reducers identically for
@@ -904,6 +909,15 @@ mod tests {
         super::configure_input_hints();
         assert_eq!(
             sdl3::hint::get("SDL_TOUCH_MOUSE_EVENTS").as_deref(),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn shell_does_not_disable_compositor_idle_policy() {
+        super::configure_input_hints();
+        assert_eq!(
+            sdl3::hint::get("SDL_VIDEO_ALLOW_SCREENSAVER").as_deref(),
             Some("1")
         );
     }
