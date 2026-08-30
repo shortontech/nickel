@@ -43,7 +43,7 @@ entry selected in SDDM. Nested runs are development evidence, not display-manage
 | Clipboard | Two Wayland clients, then Wayland and XWayland | Exact clipboard and primary-selection payloads verified Wayland-to-Wayland and in both Wayland/XWayland directions | Clipboard paste and primary-selection paste were observed between native clients; the explicit Wayland/XWayland direction matrix remains pending |
 | Drag-and-drop | Two Wayland clients, then Wayland and XWayland | Copy negotiation, drop completion, and exact payloads verified Wayland-to-Wayland and in both Wayland/XWayland directions | Dolphin-to-Konsole payload delivery and the compositor-rendered drag icon were observed; the reverse and explicit Wayland/XWayland matrix remains pending |
 | Composition | Chromium text area plus a raw `zwp_input_method_v2` client | The input method received activation and surrounding-text state, sent a live `é漢` preedit, and committed the exact payload; Chromium reported `compositionend:é漢` | Pending |
-| Decorations | SCTK server-decoration client and raw client-decoration client | Wire-level configure events verified server-side mode `2`, then an explicit transition from the server default to client-side mode | Pending |
+| Decorations | SCTK server-decoration client and raw client-decoration client | Wire-level configure events verified server-side mode `2`, then an explicit transition from the server default to client-side mode | The raw protocol client received `ServerSide` for Nickel's default and then `ClientSide` after its explicit mode request. |
 
 ## Known limitations
 
