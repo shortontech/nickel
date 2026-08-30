@@ -19,6 +19,17 @@ impl SettingsApp {
             ButtonPresentation::Secondary,
         )
         .width(145.0);
+        let enabled = Button::semantic(
+            theme,
+            SettingsMessage::DisplayEnabled(!selected.enabled),
+            if selected.enabled {
+                "Disable"
+            } else {
+                "Enable"
+            },
+            ButtonPresentation::Secondary,
+        )
+        .width(105.0);
         let apply = Button::semantic(
             theme,
             SettingsMessage::DisplayApply,
@@ -47,7 +58,7 @@ impl SettingsApp {
                             </Text>
                         </Row>
                         <Row height={42.0} gap={12.0}>
-                            {identify}{make_primary}{apply}
+                            {identify}{make_primary}{enabled}{apply}
                         </Row>
                     </Column>
                 </Container>

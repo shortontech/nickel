@@ -206,6 +206,7 @@ pub struct NickelSession {
     pub pointer_constraints_state: PointerConstraintsState,
     pub(crate) pointer_lock_hints: HashMap<ObjectId, Point<f64, Logical>>,
     pub(crate) active_pointer_locks: HashSet<ObjectId>,
+    pub(crate) active_pointer_constraint_origins: HashMap<ObjectId, Point<f64, Logical>>,
     pub idle_inhibit_state: IdleInhibitManagerState,
     pub input_method_state: InputMethodManagerState,
     pub xwayland_shell_state: XWaylandShellState,
@@ -495,6 +496,7 @@ impl NickelSession {
             pointer_constraints_state,
             pointer_lock_hints: HashMap::new(),
             active_pointer_locks: HashSet::new(),
+            active_pointer_constraint_origins: HashMap::new(),
             idle_inhibit_state,
             input_method_state,
             xwayland_shell_state,
@@ -1296,7 +1298,8 @@ impl NickelSession {
     }
 
     fn protocol_outputs(&self) -> Vec<OutputSnapshot> {
-        self.space
+        let outputs = self
+            .space
             .outputs()
             .filter_map(|output| {
                 let geometry = self.space.output_geometry(output)?;
@@ -1338,10 +1341,49 @@ impl NickelSession {
                     physical_width_mm: physical.size.w,
                     physical_height_mm: physical.size.h,
                     primary: self.primary_output_name.as_deref() == Some(output.name().as_str()),
+                    enabled: true,
                 })
             })
             .take(nickel_session_protocol::MAX_OUTPUTS)
-            .collect()
+            .collect::<Vec<_>>();
+        #[cfg(feature = "backend-udev")]
+        let mut outputs = outputs;
+        #[cfg(feature = "backend-udev")]
+        if let Some(native) = self.native.as_ref() {
+            for output in native.disabled_outputs() {
+                if outputs.len() >= nickel_session_protocol::MAX_OUTPUTS {
+                    break;
+                }
+                let Some(mode) = output.current_mode() else {
+                    continue;
+                };
+                let physical = output.physical_properties();
+                let location = output.current_location();
+                outputs.push(OutputSnapshot {
+                    name: output.name(),
+                    model: physical.model,
+                    geometry: ProtocolGeometry {
+                        x: location.x,
+                        y: location.y,
+                        width: mode.size.w,
+                        height: mode.size.h,
+                    },
+                    work_area: ProtocolGeometry {
+                        x: location.x,
+                        y: location.y,
+                        width: mode.size.w,
+                        height: mode.size.h,
+                    },
+                    scale_120: (output.current_scale().fractional_scale() * 120.0).round() as u32,
+                    transform: OutputTransform::Normal,
+                    physical_width_mm: physical.size.w,
+                    physical_height_mm: physical.size.h,
+                    primary: false,
+                    enabled: false,
+                });
+            }
+        }
+        outputs
     }
 
     pub(crate) fn protocol_shell_surfaces(&self) -> Vec<ShellSurfaceSnapshot> {
@@ -1490,6 +1532,24 @@ impl NickelSession {
                     .map(|geometry| (output.name(), (output.clone(), geometry.size)))
             })
             .collect();
+        #[cfg(feature = "backend-udev")]
+        let mut connected = connected;
+        #[cfg(feature = "backend-udev")]
+        for (name, size) in self.native_output_inventory() {
+            connected.entry(name.clone()).or_insert_with(|| {
+                let output = self
+                    .native
+                    .as_ref()
+                    .and_then(|native| {
+                        native
+                            .disabled_outputs()
+                            .find(|output| output.name() == name)
+                            .cloned()
+                    })
+                    .expect("disabled inventory retains its output");
+                (output, size)
+            });
+        }
         if placements.len() != connected.len() {
             return Err("layout must include every connected output");
         }
@@ -1499,8 +1559,11 @@ impl NickelSession {
         }) {
             return Err("layout contains an unknown or duplicate output");
         }
-        if !names.contains(&primary) {
-            return Err("primary output is not connected");
+        if !placements
+            .iter()
+            .any(|placement| placement.name == primary && placement.enabled)
+        {
+            return Err("primary output must be enabled");
         }
         let minimum_x = placements
             .iter()
@@ -1516,9 +1579,17 @@ impl NickelSession {
             placement.x -= minimum_x;
             placement.y -= minimum_y;
         }
-        for (index, left) in placements.iter().enumerate() {
+        for (index, left) in placements
+            .iter()
+            .enumerate()
+            .filter(|(_, output)| output.enabled)
+        {
             let left_size = connected[&left.name].1;
-            for right in placements.iter().skip(index + 1) {
+            for right in placements
+                .iter()
+                .skip(index + 1)
+                .filter(|output| output.enabled)
+            {
                 let right_size = connected[&right.name].1;
                 let overlaps = left.x < right.x + right_size.w
                     && left.x + left_size.w > right.x
@@ -1530,13 +1601,30 @@ impl NickelSession {
             }
         }
 
-        for placement in &placements {
-            let (output, _) = &connected[&placement.name];
+        #[cfg(feature = "backend-udev")]
+        for placement in placements.iter().filter(|placement| placement.enabled) {
+            self.set_native_output_enabled(&placement.name, true)?;
+        }
+        #[cfg(not(feature = "backend-udev"))]
+        if placements.iter().any(|placement| !placement.enabled) {
+            return Err("output disabling requires the native DRM backend");
+        }
+        self.primary_output_name = Some(primary.clone());
+        #[cfg(feature = "backend-udev")]
+        for placement in placements.iter().filter(|placement| !placement.enabled) {
+            self.set_native_output_enabled(&placement.name, false)?;
+        }
+        for placement in placements.iter().filter(|placement| placement.enabled) {
+            let output = self
+                .space
+                .outputs()
+                .find(|output| output.name() == placement.name)
+                .cloned()
+                .ok_or("enabled output did not become active")?;
             let location = (placement.x, placement.y).into();
             output.change_current_state(None, None, None, Some(location));
-            self.space.map_output(output, location);
+            self.space.map_output(&output, location);
         }
-        self.primary_output_name = Some(primary);
         self.rescue_stranded_windows();
         self.relayout_shell_surfaces();
         self.notify_protocol_snapshot();
@@ -3041,7 +3129,7 @@ impl NickelSession {
         })
     }
 
-    fn output_geometry_named(&self, name: &str) -> Option<Geometry> {
+    pub(crate) fn output_geometry_named(&self, name: &str) -> Option<Geometry> {
         let output = self.space.outputs().find(|output| output.name() == name)?;
         let geometry = self.space.output_geometry(output)?;
         Some(Geometry {
@@ -3052,7 +3140,7 @@ impl NickelSession {
         })
     }
 
-    fn preferred_interaction_output_name(&self) -> Option<String> {
+    pub(crate) fn preferred_interaction_output_name(&self) -> Option<String> {
         self.output_name_at_pointer()
             .or_else(|| self.workspaces.active_output().map(str::to_owned))
             .or_else(|| self.primary_output_name.clone())

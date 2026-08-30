@@ -78,7 +78,23 @@ impl Application {
         self.process()?.spawn()
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn launch_as_session_client(&self) -> io::Result<Child> {
+        self.session_process()?.spawn()
+    }
+
     fn process(&self) -> io::Result<Command> {
+        let mut command = self.process_with_capabilities()?;
+        // These capabilities authenticate trusted Nickel session clients.
+        // They must never cross into an ordinary application.
+        command
+            .env_remove("NICKEL_SESSION_CONTROL")
+            .env_remove("NICKEL_SESSION_TOKEN")
+            .env_remove("NICKEL_SHELL_TEST_CONTROL");
+        Ok(command)
+    }
+
+    fn process_with_capabilities(&self) -> io::Result<Command> {
         let (program, arguments) = self
             .launch_command
             .as_deref()
@@ -86,15 +102,16 @@ impl Application {
             .ok_or_else(|| io::Error::other("application has no launch command"))?;
         let mut command = Command::new(program);
         command.args(arguments);
-        // These capabilities authenticate the trusted Nickel shell to its
-        // compositor. They must never cross into an ordinary application.
-        command
-            .env_remove("NICKEL_SESSION_CONTROL")
-            .env_remove("NICKEL_SESSION_TOKEN")
-            .env_remove("NICKEL_SHELL_TEST_CONTROL");
         if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
             command.current_dir(home);
         }
+        Ok(command)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn session_process(&self) -> io::Result<Command> {
+        let mut command = self.process_with_capabilities()?;
+        command.env_remove("NICKEL_SHELL_TEST_CONTROL");
         Ok(command)
     }
 }
@@ -155,6 +172,26 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(removals.contains(&std::ffi::OsStr::new("NICKEL_SESSION_CONTROL")));
         assert!(removals.contains(&std::ffi::OsStr::new("NICKEL_SESSION_TOKEN")));
+        assert!(removals.contains(&std::ffi::OsStr::new("NICKEL_SHELL_TEST_CONTROL")));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn trusted_session_client_retains_only_production_session_capabilities() {
+        let application = Application::new(
+            "nickel-settings".into(),
+            "Nickel Settings".into(),
+            None,
+            None,
+            Some(vec!["true".into()]),
+        );
+        let command = application.session_process().unwrap();
+        let removals = command
+            .get_envs()
+            .filter_map(|(name, value)| value.is_none().then_some(name))
+            .collect::<Vec<_>>();
+        assert!(!removals.contains(&std::ffi::OsStr::new("NICKEL_SESSION_CONTROL")));
+        assert!(!removals.contains(&std::ffi::OsStr::new("NICKEL_SESSION_TOKEN")));
         assert!(removals.contains(&std::ffi::OsStr::new("NICKEL_SHELL_TEST_CONTROL")));
     }
 }

@@ -228,17 +228,36 @@ impl NickelSession {
                         time: event.time(),
                     },
                 );
-                let position = current_focus
-                    .as_ref()
-                    .map_or(proposed, |(surface, origin)| {
-                        surface.wl_surface().map_or(proposed, |surface| {
-                            self.constrained_pointer_position(&surface, *origin, current, proposed)
-                        })
+                // An active constraint owns pointer focus until the protocol
+                // releases it. Re-hit-testing here would let an overlapping
+                // window steal motion before the pointer reaches the
+                // constrained surface boundary.
+                let protocol_focus = pointer.current_focus().and_then(|focus| {
+                    let surface = focus.wl_surface()?.into_owned();
+                    let origin = self
+                        .active_pointer_constraint_origins
+                        .get(&surface.id())
+                        .copied()
+                        .or_else(|| {
+                            current_focus.as_ref().and_then(|(candidate, origin)| {
+                                (candidate.wl_surface().as_deref() == Some(&surface))
+                                    .then_some(*origin)
+                            })
+                        })?;
+                    Some((focus, surface, origin))
+                });
+                let (position, constraint_focus) =
+                    protocol_focus.map_or((proposed, None), |(focus, surface, origin)| {
+                        let (position, active) =
+                            self.constrained_pointer_position(&surface, origin, current, proposed);
+                        (position, active.then_some((focus, origin)))
                     });
                 self.update_frame_cursor(position);
+                let motion_focus =
+                    constraint_focus.or_else(|| self.pointer_surface_under(position));
                 pointer.motion(
                     self,
-                    self.pointer_surface_under(position),
+                    motion_focus,
                     &MotionEvent {
                         location: position,
                         serial: SERIAL_COUNTER.next_serial(),
@@ -257,18 +276,31 @@ impl NickelSession {
                 let pointer = self.seat.get_pointer().unwrap();
                 let current = pointer.current_location();
                 let current_focus = self.pointer_surface_under(current);
-                let pos = current_focus
-                    .as_ref()
-                    .map_or(proposed, |(surface, origin)| {
-                        surface.wl_surface().map_or(proposed, |surface| {
-                            self.constrained_pointer_position(&surface, *origin, current, proposed)
-                        })
+                let protocol_focus = pointer.current_focus().and_then(|focus| {
+                    let surface = focus.wl_surface()?.into_owned();
+                    let origin = self
+                        .active_pointer_constraint_origins
+                        .get(&surface.id())
+                        .copied()
+                        .or_else(|| {
+                            current_focus.as_ref().and_then(|(candidate, origin)| {
+                                (candidate.wl_surface().as_deref() == Some(&surface))
+                                    .then_some(*origin)
+                            })
+                        })?;
+                    Some((focus, surface, origin))
+                });
+                let (pos, constraint_focus) =
+                    protocol_focus.map_or((proposed, None), |(focus, surface, origin)| {
+                        let (position, active) =
+                            self.constrained_pointer_position(&surface, origin, current, proposed);
+                        (position, active.then_some((focus, origin)))
                     });
                 self.update_frame_cursor(pos);
 
                 let serial = SERIAL_COUNTER.next_serial();
 
-                let under = self.pointer_surface_under(pos);
+                let under = constraint_focus.or_else(|| self.pointer_surface_under(pos));
 
                 pointer.motion(
                     self,

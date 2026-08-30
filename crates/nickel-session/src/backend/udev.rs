@@ -51,7 +51,7 @@ use smithay::{
         rustix::fs::OFlags,
         wayland_server::{Resource, backend::GlobalId},
     },
-    utils::{Buffer, DeviceFd, Physical, Point, Rectangle, Scale, Transform},
+    utils::{Buffer, DeviceFd, Logical, Physical, Point, Rectangle, Scale, Size, Transform},
     wayland::seat::WaylandFocus,
 };
 use thiserror::Error;
@@ -134,10 +134,18 @@ struct OutputId {
 struct SurfaceData {
     global: Option<GlobalId>,
     output: Output,
+    connector: connector::Info,
     drm: NativeDrmOutput,
     background: SolidColorBuffer,
     render_path_logged: bool,
     invalidate_pending: bool,
+}
+
+struct DisabledOutput {
+    node: DrmNode,
+    connector: connector::Info,
+    crtc: crtc::Handle,
+    output: Output,
 }
 
 struct DeviceData {
@@ -156,12 +164,21 @@ pub struct UdevData {
     gpus: GpuManager<RendererBackend>,
     primary_gpu: DrmNode,
     devices: HashMap<DrmNode, DeviceData>,
+    disabled_outputs: HashMap<String, DisabledOutput>,
     layout: OutputLayout,
     bootstrap_render_until: Instant,
     client_bootstrap_started: bool,
     cursors: HashMap<crate::window_frame::FrameCursor, CursorBuffer>,
     frame_icons: Option<crate::window_frame::FrameIcons>,
     identify_badges: Vec<MemoryRenderBuffer>,
+}
+
+impl UdevData {
+    pub(crate) fn disabled_outputs(&self) -> impl Iterator<Item = &Output> {
+        self.disabled_outputs
+            .values()
+            .map(|disabled| &disabled.output)
+    }
 }
 
 #[derive(Clone)]
@@ -200,6 +217,7 @@ pub fn init_udev(
         gpus,
         primary_gpu,
         devices: HashMap::new(),
+        disabled_outputs: HashMap::new(),
         layout: OutputLayout::default(),
         bootstrap_render_until: Instant::now() + BOOTSTRAP_RENDER_TIMEOUT,
         client_bootstrap_started: false,
@@ -672,6 +690,7 @@ impl NickelSession {
                     SurfaceData {
                         global: Some(global),
                         output: output.clone(),
+                        connector,
                         drm,
                         background: SolidColorBuffer::new(
                             wl_mode.size.to_logical(1),
@@ -703,6 +722,7 @@ impl NickelSession {
         let Some(native) = self.native.as_mut() else {
             return;
         };
+        native.disabled_outputs.remove(&name);
         let surface = native
             .devices
             .get_mut(&node)
@@ -734,6 +754,99 @@ impl NickelSession {
         self.relayout_fullscreen_windows();
         self.relayout_shell_surfaces();
         tracing::info!(output = %name, "DRM output disconnected");
+    }
+
+    pub(crate) fn native_output_inventory(&self) -> Vec<(String, Size<i32, Logical>)> {
+        let Some(native) = self.native.as_ref() else {
+            return Vec::new();
+        };
+        let mut outputs = self
+            .space
+            .outputs()
+            .filter_map(|output| {
+                self.space
+                    .output_geometry(output)
+                    .map(|geometry| (output.name(), geometry.size))
+            })
+            .collect::<Vec<_>>();
+        outputs.extend(native.disabled_outputs.values().filter_map(|disabled| {
+            disabled
+                .output
+                .current_mode()
+                .map(|mode| (disabled.output.name(), mode.size.to_logical(1)))
+        }));
+        outputs
+    }
+
+    pub(crate) fn set_native_output_enabled(
+        &mut self,
+        name: &str,
+        enabled: bool,
+    ) -> Result<(), &'static str> {
+        if enabled {
+            let disabled = self
+                .native
+                .as_mut()
+                .and_then(|native| native.disabled_outputs.remove(name));
+            if let Some(disabled) = disabled {
+                self.connect_output(disabled.node, disabled.connector, disabled.crtc);
+            }
+            return Ok(());
+        }
+        let active_count = self.space.outputs().count();
+        if active_count <= 1 {
+            return Err("cannot disable the last active output");
+        }
+        let target = self.native.as_ref().and_then(|native| {
+            native.devices.iter().find_map(|(node, device)| {
+                device
+                    .surfaces
+                    .iter()
+                    .find(|(_, surface)| surface.output.name() == name)
+                    .map(|(crtc, _)| (*node, *crtc))
+            })
+        });
+        let Some((node, crtc)) = target else {
+            return self
+                .native
+                .as_ref()
+                .is_some_and(|native| native.disabled_outputs.contains_key(name))
+                .then_some(())
+                .ok_or("unknown output");
+        };
+        let surface = self
+            .native
+            .as_mut()
+            .and_then(|native| native.devices.get_mut(&node))
+            .and_then(|device| device.surfaces.remove(&crtc))
+            .ok_or("output disappeared while disabling")?;
+        self.stage_output_removal(&surface.output);
+        self.space.unmap_output(&surface.output);
+        surface.output.leave_all();
+        if let Some(global) = surface.global {
+            self.display_handle.remove_global::<NickelSession>(global);
+        }
+        let connector = surface.connector;
+        let output = surface.output;
+        drop(surface.drm);
+        let native = self.native.as_mut().expect("native backend exists");
+        native.layout.disconnect(name);
+        native.disabled_outputs.insert(
+            name.to_owned(),
+            DisabledOutput {
+                node,
+                connector,
+                crtc,
+                output,
+            },
+        );
+        self.reconcile_output_removal(name);
+        self.reflow_windows_to_connected_outputs();
+        self.relayout_maximized_windows();
+        self.relayout_fullscreen_windows();
+        self.relayout_shell_surfaces();
+        tracing::info!(output = %name, "DRM output disabled by user");
+        Ok(())
     }
 
     fn remove_drm_device(&mut self, node: DrmNode) {

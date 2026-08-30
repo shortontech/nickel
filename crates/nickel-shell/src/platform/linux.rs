@@ -1161,6 +1161,15 @@ pub fn launch_application(application: &Application) -> Result<Option<u32>, supe
         .map_err(|error| super::LaunchError::Platform(error.to_string()))
 }
 
+pub fn launch_session_application(
+    application: &Application,
+) -> Result<Option<u32>, super::LaunchError> {
+    application
+        .launch_as_session_client()
+        .map(|child| Some(child.id()))
+        .map_err(|error| super::LaunchError::Platform(error.to_string()))
+}
+
 pub fn launcher_visibility_applied(_: bool) {}
 
 pub fn launcher_has_foreground_focus() -> bool {

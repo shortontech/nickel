@@ -201,6 +201,7 @@ struct OutputSnapshot {
     physical_width: i32,
     physical_height: i32,
     primary: bool,
+    enabled: bool,
 }
 
 impl Rect {
@@ -217,6 +218,7 @@ struct DisplayCard {
     logical_height: i32,
     rect: Rect,
     primary: bool,
+    enabled: bool,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -344,6 +346,7 @@ enum SettingsMessage {
     SetDesktopCount(u8),
     DisplayIdentify,
     DisplayPrimary,
+    DisplayEnabled(bool),
     DisplayApply,
 }
 
@@ -574,11 +577,36 @@ impl SettingsApp {
                 }
             }
             SettingsMessage::DisplayPrimary => {
+                self.displays[self.selected].enabled = true;
                 for (index, display) in self.displays.iter_mut().enumerate() {
                     display.primary = index == self.selected;
                 }
                 self.applied = false;
                 self.status = self.localizer.text("settings-status-changes-not-applied");
+            }
+            SettingsMessage::DisplayEnabled(enabled) => {
+                if !enabled
+                    && self
+                        .displays
+                        .iter()
+                        .filter(|display| display.enabled)
+                        .count()
+                        <= 1
+                {
+                    self.status = "At least one display must remain enabled.".into();
+                } else {
+                    self.displays[self.selected].enabled = enabled;
+                    if !enabled && self.displays[self.selected].primary {
+                        self.displays[self.selected].primary = false;
+                        if let Some(display) =
+                            self.displays.iter_mut().find(|display| display.enabled)
+                        {
+                            display.primary = true;
+                        }
+                    }
+                    self.applied = false;
+                    self.status = self.localizer.text("settings-status-changes-not-applied");
+                }
             }
             SettingsMessage::DisplayApply => self.apply_layout(),
             SettingsMessage::WifiNetwork(index) => self.connect_windows_wifi(index),
@@ -610,8 +638,7 @@ impl SettingsApp {
             self.selected = index;
             let rect = self.displays[index].rect;
             self.drag_offset = Some((x - rect.x, y - rect.y));
-            self.applied = false;
-            self.status = self.localizer.text("settings-status-changes-not-applied");
+            self.drag_origin = Some(rect);
         }
         self.request_redraw();
     }
@@ -641,8 +668,6 @@ impl SettingsApp {
                 .filter(|(index, _)| *index != self.selected)
                 .fold(rect, |moving, (_, other)| snap_rect(moving, other.rect, 42));
             self.displays[self.selected].rect = rect;
-            self.applied = false;
-            self.status = self.localizer.text("settings-status-changes-not-applied");
             self.request_redraw();
         }
     }
@@ -656,7 +681,14 @@ impl SettingsApp {
         if self.drag_offset.take().is_none() {
             return;
         }
+        let Some(origin) = self.drag_origin.take() else {
+            return;
+        };
         let selected = self.displays[self.selected].rect;
+        if selected == origin {
+            self.request_redraw();
+            return;
+        }
         let snapped = self
             .displays
             .iter()
@@ -670,6 +702,10 @@ impl SettingsApp {
             })
             .unwrap_or(selected);
         self.displays[self.selected].rect = snapped;
+        if snapped != origin {
+            self.applied = false;
+            self.status = self.localizer.text("settings-status-changes-not-applied");
+        }
         self.request_redraw();
     }
 
@@ -813,7 +849,9 @@ impl SettingsApp {
                 );
                 commands.push(PaintCommand::Fill {
                     rect,
-                    color: if index == self.selected {
+                    color: if !display.enabled {
+                        palette.background
+                    } else if index == self.selected {
                         palette.accent_soft
                     } else {
                         palette.surface
@@ -821,12 +859,18 @@ impl SettingsApp {
                 });
                 commands.push(PaintCommand::Stroke {
                     rect,
-                    color: if display.primary {
+                    color: if !display.enabled {
+                        palette.muted
+                    } else if display.primary {
                         palette.accent
                     } else {
                         palette.muted
                     },
-                    width: if display.primary { 4.0 } else { 2.0 },
+                    width: if display.primary && display.enabled {
+                        4.0
+                    } else {
+                        2.0
+                    },
                 });
                 commands.push(PaintCommand::Text {
                     bounds: UiRect::new(
@@ -849,7 +893,11 @@ impl SettingsApp {
                         (display.rect.w - 36) as f32,
                         24.0,
                     ),
-                    text: display.detail.clone(),
+                    text: if display.enabled {
+                        display.detail.clone()
+                    } else {
+                        format!("{}  DISABLED", display.detail)
+                    },
                     scale: 2.0,
                     color: palette.muted,
                     align: TextAlign::Start,
@@ -1492,6 +1540,48 @@ mod tests {
 
         let snapped = snap_rect(moving, fixed, 42);
         assert_eq!((snapped.x, snapped.y), (moving.x, moving.y));
+    }
+
+    #[test]
+    fn display_disable_keeps_one_active_output_and_transfers_primary() {
+        let mut app = SettingsApp {
+            selected: 1,
+            ..SettingsApp::default()
+        };
+
+        app.handle_settings_message(SettingsMessage::DisplayEnabled(false));
+
+        assert!(!app.displays[1].enabled);
+        assert!(app.displays[0].enabled);
+        assert!(app.displays[0].primary);
+
+        app.selected = 0;
+        app.handle_settings_message(SettingsMessage::DisplayEnabled(false));
+        assert!(app.displays[0].enabled);
+        assert_eq!(
+            app.displays
+                .iter()
+                .filter(|display| display.enabled)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn selecting_display_without_moving_it_keeps_layout_clean() {
+        let mut app = SettingsApp {
+            applied: true,
+            ..SettingsApp::default()
+        };
+        let display = app.displays[0].rect;
+        app.cursor = (display.x + 20, display.y + 20);
+
+        app.pointer_pressed();
+        app.finish_drag();
+
+        assert_eq!(app.selected, 0);
+        assert_eq!(app.displays[0].rect, display);
+        assert!(app.applied);
     }
 
     #[test]

@@ -75,7 +75,12 @@ impl XdgShellHandler for NickelSession {
         // configure makes a hidden transient recreate as a full application
         // window and temporarily steals pointer hit testing from the panel.
         let geometry = (!is_shell_client)
-            .then(|| self.output_geometry_for_shell())
+            .then(|| {
+                self.preferred_interaction_output_name()
+                    .as_deref()
+                    .and_then(|name| self.output_geometry_named(name))
+                    .or_else(|| self.output_geometry_for_shell())
+            })
             .flatten()
             .map(shell_layout::work_area)
             .map(|area| shell_layout::initial_window(area, cascade));

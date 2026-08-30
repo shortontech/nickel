@@ -232,7 +232,7 @@ pub use linux::{
     NotificationFeed, TrayFeed, WindowFeed, activate_wifi_network, application_icon, applications,
     audio_status, bluetooth_status, capture_active_window, capture_active_window_to_file,
     capture_desktop, capture_pointer, copy_image_to_clipboard, copy_temp_image_path,
-    execute_run_command, handle_focused_shortcut, launch_application,
+    execute_run_command, handle_focused_shortcut, launch_application, launch_session_application,
     launcher_has_foreground_focus, launcher_hotkey_receiver, launcher_visibility_applied,
     network_status, paste_text_if_requested, register_session_shell, release_pointer,
     request_secure_storage_retry, respond_semantic_target, secure_storage_state,

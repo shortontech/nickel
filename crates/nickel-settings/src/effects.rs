@@ -90,6 +90,7 @@ impl SettingsApp {
                 physical_width: output.physical_width_mm,
                 physical_height: output.physical_height_mm,
                 primary: output.primary,
+                enabled: output.enabled,
             })
             .collect();
         if outputs.is_empty() {
@@ -120,8 +121,6 @@ impl SettingsApp {
             .max()
             .unwrap_or(1)
             .max(1);
-        let physical_scale = (280.0 / f64::from(maximum_physical_width))
-            .min(160.0 / f64::from(maximum_physical_height));
         // Leave enough empty plane around the arrangement to drag one display
         // completely around another before release snapping chooses an edge.
         self.pixels_per_logical = (470.0 / f64::from((maximum_x - minimum_x).max(1)))
@@ -134,8 +133,16 @@ impl SettingsApp {
                     output.physical_width >= 50 && output.physical_height >= 50;
                 let (card_width, card_height) = if physical_size_known {
                     (
-                        (f64::from(output.physical_width) * physical_scale).round() as i32,
-                        (f64::from(output.physical_height) * physical_scale).round() as i32,
+                        compressed_physical_extent(
+                            output.physical_width,
+                            maximum_physical_width,
+                            280,
+                        ),
+                        compressed_physical_extent(
+                            output.physical_height,
+                            maximum_physical_height,
+                            160,
+                        ),
                     )
                 } else {
                     (
@@ -160,6 +167,7 @@ impl SettingsApp {
                         h: card_height.max(80),
                     },
                     primary: output.primary,
+                    enabled: output.enabled,
                 }
             })
             .collect();
@@ -173,6 +181,7 @@ impl SettingsApp {
             .iter()
             .position(|display| display.primary)
             .unwrap_or(0);
+        self.applied = true;
         self.status.clear();
     }
 
@@ -599,6 +608,7 @@ impl SettingsApp {
                     name: display.connector.clone(),
                     x,
                     y,
+                    enabled: display.enabled,
                 })
                 .collect(),
         };
@@ -621,5 +631,28 @@ impl SettingsApp {
                 self.status = self.localizer.text("settings-status-session-unavailable");
             }
         }
+    }
+}
+
+/// Preserve the perceived ordering of physical display sizes without making a
+/// portable monitor unusably tiny beside a desktop panel. A fifth-root curve
+/// deliberately compresses the real-world ratio while keeping equal extents
+/// equal and the largest extent at the available visual size.
+fn compressed_physical_extent(value: i32, maximum: i32, rendered_maximum: i32) -> i32 {
+    let ratio = f64::from(value.max(1)) / f64::from(maximum.max(1));
+    (ratio.powf(0.2) * f64::from(rendered_maximum)).round() as i32
+}
+
+#[cfg(test)]
+mod display_size_tests {
+    use super::compressed_physical_extent;
+
+    #[test]
+    fn physical_size_ratios_are_compressed_without_becoming_equal() {
+        let desktop = compressed_physical_extent(600, 600, 280);
+        let portable = compressed_physical_extent(310, 600, 280);
+
+        assert_eq!(desktop, 280);
+        assert!((240..desktop).contains(&portable));
     }
 }

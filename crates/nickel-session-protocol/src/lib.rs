@@ -383,6 +383,7 @@ pub struct OutputSnapshot {
     pub physical_width_mm: i32,
     pub physical_height_mm: i32,
     pub primary: bool,
+    pub enabled: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -425,6 +426,7 @@ pub struct OutputPlacement {
     pub name: String,
     pub x: i32,
     pub y: i32,
+    pub enabled: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -864,6 +866,7 @@ mod tests {
                 physical_width_mm: 300,
                 physical_height_mm: 170,
                 primary: true,
+                enabled: true,
             }],
             windows: vec![WindowSnapshot {
                 id: WindowId(9),

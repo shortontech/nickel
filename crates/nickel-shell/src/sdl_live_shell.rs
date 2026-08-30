@@ -49,12 +49,15 @@ const PANEL_TRAY_WIDTH: f32 = 28.0;
 const PANEL_TRAY_ICON_SIZE: u32 = 18;
 const PANEL_CODEX_WIDTH: f32 = 36.0;
 const PANEL_CODEX_ICON_SIZE: f32 = 28.0;
+const PANEL_SETTINGS_WIDTH: f32 = 36.0;
+const PANEL_SETTINGS_ICON_SIZE: f32 = 24.0;
 const PREVIEW_LEAVE_DELAY: Duration = Duration::from_millis(500);
 const PREVIEW_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct PanelStatusLayout {
     control_start: f32,
+    settings_start: f32,
     tray_start: f32,
     codex_start: f32,
 }
@@ -72,9 +75,11 @@ impl PanelStatusLayout {
 
 fn panel_status_layout(width: u32, tray_count: usize) -> PanelStatusLayout {
     let control_start = panel_control_start(width);
-    let tray_start = control_start - tray_count.min(4) as f32 * PANEL_TRAY_WIDTH;
+    let settings_start = control_start - PANEL_SETTINGS_WIDTH;
+    let tray_start = settings_start - tray_count.min(4) as f32 * PANEL_TRAY_WIDTH;
     PanelStatusLayout {
         control_start,
+        settings_start,
         tray_start,
         codex_start: tray_start - PANEL_CODEX_WIDTH,
     }
@@ -94,6 +99,7 @@ enum PanelHover {
     Launcher,
     Task(usize),
     Codex,
+    Settings,
     Tray(usize),
     #[cfg(not(target_os = "macos"))]
     Control,
@@ -114,6 +120,7 @@ pub struct LiveShell {
     wallpaper_size: (u32, u32),
     panel_icon: Arc<image::RgbaImage>,
     codex_icon: Arc<image::RgbaImage>,
+    settings_icon: Arc<image::RgbaImage>,
     palette: ThemePalette,
     network: NetworkStatus,
     bluetooth: BluetoothStatus,
@@ -232,6 +239,16 @@ impl LiveShell {
         .map(|icon| tint_panel_icon(icon, palette.text))
         .map(Arc::new)
         .expect("embedded Nickel chat icon remains valid");
+        let settings_icon = crate::icons::nickel_application("Nickel Settings")
+            .map(|(_, icon)| {
+                crate::icons::resized(
+                    &icon,
+                    PANEL_SETTINGS_ICON_SIZE as u32,
+                    PANEL_SETTINGS_ICON_SIZE as u32,
+                )
+            })
+            .map(Arc::new)
+            .expect("embedded Nickel Settings icon remains valid");
         let window_feed = WindowFeed::new();
         let tray_feed = TrayFeed::new();
         let notification_feed = NotificationFeed::new()?;
@@ -261,6 +278,7 @@ impl LiveShell {
             wallpaper_size: (0, 0),
             panel_icon,
             codex_icon,
+            settings_icon,
             palette,
             network,
             bluetooth,
@@ -543,6 +561,18 @@ impl LiveShell {
                 self.set_launcher_visible(false);
             }
             self.codex_project_menu_visible = !self.codex_project_menu_visible;
+            return true;
+        }
+        if x >= status.settings_start && x < status.control_start {
+            let application = {
+                self.launcher
+                    .applications()
+                    .find(|application| application.name() == "Nickel Settings")
+                    .cloned()
+            };
+            if let Some(application) = application {
+                self.launch_application(application);
+            }
             return true;
         }
         if x >= status.tray_start {
@@ -1267,7 +1297,15 @@ impl LiveShell {
         }
         self.secure_storage_override = None;
         self.launcher_status = None;
-        let _ = platform::launch_application(&application);
+        #[cfg(target_os = "linux")]
+        let result = if application.name() == "Nickel Settings" {
+            platform::launch_session_application(&application)
+        } else {
+            platform::launch_application(&application)
+        };
+        #[cfg(not(target_os = "linux"))]
+        let result = platform::launch_application(&application);
+        let _ = result;
         self.set_launcher_visible(false);
     }
 
@@ -1715,6 +1753,29 @@ impl LiveShell {
             ));
         }
         let status = panel_status_layout(width, self.tray.len());
+        if self.panel_hover == Some(PanelHover::Settings) {
+            commands.push(PaintCommand::RoundedFill {
+                rect: Rect::new(
+                    status.settings_start + 2.0,
+                    7.0,
+                    PANEL_SETTINGS_WIDTH - 4.0,
+                    42.0,
+                ),
+                color: self.palette.surface_hover,
+                radius: 8.0,
+            });
+        }
+        commands.push(PaintCommand::Image {
+            bounds: Rect::new(
+                status.settings_start + (PANEL_SETTINGS_WIDTH - PANEL_SETTINGS_ICON_SIZE) / 2.0,
+                (56.0 - PANEL_SETTINGS_ICON_SIZE) / 2.0,
+                PANEL_SETTINGS_ICON_SIZE,
+                PANEL_SETTINGS_ICON_SIZE,
+            ),
+            id: 0x5001,
+            image: Arc::clone(&self.settings_icon),
+            high_density: None,
+        });
         for (index, _) in self.tray.iter().rev().take(4).rev().enumerate() {
             let x = status.tray_start + index as f32 * PANEL_TRAY_WIDTH;
             if self.panel_hover == Some(PanelHover::Tray(index)) {
@@ -1766,6 +1827,9 @@ impl LiveShell {
         #[cfg(not(target_os = "macos"))]
         if x >= status.control_start {
             return Some(PanelHover::Control);
+        }
+        if x >= status.settings_start {
+            return Some(PanelHover::Settings);
         }
         if x >= status.tray_start {
             return Some(PanelHover::Tray(
@@ -2252,11 +2316,12 @@ mod tests {
     fn right_panel_cluster_is_compact_and_grouped() {
         let layout = panel_status_layout(1920, 3);
         assert_eq!(layout.control_start, 1816.0);
-        assert_eq!(layout.tray_start, 1732.0);
-        assert_eq!(layout.codex_start, 1696.0);
+        assert_eq!(layout.settings_start, 1780.0);
+        assert_eq!(layout.tray_start, 1696.0);
+        assert_eq!(layout.codex_start, 1660.0);
         assert_eq!(
             layout.codex_icon_bounds(),
-            Rect::new(1700.0, 14.0, 28.0, 28.0)
+            Rect::new(1664.0, 14.0, 28.0, 28.0)
         );
     }
 

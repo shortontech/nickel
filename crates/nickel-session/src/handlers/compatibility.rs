@@ -136,18 +136,36 @@ impl NickelSession {
         surface_origin: smithay::utils::Point<f64, Logical>,
         current: smithay::utils::Point<f64, Logical>,
         proposed: smithay::utils::Point<f64, Logical>,
-    ) -> smithay::utils::Point<f64, Logical> {
+    ) -> (smithay::utils::Point<f64, Logical>, bool) {
         let Some(pointer) = self.seat.get_pointer() else {
-            return proposed;
+            return (proposed, false);
         };
+        let has_keyboard_focus = self
+            .seat
+            .get_keyboard()
+            .and_then(|keyboard| keyboard.current_focus())
+            .and_then(|focus| focus.wl_surface().map(|surface| surface.into_owned()))
+            .as_ref()
+            == Some(surface);
+        if !has_keyboard_focus {
+            with_pointer_constraint(surface, &pointer, |constraint| {
+                if let Some(constraint) = constraint
+                    && constraint.is_active()
+                {
+                    constraint.deactivate();
+                }
+            });
+            self.active_pointer_constraint_origins.remove(&surface.id());
+            return (proposed, false);
+        }
         let proposed_hits_surface = self
             .surface_under(proposed)
             .is_some_and(|(candidate, _)| candidate == *surface);
         let surface_region = surface_extent_region(surface);
         let mut activated_lock = false;
-        let position = with_pointer_constraint(surface, &pointer, |constraint| {
+        let (position, active) = with_pointer_constraint(surface, &pointer, |constraint| {
             let Some(constraint) = constraint else {
-                return proposed;
+                return (proposed, false);
             };
             let mut just_activated = false;
             if !constraint.is_active() {
@@ -159,13 +177,13 @@ impl NickelSession {
                         region.contains((local.x.floor() as i32, local.y.floor() as i32))
                     });
                 if !enters_constraint {
-                    return proposed;
+                    return (proposed, false);
                 }
                 constraint.activate();
                 just_activated = true;
                 activated_lock = matches!(&*constraint, PointerConstraint::Locked(_));
             }
-            match &*constraint {
+            let position = match &*constraint {
                 PointerConstraint::Locked(_) if just_activated => proposed,
                 PointerConstraint::Locked(_) => current,
                 PointerConstraint::Confined(confined) => {
@@ -184,12 +202,20 @@ impl NickelSession {
                         },
                     )
                 }
-            }
+            };
+            (position, constraint.is_active())
         });
         if activated_lock {
             self.remember_active_pointer_lock(surface);
         }
-        position
+        let id = surface.id();
+        if active {
+            self.active_pointer_constraint_origins
+                .insert(id, surface_origin);
+        } else {
+            self.active_pointer_constraint_origins.remove(&id);
+        }
+        (position, active)
     }
 
     /// Apply a client's last committed lock hint once that lock has gone away.
@@ -234,18 +260,34 @@ impl PrimarySelectionHandler for NickelSession {
 
 impl PointerConstraintsHandler for NickelSession {
     fn new_constraint(&mut self, surface: &WlSurface, pointer: &PointerHandle<Self>) {
-        if pointer
+        let has_pointer_focus = pointer
             .current_focus()
             .as_ref()
             .and_then(WaylandFocus::wl_surface)
             .as_deref()
-            == Some(surface)
-        {
+            == Some(surface);
+        let has_keyboard_focus = self
+            .seat
+            .get_keyboard()
+            .and_then(|keyboard| keyboard.current_focus())
+            .and_then(|focus| focus.wl_surface().map(|surface| surface.into_owned()))
+            .as_ref()
+            == Some(surface);
+        if has_pointer_focus && has_keyboard_focus {
             let current = pointer.current_location();
+            // A replacement constraint can arrive while another surface
+            // geometrically overlaps the constrained one. Preserve the
+            // protocol focus origin instead of deriving authority again from
+            // current stacking order.
             let origin = self
-                .pointer_surface_under(current)
-                .filter(|(focus, _)| focus.wl_surface().as_deref() == Some(surface))
-                .map(|(_, origin)| origin);
+                .active_pointer_constraint_origins
+                .get(&surface.id())
+                .copied()
+                .or_else(|| {
+                    self.pointer_surface_under(current)
+                        .filter(|(focus, _)| focus.wl_surface().as_deref() == Some(surface))
+                        .map(|(_, origin)| origin)
+                });
             let mut activated_lock = false;
             with_pointer_constraint(surface, pointer, |constraint| {
                 if let Some(constraint) = constraint {
