@@ -73,6 +73,13 @@ fn protocol_error(code: ErrorCode, message: impl Into<String>) -> ServerMessage 
     }
 }
 
+fn retain_live_idle_inhibitors<K: Eq + std::hash::Hash>(
+    inhibitors: &mut HashMap<K, usize>,
+    mut is_alive: impl FnMut(&K) -> bool,
+) {
+    inhibitors.retain(|surface, _| is_alive(surface));
+}
+
 fn workspace_error(error: WorkspaceError) -> &'static str {
     match error {
         WorkspaceError::UnknownWorkspace => "unknown workspace",
@@ -265,7 +272,7 @@ pub struct NickelSession {
     x11_fullscreen_restore: HashMap<u32, smithay::utils::Rectangle<i32, Logical>>,
     pub last_titlebar_click: Option<(ObjectId, u32, Point<f64, Logical>)>,
     pub suppress_left_button_release: bool,
-    pub idle_inhibitors: HashMap<ObjectId, usize>,
+    pub idle_inhibitors: HashMap<WlSurface, usize>,
     pub(crate) active_touch_slots: HashSet<smithay::backend::input::TouchSlot>,
     idle_controller: IdleController,
     pub dimmed: bool,
@@ -321,6 +328,7 @@ impl NickelSession {
     }
 
     pub(crate) fn poll_idle_policy(&mut self) {
+        self.prune_dead_idle_inhibitors();
         let effects = self.idle_controller.poll(
             self.start_time.elapsed(),
             !self.idle_inhibitors.is_empty(),
@@ -355,6 +363,14 @@ impl NickelSession {
                 }
             }
         }
+    }
+
+    pub(crate) fn prune_dead_idle_inhibitors(&mut self) {
+        // Smithay calls `uninhibit` for an explicit protocol destroy, but the
+        // protocol also destroys every inhibitor when its client disconnects.
+        // Those resources do not produce an `uninhibit` callback, so retain
+        // the surface proxy and discard entries whose Wayland resource died.
+        retain_live_idle_inhibitors(&mut self.idle_inhibitors, Resource::is_alive);
     }
 
     pub(crate) fn is_authenticated_shell_pid(&self, pid: u32) -> bool {
@@ -806,7 +822,10 @@ impl NickelSession {
                 state: self.protocol_secure_storage_state(),
             },
             Query::IdleInhibition => ServerMessage::IdleInhibition {
-                surfaces: u16::try_from(self.idle_inhibitors.len()).unwrap_or(u16::MAX),
+                surfaces: {
+                    self.prune_dead_idle_inhibitors();
+                    u16::try_from(self.idle_inhibitors.len()).unwrap_or(u16::MAX)
+                },
             },
             Query::CacheDiagnostics => {
                 ServerMessage::CacheDiagnostics(nickel_session_protocol::CacheDiagnostics {
@@ -3342,10 +3361,11 @@ impl ClientData for ClientState {
 mod protocol_tests {
     use super::{
         clamp_window_location, command_requires_shell_identity, drag_icon_location,
-        shell_registration_allowed, test_control_may_invoke,
+        retain_live_idle_inhibitors, shell_registration_allowed, test_control_may_invoke,
     };
     use crate::shell_layout::Geometry;
     use nickel_session_protocol::{Command, SessionAction, ShellRole};
+    use std::collections::HashMap;
 
     #[test]
     fn only_the_exact_supervised_shell_pid_can_register() {
@@ -3389,6 +3409,13 @@ mod protocol_tests {
         assert!(!test_control_may_invoke(&Command::SessionAction {
             action: SessionAction::PowerOff,
         }));
+    }
+
+    #[test]
+    fn disconnected_surfaces_stop_inhibiting_idle_policy() {
+        let mut inhibitors = HashMap::from([("alive", 2), ("disconnected", 1)]);
+        retain_live_idle_inhibitors(&mut inhibitors, |surface| *surface == "alive");
+        assert_eq!(inhibitors, HashMap::from([("alive", 2)]));
     }
 
     #[test]

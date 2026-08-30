@@ -333,7 +333,6 @@ impl PointerConstraintsHandler for NickelSession {
 
 impl IdleInhibitHandler for NickelSession {
     fn inhibit(&mut self, surface: WlSurface) {
-        let surface = surface.id();
         if let Some(count) = self.idle_inhibitors.get_mut(&surface) {
             *count = count.saturating_add(1);
         } else if idle_inhibitor_allowed(self.idle_inhibitors.len(), false) {
@@ -347,7 +346,6 @@ impl IdleInhibitHandler for NickelSession {
     }
 
     fn uninhibit(&mut self, surface: WlSurface) {
-        let surface = surface.id();
         let remove = self.idle_inhibitors.get_mut(&surface).is_some_and(|count| {
             *count = count.saturating_sub(1);
             *count == 0
