@@ -1290,19 +1290,20 @@ impl NickelSession {
                     .current_mode()
                     .map(|mode| mode.size)
                     .unwrap_or_else(|| (1, 1).into());
-                let banner_width = recovery_size.w.clamp(1, 560);
-                let banner_height = recovery_size.h.clamp(1, 144);
+                let layout = crate::window_frame::recovery_layout(crate::shell_layout::Geometry {
+                    x: 0,
+                    y: 0,
+                    width: recovery_size.w,
+                    height: recovery_size.h,
+                });
                 if let Some(panel) = crate::window_frame::render_recovery_panel()
                     && let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
                         &mut renderer,
-                        (
-                            f64::from((recovery_size.w - banner_width) / 2),
-                            f64::from((recovery_size.h - banner_height) / 2),
-                        ),
+                        (f64::from(layout.panel.x), f64::from(layout.panel.y)),
                         &panel,
                         None,
                         None,
-                        Some((banner_width, banner_height).into()),
+                        Some((layout.panel.width, layout.panel.height).into()),
                         Kind::Unspecified,
                     )
                 {

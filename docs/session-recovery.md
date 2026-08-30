@@ -26,3 +26,9 @@ the compositor-owned recovery panel over an opaque output; semantic Enter replac
 cleared recovery without restarting the compositor. A second recovery run used semantic Escape;
 the compositor exited normally and reaped the replacement shell, XWayland, and native test client.
 This is development evidence only; the same failure matrix still requires an SDDM-launched session.
+
+On 2026-08-30, recovery pointer acceptance used the compositor's production panel layout rather
+than copied coordinates. After three `SIGKILL` shell failures, clicking Retry replaced shell PID
+`1309903` with `1311200` and restored all nine registered shell surfaces. A second three-failure
+cycle clicked Log out safely; the nested compositor, shell, and XWayland PIDs all exited. Recovery
+pointer motion remained compositor-owned and was never forwarded to an application client.

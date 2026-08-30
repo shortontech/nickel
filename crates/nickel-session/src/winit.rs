@@ -317,18 +317,21 @@ pub fn init_winit(
                             .then(crate::window_frame::render_recovery_panel)
                             .flatten()
                             .and_then(|panel| {
-                                let banner_width = size.w.clamp(1, 560);
-                                let banner_height = size.h.clamp(1, 144);
+                                let layout = crate::window_frame::recovery_layout(
+                                    crate::shell_layout::Geometry {
+                                        x: 0,
+                                        y: 0,
+                                        width: size.w,
+                                        height: size.h,
+                                    },
+                                );
                                 MemoryRenderBufferRenderElement::from_buffer(
                                     renderer,
-                                    (
-                                        f64::from((size.w - banner_width) / 2),
-                                        f64::from((size.h - banner_height) / 2),
-                                    ),
+                                    (f64::from(layout.panel.x), f64::from(layout.panel.y)),
                                     &panel,
                                     None,
                                     None,
-                                    Some((banner_width, banner_height).into()),
+                                    Some((layout.panel.width, layout.panel.height).into()),
                                     Kind::Unspecified,
                                 )
                                 .map_err(|error| {

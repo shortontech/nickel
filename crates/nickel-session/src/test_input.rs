@@ -6,7 +6,8 @@
 use std::path::PathBuf;
 
 use nickel_session_protocol::{
-    InputState, PointerInteraction, ResolvedShellTarget, TestInput, TestKey, TestPointerButton,
+    InputState, PointerInteraction, RecoveryTargetAction, ResolvedShellTarget, TestInput, TestKey,
+    TestPointerButton,
 };
 use smithay::backend::input::{
     AbsolutePositionEvent, ButtonState, Device, DeviceCapability, Event, InputBackend, InputEvent,
@@ -235,6 +236,9 @@ impl NickelSession {
                 },
             },
             TestInput::ShellPointer { target } => return self.inject_shell_pointer(target),
+            TestInput::RecoveryPointer { action, output } => {
+                return self.inject_recovery_pointer(action, output.as_deref());
+            }
         };
         let _ = self.process_input_event::<TestInputBackend>(event);
         self.display_handle
@@ -298,6 +302,49 @@ impl NickelSession {
         })?;
         self.inject_test_input(TestInput::PointerButton {
             button,
+            state: InputState::Released,
+        })
+    }
+
+    fn inject_recovery_pointer(
+        &mut self,
+        action: RecoveryTargetAction,
+        output_name: Option<&str>,
+    ) -> Result<(), String> {
+        if !self.shell_recovery_visible() {
+            return Err("compositor recovery is not visible".into());
+        }
+        let output = self
+            .space
+            .outputs()
+            .find(|output| output_name.is_none_or(|name| output.name() == name))
+            .ok_or_else(|| match output_name {
+                Some(name) => format!("unknown output {name:?}"),
+                None => "session has no output".into(),
+            })?;
+        let geometry = self
+            .space
+            .output_geometry(output)
+            .ok_or("recovery output has no geometry")?;
+        let layout = crate::window_frame::recovery_layout(crate::shell_layout::Geometry {
+            x: geometry.loc.x,
+            y: geometry.loc.y,
+            width: geometry.size.w,
+            height: geometry.size.h,
+        });
+        let target = match action {
+            RecoveryTargetAction::Retry => layout.retry,
+            RecoveryTargetAction::Exit => layout.exit,
+        };
+        let x = target.x + target.width / 2;
+        let y = target.y + target.height / 2;
+        self.inject_test_input(TestInput::PointerMove { x, y })?;
+        self.inject_test_input(TestInput::PointerButton {
+            button: TestPointerButton::Left,
+            state: InputState::Pressed,
+        })?;
+        self.inject_test_input(TestInput::PointerButton {
+            button: TestPointerButton::Left,
             state: InputState::Released,
         })
     }

@@ -1,8 +1,8 @@
 use std::ffi::OsString;
 
 use nickel_session_protocol::{
-    InputState, PointerInteraction, PreviewTargetAction, ShellSemanticTarget, TestInput, TestKey,
-    TestPointerButton, WindowMenuTargetAction,
+    InputState, PointerInteraction, PreviewTargetAction, RecoveryTargetAction, ShellSemanticTarget,
+    TestInput, TestKey, TestPointerButton, WindowMenuTargetAction,
 };
 
 const HELP: &str = "\
@@ -26,6 +26,7 @@ Usage:
   nickel-test-input semantic panel-app APPLICATION_ID hover|click [OUTPUT]
   nickel-test-input semantic preview WINDOW_ID hover|activate|close|menu
   nickel-test-input semantic menu WINDOW_ID close|maximize|minimize
+  nickel-test-input semantic recovery retry|exit [OUTPUT]
   nickel-test-input scenario grouped-windows APPLICATION_ID
   nickel-test-input move X Y
   nickel-test-input move-relative DX DY
@@ -154,6 +155,18 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, String> {
         }
         [command] if command == "idle-inhibition" => Ok(Parsed::IdleInhibition),
         [command] if command == "caches" => Ok(Parsed::Caches),
+        [command, kind, action] | [command, kind, action, _]
+            if command == "semantic" && kind == "recovery" =>
+        {
+            Ok(Parsed::Input(TestInput::RecoveryPointer {
+                action: match action.as_str() {
+                    "retry" => RecoveryTargetAction::Retry,
+                    "exit" => RecoveryTargetAction::Exit,
+                    _ => return Err(format!("unknown recovery action {action:?}")),
+                },
+                output: args.get(3).cloned(),
+            }))
+        }
         [command, kind, application_id, interaction]
         | [command, kind, application_id, interaction, _]
             if command == "semantic" && kind == "panel-app" =>
@@ -829,6 +842,18 @@ mod tests {
                 window: nickel_session_protocol::WindowId(9),
                 action: PreviewTargetAction::OpenMenu,
             }))
+        ));
+        assert!(matches!(
+            parse([
+                "semantic".into(),
+                "recovery".into(),
+                "exit".into(),
+                "DP-1".into(),
+            ]),
+            Ok(Parsed::Input(TestInput::RecoveryPointer {
+                action: RecoveryTargetAction::Exit,
+                output: Some(output),
+            })) if output == "DP-1"
         ));
         assert!(matches!(
             parse([

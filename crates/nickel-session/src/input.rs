@@ -27,6 +27,33 @@ use crate::{
 };
 
 impl NickelSession {
+    fn recovery_action_at(
+        &self,
+        position: smithay::utils::Point<f64, Logical>,
+    ) -> Option<window_frame::RecoveryAction> {
+        self.space.outputs().find_map(|output| {
+            let geometry = self.space.output_geometry(output)?;
+            let output = crate::shell_layout::Geometry {
+                x: geometry.loc.x,
+                y: geometry.loc.y,
+                width: geometry.size.w,
+                height: geometry.size.h,
+            };
+            window_frame::recovery_action_at(output, position.x, position.y)
+        })
+    }
+
+    fn apply_recovery_action(&mut self, action: window_frame::RecoveryAction) {
+        match action {
+            window_frame::RecoveryAction::Retry => {
+                self.retry_shell_from_recovery();
+            }
+            window_frame::RecoveryAction::Exit => {
+                self.exit_from_recovery();
+            }
+        }
+    }
+
     pub fn release_pressed_keys_on_host_focus_loss(&mut self) {
         let keyboard = self.seat.get_keyboard().unwrap();
         let pressed = keyboard.pressed_keys();
@@ -78,21 +105,94 @@ impl NickelSession {
 
     pub fn process_input_event<I: InputBackend>(&mut self, event: InputEvent<I>) -> Option<i32> {
         self.note_input_activity();
-        if self.shell_recovery_visible()
-            && matches!(
-                &event,
-                InputEvent::PointerMotion { .. }
-                    | InputEvent::PointerMotionAbsolute { .. }
-                    | InputEvent::PointerButton { .. }
-                    | InputEvent::PointerAxis { .. }
-                    | InputEvent::TouchDown { .. }
-                    | InputEvent::TouchMotion { .. }
-                    | InputEvent::TouchUp { .. }
-                    | InputEvent::TouchFrame { .. }
-                    | InputEvent::TouchCancel { .. }
-            )
-        {
-            return None;
+        if self.shell_recovery_visible() {
+            match &event {
+                InputEvent::PointerMotionAbsolute { event, .. } => {
+                    let output = self.space.outputs().next()?;
+                    let geometry = self.space.output_geometry(output)?;
+                    let position =
+                        event.position_transformed(geometry.size) + geometry.loc.to_f64();
+                    let pointer = self.seat.get_pointer().unwrap();
+                    pointer.motion(
+                        self,
+                        None,
+                        &MotionEvent {
+                            location: position,
+                            serial: SERIAL_COUNTER.next_serial(),
+                            time: event.time(),
+                        },
+                    );
+                    pointer.frame(self);
+                    return None;
+                }
+                InputEvent::PointerMotion { event, .. } => {
+                    let pointer = self.seat.get_pointer().unwrap();
+                    let current = pointer.current_location();
+                    let (max_x, max_y) = self
+                        .space
+                        .outputs()
+                        .filter_map(|output| self.space.output_geometry(output))
+                        .fold((1, 1), |(max_x, max_y), geometry| {
+                            (
+                                max_x.max(geometry.loc.x + geometry.size.w),
+                                max_y.max(geometry.loc.y + geometry.size.h),
+                            )
+                        });
+                    let delta = event.delta();
+                    let position = (
+                        (current.x + delta.x).clamp(0.0, f64::from(max_x.saturating_sub(1))),
+                        (current.y + delta.y).clamp(0.0, f64::from(max_y.saturating_sub(1))),
+                    )
+                        .into();
+                    pointer.relative_motion(
+                        self,
+                        None,
+                        &RelativeMotionEvent {
+                            delta,
+                            delta_unaccel: event.delta_unaccel(),
+                            time: event.time(),
+                        },
+                    );
+                    pointer.motion(
+                        self,
+                        None,
+                        &MotionEvent {
+                            location: position,
+                            serial: SERIAL_COUNTER.next_serial(),
+                            time: event.time(),
+                        },
+                    );
+                    pointer.frame(self);
+                    return None;
+                }
+                InputEvent::PointerButton { event, .. }
+                    if event.button() == Some(MouseButton::Left)
+                        && event.state() == ButtonState::Pressed =>
+                {
+                    let position = self.seat.get_pointer().unwrap().current_location();
+                    if let Some(action) = self.recovery_action_at(position) {
+                        self.apply_recovery_action(action);
+                    }
+                    return None;
+                }
+                InputEvent::TouchDown { event, .. } => {
+                    let output = self.space.outputs().next()?;
+                    let geometry = self.space.output_geometry(output)?;
+                    let position =
+                        event.position_transformed(geometry.size) + geometry.loc.to_f64();
+                    if let Some(action) = self.recovery_action_at(position) {
+                        self.apply_recovery_action(action);
+                    }
+                    return None;
+                }
+                InputEvent::PointerButton { .. }
+                | InputEvent::PointerAxis { .. }
+                | InputEvent::TouchMotion { .. }
+                | InputEvent::TouchUp { .. }
+                | InputEvent::TouchFrame { .. }
+                | InputEvent::TouchCancel { .. } => return None,
+                _ => {}
+            }
         }
         match event {
             InputEvent::Keyboard { event, .. } => {
@@ -123,10 +223,10 @@ impl NickelSession {
                             if session.shell_recovery_visible() {
                                 if state == KeyState::Pressed {
                                     match recovery_action_from_keysym(sym) {
-                                        Some(RecoveryAction::Retry) => {
+                                        Some(window_frame::RecoveryAction::Retry) => {
                                             session.retry_shell_from_recovery();
                                         }
-                                        Some(RecoveryAction::Exit) => {
+                                        Some(window_frame::RecoveryAction::Exit) => {
                                             session.exit_from_recovery();
                                         }
                                         None => {}
@@ -923,16 +1023,10 @@ fn vt_from_keysym(sym: Keysym) -> Option<i32> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RecoveryAction {
-    Retry,
-    Exit,
-}
-
-fn recovery_action_from_keysym(sym: Keysym) -> Option<RecoveryAction> {
+fn recovery_action_from_keysym(sym: Keysym) -> Option<window_frame::RecoveryAction> {
     match sym.raw() {
-        keysyms::KEY_Return | keysyms::KEY_KP_Enter => Some(RecoveryAction::Retry),
-        keysyms::KEY_Escape => Some(RecoveryAction::Exit),
+        keysyms::KEY_Return | keysyms::KEY_KP_Enter => Some(window_frame::RecoveryAction::Retry),
+        keysyms::KEY_Escape => Some(window_frame::RecoveryAction::Exit),
         _ => None,
     }
 }
@@ -943,9 +1037,8 @@ mod tests {
 
     use smithay::input::keyboard::{Keysym, keysyms};
 
-    use super::{
-        RecoveryAction, ResizeEdge, recovery_action_from_keysym, resize_edges_at, vt_from_keysym,
-    };
+    use super::{ResizeEdge, recovery_action_from_keysym, resize_edges_at, vt_from_keysym};
+    use crate::window_frame::RecoveryAction;
 
     #[test]
     fn resize_edges_follow_pointer_region() {

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-pub const PROTOCOL_VERSION: u16 = 8;
+pub const PROTOCOL_VERSION: u16 = 9;
 pub const MAX_FRAME_BYTES: usize = 196_608;
 pub const MAX_PREVIEW_WIDTH: u16 = 256;
 pub const MAX_PREVIEW_HEIGHT: u16 = 144;
@@ -167,6 +167,19 @@ pub enum TestInput {
     ShellPointer {
         target: ResolvedShellTarget,
     },
+    /// Resolve a compositor-owned recovery action through the production
+    /// panel layout, then dispatch an ordinary pointer click.
+    RecoveryPointer {
+        action: RecoveryTargetAction,
+        output: Option<String>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryTargetAction {
+    Retry,
+    Exit,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -672,6 +685,10 @@ mod tests {
                     y: 96,
                     interaction: PointerInteraction::RightClick,
                 },
+            },
+            TestInput::RecoveryPointer {
+                action: RecoveryTargetAction::Retry,
+                output: Some("DP-1".into()),
             },
         ] {
             let envelope = ClientEnvelope {
