@@ -4103,32 +4103,58 @@ fn emit_element<Message: Clone>(
         }
         return;
     }
-    if let Some(background) = element.style.background {
-        tree.commands.push(match background {
-            Background::Solid(color) if element.style.corner_radius > 0.0 => {
-                PaintCommand::RoundedFill {
-                    rect,
-                    color,
-                    radius: element.style.corner_radius,
-                }
-            }
-            Background::Solid(color) if element.style.top_corner_radius > 0.0 => {
-                PaintCommand::TopRoundedFill {
-                    rect,
-                    color,
-                    radius: element.style.top_corner_radius,
-                }
-            }
-            Background::Solid(color) => PaintCommand::Fill { rect, color },
-            Background::LinearGradient(gradient) => PaintCommand::Gradient { rect, gradient },
-        });
-    }
-    if let Some(color) = element.style.border {
-        tree.commands.push(PaintCommand::Stroke {
+    let rounded_solid_border = match (element.style.background, element.style.border) {
+        (Some(Background::Solid(background)), Some(border))
+            if element.style.corner_radius > 0.0 && element.style.border_width > 0.0 =>
+        {
+            Some((background, border))
+        }
+        _ => None,
+    };
+    if let Some((background, border)) = rounded_solid_border {
+        let width = element
+            .style
+            .border_width
+            .min(rect.size.width / 2.0)
+            .min(rect.size.height / 2.0);
+        tree.commands.push(PaintCommand::RoundedFill {
             rect,
-            color,
-            width: element.style.border_width,
+            color: border,
+            radius: element.style.corner_radius,
         });
+        tree.commands.push(PaintCommand::RoundedFill {
+            rect: rect.inset(Insets::all(width)),
+            color: background,
+            radius: (element.style.corner_radius - width).max(0.0),
+        });
+    } else {
+        if let Some(background) = element.style.background {
+            tree.commands.push(match background {
+                Background::Solid(color) if element.style.corner_radius > 0.0 => {
+                    PaintCommand::RoundedFill {
+                        rect,
+                        color,
+                        radius: element.style.corner_radius,
+                    }
+                }
+                Background::Solid(color) if element.style.top_corner_radius > 0.0 => {
+                    PaintCommand::TopRoundedFill {
+                        rect,
+                        color,
+                        radius: element.style.top_corner_radius,
+                    }
+                }
+                Background::Solid(color) => PaintCommand::Fill { rect, color },
+                Background::LinearGradient(gradient) => PaintCommand::Gradient { rect, gradient },
+            });
+        }
+        if let Some(color) = element.style.border {
+            tree.commands.push(PaintCommand::Stroke {
+                rect,
+                color,
+                width: element.style.border_width,
+            });
+        }
     }
     if let Some(message) = &element.message {
         tree.messages.push(MessageRegion {

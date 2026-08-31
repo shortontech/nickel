@@ -1347,8 +1347,8 @@ mod tests {
         );
         assert!(focused.commands().iter().any(|command| matches!(
             command,
-            PaintCommand::Stroke { color, width, .. }
-                if *color == theme().borders.focus && *width == 2.0
+            PaintCommand::RoundedFill { color, radius, .. }
+                if *color == theme().borders.focus && *radius == theme().radii.control
         )));
         assert!(focused.accessibility_nodes().iter().any(|node| {
             node.label.as_deref() == Some("Focused") && node.state.as_deref() == Some("focused")

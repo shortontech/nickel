@@ -908,6 +908,42 @@ fn top_corner_radius_emits_rounded_fill() {
 }
 
 #[test]
+fn rounded_solid_surface_keeps_its_border_on_the_same_curve() {
+    let tree = UiFrame::<()>::layout(
+        Container::new()
+            .width(120.0)
+            .height(48.0)
+            .background(0x101114)
+            .border(0x8b5cf6, 2.0)
+            .radius(8.0),
+        Rect::new(0.0, 0.0, 120.0, 48.0),
+    );
+    let rounded = tree
+        .commands()
+        .iter()
+        .filter_map(|command| match command {
+            PaintCommand::RoundedFill {
+                rect,
+                color,
+                radius,
+            } => Some((*rect, *color, *radius)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(rounded.len(), 2);
+    assert_eq!(rounded[0].1, 0x8b5cf6);
+    assert_eq!(rounded[0].2, 8.0);
+    assert_eq!(rounded[1].0, Rect::new(2.0, 2.0, 116.0, 44.0));
+    assert_eq!(rounded[1].1, 0x101114);
+    assert_eq!(rounded[1].2, 6.0);
+    assert!(
+        tree.commands()
+            .iter()
+            .all(|command| !matches!(command, PaintCommand::Stroke { .. }))
+    );
+}
+
+#[test]
 fn intrinsic_measurement_covers_empty_and_nested_flex_content() {
     let empty = Container::<()>::new()
         .padding(Insets::symmetric(8.0, 5.0))

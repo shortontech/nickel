@@ -2916,8 +2916,8 @@ mod semantic_control_tests {
         tree = UiFrame::layout_with_state(view(), bounds, &mut state);
         assert!(tree.commands().iter().any(|command| matches!(
             command,
-            PaintCommand::Stroke { color, width, .. }
-                if *color == theme.borders.focus && *width >= 2.0
+            PaintCommand::RoundedFill { color, radius, .. }
+                if *color == theme.borders.focus && *radius == theme.radii.control
         )));
     }
 
