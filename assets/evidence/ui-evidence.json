@@ -1,0 +1,79 @@
+{
+  "schema": 1,
+  "captured_at": "2026-08-31T16:00:00-07:00",
+  "repository_revision": "e94558ccdce4c66827b5150806c8aa05a1cbaa6b",
+  "working_tree_note": "Evidence was generated from the active post-migration working tree; the content hashes and drift tests, not the base revision alone, identify the exact retained artifacts.",
+  "environment": {
+    "profile": "development checks plus deterministic headless raster",
+    "rustc": "rustc 1.94.1 (e408947bf 2026-03-25), x86_64-unknown-linux-gnu, LLVM 21.1.8",
+    "cpu": "AMD Ryzen 9 5900X 12-Core Processor",
+    "renderer": "nickel-ui deterministic software raster; native workbench acceptance used llvmpipe LLVM 21.1.8, Mesa OpenGL ES 3.2",
+    "scale": 1.0
+  },
+  "reachability": {
+    "path": "assets/evidence/ui-reachability-report.json",
+    "sha256": "2ecf95880197095917d104363be0810572227cedcd99613f72f27d85a7ce8820",
+    "report_schema": 2,
+    "fixture_variants": 66,
+    "path_count": 1125,
+    "reached_count": 1125,
+    "issue_count": 0,
+    "generator_command": "cargo run -q -p nickel-ui-workbench --all-features -- reachability-report assets/evidence/ui-reachability-report.json",
+    "drift_check": "The evidence validator regenerates or reads the full report, verifies its hash and schema, and requires reached_count == path_count with issue_count == 0. Any topology, action, route, or serialized-path change changes the retained hash."
+  },
+  "workbench_live_acceptance": {
+    "evidence_class": "nested_native_workbench",
+    "date": "2026-08-31",
+    "session": "nested Smithay winit backend, 1200x768 output, 900x534 client",
+    "renderer": "llvmpipe LLVM 21.1.8, Mesa OpenGL ES 3.2",
+    "fixture": "shared.public-components",
+    "limitations": "Native workbench delivery is proven. The accessibility route uses production UiHost accessibility dispatch but is not external assistive-technology protocol acceptance. Content-addressed raster records are retained without checking in redundant PNG bytes.",
+    "modalities": {
+      "pointer": {
+        "result": "passed",
+        "action": "Clicked Scale 150% after activating the native window.",
+        "artifact_name": "nickel-workbench-live-pointer4.png",
+        "bytes": 136342,
+        "sha256": "ae9adfd60307b26d8c5a453eca9f98cff17a985021f587cbae35ad520f9bdb16"
+      },
+      "keyboard": {
+        "result": "passed",
+        "action": "Tab moved focus to Light and Enter activated it.",
+        "artifact_name": "nickel-workbench-live-keyboard-enter.png",
+        "bytes": 136359,
+        "sha256": "3c82957ee67a9876e09c54e9e1603d971732c2636bf0408a18cadecb06f4ce03"
+      },
+      "controller": {
+        "result": "passed",
+        "action": "Connected controller, navigated with D-pad, and confirmed the Counter catalog row.",
+        "artifact_name": "nickel-workbench-live-controller2.png",
+        "bytes": 113025,
+        "sha256": "32ce0c7ca51380dda0f8045b893b0a85e6e41e9a138c1965a7f86ad20f1b6715"
+      },
+      "accessibility": {
+        "result": "passed",
+        "action": "Scrolled to the live Interaction route, selected Accessibility, and activated the primary fixture action through production UiHost accessibility routing.",
+        "artifact_name": "nickel-workbench-live-accessibility-reflow4.png",
+        "bytes": 109556,
+        "sha256": "896707f42aaf5de1636307831343edc5dd430c3661e10b2bc810856776760291"
+      }
+    }
+  },
+  "performance_comparison": {
+    "generator_command": "cargo run -q -p nickel-ui-workbench -- feedback-evidence --full-comparison",
+    "captured_at": "2026-08-31",
+    "clean_bootstrap_ms": 11109.6,
+    "clean_incremental_ms": 120.6,
+    "old_launcher_matrix_ms": 10637.4,
+    "measured_speedup": 88.2,
+    "incremental_budget_ms": 6000.0,
+    "full_matrix_budget_ms": 300000.0,
+    "minimum_speedup": 4.0,
+    "samples": {
+      "clean_bootstrap": 1,
+      "clean_incremental": 1,
+      "old_launcher_matrix": 1
+    },
+    "interpretation": "The command enforces absolute tier budgets and a predeclared four-times material-speedup floor. These isolated Cargo measurements are developer feedback evidence, not native frame or input latency evidence."
+  }
+}

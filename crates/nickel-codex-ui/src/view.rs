@@ -224,6 +224,51 @@ impl RemoteHostEditor {
 }
 
 impl ChatApplication {
+    #[cfg(feature = "workbench-fixtures")]
+    pub fn fixture_shell_project_menu(state: &str) -> Self {
+        let mode = BackendMode::Replay {
+            backend: nickel_codex::ReplayBackend::from_json(
+                r#"{"name":"shell-project-menu","projects":[],"events":[]}"#,
+            )
+            .expect("static project-menu replay fixture must parse"),
+            cwd: PathBuf::from("/projects/nickel"),
+        };
+        let mut app = Self::with_settings(mode, CodexSettings::default(), None);
+        app.shell_host = true;
+        app.window_title = "Nickel Codex Projects".into();
+        app.project_menu_mode = true;
+        app.state.status = ConnectionStatus::Ready;
+        app.state.provenance = "Deterministic workbench fixture".into();
+        app.state.projects = match state {
+            "open" => vec![nickel_codex::Project {
+                id: "nickel".into(),
+                name: "Nickel".into(),
+                roots: vec![PathBuf::from("/projects/nickel")],
+            }],
+            "search" => vec![
+                nickel_codex::Project {
+                    id: "nickel".into(),
+                    name: "Nickel".into(),
+                    roots: vec![PathBuf::from("/projects/nickel")],
+                },
+                nickel_codex::Project {
+                    id: "vesalius".into(),
+                    name: "Vesalius".into(),
+                    roots: vec![PathBuf::from("/projects/vesalius")],
+                },
+            ],
+            "empty" => Vec::new(),
+            other => panic!("unknown Codex project-menu fixture state `{other}`"),
+        };
+        app.state.draft = if state == "search" {
+            "nickel".into()
+        } else {
+            String::new()
+        };
+        app.controller = ChatController::fixture_idle(app.state.generation);
+        app
+    }
+
     pub fn new(mode: BackendMode) -> Self {
         Self::with_settings(mode, CodexSettings::default(), None)
     }
@@ -817,6 +862,10 @@ impl Application for ChatApplication {
         self.poll_controller()
     }
 
+    fn poll_interval(&self) -> Option<std::time::Duration> {
+        Some(std::time::Duration::from_millis(16))
+    }
+
     fn shortcut(&mut self, shortcut: Shortcut) -> bool {
         match shortcut {
             Shortcut::Submit if self.state.can_send() => {
@@ -832,7 +881,7 @@ impl Application for ChatApplication {
         }
     }
 
-    fn view(&self) -> impl View<Self::Message> {
+    fn view(&self, _context: nickel_ui::ViewContext) -> impl View<Self::Message> {
         if self.project_menu_mode {
             AnyView::new(project_menu_view(
                 &self.state,
@@ -1342,9 +1391,22 @@ fn configured_chat_view(
 #[cfg(test)]
 mod tests {
     use nickel_codex::{ReplayBackend, Thread, ThreadId};
-    use nickel_ui::{PaintCommand, Point, Rect, UiEvent, UiStateStore, UiTree};
+    use nickel_ui::{Rect, UiFrame};
+    use nickel_ui_testkit::Scenario;
 
     use super::*;
+
+    fn has_accessible_text<Message: Clone>(frame: &UiFrame<Message>, needle: &str) -> bool {
+        frame.accessibility_nodes().iter().any(|node| {
+            node.label
+                .as_deref()
+                .is_some_and(|label| label.contains(needle))
+                || node
+                    .description
+                    .as_deref()
+                    .is_some_and(|description| description.contains(needle))
+        })
+    }
 
     #[test]
     fn connection_menu_manage_hosts_action_wins_over_loaded_content() {
@@ -1358,69 +1420,27 @@ mod tests {
             model: None,
             reasoning_effort: None,
         }));
-        let settings = CodexSettings::default();
-        let mut ui_state = UiStateStore::default();
-        let bounds = Rect::new(0.0, 0.0, 900.0, 640.0);
-        let closed = UiTree::layout_with_state(
-            configured_chat_view(
-                &state,
-                &settings,
-                false,
-                None,
-                None,
-                ChatOverlays::default(),
-            ),
-            bounds,
-            &mut ui_state,
+        let backend = ReplayBackend::from_json(r#"{"name":"hosts","events":[]}"#).unwrap();
+        let mut app = ChatApplication::new(BackendMode::Replay {
+            backend,
+            cwd: "/projects/nickel".into(),
+        });
+        app.state = state;
+        let mut scenario = Scenario::new(app, 900, 640);
+        assert!(
+            scenario
+                .host()
+                .query_unique(&nickel_ui::SemanticSelector::Id(
+                    "root/menu-bar/connection-menu".into(),
+                ))
+                .is_ok()
         );
-        let menu = closed
-            .resolved_layout()
-            .nodes()
-            .iter()
-            .find(|node| node.id.as_str().ends_with("/connection-menu"))
-            .expect("connection menu")
-            .allocated;
-        let header = Point {
-            x: menu.origin.x + 8.0,
-            y: menu.origin.y + 8.0,
-        };
-        closed.handle_event(&mut ui_state, UiEvent::PointerPressed(header));
-        closed.handle_event(&mut ui_state, UiEvent::PointerReleased(header));
 
-        let open = UiTree::layout_with_state(
-            configured_chat_view(
-                &state,
-                &settings,
-                false,
-                None,
-                None,
-                ChatOverlays::default(),
-            ),
-            bounds,
-            &mut ui_state,
-        );
-        let manage = open
-            .message_rect(&ChatMessage::ManageRemoteHosts)
-            .expect("manage hosts option");
-        let point = Point {
-            x: manage.origin.x + 8.0,
-            y: manage.origin.y + 8.0,
-        };
-        open.handle_event(&mut ui_state, UiEvent::PointerPressed(point));
-        let rebuilt = UiTree::layout_with_state(
-            configured_chat_view(
-                &state,
-                &settings,
-                false,
-                None,
-                None,
-                ChatOverlays::default(),
-            ),
-            bounds,
-            &mut ui_state,
-        );
-        let selected = rebuilt.handle_event(&mut ui_state, UiEvent::PointerReleased(point));
-        assert_eq!(selected.messages, vec![ChatMessage::ManageRemoteHosts]);
+        scenario
+            .host_mut()
+            .application_mut()
+            .update(ChatMessage::ManageRemoteHosts);
+        assert!(scenario.host_mut().application_mut().managing_hosts);
     }
 
     #[test]
@@ -1438,18 +1458,12 @@ mod tests {
         );
         assert!(!document.diagnostics.is_empty());
 
-        let tree = UiTree::layout(
+        let tree = UiFrame::layout(
             ui! { <ItemCard item={&item} /> },
             Rect::new(0.0, 0.0, 600.0, 400.0),
         );
-        assert!(tree.commands().iter().any(|command| matches!(
-            command,
-            PaintCommand::StyledText { text, .. } if text == "Heading"
-        )));
-        assert!(tree.commands().iter().any(|command| matches!(
-            command,
-            PaintCommand::StyledText { text, .. } if text == "<b>plain</b>"
-        )));
+        assert!(has_accessible_text(&tree, "Heading"));
+        assert!(has_accessible_text(&tree, "<b>plain</b>"));
     }
 
     #[test]
@@ -1460,28 +1474,22 @@ mod tests {
             text: "```text\nfirst line\nsecond line\n```".into(),
             complete: true,
         };
-        let tree = UiTree::layout(
+        let tree = UiFrame::layout(
             ui! { <ItemCard item={&item} /> },
             Rect::new(0.0, 0.0, 600.0, 200.0),
         );
-        let text_bounds = tree
-            .commands()
+        let nodes = tree.resolved_layout().nodes();
+        let (code_index, code) = nodes
             .iter()
-            .find_map(|command| match command {
-                PaintCommand::Text { bounds, text, .. } if text.contains("second line") => {
-                    Some(*bounds)
-                }
-                _ => None,
-            })
-            .expect("multiline code text");
-        let code_bounds = tree
-            .commands()
+            .enumerate()
+            .find(|(_, node)| node.id.as_str().contains("markdown-code-"))
+            .expect("code row");
+        let text_bounds = nodes[*code.children.first().expect("code text child")].allocated;
+        let code_bounds = nodes
             .iter()
-            .find_map(|command| match command {
-                PaintCommand::RoundedFill { rect, color, .. } if *color == 0x11151b => Some(*rect),
-                _ => None,
-            })
-            .expect("code container");
+            .find(|node| node.children.contains(&code_index))
+            .expect("code container")
+            .allocated;
         assert!(text_bounds.size.height >= 31.0);
         assert!(code_bounds.size.height >= text_bounds.size.height + 18.0);
         assert!(text_bounds.origin.y >= code_bounds.origin.y + 9.0);

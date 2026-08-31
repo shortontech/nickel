@@ -1,0 +1,43 @@
+version = 1
+
+[metadata]
+build_profile = "release"
+toolchain = "stable"
+cpu = "developer-workstation-baseline"
+gpu = "headless-software-unless-fixture-declares-native"
+scale = 1.0
+fixture = "selected-by-id"
+execution = "headless-and-native-recorded-separately"
+
+[fast]
+incremental_compile_ms = 6000.0
+selected_unit_test_ms = 1000.0
+
+[focused]
+semantic_scenario_p95_ms = 250.0
+software_render_p95_ms = 750.0
+hard_command_ms = 6000.0
+samples = 8
+workbench_open_p95_ms = 1000.0
+warm_frame_p95_ms = 16.7
+input_to_visible_p95_ms = 50.0
+frame_allocations = 0
+retained_frame_bytes = 8388608
+cache_growth_bytes = 16777216
+
+[pre_commit]
+strict_clippy_ms = 120000.0
+workspace_test_ms = 300000.0
+
+[full_visual]
+full_matrix_ms = 300000.0
+shardable = true
+
+[live]
+input_to_visible_p95_ms = 50.0
+warm_frame_p95_ms = 16.7
+samples = 20
+
+[lifecycle]
+idle_frames = 0
+retained_build_scratch_bytes = 0

@@ -8,9 +8,18 @@ struct HitRegion<Message> {
     message_mapper: Option<fn(f32) -> Message>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ControllerDirection {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
 #[derive(Clone, Debug)]
 struct MessageRegion<Message> {
     id: UiId,
+    navigation_owner: Option<UiId>,
     rect: Rect,
     message: Message,
     message_mapper: Option<fn(f32) -> Message>,
@@ -259,6 +268,7 @@ pub struct ResolvedGrid {
 #[derive(Clone, Debug, PartialEq)]
 pub struct AccessibilityNode {
     pub id: UiId,
+    pub parent: Option<UiId>,
     pub component: &'static str,
     pub rect: Rect,
     pub interactive: bool,
@@ -267,6 +277,12 @@ pub struct AccessibilityNode {
     pub role: Option<String>,
     pub state: Option<String>,
     pub controls: Option<UiId>,
+    pub semantic_role: Option<SemanticRole>,
+    pub actions: Vec<ActionKind>,
+    pub enabled: bool,
+    pub focused: bool,
+    pub controller_selected: bool,
+    pub value: Option<SemanticValueSnapshot>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -280,6 +296,7 @@ pub enum DiagnosticKind {
     ScrollOffsetClamped,
     UnsatisfiedContent,
     MissingAsset,
+    MissingAccessibleName,
     UnbalancedClip,
 }
 
@@ -320,10 +337,8 @@ pub struct ResolvedNode {
     pub grid_tracks: Vec<f32>,
     pub hit_stack: Option<usize>,
     pub interaction: InteractionState,
-    pub controller_group: bool,
-    pub controller_pane: bool,
-    pub controller_pane_default: bool,
-    pub controller_step: f32,
+    pub navigation_scope: Option<crate::NavigationScope>,
+    pub adjustment_step: f32,
     pub controller_value: Option<f32>,
     pub accessibility_label: Option<String>,
     pub accessibility_description: Option<String>,
@@ -331,12 +346,111 @@ pub struct ResolvedNode {
     pub accessibility_state: Option<String>,
     pub accessibility_controls: Option<UiId>,
     pub accessibility_hidden: bool,
+    pub semantic_role: Option<SemanticRole>,
+    pub semantic_actions: Vec<ActionKind>,
+    pub semantic_value: Option<SemanticValueSnapshot>,
     pub children: Vec<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SemanticNodeSnapshot {
+    pub id: UiId,
+    pub parent: Option<UiId>,
+    pub bounds: Rect,
+    pub role: Option<SemanticRole>,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub enabled: bool,
+    pub focused: bool,
+    pub controller_selected: bool,
+    pub controls: Option<UiId>,
+    pub actions: Vec<ActionKind>,
+    pub value: Option<SemanticValueSnapshot>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SemanticActionError {
+    MissingTarget,
+    AmbiguousTarget,
+    ActionUnavailable,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct EffectiveHitRoute {
+    pub target: UiId,
+    pub bounds: Rect,
+    pub point: Point,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ResolvedLayout {
     nodes: Vec<ResolvedNode>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SemanticTarget {
+    pub id: UiId,
+    pub bounds: Rect,
+    pub role: Option<SemanticRole>,
+    pub name: Option<String>,
+    pub interactive: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SemanticSelector {
+    Id(UiId),
+    Role(SemanticRole),
+    Name(String),
+    RoleAndName { role: SemanticRole, name: String },
+    Action(ActionKind),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SemanticQueryError {
+    Missing,
+    Ambiguous { matches: usize },
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FrameResourceDiagnostics {
+    pub node_count: usize,
+    pub paint_primitive_count: usize,
+    pub hit_target_count: usize,
+    pub message_binding_count: usize,
+    pub accessibility_node_count: usize,
+    /// Lower-bound estimate covering owned vector storage and accessibility
+    /// strings. Message payloads and shared image pixels belong to their model
+    /// or resource cache and are intentionally not guessed here.
+    pub estimated_retained_bytes: usize,
+    pub retained_build_scratch_bytes: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum DiagnosticMode {
+    #[default]
+    Disabled,
+    Collect,
+}
+
+pub struct FrameRequest<'state> {
+    pub viewport: Rect,
+    pub state: &'state mut UiStateStore,
+    pub diagnostics: DiagnosticMode,
+}
+
+impl<'state> FrameRequest<'state> {
+    pub fn new(viewport: Rect, state: &'state mut UiStateStore) -> Self {
+        Self {
+            viewport,
+            state,
+            diagnostics: DiagnosticMode::Disabled,
+        }
+    }
+
+    pub fn diagnostics(mut self, mode: DiagnosticMode) -> Self {
+        self.diagnostics = mode;
+        self
+    }
 }
 
 impl ResolvedLayout {
@@ -346,6 +460,10 @@ impl ResolvedLayout {
 
     pub fn find(&self, id: &UiId) -> Option<&ResolvedNode> {
         self.nodes.iter().find(|node| &node.id == id)
+    }
+
+    fn find_mut(&mut self, id: &UiId) -> Option<&mut ResolvedNode> {
+        self.nodes.iter_mut().find(|node| &node.id == id)
     }
 
     pub fn deterministic_snapshot(&self) -> String {
@@ -395,26 +513,33 @@ impl ResolvedLayout {
 }
 
 #[derive(Clone, Debug)]
-pub struct UiTree<Message = String> {
+pub struct UiFrame<Message = String> {
     commands: Vec<PaintCommand>,
     overlay_commands: Vec<PaintCommand>,
     hits: Vec<HitRegion<Message>>,
     overlay_hits: Vec<HitRegion<Message>>,
     messages: Vec<MessageRegion<Message>>,
+    context_messages: Vec<MessageRegion<Message>>,
     text_inputs: Vec<TextInputRegion<Message>>,
     selection_regions: Vec<SelectionRegionLayout>,
     selection_paints: HashMap<usize, Vec<Rect>>,
     scrolls: Vec<ScrollRegion<Message>>,
     grids: Vec<ResolvedGrid>,
     accessibility: Vec<AccessibilityNode>,
+    semantic_role_name_index: HashMap<(SemanticRole, String), Vec<usize>>,
+    semantic_parents: Vec<Option<usize>>,
     resolved: ResolvedLayout,
     diagnostics: Vec<LayoutDiagnostic>,
     diagnostic_keys: HashSet<(DiagnosticKind, UiId)>,
     seen_ids: HashSet<UiId>,
     diagnostics_enabled: bool,
+    viewport: Rect,
+    overlay_invokers: Vec<(UiId, crate::OverlayId)>,
+    active_overlay: Option<(crate::OverlayId, Rect)>,
+    active_overlay_dismiss: Option<crate::DismissPolicy>,
 }
 
-impl<Message> Default for UiTree<Message> {
+impl<Message> Default for UiFrame<Message> {
     fn default() -> Self {
         Self {
             commands: Vec::new(),
@@ -422,22 +547,510 @@ impl<Message> Default for UiTree<Message> {
             hits: Vec::new(),
             overlay_hits: Vec::new(),
             messages: Vec::new(),
+            context_messages: Vec::new(),
             text_inputs: Vec::new(),
             selection_regions: Vec::new(),
             selection_paints: HashMap::new(),
             scrolls: Vec::new(),
             grids: Vec::new(),
             accessibility: Vec::new(),
+            semantic_role_name_index: HashMap::new(),
+            semantic_parents: Vec::new(),
             resolved: ResolvedLayout::default(),
             diagnostics: Vec::new(),
             diagnostic_keys: HashSet::new(),
             seen_ids: HashSet::new(),
             diagnostics_enabled: false,
+            viewport: Rect::new(0.0, 0.0, 0.0, 0.0),
+            overlay_invokers: Vec::new(),
+            active_overlay: None,
+            active_overlay_dismiss: None,
         }
     }
 }
 
-impl<Message: Clone> UiTree<Message> {
+impl<Message: Clone> UiFrame<Message> {
+    pub(crate) fn contains_target(&self, id: &UiId) -> bool {
+        self.resolved.find(id).is_some()
+            || self.hits.iter().any(|region| &region.id == id)
+            || self.messages.iter().any(|region| &region.id == id)
+    }
+    /// Adds the visual marquee for an application-owned image selection.
+    ///
+    /// Selection geometry remains application state, while display-list
+    /// construction stays owned by the resolved frame. The marquee is
+    /// intentionally non-interactive; callers route drag gestures through the
+    /// semantic image/selection surface that produced the rectangle.
+    pub fn selection_marquee(&mut self, rect: Rect, color: Color, width: f32) {
+        self.selection_marquee_layer(rect, None, color, width);
+    }
+
+    pub fn selection_marquee_layer(
+        &mut self,
+        rect: Rect,
+        fill: Option<Color>,
+        stroke: Color,
+        width: f32,
+    ) {
+        if rect.size.width <= 0.0 || rect.size.height <= 0.0 || width <= 0.0 {
+            return;
+        }
+        if let Some(color) = fill {
+            self.commands
+                .push(PaintCommand::OverlayFill { rect, color });
+        }
+        self.commands.push(PaintCommand::OverlayStroke {
+            rect,
+            color: stroke,
+            width,
+        });
+    }
+
+    pub fn present_transient_surface(
+        &mut self,
+        state: &mut UiStateStore,
+        mut surface: crate::TransientSurface,
+    ) -> Result<(), SemanticActionError> {
+        let requested = surface.anchor.id().clone();
+        let suffix = format!("/{}", requested.as_str());
+        let mut matches = self
+            .resolved
+            .nodes
+            .iter()
+            .filter(|node| node.id == requested || node.id.as_str().ends_with(&suffix))
+            .map(|node| node.id.clone());
+        let target = matches.next().ok_or(SemanticActionError::MissingTarget)?;
+        if matches.next().is_some() {
+            return Err(SemanticActionError::AmbiguousTarget);
+        }
+        surface.anchor = surface.anchor.with_resolved_target(target);
+        self.overlay_invokers
+            .push((surface.anchor.id().clone(), surface.id.clone()));
+        if state.open_overlay_id() != Some(&surface.id) {
+            return Ok(());
+        }
+        let anchor_node = self
+            .resolved
+            .find(surface.anchor.id())
+            .ok_or(SemanticActionError::MissingTarget)?
+            .allocated;
+        let rect = crate::place_transient(
+            surface.anchor.rect(anchor_node),
+            surface.logical_size,
+            self.viewport,
+            surface.placement,
+            surface.collision,
+            surface.direction,
+            surface.scale,
+        );
+        let role = Some(match surface.kind {
+            crate::TransientKind::Dialog => SemanticRole::Dialog,
+            crate::TransientKind::Popover => SemanticRole::Popover,
+            crate::TransientKind::Tooltip => SemanticRole::Tooltip,
+            crate::TransientKind::ContextMenu => SemanticRole::Menu,
+        });
+        self.commands.push(PaintCommand::OverlayFill {
+            rect,
+            color: surface.style.background,
+        });
+        self.commands.push(PaintCommand::OverlayStroke {
+            rect,
+            color: surface.style.border,
+            width: 1.0,
+        });
+        let index = self.resolved.nodes.len();
+        self.resolved.nodes.push(ResolvedNode {
+            component: "TransientSurface",
+            id: surface.id.as_ui_id().clone(),
+            source: None,
+            allocated: rect,
+            padding_box: rect,
+            border_box: rect,
+            content: rect,
+            constraints: Constraints::tight(rect.size),
+            preferred: rect.size,
+            flex_basis: Length::Auto,
+            flex_grow: 0.0,
+            flex_shrink: 0.0,
+            clip: None,
+            scroll: None,
+            grid_tracks: Vec::new(),
+            hit_stack: None,
+            interaction: InteractionState::default(),
+            navigation_scope: Some(crate::NavigationScope::group()),
+            adjustment_step: 0.05,
+            controller_value: None,
+            accessibility_label: surface
+                .accessible_name
+                .clone()
+                .or_else(|| Some(format!("{:?}", surface.kind))),
+            accessibility_description: None,
+            accessibility_role: role.map(|role| role.as_str().into()),
+            accessibility_state: Some("expanded".into()),
+            accessibility_controls: Some(surface.anchor.id().clone()),
+            accessibility_hidden: false,
+            semantic_role: role,
+            semantic_actions: vec![ActionKind::Dismiss, ActionKind::Cancel],
+            semantic_value: None,
+            children: Vec::new(),
+        });
+        if let Some(root) = self.resolved.nodes.first_mut() {
+            root.children.push(index);
+        }
+        self.active_overlay = Some((surface.id, rect));
+        self.active_overlay_dismiss = Some(surface.dismiss);
+        Ok(())
+    }
+
+    pub fn present_transient_content(
+        &mut self,
+        state: &mut UiStateStore,
+        surface: crate::TransientSurface,
+        mut content: Element<Message>,
+    ) -> Result<(), SemanticActionError> {
+        let overlay = surface.id.clone();
+        self.present_transient_surface(state, surface)?;
+        if self.active_overlay.as_ref().map(|(id, _)| id) != Some(&overlay) {
+            return Ok(());
+        }
+        let Some((_, rect)) = self.active_overlay.clone() else {
+            return Ok(());
+        };
+        let Some(parent) = self.node_index(overlay.as_ui_id()) else {
+            return Err(SemanticActionError::MissingTarget);
+        };
+        let content_rect = Rect::new(
+            rect.origin.x + 12.0,
+            rect.origin.y + 12.0,
+            (rect.size.width - 24.0).max(0.0),
+            (rect.size.height - 24.0).max(0.0),
+        );
+        let content_id = overlay.as_ui_id().scoped("content");
+        apply_transient_state(&mut content, &content_id, state);
+        let index = layout_element(&content, &content_id, content_rect, None, Some(rect), self);
+        self.resolved.nodes[parent].children.push(index);
+        emit_element(&content, index, None, self);
+        for node in &self.resolved.nodes[index..] {
+            state.touch(node.id.clone());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn finalize_transient_layers(&mut self, state: &UiStateStore) {
+        self.apply_interaction_state(state);
+        self.emit_accessibility_geometry();
+        self.validate_clip_commands();
+    }
+
+    pub(crate) fn reconcile_transient_focus(&self, state: &mut UiStateStore) {
+        let Some((overlay, _)) = &self.active_overlay else {
+            return;
+        };
+        if let Some(selected) = state.navigation().controller_selected().cloned()
+            && self.is_descendant_or_self(overlay.as_ui_id(), &selected)
+        {
+            state.set_focus(Some(selected));
+        }
+    }
+
+    /// Registers and, when open, emits a menu into this frame's authoritative
+    /// overlay paint and hit stacks.
+    pub fn present_menu(
+        &mut self,
+        state: &mut UiStateStore,
+        mut menu: crate::OverlayMenu<Message>,
+    ) -> Result<(), SemanticActionError> {
+        let requested = menu.anchor.id().clone();
+        let suffix = format!("/{}", requested.as_str());
+        let mut matches = self
+            .resolved
+            .nodes
+            .iter()
+            .filter(|node| node.id == requested || node.id.as_str().ends_with(&suffix))
+            .map(|node| node.id.clone());
+        let target = matches.next().ok_or(SemanticActionError::MissingTarget)?;
+        if matches.next().is_some() {
+            return Err(SemanticActionError::AmbiguousTarget);
+        }
+        menu.anchor = menu.anchor.with_resolved_target(target);
+        let anchor_node = self
+            .resolved
+            .find(menu.anchor.id())
+            .ok_or(SemanticActionError::MissingTarget)?
+            .allocated;
+        let anchor = menu.anchor.rect(anchor_node);
+        self.overlay_invokers
+            .push((menu.anchor.id().clone(), menu.id.clone()));
+        if let Some(anchor) = self.resolved.find_mut(menu.anchor.id())
+            && !anchor.semantic_actions.contains(&ActionKind::ContextMenu)
+        {
+            anchor.semantic_actions.push(ActionKind::ContextMenu);
+        }
+        if state.open_overlay_id() != Some(&menu.id) {
+            return Ok(());
+        }
+        if state.navigation().controller_selected().is_none()
+            && let Some(item) = menu.initial_controller_item.as_ref()
+        {
+            state
+                .navigation_mut()
+                .set_controller_selected(Some(menu.id.item_id(item)));
+        }
+        let item_count = menu.items.len();
+        let content_height = menu.row_height * item_count as f32
+            + menu.row_gap * item_count.saturating_sub(1) as f32;
+        let rect = crate::overlay::place(
+            anchor,
+            Size {
+                width: menu.width,
+                height: menu.padding.top + content_height + menu.padding.bottom,
+            },
+            self.viewport,
+            menu.placement,
+            menu.collision,
+        );
+        self.commands.push(PaintCommand::RoundedFill {
+            rect,
+            color: menu.background,
+            radius: menu.radius,
+        });
+        let menu_index = self.resolved.nodes.len();
+        self.resolved.nodes.push(ResolvedNode {
+            component: "Menu",
+            id: menu.id.as_ui_id().clone(),
+            source: None,
+            allocated: rect,
+            padding_box: rect,
+            border_box: rect,
+            content: rect.inset(menu.padding),
+            constraints: Constraints::tight(rect.size),
+            preferred: rect.size,
+            flex_basis: Length::Auto,
+            flex_grow: 0.0,
+            flex_shrink: 0.0,
+            clip: None,
+            scroll: None,
+            grid_tracks: Vec::new(),
+            hit_stack: None,
+            interaction: InteractionState::default(),
+            navigation_scope: Some(crate::NavigationScope::group()),
+            adjustment_step: 0.05,
+            controller_value: None,
+            accessibility_label: None,
+            accessibility_description: None,
+            accessibility_role: Some(SemanticRole::Menu.as_str().into()),
+            accessibility_state: None,
+            accessibility_controls: None,
+            accessibility_hidden: false,
+            semantic_role: Some(SemanticRole::Menu),
+            semantic_actions: Vec::new(),
+            semantic_value: None,
+            children: Vec::with_capacity(item_count),
+        });
+        self.accessibility.push(AccessibilityNode {
+            id: menu.id.as_ui_id().clone(),
+            parent: None,
+            component: "Menu",
+            rect,
+            interactive: false,
+            label: None,
+            description: None,
+            role: Some(SemanticRole::Menu.as_str().into()),
+            state: None,
+            controls: None,
+            semantic_role: Some(SemanticRole::Menu),
+            actions: Vec::new(),
+            enabled: true,
+            focused: false,
+            controller_selected: false,
+            value: None,
+        });
+        if menu.focus == crate::OverlayFocusPolicy::FirstItem
+            && let Some(item) = menu.items.iter().find(|item| item.action.is_some())
+        {
+            let id = menu.id.item_id(&item.id);
+            let menu_item_ids = menu
+                .items
+                .iter()
+                .map(|candidate| menu.id.item_id(&candidate.id))
+                .collect::<Vec<_>>();
+            let belongs_to_menu = |selected: Option<&UiId>| {
+                selected.is_some_and(|selected| menu_item_ids.contains(selected))
+            };
+            if !belongs_to_menu(state.focused()) {
+                state.set_focus(Some(id.clone()));
+            }
+            if (state.navigation().controller_selected().is_some()
+                || state.input_modality() == InputModality::Controller)
+                && !belongs_to_menu(state.navigation().controller_selected())
+            {
+                state.navigation_mut().set_controller_selected(Some(id));
+            }
+            // Controller selection is the menu's active focus authority. Keep
+            // focus synchronized before emitting paint commands so a rebuild
+            // cannot retain the former focused row's selected treatment while
+            // semantics already report the newly selected row.
+            if let Some(selected) = state
+                .navigation()
+                .controller_selected()
+                .filter(|selected| belongs_to_menu(Some(selected)))
+                .cloned()
+            {
+                state.set_focus(Some(selected));
+            }
+        }
+        for (index, item) in menu.items.into_iter().enumerate() {
+            let item_rect = Rect::new(
+                rect.origin.x + menu.padding.left,
+                rect.origin.y + menu.padding.top + index as f32 * (menu.row_height + menu.row_gap),
+                rect.size.width - menu.padding.left - menu.padding.right,
+                menu.row_height,
+            );
+            let id = menu.id.item_id(&item.id);
+            let interaction = InteractionState {
+                interactive: item.action.is_some(),
+                focused: state.focused() == Some(&id),
+                hovered: state.hovered() == Some(&id),
+                pressed: state.pressed() == Some(&id),
+                controller_selected: state.navigation().controller_selected() == Some(&id),
+                ..InteractionState::default()
+            };
+            let interaction_color = if interaction.pressed {
+                menu.item_pressed
+            } else if interaction.hovered {
+                menu.item_hover
+            } else if interaction.focused || interaction.controller_selected {
+                menu.item_selected
+            } else {
+                None
+            };
+            if let Some(color) = interaction_color {
+                self.commands.push(PaintCommand::RoundedFill {
+                    rect: item_rect,
+                    color,
+                    radius: menu.item_radius,
+                });
+            }
+            self.commands.push(PaintCommand::Text {
+                bounds: item_rect.inset(Insets::all(8.0)),
+                text: item.label.clone(),
+                scale: menu.text_scale,
+                color: menu.foreground,
+                align: menu.text_align,
+                bold: false,
+                wrap: false,
+            });
+            let enabled = item.action.is_some();
+            let item_index = self.resolved.nodes.len();
+            self.resolved.nodes.push(ResolvedNode {
+                component: "MenuItem",
+                id: id.clone(),
+                source: None,
+                allocated: item_rect,
+                padding_box: item_rect,
+                border_box: item_rect,
+                content: item_rect.inset(Insets::all(8.0)),
+                constraints: Constraints::tight(item_rect.size),
+                preferred: item_rect.size,
+                flex_basis: Length::Auto,
+                flex_grow: 0.0,
+                flex_shrink: 0.0,
+                clip: Some(rect),
+                scroll: None,
+                grid_tracks: Vec::new(),
+                hit_stack: Some(self.hits.len()),
+                interaction,
+                navigation_scope: None,
+                adjustment_step: 0.05,
+                controller_value: None,
+                accessibility_label: Some(item.label.clone()),
+                accessibility_description: None,
+                accessibility_role: Some(SemanticRole::MenuItem.as_str().into()),
+                accessibility_state: None,
+                accessibility_controls: None,
+                accessibility_hidden: false,
+                semantic_role: Some(SemanticRole::MenuItem),
+                semantic_actions: enabled
+                    .then_some(ActionKind::Activate)
+                    .into_iter()
+                    .collect(),
+                semantic_value: None,
+                children: Vec::new(),
+            });
+            self.resolved.nodes[menu_index].children.push(item_index);
+            self.hits.push(HitRegion {
+                id: id.clone(),
+                rect: item_rect,
+                message: item.action.clone(),
+                message_mapper: None,
+            });
+            if let Some(message) = item.action {
+                self.messages.push(MessageRegion {
+                    id: id.clone(),
+                    navigation_owner: Some(menu.id.as_ui_id().clone()),
+                    rect: item_rect,
+                    message,
+                    message_mapper: None,
+                });
+            }
+            self.accessibility.push(AccessibilityNode {
+                id: id.clone(),
+                parent: Some(menu.id.as_ui_id().clone()),
+                component: "MenuItem",
+                rect: item_rect,
+                interactive: enabled,
+                label: Some(item.label),
+                description: None,
+                role: Some("menuitem".into()),
+                state: None,
+                controls: None,
+                semantic_role: Some(SemanticRole::MenuItem),
+                actions: enabled
+                    .then_some(ActionKind::Activate)
+                    .into_iter()
+                    .collect(),
+                enabled,
+                focused: interaction.focused,
+                controller_selected: interaction.controller_selected,
+                value: None,
+            });
+        }
+        self.active_overlay = Some((menu.id.clone(), rect));
+        self.active_overlay_dismiss = Some(crate::DismissPolicy::default());
+        Ok(())
+    }
+
+    /// Presents a menu whose host surface is itself the open menu. This keeps
+    /// overlay ownership and focus initialization inside the canonical frame
+    /// transition instead of requiring consumers to mutate [`UiStateStore`].
+    pub fn present_open_menu(
+        &mut self,
+        state: &mut UiStateStore,
+        menu: crate::OverlayMenu<Message>,
+    ) -> Result<EventOutcome<Message>, SemanticActionError> {
+        let target = menu.anchor.id().clone();
+        self.present_menu(state, menu.clone())?;
+        let outcome = self.transition(
+            state,
+            InputSource::Programmatic,
+            InteractionIntent::Invoke {
+                target,
+                action: SemanticAction::Invoke(ActionKind::ContextMenu),
+            },
+        )?;
+        self.present_menu(state, menu)?;
+        Ok(outcome)
+    }
+    /// Resolves a declarative view into the canonical retained frame.
+    pub fn resolve(root: impl Component<Message>, request: FrameRequest<'_>) -> Self {
+        Self::layout_with_state_and_diagnostics(
+            root,
+            request.viewport,
+            request.state,
+            request.diagnostics == DiagnosticMode::Collect,
+        )
+    }
+
     fn selection_hit_at(
         &self,
         point: Point,
@@ -534,6 +1147,7 @@ impl<Message: Clone> UiTree<Message> {
         apply_transient_state(&mut root, &root_id, state);
         let mut tree = Self {
             diagnostics_enabled: diagnostics,
+            viewport: bounds,
             ..Self::default()
         };
         layout_element(&root, &root_id, bounds, None, None, &mut tree);
@@ -543,7 +1157,7 @@ impl<Message: Clone> UiTree<Message> {
             state.reconcile_document_selection(region.id.clone(), region.document.clone());
         }
         for node in &tree.resolved.nodes {
-            if node.controller_group || node.controller_pane {
+            if node.navigation_scope.is_some() {
                 state.touch(node.id.clone());
             }
         }
@@ -555,6 +1169,11 @@ impl<Message: Clone> UiTree<Message> {
         tree.hits.append(&mut tree.overlay_hits);
         for hit in &tree.hits {
             state.touch(hit.id.clone());
+        }
+        if state.navigation().controller_scope().is_some()
+            && state.navigation().controller_selected().is_none()
+        {
+            tree.move_controller(state, 1);
         }
         tree.emit_accessibility_geometry();
         tree.validate_clip_commands();
@@ -569,7 +1188,9 @@ impl<Message: Clone> UiTree<Message> {
             }
         }
         state.end_frame();
+        state.reconcile_live_targets();
         tree.apply_interaction_state(state);
+        tree.release_build_scratch();
         tree
     }
 
@@ -592,6 +1213,7 @@ impl<Message: Clone> UiTree<Message> {
         tree.hits.append(&mut tree.overlay_hits);
         tree.emit_accessibility_geometry();
         tree.validate_clip_commands();
+        tree.release_build_scratch();
         tree
     }
 
@@ -609,6 +1231,262 @@ impl<Message: Clone> UiTree<Message> {
 
     pub fn accessibility_nodes(&self) -> &[AccessibilityNode] {
         &self.accessibility
+    }
+
+    pub fn semantic_nodes(&self) -> Vec<SemanticNodeSnapshot> {
+        let mut parents = vec![None; self.resolved.nodes.len()];
+        for node in &self.resolved.nodes {
+            for child in &node.children {
+                parents[*child] = Some(node.id.clone());
+            }
+        }
+        self.resolved
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| node.semantic_role.is_some() || !node.semantic_actions.is_empty())
+            .map(|(index, node)| SemanticNodeSnapshot {
+                id: node.id.clone(),
+                parent: parents[index].clone(),
+                bounds: node.border_box,
+                role: node.semantic_role,
+                name: node.accessibility_label.clone(),
+                description: node.accessibility_description.clone(),
+                enabled: !node.semantic_actions.is_empty(),
+                focused: node.interaction.focused,
+                controller_selected: node.interaction.controller_selected,
+                controls: node.accessibility_controls.clone(),
+                actions: node.semantic_actions.clone(),
+                value: node.semantic_value.clone(),
+            })
+            .collect()
+    }
+
+    fn semantic_snapshot(&self, index: usize) -> SemanticNodeSnapshot {
+        let node = &self.resolved.nodes[index];
+        let parent = self
+            .semantic_parents
+            .get(index)
+            .copied()
+            .flatten()
+            .map(|parent| self.resolved.nodes[parent].id.clone());
+        SemanticNodeSnapshot {
+            id: node.id.clone(),
+            parent,
+            bounds: node.border_box,
+            role: node.semantic_role,
+            name: node.accessibility_label.clone(),
+            description: node.accessibility_description.clone(),
+            enabled: !node.semantic_actions.is_empty(),
+            focused: node.interaction.focused,
+            controller_selected: node.interaction.controller_selected,
+            controls: node.accessibility_controls.clone(),
+            actions: node.semantic_actions.clone(),
+            value: node.semantic_value.clone(),
+        }
+    }
+
+    /// Applies one interaction through the canonical frame and state authority.
+    ///
+    /// Existing event-specific entry points remain temporarily available while consumers migrate,
+    /// but hosts and development tooling must use this transition surface.
+    pub fn transition(
+        &self,
+        state: &mut UiStateStore,
+        source: InputSource,
+        intent: InteractionIntent,
+    ) -> Result<EventOutcome<Message>, SemanticActionError> {
+        let modality = match source {
+            InputSource::Keyboard => Some(InputModality::Keyboard),
+            InputSource::Pointer => Some(InputModality::Pointer),
+            InputSource::Controller => Some(InputModality::Controller),
+            InputSource::Accessibility => Some(InputModality::Accessibility),
+            InputSource::Programmatic | InputSource::System => None,
+        };
+        let mut modality_invalidation = modality
+            .map(|modality| state.set_input_modality(modality))
+            .unwrap_or(Invalidation::None);
+        if matches!(
+            source,
+            InputSource::Keyboard | InputSource::Controller | InputSource::Accessibility
+        ) {
+            modality_invalidation = modality_invalidation.merge(state.set_hovered(None));
+        }
+        let mut outcome = match intent {
+            InteractionIntent::Event(event) => self.reduce_event(state, event),
+            InteractionIntent::Invoke { target, action } => {
+                if action == SemanticAction::Invoke(ActionKind::ContextMenu)
+                    && let Some((invocation_target, overlay)) = self
+                        .overlay_invokers
+                        .iter()
+                        .find(|(invocation_target, _)| invocation_target == &target)
+                        .cloned()
+                {
+                    EventOutcome {
+                        invalidation: state.open_overlay(overlay, invocation_target),
+                        ..EventOutcome::default()
+                    }
+                } else {
+                    let dismisses = matches!(action, SemanticAction::Invoke(ActionKind::Activate))
+                        && self
+                            .active_overlay_dismiss
+                            .is_none_or(|policy| policy.action)
+                        && self.active_overlay.as_ref().is_some_and(|(overlay, _)| {
+                            self.is_descendant_or_self(overlay.as_ui_id(), &target)
+                        });
+                    let mut outcome = self.perform_semantic_action(&target, action)?;
+                    if dismisses {
+                        outcome.invalidation = outcome
+                            .invalidation
+                            .merge(state.dismiss_overlay(crate::DismissReason::Action));
+                    }
+                    outcome
+                }
+            }
+        };
+        outcome.invalidation = outcome.invalidation.merge(modality_invalidation);
+        Ok(outcome)
+    }
+
+    pub fn perform_semantic_action(
+        &self,
+        id: &UiId,
+        action: SemanticAction,
+    ) -> Result<EventOutcome<Message>, SemanticActionError> {
+        let node = self
+            .resolved
+            .find(id)
+            .ok_or(SemanticActionError::MissingTarget)?;
+        let kind = match &action {
+            SemanticAction::Invoke(kind) => *kind,
+            SemanticAction::SetValue(_) => ActionKind::SetValue,
+        };
+        if !node.semantic_actions.contains(&kind) {
+            return Err(SemanticActionError::ActionUnavailable);
+        }
+        let message = match action {
+            SemanticAction::Invoke(ActionKind::Activate) => self.message_for_id(id).cloned(),
+            SemanticAction::Invoke(ActionKind::ContextMenu) => {
+                self.context_message_for_id(id).cloned()
+            }
+            SemanticAction::Invoke(ActionKind::Increment | ActionKind::Decrement) => {
+                let direction = if kind == ActionKind::Increment {
+                    1.0
+                } else {
+                    -1.0
+                };
+                self.messages
+                    .iter()
+                    .rev()
+                    .find(|region| &region.id == id)
+                    .and_then(|region| region.message_mapper)
+                    .zip(node.controller_value)
+                    .map(|(map, value)| {
+                        map((value + direction * node.adjustment_step).clamp(0.0, 1.0))
+                    })
+            }
+            SemanticAction::SetValue(SemanticValueInput::Number(value)) => self
+                .messages
+                .iter()
+                .rev()
+                .find(|region| &region.id == id)
+                .and_then(|region| region.message_mapper)
+                .map(|map| map((value as f32).clamp(0.0, 1.0))),
+            SemanticAction::SetValue(SemanticValueInput::Text(value)) => self
+                .text_inputs
+                .iter()
+                .rev()
+                .find(|region| &region.id == id)
+                .map(|region| (region.map)(value)),
+            _ => None,
+        }
+        .ok_or(SemanticActionError::ActionUnavailable)?;
+        Ok(EventOutcome {
+            messages: vec![message],
+            clipboard_text: None,
+            invalidation: Invalidation::None,
+        })
+    }
+
+    pub fn resolve_effective_target(
+        &self,
+        id: &UiId,
+        action: ActionKind,
+    ) -> Result<EffectiveHitRoute, SemanticActionError> {
+        let node = self
+            .resolved
+            .find(id)
+            .ok_or(SemanticActionError::MissingTarget)?;
+        if !node.semantic_actions.contains(&action) {
+            return Err(SemanticActionError::ActionUnavailable);
+        }
+        let hit = self
+            .hits
+            .iter()
+            .rev()
+            .find(|hit| &hit.id == id)
+            .ok_or(SemanticActionError::ActionUnavailable)?;
+        let bounds = node
+            .clip
+            .and_then(|clip| intersection(hit.rect, clip))
+            .unwrap_or(hit.rect);
+        let point = Point {
+            x: bounds.origin.x + bounds.size.width / 2.0,
+            y: bounds.origin.y + bounds.size.height / 2.0,
+        };
+        if self.id_at(point) != Some(id) {
+            return Err(SemanticActionError::ActionUnavailable);
+        }
+        Ok(EffectiveHitRoute {
+            target: id.clone(),
+            bounds,
+            point,
+        })
+    }
+
+    pub fn resource_diagnostics(&self) -> FrameResourceDiagnostics {
+        let vector_bytes = self.commands.capacity() * std::mem::size_of::<PaintCommand>()
+            + self.hits.capacity() * std::mem::size_of::<HitRegion<Message>>()
+            + self.messages.capacity() * std::mem::size_of::<MessageRegion<Message>>()
+            + self.context_messages.capacity() * std::mem::size_of::<MessageRegion<Message>>()
+            + self.text_inputs.capacity() * std::mem::size_of::<TextInputRegion<Message>>()
+            + self.selection_regions.capacity() * std::mem::size_of::<SelectionRegionLayout>()
+            + self.scrolls.capacity() * std::mem::size_of::<ScrollRegion<Message>>()
+            + self.grids.capacity() * std::mem::size_of::<ResolvedGrid>()
+            + self.accessibility.capacity() * std::mem::size_of::<AccessibilityNode>()
+            + self.resolved.nodes.capacity() * std::mem::size_of::<ResolvedNode>()
+            + self.diagnostics.capacity() * std::mem::size_of::<LayoutDiagnostic>();
+        let node_children = self
+            .resolved
+            .nodes
+            .iter()
+            .map(|node| node.children.capacity() * std::mem::size_of::<usize>())
+            .sum::<usize>();
+        let accessibility_strings = self
+            .accessibility
+            .iter()
+            .map(|node| {
+                node.label.as_ref().map_or(0, String::capacity)
+                    + node.description.as_ref().map_or(0, String::capacity)
+                    + node.role.as_ref().map_or(0, String::capacity)
+                    + node.state.as_ref().map_or(0, String::capacity)
+            })
+            .sum::<usize>();
+        let retained_build_scratch_bytes = self.overlay_commands.capacity()
+            * std::mem::size_of::<PaintCommand>()
+            + self.overlay_hits.capacity() * std::mem::size_of::<HitRegion<Message>>()
+            + self.selection_paints.capacity() * std::mem::size_of::<(usize, Vec<Rect>)>()
+            + self.diagnostic_keys.capacity() * std::mem::size_of::<(DiagnosticKind, UiId)>()
+            + self.seen_ids.capacity() * std::mem::size_of::<UiId>();
+        FrameResourceDiagnostics {
+            node_count: self.resolved.nodes.len(),
+            paint_primitive_count: self.commands.len(),
+            hit_target_count: self.hits.len(),
+            message_binding_count: self.messages.len() + self.context_messages.len(),
+            accessibility_node_count: self.accessibility.len(),
+            estimated_retained_bytes: vector_bytes + node_children + accessibility_strings,
+            retained_build_scratch_bytes,
+        }
     }
 
     pub fn message_at(&self, point: Point) -> Option<&Message> {
@@ -645,15 +1523,92 @@ impl<Message: Clone> UiTree<Message> {
             .map(|region| &region.message)
     }
 
-    pub fn id_for_message(&self, message: &Message) -> Option<&UiId>
+    /// Returns every semantic target that dispatches `message`. Duplicate
+    /// messages remain visible so callers must choose targets semantically.
+    pub fn semantic_targets_for_message(&self, message: &Message) -> Vec<SemanticTarget>
     where
         Message: PartialEq,
     {
         self.messages
             .iter()
-            .rev()
-            .find(|region| &region.message == message)
-            .map(|region| &region.id)
+            .filter(|region| &region.message == message)
+            .map(|region| {
+                let node = self.resolved.find(&region.id);
+                SemanticTarget {
+                    id: region.id.clone(),
+                    bounds: region.rect,
+                    role: node.and_then(|node| node.semantic_role),
+                    name: node.and_then(|node| node.accessibility_label.clone()),
+                    interactive: node.is_some_and(|node| node.interaction.interactive),
+                }
+            })
+            .collect()
+    }
+
+    /// Queries backend-neutral semantics without exposing renderer traversal
+    /// or silently collapsing duplicate matches.
+    pub fn query(&self, selector: &SemanticSelector) -> Vec<SemanticNodeSnapshot> {
+        if let SemanticSelector::RoleAndName { role, name } = selector {
+            return self
+                .semantic_role_name_index
+                .get(&(*role, name.clone()))
+                .into_iter()
+                .flatten()
+                .map(|index| self.semantic_snapshot(*index))
+                .collect();
+        }
+        self.semantic_nodes()
+            .into_iter()
+            .filter(|node| match selector {
+                SemanticSelector::Id(id) => &node.id == id,
+                SemanticSelector::Role(role) => node.role == Some(*role),
+                SemanticSelector::Name(name) => node.name.as_ref() == Some(name),
+                SemanticSelector::RoleAndName { role, name } => {
+                    node.role == Some(*role) && node.name.as_ref() == Some(name)
+                }
+                SemanticSelector::Action(action) => node.actions.contains(action),
+            })
+            .collect()
+    }
+
+    pub fn query_unique(
+        &self,
+        selector: &SemanticSelector,
+    ) -> Result<SemanticNodeSnapshot, SemanticQueryError> {
+        let mut matches = self.query(selector).into_iter();
+        let Some(target) = matches.next() else {
+            return Err(SemanticQueryError::Missing);
+        };
+        let additional = matches.count();
+        if additional == 0 {
+            Ok(target)
+        } else {
+            Err(SemanticQueryError::Ambiguous {
+                matches: additional + 1,
+            })
+        }
+    }
+
+    /// Resolves one semantic target and rejects message reuse explicitly.
+    pub fn unique_semantic_target_for_message(
+        &self,
+        message: &Message,
+    ) -> Result<SemanticTarget, SemanticQueryError>
+    where
+        Message: PartialEq,
+    {
+        let mut matches = self.semantic_targets_for_message(message).into_iter();
+        let Some(target) = matches.next() else {
+            return Err(SemanticQueryError::Missing);
+        };
+        let additional = matches.count();
+        if additional == 0 {
+            Ok(target)
+        } else {
+            Err(SemanticQueryError::Ambiguous {
+                matches: additional + 1,
+            })
+        }
     }
 
     pub fn message_at_with_horizontal_fraction(&self, point: Point) -> Option<(&Message, f32)> {
@@ -741,26 +1696,9 @@ impl<Message: Clone> UiTree<Message> {
             .map(|scroll| scroll.rect)
     }
 
-    pub fn message_rect(&self, message: &Message) -> Option<Rect>
-    where
-        Message: PartialEq,
-    {
-        self.hits
-            .iter()
-            .rev()
-            .find(|hit| hit.message.as_ref() == Some(message))
-            .map(|hit| hit.rect)
-    }
-
-    pub fn message_layout_rect(&self, message: &Message) -> Option<Rect>
-    where
-        Message: PartialEq,
-    {
-        self.messages
-            .iter()
-            .rev()
-            .find(|region| &region.message == message)
-            .map(|region| region.rect)
+    pub fn context_message_at(&self, point: Point) -> Option<&Message> {
+        self.id_at(point)
+            .and_then(|id| self.context_message_for_id(id))
     }
 
     pub fn resolved_grid_columns(&self) -> Option<usize> {
@@ -788,7 +1726,7 @@ impl<Message: Clone> UiTree<Message> {
             state.touch(scroll.id.clone());
         }
         for node in &self.resolved.nodes {
-            if node.controller_group || node.controller_pane {
+            if node.navigation_scope.is_some() {
                 state.touch(node.id.clone());
             }
         }
@@ -907,16 +1845,27 @@ impl<Message: Clone> UiTree<Message> {
     }
 
     pub fn handle_event(&self, state: &mut UiStateStore, event: UiEvent) -> EventOutcome<Message> {
+        let source = event.input_source();
+        self.transition(state, source, InteractionIntent::Event(event))
+            .expect("ordinary UI events cannot fail semantic resolution")
+    }
+
+    fn reduce_event(&self, state: &mut UiStateStore, event: UiEvent) -> EventOutcome<Message> {
         let mut outcome = EventOutcome::default();
         if matches!(
             event,
-            UiEvent::ControllerNext
+            UiEvent::ControllerUp
+                | UiEvent::ControllerDown
+                | UiEvent::ControllerLeft
+                | UiEvent::ControllerRight
+                | UiEvent::ControllerNext
                 | UiEvent::ControllerPrevious
                 | UiEvent::ControllerPreviousPane
                 | UiEvent::ControllerNextPane
                 | UiEvent::ControllerAdjust(_)
                 | UiEvent::ControllerBack
                 | UiEvent::ControllerActivate
+                | UiEvent::ControllerContextMenu
         ) && !state.window_focused()
         {
             return outcome;
@@ -1005,7 +1954,45 @@ impl<Message: Clone> UiTree<Message> {
                 }
                 invalidation
             }
+            UiEvent::PointerContext(point) => {
+                if let Some((target, overlay)) = self
+                    .id_at(point)
+                    .and_then(|id| {
+                        self.overlay_invokers
+                            .iter()
+                            .find(|(target, _)| target == id)
+                    })
+                    .cloned()
+                {
+                    return EventOutcome {
+                        invalidation: state.open_overlay(overlay, target),
+                        ..outcome
+                    };
+                }
+                if let Some(message) = self
+                    .id_at(point)
+                    .and_then(|id| self.context_message_for_id(id))
+                    .cloned()
+                {
+                    outcome.messages.push(message);
+                }
+                Invalidation::None
+            }
             UiEvent::PointerPressed(point) => {
+                if self
+                    .active_overlay
+                    .as_ref()
+                    .is_some_and(|(_, rect)| !contains(*rect, point))
+                    && self
+                        .active_overlay_dismiss
+                        .is_none_or(|policy| policy.outside_pointer)
+                {
+                    let invalidation = state.dismiss_overlay(crate::DismissReason::OutsidePointer);
+                    return EventOutcome {
+                        invalidation,
+                        ..outcome
+                    };
+                }
                 if let Some((scroll, axis)) = self.scrollbar_at(point) {
                     let invalidation = state
                         .set_focus(None)
@@ -1034,7 +2021,9 @@ impl<Message: Clone> UiTree<Message> {
                     if state
                         .state(&node.id)
                         .is_some_and(|entry| entry.dropdown_open)
-                        && !clicked.is_some_and(|id| id.starts_with(node.id.as_str()))
+                        && !clicked.is_some_and(|id| {
+                            self.is_descendant_or_self(&node.id, &UiId::from(id.to_owned()))
+                        })
                     {
                         dismissed =
                             dismissed.merge(state.set_dropdown_open(node.id.clone(), false));
@@ -1093,30 +2082,50 @@ impl<Message: Clone> UiTree<Message> {
                 if activates && let Some(message) = self.message_at_owned(point) {
                     outcome.messages.push(message);
                 }
+                let overlay_action = activates
+                    && self.active_overlay.as_ref().is_some_and(|(id, _)| {
+                        released.is_some_and(|item| self.is_descendant_or_self(id.as_ui_id(), item))
+                    });
                 let dropdown = state.captured().and_then(|id| {
                     self.resolved_layout()
                         .find(id)
                         .filter(|node| node.component == "Dropdown")
                         .map(|_| id.clone())
                 });
-                let dropdown_invalidation = dropdown.map_or(Invalidation::None, |id| {
-                    let open = !state.state(&id).is_some_and(|entry| entry.dropdown_open);
-                    state.set_dropdown_open(id, open)
+                let dropdown_invalidation = dropdown.as_ref().map_or(Invalidation::None, |id| {
+                    let open = !state.state(id).is_some_and(|entry| entry.dropdown_open);
+                    state.set_dropdown_open(id.clone(), open)
                 });
-                let option_parent = state.captured().and_then(|id| {
-                    id.as_str()
-                        .rsplit_once("/option-")
-                        .map(|(parent, _)| UiId::from(parent.to_owned()))
-                });
+                let option_parent = state
+                    .captured()
+                    .filter(|id| {
+                        self.resolved
+                            .find(id)
+                            .is_none_or(|node| node.component != "Dropdown")
+                    })
+                    .and_then(|id| {
+                        self.nearest_ancestor_where(id, |node| node.component == "Dropdown")
+                            .map(|node| node.id.clone())
+                    });
                 let option_invalidation = option_parent
-                    .map(|id| state.set_dropdown_open(id, false))
+                    .as_ref()
+                    .map(|id| state.set_dropdown_open(id.clone(), false))
                     .unwrap_or(Invalidation::None);
-                state
+                let invalidation = state
                     .set_pressed(None)
                     .merge(state.set_capture(None))
                     .merge(dropdown_invalidation)
-                    .merge(option_invalidation)
+                    .merge(option_invalidation);
+                if overlay_action {
+                    invalidation.merge(state.dismiss_overlay(crate::DismissReason::Action))
+                } else {
+                    invalidation
+                }
             }
+            UiEvent::PointerCancelled => state
+                .set_pressed(None)
+                .merge(state.set_capture(None))
+                .merge(Invalidation::Paint),
             UiEvent::Scroll { point, delta_y } => {
                 let Some(scroll) = self.scrolls.iter().rev().find(|scroll| {
                     if !contains(scroll.rect, point) {
@@ -1177,22 +2186,40 @@ impl<Message: Clone> UiTree<Message> {
                 .unwrap_or(Invalidation::None),
             UiEvent::FocusNext => self.move_focus(state, 1),
             UiEvent::FocusPrevious => self.move_focus(state, -1),
+            UiEvent::ControllerUp => {
+                self.move_controller_spatial(state, ControllerDirection::Up, &mut outcome.messages)
+            }
+            UiEvent::ControllerDown => self.move_controller_spatial(
+                state,
+                ControllerDirection::Down,
+                &mut outcome.messages,
+            ),
+            UiEvent::ControllerLeft => self.move_controller_spatial(
+                state,
+                ControllerDirection::Left,
+                &mut outcome.messages,
+            ),
+            UiEvent::ControllerRight => self.move_controller_spatial(
+                state,
+                ControllerDirection::Right,
+                &mut outcome.messages,
+            ),
             UiEvent::ControllerNext => self.move_controller(state, 1),
             UiEvent::ControllerPrevious => self.move_controller(state, -1),
             UiEvent::ControllerPreviousPane => self.switch_controller_pane(state, -1),
             UiEvent::ControllerNextPane => self.switch_controller_pane(state, 1),
             UiEvent::ControllerAdjust(direction) => {
-                if !state.controller_editing() {
+                if !state.navigation().controller_editing() {
                     Invalidation::None
                 } else if let Some((value, step, map)) =
-                    state.controller_selected().and_then(|id| {
+                    state.navigation().controller_selected().and_then(|id| {
                         let node = self.resolved.nodes.iter().find(|node| &node.id == id)?;
                         let map = self
                             .messages
                             .iter()
                             .find(|region| &region.id == id)?
                             .message_mapper?;
-                        Some((node.controller_value?, node.controller_step, map))
+                        Some((node.controller_value?, node.adjustment_step, map))
                     })
                 {
                     outcome
@@ -1204,23 +2231,42 @@ impl<Message: Clone> UiTree<Message> {
                 }
             }
             UiEvent::ControllerBack => {
-                if state.controller_editing() {
-                    state.set_controller_editing(false)
-                } else if let Some(scope) = state.controller_scope().cloned() {
+                if state.open_overlay_id().is_some()
+                    && self
+                        .active_overlay_dismiss
+                        .is_none_or(|policy| policy.cancel)
+                {
+                    let dismissed = state.dismiss_overlay(crate::DismissReason::Cancel);
+                    let restored = state.focused().cloned();
+                    dismissed.merge(state.navigation_mut().set_controller_selected(restored))
+                } else if state.navigation().controller_editing() {
+                    state.navigation_mut().set_controller_editing(false)
+                } else if let Some(scope) = state.navigation().controller_scope().cloned() {
+                    if let Some(selected) = state.navigation().controller_selected().cloned() {
+                        state
+                            .navigation_mut()
+                            .retain_controller_focus(scope.clone(), selected);
+                    }
                     let parent_scope = self
+                        .nearest_ancestor_where(&scope, |node| node.navigation_scope.is_some())
+                        .map(|node| node.id.clone());
+                    let close_menu = if self
                         .resolved
                         .nodes
                         .iter()
-                        .filter(|node| {
-                            node.controller_group
-                                && node.id != scope
-                                && scope.as_str().starts_with(node.id.as_str())
-                        })
-                        .max_by_key(|node| node.id.as_str().len())
-                        .map(|node| node.id.clone());
-                    state
-                        .set_controller_scope(parent_scope)
-                        .merge(self.select_controller_id(state, scope))
+                        .find(|node| node.id == scope)
+                        .is_some_and(|node| node.component == "Dropdown")
+                    {
+                        state.set_dropdown_open(scope.clone(), false)
+                    } else {
+                        Invalidation::None
+                    };
+                    close_menu.merge(
+                        state
+                            .navigation_mut()
+                            .set_controller_scope(parent_scope)
+                            .merge(self.select_controller_id(state, scope)),
+                    )
                 } else {
                     self.switch_controller_pane(state, -1)
                 }
@@ -1237,6 +2283,7 @@ impl<Message: Clone> UiTree<Message> {
             }
             UiEvent::ControllerActivate => {
                 let selected = state
+                    .navigation()
                     .controller_selected()
                     .or_else(|| state.focused())
                     .cloned();
@@ -1244,20 +2291,36 @@ impl<Message: Clone> UiTree<Message> {
                     .as_ref()
                     .and_then(|id| self.resolved.nodes.iter().find(|node| &node.id == id))
                 {
-                    if node.controller_group {
+                    if node.navigation_scope.is_some() {
                         let scope = node.id.clone();
-                        state.set_controller_scope(Some(scope));
-                        state.set_controller_selected(None);
+                        let retained = state
+                            .navigation()
+                            .retained_controller_focus(&scope)
+                            .cloned();
+                        state.navigation_mut().set_controller_scope(Some(scope));
+                        state.navigation_mut().set_controller_selected(None);
+                        let dropdown_invalidation = if node.component == "Dropdown" {
+                            state.set_dropdown_open(node.id.clone(), true)
+                        } else {
+                            Invalidation::None
+                        };
+                        let targets = self.controller_targets(state);
+                        let invalidation =
+                            if let Some(retained) = retained.filter(|id| targets.contains(id)) {
+                                self.select_controller_id(state, retained)
+                            } else {
+                                self.move_controller(state, 1)
+                            };
                         return EventOutcome {
                             messages: outcome.messages,
-                            invalidation: self.move_controller(state, 1),
+                            invalidation: invalidation.merge(dropdown_invalidation),
                             clipboard_text: None,
                         };
                     }
-                    if node.controller_value.is_some() && node.controller_step > 0.0 {
+                    if node.controller_value.is_some() && node.adjustment_step > 0.0 {
                         return EventOutcome {
                             messages: outcome.messages,
-                            invalidation: state.set_controller_editing(true),
+                            invalidation: state.navigation_mut().set_controller_editing(true),
                             clipboard_text: None,
                         };
                     }
@@ -1265,6 +2328,84 @@ impl<Message: Clone> UiTree<Message> {
                 if let Some(message) = selected
                     .as_ref()
                     .and_then(|id| self.message_for_id(id))
+                    .cloned()
+                {
+                    outcome.messages.push(message);
+                }
+                let dropdown = selected
+                    .as_ref()
+                    .and_then(|id| {
+                        self.nearest_ancestor_where(id, |node| node.component == "Dropdown")
+                    })
+                    .map(|parent| {
+                        let parent = parent.id.clone();
+                        state
+                            .set_dropdown_open(parent.clone(), false)
+                            .merge(state.navigation_mut().set_controller_scope(None))
+                            .merge(self.select_controller_id(state, parent))
+                    })
+                    .unwrap_or(Invalidation::None);
+                let overlay_action = selected.as_ref().is_some_and(|selected| {
+                    self.active_overlay.as_ref().is_some_and(|(overlay, _)| {
+                        self.is_descendant_or_self(overlay.as_ui_id(), selected)
+                    })
+                });
+                if overlay_action {
+                    let dismissed = state.dismiss_overlay(crate::DismissReason::Action);
+                    let restored = state.focused().cloned();
+                    dropdown
+                        .merge(dismissed)
+                        .merge(state.navigation_mut().set_controller_selected(restored))
+                } else {
+                    dropdown
+                }
+            }
+            UiEvent::ControllerContextMenu => {
+                if let Some((target, overlay)) = state
+                    .navigation()
+                    .controller_selected()
+                    .or_else(|| state.focused())
+                    .and_then(|id| {
+                        self.overlay_invokers
+                            .iter()
+                            .find(|(target, _)| target == id)
+                    })
+                    .cloned()
+                {
+                    return EventOutcome {
+                        invalidation: state.open_overlay(overlay, target),
+                        ..outcome
+                    };
+                }
+                if let Some(message) = state
+                    .navigation()
+                    .controller_selected()
+                    .or_else(|| state.focused())
+                    .and_then(|id| self.context_message_for_id(id))
+                    .cloned()
+                {
+                    outcome.messages.push(message);
+                }
+                Invalidation::None
+            }
+            UiEvent::KeyboardContextMenu => {
+                if let Some((target, overlay)) = state
+                    .focused()
+                    .and_then(|id| {
+                        self.overlay_invokers
+                            .iter()
+                            .find(|(target, _)| target == id)
+                    })
+                    .cloned()
+                {
+                    return EventOutcome {
+                        invalidation: state.open_overlay(overlay, target),
+                        ..outcome
+                    };
+                }
+                if let Some(message) = state
+                    .focused()
+                    .and_then(|id| self.context_message_for_id(id))
                     .cloned()
                 {
                     outcome.messages.push(message);
@@ -1280,6 +2421,23 @@ impl<Message: Clone> UiTree<Message> {
             }
             UiEvent::AccessibilityActivate(id) => {
                 if let Some(message) = self.message_for_id(&id).cloned() {
+                    outcome.messages.push(message);
+                }
+                Invalidation::None
+            }
+            UiEvent::AccessibilityContextMenu(id) => {
+                if let Some((target, overlay)) = self
+                    .overlay_invokers
+                    .iter()
+                    .find(|(target, _)| target == &id)
+                    .cloned()
+                {
+                    return EventOutcome {
+                        invalidation: state.open_overlay(overlay, target),
+                        ..outcome
+                    };
+                }
+                if let Some(message) = self.context_message_for_id(&id).cloned() {
                     outcome.messages.push(message);
                 }
                 Invalidation::None
@@ -1437,14 +2595,16 @@ impl<Message: Clone> UiTree<Message> {
                 })
                 .unwrap_or(Invalidation::None),
             UiEvent::SelectionClear => state.clear_document_selection(),
-            UiEvent::Dismiss => self
-                .resolved_layout()
-                .nodes()
-                .iter()
-                .filter(|node| node.component == "Dropdown")
-                .fold(Invalidation::None, |invalidation, node| {
-                    invalidation.merge(state.set_dropdown_open(node.id.clone(), false))
-                }),
+            UiEvent::Dismiss => {
+                let overlay = state.dismiss_overlay(crate::DismissReason::Cancel);
+                self.resolved_layout()
+                    .nodes()
+                    .iter()
+                    .filter(|node| node.component == "Dropdown")
+                    .fold(overlay, |invalidation, node| {
+                        invalidation.merge(state.set_dropdown_open(node.id.clone(), false))
+                    })
+            }
             UiEvent::CaretBlink => state.toggle_caret(),
             UiEvent::FocusGained => state.set_window_focused(true),
             UiEvent::FocusLost => state.set_window_focused(false).merge(state.focus_lost()),
@@ -1554,7 +2714,28 @@ impl<Message: Clone> UiTree<Message> {
     }
 
     fn move_focus(&self, state: &mut UiStateStore, direction: isize) -> Invalidation {
-        let mut ids = self.hits.iter().map(|hit| &hit.id).collect::<Vec<_>>();
+        let mut ids = self
+            .resolved
+            .nodes
+            .iter()
+            .filter(|node| {
+                node.semantic_actions.iter().any(|action| {
+                    matches!(
+                        action,
+                        ActionKind::Activate
+                            | ActionKind::SetValue
+                            | ActionKind::Increment
+                            | ActionKind::Decrement
+                    )
+                })
+            })
+            .filter(|node| {
+                self.active_overlay.as_ref().is_none_or(|(overlay, _)| {
+                    self.is_descendant_or_self(overlay.as_ui_id(), &node.id)
+                })
+            })
+            .map(|node| &node.id)
+            .collect::<Vec<_>>();
         ids.dedup();
         if ids.is_empty() {
             return state.set_focus(None);
@@ -1568,12 +2749,168 @@ impl<Message: Clone> UiTree<Message> {
             (Some(index), true) => index - 1,
             (None, false) => 0,
         };
-        state.set_focus(Some(ids[next].clone()))
+        let target = ids[next].clone();
+        state
+            .set_focus(Some(target.clone()))
+            .merge(self.reveal_controller_target(state, &target))
     }
 
     fn move_controller(&self, state: &mut UiStateStore, direction: isize) -> Invalidation {
         let ids = self.controller_targets(state);
+        let at_scope_edge = state
+            .navigation()
+            .controller_selected()
+            .and_then(|selected| ids.iter().position(|id| id == selected))
+            .is_some_and(|index| {
+                if direction.is_negative() {
+                    index == 0
+                } else {
+                    index + 1 == ids.len()
+                }
+            });
+        if at_scope_edge && let Some(scope) = state.navigation().controller_scope().cloned() {
+            if let Some(selected) = state.navigation().controller_selected().cloned() {
+                state
+                    .navigation_mut()
+                    .retain_controller_focus(scope.clone(), selected);
+            }
+            let parent_scope = self
+                .nearest_ancestor_where(&scope, |node| node.navigation_scope.is_some())
+                .map(|node| node.id.clone());
+            let mut invalidation = state
+                .navigation_mut()
+                .set_controller_scope(parent_scope)
+                .merge(state.navigation_mut().set_controller_editing(false))
+                .merge(self.select_controller_id(state, scope));
+            let parent_targets = self.controller_targets(state);
+            invalidation =
+                invalidation.merge(self.select_controller_from(state, direction, parent_targets));
+            return invalidation;
+        }
         self.select_controller_from(state, direction, ids)
+    }
+
+    fn context_message_for_id(&self, id: &UiId) -> Option<&Message> {
+        self.context_messages
+            .iter()
+            .rev()
+            .find(|region| &region.id == id)
+            .map(|region| &region.message)
+    }
+
+    fn move_controller_spatial(
+        &self,
+        state: &mut UiStateStore,
+        direction: ControllerDirection,
+        messages: &mut Vec<Message>,
+    ) -> Invalidation {
+        if state.navigation().controller_editing() {
+            return match direction {
+                ControllerDirection::Left => self.adjust_controller_value(state, -1.0, messages),
+                ControllerDirection::Right => self.adjust_controller_value(state, 1.0, messages),
+                ControllerDirection::Up | ControllerDirection::Down => Invalidation::None,
+            };
+        }
+        let ids = self.controller_targets(state);
+        if ids.is_empty() {
+            return state.navigation_mut().set_controller_selected(None);
+        }
+        let Some(current) = state
+            .navigation()
+            .controller_selected()
+            .filter(|selected| ids.contains(selected))
+            .cloned()
+        else {
+            return self.select_controller_id(state, ids[0].clone());
+        };
+        let Some(current_rect) = self.controller_rect(&current) else {
+            return self.select_controller_id(state, ids[0].clone());
+        };
+        let current_center = Point {
+            x: current_rect.origin.x + current_rect.size.width / 2.0,
+            y: current_rect.origin.y + current_rect.size.height / 2.0,
+        };
+        let mut candidates = ids
+            .iter()
+            .filter(|id| *id != &current)
+            .cloned()
+            .filter_map(|id| {
+                let rect = self.controller_rect(&id)?;
+                let center = Point {
+                    x: rect.origin.x + rect.size.width / 2.0,
+                    y: rect.origin.y + rect.size.height / 2.0,
+                };
+                let dx = center.x - current_center.x;
+                let dy = center.y - current_center.y;
+                let (primary, secondary) = match direction {
+                    ControllerDirection::Up if dy < -0.5 => (-dy, dx.abs()),
+                    ControllerDirection::Down if dy > 0.5 => (dy, dx.abs()),
+                    ControllerDirection::Left if dx < -0.5 => (-dx, dy.abs()),
+                    ControllerDirection::Right if dx > 0.5 => (dx, dy.abs()),
+                    _ => return None,
+                };
+                let directional_score = primary + secondary * 4.0;
+                Some((id, directional_score, primary, secondary, dx * dx + dy * dy))
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by(|left, right| {
+            left.1
+                .total_cmp(&right.1)
+                .then_with(|| left.2.total_cmp(&right.2))
+                .then_with(|| left.3.total_cmp(&right.3))
+                .then_with(|| left.4.total_cmp(&right.4))
+                .then_with(|| left.0.cmp(&right.0))
+        });
+        if let Some((id, _, _, _, _)) = candidates.into_iter().next() {
+            return self.select_controller_id(state, id);
+        }
+
+        // Large nested scopes can geometrically contain the current target,
+        // leaving their centers neither strictly ahead nor behind. Preserve
+        // spatial edge behavior for ordinary controls, but allow a declared
+        // scope waypoint to be entered in structural order.
+        let current_index = ids.iter().position(|id| id == &current).unwrap_or(0);
+        let structural_scope = match direction {
+            ControllerDirection::Down | ControllerDirection::Right => {
+                ids.iter().skip(current_index + 1).find(|id| {
+                    self.resolved
+                        .find(id)
+                        .is_some_and(|node| node.navigation_scope.is_some())
+                })
+            }
+            ControllerDirection::Up | ControllerDirection::Left => {
+                ids[..current_index].iter().rev().find(|id| {
+                    self.resolved
+                        .find(id)
+                        .is_some_and(|node| node.navigation_scope.is_some())
+                })
+            }
+        };
+        structural_scope
+            .cloned()
+            .map(|id| self.select_controller_id(state, id))
+            .unwrap_or(Invalidation::None)
+    }
+
+    fn adjust_controller_value(
+        &self,
+        state: &UiStateStore,
+        direction: f32,
+        messages: &mut Vec<Message>,
+    ) -> Invalidation {
+        let Some((value, step, map)) = state.navigation().controller_selected().and_then(|id| {
+            let node = self.resolved.nodes.iter().find(|node| &node.id == id)?;
+            let map = self
+                .messages
+                .iter()
+                .find(|region| &region.id == id)?
+                .message_mapper?;
+            Some((node.controller_value?, node.adjustment_step, map))
+        }) else {
+            return Invalidation::None;
+        };
+        messages.push(map((value + direction.signum() * step).clamp(0.0, 1.0)));
+        Invalidation::Layout
     }
 
     fn node_has_controller_action(&self, index: usize) -> bool {
@@ -1585,14 +2922,90 @@ impl<Message: Clone> UiTree<Message> {
                 .any(|child| self.node_has_controller_action(*child))
     }
 
+    fn node_index(&self, id: &UiId) -> Option<usize> {
+        self.resolved.nodes.iter().position(|node| &node.id == id)
+    }
+
+    fn subtree_contains_id(&self, index: usize, id: &UiId) -> bool {
+        let node = &self.resolved.nodes[index];
+        node.id == *id
+            || node
+                .children
+                .iter()
+                .any(|child| self.subtree_contains_id(*child, id))
+    }
+
+    pub(crate) fn is_descendant_or_self(&self, ancestor: &UiId, candidate: &UiId) -> bool {
+        self.node_index(ancestor)
+            .is_some_and(|index| self.subtree_contains_id(index, candidate))
+            || self.messages.iter().any(|region| {
+                region.id == *candidate
+                    && region.navigation_owner.as_ref().is_some_and(|owner| {
+                        owner == ancestor || self.is_descendant_or_self(ancestor, owner)
+                    })
+            })
+    }
+
+    fn navigation_owner(&self, id: &UiId) -> Option<&UiId> {
+        self.messages
+            .iter()
+            .find(|region| &region.id == id)
+            .and_then(|region| region.navigation_owner.as_ref())
+    }
+
+    fn nearest_ancestor_where(
+        &self,
+        candidate: &UiId,
+        include: impl Fn(&ResolvedNode) -> bool,
+    ) -> Option<&ResolvedNode> {
+        let direct_owner = self.navigation_owner(candidate);
+        if let Some(owner) = direct_owner
+            && let Some(node) = self.resolved.nodes.iter().find(|node| &node.id == owner)
+            && include(node)
+        {
+            return Some(node);
+        }
+        let candidate = direct_owner.unwrap_or(candidate);
+        self.resolved
+            .nodes
+            .iter()
+            .filter(|node| node.id != *candidate && include(node))
+            .filter(|node| self.is_descendant_or_self(&node.id, candidate))
+            .min_by_key(|node| self.subtree_size(&node.id).unwrap_or(usize::MAX))
+    }
+
+    fn subtree_size(&self, id: &UiId) -> Option<usize> {
+        fn count(nodes: &[ResolvedNode], index: usize) -> usize {
+            1 + nodes[index]
+                .children
+                .iter()
+                .map(|child| count(nodes, *child))
+                .sum::<usize>()
+        }
+        self.node_index(id)
+            .map(|index| count(&self.resolved.nodes, index))
+    }
+
     fn collect_controller_targets(&self, index: usize, root: bool, targets: &mut Vec<UiId>) {
         let node = &self.resolved.nodes[index];
-        if !root && node.controller_group && self.node_has_controller_action(index) {
+        // A nested scope is itself a controller waypoint even when its
+        // container has no activation message. Confirm enters the scope; its
+        // descendants remain hidden from the parent traversal until then.
+        if !root && node.navigation_scope.is_some() {
             targets.push(node.id.clone());
             return;
         }
-        if (!root || !node.controller_group && !node.controller_pane)
-            && self.messages.iter().any(|region| region.id == node.id)
+        if (!root || node.navigation_scope.is_none())
+            && node.semantic_actions.iter().any(|action| {
+                matches!(
+                    action,
+                    ActionKind::Activate
+                        | ActionKind::ContextMenu
+                        | ActionKind::Increment
+                        | ActionKind::Decrement
+                        | ActionKind::SetValue
+                )
+            })
             && !self.scrolls.iter().any(|scroll| scroll.id == node.id)
         {
             targets.push(node.id.clone());
@@ -1604,14 +3017,62 @@ impl<Message: Clone> UiTree<Message> {
     }
 
     fn controller_targets(&self, state: &UiStateStore) -> Vec<UiId> {
+        if let Some((overlay, _)) = &self.active_overlay {
+            let mut targets = self
+                .messages
+                .iter()
+                .filter(|region| self.is_descendant_or_self(overlay.as_ui_id(), &region.id))
+                .map(|region| region.id.clone())
+                .collect::<Vec<_>>();
+            targets.dedup();
+            return targets;
+        }
+        if state.navigation().controller_scope().is_none()
+            && state.navigation().controller_pane().is_none()
+            && self.resolved.nodes[0].navigation_scope.is_some()
+            && self.node_has_controller_action(0)
+        {
+            return vec![self.resolved.nodes[0].id.clone()];
+        }
         let root = state
+            .navigation()
             .controller_scope()
-            .or_else(|| state.controller_pane())
+            .or_else(|| state.navigation().controller_pane())
             .and_then(|id| self.resolved.nodes.iter().position(|node| &node.id == id))
             .unwrap_or(0);
         let mut targets = Vec::new();
         self.collect_controller_targets(root, true, &mut targets);
+        let root_id = &self.resolved.nodes[root].id;
+        if state
+            .state(root_id)
+            .is_some_and(|entry| entry.dropdown_open)
+        {
+            targets.extend(
+                self.messages
+                    .iter()
+                    .filter(|region| {
+                        region.id != *root_id && self.is_descendant_or_self(root_id, &region.id)
+                    })
+                    .map(|region| region.id.clone()),
+            );
+        }
+        targets.dedup();
         targets
+    }
+
+    fn controller_rect(&self, id: &UiId) -> Option<Rect> {
+        self.resolved
+            .nodes
+            .iter()
+            .find(|node| &node.id == id)
+            .map(|node| node.allocated)
+            .or_else(|| {
+                self.messages
+                    .iter()
+                    .rev()
+                    .find(|region| &region.id == id)
+                    .map(|region| region.rect)
+            })
     }
 
     fn select_controller_from(
@@ -1621,9 +3082,10 @@ impl<Message: Clone> UiTree<Message> {
         ids: Vec<UiId>,
     ) -> Invalidation {
         if ids.is_empty() {
-            return state.set_controller_selected(None);
+            return state.navigation_mut().set_controller_selected(None);
         }
         let current = state
+            .navigation()
             .controller_selected()
             .and_then(|selected| ids.iter().position(|id| id == selected));
         let next = match (current, direction.is_negative()) {
@@ -1636,19 +3098,22 @@ impl<Message: Clone> UiTree<Message> {
     }
 
     fn select_controller_id(&self, state: &mut UiStateStore, selected: UiId) -> Invalidation {
-        let mut invalidation = state.set_controller_selected(Some(selected.clone()));
+        let mut invalidation = state
+            .navigation_mut()
+            .set_controller_selected(Some(selected.clone()));
+        if self
+            .active_overlay
+            .as_ref()
+            .is_some_and(|(overlay, _)| self.is_descendant_or_self(overlay.as_ui_id(), &selected))
+        {
+            invalidation = invalidation.merge(state.set_focus(Some(selected.clone())));
+        }
         invalidation = invalidation.merge(self.reveal_controller_target(state, &selected));
         invalidation
     }
 
     fn reveal_controller_target(&self, state: &mut UiStateStore, selected: &UiId) -> Invalidation {
-        let Some(target) = self
-            .resolved
-            .nodes
-            .iter()
-            .find(|node| &node.id == selected)
-            .map(|node| node.allocated)
-        else {
+        let Some(target) = self.controller_rect(selected) else {
             return Invalidation::None;
         };
         for scroll in self.scrolls.iter().rev() {
@@ -1686,13 +3151,18 @@ impl<Message: Clone> UiTree<Message> {
             .resolved
             .nodes
             .iter()
-            .filter(|node| node.controller_pane)
+            .filter(|node| {
+                node.navigation_scope
+                    .as_ref()
+                    .is_some_and(|scope| scope.pane)
+            })
             .map(|node| node.id.clone())
             .collect::<Vec<_>>();
         if panes.is_empty() {
             return Invalidation::None;
         }
         let current = state
+            .navigation()
             .controller_pane()
             .and_then(|pane| panes.iter().position(|candidate| candidate == pane));
         let next = match (current, direction.is_negative()) {
@@ -1701,12 +3171,34 @@ impl<Message: Clone> UiTree<Message> {
             (None, false) => 0,
             (None, true) => panes.len() - 1,
         };
-        state
-            .set_controller_pane(Some(panes[next].clone()))
-            .merge(state.set_controller_scope(None))
-            .merge(state.set_controller_editing(false))
-            .merge(state.set_controller_selected(None))
-            .merge(self.move_controller(state, 1))
+        if let (Some(pane), Some(selected)) = (
+            state.navigation().controller_pane().cloned(),
+            state.navigation().controller_selected().cloned(),
+        ) {
+            state
+                .navigation_mut()
+                .retain_controller_focus(pane, selected);
+        }
+        let destination = panes[next].clone();
+        let retained = state
+            .navigation()
+            .retained_controller_focus(&destination)
+            .cloned();
+        let mut invalidation = state
+            .navigation_mut()
+            .set_controller_pane(Some(destination))
+            .merge(state.navigation_mut().set_controller_scope(None))
+            .merge(state.navigation_mut().set_controller_editing(false))
+            .merge(state.navigation_mut().set_controller_selected(None));
+        let targets = self.controller_targets(state);
+        invalidation = invalidation.merge(
+            if let Some(retained) = retained.filter(|id| targets.contains(id)) {
+                self.select_controller_id(state, retained)
+            } else {
+                self.move_controller(state, 1)
+            },
+        );
+        invalidation
     }
 
     /// Moves controller selection among messages accepted by `include`.
@@ -1727,9 +3219,10 @@ impl<Message: Clone> UiTree<Message> {
             .collect::<Vec<_>>();
         ids.dedup();
         if ids.is_empty() {
-            return state.set_controller_selected(None);
+            return state.navigation_mut().set_controller_selected(None);
         }
         let current = state
+            .navigation()
             .controller_selected()
             .and_then(|selected| ids.iter().position(|id| *id == selected));
         let next = match (current, direction.is_negative()) {
@@ -1739,7 +3232,9 @@ impl<Message: Clone> UiTree<Message> {
             (None, false) => 0,
         };
         let selected = ids[next].clone();
-        let mut invalidation = state.set_controller_selected(Some(selected.clone()));
+        let mut invalidation = state
+            .navigation_mut()
+            .set_controller_selected(Some(selected.clone()));
         if let Some(target) = self
             .messages
             .iter()
@@ -1779,32 +3274,14 @@ impl<Message: Clone> UiTree<Message> {
         invalidation
     }
 
-    pub fn push_overlay_command(&mut self, command: PaintCommand) {
-        self.commands.push(command);
-    }
-
-    pub fn push_overlay_message(&mut self, rect: Rect, message: Message) {
-        self.messages.push(MessageRegion {
-            id: UiId::from("overlay"),
-            rect,
-            message: message.clone(),
-            message_mapper: None,
-        });
-        self.hits.push(HitRegion {
-            id: UiId::from("overlay"),
-            rect,
-            message: Some(message),
-            message_mapper: None,
-        });
-    }
-
     pub fn apply_interaction_state(&mut self, state: &UiStateStore) {
         for node in &mut self.resolved.nodes {
             node.interaction.focused = state.focused() == Some(&node.id);
             node.interaction.hovered = state.hovered() == Some(&node.id);
             node.interaction.pressed = state.pressed() == Some(&node.id);
             node.interaction.captured = state.captured() == Some(&node.id);
-            node.interaction.controller_selected = state.controller_selected() == Some(&node.id);
+            node.interaction.controller_selected =
+                state.navigation().controller_selected() == Some(&node.id);
         }
     }
 
@@ -1974,31 +3451,60 @@ impl<Message: Clone> UiTree<Message> {
     }
 
     fn emit_accessibility_geometry(&mut self) {
+        let mut parents = vec![None; self.resolved.nodes.len()];
+        for node in &self.resolved.nodes {
+            for child in &node.children {
+                parents[*child] = Some(node.id.clone());
+            }
+        }
         self.accessibility = self
             .resolved
             .nodes
             .iter()
-            .filter_map(|node| {
+            .enumerate()
+            .filter_map(|(index, node)| {
                 if node.accessibility_hidden {
                     return None;
                 }
-                let rect = node
-                    .clip
-                    .map(|clip| intersection(node.allocated, clip))
-                    .unwrap_or(Some(node.allocated))?;
+                let rect = node.clip.map_or(node.allocated, |clip| {
+                    intersection(node.allocated, clip).unwrap_or(node.allocated)
+                });
                 Some(AccessibilityNode {
                     id: node.id.clone(),
+                    parent: parents[index].clone(),
                     component: node.component,
                     rect,
                     interactive: node.interaction.interactive,
                     label: node.accessibility_label.clone(),
                     description: node.accessibility_description.clone(),
-                    role: node.accessibility_role.clone(),
+                    role: node
+                        .semantic_role
+                        .map(|role| role.as_str().to_owned())
+                        .or_else(|| node.accessibility_role.clone()),
                     state: node.accessibility_state.clone(),
                     controls: node.accessibility_controls.clone(),
+                    semantic_role: node.semantic_role,
+                    actions: node.semantic_actions.clone(),
+                    enabled: !node.semantic_actions.is_empty(),
+                    focused: node.interaction.focused,
+                    controller_selected: node.interaction.controller_selected,
+                    value: node.semantic_value.clone(),
                 })
             })
             .collect();
+        self.semantic_role_name_index.clear();
+        self.semantic_parents = vec![None; self.resolved.nodes.len()];
+        for (index, node) in self.resolved.nodes.iter().enumerate() {
+            for child in &node.children {
+                self.semantic_parents[*child] = Some(index);
+            }
+            if let (Some(role), Some(name)) = (node.semantic_role, &node.accessibility_label) {
+                self.semantic_role_name_index
+                    .entry((role, name.clone()))
+                    .or_default()
+                    .push(index);
+            }
+        }
     }
 
     fn reset_emission(&mut self) {
@@ -2011,6 +3517,14 @@ impl<Message: Clone> UiTree<Message> {
         for node in &mut self.resolved.nodes {
             node.hit_stack = None;
         }
+    }
+
+    fn release_build_scratch(&mut self) {
+        self.overlay_commands = Vec::new();
+        self.overlay_hits = Vec::new();
+        self.selection_paints = HashMap::new();
+        self.diagnostic_keys = HashSet::new();
+        self.seen_ids = HashSet::new();
     }
 
     fn validate_clip_commands(&mut self) {
@@ -2079,6 +3593,7 @@ pub(super) fn measure_element<Message>(
     );
     let child_constraints = Constraints::loose(child_max);
     let content = match &element.kind {
+        Kind::CustomPaint { .. } => Size::default(),
         Kind::Text {
             value,
             scale,
@@ -2524,11 +4039,35 @@ fn shape_selection_glyphs(
     })
 }
 
+fn custom_paint_bounds(command: &PaintCommand) -> Option<Rect> {
+    match command {
+        PaintCommand::Fill { rect, .. }
+        | PaintCommand::TopRoundedFill { rect, .. }
+        | PaintCommand::RoundedFill { rect, .. }
+        | PaintCommand::Gradient { rect, .. }
+        | PaintCommand::Stroke { rect, .. } => Some(*rect),
+        PaintCommand::Text { bounds, .. }
+        | PaintCommand::StyledText { bounds, .. }
+        | PaintCommand::Image { bounds, .. } => Some(*bounds),
+        PaintCommand::OverlayFill { .. }
+        | PaintCommand::OverlayStroke { .. }
+        | PaintCommand::PushClip(_)
+        | PaintCommand::PopClip => None,
+    }
+}
+
+fn rect_contains(outer: Rect, inner: Rect) -> bool {
+    inner.origin.x >= outer.origin.x
+        && inner.origin.y >= outer.origin.y
+        && inner.origin.x + inner.size.width <= outer.origin.x + outer.size.width
+        && inner.origin.y + inner.size.height <= outer.origin.y + outer.size.height
+}
+
 fn emit_element<Message: Clone>(
     element: &Element<Message>,
     node_index: usize,
     inherited_foreground: Option<Color>,
-    tree: &mut UiTree<Message>,
+    tree: &mut UiFrame<Message>,
 ) {
     let node = tree.resolved.nodes[node_index].clone();
     let rect = node.allocated;
@@ -2541,9 +4080,19 @@ fn emit_element<Message: Clone>(
         if let Some(message) = &element.message {
             tree.messages.push(MessageRegion {
                 id: node.id.clone(),
+                navigation_owner: None,
                 rect,
                 message: message.clone(),
                 message_mapper: element.message_mapper,
+            });
+        }
+        if let Some(message) = &element.context_message {
+            tree.context_messages.push(MessageRegion {
+                id: node.id.clone(),
+                navigation_owner: None,
+                rect,
+                message: message.clone(),
+                message_mapper: None,
             });
         }
         let foreground = element.style.foreground.or(inherited_foreground);
@@ -2584,6 +4133,7 @@ fn emit_element<Message: Clone>(
     if let Some(message) = &element.message {
         tree.messages.push(MessageRegion {
             id: node.id.clone(),
+            navigation_owner: None,
             rect,
             message: message.clone(),
             message_mapper: element.message_mapper,
@@ -2602,6 +4152,15 @@ fn emit_element<Message: Clone>(
                 message_mapper: element.message_mapper,
             });
         }
+    }
+    if let Some(message) = &element.context_message {
+        tree.context_messages.push(MessageRegion {
+            id: node.id.clone(),
+            navigation_owner: None,
+            rect,
+            message: message.clone(),
+            message_mapper: None,
+        });
     }
     if let Some(map) = element.text_mapper
         && let Kind::Text {
@@ -2692,6 +4251,14 @@ fn emit_element<Message: Clone>(
         });
     }
     match &element.kind {
+        Kind::CustomPaint { paint } => {
+            tree.commands.push(PaintCommand::PushClip(rect));
+            tree.commands
+                .extend((paint)(rect).into_iter().filter(|command| {
+                    custom_paint_bounds(command).is_some_and(|bounds| rect_contains(rect, bounds))
+                }));
+            tree.commands.push(PaintCommand::PopClip);
+        }
         Kind::Text {
             value,
             scale,
@@ -2743,6 +4310,7 @@ fn emit_element<Message: Clone>(
                         }
                         tree.messages.push(MessageRegion {
                             id: link_id.clone(),
+                            navigation_owner: Some(node.id.clone()),
                             rect: glyph.rect,
                             message: message.clone(),
                             message_mapper: None,
@@ -2759,6 +4327,7 @@ fn emit_element<Message: Clone>(
         }
         Kind::Image {
             id,
+            generation,
             image,
             high_density,
             presentation,
@@ -2783,6 +4352,7 @@ fn emit_element<Message: Clone>(
                         tree.commands.push(PaintCommand::Image {
                             bounds: Rect::new(x, y, bounds.size.width, bounds.size.height),
                             id: *id,
+                            generation: *generation,
                             image: image.clone(),
                             high_density: high_density.clone(),
                         });
@@ -2795,6 +4365,7 @@ fn emit_element<Message: Clone>(
                 tree.commands.push(PaintCommand::Image {
                     bounds,
                     id: *id,
+                    generation: *generation,
                     image: image.clone(),
                     high_density: high_density.clone(),
                 });
@@ -2890,6 +4461,28 @@ fn emit_element<Message: Clone>(
                 bold: false,
                 wrap: false,
             });
+            // Keep the typed option topology available while collapsed so the
+            // opening transition can select its declared entry target in the
+            // same event batch. Hidden options remain absent from hit testing,
+            // painting, and accessibility until expanded.
+            if !*expanded {
+                for (index, message) in element.option_messages.iter().enumerate() {
+                    if let Some(message) = message {
+                        tree.messages.push(MessageRegion {
+                            id: node.id.scoped(format!("option-{index}")),
+                            navigation_owner: Some(node.id.clone()),
+                            rect: Rect::new(
+                                rect.origin.x,
+                                rect.origin.y + header_height + index as f32 * option_height,
+                                rect.size.width,
+                                option_height,
+                            ),
+                            message: message.clone(),
+                            message_mapper: None,
+                        });
+                    }
+                }
+            }
             if *expanded {
                 for (index, option) in options.iter().enumerate() {
                     let option_rect = Rect::new(
@@ -2923,9 +4516,48 @@ fn emit_element<Message: Clone>(
                     });
                     let option_id = node.id.scoped(format!("option-{index}"));
                     let message = element.option_messages.get(index).cloned().flatten();
+                    let option_node = tree.resolved.nodes.len();
+                    tree.resolved.nodes.push(ResolvedNode {
+                        component: "MenuItem",
+                        id: option_id.clone(),
+                        source: node.source,
+                        allocated: option_rect,
+                        padding_box: option_rect,
+                        border_box: option_rect,
+                        content: option_rect.inset(Insets::all(8.0)),
+                        constraints: Constraints::tight(option_rect.size),
+                        preferred: option_rect.size,
+                        flex_basis: Length::Auto,
+                        flex_grow: 0.0,
+                        flex_shrink: 0.0,
+                        clip: node.clip,
+                        scroll: None,
+                        grid_tracks: Vec::new(),
+                        hit_stack: None,
+                        interaction: InteractionState::default(),
+                        navigation_scope: None,
+                        adjustment_step: 0.05,
+                        controller_value: None,
+                        accessibility_label: Some(option.clone()),
+                        accessibility_description: None,
+                        accessibility_role: Some(SemanticRole::MenuItem.as_str().into()),
+                        accessibility_state: None,
+                        accessibility_controls: None,
+                        accessibility_hidden: false,
+                        semantic_role: Some(SemanticRole::MenuItem),
+                        semantic_actions: message
+                            .is_some()
+                            .then_some(ActionKind::Activate)
+                            .into_iter()
+                            .collect(),
+                        semantic_value: None,
+                        children: Vec::new(),
+                    });
+                    tree.resolved.nodes[node_index].children.push(option_node);
                     if let Some(message) = &message {
                         tree.messages.push(MessageRegion {
                             id: option_id.clone(),
+                            navigation_owner: Some(node.id.clone()),
                             rect: option_rect,
                             message: message.clone(),
                             message_mapper: None,
@@ -2969,13 +4601,71 @@ fn emit_element<Message: Clone>(
     }
 }
 
+fn derive_accessible_name<Message>(element: &Element<Message>) -> Option<String> {
+    if let Some(label) = element
+        .style
+        .accessibility_label
+        .as_ref()
+        .filter(|label| !label.is_empty())
+    {
+        return Some(label.clone());
+    }
+    if let Kind::Text { value, .. } = &element.kind
+        && !value.is_empty()
+    {
+        return Some(value.clone());
+    }
+    if let Kind::Dropdown { selected, .. } = &element.kind
+        && !selected.is_empty()
+    {
+        return Some(selected.clone());
+    }
+    element
+        .style
+        .semantic_role
+        .and_then(|_| {
+            element
+                .children
+                .iter()
+                .find_map(derive_descendant_accessible_name)
+        })
+        .or_else(|| match element.style.semantic_role {
+            // Value/editing controls have an intrinsic control-type name even
+            // when an author supplies no surrounding label.
+            // Product components should still provide the more specific name.
+            Some(SemanticRole::Slider) => Some("Value".into()),
+            Some(SemanticRole::TextField) => Some("Text input".into()),
+            _ => None,
+        })
+}
+
+fn derive_descendant_accessible_name<Message>(element: &Element<Message>) -> Option<String> {
+    element
+        .style
+        .accessibility_label
+        .as_ref()
+        .filter(|label| !label.is_empty())
+        .cloned()
+        .or_else(|| match &element.kind {
+            Kind::Text { value, .. } if !value.is_empty() => Some(value.clone()),
+            Kind::Dropdown { selected, .. } if !selected.is_empty() => Some(selected.clone()),
+            _ => None,
+        })
+        .or_else(|| {
+            element
+                .children
+                .iter()
+                .find_map(derive_descendant_accessible_name)
+        })
+}
+
 fn layout_element<Message: Clone>(
     element: &Element<Message>,
     id: &UiId,
     bounds: Rect,
     inherited_foreground: Option<Color>,
     inherited_clip: Option<Rect>,
-    tree: &mut UiTree<Message>,
+    tree: &mut UiFrame<Message>,
 ) -> usize {
     let rect = bounds;
     let preferred = measure_element(element, Constraints::loose(bounds.size));
@@ -2985,6 +4675,16 @@ fn layout_element<Message: Clone>(
             || element.text_mapper.is_some(),
         ..InteractionState::default()
     };
+    let derived_accessible_name = derive_accessible_name(element);
+    let missing_accessible_name = element.style.semantic_role.is_some()
+        && derived_accessible_name.as_deref().is_none_or(str::is_empty)
+        && !element.style.semantic_decorative;
+    let semantic_role = (!missing_accessible_name && !element.style.semantic_decorative)
+        .then_some(element.style.semantic_role)
+        .flatten();
+    let semantic_hidden = element.style.accessibility_hidden
+        || element.style.semantic_decorative
+        || missing_accessible_name;
     tree.resolved.nodes.push(ResolvedNode {
         component: element.kind.name(),
         id: id.clone(),
@@ -3006,22 +4706,68 @@ fn layout_element<Message: Clone>(
         grid_tracks: Vec::new(),
         hit_stack: None,
         interaction,
-        controller_group: element.controller_group,
-        controller_pane: element.controller_pane,
-        controller_pane_default: element.controller_pane_default,
-        controller_step: element.controller_step,
+        navigation_scope: element.navigation_scope.clone(),
+        adjustment_step: element.adjustment_step,
         controller_value: match &element.kind {
             Kind::Slider { value, .. } => Some(*value),
             _ => None,
         },
-        accessibility_label: element.style.accessibility_label.clone(),
+        accessibility_label: derived_accessible_name,
         accessibility_description: element.style.accessibility_description.clone(),
         accessibility_role: element.style.accessibility_role.clone(),
         accessibility_state: element.style.accessibility_state.clone(),
         accessibility_controls: element.style.accessibility_controls.clone(),
-        accessibility_hidden: element.style.accessibility_hidden,
+        accessibility_hidden: semantic_hidden,
+        semantic_role,
+        semantic_actions: {
+            let mut actions = Vec::new();
+            if missing_accessible_name {
+                actions.clear();
+                actions
+            } else {
+                if let Kind::Slider { value, .. } = &element.kind
+                    && element.message_mapper.is_some()
+                {
+                    if *value < 1.0 {
+                        actions.push(ActionKind::Increment);
+                    }
+                    if *value > 0.0 {
+                        actions.push(ActionKind::Decrement);
+                    }
+                    actions.push(ActionKind::SetValue);
+                } else if element.text_mapper.is_some() {
+                    actions.push(ActionKind::SetValue);
+                } else if element.message.is_some() && !is_scroll_container(element) {
+                    actions.push(ActionKind::Activate);
+                }
+                if element.context_message.is_some() {
+                    actions.push(ActionKind::ContextMenu);
+                }
+                actions
+            }
+        },
+        semantic_value: match &element.kind {
+            Kind::Slider { value, .. } => Some(SemanticValueSnapshot::Number {
+                value: f64::from(*value),
+                minimum: 0.0,
+                maximum: 1.0,
+                step: f64::from(element.adjustment_step),
+            }),
+            Kind::Text {
+                input_value: Some(value),
+                ..
+            } => Some(SemanticValueSnapshot::Text(value.clone())),
+            _ => None,
+        },
         children: Vec::new(),
     });
+    if missing_accessible_name {
+        tree.diagnostic(
+            DiagnosticKind::MissingAccessibleName,
+            id,
+            "semantic role requires an accessible name or an explicit decorative exemption",
+        );
+    }
     if tree.diagnostics_enabled && !tree.seen_ids.insert(id.clone()) {
         tree.diagnostic(
             DiagnosticKind::DuplicateIdentity,
@@ -3147,6 +4893,7 @@ fn layout_element<Message: Clone>(
     match &element.kind {
         Kind::Text { .. }
         | Kind::StyledText { .. }
+        | Kind::CustomPaint { .. }
         | Kind::Image { .. }
         | Kind::Slider { .. }
         | Kind::Dropdown { .. } => {}
@@ -3527,8 +5274,7 @@ fn apply_transient_state<Message>(
     state: &mut UiStateStore,
 ) {
     let owns_state = element.message.is_some()
-        || element.controller_group
-        || element.controller_pane
+        || element.navigation_scope.is_some()
         || element.text_mapper.is_some()
         || matches!(element.style.overflow_x, Overflow::Scroll | Overflow::Auto)
         || matches!(element.style.overflow_y, Overflow::Scroll | Overflow::Auto)
@@ -3537,11 +5283,17 @@ fn apply_transient_state<Message>(
             Kind::VerticalScroll { .. } | Kind::Dropdown { .. }
         );
     if owns_state {
-        if element.controller_pane
-            && state.controller_pane().is_none()
-            && element.controller_pane_default
+        if element
+            .navigation_scope
+            .as_ref()
+            .is_some_and(|scope| scope.pane)
+            && state.navigation().controller_pane().is_none()
+            && element
+                .navigation_scope
+                .as_ref()
+                .is_some_and(|scope| scope.default_pane)
         {
-            state.set_controller_pane(Some(id.clone()));
+            state.navigation_mut().set_controller_pane(Some(id.clone()));
         }
         if state.pressed() == Some(id) {
             if let Some(background) = element.style.pressed_background {
@@ -3552,23 +5304,27 @@ fn apply_transient_state<Message>(
         {
             element.style.background = Some(background);
         }
-        let active_border = if state.window_focused() && state.controller_selected() == Some(id) {
-            element
-                .style
-                .controller_focus_border
-                .or(element.style.focus_border)
-        } else if state.focused() == Some(id) {
-            element.style.focus_border
-        } else {
-            None
-        };
+        let active_border =
+            if state.window_focused() && state.navigation().controller_selected() == Some(id) {
+                element
+                    .style
+                    .controller_focus_border
+                    .or(element.style.focus_border)
+            } else if state.focused() == Some(id) {
+                element.style.focus_border
+            } else {
+                None
+            };
         if let Some(border) = active_border {
             element.style.border = Some(border);
             element.style.border_width = element.style.border_width.max(2.0);
         }
         if state.window_focused()
-            && element.controller_pane
-            && state.controller_pane() == Some(id)
+            && element
+                .navigation_scope
+                .as_ref()
+                .is_some_and(|scope| scope.pane)
+            && state.navigation().controller_pane() == Some(id)
             && let Some(border) = element.style.controller_pane_border
         {
             element.style.border = Some(border);
@@ -3617,7 +5373,10 @@ fn apply_transient_state<Message>(
                 ..
             } = &mut element.kind
         {
-            let initial = value.clone();
+            // A text field may paint a placeholder while its editable value is
+            // intentionally empty. Reconciliation must seed the editor from
+            // that canonical input value, not from presentation text.
+            let initial = input_value.clone().unwrap_or_else(|| value.clone());
             let focused = state.focused() == Some(id);
             let caret_visible = state.caret_visible();
             let editor = state.editor(id.clone(), &initial);

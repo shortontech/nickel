@@ -49,14 +49,27 @@ mod tests {
         ThreadId, TurnId,
     };
     use nickel_ui::{
-        Application, DocumentSelection, PaintCommand, Point, Rect, SdlComponentRenderer,
-        SelectionEndpoint, Shortcut, UiEvent, UiStateStore, UiTree,
+        Application, DocumentSelection, Rect, SdlComponentRenderer, SelectionEndpoint,
+        SemanticRole, Shortcut, UiEvent, UiFrame, UiStateStore,
     };
+    use nickel_ui_testkit::{ActivationVia, Scenario, Selector};
 
     use super::*;
 
     fn event(sequence: u64, kind: EventKind) -> ControllerEvent {
         ControllerEvent::Protocol(CodexEvent { sequence, kind })
+    }
+
+    fn has_accessible_text<Message: Clone>(frame: &UiFrame<Message>, needle: &str) -> bool {
+        frame.accessibility_nodes().iter().any(|node| {
+            node.label
+                .as_deref()
+                .is_some_and(|label| label.contains(needle))
+                || node
+                    .description
+                    .as_deref()
+                    .is_some_and(|description| description.contains(needle))
+        })
     }
 
     #[test]
@@ -452,13 +465,26 @@ mod tests {
             ),
         );
         assert_eq!(state.pending.len(), 1);
-        let tree = UiTree::layout(view::chat_view(&state), Rect::new(0.0, 0.0, 900.0, 640.0));
-        assert!(tree.commands().iter().any(
-            |command| matches!(command, PaintCommand::Text { text, .. } if text == "Decline")
-        ));
-        assert!(tree.commands().iter().any(
-            |command| matches!(command, PaintCommand::Text { text, .. } if text == "Approve")
-        ));
+        for action in ["Approve", "Decline"] {
+            let backend = ReplayBackend::from_json(r#"{"name":"approval","events":[]}"#).unwrap();
+            let mut app = ChatApplication::new(BackendMode::Replay {
+                backend,
+                cwd: "/projects/nickel".into(),
+            });
+            app.state = state.clone();
+            let mut scenario = Scenario::new(app, 900, 640);
+            scenario
+                .pointer_activate(&Selector::role_name(SemanticRole::Button, action))
+                .unwrap();
+            assert!(
+                scenario
+                    .host_mut()
+                    .application_mut()
+                    .state
+                    .pending
+                    .is_empty()
+            );
+        }
     }
 
     #[test]
@@ -473,7 +499,7 @@ mod tests {
             complete: true,
         });
         for (width, height) in [(640.0, 480.0), (1120.0, 760.0), (2240.0, 1520.0)] {
-            let tree = UiTree::layout(view::chat_view(&state), Rect::new(0.0, 0.0, width, height));
+            let tree = UiFrame::layout(view::chat_view(&state), Rect::new(0.0, 0.0, width, height));
             assert!(tree.resolved_layout().nodes().iter().all(|node| {
                 node.allocated.origin.x.is_finite()
                     && node.allocated.origin.y.is_finite()
@@ -482,9 +508,7 @@ mod tests {
                     && node.allocated.size.width >= 0.0
                     && node.allocated.size.height >= 0.0
             }));
-            assert!(tree.commands().iter().any(
-                |command| matches!(command, PaintCommand::StyledText { text, .. } if text.contains("Hello"))
-            ));
+            assert!(has_accessible_text(&tree, "Hello"));
         }
     }
 
@@ -517,7 +541,7 @@ mod tests {
         state.thread_error = Some("thread/list rejected".into());
         for (width, height) in [(360.0, 420.0), (280.0, 320.0)] {
             let mut ui_state = UiStateStore::default();
-            let tree = UiTree::layout_with_state(
+            let tree = UiFrame::layout_with_state(
                 view::shell_project_menu_view(&state),
                 Rect::new(0.0, 0.0, width, height),
                 &mut ui_state,
@@ -531,53 +555,53 @@ mod tests {
                     && node.allocated.size.height >= 0.0
             }));
             assert!(
-                tree.message_rect(&ChatMessage::NewChatIn(
-                    "/projects/nickel".into(),
-                    "nickel".into(),
-                ))
-                .is_some()
+                tree.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    role: SemanticRole::Button,
+                    name: "Nickel".into(),
+                })
+                .is_ok()
             );
         }
 
-        let mut ui_state = UiStateStore::default();
-        let tree = UiTree::layout_with_state(
+        let make_app = || {
+            let backend =
+                ReplayBackend::from_json(r#"{"name":"project-menu","events":[]}"#).unwrap();
+            let mut app = ChatApplication::new(BackendMode::Replay {
+                backend,
+                cwd: "/projects/nickel".into(),
+            })
+            .as_shell_project_menu();
+            app.state = state.clone();
+            app
+        };
+        let project = Selector::role_name(SemanticRole::Button, "Nickel");
+        for via in [ActivationVia::Keyboard, ActivationVia::Controller] {
+            let mut scenario = Scenario::new(make_app(), 360, 420);
+            assert!(
+                scenario
+                    .host()
+                    .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                        role: SemanticRole::Button,
+                        name: "Integrate Codex with the shell".into(),
+                    })
+                    .is_err()
+            );
+            scenario.activate_via(via, &project).unwrap();
+            assert_eq!(
+                scenario.host_mut().application_mut().take_shell_requests(),
+                vec![ShellRequest::OpenProject {
+                    cwd: "/projects/nickel".into(),
+                    project_id: "nickel".into(),
+                    name: "Nickel".into(),
+                    initial_thread: None,
+                }]
+            );
+        }
+
+        let tree = UiFrame::layout(
             view::shell_project_menu_view(&state),
             Rect::new(0.0, 0.0, 360.0, 420.0),
-            &mut ui_state,
         );
-        assert!(
-            tree.message_rect(&ChatMessage::NewChatIn(
-                "/projects/nickel".into(),
-                "nickel".into(),
-            ))
-            .is_some()
-        );
-        assert!(
-            tree.message_rect(&ChatMessage::SelectThread(ThreadId("available".into())))
-                .is_none()
-        );
-        tree.handle_event(&mut ui_state, UiEvent::FocusNext);
-        tree.handle_event(&mut ui_state, UiEvent::FocusNext);
-        assert_eq!(
-            tree.handle_event(&mut ui_state, UiEvent::KeyboardActivate)
-                .messages,
-            vec![ChatMessage::NewChatIn(
-                "/projects/nickel".into(),
-                "nickel".into(),
-            )]
-        );
-
-        tree.handle_event(&mut ui_state, UiEvent::ControllerNext);
-        tree.handle_event(&mut ui_state, UiEvent::ControllerNext);
-        assert_eq!(
-            tree.handle_event(&mut ui_state, UiEvent::ControllerActivate)
-                .messages,
-            vec![ChatMessage::NewChatIn(
-                "/projects/nickel".into(),
-                "nickel".into(),
-            )]
-        );
-
         let mut renderer = SdlComponentRenderer::new(360, 420, 1.0);
         renderer.render(tree.commands());
         let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -599,7 +623,7 @@ mod tests {
         );
         let mut state = ChatState::default();
         state.provenance = "powered by OpenAI Codex CLI v0.149.0.".into();
-        let tree = UiTree::layout(view::chat_view(&state), Rect::new(0.0, 0.0, 900.0, 640.0));
+        let tree = UiFrame::layout(view::chat_view(&state), Rect::new(0.0, 0.0, 900.0, 640.0));
         assert!(
             !tree
                 .resolved_layout()
@@ -607,43 +631,32 @@ mod tests {
                 .iter()
                 .any(|node| node.id.as_str().ends_with("thread-sidebar"))
         );
-        assert!(tree.commands().iter().any(
-            |command| matches!(command, PaintCommand::Text { text, .. } if text == "powered by OpenAI Codex CLI v0.149.0.")
+        assert!(has_accessible_text(
+            &tree,
+            "powered by OpenAI Codex CLI v0.149.0."
         ));
-        assert!(!tree.commands().iter().any(
-            |command| matches!(command, PaintCommand::Text { text, .. } if text == "Nickel Codex")
-        ));
+        assert!(!has_accessible_text(&tree, "Nickel Codex"));
     }
 
     #[test]
     fn file_menu_exposes_existing_new_and_refresh_actions() {
-        let state = ChatState::default();
-        let mut ui_state = UiStateStore::default();
-        let closed = UiTree::layout_with_state(
-            view::chat_view(&state),
-            Rect::new(0.0, 0.0, 900.0, 640.0),
-            &mut ui_state,
-        );
-        let toggle = closed
-            .resolved_layout()
-            .nodes()
-            .iter()
-            .find(|node| node.id.as_str().ends_with("file-menu"))
-            .expect("File menu")
-            .allocated;
-        let point = Point {
-            x: toggle.origin.x + 4.0,
-            y: toggle.origin.y + 4.0,
-        };
-        closed.handle_event(&mut ui_state, UiEvent::PointerPressed(point));
-        closed.handle_event(&mut ui_state, UiEvent::PointerReleased(point));
-        let open = UiTree::layout_with_state(
-            view::chat_view(&state),
-            Rect::new(0.0, 0.0, 900.0, 640.0),
-            &mut ui_state,
-        );
-        assert!(open.message_rect(&ChatMessage::NewChat).is_some());
-        assert!(open.message_rect(&ChatMessage::Refresh).is_some());
+        let backend = ReplayBackend::from_json(r#"{"name":"file-menu","events":[]}"#).unwrap();
+        let app = ChatApplication::new(BackendMode::Replay {
+            backend,
+            cwd: "/projects/nickel".into(),
+        });
+        let mut scenario = Scenario::new(app, 900, 640);
+        scenario
+            .pointer_activate(&Selector::id("root/menu-bar/file-menu"))
+            .expect("production semantic menu expansion");
+        for name in ["New conversation", "Refresh"] {
+            scenario
+                .assert_action_available(
+                    &Selector::role_name(SemanticRole::MenuItem, name),
+                    nickel_ui::ActionKind::Activate,
+                )
+                .expect("expanded menu item is semantic and actionable");
+        }
     }
 
     #[test]
@@ -680,17 +693,18 @@ mod tests {
         assert!(stored.contains("NICKEL_CODEX_TOKEN"));
         assert!(!stored.contains("fixture-secret"));
 
-        let tree = UiTree::layout(app.view(), Rect::new(0.0, 0.0, 900.0, 640.0));
-        assert!(tree.commands().iter().any(
-            |command| matches!(command, PaintCommand::Text { text, .. } if text == "Workstation")
-        ));
+        let mut scenario = Scenario::new(app, 900, 640);
+        scenario
+            .activate(&Selector::role_name(SemanticRole::Button, "Edit"))
+            .unwrap();
         assert!(
-            tree.message_rect(&ChatMessage::EditRemoteHost("workstation".into()))
-                .is_some()
-        );
-        assert!(
-            tree.message_rect(&ChatMessage::RemoveRemoteHost("workstation".into()))
-                .is_some()
+            scenario
+                .host()
+                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    role: SemanticRole::Button,
+                    name: "Save host".into(),
+                })
+                .is_ok()
         );
     }
 
@@ -722,7 +736,7 @@ mod tests {
             });
         }
         for (width, height) in [(640.0, 480.0), (1120.0, 760.0), (2240.0, 1520.0)] {
-            let tree = UiTree::layout(view::chat_view(&state), Rect::new(0.0, 0.0, width, height));
+            let tree = UiFrame::layout(view::chat_view(&state), Rect::new(0.0, 0.0, width, height));
             let find = |suffix: &str| {
                 tree.resolved_layout()
                     .nodes()
@@ -755,7 +769,7 @@ mod tests {
             complete: true,
         });
         for scale in [1.0, 2.0] {
-            let tree = UiTree::layout(view::chat_view(&state), Rect::new(0.0, 0.0, 800.0, 600.0));
+            let tree = UiFrame::layout(view::chat_view(&state), Rect::new(0.0, 0.0, 800.0, 600.0));
             let mut renderer =
                 SdlComponentRenderer::new((800.0 * scale) as u32, (600.0 * scale) as u32, scale);
             assert!(!renderer.render(tree.commands()).is_empty());
@@ -819,13 +833,11 @@ mod tests {
                 .iter()
                 .any(|item| item.kind == ChatItemKind::Agent && item.text == "fixture response")
         });
-        let tree = UiTree::layout(
+        let tree = UiFrame::layout(
             view::chat_view(&app.state),
             Rect::new(0.0, 0.0, 1120.0, 760.0),
         );
-        assert!(tree.commands().iter().any(
-            |command| matches!(command, PaintCommand::StyledText { text, .. } if text == "fixture response")
-        ));
+        assert!(has_accessible_text(&tree, "fixture response"));
     }
 
     #[test]
@@ -965,35 +977,42 @@ mod tests {
         }
 
         app.update(ChatMessage::ToggleCommandPicker);
-        let commands = UiTree::layout(app.view(), Rect::new(0.0, 0.0, 900.0, 640.0));
-        assert!(commands.commands().iter().any(
-            |command| matches!(command, PaintCommand::Text { text, .. } if text.contains("/review — unavailable"))
-        ));
+        let commands = UiFrame::layout(
+            app.view(nickel_ui::ViewContext::new(
+                Rect::new(0.0, 0.0, 900.0, 640.0),
+                nickel_ui::InputModality::Keyboard,
+            )),
+            Rect::new(0.0, 0.0, 900.0, 640.0),
+        );
+        assert!(has_accessible_text(&commands, "/review — unavailable"));
 
         app.update(ChatMessage::ToggleCommandPicker);
         app.update(ChatMessage::ToggleModelPicker);
-        let models = UiTree::layout(app.view(), Rect::new(0.0, 0.0, 900.0, 640.0));
-        assert!(models.commands().iter().any(
-            |command| matches!(command, PaintCommand::Text { text, .. } if text.contains("high — Deep reasoning"))
-        ));
+        let models = UiFrame::layout(
+            app.view(nickel_ui::ViewContext::new(
+                Rect::new(0.0, 0.0, 900.0, 640.0),
+                nickel_ui::InputModality::Keyboard,
+            )),
+            Rect::new(0.0, 0.0, 900.0, 640.0),
+        );
+        assert!(has_accessible_text(&models, "high — Deep reasoning"));
 
         app.update(ChatMessage::ToggleModelPicker);
         app.update(ChatMessage::ToggleResumePicker);
-        let resume = UiTree::layout(app.view(), Rect::new(0.0, 0.0, 900.0, 640.0));
-        assert!(
-            resume
-                .message_rect(&ChatMessage::SelectThread(ThreadId("eligible".into())))
-                .is_some()
-        );
-        assert!(
-            resume
-                .message_rect(&ChatMessage::SelectThread(ThreadId("active".into())))
-                .is_none()
-        );
-        assert!(
-            resume
-                .message_rect(&ChatMessage::SelectThread(ThreadId("other".into())))
-                .is_none()
+        let mut scenario = Scenario::new(app, 900, 640);
+        let button = |name: &str| nickel_ui::SemanticSelector::RoleAndName {
+            role: SemanticRole::Button,
+            name: name.into(),
+        };
+        assert!(scenario.host().query_unique(&button("eligible")).is_ok());
+        assert!(scenario.host().query_unique(&button("active")).is_err());
+        assert!(scenario.host().query_unique(&button("other")).is_err());
+        scenario
+            .activate(&Selector::role_name(SemanticRole::Button, "eligible"))
+            .unwrap();
+        assert_eq!(
+            scenario.host_mut().application_mut().take_shell_requests(),
+            vec![ShellRequest::ResumeThread(ThreadId("eligible".into()))]
         );
     }
 
@@ -1001,42 +1020,35 @@ mod tests {
     fn multiline_paste_normalizes_newlines_without_submitting() {
         let mut state = ChatState::default();
         state.status = ConnectionStatus::Ready;
-        let mut ui_state = UiStateStore::default();
-        let tree = UiTree::layout_with_state(
-            view::chat_view(&state),
-            Rect::new(0.0, 0.0, 1120.0, 760.0),
-            &mut ui_state,
-        );
-        let draft = tree
-            .resolved_layout()
-            .nodes()
-            .iter()
-            .find(|node| node.id.as_str().ends_with("/chat-draft"))
-            .expect("draft field");
-        tree.handle_event(
-            &mut ui_state,
-            UiEvent::PointerPressed(Point {
-                x: draft.allocated.origin.x + 2.0,
-                y: draft.allocated.origin.y + 2.0,
-            }),
-        );
-        let pasted = tree.handle_event(
-            &mut ui_state,
-            UiEvent::TextPaste("one\r\ntwo\rthree\nfour".into()),
-        );
+        let backend = ReplayBackend::from_json(r#"{"name":"paste","events":[]}"#).unwrap();
+        let mut app = ChatApplication::new(BackendMode::Replay {
+            backend,
+            cwd: "/projects/nickel".into(),
+        });
+        app.state = state;
+        let mut scenario = Scenario::new(app, 1120, 760);
+        let draft = scenario
+            .host()
+            .query_unique(&nickel_ui::SemanticSelector::Role(SemanticRole::TextField))
+            .unwrap();
+        scenario
+            .host_mut()
+            .handle_event(UiEvent::AccessibilityFocus(draft.id));
+        scenario
+            .host_mut()
+            .handle_event(UiEvent::TextPaste("one\r\ntwo\rthree\nfour".into()));
         let expected = "one\ntwo\nthree\nfour";
-        assert_eq!(
-            pasted.messages,
-            vec![ChatMessage::DraftChanged(expected.into())]
-        );
+        let state = &mut scenario.host_mut().application_mut().state;
+        assert_eq!(state.draft, expected);
         assert!(state.items.is_empty());
 
         state.draft = (0..30)
             .map(|line| format!("line {line}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let rebuilt = UiTree::layout_with_state(
-            view::chat_view(&state),
+        let mut ui_state = UiStateStore::default();
+        let rebuilt = UiFrame::layout_with_state(
+            view::chat_view(state),
             Rect::new(0.0, 0.0, 1120.0, 760.0),
             &mut ui_state,
         );
@@ -1174,21 +1186,17 @@ mod tests {
         }
 
         let mut ui_state = UiStateStore::default();
-        let tree = UiTree::layout_with_state(
+        let tree = UiFrame::layout_with_state(
             view::chat_view(&state),
             Rect::new(0.0, 0.0, 1120.0, 760.0),
             &mut ui_state,
         );
-        assert!(tree.commands().iter().any(
-            |command| matches!(command, PaintCommand::StyledText { text, .. } if text.contains("history message 1999"))
-        ));
-        assert!(!tree.commands().iter().any(
-            |command| matches!(command, PaintCommand::StyledText { text, .. } if text.contains("history message 0"))
-        ));
+        assert!(has_accessible_text(&tree, "history message 1999"));
+        assert!(!has_accessible_text(&tree, "history message 0"));
         assert!(
-            tree.commands().len() < 500,
-            "{} commands",
-            tree.commands().len()
+            tree.resource_diagnostics().paint_primitive_count < 500,
+            "{} paint primitives",
+            tree.resource_diagnostics().paint_primitive_count
         );
         let conversation = tree
             .resolved_layout()
@@ -1213,7 +1221,7 @@ mod tests {
             });
         }
         let mut ui_state = UiStateStore::default();
-        let tree = UiTree::layout_with_state(
+        let tree = UiFrame::layout_with_state(
             view::chat_view(&state),
             Rect::new(0.0, 0.0, 1120.0, 760.0),
             &mut ui_state,
@@ -1238,22 +1246,20 @@ mod tests {
         assert!(copied.starts_with("Codex\nhistory message 0\nCodex"));
         assert!(copied.contains("history message 1000"));
         assert!(copied.ends_with("Codex\nhistory message 1999"));
-        assert!(!tree.commands().iter().any(
-            |command| matches!(command, PaintCommand::StyledText { text, .. } if text.contains("history message 0"))
-        ));
+        assert!(!has_accessible_text(&tree, "history message 0"));
 
-        let selected = UiTree::layout_with_state(
+        let mut unselected_renderer = SdlComponentRenderer::new(1120, 760, 1.0);
+        unselected_renderer.render(tree.commands());
+        let unselected_pixels = unselected_renderer.pixels().to_vec();
+
+        let selected = UiFrame::layout_with_state(
             view::chat_view(&state),
             Rect::new(0.0, 0.0, 1120.0, 760.0),
             &mut ui_state,
         );
-        assert!(selected.commands().iter().any(|command| matches!(
-            command,
-            PaintCommand::Fill {
-                color: 0x315a8f,
-                ..
-            }
-        )));
+        let mut selected_renderer = SdlComponentRenderer::new(1120, 760, 1.0);
+        selected_renderer.render(selected.commands());
+        assert_ne!(selected_renderer.pixels(), unselected_pixels.as_slice());
     }
 
     #[test]

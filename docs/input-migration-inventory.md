@@ -10,7 +10,7 @@ shortcut outcomes. Native event types are allowed only at the listed adapters an
 | --- | --- | --- | --- | --- |
 | SDL focused input | `sdl3::event::Event` | `nickel_input::sdl::Adapter` | shell, launcher, screenshot, lock, overlays, embedded Codex surfaces, gaze grid | migrated; focus gain/loss preserved |
 | winit focused input | `winit::event::WindowEvent` | `nickel_input::winit::Adapter` | `nickel-ui` runtime, Settings, Nickel File, Shapes test | migrated; focus gain/loss preserved |
-| Declarative UI dispatch | normalized focused events | `nickel_ui::input::FocusedInputDispatcher` and `ApplicationHost::handle_input` | typed widget and application messages, standalone and embedded hosts | migrated |
+| Declarative UI dispatch | normalized focused events | `nickel_ui::input::FocusedInputDispatcher` and `UiHost::handle_input` | typed widget and application messages, standalone and embedded hosts | migrated |
 | Gilrs controllers | `gilrs::Event` | `nickel_input::gilrs` plus `ControllerNormalizer` | `nickel-ui` controller feed | migrated |
 | SDL controllers | SDL gamepad events | `nickel_input::sdl` plus `ControllerNormalizer` | shell navigation | migrated |
 | Smithay compositor shortcuts | XKB keysyms | `CompositorShortcutAdapter` | launcher, task switching, workspaces, screenshot actions | migrated boundary |

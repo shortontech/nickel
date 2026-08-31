@@ -10,3 +10,6 @@ path = "src/lib.rs"
 
 [dependencies]
 nickel-input = { path = "../nickel-input" }
+
+[dev-dependencies]
+tempfile = "3.25.0"

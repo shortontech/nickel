@@ -1,18 +1,11 @@
 use crate::{
     Align, AnyView, Border, Button, Color, Column, Component, ComponentBuilderExt, Container,
-    Dropdown, Grid, HorizontalRule, Insets, Justify, Overflow, ReadingDirection, Row,
-    SemanticTheme, Slider, Spacer, Text, TextAlign, TextField, Track, UiId,
+    Dropdown, Grid, HorizontalRule, Insets, Justify, NavigationScope, Overflow, ReadingDirection,
+    Row, SemanticRole, SemanticTheme, Slider, Spacer, Text, TextAlign, TextField, Track, UiId,
 };
 
 /// Width below which [`SettingsShell`] stacks navigation above its content.
 pub const SETTINGS_SHELL_NARROW_BREAKPOINT: f32 = 720.0;
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum SettingsNarrowPane {
-    Navigation,
-    #[default]
-    Content,
-}
 
 /// Localized page title and supporting description.
 pub struct PageHeader<Message = String>(Container<Message>);
@@ -82,7 +75,7 @@ impl<Message> NavigationItem<Message> {
                 ))
                 .radius(theme.radii.control)
                 .background(theme.colors.sidebar)
-                .accessibility_role("navigation-item")
+                .semantic_role(SemanticRole::NavigationItem)
                 .accessibility_label(&label)
                 .accessibility_state("unavailable")
                 .child(
@@ -95,7 +88,8 @@ impl<Message> NavigationItem<Message> {
                                 .scale(0.85)
                                 .wrap(true),
                         ),
-                ),
+                )
+                .into_element(),
         )
     }
 
@@ -208,14 +202,20 @@ impl<Message> NavigationItem<Message> {
                 })
                 .message(message)
                 .child(row)
-                .accessibility_role("navigation-item")
+                .semantic_role(SemanticRole::NavigationItem)
                 .accessibility_label(label)
-                .accessibility_state(if selected { "selected" } else { "unselected" }),
+                .accessibility_state(if selected { "selected" } else { "unselected" })
+                .into_element(),
         )
     }
 
     pub fn id(mut self, id: impl Into<UiId>) -> Self {
         self.0 = self.0.id(id);
+        self
+    }
+
+    pub fn semantic_role(mut self, role: SemanticRole) -> Self {
+        self.0 = self.0.semantic_role(role);
         self
     }
 
@@ -417,9 +417,8 @@ impl<Message> SettingsNavigation<Message> {
                 .min_width(width)
                 .fill_height()
                 .border(theme.borders.subtle, 1.0)
-                .controller_pane(true)
-                .controller_pane_default(false)
-                .controller_pane_highlight(theme.colors.secondary_accent)
+                .navigation_scope(NavigationScope::pane(false))
+                .navigation_scope_highlight(theme.colors.secondary_accent)
                 .padding(Insets::all(theme.spacing.content))
                 .gap(theme.spacing.compact)
                 .overflow_y(Overflow::Auto)
@@ -468,62 +467,6 @@ impl<Message> Component<Message> for SettingsNavigation<Message> {
 pub struct SettingsShell<Message = String>(Container<Message>);
 
 impl<Message> SettingsShell<Message> {
-    #[allow(clippy::too_many_arguments)]
-    pub fn responsive(
-        theme: SemanticTheme,
-        viewport_width: f32,
-        narrow_pane: SettingsNarrowPane,
-        navigation_toggle: impl Component<Message>,
-        navigation: impl Component<Message>,
-        header: impl Component<Message>,
-        content: impl Component<Message>,
-        direction: ReadingDirection,
-    ) -> Self {
-        if viewport_width >= SETTINGS_SHELL_NARROW_BREAKPOINT {
-            return Self::new_directional(
-                theme,
-                viewport_width,
-                navigation,
-                header,
-                content,
-                direction,
-            );
-        }
-        let content = Container::new()
-            .id("settings-content-pane")
-            .fill_width()
-            .fill_height()
-            .border(theme.borders.subtle, 1.0)
-            .controller_pane(true)
-            .controller_pane_default(true)
-            .controller_pane_highlight(theme.colors.secondary_accent)
-            .child(content);
-        let root = match narrow_pane {
-            SettingsNarrowPane::Navigation => Container::new().child(navigation),
-            SettingsNarrowPane::Content => Container::new().child(
-                Column::new()
-                    .fill_width()
-                    .fill_height()
-                    .child(
-                        Container::new()
-                            .shrink(0.0)
-                            .padding(Insets::symmetric(
-                                theme.spacing.compact,
-                                theme.spacing.content,
-                            ))
-                            .child(navigation_toggle),
-                    )
-                    .child(header)
-                    .child(Container::new().grow(1.0).child(content)),
-            ),
-        };
-        Self(
-            root.fill_width()
-                .fill_height()
-                .background(theme.colors.window),
-        )
-    }
-
     pub fn new(
         theme: SemanticTheme,
         viewport_width: f32,
@@ -554,9 +497,8 @@ impl<Message> SettingsShell<Message> {
             .fill_width()
             .fill_height()
             .border(theme.borders.subtle, 1.0)
-            .controller_pane(true)
-            .controller_pane_default(true)
-            .controller_pane_highlight(theme.colors.secondary_accent)
+            .navigation_scope(NavigationScope::pane(true))
+            .navigation_scope_highlight(theme.colors.secondary_accent)
             .child(content);
         let root = if viewport_width < SETTINGS_SHELL_NARROW_BREAKPOINT {
             Container::new().child(
@@ -739,6 +681,8 @@ impl<Message> Switch<Message> {
         let mut control = Container::new()
             .width(42.0)
             .height(24.0)
+            .semantic_role(SemanticRole::Switch)
+            .accessibility_label("Switch")
             .radius(12.0)
             .padding(Insets::all(3.0))
             .background(if state == SwitchState::MixedUnavailable {
@@ -803,7 +747,7 @@ impl<Message> SettingsCard<Message> {
                 .background(theme.colors.card)
                 .border(theme.colors.raised, 1.0)
                 .radius(theme.radii.card)
-                .controller_group(true)
+                .navigation_scope(NavigationScope::group())
                 .controller_focus_border(theme.borders.controller_focus),
         )
     }
@@ -980,7 +924,7 @@ impl<Message> SettingsRow<Message> {
     /// Makes the row itself activatable. Use only when this is semantically
     /// identical to activating its trailing control.
     pub fn activate(self, message: Message) -> AnyView<Message> {
-        AnyView::new(self.0.message(message).accessibility_role("button"))
+        AnyView::new(self.0.message(message).semantic_role(SemanticRole::Button))
     }
 
     pub fn id(mut self, id: impl Into<UiId>) -> Self {
@@ -1014,6 +958,7 @@ impl<Message> SliderField<Message> {
         value: f32,
         on_change: fn(f32) -> Message,
     ) -> Self {
+        let label = label.into();
         let control = Row::new()
             .width(420.0)
             .gap(theme.spacing.content)
@@ -1027,7 +972,8 @@ impl<Message> SliderField<Message> {
                     )
                     .focus_border(theme.borders.focus)
                     .controller_focus_border(theme.borders.controller_focus)
-                    .width(330.0),
+                    .width(330.0)
+                    .accessibility_label(label.clone()),
             )
             .child(
                 Text::new(value_label)
@@ -1063,13 +1009,15 @@ impl<Message> SelectField<Message> {
         options: impl IntoIterator<Item = (impl Into<String>, Message)>,
         expanded: bool,
     ) -> Self {
+        let label = label.into();
         let dropdown = Dropdown::new(toggle_message, selected, options)
             .expanded(expanded)
             .colors(
                 theme.colors.raised,
                 theme.colors.hover,
                 theme.colors.primary_text,
-            );
+            )
+            .accessibility_label(label.clone());
         Self(
             SettingsRow::new(theme, label, supporting_text)
                 .trailing(Container::new().width(180.0).child(dropdown)),
@@ -1163,7 +1111,7 @@ impl<Message> SettingsStatus<Message> {
                 .padding(Insets::all(theme.spacing.control))
                 .radius(theme.radii.control)
                 .background(theme.surfaces.raised)
-                .accessibility_role("status")
+                .semantic_role(SemanticRole::Status)
                 .accessibility_label(&message)
                 .accessibility_state(state)
                 .child(
@@ -1172,7 +1120,8 @@ impl<Message> SettingsStatus<Message> {
                         .align_items(Align::Center)
                         .child(Text::new(mark).color(color).accessibility_hidden(true))
                         .child(Text::new(message).color(color).wrap(true)),
-                ),
+                )
+                .into_element(),
         )
     }
 }
@@ -1209,7 +1158,7 @@ impl<Message> TabList<Message> {
                     .interaction_backgrounds(theme.surfaces.hover, theme.surfaces.pressed)
                     .focus_border(theme.borders.focus)
                     .controller_focus_border(theme.borders.controller_focus)
-                    .accessibility_role("tab")
+                    .semantic_role(SemanticRole::Tab)
                     .accessibility_label(&label)
                     .accessibility_state(if selected { "selected" } else { "unselected" })
                     .accessibility_controls(panel_id.clone())
@@ -1235,7 +1184,7 @@ impl<Message> TabList<Message> {
                 .gap(theme.spacing.section)
                 .shrink(0.0)
                 .children(tabs)
-                .accessibility_role("tab-list"),
+                .semantic_role(SemanticRole::TabList),
         )
     }
 
@@ -1354,7 +1303,7 @@ impl<Message> ChoiceCard<Message> {
                 .radius(theme.radii.card)
                 .message(message)
                 .enabled(enabled)
-                .semantic_role("option")
+                .semantic_role(SemanticRole::Option)
                 .accessibility_label(&label)
                 .accessibility_state(state)
                 .accessibility_description(description.unwrap_or_default())
@@ -1391,7 +1340,7 @@ impl<Message> ChoiceCardGroup<Message> {
                 .gap(16.0)
                 .fill_width()
                 .children(items)
-                .semantic_role("radiogroup"),
+                .semantic_role(SemanticRole::RadioGroup),
         )
     }
 
@@ -1401,7 +1350,7 @@ impl<Message> ChoiceCardGroup<Message> {
                 .gap(16.0)
                 .fill_width()
                 .children(items)
-                .semantic_role("radiogroup"),
+                .semantic_role(SemanticRole::RadioGroup),
         )
     }
 
@@ -1446,7 +1395,7 @@ impl<Message> PreviewTile<Message> {
         };
         Self(
             Self::frame(theme)
-                .semantic_role("status")
+                .semantic_role(SemanticRole::Status)
                 .accessibility_label(&label)
                 .accessibility_state(match state {
                     PreviewState::Loading => "loading",
@@ -1560,7 +1509,7 @@ impl<Message> ColorSwatch<Message> {
                 .interaction_backgrounds(theme.surfaces.hover, theme.surfaces.pressed)
                 .focus_border(theme.borders.focus)
                 .controller_focus_border(theme.borders.controller_focus)
-                .semantic_role("radio")
+                .semantic_role(SemanticRole::Radio)
                 .accessibility_label(label)
                 .accessibility_state(if selected { "selected" } else { "unselected" })
                 .child(ring),
@@ -1578,7 +1527,7 @@ impl<Message> ColorSwatch<Message> {
                 .interaction_backgrounds(theme.surfaces.hover, theme.surfaces.pressed)
                 .focus_border(theme.borders.focus)
                 .controller_focus_border(theme.borders.controller_focus)
-                .semantic_role("button")
+                .semantic_role(SemanticRole::Button)
                 .accessibility_label("Choose a custom color")
                 .child(
                     Container::new().fill_width().child(
@@ -1608,7 +1557,7 @@ mod tests {
     use super::*;
     use crate::{
         DiagnosticKind, PaintCommand, Point, Rect, ResolvedNode, SdlComponentRenderer,
-        SemanticColors, UiEvent, UiStateStore, UiTree,
+        SemanticColors, UiEvent, UiFrame, UiStateStore,
     };
 
     #[derive(Clone, Debug, PartialEq)]
@@ -1655,13 +1604,16 @@ mod tests {
     #[test]
     fn switch_emits_requested_value() {
         let mut state = UiStateStore::default();
-        let tree = UiTree::layout(
+        let tree = UiFrame::layout(
             Switch::new(false, toggle, theme()).id("switch"),
             Rect::new(0.0, 0.0, 100.0, 50.0),
         );
         let bounds = tree
-            .message_rect(&Message::Toggle(true))
-            .expect("enabled switch should expose its typed action");
+            .semantic_targets_for_message(&Message::Toggle(true))
+            .into_iter()
+            .next()
+            .expect("enabled switch should expose its typed action")
+            .bounds;
         let center = Point {
             x: bounds.origin.x + bounds.size.width * 0.5,
             y: bounds.origin.y + bounds.size.height * 0.5,
@@ -1678,12 +1630,18 @@ mod tests {
             SwitchState::DisabledOff,
             SwitchState::DisabledOn,
         ] {
-            let tree = UiTree::layout(
+            let tree = UiFrame::layout(
                 Switch::with_state(state, Some(toggle), theme()).id("switch"),
                 Rect::new(0.0, 0.0, 100.0, 50.0),
             );
-            assert_eq!(tree.message_rect(&Message::Toggle(true)), None);
-            assert_eq!(tree.message_rect(&Message::Toggle(false)), None);
+            assert!(
+                tree.semantic_targets_for_message(&Message::Toggle(true))
+                    .is_empty()
+            );
+            assert!(
+                tree.semantic_targets_for_message(&Message::Toggle(false))
+                    .is_empty()
+            );
             assert!(tree.resolved_layout().nodes().iter().any(|node| {
                 node.id.as_str().ends_with("switch") && !node.interaction.interactive
             }));
@@ -1693,7 +1651,7 @@ mod tests {
     #[test]
     fn settings_search_placeholder_keeps_an_empty_edit_value() {
         let mut state = UiStateStore::default();
-        let tree = UiTree::layout(
+        let tree = UiFrame::layout(
             SettingsSearchField::new(theme(), "search", "", "Search settings...", search),
             Rect::new(0.0, 0.0, 220.0, 48.0),
         );
@@ -1756,7 +1714,7 @@ mod tests {
     fn tabs_and_swatches_preserve_typed_activation() {
         let mut state = UiStateStore::default();
         let theme = theme();
-        let tree = UiTree::layout(
+        let tree = UiFrame::layout(
             Column::new()
                 .child(TabList::new(
                     theme,
@@ -1774,8 +1732,11 @@ mod tests {
         );
         for message in [Message::Tab(1), Message::Color(0), Message::Color(1)] {
             let bounds = tree
-                .message_rect(&message)
-                .expect("enabled tab/swatch should expose its typed action");
+                .semantic_targets_for_message(&message)
+                .into_iter()
+                .next()
+                .expect("enabled tab/swatch should expose its typed action")
+                .bounds;
             let center = Point {
                 x: bounds.origin.x + bounds.size.width * 0.5,
                 y: bounds.origin.y + bounds.size.height * 0.5,
@@ -1792,7 +1753,7 @@ mod tests {
     #[test]
     fn visual_choices_expose_one_semantic_target_and_disabled_choices_do_not_activate() {
         let theme = theme();
-        let tree = UiTree::layout(
+        let tree = UiFrame::layout(
             ChoiceCardGroup::new([
                 ChoiceCard::option(
                     theme,
@@ -1817,8 +1778,15 @@ mod tests {
             ]),
             Rect::new(0.0, 0.0, 420.0, 200.0),
         );
-        assert!(tree.message_rect(&Message::Choice(0)).is_some());
-        assert_eq!(tree.message_rect(&Message::Choice(1)), None);
+        assert!(
+            !tree
+                .semantic_targets_for_message(&Message::Choice(0))
+                .is_empty()
+        );
+        assert!(
+            tree.semantic_targets_for_message(&Message::Choice(1))
+                .is_empty()
+        );
         let options = tree
             .accessibility_nodes()
             .iter()
@@ -1844,20 +1812,25 @@ mod tests {
         };
         let bounds = Rect::new(0.0, 0.0, 240.0, 240.0);
         let mut state = UiStateStore::default();
-        let initial = UiTree::layout_with_state(view(), bounds, &mut state);
-        let rect = initial.message_rect(&Message::Choice(0)).unwrap();
+        let initial = UiFrame::layout_with_state(view(), bounds, &mut state);
+        let rect = initial
+            .semantic_targets_for_message(&Message::Choice(0))
+            .into_iter()
+            .next()
+            .unwrap()
+            .bounds;
         let point = Point {
             x: rect.origin.x + rect.size.width / 2.0,
             y: rect.origin.y + rect.size.height / 2.0,
         };
         let _ = initial.handle_event(&mut state, UiEvent::PointerMoved(point));
-        let hovered = UiTree::layout_with_state(view(), bounds, &mut state);
+        let hovered = UiFrame::layout_with_state(view(), bounds, &mut state);
         assert!(hovered.commands().iter().any(|command| matches!(
             command,
             PaintCommand::RoundedFill { color, .. } if *color == theme.surfaces.hover
         )));
         let _ = hovered.handle_event(&mut state, UiEvent::FocusNext);
-        let focused = UiTree::layout_with_state(view(), bounds, &mut state);
+        let focused = UiFrame::layout_with_state(view(), bounds, &mut state);
         assert!(focused.commands().iter().any(|command| matches!(
             command,
             PaintCommand::Stroke { color, .. } if *color == theme.borders.focus
@@ -1870,7 +1843,7 @@ mod tests {
     #[test]
     fn swatches_distinguish_color_selection_from_custom_activation() {
         let theme = theme();
-        let tree = UiTree::layout(
+        let tree = UiFrame::layout(
             Row::new()
                 .child(ColorSwatch::color_labeled(
                     theme,
@@ -1905,17 +1878,21 @@ mod tests {
                 Surface::new(theme, SurfaceRole::Raised).height(86.0),
             )
         };
-        let wide = UiTree::layout(
+        let wide = UiFrame::layout(
             ChoiceCardGroup::new([make(0), make(1), make(2)]),
             Rect::new(0.0, 0.0, 640.0, 400.0),
         );
-        let narrow = UiTree::layout(
+        let narrow = UiFrame::layout(
             ChoiceCardGroup::new([make(0), make(1), make(2)]),
             Rect::new(0.0, 0.0, 220.0, 600.0),
         );
         assert_eq!(wide.resolved_grid_columns(), Some(3));
         assert_eq!(narrow.resolved_grid_columns(), Some(1));
-        assert!(wide.message_rect(&Message::Choice(2)).is_some());
+        assert!(
+            !wide
+                .semantic_targets_for_message(&Message::Choice(2))
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1952,7 +1929,7 @@ mod tests {
                 )
             };
             let bounds = Rect::new(0.0, 0.0, width, 1000.0);
-            let tree = UiTree::layout_with_diagnostics(
+            let tree = UiFrame::layout_with_diagnostics(
                 ChoiceCardGroup::new([make(0), make(1), make(2)]).direction(direction),
                 bounds,
             );
@@ -2001,7 +1978,7 @@ mod tests {
     #[test]
     fn preview_tile_renders_rounded_content_and_explicit_placeholder_states() {
         let theme = theme();
-        let content = UiTree::<Message>::layout(
+        let content = UiFrame::<Message>::layout(
             PreviewTile::new(theme, Text::new("Preview"))
                 .width(160.0)
                 .height(96.0),
@@ -2020,7 +1997,7 @@ mod tests {
             PreviewTile::unavailable(theme, "Preview unavailable"),
             PreviewTile::error(theme, "Preview failed"),
         ] {
-            let tree = UiTree::<Message>::layout(
+            let tree = UiFrame::<Message>::layout(
                 tile.width(160.0).height(96.0),
                 Rect::new(0.0, 0.0, 160.0, 96.0),
             );
@@ -2035,7 +2012,7 @@ mod tests {
     #[test]
     fn settings_composites_have_finite_deterministic_layout() {
         let theme = theme();
-        let tree = UiTree::layout_with_diagnostics(
+        let tree = UiFrame::layout_with_diagnostics(
             SettingsCard::titled(theme, "Interface settings", "Shared visual controls")
                 .child(
                     SettingsRow::new(theme, "Transparency", "Use solid surfaces")
@@ -2052,8 +2029,16 @@ mod tests {
             Rect::new(0.0, 0.0, 800.0, 300.0),
         );
         assert!(tree.diagnostics().is_empty(), "{:?}", tree.diagnostics());
-        assert!(tree.message_rect(&Message::Toggle(false)).is_some());
-        assert!(tree.message_rect(&Message::Slide(0.85)).is_some());
+        assert!(
+            !tree
+                .semantic_targets_for_message(&Message::Toggle(false))
+                .is_empty()
+        );
+        assert!(
+            !tree
+                .semantic_targets_for_message(&Message::Slide(0.85))
+                .is_empty()
+        );
     }
 
     fn shell(width: f32) -> SettingsShell<Message> {
@@ -2084,7 +2069,7 @@ mod tests {
         )
     }
 
-    fn node_ending<'a>(tree: &'a UiTree<Message>, suffix: &str) -> &'a ResolvedNode {
+    fn node_ending<'a>(tree: &'a UiFrame<Message>, suffix: &str) -> &'a ResolvedNode {
         tree.resolved_layout()
             .nodes()
             .iter()
@@ -2095,9 +2080,9 @@ mod tests {
     #[test]
     fn settings_shell_reflows_at_its_own_breakpoint() {
         let ordinary =
-            UiTree::layout_with_diagnostics(shell(1000.0), Rect::new(0.0, 0.0, 1000.0, 640.0));
+            UiFrame::layout_with_diagnostics(shell(1000.0), Rect::new(0.0, 0.0, 1000.0, 640.0));
         let narrow =
-            UiTree::layout_with_diagnostics(shell(560.0), Rect::new(0.0, 0.0, 560.0, 760.0));
+            UiFrame::layout_with_diagnostics(shell(560.0), Rect::new(0.0, 0.0, 560.0, 760.0));
         assert!(
             ordinary.diagnostics().is_empty(),
             "{:?}",
@@ -2123,14 +2108,22 @@ mod tests {
             narrow_navigation.allocated.origin.y
                 >= narrow_header.allocated.origin.y + narrow_header.allocated.size.height
         );
-        assert!(ordinary.message_rect(&Message::Navigate(1)).is_some());
-        assert!(narrow.message_rect(&Message::Navigate(0)).is_some());
+        assert!(
+            !ordinary
+                .semantic_targets_for_message(&Message::Navigate(1))
+                .is_empty()
+        );
+        assert!(
+            !narrow
+                .semantic_targets_for_message(&Message::Navigate(0))
+                .is_empty()
+        );
     }
 
     #[test]
     fn select_field_preserves_toggle_and_option_messages() {
         let theme = theme();
-        let tree = UiTree::layout(
+        let tree = UiFrame::layout(
             SettingsCard::new(theme).child(SelectField::new(
                 theme,
                 "Animations",
@@ -2145,9 +2138,21 @@ mod tests {
             )),
             Rect::new(0.0, 0.0, 760.0, 240.0),
         );
-        assert!(tree.message_rect(&Message::ToggleSelect).is_some());
-        assert!(tree.message_rect(&Message::Select(0)).is_some());
-        assert!(tree.message_rect(&Message::Select(1)).is_some());
+        assert!(
+            !tree
+                .semantic_targets_for_message(&Message::ToggleSelect)
+                .is_empty()
+        );
+        assert!(
+            !tree
+                .semantic_targets_for_message(&Message::Select(0))
+                .is_empty()
+        );
+        assert!(
+            !tree
+                .semantic_targets_for_message(&Message::Select(1))
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2166,7 +2171,7 @@ mod tests {
                 "Details",
                 crate::ButtonPresentation::Secondary,
             ));
-        let tree = UiTree::layout_with_diagnostics(
+        let tree = UiFrame::layout_with_diagnostics(
             SettingsSection::new(theme, "Connectivity")
                 .id("section")
                 .child(
@@ -2195,8 +2200,18 @@ mod tests {
             Rect::new(0.0, 0.0, 720.0, 360.0),
         );
         assert!(tree.diagnostics().is_empty(), "{:?}", tree.diagnostics());
-        let retry = tree.message_rect(&Message::Navigate(1)).unwrap();
-        let details = tree.message_rect(&Message::Navigate(2)).unwrap();
+        let retry = tree
+            .semantic_targets_for_message(&Message::Navigate(1))
+            .into_iter()
+            .next()
+            .unwrap()
+            .bounds;
+        let details = tree
+            .semantic_targets_for_message(&Message::Navigate(2))
+            .into_iter()
+            .next()
+            .unwrap()
+            .bounds;
         assert!(retry.origin.x + retry.size.width <= details.origin.x);
         assert!(tree.accessibility_nodes().iter().any(|node| {
             node.role.as_deref() == Some("status") && node.state.as_deref() == Some("unavailable")
@@ -2207,7 +2222,7 @@ mod tests {
     fn tabs_expose_one_selection_and_their_controlled_panel() {
         let theme = theme();
         let panel = UiId::from("appearance-panel");
-        let tree = UiTree::layout(
+        let tree = UiFrame::layout(
             Column::new()
                 .child(TabList::with_panel(
                     theme,
@@ -2220,7 +2235,7 @@ mod tests {
                 .child(
                     SettingsCard::new(theme)
                         .id(panel.clone())
-                        .accessibility_role("tab-panel"),
+                        .semantic_role(SemanticRole::TabPanel),
                 ),
             Rect::new(0.0, 0.0, 500.0, 180.0),
         );
@@ -2332,7 +2347,7 @@ mod tests {
         ];
         for (name, title, description, label, direction) in locales {
             let bounds = Rect::new(0.0, 0.0, 1000.0, 720.0);
-            let tree = UiTree::layout_with_diagnostics(
+            let tree = UiFrame::layout_with_diagnostics(
                 localized_shell(bounds.size.width, title, description, label, direction),
                 bounds,
             );
@@ -2352,7 +2367,7 @@ mod tests {
             (1400.0, 820.0, 2.0),
         ] {
             let bounds = Rect::new(0.0, 0.0, width, height);
-            let tree = UiTree::layout_with_diagnostics(
+            let tree = UiFrame::layout_with_diagnostics(
                 localized_shell(
                     width,
                     "Appearance",
@@ -2380,7 +2395,7 @@ mod tests {
     #[test]
     fn right_to_left_shell_mirrors_sidebar_and_preserves_mixed_numerals() {
         let bounds = Rect::new(0.0, 0.0, 1000.0, 720.0);
-        let ltr = UiTree::layout(
+        let ltr = UiFrame::layout(
             localized_shell(
                 bounds.size.width,
                 "Appearance",
@@ -2390,7 +2405,7 @@ mod tests {
             ),
             bounds,
         );
-        let rtl = UiTree::layout(
+        let rtl = UiFrame::layout(
             localized_shell(
                 bounds.size.width,
                 "المظهر",
@@ -2442,7 +2457,7 @@ mod tests {
         };
         let bounds = Rect::new(0.0, 0.0, 900.0, 360.0);
         let mut state = UiStateStore::default();
-        let tree = UiTree::layout_with_state(
+        let tree = UiFrame::layout_with_state(
             SettingsShell::new(
                 theme,
                 bounds.size.width,
@@ -2497,7 +2512,7 @@ mod tests {
                 > 0.0
         );
 
-        let rebuilt = UiTree::layout_with_state(
+        let rebuilt = UiFrame::layout_with_state(
             SettingsShell::new(
                 theme,
                 bounds.size.width,
@@ -2530,18 +2545,22 @@ mod tests {
         };
         let bounds = Rect::new(0.0, 0.0, 220.0, 360.0);
         let mut state = UiStateStore::default();
-        let initial = UiTree::layout_with_state(build(), bounds, &mut state);
+        let initial = UiFrame::layout_with_state(build(), bounds, &mut state);
         let sidebar = initial
             .resolved_layout()
             .nodes()
             .iter()
-            .find(|node| node.controller_pane)
+            .find(|node| {
+                node.navigation_scope
+                    .as_ref()
+                    .is_some_and(|scope| scope.pane)
+            })
             .expect("SettingsNavigation should be a controller pane")
             .id
             .clone();
-        state.set_controller_pane(Some(sidebar));
+        state.navigation_mut().set_controller_pane(Some(sidebar));
 
-        let selected = UiTree::layout_with_state(build(), bounds, &mut state);
+        let selected = UiFrame::layout_with_state(build(), bounds, &mut state);
         assert!(selected.commands().iter().any(|command| matches!(
             command,
             PaintCommand::Stroke { color, width, .. }
@@ -2567,10 +2586,10 @@ mod tests {
         };
         let bounds = Rect::new(0.0, 0.0, 220.0, 300.0);
         let mut state = UiStateStore::default();
-        let initial = UiTree::layout_with_state(build(true), bounds, &mut state);
+        let initial = UiFrame::layout_with_state(build(true), bounds, &mut state);
         let focused = node_ending(&initial, "/appearance").id.clone();
         initial.handle_event(&mut state, UiEvent::AccessibilityFocus(focused.clone()));
-        let rebuilt = UiTree::layout_with_state(build(false), bounds, &mut state);
+        let rebuilt = UiFrame::layout_with_state(build(false), bounds, &mut state);
         assert_eq!(state.focused(), Some(&focused));
         assert!(node_ending(&rebuilt, "/appearance").interaction.interactive);
     }

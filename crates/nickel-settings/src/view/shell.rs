@@ -1,46 +1,18 @@
 use super::*;
 
 impl SettingsApp {
-    pub(crate) fn handle_controller_action(&mut self, action: ControllerAction) {
-        if action == ControllerAction::Launcher {
-            if let Err(error) =
-                session_request(SessionRequest::Command(SessionCommand::ToggleLauncher))
-            {
-                tracing::warn!(%error, "controller could not toggle the Nickel launcher");
-            }
-            return;
-        }
-        let event = match action {
-            ControllerAction::Up => Some(UiEvent::ControllerPrevious),
-            ControllerAction::Down => Some(UiEvent::ControllerNext),
-            ControllerAction::Left => Some(UiEvent::ControllerAdjust(-1.0)),
-            ControllerAction::Right => Some(UiEvent::ControllerAdjust(1.0)),
-            ControllerAction::Confirm => Some(UiEvent::ControllerActivate),
-            ControllerAction::Cancel => Some(UiEvent::ControllerBack),
-            ControllerAction::PreviousPane => Some(UiEvent::ControllerPreviousPane),
-            ControllerAction::NextPane => Some(UiEvent::ControllerNextPane),
-            ControllerAction::Launcher => None,
-        };
-        if self.navigation.handle(action) {
-            self.controller_page = self.page;
-            self.narrow_navigation = self.navigation.pane() == NavigationPane::Sidebar;
-        }
-        if let Some(event) = event {
-            self.dispatch_ui_event(event);
-        }
-    }
-
     #[cfg(test)]
-    pub(crate) fn build_ui(&self, width: f32, height: f32) -> UiTree<SettingsMessage> {
+    pub(crate) fn build_ui(&self, width: f32, height: f32) -> UiFrame<SettingsMessage> {
         self.build_ui_internal(width, height, false, None)
     }
 
+    #[cfg(test)]
     pub(crate) fn build_ui_with_state(
         &self,
         width: f32,
         height: f32,
         state: &mut UiStateStore,
-    ) -> UiTree<SettingsMessage> {
+    ) -> UiFrame<SettingsMessage> {
         self.build_ui_internal(width, height, false, Some(state))
     }
 
@@ -49,54 +21,69 @@ impl SettingsApp {
         &self,
         width: f32,
         height: f32,
-    ) -> UiTree<SettingsMessage> {
+    ) -> UiFrame<SettingsMessage> {
         self.build_ui_internal(width, height, true, None)
     }
 
-    fn build_ui_internal(
+    pub(crate) fn settings_view(
         &self,
         width: f32,
-        height: f32,
-        diagnostics: bool,
-        state: Option<&mut UiStateStore>,
-    ) -> UiTree<SettingsMessage> {
+        _height: f32,
+        modality: InputModality,
+    ) -> AnyView<SettingsMessage> {
         let theme = self.ui_theme();
-        let palette = self.palette();
-        let (title, subtitle) = match self.page {
-            SettingsPage::Display => (
-                self.localizer.text("settings-display-title"),
-                self.localizer.text("settings-display-subtitle"),
-            ),
-            SettingsPage::Bar => (
-                self.localizer.text("settings-bar-title"),
-                self.localizer.text("settings-bar-subtitle"),
-            ),
-            SettingsPage::Appearance => (
-                self.localizer.text("settings-appearance-title"),
-                self.localizer.text("settings-appearance-subtitle"),
-            ),
-            SettingsPage::Network => (
-                self.localizer.text("settings-network-title"),
-                self.localizer.text("settings-network-subtitle"),
-            ),
-            SettingsPage::Bluetooth => (
-                self.localizer.text("settings-bluetooth-title"),
-                self.localizer.text("settings-bluetooth-subtitle"),
-            ),
-            SettingsPage::KeyboardShortcuts => (
-                self.localizer.text("settings-keyboard-title"),
-                self.localizer.text("settings-keyboard-subtitle"),
-            ),
-            SettingsPage::About => (
-                self.localizer.text("settings-about-title"),
-                self.localizer.text("settings-about-subtitle"),
-            ),
-        };
-        let header = PageHeader::new(theme, title, subtitle);
-        let selected_page = if self.navigation.pane() == NavigationPane::Sidebar {
-            self.controller_page
-        } else {
-            self.page
+        let destination_header = |page| {
+            let (title, subtitle) = match page {
+                SettingsPage::Display => (
+                    self.localizer.text("settings-display-title"),
+                    self.localizer.text("settings-display-subtitle"),
+                ),
+                SettingsPage::Bar => (
+                    self.localizer.text("settings-bar-title"),
+                    self.localizer.text("settings-bar-subtitle"),
+                ),
+                SettingsPage::Appearance => (
+                    self.localizer.text("settings-appearance-title"),
+                    self.localizer.text("settings-appearance-subtitle"),
+                ),
+                SettingsPage::Network => (
+                    self.localizer.text("settings-network-title"),
+                    self.localizer.text("settings-network-subtitle"),
+                ),
+                SettingsPage::Bluetooth => (
+                    self.localizer.text("settings-bluetooth-title"),
+                    self.localizer.text("settings-bluetooth-subtitle"),
+                ),
+                SettingsPage::KeyboardShortcuts => (
+                    self.localizer.text("settings-keyboard-title"),
+                    self.localizer.text("settings-keyboard-subtitle"),
+                ),
+                SettingsPage::About => (
+                    self.localizer.text("settings-about-title"),
+                    self.localizer.text("settings-about-subtitle"),
+                ),
+            };
+            if width < 720.0 {
+                AnyView::new(
+                    nickel_ui::Row::new()
+                        .fill_width()
+                        .min_height(76.0)
+                        .child(
+                            Button::semantic(
+                                theme,
+                                SettingsMessage::ShowNavigation,
+                                "‹",
+                                ButtonPresentation::Quiet,
+                            )
+                            .id("settings-show-navigation")
+                            .width(40.0)
+                            .min_width(40.0),
+                        )
+                        .child(PageHeader::new(theme, title, subtitle)),
+                )
+            } else {
+                AnyView::new(PageHeader::new(theme, title, subtitle))
+            }
         };
         let display_label = self.localizer.text("settings-nav-display");
         let bar_label = self.localizer.text("settings-nav-bar");
@@ -105,77 +92,59 @@ impl SettingsApp {
         let bluetooth_label = self.localizer.text("settings-nav-bluetooth");
         let keyboard_label = self.localizer.text("settings-nav-keyboard");
         let about_label = self.localizer.text("settings-nav-about");
+        let palette = self.palette();
         let query = self.sidebar_query.trim().to_lowercase();
-        let show_display = query.is_empty();
-        let show_bar = query.is_empty();
-        let show_appearance = query.is_empty();
-        let show_network = query.is_empty();
-        let show_bluetooth = query.is_empty();
-        let show_keyboard = query.is_empty();
-        let show_about = query.is_empty();
-        let display_selected = selected_page == SettingsPage::Display;
-        let bar_selected = selected_page == SettingsPage::Bar;
-        let appearance_selected = selected_page == SettingsPage::Appearance;
-        let network_selected = selected_page == SettingsPage::Network;
-        let bluetooth_selected = selected_page == SettingsPage::Bluetooth;
-        let keyboard_selected = selected_page == SettingsPage::KeyboardShortcuts;
-        let about_selected = selected_page == SettingsPage::About;
-        let display_button = NavigationItem::with_leading(
+        let (
+            show_display,
+            show_bar,
+            show_appearance,
+            show_network,
+            show_bluetooth,
+            show_keyboard,
+            show_about,
+        ) = (false, false, false, false, false, false, false);
+        let display_button = NavigationItem::new(
             theme,
             SettingsMessage::Navigate(SettingsPage::Display),
-            display_label,
-            display_selected,
-            sidebar_icon(SidebarIconKind::Display),
-        )
-        .id("nav-display");
-        let bar_button = NavigationItem::with_leading(
+            &display_label,
+            false,
+        );
+        let bar_button = NavigationItem::new(
             theme,
             SettingsMessage::Navigate(SettingsPage::Bar),
-            bar_label,
-            bar_selected,
-            sidebar_icon(SidebarIconKind::Bar),
-        )
-        .id("nav-bar");
-        let appearance_button = NavigationItem::with_leading(
+            &bar_label,
+            false,
+        );
+        let appearance_button = NavigationItem::new(
             theme,
             SettingsMessage::Navigate(SettingsPage::Appearance),
             &appearance_label,
-            appearance_selected,
-            sidebar_icon(SidebarIconKind::Appearance),
-        )
-        .id("nav-appearance");
-        let network_button = NavigationItem::with_leading(
+            false,
+        );
+        let network_button = NavigationItem::new(
             theme,
             SettingsMessage::Navigate(SettingsPage::Network),
-            network_label,
-            network_selected,
-            sidebar_icon(SidebarIconKind::Network),
-        )
-        .id("nav-network");
-        let bluetooth_button = NavigationItem::with_leading(
+            &network_label,
+            false,
+        );
+        let bluetooth_button = NavigationItem::new(
             theme,
             SettingsMessage::Navigate(SettingsPage::Bluetooth),
-            bluetooth_label,
-            bluetooth_selected,
-            sidebar_icon(SidebarIconKind::Bluetooth),
-        )
-        .id("nav-bluetooth");
-        let keyboard_button = NavigationItem::with_leading(
+            &bluetooth_label,
+            false,
+        );
+        let keyboard_button = NavigationItem::new(
             theme,
             SettingsMessage::Navigate(SettingsPage::KeyboardShortcuts),
-            keyboard_label,
-            keyboard_selected,
-            sidebar_icon(SidebarIconKind::Keyboard),
-        )
-        .id("nav-keyboard");
-        let about_button = NavigationItem::with_leading(
+            &keyboard_label,
+            false,
+        );
+        let about_button = NavigationItem::new(
             theme,
             SettingsMessage::Navigate(SettingsPage::About),
-            about_label,
-            about_selected,
-            sidebar_icon(SidebarIconKind::About),
-        )
-        .id("nav-about");
+            &about_label,
+            false,
+        );
         let mut navigation = SettingsNavigation::new(theme, SIDEBAR_WIDTH as f32).child(
             SettingsSearchField::with_leading(
                 theme,
@@ -351,13 +320,14 @@ impl SettingsApp {
                 navigation = navigation.item(about_button);
             }
         }
-        if !(show_display
-            || show_bar
-            || show_appearance
-            || show_network
-            || show_bluetooth
-            || show_keyboard
-            || show_about)
+        if !query.is_empty()
+            && !(show_display
+                || show_bar
+                || show_appearance
+                || show_network
+                || show_bluetooth
+                || show_keyboard
+                || show_about)
         {
             navigation = navigation.child(ui! {
                 <Container padding={Insets::all(10.0)}>
@@ -367,55 +337,151 @@ impl SettingsApp {
                 </Container>
             });
         }
-        if self.controller.connected() {
-            navigation = navigation.child(ui! {
-                <Container grow={1.0} padding={Insets {
-                    top: 12.0, right: 0.0, bottom: 0.0, left: 8.0,
-                }}>
-                    <ShoulderHints color={palette.text} muted={palette.muted} />
-                </Container>
-            });
-        }
-        let content = match self.page {
-            SettingsPage::Display => AnyView::new(self.display_components()),
-            SettingsPage::Bar => AnyView::new(self.bar_components()),
-            SettingsPage::Appearance => AnyView::new(self.appearance_components()),
-            SettingsPage::Network => AnyView::new(self.network_components()),
-            SettingsPage::Bluetooth => AnyView::new(self.bluetooth_components()),
-            SettingsPage::KeyboardShortcuts => AnyView::new(self.keyboard_shortcuts_components()),
-            SettingsPage::About => AnyView::new(self.about_components()),
-        };
-        let navigation_toggle = Button::semantic(
-            theme,
-            SettingsMessage::ToggleNavigation,
-            self.localizer.text("settings-show-navigation"),
-            ButtonPresentation::Quiet,
-        );
-        let root = SettingsShell::responsive(
+        // ResponsiveNavigation owns the presentation and controller-pane policy. The
+        // existing sidebar is retained above while search remains app-specific; destination
+        // identity and all navigation activation now flow through the shared primitive.
+        let destinations = vec![
+            ResponsiveNavigationDestination::new(
+                SettingsPage::Display,
+                display_label,
+                SettingsMessage::Navigate(SettingsPage::Display),
+                self.display_components(),
+            )
+            .header(destination_header(SettingsPage::Display))
+            .leading(sidebar_icon(SidebarIconKind::Display))
+            .section(self.localizer.text("settings-nav-section-system"))
+            .visible(query.is_empty()),
+            ResponsiveNavigationDestination::new(
+                SettingsPage::Bar,
+                bar_label,
+                SettingsMessage::Navigate(SettingsPage::Bar),
+                self.bar_components(),
+            )
+            .header(destination_header(SettingsPage::Bar))
+            .leading(sidebar_icon(SidebarIconKind::Bar))
+            .section(self.localizer.text("settings-nav-section-personalization"))
+            .visible(query.is_empty()),
+            ResponsiveNavigationDestination::new(
+                SettingsPage::Appearance,
+                appearance_label,
+                SettingsMessage::Navigate(SettingsPage::Appearance),
+                self.appearance_components(),
+            )
+            .header(destination_header(SettingsPage::Appearance))
+            .leading(sidebar_icon(SidebarIconKind::Appearance))
+            .visible(query.is_empty()),
+            ResponsiveNavigationDestination::new(
+                SettingsPage::Network,
+                network_label,
+                SettingsMessage::Navigate(SettingsPage::Network),
+                self.network_components(),
+            )
+            .header(destination_header(SettingsPage::Network))
+            .leading(sidebar_icon(SidebarIconKind::Network))
+            .section(self.localizer.text("settings-nav-section-connectivity"))
+            .visible(query.is_empty()),
+            ResponsiveNavigationDestination::new(
+                SettingsPage::Bluetooth,
+                bluetooth_label,
+                SettingsMessage::Navigate(SettingsPage::Bluetooth),
+                self.bluetooth_components(),
+            )
+            .header(destination_header(SettingsPage::Bluetooth))
+            .leading(sidebar_icon(SidebarIconKind::Bluetooth))
+            .visible(query.is_empty()),
+            ResponsiveNavigationDestination::new(
+                SettingsPage::KeyboardShortcuts,
+                keyboard_label,
+                SettingsMessage::Navigate(SettingsPage::KeyboardShortcuts),
+                self.keyboard_shortcuts_components(),
+            )
+            .header(destination_header(SettingsPage::KeyboardShortcuts))
+            .leading(sidebar_icon(SidebarIconKind::Keyboard))
+            .section(self.localizer.text("settings-nav-section-support"))
+            .visible(query.is_empty()),
+            ResponsiveNavigationDestination::new(
+                SettingsPage::About,
+                about_label,
+                SettingsMessage::Navigate(SettingsPage::About),
+                self.about_components(),
+            )
+            .header(destination_header(SettingsPage::About))
+            .leading(sidebar_icon(SidebarIconKind::About))
+            .visible(query.is_empty()),
+        ];
+        let root = ResponsiveNavigation::try_new(
             theme,
             width,
-            if self.narrow_navigation {
-                SettingsNarrowPane::Navigation
-            } else {
-                SettingsNarrowPane::Content
-            },
-            navigation_toggle,
-            navigation,
-            header,
-            content,
-            if self.localizer.is_right_to_left() {
-                ReadingDirection::RightToLeft
-            } else {
-                ReadingDirection::LeftToRight
-            },
-        );
+            self.active_destination.map(|_| self.page),
+            destinations,
+        )
+        .expect("settings destinations are stable and unique")
+        .breakpoint(720.0)
+        .direction(if self.localizer.is_right_to_left() {
+            ReadingDirection::RightToLeft
+        } else {
+            ReadingDirection::LeftToRight
+        })
+        .navigation_header(navigation)
+        .navigation_width(SIDEBAR_WIDTH as f32)
+        .id("settings-navigation");
+        let show_controller_legend = modality == InputModality::Controller;
+        if show_controller_legend {
+            AnyView::new(
+                nickel_ui::Column::new()
+                    .fill_width()
+                    .fill_height()
+                    .child(root)
+                    .child(ActionLegend::new_directional(
+                        theme,
+                        self.controller.active_family().unwrap_or_default(),
+                        [
+                            ActionLegendEntry::available(
+                                SemanticControllerAction::Confirm,
+                                "Select",
+                            ),
+                            ActionLegendEntry::available(
+                                SemanticControllerAction::PreviousSection,
+                                "Navigation",
+                            ),
+                            ActionLegendEntry::available(
+                                SemanticControllerAction::NextSection,
+                                "Content",
+                            ),
+                            ActionLegendEntry::available(SemanticControllerAction::Cancel, "Back"),
+                        ],
+                        if self.localizer.is_right_to_left() {
+                            ReadingDirection::RightToLeft
+                        } else {
+                            ReadingDirection::LeftToRight
+                        },
+                    )),
+            )
+        } else {
+            AnyView::new(root)
+        }
+    }
+
+    #[cfg(test)]
+    fn build_ui_internal(
+        &self,
+        width: f32,
+        height: f32,
+        diagnostics: bool,
+        state: Option<&mut UiStateStore>,
+    ) -> UiFrame<SettingsMessage> {
+        let modality = state
+            .as_ref()
+            .map(|state| state.input_modality())
+            .unwrap_or_else(|| self.ui_state.input_modality());
+        let root = self.settings_view(width, height, modality);
         let bounds = UiRect::new(0.0, 0.0, width, height);
         match (state, diagnostics) {
             (Some(state), diagnostics) => {
-                UiTree::layout_with_state_and_diagnostics(root, bounds, state, diagnostics)
+                UiFrame::layout_with_state_and_diagnostics(root, bounds, state, diagnostics)
             }
-            (None, true) => UiTree::layout_with_diagnostics(root, bounds),
-            (None, false) => UiTree::layout(root, bounds),
+            (None, true) => UiFrame::layout_with_diagnostics(root, bounds),
+            (None, false) => UiFrame::layout(root, bounds),
         }
     }
 }

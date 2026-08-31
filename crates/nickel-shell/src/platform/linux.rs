@@ -1063,6 +1063,7 @@ fn session_request_operation(request: &SessionRequest) -> &'static str {
             SessionQuery::Workspaces => "query-workspaces",
             SessionQuery::Preview { .. } => "query-preview",
             SessionQuery::ShellSemanticTarget { .. } => "query-shell-semantic-target",
+            SessionQuery::ShellRuntimeDiagnostics => "query-shell-runtime-diagnostics",
         },
         SessionRequest::Command(command) => match command {
             SessionCommand::ToggleLauncher => "toggle-launcher",
@@ -1457,7 +1458,7 @@ pub fn launcher_hotkey_receiver() -> super::GlobalShortcutFeed {
     }
 }
 
-pub fn semantic_target_receiver() -> mpsc::Receiver<super::SemanticTargetRequest> {
+pub fn semantic_target_receiver() -> mpsc::Receiver<super::ShellTestRequest> {
     use std::os::unix::net::UnixDatagram;
 
     let (sender, receiver) = mpsc::channel();
@@ -1480,10 +1481,20 @@ pub fn semantic_target_receiver() -> mpsc::Receiver<super::SemanticTargetRequest
                     continue;
                 };
                 let request = decode_session::<ClientEnvelope>(&frame[..length]);
-                let (request_id, target) = match request {
+                let request = match request {
                     Ok(envelope) if envelope.token == token => match envelope.request {
                         SessionRequest::Query(SessionQuery::ShellSemanticTarget { target }) => {
-                            (envelope.request_id, target)
+                            super::ShellTestRequest::SemanticTarget {
+                                request_id: envelope.request_id,
+                                target,
+                                reply_path,
+                            }
+                        }
+                        SessionRequest::Query(SessionQuery::ShellRuntimeDiagnostics) => {
+                            super::ShellTestRequest::RuntimeDiagnostics {
+                                request_id: envelope.request_id,
+                                reply_path,
+                            }
                         }
                         _ => {
                             respond_semantic_target_error(
@@ -1514,14 +1525,7 @@ pub fn semantic_target_receiver() -> mpsc::Receiver<super::SemanticTargetRequest
                         continue;
                     }
                 };
-                if sender
-                    .send(super::SemanticTargetRequest {
-                        request_id,
-                        target,
-                        reply_path,
-                    })
-                    .is_err()
-                {
+                if sender.send(request).is_err() {
                     break;
                 }
             }
@@ -1532,7 +1536,8 @@ pub fn semantic_target_receiver() -> mpsc::Receiver<super::SemanticTargetRequest
 }
 
 pub fn respond_semantic_target(
-    request: super::SemanticTargetRequest,
+    request_id: u64,
+    reply_path: &Path,
     target: Option<nickel_session_protocol::ResolvedShellTarget>,
 ) {
     let message = target.map_or_else(
@@ -1542,7 +1547,19 @@ pub fn respond_semantic_target(
         },
         ServerMessage::ShellSemanticTarget,
     );
-    send_semantic_target_response(&request.reply_path, request.request_id, message);
+    send_semantic_target_response(reply_path, request_id, message);
+}
+
+pub fn respond_runtime_diagnostics(
+    request_id: u64,
+    reply_path: &Path,
+    diagnostics: nickel_session_protocol::ShellRuntimeDiagnostics,
+) {
+    send_semantic_target_response(
+        reply_path,
+        request_id,
+        ServerMessage::ShellRuntimeDiagnostics(diagnostics),
+    );
 }
 
 fn respond_semantic_target_error(

@@ -2,7 +2,7 @@
 
 use nickel_input::{
     AggregateModifier, InputEvent, KeyCode, KeyEdge, LogicalKey, NamedKey, PhysicalKey,
-    PointerButton, PointerEvent, TextEvent,
+    PointerButton, PointerEvent, TextEvent, TouchEvent, TouchId,
 };
 
 use crate::{Point, Shortcut, UiEvent};
@@ -28,6 +28,7 @@ pub enum InputCommand {
 #[derive(Clone, Debug, Default)]
 pub struct FocusedInputDispatcher {
     pointer: Point,
+    active_touch: Option<TouchId>,
 }
 
 impl FocusedInputDispatcher {
@@ -54,6 +55,44 @@ impl FocusedInputDispatcher {
                 };
                 vec![InputCommand::Ui(UiEvent::PointerMoved(self.pointer))]
             }
+            InputEvent::Touch(TouchEvent::Started {
+                contact, position, ..
+            }) if self.active_touch.is_none() => {
+                self.active_touch = Some(*contact);
+                self.pointer = Point {
+                    x: position.x as f32,
+                    y: position.y as f32,
+                };
+                vec![
+                    InputCommand::Ui(UiEvent::PointerMoved(self.pointer)),
+                    InputCommand::Ui(UiEvent::PointerPressed(self.pointer)),
+                ]
+            }
+            InputEvent::Touch(TouchEvent::Moved {
+                contact, position, ..
+            }) if self.active_touch == Some(*contact) => {
+                self.pointer = Point {
+                    x: position.x as f32,
+                    y: position.y as f32,
+                };
+                vec![InputCommand::Ui(UiEvent::PointerMoved(self.pointer))]
+            }
+            InputEvent::Touch(TouchEvent::Ended {
+                contact, position, ..
+            }) if self.active_touch == Some(*contact) => {
+                self.active_touch = None;
+                self.pointer = Point {
+                    x: position.x as f32,
+                    y: position.y as f32,
+                };
+                vec![InputCommand::Ui(UiEvent::PointerReleased(self.pointer))]
+            }
+            InputEvent::Touch(TouchEvent::Cancelled { contact, .. })
+                if self.active_touch == Some(*contact) =>
+            {
+                self.active_touch = None;
+                vec![InputCommand::Ui(UiEvent::PointerCancelled)]
+            }
             InputEvent::Pointer(PointerEvent::Button {
                 button: PointerButton::Primary,
                 edge,
@@ -70,6 +109,20 @@ impl FocusedInputDispatcher {
                     KeyEdge::Pressed => UiEvent::PointerPressed(self.pointer),
                     KeyEdge::Released => UiEvent::PointerReleased(self.pointer),
                 })]
+            }
+            InputEvent::Pointer(PointerEvent::Button {
+                button: PointerButton::Secondary,
+                edge: KeyEdge::Pressed,
+                position,
+                ..
+            }) => {
+                if let Some(position) = position {
+                    self.pointer = Point {
+                        x: position.x as f32,
+                        y: position.y as f32,
+                    };
+                }
+                vec![InputCommand::Ui(UiEvent::PointerContext(self.pointer))]
             }
             InputEvent::Pointer(PointerEvent::Axis {
                 delta, position, ..
@@ -107,6 +160,9 @@ impl FocusedInputDispatcher {
                     control
                 };
                 let command = match (&event.logical, &event.physical) {
+                    (_, PhysicalKey::Code(KeyCode::F10)) if shift && !event.repeat => {
+                        InputCommand::Ui(UiEvent::KeyboardContextMenu)
+                    }
                     (LogicalKey::Character(value), _)
                         if command && value.eq_ignore_ascii_case("r") && !event.repeat =>
                     {
@@ -337,6 +393,48 @@ mod tests {
             FocusedInputDispatcher::default()
                 .dispatch(&event)
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn shift_f10_dispatches_the_shared_context_action() {
+        assert_eq!(
+            FocusedInputDispatcher::default().dispatch(&key(
+                LogicalKey::Native(NativeKey {
+                    namespace: "fixture".into(),
+                    code: NativeCode::Numeric(10),
+                }),
+                KeyCode::F10,
+                &[Modifier::ShiftLeft]
+            )),
+            [InputCommand::Ui(UiEvent::KeyboardContextMenu)]
+        );
+    }
+
+    #[test]
+    fn one_touch_contact_uses_the_canonical_pointer_transition_and_cancel_path() {
+        let mut dispatch = FocusedInputDispatcher::default();
+        let started = InputEvent::Touch(TouchEvent::Started {
+            device: DeviceId(7),
+            order: EventOrder(1),
+            contact: TouchId(9),
+            position: nickel_input::Point { x: 12.0, y: 18.0 },
+        });
+        assert_eq!(
+            dispatch.dispatch(&started),
+            [
+                InputCommand::Ui(UiEvent::PointerMoved(Point { x: 12.0, y: 18.0 })),
+                InputCommand::Ui(UiEvent::PointerPressed(Point { x: 12.0, y: 18.0 })),
+            ]
+        );
+        let cancelled = InputEvent::Touch(TouchEvent::Cancelled {
+            device: DeviceId(7),
+            order: EventOrder(2),
+            contact: TouchId(9),
+        });
+        assert_eq!(
+            dispatch.dispatch(&cancelled),
+            [InputCommand::Ui(UiEvent::PointerCancelled)]
         );
     }
 }

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-pub const PROTOCOL_VERSION: u16 = 14;
+pub const PROTOCOL_VERSION: u16 = 15;
 pub const MAX_FRAME_BYTES: usize = 196_608;
 pub const MAX_PREVIEW_WIDTH: u16 = 256;
 pub const MAX_PREVIEW_HEIGHT: u16 = 144;
@@ -8,6 +8,7 @@ pub const MAX_SUBSCRIBERS: usize = 8;
 pub const MAX_WINDOWS: usize = 1_024;
 pub const MAX_OUTPUTS: usize = 32;
 pub const MAX_WORKSPACES: usize = 32;
+pub const MAX_RUNTIME_PERFORMANCE_SAMPLES: usize = 64;
 
 const MAGIC: [u8; 4] = *b"NIKL";
 const HEADER_BYTES: usize = 10;
@@ -46,6 +47,9 @@ pub enum Query {
     SecureStorage,
     IdleInhibition,
     CacheDiagnostics,
+    /// Read bounded renderer timing and allocation telemetry from the shell's
+    /// capability-gated nested test endpoint.
+    ShellRuntimeDiagnostics,
     Workspaces,
     Preview {
         window: WindowId,
@@ -369,6 +373,7 @@ pub enum ServerMessage {
         surfaces: u16,
     },
     CacheDiagnostics(CacheDiagnostics),
+    ShellRuntimeDiagnostics(ShellRuntimeDiagnostics),
     Workspaces(WorkspaceState),
     Preview(PreviewFrame),
     ShellSemanticTarget(ResolvedShellTarget),
@@ -380,6 +385,51 @@ pub struct CacheDiagnostics {
     pub preview_entries: u16,
     pub preview_capacity: u16,
     pub preview_bytes: u64,
+}
+
+/// Bounded runtime evidence retained by a shell presenter.
+///
+/// Durations are represented as integer microseconds so evidence is stable
+/// across JSON encoders without claiming sub-microsecond precision. Each
+/// sample vector is capped by [`MAX_RUNTIME_PERFORMANCE_SAMPLES`].
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShellRuntimeDiagnostics {
+    pub warm_present_us: Vec<u64>,
+    pub input_to_visible_us: Vec<u64>,
+    pub retained_presenter_bytes: u64,
+    pub frame_allocations: AllocationMeasurement,
+}
+
+impl ShellRuntimeDiagnostics {
+    pub fn validate(&self) -> Result<(), FrameError> {
+        if self.warm_present_us.len() > MAX_RUNTIME_PERFORMANCE_SAMPLES
+            || self.input_to_visible_us.len() > MAX_RUNTIME_PERFORMANCE_SAMPLES
+        {
+            return Err(FrameError::TooLarge);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AllocationMeasurement {
+    pub count: u64,
+    pub scope: AllocationScope,
+}
+
+/// Scope covered by an allocator-visible measurement.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AllocationScope {
+    /// All allocations made by the instrumented shell process while sampling.
+    Process,
+    /// Allocations made by the thread executing the presenter while sampling.
+    Thread,
+    /// Allocations explicitly owned by the presenter implementation.
+    Presenter,
+    /// The runtime does not currently expose an allocation counter.
+    #[default]
+    Unavailable,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -899,6 +949,45 @@ mod tests {
             decode::<ClientEnvelope>(&encode(&screenshot).unwrap()).unwrap(),
             screenshot
         );
+    }
+
+    #[test]
+    fn shell_runtime_diagnostics_are_versioned_bounded_and_explicit() {
+        let request = ClientEnvelope {
+            token: "test-capability".into(),
+            request_id: 14,
+            request: Request::Query(Query::ShellRuntimeDiagnostics),
+        };
+        assert_eq!(
+            decode::<ClientEnvelope>(&encode(&request).unwrap()).unwrap(),
+            request
+        );
+
+        let diagnostics = ShellRuntimeDiagnostics {
+            warm_present_us: vec![950; MAX_RUNTIME_PERFORMANCE_SAMPLES],
+            input_to_visible_us: vec![2_400; MAX_RUNTIME_PERFORMANCE_SAMPLES],
+            retained_presenter_bytes: 1_048_576,
+            frame_allocations: AllocationMeasurement {
+                count: 0,
+                scope: AllocationScope::Process,
+            },
+        };
+        assert_eq!(diagnostics.validate(), Ok(()));
+        let json = serde_json::to_value(&diagnostics).unwrap();
+        assert_eq!(json["warm_present_us"][0], 950);
+        assert_eq!(json["frame_allocations"]["scope"], "process");
+        let response = ServerEnvelope {
+            request_id: 14,
+            message: ServerMessage::ShellRuntimeDiagnostics(diagnostics.clone()),
+        };
+        assert_eq!(
+            decode::<ServerEnvelope>(&encode(&response).unwrap()).unwrap(),
+            response
+        );
+
+        let mut oversized = diagnostics;
+        oversized.warm_present_us.push(950);
+        assert_eq!(oversized.validate(), Err(FrameError::TooLarge));
     }
 
     #[test]

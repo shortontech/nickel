@@ -12,15 +12,15 @@ usage_status = "Authorized by the repository owner for use as a Nickel design an
 source = "Copied from the repository owner's supplied /home/shorton/Documents/Nickel Settings.png on 2026-08-28."
 
 [[reference]]
-id = "nickel-start-menu-2026-08-27"
+id = "nickel-controller-launcher-2026-08-31"
 path = "references/nickel-start-menu.png"
 kind = "visual-composition-reference"
-width = 1401
-height = 1123
-sha256 = "548e5269189a1b4d1e8341527296d7974d23f7fc239b28a91a6e7f0ae1f31eb8"
-authorship = "User-provided Nickel design reference; original production method is not independently recorded."
+width = 1402
+height = 1122
+sha256 = "e8da9f1045b2045a1bd5e51812319ee159603dc56db7c6b7de1647f209cadebf"
+authorship = "User-provided generated Nickel controller-launcher design reference; exact generation metadata is not independently recorded."
 usage_status = "Authorized by the repository owner for use as a Nickel design and test reference; not shipped as product artwork."
-source = "Copied from the repository owner's supplied /home/shorton/Documents/Nickel Start Menu.png on 2026-08-27."
+source = "Copied from the repository owner's supplied /home/shorton/Downloads/ChatGPT Image Aug 31, 2026, 05_12_38 AM.png on 2026-08-31."
 
 [[icon_family]]
 id = "start-menu-structural"

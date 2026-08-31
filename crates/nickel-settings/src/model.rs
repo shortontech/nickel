@@ -4,7 +4,6 @@ use crate::persistence::{load_shell_settings, load_wallpaper_settings};
 pub(super) struct SettingsApp {
     pub(super) localizer: Localizer,
     pub(super) redraw_requested: Cell<bool>,
-    pub(super) running: bool,
     pub(super) displays: Vec<DisplayCard>,
     pub(super) selected: usize,
     pub(super) cursor: (i32, i32),
@@ -17,7 +16,7 @@ pub(super) struct SettingsApp {
     pub(super) page: SettingsPage,
     pub(super) sidebar_query: String,
     pub(super) pending_focus: Option<nickel_ui::UiId>,
-    pub(super) narrow_navigation: bool,
+    pub(super) active_destination: Option<SettingsPage>,
     pub(super) appearance_tab: AppearanceTab,
     pub(super) appearance_notice: Option<AppearanceNotice>,
     pub(super) persistence_enabled: bool,
@@ -30,9 +29,8 @@ pub(super) struct SettingsApp {
     pub(super) wallpaper_status: Option<String>,
     pub(super) wallpaper_dialog_rx:
         Option<std::sync::mpsc::Receiver<nickel_platform::FileDialogOutcome>>,
+    pub(super) wallpaper_poll_delay: Duration,
     pub(super) appearance_save_deadline: Option<Instant>,
-    pub(super) resize_deadline: Option<Instant>,
-    pub(super) frame_interval: Duration,
     pub(super) network_adapters: Vec<NetworkAdapter>,
     pub(super) wifi_networks: Vec<WifiNetwork>,
     pub(super) network_available: bool,
@@ -44,13 +42,11 @@ pub(super) struct SettingsApp {
     pub(super) bluetooth: BluetoothSnapshot,
     pub(super) next_bluetooth_refresh: Instant,
     pub(super) next_network_refresh: Instant,
-    pub(super) ui: UiTree<SettingsMessage>,
+    #[cfg(test)]
+    pub(super) ui: UiFrame<SettingsMessage>,
+    #[cfg(test)]
     pub(super) ui_state: UiStateStore,
     pub(super) controller: ControllerInput,
-    pub(super) navigation: PaneNavigation,
-    pub(super) controller_page: SettingsPage,
-    pub(super) input_adapter: nickel_input::sdl::Adapter,
-    pub(super) input_dispatcher: FocusedInputDispatcher,
 }
 
 impl Default for SettingsApp {
@@ -71,7 +67,6 @@ impl Default for SettingsApp {
         Self {
             localizer,
             redraw_requested: Cell::new(true),
-            running: true,
             displays: vec![
                 DisplayCard {
                     connector: "DVI-I-1".into(),
@@ -115,7 +110,7 @@ impl Default for SettingsApp {
             page: SettingsPage::Display,
             sidebar_query: String::new(),
             pending_focus: None,
-            narrow_navigation: false,
+            active_destination: Some(SettingsPage::Display),
             appearance_tab: AppearanceTab::General,
             appearance_notice: None,
             persistence_enabled: !cfg!(test),
@@ -127,9 +122,8 @@ impl Default for SettingsApp {
             wallpaper_dimensions,
             wallpaper_status,
             wallpaper_dialog_rx: None,
+            wallpaper_poll_delay: Duration::from_millis(16),
             appearance_save_deadline: None,
-            resize_deadline: None,
-            frame_interval: Duration::from_millis(16),
             network_adapters: Vec::new(),
             wifi_networks: Vec::new(),
             network_available: false,
@@ -141,13 +135,11 @@ impl Default for SettingsApp {
             bluetooth: BluetoothSnapshot::default(),
             next_bluetooth_refresh: Instant::now(),
             next_network_refresh: Instant::now(),
-            ui: UiTree::default(),
+            #[cfg(test)]
+            ui: UiFrame::default(),
+            #[cfg(test)]
             ui_state: UiStateStore::default(),
             controller: ControllerInput::new(),
-            navigation: PaneNavigation::default(),
-            controller_page: SettingsPage::Display,
-            input_adapter: nickel_input::sdl::Adapter::default(),
-            input_dispatcher: FocusedInputDispatcher::default(),
         }
     }
 }
@@ -156,7 +148,7 @@ impl SettingsApp {
     pub(super) fn with_initial_page(page: SettingsPage) -> Self {
         Self {
             page,
-            controller_page: page,
+            active_destination: Some(page),
             ..Self::default()
         }
     }
@@ -167,7 +159,13 @@ impl SettingsApp {
         };
         let outcome = match receiver.try_recv() {
             Ok(outcome) => outcome,
-            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                self.wallpaper_poll_delay = self
+                    .wallpaper_poll_delay
+                    .saturating_mul(2)
+                    .min(Duration::from_millis(250));
+                return;
+            }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 nickel_platform::FileDialogOutcome::Failed(
                     self.localizer.text("settings-wallpaper-picker-failed"),
@@ -175,6 +173,7 @@ impl SettingsApp {
             }
         };
         self.wallpaper_dialog_rx = None;
+        self.wallpaper_poll_delay = Duration::from_millis(16);
         match outcome {
             nickel_platform::FileDialogOutcome::Cancelled => {
                 self.wallpaper_status = None;
@@ -207,11 +206,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn initial_page_also_sets_controller_navigation_page() {
+    fn initial_page_is_the_active_navigation_destination() {
         let app = SettingsApp::with_initial_page(SettingsPage::Appearance);
 
         assert_eq!(app.page, SettingsPage::Appearance);
-        assert_eq!(app.controller_page, SettingsPage::Appearance);
+        assert_eq!(app.active_destination, Some(SettingsPage::Appearance));
     }
 
     #[test]

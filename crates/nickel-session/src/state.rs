@@ -959,9 +959,9 @@ impl NickelSession {
                 }
                 ServerMessage::Preview(preview)
             }
-            Query::ShellSemanticTarget { .. } => protocol_error(
+            Query::ShellSemanticTarget { .. } | Query::ShellRuntimeDiagnostics => protocol_error(
                 ErrorCode::InvalidRequest,
-                "shell semantic targets are resolved by the nested shell test endpoint",
+                "shell-only queries are resolved by the nested shell test endpoint",
             ),
         }
     }

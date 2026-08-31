@@ -21,7 +21,7 @@ impl Application for Counter {
         }
     }
 
-    fn view(&self) -> impl View<Message> {
+    fn view(&self, _context: nickel_ui::ViewContext) -> impl View<Message> {
         ui! {
             <Column id={id!(counter)} gap={12.0} padding={Insets::all(24.0)}>
                 <Text scale={2.0}>{format!("Count: {}", self.value)}</Text>

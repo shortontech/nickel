@@ -1,0 +1,28 @@
+[package]
+name = "nickel-ui-workbench"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Focused semantic and visual fixture workbench for nickel-ui"
+
+[dependencies]
+image.workspace = true
+nickel-file = { path = "../nickel-file", optional = true }
+nickel-gaze = { path = "../nickel-gaze", optional = true }
+nickel-markdown = { path = "../nickel-markdown" }
+nickel-markdown-ui = { path = "../nickel-markdown-ui", optional = true, features = ["workbench-fixtures"] }
+nickel-shell = { path = "../nickel-shell", optional = true, features = ["workbench-fixtures"] }
+nickel-ui = { path = "../nickel-ui" }
+nickel-ui-testkit = { path = "../nickel-ui-testkit" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+toml.workspace = true
+
+[features]
+default = []
+file-provider = ["dep:nickel-file"]
+gaze-provider = ["dep:nickel-gaze"]
+markdown-viewer-provider = ["dep:nickel-markdown-ui"]
+shell-provider = ["dep:nickel-shell"]

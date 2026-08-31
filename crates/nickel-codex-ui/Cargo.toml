@@ -8,6 +8,7 @@ description = "Standalone Nickel Codex chat application"
 
 [features]
 authenticated-live-tests = []
+workbench-fixtures = []
 
 [dependencies]
 nickel-codex = { path = "../nickel-codex" }
@@ -22,4 +23,5 @@ toml.workspace = true
 
 [dev-dependencies]
 image.workspace = true
+nickel-ui-testkit = { path = "../nickel-ui-testkit" }
 tempfile.workspace = true

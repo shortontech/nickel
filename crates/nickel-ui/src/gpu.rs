@@ -42,7 +42,7 @@ impl DamageRegion {
 
 /// SDL presentation backend for the platform-neutral component tree.
 ///
-/// Component layout and hit testing remain in `UiTree`; this type only rasterizes
+/// Component layout and hit testing remain in `UiFrame`; this type only rasterizes
 /// its paint list. The retained pixel buffer makes an eventual SDL GPU upload or
 /// Wayland damage submission independent of component semantics.
 pub struct SdlComponentRenderer {
@@ -54,28 +54,12 @@ pub struct SdlComponentRenderer {
     previous_commands: Vec<PaintCommand>,
     font_system: FontSystem,
     swash_cache: SwashCache,
-    text_cache: HashMap<TextCacheKey, Arc<Vec<CachedGlyphPixel>>>,
+    swash_source_bytes: usize,
 }
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct TextCacheKey {
-    text: String,
-    font_size: u32,
-    width: u32,
-    height: u32,
-    align: u8,
-    bold: bool,
-    wrap: bool,
-    color: Color,
-}
-
-type CachedGlyphPixel = (i32, i32, u32, u32, TextColor);
 type PhysicalGlyphs = Vec<(PhysicalGlyph, TextColor)>;
+const SOFTWARE_SWASH_SOURCE_BUDGET: usize = 2 * 1024 * 1024;
 type StrikeLines = Vec<(Rect, Color)>;
 type SpanBackgrounds = Vec<(Rect, Color)>;
-
-/// Transitional name retained while callers move from the old wgpu backend.
-pub type ComponentGpu = SdlComponentRenderer;
 
 pub struct SdlCanvasPresenter {
     canvas: WindowCanvas,
@@ -84,6 +68,91 @@ pub struct SdlCanvasPresenter {
     glyph_atlas: GlyphAtlas,
     image_textures: HashMap<u16, CachedImageTexture>,
     text_layouts: HashMap<PhysicalTextKey, Arc<CachedPhysicalText>>,
+    text_layout_bytes: usize,
+    image_texture_bytes: usize,
+    cache_activity: CacheActivity,
+    cache_mode: PresenterCacheMode,
+}
+
+/// Diagnostic policy for comparing accelerated presentation with and without
+/// derived performance caches. Resource textures remain bounded and reusable.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PresenterCacheMode {
+    #[default]
+    Enabled,
+    BypassDerived,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct CacheActivity {
+    hits: u64,
+    misses: u64,
+    insertions: u64,
+    evictions: u64,
+    invalidations: u64,
+    recomputation_nanos: u64,
+    peak_bytes: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PresenterCacheDiagnostics {
+    pub text_layouts: usize,
+    pub text_layout_bytes: usize,
+    pub image_textures: usize,
+    pub glyphs: usize,
+    pub live_bytes: usize,
+    pub peak_bytes: usize,
+    pub hits: u64,
+    pub misses: u64,
+    pub insertions: u64,
+    pub evictions: u64,
+    pub invalidations: u64,
+    pub recomputation_nanos: u64,
+}
+
+/// Process-level accounting assembled from every live presenter. Allocator RSS
+/// remains a separate operating-system measurement and is deliberately not
+/// inferred from these cache-owned byte estimates.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AggregatePresenterCacheDiagnostics {
+    pub presenters: usize,
+    pub live_entries: usize,
+    pub live_bytes: usize,
+    pub peak_cache_bytes: usize,
+    pub hits: u64,
+    pub misses: u64,
+    pub insertions: u64,
+    pub evictions: u64,
+    pub invalidations: u64,
+    pub recomputation_nanos: u64,
+}
+
+impl AggregatePresenterCacheDiagnostics {
+    pub fn from_presenters(
+        presenters: impl IntoIterator<Item = PresenterCacheDiagnostics>,
+    ) -> Self {
+        presenters
+            .into_iter()
+            .fold(Self::default(), |mut total, item| {
+                total.presenters = total.presenters.saturating_add(1);
+                total.live_entries = total.live_entries.saturating_add(
+                    item.text_layouts
+                        .saturating_add(item.image_textures)
+                        .saturating_add(item.glyphs),
+                );
+                total.live_bytes = total.live_bytes.saturating_add(item.live_bytes);
+                total.peak_cache_bytes = total.peak_cache_bytes.saturating_add(item.peak_bytes);
+                total.hits = total.hits.saturating_add(item.hits);
+                total.misses = total.misses.saturating_add(item.misses);
+                total.insertions = total.insertions.saturating_add(item.insertions);
+                total.evictions = total.evictions.saturating_add(item.evictions);
+                total.invalidations = total.invalidations.saturating_add(item.invalidations);
+                total.recomputation_nanos = total
+                    .recomputation_nanos
+                    .saturating_add(item.recomputation_nanos);
+                total
+            })
+    }
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -106,12 +175,35 @@ struct CachedPhysicalText {
 }
 
 struct CachedImageTexture {
-    identity: usize,
+    source: CachedImageSource,
     texture: Texture,
+}
+
+struct CachedImageSource {
+    generation: u64,
+    width: u32,
+    height: u32,
+}
+
+impl CachedImageSource {
+    fn new(generation: u64, image: &Arc<image::RgbaImage>) -> Self {
+        Self {
+            generation,
+            width: image.width(),
+            height: image.height(),
+        }
+    }
+
+    fn matches(&self, generation: u64, image: &Arc<image::RgbaImage>) -> bool {
+        self.generation == generation
+            && self.width == image.width()
+            && self.height == image.height()
+    }
 }
 
 const GLYPH_ATLAS_SIZE: u32 = 1024;
 const TEXT_LAYOUT_CACHE_CAPACITY: usize = 2048;
+const TEXT_LAYOUT_CACHE_BYTE_BUDGET: usize = 16 * 1024 * 1024;
 
 struct GlyphAtlas {
     texture: Texture,
@@ -216,24 +308,25 @@ impl GlyphAtlas {
         font_system: &mut FontSystem,
         swash_cache: &mut SwashCache,
         key: CacheKey,
-    ) -> Result<Option<GlyphAtlasEntry>, String> {
+    ) -> Result<(Option<GlyphAtlasEntry>, bool), String> {
         if let Some(entry) = self.entries.get(&key) {
-            return Ok(Some(*entry));
+            return Ok((Some(*entry), true));
         }
         let Some(image) = swash_cache.get_image(font_system, key).clone() else {
-            return Ok(None);
+            return Ok((None, false));
         };
         let width = image.placement.width;
         let height = image.placement.height;
         if width == 0 || height == 0 {
-            return Ok(None);
+            return Ok((None, false));
         }
         let position = match self.allocator.allocate(width, height) {
             Some(position) => position,
             None => {
                 self.clear()?;
+                *swash_cache = SwashCache::new();
                 let Some(position) = self.allocator.allocate(width, height) else {
-                    return Ok(None);
+                    return Ok((None, false));
                 };
                 position
             }
@@ -266,7 +359,7 @@ impl GlyphAtlas {
             colored,
         };
         self.entries.insert(key, entry);
-        Ok(Some(entry))
+        Ok((Some(entry), false))
     }
 }
 
@@ -295,6 +388,10 @@ impl SdlCanvasPresenter {
             glyph_atlas,
             image_textures: HashMap::new(),
             text_layouts: HashMap::new(),
+            text_layout_bytes: 0,
+            image_texture_bytes: 0,
+            cache_activity: CacheActivity::default(),
+            cache_mode: PresenterCacheMode::Enabled,
         })
     }
 
@@ -304,6 +401,58 @@ impl SdlCanvasPresenter {
 
     pub fn window_mut(&mut self) -> &mut Window {
         self.canvas.window_mut()
+    }
+
+    pub fn cache_diagnostics(&self) -> PresenterCacheDiagnostics {
+        let live_bytes = self.text_layout_bytes
+            + self.image_texture_bytes
+            + (GLYPH_ATLAS_SIZE * GLYPH_ATLAS_SIZE * 4) as usize;
+        PresenterCacheDiagnostics {
+            text_layouts: self.text_layouts.len(),
+            text_layout_bytes: self.text_layout_bytes,
+            image_textures: self.image_textures.len(),
+            glyphs: self.glyph_atlas.entries.len(),
+            live_bytes,
+            peak_bytes: self.cache_activity.peak_bytes.max(live_bytes),
+            hits: self.cache_activity.hits,
+            misses: self.cache_activity.misses,
+            insertions: self.cache_activity.insertions,
+            evictions: self.cache_activity.evictions,
+            invalidations: self.cache_activity.invalidations,
+            recomputation_nanos: self.cache_activity.recomputation_nanos,
+        }
+    }
+
+    /// Selects the diagnostic cache path. Bypass mode clears retained text
+    /// layouts and shapes every text primitive through the canonical fallback.
+    pub fn set_cache_mode(&mut self, mode: PresenterCacheMode) {
+        if self.cache_mode != mode {
+            self.text_layouts.clear();
+            self.text_layout_bytes = 0;
+            self.cache_activity.invalidations = self.cache_activity.invalidations.saturating_add(1);
+            self.cache_mode = mode;
+        }
+    }
+
+    /// Releases derived accelerated resources when the owning surface is
+    /// hidden. The fixed-size atlas texture remains allocated but is emptied;
+    /// subsequent presentation repopulates every resource on demand.
+    pub fn suspend(&mut self) -> Result<(), String> {
+        self.cache_activity.invalidations = self.cache_activity.invalidations.saturating_add(1);
+        self.cache_activity.evictions = self.cache_activity.evictions.saturating_add(
+            (self.text_layouts.len() + self.image_textures.len() + self.glyph_atlas.entries.len())
+                as u64,
+        );
+        self.text_layouts.clear();
+        self.text_layout_bytes = 0;
+        self.image_texture_bytes = 0;
+        for (_, cached) in self.image_textures.drain() {
+            // SAFETY: this presenter created and exclusively owns the SDL
+            // texture. It is removed from the cache before destruction.
+            unsafe { cached.texture.destroy() };
+        }
+        self.swash_cache = SwashCache::new();
+        self.glyph_atlas.clear()
     }
 
     pub fn present_accelerated(
@@ -406,6 +555,7 @@ impl SdlCanvasPresenter {
             PaintCommand::Image {
                 bounds,
                 id,
+                generation,
                 image,
                 high_density,
             } => {
@@ -413,12 +563,7 @@ impl SdlCanvasPresenter {
                     .as_ref()
                     .filter(|_| scale >= 1.5)
                     .unwrap_or(image);
-                self.direct_image(
-                    physical_rect(*bounds, scale),
-                    *id,
-                    Arc::as_ptr(image) as usize,
-                    image,
-                )?
+                self.direct_image(physical_rect(*bounds, scale), *id, *generation, image)?
             }
             PaintCommand::PushClip(rect) => {
                 let rect = physical_rect(*rect, scale);
@@ -560,9 +705,15 @@ impl SdlCanvasPresenter {
         parent_clip: Rect,
     ) -> Result<(), String> {
         let key = physical_text_key(text, &[], bounds, size, color, align, bold, wrap);
-        let layout = if let Some(layout) = self.text_layouts.get(&key) {
+        let cached = (self.cache_mode == PresenterCacheMode::Enabled)
+            .then(|| self.text_layouts.get(&key))
+            .flatten();
+        let layout = if let Some(layout) = cached {
+            self.cache_activity.hits = self.cache_activity.hits.saturating_add(1);
             Arc::clone(layout)
         } else {
+            self.cache_activity.misses = self.cache_activity.misses.saturating_add(1);
+            let started = std::time::Instant::now();
             let relative_bounds = Rect::new(0.0, 0.0, bounds.size.width, bounds.size.height);
             let layout = Arc::new(CachedPhysicalText {
                 glyphs: shape_physical_glyphs(
@@ -578,17 +729,43 @@ impl SdlCanvasPresenter {
                 strikes: Vec::new(),
                 backgrounds: Vec::new(),
             });
-            insert_bounded_text_layout(&mut self.text_layouts, key, Arc::clone(&layout));
+            if self.cache_mode == PresenterCacheMode::Enabled {
+                insert_bounded_text_layout(
+                    &mut self.text_layouts,
+                    &mut self.text_layout_bytes,
+                    key,
+                    Arc::clone(&layout),
+                );
+                self.cache_activity.insertions = self.cache_activity.insertions.saturating_add(1);
+            }
+            self.cache_activity.recomputation_nanos = self
+                .cache_activity
+                .recomputation_nanos
+                .saturating_add(started.elapsed().as_nanos().min(u64::MAX as u128) as u64);
+            self.cache_activity.peak_bytes = self.cache_activity.peak_bytes.max(
+                self.text_layout_bytes
+                    + self.image_texture_bytes
+                    + (GLYPH_ATLAS_SIZE * GLYPH_ATLAS_SIZE * 4) as usize,
+            );
             layout
         };
         self.canvas.set_clip_rect(Some(sdl_rect(parent_clip)));
         for (glyph, glyph_color) in &layout.glyphs {
-            let Some(entry) = self.glyph_atlas.entry(
+            let (entry, atlas_hit) = self.glyph_atlas.entry(
                 &mut self.font_system,
                 &mut self.swash_cache,
                 glyph.cache_key,
-            )?
-            else {
+            )?;
+            if atlas_hit {
+                self.cache_activity.hits = self.cache_activity.hits.saturating_add(1);
+            } else {
+                self.cache_activity.misses = self.cache_activity.misses.saturating_add(1);
+                if entry.is_some() {
+                    self.cache_activity.insertions =
+                        self.cache_activity.insertions.saturating_add(1);
+                }
+            }
+            let Some(entry) = entry else {
                 continue;
             };
             let destination = Rect::new(
@@ -639,9 +816,15 @@ impl SdlCanvasPresenter {
         parent_clip: Rect,
     ) -> Result<(), String> {
         let key = physical_text_key(text, spans, bounds, size, color, align, false, true);
-        let layout = if let Some(layout) = self.text_layouts.get(&key) {
+        let cached = (self.cache_mode == PresenterCacheMode::Enabled)
+            .then(|| self.text_layouts.get(&key))
+            .flatten();
+        let layout = if let Some(layout) = cached {
+            self.cache_activity.hits = self.cache_activity.hits.saturating_add(1);
             Arc::clone(layout)
         } else {
+            self.cache_activity.misses = self.cache_activity.misses.saturating_add(1);
+            let started = std::time::Instant::now();
             let relative_bounds = Rect::new(0.0, 0.0, bounds.size.width, bounds.size.height);
             let (glyphs, strikes, backgrounds) = shape_styled_physical_glyphs(
                 &mut self.font_system,
@@ -657,7 +840,24 @@ impl SdlCanvasPresenter {
                 strikes,
                 backgrounds,
             });
-            insert_bounded_text_layout(&mut self.text_layouts, key, Arc::clone(&layout));
+            if self.cache_mode == PresenterCacheMode::Enabled {
+                insert_bounded_text_layout(
+                    &mut self.text_layouts,
+                    &mut self.text_layout_bytes,
+                    key,
+                    Arc::clone(&layout),
+                );
+                self.cache_activity.insertions = self.cache_activity.insertions.saturating_add(1);
+            }
+            self.cache_activity.recomputation_nanos = self
+                .cache_activity
+                .recomputation_nanos
+                .saturating_add(started.elapsed().as_nanos().min(u64::MAX as u128) as u64);
+            self.cache_activity.peak_bytes = self.cache_activity.peak_bytes.max(
+                self.text_layout_bytes
+                    + self.image_texture_bytes
+                    + (GLYPH_ATLAS_SIZE * GLYPH_ATLAS_SIZE * 4) as usize,
+            );
             layout
         };
         self.canvas.set_clip_rect(Some(sdl_rect(parent_clip)));
@@ -673,12 +873,21 @@ impl SdlCanvasPresenter {
             )?;
         }
         for (glyph, glyph_color) in &layout.glyphs {
-            let Some(entry) = self.glyph_atlas.entry(
+            let (entry, atlas_hit) = self.glyph_atlas.entry(
                 &mut self.font_system,
                 &mut self.swash_cache,
                 glyph.cache_key,
-            )?
-            else {
+            )?;
+            if atlas_hit {
+                self.cache_activity.hits = self.cache_activity.hits.saturating_add(1);
+            } else {
+                self.cache_activity.misses = self.cache_activity.misses.saturating_add(1);
+                if entry.is_some() {
+                    self.cache_activity.insertions =
+                        self.cache_activity.insertions.saturating_add(1);
+                }
+            }
+            let Some(entry) = entry else {
                 continue;
             };
             let destination = Rect::new(
@@ -732,16 +941,39 @@ impl SdlCanvasPresenter {
         &mut self,
         bounds: Rect,
         id: u16,
-        identity: usize,
-        image: &image::RgbaImage,
+        generation: u64,
+        image: &Arc<image::RgbaImage>,
     ) -> Result<(), String> {
-        if !self.image_textures.contains_key(&id) {
+        if image.width() == 0 || image.height() == 0 {
+            return Ok(());
+        }
+        let recreate = self
+            .image_textures
+            .get(&id)
+            .is_none_or(|cached| !cached.source.matches(generation, image));
+        if recreate {
+            self.cache_activity.misses = self.cache_activity.misses.saturating_add(1);
+            let started = std::time::Instant::now();
+            if let Some(cached) = self.image_textures.remove(&id) {
+                self.image_texture_bytes = self.image_texture_bytes.saturating_sub(
+                    cached.source.width as usize * cached.source.height as usize * 4,
+                );
+                self.cache_activity.evictions = self.cache_activity.evictions.saturating_add(1);
+                // SAFETY: every texture was created by `self.canvas`, which remains alive for the
+                // duration of this presenter.
+                unsafe { cached.texture.destroy() };
+            }
             if self.image_textures.len() >= 512 {
+                self.cache_activity.evictions = self
+                    .cache_activity
+                    .evictions
+                    .saturating_add(self.image_textures.len() as u64);
                 for (_, cached) in self.image_textures.drain() {
                     // SAFETY: every texture was created by `self.canvas`, which
                     // remains alive for the duration of this presenter.
                     unsafe { cached.texture.destroy() };
                 }
+                self.image_texture_bytes = 0;
             }
             let creator = self.canvas.texture_creator();
             let mut texture = creator
@@ -755,25 +987,28 @@ impl SdlCanvasPresenter {
                 .update(None, image.as_raw(), image.width().max(1) as usize * 4)
                 .map_err(|error| error.to_string())?;
             texture.set_blend_mode(BlendMode::Blend);
-            self.image_textures
-                .insert(id, CachedImageTexture { identity, texture });
-        } else if self
-            .image_textures
-            .get(&id)
-            .is_some_and(|cached| cached.identity != identity)
-        {
-            let cached = self
-                .image_textures
-                .get_mut(&id)
-                .expect("cached image texture");
-            cached
-                .texture
-                .update(None, image.as_raw(), image.width().max(1) as usize * 4)
-                .map_err(|error| error.to_string())?;
-            cached.identity = identity;
-        }
-        if image.width() == 0 || image.height() == 0 {
-            return Ok(());
+            self.image_textures.insert(
+                id,
+                CachedImageTexture {
+                    source: CachedImageSource::new(generation, image),
+                    texture,
+                },
+            );
+            self.image_texture_bytes = self
+                .image_texture_bytes
+                .saturating_add(image.width() as usize * image.height() as usize * 4);
+            self.cache_activity.insertions = self.cache_activity.insertions.saturating_add(1);
+            self.cache_activity.recomputation_nanos = self
+                .cache_activity
+                .recomputation_nanos
+                .saturating_add(started.elapsed().as_nanos().min(u64::MAX as u128) as u64);
+            self.cache_activity.peak_bytes = self.cache_activity.peak_bytes.max(
+                self.text_layout_bytes
+                    + self.image_texture_bytes
+                    + (GLYPH_ATLAS_SIZE * GLYPH_ATLAS_SIZE * 4) as usize,
+            );
+        } else {
+            self.cache_activity.hits = self.cache_activity.hits.saturating_add(1);
         }
         let destination = FRect::new(
             bounds.origin.x,
@@ -819,7 +1054,7 @@ impl SdlComponentRenderer {
             previous_commands: Vec::new(),
             font_system: FontSystem::new(),
             swash_cache: SwashCache::new(),
-            text_cache: HashMap::new(),
+            swash_source_bytes: 0,
         }
     }
 
@@ -858,6 +1093,21 @@ impl SdlComponentRenderer {
 
     pub fn invalidate(&mut self) {
         self.previous_commands.clear();
+    }
+
+    /// Release frame-sized and derived raster resources while a presenter is
+    /// hidden. The renderer remains reusable and grows to the next requested
+    /// size on [`Self::resize`].
+    pub fn suspend(&mut self) {
+        self.width = 1;
+        self.height = 1;
+        self.pixels = vec![Pixel::TRANSPARENT];
+        if self.upload.is_some() {
+            self.upload = Some(Self::create_upload_surface(1, 1));
+        }
+        self.previous_commands = Vec::new();
+        self.swash_cache = SwashCache::new();
+        self.swash_source_bytes = 0;
     }
 
     /// Rasterize a component display list and return its conservative damage.
@@ -1108,63 +1358,44 @@ impl SdlComponentRenderer {
             return;
         };
         let font_size = text_size(*scale) * self.scale;
+        if self.swash_source_bytes.saturating_add(text.len()) > SOFTWARE_SWASH_SOURCE_BUDGET {
+            self.swash_cache = SwashCache::new();
+            self.swash_source_bytes = 0;
+        }
+        self.swash_source_bytes = self.swash_source_bytes.saturating_add(text.len());
         let physical = physical_rect(*bounds, self.scale);
         let buffer_width = physical.size.width.max(1.0);
         let buffer_height = physical.size.height.max(font_size * 1.4);
-        let key = TextCacheKey {
-            text: text.clone(),
-            font_size: font_size.to_bits(),
-            width: buffer_width.to_bits(),
-            height: buffer_height.to_bits(),
-            align: match align {
-                TextAlign::Start => 0,
-                TextAlign::Center => 1,
-                TextAlign::End => 2,
+        let mut buffer = Buffer::new(
+            &mut self.font_system,
+            Metrics::new(font_size, font_size * 1.3),
+        );
+        buffer.set_size(Some(buffer_width), Some(buffer_height));
+        let mut attrs = Attrs::new().family(Family::SansSerif);
+        if *bold {
+            attrs = attrs.weight(Weight::BOLD);
+        }
+        buffer.set_wrap(if *wrap { Wrap::WordOrGlyph } else { Wrap::None });
+        buffer.set_text(text, &attrs, Shaping::Advanced, None);
+        for line in &mut buffer.lines {
+            line.set_align(Some(match align {
+                TextAlign::Start => Align::Left,
+                TextAlign::Center => Align::Center,
+                TextAlign::End => Align::Right,
+            }));
+        }
+        buffer.shape_until_scroll(&mut self.font_system, false);
+        let pixel = pixel(*color);
+        let text_color = TextColor::rgba(pixel.r, pixel.g, pixel.b, pixel.a);
+        let mut glyph_pixels = Vec::new();
+        buffer.draw(
+            &mut self.font_system,
+            &mut self.swash_cache,
+            text_color,
+            |x, y, width, height, glyph_color| {
+                glyph_pixels.push((x, y, width, height, glyph_color));
             },
-            bold: *bold,
-            wrap: *wrap,
-            color: *color,
-        };
-        let glyph_pixels = if let Some(cached) = self.text_cache.get(&key) {
-            Arc::clone(cached)
-        } else {
-            let mut buffer = Buffer::new(
-                &mut self.font_system,
-                Metrics::new(font_size, font_size * 1.3),
-            );
-            buffer.set_size(Some(buffer_width), Some(buffer_height));
-            let mut attrs = Attrs::new().family(Family::SansSerif);
-            if *bold {
-                attrs = attrs.weight(Weight::BOLD);
-            }
-            buffer.set_wrap(if *wrap { Wrap::WordOrGlyph } else { Wrap::None });
-            buffer.set_text(text, &attrs, Shaping::Advanced, None);
-            for line in &mut buffer.lines {
-                line.set_align(Some(match align {
-                    TextAlign::Start => Align::Left,
-                    TextAlign::Center => Align::Center,
-                    TextAlign::End => Align::Right,
-                }));
-            }
-            buffer.shape_until_scroll(&mut self.font_system, false);
-            let pixel = pixel(*color);
-            let text_color = TextColor::rgba(pixel.r, pixel.g, pixel.b, pixel.a);
-            let mut pixels = Vec::new();
-            buffer.draw(
-                &mut self.font_system,
-                &mut self.swash_cache,
-                text_color,
-                |x, y, width, height, glyph_color| {
-                    pixels.push((x, y, width, height, glyph_color));
-                },
-            );
-            if self.text_cache.len() >= 2048 {
-                self.text_cache.clear();
-            }
-            let pixels = Arc::new(pixels);
-            self.text_cache.insert(key, Arc::clone(&pixels));
-            pixels
-        };
+        );
         // Cosmic Text emits already-rasterized 1x1 physical pixels. Keep their
         // origin on the physical pixel grid; a fractional origin would make
         // `for_pixels` expand each sample across adjacent pixels.
@@ -1465,13 +1696,26 @@ fn physical_text_key(
 
 fn insert_bounded_text_layout(
     cache: &mut HashMap<PhysicalTextKey, Arc<CachedPhysicalText>>,
+    retained_bytes: &mut usize,
     key: PhysicalTextKey,
     layout: Arc<CachedPhysicalText>,
 ) {
-    if cache.len() >= TEXT_LAYOUT_CACHE_CAPACITY {
+    let entry_bytes = std::mem::size_of::<PhysicalTextKey>()
+        + key.text.len()
+        + key.spans.len() * std::mem::size_of::<StyledTextSpan>()
+        + layout.glyphs.len() * std::mem::size_of::<(PhysicalGlyph, TextColor)>()
+        + layout.strikes.len() * std::mem::size_of::<(Rect, Color)>()
+        + layout.backgrounds.len() * std::mem::size_of::<(Rect, Color)>();
+    if cache.len() >= TEXT_LAYOUT_CACHE_CAPACITY
+        || retained_bytes.saturating_add(entry_bytes) > TEXT_LAYOUT_CACHE_BYTE_BUDGET
+    {
         cache.clear();
+        *retained_bytes = 0;
     }
-    cache.insert(key, layout);
+    if entry_bytes <= TEXT_LAYOUT_CACHE_BYTE_BUDGET {
+        *retained_bytes += entry_bytes;
+        cache.insert(key, layout);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1690,14 +1934,356 @@ use std::{collections::HashMap, sync::Arc};
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::{
+        collections::{HashMap, HashSet},
+        sync::Arc,
+    };
 
     use cosmic_text::FontSystem;
 
     use super::{
-        PaintCommand, Rect, ShelfAllocator, TextAlign, command_intersects_clip, physical_text_key,
-        shape_physical_glyphs,
+        CachedImageSource, PaintCommand, Rect, SdlComponentRenderer, ShelfAllocator, TextAlign,
+        command_intersects_clip, physical_text_key, shape_physical_glyphs,
     };
+
+    #[test]
+    fn aggregate_presenter_diagnostics_saturate_across_surfaces() {
+        let aggregate = super::AggregatePresenterCacheDiagnostics::from_presenters([
+            super::PresenterCacheDiagnostics {
+                text_layouts: 2,
+                text_layout_bytes: 80,
+                image_textures: 1,
+                glyphs: 4,
+                live_bytes: 120,
+                peak_bytes: 180,
+                hits: 8,
+                misses: 2,
+                insertions: 6,
+                evictions: 1,
+                invalidations: 1,
+                recomputation_nanos: 90,
+            },
+            super::PresenterCacheDiagnostics {
+                text_layouts: 1,
+                text_layout_bytes: 40,
+                image_textures: 2,
+                glyphs: 3,
+                live_bytes: 100,
+                peak_bytes: 140,
+                hits: 5,
+                misses: 3,
+                insertions: 4,
+                evictions: 2,
+                invalidations: 2,
+                recomputation_nanos: 70,
+            },
+        ]);
+        assert_eq!(aggregate.presenters, 2);
+        assert_eq!(aggregate.live_entries, 13);
+        assert_eq!(aggregate.live_bytes, 220);
+        assert_eq!(aggregate.peak_cache_bytes, 320);
+        assert_eq!((aggregate.hits, aggregate.misses), (13, 5));
+        assert_eq!((aggregate.insertions, aggregate.evictions), (10, 3));
+        assert_eq!(aggregate.invalidations, 3);
+        assert_eq!(aggregate.recomputation_nanos, 160);
+    }
+
+    #[test]
+    fn accelerated_image_identity_uses_stable_content_generation_without_retaining_pixels() {
+        let first = Arc::new(image::RgbaImage::new(16, 8));
+        let source = CachedImageSource::new(41, &first);
+        assert!(source.matches(41, &first));
+        assert_eq!(Arc::strong_count(&first), 1);
+
+        let same_pixels_new_allocation = Arc::new((*first).clone());
+        assert!(source.matches(41, &same_pixels_new_allocation));
+        assert!(!source.matches(42, &same_pixels_new_allocation));
+        drop(first);
+        assert_eq!(Arc::strong_count(&same_pixels_new_allocation), 1);
+    }
+
+    #[test]
+    #[ignore = "release-mode cache admission benchmark"]
+    fn native_text_layout_cache_has_measured_equivalent_benefit() {
+        use std::time::Instant;
+
+        fn p95(mut samples: Vec<f64>) -> f64 {
+            samples.sort_by(f64::total_cmp);
+            samples[(samples.len() * 95 / 100).min(samples.len() - 1)]
+        }
+
+        let text = "Native accelerated Nickel text layout remains glyph equivalent";
+        let bounds = Rect::new(0.0, 0.0, 560.0, 80.0);
+        let key = physical_text_key(
+            text,
+            &[],
+            bounds,
+            18.0,
+            0xf4f7ffff,
+            TextAlign::Start,
+            false,
+            true,
+        );
+        let mut font_system = FontSystem::new();
+        let expected = shape_physical_glyphs(
+            &mut font_system,
+            text,
+            bounds,
+            18.0,
+            0xf4f7ffff,
+            TextAlign::Start,
+            false,
+            true,
+        );
+        let expected_debug = format!("{expected:?}");
+        let mut cache = HashMap::new();
+        cache.insert(
+            key.clone(),
+            Arc::new(super::CachedPhysicalText {
+                glyphs: expected.clone(),
+                strikes: Vec::new(),
+                backgrounds: Vec::new(),
+            }),
+        );
+        let mut cached = Vec::new();
+        let mut bypass = Vec::new();
+        for _ in 0..100 {
+            let started = Instant::now();
+            let hit = cache.get(&key).unwrap().glyphs.clone();
+            cached.push(started.elapsed().as_secs_f64() * 1_000_000.0);
+            assert_eq!(format!("{hit:?}"), expected_debug);
+
+            let started = Instant::now();
+            let shaped = shape_physical_glyphs(
+                &mut font_system,
+                text,
+                bounds,
+                18.0,
+                0xf4f7ffff,
+                TextAlign::Start,
+                false,
+                true,
+            );
+            bypass.push(started.elapsed().as_secs_f64() * 1_000_000.0);
+            assert_eq!(format!("{shaped:?}"), expected_debug);
+        }
+        let cached = p95(cached);
+        let bypass = p95(bypass);
+        println!("native_layout cached_p95_us={cached:.3} bypass_p95_us={bypass:.3}");
+        assert!(bypass - cached >= 25.0);
+    }
+
+    #[test]
+    #[ignore = "release-mode cache admission benchmark"]
+    fn native_glyph_atlas_lookup_has_measured_raster_bypass_benefit() {
+        use std::time::Instant;
+
+        fn p95(mut samples: Vec<f64>) -> f64 {
+            samples.sort_by(f64::total_cmp);
+            samples[(samples.len() * 95 / 100).min(samples.len() - 1)]
+        }
+
+        let mut font_system = FontSystem::new();
+        let glyphs = shape_physical_glyphs(
+            &mut font_system,
+            "W",
+            Rect::new(0.0, 0.0, 64.0, 64.0),
+            32.0,
+            0xffffffff,
+            TextAlign::Start,
+            false,
+            false,
+        );
+        let key = glyphs[0].0.cache_key;
+        let mut entries = HashMap::new();
+        entries.insert(
+            key,
+            super::GlyphAtlasEntry {
+                source: sdl3::rect::Rect::new(0, 0, 32, 32),
+                left: 0,
+                top: 0,
+                colored: false,
+            },
+        );
+        let mut cached = Vec::new();
+        let mut bypass = Vec::new();
+        for _ in 0..100 {
+            let started = Instant::now();
+            assert!(entries.contains_key(&key));
+            cached.push(started.elapsed().as_secs_f64() * 1_000_000.0);
+
+            let mut swash = cosmic_text::SwashCache::new();
+            let started = Instant::now();
+            let image = swash.get_image(&mut font_system, key);
+            bypass.push(started.elapsed().as_secs_f64() * 1_000_000.0);
+            assert!(image.is_some());
+        }
+        let cached = p95(cached);
+        let bypass = p95(bypass);
+        println!("native_atlas cached_p95_us={cached:.3} bypass_raster_p95_us={bypass:.3}");
+        assert!(bypass - cached >= 5.0);
+    }
+
+    #[test]
+    #[ignore = "release-mode whole-typography cache admission benchmark"]
+    fn whole_typography_cache_admission_includes_uncached_raster_into_existing_atlas() {
+        use cosmic_text::SwashCache;
+        use std::time::Instant;
+
+        fn p95(mut samples: Vec<f64>) -> f64 {
+            samples.sort_by(f64::total_cmp);
+            samples[(samples.len() * 95 / 100).min(samples.len() - 1)]
+        }
+
+        let text = "Nickel typography admission shapes and rasters the complete warm line";
+        let bounds = Rect::new(0.0, 0.0, 640.0, 80.0);
+        let mut font_system = FontSystem::new();
+        let cached_layout = shape_physical_glyphs(
+            &mut font_system,
+            text,
+            bounds,
+            18.0,
+            0xf4f7ffff,
+            TextAlign::Start,
+            false,
+            true,
+        );
+        let expected_keys = cached_layout
+            .iter()
+            .map(|(glyph, _)| glyph.cache_key)
+            .collect::<Vec<_>>();
+        let mut atlas = HashMap::new();
+        let mut initial_raster = SwashCache::new();
+        for key in &expected_keys {
+            let image = initial_raster
+                .get_image(&mut font_system, *key)
+                .clone()
+                .expect("fixture glyph raster");
+            atlas.insert(*key, (image.placement.width, image.placement.height));
+        }
+
+        let mut cached_samples = Vec::new();
+        let mut bypass_samples = Vec::new();
+        for _ in 0..100 {
+            let started = Instant::now();
+            let cached_keys = cached_layout
+                .iter()
+                .map(|(glyph, _)| glyph.cache_key)
+                .collect::<Vec<_>>();
+            assert!(cached_keys.iter().all(|key| atlas.contains_key(key)));
+            cached_samples.push(started.elapsed().as_secs_f64() * 1_000_000.0);
+
+            let started = Instant::now();
+            let bypass_layout = shape_physical_glyphs(
+                &mut font_system,
+                text,
+                bounds,
+                18.0,
+                0xf4f7ffff,
+                TextAlign::Start,
+                false,
+                true,
+            );
+            let mut uncached_raster = SwashCache::new();
+            let bypass_keys = bypass_layout
+                .iter()
+                .map(|(glyph, _)| {
+                    let image = uncached_raster
+                        .get_image(&mut font_system, glyph.cache_key)
+                        .clone()
+                        .expect("uncached glyph raster");
+                    atlas.insert(
+                        glyph.cache_key,
+                        (image.placement.width, image.placement.height),
+                    );
+                    glyph.cache_key
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(bypass_keys, expected_keys);
+            bypass_samples.push(started.elapsed().as_secs_f64() * 1_000_000.0);
+        }
+
+        let cached = p95(cached_samples);
+        let bypass = p95(bypass_samples);
+        println!("whole_typography cached_p95_us={cached:.3} bypass_p95_us={bypass:.3}");
+        assert!(bypass - cached >= 25.0);
+    }
+
+    #[test]
+    #[ignore = "requires an SDL video driver for accelerated readback"]
+    fn accelerated_cache_bypass_preserves_semantics_accessibility_and_raster() {
+        use crate::{
+            Button, FrameRequest, PresenterCacheMode, SemanticRole, SemanticSelector, UiFrame,
+            UiStateStore,
+        };
+
+        let sdl = sdl3::init().expect("SDL initialization");
+        let video = sdl.video().expect("SDL video subsystem");
+        let window = video
+            .window("Nickel cache equivalence", 320, 96)
+            .hidden()
+            .build()
+            .expect("hidden native test window");
+        let mut presenter = super::SdlCanvasPresenter::new(window).expect("accelerated presenter");
+        let mut state = UiStateStore::default();
+        let frame = UiFrame::resolve(
+            Button::new(7_u8, "Cache equivalence").id("target"),
+            FrameRequest::new(Rect::new(0.0, 0.0, 320.0, 96.0), &mut state),
+        );
+        let selector = SemanticSelector::RoleAndName {
+            role: SemanticRole::Button,
+            name: "Cache equivalence".into(),
+        };
+        let semantic = frame.query_unique(&selector).expect("semantic target");
+        let accessibility = frame
+            .accessibility_nodes()
+            .iter()
+            .find(|node| node.id == semantic.id)
+            .expect("accessibility target");
+        assert_eq!(accessibility.rect, semantic.bounds);
+        assert_eq!(accessibility.label.as_deref(), semantic.name.as_deref());
+
+        presenter
+            .present_accelerated(frame.commands(), 1.0)
+            .expect("cached presentation");
+        presenter
+            .present_accelerated(frame.commands(), 1.0)
+            .expect("warm cached presentation");
+        let cached = presenter.canvas.read_pixels(None).expect("cached readback");
+        // SAFETY: SDL owns the returned readback surface and no mutable access
+        // occurs while its immutable byte slice is copied.
+        let cached = unsafe { cached.without_lock() }
+            .expect("cached surface pixels")
+            .to_vec();
+
+        presenter.set_cache_mode(PresenterCacheMode::BypassDerived);
+        presenter
+            .present_accelerated(frame.commands(), 1.0)
+            .expect("bypass presentation");
+        let bypass = presenter.canvas.read_pixels(None).expect("bypass readback");
+        // SAFETY: as above, the owned readback surface is only read here.
+        let bypass = unsafe { bypass.without_lock() }.expect("bypass surface pixels");
+        assert_eq!(bypass, cached);
+        assert_eq!(frame.query_unique(&selector).unwrap(), semantic);
+    }
+
+    #[test]
+    fn suspended_pixel_renderer_releases_frame_storage_and_can_render_again() {
+        let mut renderer = SdlComponentRenderer::new_pixel_buffer(1920, 1080, 1.0);
+        assert_eq!(renderer.pixels().len(), 1920 * 1080);
+
+        renderer.suspend();
+        assert_eq!(renderer.size(), (1, 1));
+        assert_eq!(renderer.pixels().len(), 1);
+
+        renderer.resize(64, 32, 1.0);
+        let damage = renderer.render(&[PaintCommand::Fill {
+            rect: Rect::new(0.0, 0.0, 64.0, 32.0),
+            color: 0x010203,
+        }]);
+        assert!(!damage.is_empty());
+        assert_eq!(renderer.pixels().len(), 64 * 32);
+    }
 
     #[test]
     fn physical_text_layout_identity_ignores_scroll_translation() {

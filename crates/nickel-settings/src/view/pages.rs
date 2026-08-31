@@ -37,12 +37,56 @@ impl SettingsApp {
             ButtonPresentation::Primary,
         )
         .width(105.0);
+        let display_cards = self.displays.iter().enumerate().map(|(index, display)| {
+            let selected = index == self.selected;
+            let detail = if display.enabled {
+                display.detail.clone()
+            } else {
+                format!("{}  DISABLED", display.detail)
+            };
+            let border_color = if !display.enabled {
+                palette.muted
+            } else if display.primary {
+                palette.accent
+            } else {
+                palette.muted
+            };
+            let border_width = if display.primary && display.enabled {
+                4.0
+            } else {
+                2.0
+            };
+            ui! {
+                <Container id={format!("display-card-{index}")}
+                    width={display.rect.w as f32} height={display.rect.h as f32}
+                    min_width={160.0} min_height={104.0}
+                    background={if !display.enabled { palette.background }
+                        else if selected { palette.accent_soft } else { palette.surface }}
+                    border={(border_color, border_width)} radius={theme.radii.card}
+                    padding={Insets::all(18.0)}
+                    on_press={SettingsMessage::SelectDisplay(index)}>
+                    <Column gap={8.0}>
+                        <Text scale={1.5} color={palette.text}>{&display.name}</Text>
+                        <Text color={palette.muted}>{detail}</Text>
+                        <Text bold={true} color={palette.accent}>
+                            {if display.primary { "PRIMARY" } else { "" }}
+                        </Text>
+                    </Column>
+                </Container>
+            }
+        });
         ui! {
             <Column grow={1.0} padding={Insets {
                 top: 20.0, right: 32.0, bottom: 20.0, left: 20.0,
             }} gap={12.0}>
                 <Container id={"display-plane"} grow={1.0} min_height={300.0}
-                    background={palette.surface} border={(palette.muted, 1.0)} />
+                    background={palette.surface} border={(palette.muted, 1.0)}
+                    padding={Insets::all(20.0)} align_items={nickel_ui::Align::Center}
+                    justify_content={nickel_ui::Justify::Center}
+                    semantic_role={SemanticRole::TabPanel}
+                    accessibility_label={"Display arrangement"}>
+                    <Row gap={12.0} children={display_cards} />
+                </Container>
                 <Container background={palette.surface} border={(palette.muted, 1.0)}
                     padding={Insets::all(12.0)}>
                     <Column gap={10.0}>
@@ -101,9 +145,9 @@ impl SettingsApp {
                 };
                 ui! {
                     <Container height={44.0}
-                        background={if self.hovered_message() == Some(&SettingsMessage::WifiNetwork(index)) {
-                            palette.surface_hover
-                        } else { palette.surface }}
+                        background={palette.surface}
+                        hover_background={palette.surface_hover}
+                        pressed_background={palette.surface_hover}
                         border={(if network.connected { palette.accent } else { palette.muted },
                             if network.connected { 2.0 } else { 1.0 })}
                         padding={Insets { top: 12.0, right: 14.0, bottom: 8.0, left: 14.0 }}
@@ -192,7 +236,7 @@ impl SettingsApp {
                 top: 20.0, right: 40.0, bottom: 20.0, left: 20.0,
             }}>
                 <VerticalScroll id={"network-list"} on_scroll={SettingsMessage::NetworkScroll}
-                    offset={self.transient_scroll(&SettingsMessage::NetworkScroll)}>{content}</VerticalScroll>
+                    offset={0.0}>{content}</VerticalScroll>
             </Column>
         }
     }
@@ -218,9 +262,9 @@ impl SettingsApp {
                     .unwrap_or_default();
                 ui! {
                     <Container height={68.0}
-                        background={if self.hovered_message() == Some(&SettingsMessage::BluetoothDevice(index)) {
-                            palette.surface_hover
-                        } else { palette.surface }}
+                        background={palette.surface}
+                        hover_background={palette.surface_hover}
+                        pressed_background={palette.surface_hover}
                         border={(if device.connected { palette.accent } else { palette.muted },
                             if device.connected { 2.0 } else { 1.0 })}
                         on_press={SettingsMessage::BluetoothDevice(index)}
@@ -300,7 +344,7 @@ impl SettingsApp {
                 top: 20.0, right: 40.0, bottom: 20.0, left: 20.0,
             }}>
                 <VerticalScroll id={"bluetooth-list"} on_scroll={SettingsMessage::BluetoothScroll}
-                    offset={self.transient_scroll(&SettingsMessage::BluetoothScroll)}>{content}</VerticalScroll>
+                    offset={0.0}>{content}</VerticalScroll>
             </Column>
         }
     }
@@ -358,7 +402,7 @@ impl SettingsApp {
                 <Slider id={"bar-desktop-count"}
                     value={f32::from(self.shell_settings.desktop_count.saturating_sub(1)) / 7.0}
                     on_change={desktop_count_message} width={520.0}
-                    controller_step={1.0 / 7.0}
+                    adjustment_step={1.0 / 7.0}
                     focus_border={theme.borders.focus}
                     controller_focus_border={theme.borders.controller_focus} />
                 <Row height={46.0} gap={8.0} children={desktop_choices} />
@@ -729,7 +773,7 @@ impl SettingsApp {
             }} gap={10.0}>
                 {tabs}
                 <VerticalScroll id={"appearance-list"} on_scroll={SettingsMessage::AppearanceScroll}
-                    offset={self.transient_scroll(&SettingsMessage::AppearanceScroll)}>{content}</VerticalScroll>
+                    offset={0.0}>{content}</VerticalScroll>
             </Column>
         }
     }

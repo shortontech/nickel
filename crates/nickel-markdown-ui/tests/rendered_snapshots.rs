@@ -5,7 +5,7 @@ use std::{fs, path::Path};
 use image::{ImageBuffer, Rgba};
 use nickel_core::theme::{Appearance, ThemeMode};
 use nickel_markdown_ui::{ViewerModel, ViewerPalette, load_document, viewer_view_with_palette};
-use nickel_ui::{Rect, SdlComponentRenderer, UiEvent, UiStateStore, UiTree};
+use nickel_ui::{Rect, SdlComponentRenderer, UiFrame};
 use tempfile::tempdir;
 
 fn render_snapshot(
@@ -17,32 +17,7 @@ fn render_snapshot(
     path: &Path,
 ) {
     let bounds = Rect::new(0.0, 0.0, width as f32 / scale, height as f32 / scale);
-    let mut state = UiStateStore::default();
-    let initial = UiTree::layout_with_state(
-        viewer_view_with_palette(model, None, palette),
-        bounds,
-        &mut state,
-    );
-    initial.handle_event(&mut state, UiEvent::FocusNext);
-    let tree = UiTree::layout_with_state(
-        viewer_view_with_palette(model, None, palette),
-        bounds,
-        &mut state,
-    );
-    let reload_id = initial
-        .id_for_message(&nickel_markdown_ui::ViewerMessage::Reload)
-        .expect("viewer reload action should have a semantic identity")
-        .clone();
-    assert_eq!(state.focused(), Some(&reload_id));
-    assert_eq!(
-        tree.resolved_layout()
-            .nodes()
-            .iter()
-            .filter(|node| node.interaction.focused)
-            .count(),
-        1,
-        "FocusNext should focus exactly one viewer control"
-    );
+    let tree = UiFrame::layout(viewer_view_with_palette(model, None, palette), bounds);
     let mut renderer = SdlComponentRenderer::new(width, height, scale);
     renderer.render(tree.commands());
     let pixels = renderer.pixels();

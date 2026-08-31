@@ -230,6 +230,23 @@ fn render_titlebar_uncached(
     background: u32,
     foreground: u32,
 ) -> Option<MemoryRenderBuffer> {
+    let (pixels, width) = render_titlebar_pixels(width, title, background, foreground)?;
+    Some(MemoryRenderBuffer::from_slice(
+        &pixels,
+        Fourcc::Abgr8888,
+        (width as i32, TITLEBAR_HEIGHT),
+        1,
+        Transform::Normal,
+        None,
+    ))
+}
+
+fn render_titlebar_pixels(
+    width: i32,
+    title: &str,
+    background: u32,
+    foreground: u32,
+) -> Option<(Vec<u8>, u32)> {
     let width = u32::try_from(width).ok()?.max(1);
     let title_width = width.saturating_sub((BUTTON_WIDTH * 3 + 20) as u32);
     let escaped_title = title
@@ -244,9 +261,10 @@ fn render_titlebar_uncached(
     let svg = format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{TITLEBAR_HEIGHT}">
 <defs><clipPath id="title"><rect x="16" y="0" width="{title_width}" height="{TITLEBAR_HEIGHT}"/></clipPath></defs>
-<path d="M 10 0 H {right} Q {width} 0 {width} 10 V {TITLEBAR_HEIGHT} H 0 V 10 Q 0 0 10 0 Z" fill="#{background:06x}"/>
+<path d="M 10 .5 H {right} Q {width_minus_half} .5 {width_minus_half} 10 V {TITLEBAR_HEIGHT} H .5 V 10 Q .5 .5 10 .5 Z" fill="#{background:06x}" stroke="#{foreground:06x}" stroke-opacity=".38"/>
 <text x="16" y="26" clip-path="url(#title)" font-family="sans-serif" font-size="14" font-weight="500" fill="#{foreground:06x}">{escaped_title}</text>
-</svg>"##
+</svg>"##,
+        width_minus_half = width as f32 - 0.5
     );
     let tree = resvg::usvg::Tree::from_data(svg.as_bytes(), &options).ok()?;
     let mut pixmap = resvg::tiny_skia::Pixmap::new(width, TITLEBAR_HEIGHT as u32)?;
@@ -255,14 +273,16 @@ fn render_titlebar_uncached(
         resvg::tiny_skia::Transform::identity(),
         &mut pixmap.as_mut(),
     );
-    Some(MemoryRenderBuffer::from_slice(
-        pixmap.data(),
-        Fourcc::Abgr8888,
-        (width as i32, TITLEBAR_HEIGHT),
-        1,
-        Transform::Normal,
-        None,
-    ))
+    Some((pixmap.data().to_vec(), width))
+}
+
+pub fn titlebar_geometry(content: Geometry) -> Geometry {
+    Geometry {
+        x: content.x,
+        y: content.y - TITLEBAR_HEIGHT,
+        width: content.width,
+        height: TITLEBAR_HEIGHT,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -372,8 +392,9 @@ pub fn hit_test(content: Geometry, x: i32, y: i32) -> Option<FramePart> {
 #[cfg(test)]
 mod tests {
     use super::{
-        FramePart, RecoveryAction, hit_test, outer_geometry, recovery_action_at, recovery_layout,
-        render_recovery_panel, topmost_frame_target,
+        FramePart, RESIZE_BORDER, RecoveryAction, TITLEBAR_HEIGHT, hit_test, outer_geometry,
+        recovery_action_at, recovery_layout, render_recovery_panel, render_titlebar_pixels,
+        titlebar_geometry, topmost_frame_target,
     };
     use crate::shell_layout::Geometry;
 
@@ -395,6 +416,37 @@ mod tests {
                 height: 350
             }
         );
+    }
+
+    #[test]
+    fn titlebar_visual_geometry_has_no_resize_hit_region_overhang() {
+        let titlebar = titlebar_geometry(CONTENT);
+        let outer = outer_geometry(CONTENT);
+        assert_eq!(titlebar.x, CONTENT.x);
+        assert_eq!(titlebar.y, CONTENT.y - TITLEBAR_HEIGHT);
+        assert_eq!(titlebar.width, CONTENT.width);
+        assert_eq!(titlebar.height, TITLEBAR_HEIGHT);
+        assert_eq!(titlebar.y + titlebar.height, CONTENT.y);
+        assert_eq!(outer.x, titlebar.x - RESIZE_BORDER);
+        assert_eq!(outer.width, titlebar.width + RESIZE_BORDER * 2);
+    }
+
+    #[test]
+    fn titlebar_raster_has_rounded_alpha_corners_and_continuous_top_border() {
+        let (pixels, width) = render_titlebar_pixels(320, "Nickel File", 0x20242c, 0xe8edf4)
+            .expect("titlebar raster");
+        let alpha = |x: u32, y: u32| pixels[((y * width + x) * 4 + 3) as usize];
+        assert_eq!(alpha(0, 0), 0, "left outer corner must remain transparent");
+        assert_eq!(
+            alpha(width - 1, 0),
+            0,
+            "right outer corner must remain transparent"
+        );
+        assert!(
+            (10..width - 10).all(|x| alpha(x, 0) > 0),
+            "outer top border must have no transparent gap"
+        );
+        assert!(alpha(0, 10) > 0 && alpha(width - 1, 10) > 0);
     }
 
     #[test]

@@ -1,25 +1,25 @@
-//! Renderer-neutral Control Center scene and interaction model.
-
-use nickel_ui::{LinearGradient, PaintCommand, Rect, TextAlign};
+//! Declarative Control Center scene and semantic interaction model.
 
 use crate::platform::{
     AudioStatus, BluetoothStatus, NetworkStatus, SessionAction, WorkspaceSummary,
 };
+use nickel_ui::{
+    Align, AnyView, Application, Button, Column, ComponentBuilderExt, Container, Grid, Insets,
+    Length, LinearGradient, Row, SemanticRole, Slider, Spacer, Text, UiHost, VerticalScroll,
+    ViewContext,
+};
 
-const BACKGROUND_TOP: u32 = 0x202b43;
-const BACKGROUND_BOTTOM: u32 = 0x111827;
+const TOP: u32 = 0x202b43;
+const BOTTOM: u32 = 0x111827;
 const CARD: u32 = 0x2b3852;
-const CARD_BORDER: u32 = 0x42516c;
+const BORDER: u32 = 0x42516c;
 const PRIMARY: u32 = 0xf4f7ff;
 const SECONDARY: u32 = 0xaebbd1;
 const ACCENT: u32 = 0x65b8ff;
 const GOOD: u32 = 0x6ee7a8;
 const WARNING: u32 = 0xf6c76e;
-
-const PADDING: f32 = 16.0;
-const HEADER_HEIGHT: f32 = 66.0;
-const CARD_GAP: f32 = 12.0;
-const ROW_HEIGHT: f32 = 46.0;
+const HEADER: f32 = 66.0;
+const ROW: f32 = 46.0;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ControlAction {
@@ -42,683 +42,675 @@ pub enum ControlAction {
     SessionAction(SessionAction),
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct HitTarget {
-    pub bounds: Rect,
-    pub action: ControlAction,
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ControlViewState {
     pub wifi_expanded: bool,
     pub bluetooth_expanded: bool,
     pub audio_expanded: bool,
     pub pending_session_action: Option<SessionAction>,
-    /// Positive logical pixels scrolled below the fixed header.
-    pub scroll_offset: f32,
-    /// Production hit-target order used by keyboard and controller navigation.
-    pub selected_action: usize,
 }
 
-pub struct ControlCenterFrame {
-    pub commands: Vec<PaintCommand>,
-    pub hit_targets: Vec<HitTarget>,
-    pub content_height: f32,
-    pub viewport_height: f32,
-    volume_track: Option<Rect>,
+pub struct ControlCenterApp {
+    network: NetworkStatus,
+    bluetooth: BluetoothStatus,
+    audio: AudioStatus,
+    workspaces: Vec<WorkspaceSummary>,
+    state: ControlViewState,
+    effects: Vec<ControlAction>,
+    dirty: bool,
 }
 
-impl ControlCenterFrame {
-    pub fn action_at(&self, x: f32, y: f32) -> Option<ControlAction> {
-        self.hit_targets
-            .iter()
-            .rev()
-            .find(|target| contains(target.bounds, x, y))
-            .map(|target| match &target.action {
-                ControlAction::SetAudioVolume(_) => {
-                    let track = self.volume_track.unwrap_or(target.bounds);
-                    let fraction = ((x - track.origin.x) / track.size.width).clamp(0.0, 1.0);
-                    ControlAction::SetAudioVolume((fraction * 100.0).round() as u8)
-                }
-                action => action.clone(),
-            })
-    }
-
-    pub fn maximum_scroll(&self) -> f32 {
-        (self.content_height - self.viewport_height).max(0.0)
-    }
-
-    pub fn action(&self, index: usize) -> Option<ControlAction> {
-        self.hit_targets
-            .get(index)
-            .map(|target| target.action.clone())
-    }
-
-    pub fn reveal_delta(&self, index: usize) -> f32 {
-        let Some(target) = self.hit_targets.get(index) else {
-            return 0.0;
-        };
-        if target.bounds.origin.y < HEADER_HEIGHT {
-            target.bounds.origin.y - HEADER_HEIGHT
-        } else {
-            let target_bottom = target.bounds.origin.y + target.bounds.size.height;
-            let viewport_bottom = HEADER_HEIGHT + self.viewport_height;
-            (target_bottom - viewport_bottom).max(0.0)
+impl ControlCenterApp {
+    pub fn new(
+        network: NetworkStatus,
+        bluetooth: BluetoothStatus,
+        audio: AudioStatus,
+        workspaces: Vec<WorkspaceSummary>,
+    ) -> Self {
+        Self {
+            network,
+            bluetooth,
+            audio,
+            workspaces,
+            state: ControlViewState::default(),
+            effects: Vec::new(),
+            dirty: false,
         }
     }
+
+    pub fn sync(
+        &mut self,
+        network: &NetworkStatus,
+        bluetooth: &BluetoothStatus,
+        audio: &AudioStatus,
+        workspaces: &[WorkspaceSummary],
+    ) {
+        if self.network != *network
+            || self.bluetooth != *bluetooth
+            || self.audio != *audio
+            || self.workspaces != workspaces
+        {
+            self.network = network.clone();
+            self.bluetooth = bluetooth.clone();
+            self.audio = audio.clone();
+            self.workspaces = workspaces.to_vec();
+            self.dirty = true;
+        }
+    }
+
+    pub fn request_session_action(&mut self, action: SessionAction) {
+        if self.state.pending_session_action != Some(action) {
+            self.state.pending_session_action = Some(action);
+            self.dirty = true;
+        }
+    }
+
+    pub fn take_effects(&mut self) -> Vec<ControlAction> {
+        std::mem::take(&mut self.effects)
+    }
 }
 
-pub fn build_control_center(
+impl Application for ControlCenterApp {
+    type Message = ControlAction;
+
+    fn update(&mut self, message: Self::Message) {
+        match message {
+            ControlAction::ToggleWifiSection => {
+                self.state.wifi_expanded = !self.state.wifi_expanded;
+            }
+            ControlAction::ToggleBluetoothSection => {
+                self.state.bluetooth_expanded = !self.state.bluetooth_expanded;
+            }
+            ControlAction::ToggleAudioSection => {
+                self.state.audio_expanded = !self.state.audio_expanded;
+            }
+            ControlAction::RequestSessionAction(action) => {
+                self.state.pending_session_action = Some(action);
+            }
+            ControlAction::CancelSessionAction => self.state.pending_session_action = None,
+            ControlAction::ConfirmSessionAction => {
+                if let Some(action) = self.state.pending_session_action.take() {
+                    self.effects.push(ControlAction::SessionAction(action));
+                }
+                return;
+            }
+            _ => {}
+        }
+        self.effects.push(message);
+    }
+
+    fn view(&self, context: ViewContext) -> impl nickel_ui::View<Self::Message> {
+        control_center_view(
+            &self.network,
+            &self.bluetooth,
+            &self.audio,
+            &self.workspaces,
+            self.state,
+            context.viewport.size.width,
+            context.viewport.size.height,
+        )
+    }
+
+    fn poll(&mut self) -> bool {
+        std::mem::take(&mut self.dirty)
+    }
+}
+
+pub type ControlCenterHost = UiHost<ControlCenterApp>;
+
+struct Card {
+    view: AnyView<ControlAction>,
+}
+
+fn control_center_view(
     network: &NetworkStatus,
     bluetooth: &BluetoothStatus,
     audio: &AudioStatus,
     workspaces: &[WorkspaceSummary],
     state: ControlViewState,
-    size: (f32, f32),
-) -> ControlCenterFrame {
-    let width = size.0.max(280.0);
-    let height = size.1.max(240.0);
-    let viewport = Rect::new(0.0, HEADER_HEIGHT, width, height - HEADER_HEIGHT);
-    let mut builder = ViewBuilder {
-        commands: vec![
-            PaintCommand::Gradient {
-                rect: Rect::new(0.0, 0.0, width, height),
-                gradient: LinearGradient::vertical(BACKGROUND_TOP, BACKGROUND_BOTTOM),
-            },
-            PaintCommand::Fill {
-                rect: Rect::new(0.0, 0.0, width, HEADER_HEIGHT),
-                color: BACKGROUND_TOP,
-            },
-            text(
-                Rect::new(PADDING, 17.0, width - PADDING * 2.0, 30.0),
-                "Control Center",
-                3.0,
-                PRIMARY,
-                true,
-            ),
-            PaintCommand::PushClip(viewport),
-        ],
-        hits: Vec::new(),
-        width,
-        viewport,
-        y: HEADER_HEIGHT + PADDING - state.scroll_offset.max(0.0),
-        volume_track: None,
-    };
-
-    builder.wifi(network, state.wifi_expanded);
-    builder.bluetooth(bluetooth, state.bluetooth_expanded);
-    builder.audio(audio, state.audio_expanded);
-    builder.workspaces(workspaces);
-    builder.session(state.pending_session_action);
-
-    let content_bottom = builder.y + state.scroll_offset.max(0.0);
-    if let Some(target) = builder.hits.get(state.selected_action)
-        && let Some(visible) = intersection(target.bounds, viewport)
-    {
-        builder.commands.push(PaintCommand::Stroke {
-            rect: visible,
-            color: ACCENT,
-            width: 2.0,
-        });
-    }
-    builder.commands.push(PaintCommand::PopClip);
-    ControlCenterFrame {
-        commands: builder.commands,
-        hit_targets: builder.hits,
-        content_height: (content_bottom - HEADER_HEIGHT + PADDING).max(0.0),
-        viewport_height: viewport.size.height,
-        volume_track: builder.volume_track,
-    }
-}
-
-struct ViewBuilder {
-    commands: Vec<PaintCommand>,
-    hits: Vec<HitTarget>,
     width: f32,
-    viewport: Rect,
-    y: f32,
-    volume_track: Option<Rect>,
+    height: f32,
+) -> AnyView<ControlAction> {
+    let width = width.max(280.0);
+    let height = height.max(240.0);
+    let viewport_height = height - HEADER;
+    let cards = vec![
+        wifi(network, state.wifi_expanded),
+        bluetooth_view(bluetooth, state.bluetooth_expanded),
+        audio_view(audio, state.audio_expanded),
+        workspaces_view(workspaces),
+        session_view(state.pending_session_action),
+    ];
+    let content = Column::new()
+        .gap(12.0)
+        .padding(16.0)
+        .children(cards.into_iter().map(|card| card.view));
+    AnyView::new(
+        Column::new()
+            .width(width)
+            .height(height)
+            .background(LinearGradient::vertical(TOP, BOTTOM))
+            .child(
+                Container::new()
+                    .height(HEADER)
+                    .padding(Insets {
+                        top: 17.0,
+                        right: 16.0,
+                        bottom: 19.0,
+                        left: 16.0,
+                    })
+                    .background(TOP)
+                    .child(
+                        Text::new("Control Center")
+                            .scale(3.0)
+                            .bold(true)
+                            .color(PRIMARY),
+                    ),
+            )
+            .child(
+                VerticalScroll::new(ControlAction::ToggleWifiSection, 0.0)
+                    .id("control-center-scroll")
+                    .height(viewport_height)
+                    .child(content),
+            ),
+    )
 }
 
-impl ViewBuilder {
-    fn workspaces(&mut self, workspaces: &[WorkspaceSummary]) {
-        let card = self.card(82.0);
-        self.commands.push(text(
-            Rect::new(
-                card.origin.x + 14.0,
-                card.origin.y + 10.0,
-                card.size.width - 28.0,
-                22.0,
-            ),
-            "Workspaces",
-            1.5,
-            PRIMARY,
-            true,
-        ));
-        let mut x = card.origin.x + 14.0;
-        for (index, workspace) in workspaces.iter().take(8).enumerate() {
-            let bounds = Rect::new(x, card.origin.y + 42.0, 34.0, 28.0);
-            self.action_button(
-                bounds,
-                &(index + 1).to_string(),
-                ControlAction::SwitchWorkspace(workspace.id),
-                workspace.active,
-            );
-            x += 40.0;
-        }
-        self.action_button(
-            Rect::new(x, card.origin.y + 42.0, 34.0, 28.0),
-            "+",
-            ControlAction::CreateWorkspace,
-            false,
-        );
-        if workspaces.len() > 1
-            && let Some(active) = workspaces.iter().find(|workspace| workspace.active)
-        {
-            self.action_button(
-                Rect::new(x + 40.0, card.origin.y + 42.0, 34.0, 28.0),
-                "−",
-                ControlAction::RemoveWorkspace(active.id),
-                false,
-            );
-        }
-        self.finish_card(card);
+fn card(height: f32, children: Vec<AnyView<ControlAction>>) -> Card {
+    Card {
+        view: AnyView::new(
+            Column::new()
+                .height(height)
+                .padding(14.0)
+                .gap(8.0)
+                .background(CARD)
+                .border(BORDER, 1.0)
+                .radius(12.0)
+                .children(children),
+        ),
     }
+}
 
-    fn session(&mut self, pending: Option<SessionAction>) {
-        let card = self.card(if pending.is_some() { 98.0 } else { 174.0 });
-        self.commands.push(text(
-            Rect::new(
-                card.origin.x + 14.0,
-                card.origin.y + 11.0,
-                card.size.width - 28.0,
-                22.0,
-            ),
-            if let Some(action) = pending {
-                session_confirmation(action)
-            } else {
-                "Session"
-            },
-            1.5,
-            PRIMARY,
-            true,
-        ));
+fn title(name: &str, detail: String, color: u32) -> AnyView<ControlAction> {
+    AnyView::new(
+        Column::new()
+            .height(38.0)
+            .gap(1.0)
+            .child(
+                Text::new(name)
+                    .height(22.0)
+                    .scale(2.0)
+                    .bold(true)
+                    .color(PRIMARY),
+            )
+            .child(Text::new(detail).height(15.0).scale(1.0).color(color)),
+    )
+}
 
-        if pending.is_some() {
-            self.action_button(
-                Rect::new(card.origin.x + 14.0, card.origin.y + 47.0, 104.0, 30.0),
-                "Cancel",
-                ControlAction::CancelSessionAction,
-                false,
-            );
-            self.action_button(
-                Rect::new(
-                    card.origin.x + card.size.width - 132.0,
-                    card.origin.y + 47.0,
-                    118.0,
-                    30.0,
-                ),
-                "Confirm",
-                ControlAction::ConfirmSessionAction,
-                true,
-            );
-        } else {
-            let entries = [
-                ("Lock", SessionAction::Lock),
-                ("Suspend", SessionAction::Suspend),
-                ("Restart shell", SessionAction::RestartShell),
-                ("Log out", SessionAction::LogOut),
-                ("Restart", SessionAction::Reboot),
-                ("Shut down", SessionAction::PowerOff),
-            ];
-            let width = (card.size.width - 42.0) / 2.0;
-            for (index, (label, action)) in entries.into_iter().enumerate() {
-                let column = index % 2;
-                let row = index / 2;
-                let action = if action == SessionAction::Lock {
-                    ControlAction::SessionAction(action)
-                } else {
-                    ControlAction::RequestSessionAction(action)
-                };
-                self.action_button(
-                    Rect::new(
-                        card.origin.x + 14.0 + column as f32 * (width + 14.0),
-                        card.origin.y + 43.0 + row as f32 * 40.0,
-                        width,
-                        32.0,
-                    ),
-                    label,
-                    action,
-                    false,
-                );
-            }
-        }
-        self.finish_card(card);
-    }
+fn action(value: ControlAction) -> ControlAction {
+    value
+}
 
-    fn wifi(&mut self, status: &NetworkStatus, expanded: bool) {
-        let rows = usize::from(expanded) * status.networks.len().min(8);
-        let height = 78.0 + rows as f32 * ROW_HEIGHT;
-        let card = self.card(height);
-        self.label(
-            card,
-            "Wi-Fi",
-            if !status.available {
-                "Unavailable".into()
-            } else if !status.enabled {
-                "Powered off".into()
-            } else if status.connected {
-                format!(
-                    "{} · {}% signal",
-                    nonempty(&status.name, "Connected"),
-                    status.signal_percent
-                )
-            } else {
-                format!("{} nearby", status.networks.len())
-            },
-            status.connected.then_some(GOOD),
-        );
-        self.toggle(
-            Rect::new(
-                card.origin.x + card.size.width - 58.0,
-                card.origin.y + 15.0,
-                42.0,
-                24.0,
-            ),
-            status.enabled,
-            status.available,
-            ControlAction::SetWifiEnabled(!status.enabled),
-        );
-        self.chevron_hit(
-            Rect::new(card.origin.x, card.origin.y + 44.0, card.size.width, 34.0),
-            expanded,
-            ControlAction::ToggleWifiSection,
-        );
+fn button(value: ControlAction, label: impl Into<String>) -> Button<ControlAction> {
+    Button::new(value, label)
+        .height(32.0)
+        .padding(Insets {
+            top: 6.0,
+            right: 10.0,
+            bottom: 6.0,
+            left: 10.0,
+        })
+        .radius(7.0)
+        .background(0x34445f)
+        .color(PRIMARY)
+        .focus_border(ACCENT)
+        .controller_focus_border(ACCENT)
+}
 
-        if expanded {
-            for (index, network) in status.networks.iter().take(8).enumerate() {
-                let row = Rect::new(
-                    card.origin.x + 10.0,
-                    card.origin.y + 78.0 + index as f32 * ROW_HEIGHT,
-                    card.size.width - 20.0,
-                    ROW_HEIGHT,
-                );
-                let detail = if network.connected {
-                    format!("CONNECTED · {}%", network.signal_percent)
-                } else if network.saved {
-                    format!("SAVED · {}%", network.signal_percent)
-                } else {
-                    format!("{}% SIGNAL", network.signal_percent)
-                };
-                self.row(
-                    row,
-                    nonempty(&network.name, "Hidden network"),
-                    &detail,
-                    network.connected,
-                );
-                if network.saved && !network.connected {
-                    self.hit(
-                        row,
-                        ControlAction::ActivateWifi {
-                            id: network.id.clone(),
-                        },
-                    );
-                }
-            }
-        }
-        self.finish_card(card);
-    }
-
-    fn bluetooth(&mut self, status: &BluetoothStatus, expanded: bool) {
-        let rows = usize::from(expanded) * status.devices.len().min(8);
-        let height = 96.0 + rows as f32 * ROW_HEIGHT;
-        let card = self.card(height);
-        let connected = status
-            .devices
-            .iter()
-            .filter(|device| device.connected)
-            .count();
-        self.label(
-            card,
-            "Bluetooth",
-            if !status.available {
-                "Unavailable".into()
-            } else if !status.powered {
-                "Powered off".into()
-            } else if connected > 0 {
-                format!("{connected} connected")
-            } else if status.discovering {
-                "Discovering nearby devices".into()
-            } else {
-                format!("{} known devices", status.devices.len())
-            },
-            (connected > 0).then_some(GOOD),
-        );
-        self.toggle(
-            Rect::new(
-                card.origin.x + card.size.width - 58.0,
-                card.origin.y + 15.0,
-                42.0,
-                24.0,
-            ),
-            status.powered,
-            status.available,
-            ControlAction::SetBluetoothPowered(!status.powered),
-        );
-        let discovery = Rect::new(card.origin.x + 12.0, card.origin.y + 50.0, 116.0, 28.0);
-        self.pill(
-            discovery,
-            if status.discovering {
-                "Stop scan"
-            } else {
-                "Scan nearby"
-            },
-            status.discovering,
-        );
-        if status.available && status.powered {
-            self.hit(
-                discovery,
-                ControlAction::SetBluetoothDiscovery(!status.discovering),
-            );
-        }
-        self.chevron_hit(
-            Rect::new(
-                card.origin.x + card.size.width - 80.0,
-                card.origin.y + 46.0,
-                68.0,
-                36.0,
-            ),
-            expanded,
-            ControlAction::ToggleBluetoothSection,
-        );
-
-        if expanded {
-            for (index, device) in status.devices.iter().take(8).enumerate() {
-                let row = Rect::new(
-                    card.origin.x + 10.0,
-                    card.origin.y + 96.0 + index as f32 * ROW_HEIGHT,
-                    card.size.width - 20.0,
-                    ROW_HEIGHT,
-                );
-                let detail = if device.connected {
-                    "CONNECTED"
-                } else if device.paired {
-                    "PAIRED"
-                } else {
-                    "NEARBY"
-                };
-                self.row(
-                    row,
-                    nonempty(&device.name, "Bluetooth device"),
-                    detail,
-                    device.connected,
-                );
-                if device.paired {
-                    self.hit(
-                        row,
-                        ControlAction::ToggleBluetoothDevice {
-                            id: device.id.clone(),
-                        },
-                    );
-                }
-            }
-        }
-        self.finish_card(card);
-    }
-
-    fn audio(&mut self, status: &AudioStatus, expanded: bool) {
-        let rows = usize::from(expanded) * status.devices.len().min(8);
-        let height = 116.0 + rows as f32 * ROW_HEIGHT;
-        let card = self.card(height);
-        let selected = status
-            .devices
-            .iter()
-            .find(|device| device.is_default)
-            .map(|device| device.name.as_str())
-            .unwrap_or("No audio output");
-        self.label(
-            card,
-            "Audio",
-            if status.muted {
-                format!("Muted · {selected}")
-            } else {
-                format!("{}% · {selected}", status.volume_percent)
-            },
-            status.muted.then_some(WARNING),
-        );
-        let track = Rect::new(
-            card.origin.x + 14.0,
-            card.origin.y + 58.0,
-            card.size.width - 28.0,
-            18.0,
-        );
-        self.commands.push(PaintCommand::RoundedFill {
-            rect: Rect::new(track.origin.x, track.origin.y + 6.0, track.size.width, 6.0),
-            color: CARD_BORDER,
-            radius: 3.0,
-        });
-        self.commands.push(PaintCommand::RoundedFill {
-            rect: Rect::new(
-                track.origin.x,
-                track.origin.y + 6.0,
-                track.size.width * f32::from(status.volume_percent) / 100.0,
-                6.0,
-            ),
-            color: ACCENT,
-            radius: 3.0,
-        });
-        self.volume_track = Some(track);
-        if status.available {
-            self.hit(track, ControlAction::SetAudioVolume(status.volume_percent));
-        }
-        self.chevron_hit(
-            Rect::new(card.origin.x, card.origin.y + 80.0, card.size.width, 36.0),
-            expanded,
-            ControlAction::ToggleAudioSection,
-        );
-        if expanded {
-            for (index, device) in status.devices.iter().take(8).enumerate() {
-                let row = Rect::new(
-                    card.origin.x + 10.0,
-                    card.origin.y + 116.0 + index as f32 * ROW_HEIGHT,
-                    card.size.width - 20.0,
-                    ROW_HEIGHT,
-                );
-                self.row(
-                    row,
-                    nonempty(&device.name, "Audio device"),
-                    if device.is_default {
-                        "DEFAULT"
-                    } else {
-                        "AVAILABLE"
-                    },
-                    device.is_default,
-                );
-                self.hit(
-                    row,
-                    ControlAction::SelectAudioDevice {
-                        id: device.id.clone(),
-                    },
-                );
-            }
-        }
-        self.finish_card(card);
-    }
-
-    fn card(&mut self, height: f32) -> Rect {
-        let card = Rect::new(PADDING, self.y, self.width - PADDING * 2.0, height);
-        self.commands.push(PaintCommand::RoundedFill {
-            rect: card,
-            color: CARD,
-            radius: 12.0,
-        });
-        self.commands.push(PaintCommand::Stroke {
-            rect: card,
-            color: CARD_BORDER,
-            width: 1.0,
-        });
-        card
-    }
-
-    fn finish_card(&mut self, card: Rect) {
-        self.y = card.origin.y + card.size.height + CARD_GAP;
-    }
-
-    fn label(&mut self, card: Rect, title: &str, detail: String, detail_color: Option<u32>) {
-        self.commands.push(text(
-            Rect::new(
-                card.origin.x + 14.0,
-                card.origin.y + 10.0,
-                card.size.width - 82.0,
-                24.0,
-            ),
-            title,
-            2.0,
-            PRIMARY,
-            true,
-        ));
-        self.commands.push(text(
-            Rect::new(
-                card.origin.x + 14.0,
-                card.origin.y + 33.0,
-                card.size.width - 28.0,
-                18.0,
-            ),
-            &detail,
-            1.0,
-            detail_color.unwrap_or(SECONDARY),
-            false,
-        ));
-    }
-
-    fn row(&mut self, row: Rect, name: &str, detail: &str, selected: bool) {
-        if selected {
-            self.commands.push(PaintCommand::RoundedFill {
-                rect: row,
-                color: 0x344d68,
-                radius: 7.0,
-            });
-        }
-        self.commands.push(text(
-            Rect::new(
-                row.origin.x + 8.0,
-                row.origin.y + 5.0,
-                row.size.width - 16.0,
-                20.0,
-            ),
-            name,
-            1.0,
-            PRIMARY,
-            selected,
-        ));
-        self.commands.push(text(
-            Rect::new(
-                row.origin.x + 8.0,
-                row.origin.y + 25.0,
-                row.size.width - 16.0,
-                15.0,
-            ),
-            detail,
-            0.8,
-            if selected { GOOD } else { SECONDARY },
-            false,
-        ));
-    }
-
-    fn toggle(&mut self, rect: Rect, enabled: bool, interactive: bool, action: ControlAction) {
-        self.commands.push(PaintCommand::RoundedFill {
-            rect,
-            color: if enabled { ACCENT } else { CARD_BORDER },
-            radius: rect.size.height / 2.0,
-        });
-        self.commands.push(PaintCommand::RoundedFill {
-            rect: Rect::new(
-                if enabled {
-                    rect.origin.x + rect.size.width - rect.size.height + 3.0
-                } else {
-                    rect.origin.x + 3.0
-                },
-                rect.origin.y + 3.0,
-                rect.size.height - 6.0,
-                rect.size.height - 6.0,
-            ),
-            color: if interactive { PRIMARY } else { SECONDARY },
-            radius: (rect.size.height - 6.0) / 2.0,
-        });
-        if interactive {
-            self.hit(rect, action);
-        }
-    }
-
-    fn pill(&mut self, rect: Rect, label: &str, active: bool) {
-        self.commands.push(PaintCommand::RoundedFill {
-            rect,
-            color: if active { ACCENT } else { CARD_BORDER },
-            radius: rect.size.height / 2.0,
-        });
-        self.commands.push(text(
-            Rect::new(
-                rect.origin.x + 8.0,
-                rect.origin.y + 5.0,
-                rect.size.width - 16.0,
-                18.0,
-            ),
-            label,
-            0.9,
-            PRIMARY,
-            false,
-        ));
-    }
-
-    fn action_button(&mut self, rect: Rect, label: &str, action: ControlAction, warning: bool) {
-        self.commands.push(PaintCommand::RoundedFill {
-            rect,
-            color: if warning { 0x9f3f4a } else { 0x34445f },
-            radius: 7.0,
-        });
-        self.commands.push(text(
-            Rect::new(
-                rect.origin.x + 10.0,
-                rect.origin.y + 6.0,
-                rect.size.width - 20.0,
-                18.0,
-            ),
-            label,
-            1.0,
-            PRIMARY,
-            true,
-        ));
-        self.hit(rect, action);
-    }
-
-    fn chevron_hit(&mut self, rect: Rect, expanded: bool, action: ControlAction) {
-        self.commands.push(text(
-            Rect::new(
-                rect.origin.x + 8.0,
-                rect.origin.y + 7.0,
-                rect.size.width - 16.0,
-                20.0,
-            ),
+fn section(id: &str, expanded: bool, value: ControlAction) -> AnyView<ControlAction> {
+    AnyView::new(
+        Button::new(
+            action(value),
             if expanded {
                 "Hide devices"
             } else {
                 "Show devices"
             },
-            0.9,
-            SECONDARY,
-            false,
-        ));
-        self.hit(rect, action);
-    }
+        )
+        .id(id)
+        .height(34.0)
+        .padding(8.0)
+        .background(CARD)
+        .color(SECONDARY)
+        .focus_border(ACCENT)
+        .controller_focus_border(ACCENT),
+    )
+}
 
-    fn hit(&mut self, bounds: Rect, action: ControlAction) {
-        if let Some(bounds) = intersection(bounds, self.viewport) {
-            self.hits.push(HitTarget { bounds, action });
-        }
+fn toggle(id: &str, value: bool, enabled: bool, message: ControlAction) -> AnyView<ControlAction> {
+    let thumb = || {
+        AnyView::new(
+            Container::new()
+                .width(18.0)
+                .height(18.0)
+                .radius(9.0)
+                .background(if enabled { PRIMARY } else { SECONDARY }),
+        )
+    };
+    AnyView::new(
+        Container::new()
+            .id(id)
+            .width(42.0)
+            .height(24.0)
+            .radius(12.0)
+            .padding(3.0)
+            .background(if value { ACCENT } else { BORDER })
+            .semantic_role(SemanticRole::Switch)
+            .accessibility_label(id)
+            .message(message)
+            .enabled(enabled)
+            .child(
+                Row::new()
+                    .fill_width()
+                    .child(if value {
+                        AnyView::new(Spacer::flex())
+                    } else {
+                        thumb()
+                    })
+                    .child(if value {
+                        thumb()
+                    } else {
+                        AnyView::new(Spacer::flex())
+                    }),
+            ),
+    )
+}
+
+fn status_row(
+    id: String,
+    name: &str,
+    detail: String,
+    selected: bool,
+    message: Option<ControlAction>,
+) -> AnyView<ControlAction> {
+    let row = Column::new()
+        .height(ROW)
+        .padding(Insets {
+            top: 5.0,
+            right: 8.0,
+            bottom: 5.0,
+            left: 8.0,
+        })
+        .gap(1.0)
+        .background(if selected { 0x344d68 } else { CARD })
+        .radius(7.0)
+        .child(Text::new(name).height(20.0).bold(selected).color(PRIMARY))
+        .child(
+            Text::new(detail)
+                .height(15.0)
+                .scale(0.8)
+                .color(if selected { GOOD } else { SECONDARY }),
+        );
+    match message {
+        Some(message) => AnyView::new(
+            Container::new()
+                .id(id)
+                .message(message)
+                .semantic_role(SemanticRole::Button)
+                .accessibility_label(name)
+                .child(row),
+        ),
+        None => AnyView::new(row),
     }
 }
 
-fn session_confirmation(action: SessionAction) -> &'static str {
+fn wifi(status: &NetworkStatus, expanded: bool) -> Card {
+    let detail = if !status.available {
+        "Unavailable".into()
+    } else if !status.enabled {
+        "Powered off".into()
+    } else if status.connected {
+        format!(
+            "{} · {}% signal",
+            nonempty(&status.name, "Connected"),
+            status.signal_percent
+        )
+    } else {
+        format!("{} nearby", status.networks.len())
+    };
+    let mut children = vec![
+        AnyView::new(
+            Row::new()
+                .height(38.0)
+                .align_items(Align::Start)
+                .child(title(
+                    "Wi-Fi",
+                    detail,
+                    if status.connected { GOOD } else { SECONDARY },
+                ))
+                .child(Spacer::flex())
+                .child(toggle(
+                    "wifi-power",
+                    status.enabled,
+                    status.available,
+                    ControlAction::SetWifiEnabled(!status.enabled),
+                )),
+        ),
+        section("wifi-section", expanded, ControlAction::ToggleWifiSection),
+    ];
+    if expanded {
+        children.extend(status.networks.iter().take(8).map(|network| {
+            let detail = if network.connected {
+                format!("CONNECTED · {}%", network.signal_percent)
+            } else if network.saved {
+                format!("SAVED · {}%", network.signal_percent)
+            } else {
+                format!("{}% SIGNAL", network.signal_percent)
+            };
+            status_row(
+                format!("wifi-{}", network.id),
+                nonempty(&network.name, "Hidden network"),
+                detail,
+                network.connected,
+                (network.saved && !network.connected).then(|| ControlAction::ActivateWifi {
+                    id: network.id.clone(),
+                }),
+            )
+        }));
+    }
+    card(
+        78.0 + usize::from(expanded) as f32 * status.networks.len().min(8) as f32 * ROW,
+        children,
+    )
+}
+
+fn bluetooth_view(status: &BluetoothStatus, expanded: bool) -> Card {
+    let connected = status
+        .devices
+        .iter()
+        .filter(|device| device.connected)
+        .count();
+    let detail = if !status.available {
+        "Unavailable".into()
+    } else if !status.powered {
+        "Powered off".into()
+    } else if connected > 0 {
+        format!("{connected} connected")
+    } else if status.discovering {
+        "Discovering nearby devices".into()
+    } else {
+        format!("{} known devices", status.devices.len())
+    };
+    let scan = ControlAction::SetBluetoothDiscovery(!status.discovering);
+    let mut children = vec![
+        AnyView::new(
+            Row::new()
+                .height(38.0)
+                .child(title(
+                    "Bluetooth",
+                    detail,
+                    if connected > 0 { GOOD } else { SECONDARY },
+                ))
+                .child(Spacer::flex())
+                .child(toggle(
+                    "bluetooth-power",
+                    status.powered,
+                    status.available,
+                    ControlAction::SetBluetoothPowered(!status.powered),
+                )),
+        ),
+        AnyView::new(
+            Row::new()
+                .height(36.0)
+                .child(if status.available && status.powered {
+                    AnyView::new(
+                        button(
+                            scan,
+                            if status.discovering {
+                                "Stop scan"
+                            } else {
+                                "Scan nearby"
+                            },
+                        )
+                        .id("bluetooth-scan")
+                        .width(116.0)
+                        .height(28.0),
+                    )
+                } else {
+                    AnyView::new(
+                        Container::new()
+                            .width(116.0)
+                            .height(28.0)
+                            .radius(14.0)
+                            .background(BORDER)
+                            .child(
+                                Text::new(if status.discovering {
+                                    "Stop scan"
+                                } else {
+                                    "Scan nearby"
+                                })
+                                .color(SECONDARY),
+                            ),
+                    )
+                })
+                .child(Spacer::flex())
+                .child(section(
+                    "bluetooth-section",
+                    expanded,
+                    ControlAction::ToggleBluetoothSection,
+                )),
+        ),
+    ];
+    if expanded {
+        children.extend(status.devices.iter().take(8).map(|device| {
+            status_row(
+                format!("bluetooth-{}", device.id),
+                nonempty(&device.name, "Bluetooth device"),
+                (if device.connected {
+                    "CONNECTED"
+                } else if device.paired {
+                    "PAIRED"
+                } else {
+                    "NEARBY"
+                })
+                .into(),
+                device.connected,
+                device.paired.then(|| ControlAction::ToggleBluetoothDevice {
+                    id: device.id.clone(),
+                }),
+            )
+        }));
+    }
+    card(
+        96.0 + usize::from(expanded) as f32 * status.devices.len().min(8) as f32 * ROW,
+        children,
+    )
+}
+
+fn volume(value: f32) -> ControlAction {
+    ControlAction::SetAudioVolume((value.clamp(0.0, 1.0) * 100.0).round() as u8)
+}
+
+fn audio_view(status: &AudioStatus, expanded: bool) -> Card {
+    let selected = status
+        .devices
+        .iter()
+        .find(|device| device.is_default)
+        .map(|device| device.name.as_str())
+        .unwrap_or("No audio output");
+    let detail = if status.muted {
+        format!("Muted · {selected}")
+    } else {
+        format!("{}% · {selected}", status.volume_percent)
+    };
+    let mut children = vec![
+        title(
+            "Audio",
+            detail,
+            if status.muted { WARNING } else { SECONDARY },
+        ),
+        AnyView::new(
+            Slider::on_change(volume, f32::from(status.volume_percent) / 100.0)
+                .colors(BORDER, ACCENT, PRIMARY)
+                .id("audio-volume")
+                .accessibility_label("Audio volume")
+                .width_length(Length::Fill),
+        ),
+        section("audio-section", expanded, ControlAction::ToggleAudioSection),
+    ];
+    if expanded {
+        children.extend(status.devices.iter().take(8).map(|device| {
+            status_row(
+                format!("audio-{}", device.id),
+                nonempty(&device.name, "Audio device"),
+                (if device.is_default {
+                    "DEFAULT"
+                } else {
+                    "AVAILABLE"
+                })
+                .into(),
+                device.is_default,
+                Some(ControlAction::SelectAudioDevice {
+                    id: device.id.clone(),
+                }),
+            )
+        }));
+    }
+    card(
+        116.0 + usize::from(expanded) as f32 * status.devices.len().min(8) as f32 * ROW,
+        children,
+    )
+}
+
+fn workspaces_view(workspaces: &[WorkspaceSummary]) -> Card {
+    let mut controls = workspaces
+        .iter()
+        .take(8)
+        .enumerate()
+        .map(|(index, workspace)| {
+            AnyView::new(
+                button(
+                    action(ControlAction::SwitchWorkspace(workspace.id)),
+                    (index + 1).to_string(),
+                )
+                .id(format!("workspace-{}", workspace.id))
+                .width(34.0)
+                .height(28.0)
+                .background(if workspace.active { 0x9f3f4a } else { 0x34445f }),
+            )
+        })
+        .collect::<Vec<_>>();
+    controls.push(AnyView::new(
+        button(action(ControlAction::CreateWorkspace), "+")
+            .id("workspace-create")
+            .width(34.0)
+            .height(28.0),
+    ));
+    if workspaces.len() > 1
+        && let Some(active) = workspaces.iter().find(|workspace| workspace.active)
+    {
+        controls.push(AnyView::new(
+            button(action(ControlAction::RemoveWorkspace(active.id)), "−")
+                .id("workspace-remove")
+                .width(34.0)
+                .height(28.0),
+        ));
+    }
+    card(
+        82.0,
+        vec![
+            AnyView::new(
+                Text::new("Workspaces")
+                    .height(22.0)
+                    .scale(1.5)
+                    .bold(true)
+                    .color(PRIMARY),
+            ),
+            AnyView::new(Row::new().height(28.0).gap(6.0).children(controls)),
+        ],
+    )
+}
+
+fn session_view(pending: Option<SessionAction>) -> Card {
+    if let Some(pending) = pending {
+        let cancel = action(ControlAction::CancelSessionAction);
+        let confirm = action(ControlAction::ConfirmSessionAction);
+        return card(
+            98.0,
+            vec![
+                AnyView::new(
+                    Text::new(confirmation(pending))
+                        .height(22.0)
+                        .scale(1.5)
+                        .bold(true)
+                        .color(PRIMARY),
+                ),
+                AnyView::new(
+                    Row::new()
+                        .height(30.0)
+                        .child(
+                            button(cancel, "Cancel")
+                                .id("session-cancel")
+                                .width(104.0)
+                                .height(30.0),
+                        )
+                        .child(Spacer::flex())
+                        .child(
+                            button(confirm, "Confirm")
+                                .id("session-confirm")
+                                .width(118.0)
+                                .height(30.0)
+                                .background(0x9f3f4a),
+                        ),
+                ),
+            ],
+        );
+    }
+    let entries = [
+        ("Lock", ControlAction::SessionAction(SessionAction::Lock)),
+        (
+            "Suspend",
+            ControlAction::RequestSessionAction(SessionAction::Suspend),
+        ),
+        (
+            "Restart shell",
+            ControlAction::RequestSessionAction(SessionAction::RestartShell),
+        ),
+        (
+            "Log out",
+            ControlAction::RequestSessionAction(SessionAction::LogOut),
+        ),
+        (
+            "Restart",
+            ControlAction::RequestSessionAction(SessionAction::Reboot),
+        ),
+        (
+            "Shut down",
+            ControlAction::RequestSessionAction(SessionAction::PowerOff),
+        ),
+    ];
+    let controls = entries
+        .into_iter()
+        .enumerate()
+        .map(|(index, (label, value))| {
+            AnyView::new(button(action(value), label).id(format!("session-{index}")))
+        });
+    card(
+        174.0,
+        vec![
+            AnyView::new(
+                Text::new("Session")
+                    .height(22.0)
+                    .scale(1.5)
+                    .bold(true)
+                    .color(PRIMARY),
+            ),
+            AnyView::new(Grid::fixed(2).height(112.0).gap(8.0).children(controls)),
+        ],
+    )
+}
+
+fn confirmation(action: SessionAction) -> &'static str {
     match action {
         SessionAction::RestartShell => "Restart the Nickel shell?",
         SessionAction::Lock => "Lock this session?",
@@ -728,19 +720,6 @@ fn session_confirmation(action: SessionAction) -> &'static str {
         SessionAction::PowerOff => "Shut down this computer?",
     }
 }
-
-fn text(bounds: Rect, value: &str, scale: f32, color: u32, bold: bool) -> PaintCommand {
-    PaintCommand::Text {
-        bounds,
-        text: value.to_owned(),
-        scale,
-        color,
-        align: TextAlign::Start,
-        bold,
-        wrap: false,
-    }
-}
-
 fn nonempty<'a>(value: &'a str, fallback: &'a str) -> &'a str {
     if value.trim().is_empty() {
         fallback
@@ -749,108 +728,121 @@ fn nonempty<'a>(value: &'a str, fallback: &'a str) -> &'a str {
     }
 }
 
-fn contains(rect: Rect, x: f32, y: f32) -> bool {
-    x >= rect.origin.x
-        && y >= rect.origin.y
-        && x < rect.origin.x + rect.size.width
-        && y < rect.origin.y + rect.size.height
-}
-
-fn intersection(left: Rect, right: Rect) -> Option<Rect> {
-    let x = left.origin.x.max(right.origin.x);
-    let y = left.origin.y.max(right.origin.y);
-    let right_edge = (left.origin.x + left.size.width).min(right.origin.x + right.size.width);
-    let bottom_edge = (left.origin.y + left.size.height).min(right.origin.y + right.size.height);
-    (right_edge > x && bottom_edge > y).then(|| Rect::new(x, y, right_edge - x, bottom_edge - y))
-}
-
 #[cfg(test)]
 mod tests {
+    use super::{ControlAction, ControlCenterApp, ControlCenterHost};
     use crate::platform::{
         AudioStatus, BluetoothStatus, NetworkStatus, SessionAction, WorkspaceSummary,
     };
-
-    use super::{ControlAction, ControlViewState, build_control_center};
-
-    fn session_actions(state: ControlViewState) -> Vec<ControlAction> {
-        let frame = build_control_center(
-            &NetworkStatus::default(),
-            &BluetoothStatus::default(),
-            &AudioStatus::default(),
-            &[],
-            state,
-            (380.0, 650.0),
-        );
-        frame
-            .hit_targets
-            .iter()
-            .filter_map(|target| {
-                frame.action_at(
-                    target.bounds.origin.x + target.bounds.size.width / 2.0,
-                    target.bounds.origin.y + target.bounds.size.height / 2.0,
-                )
-            })
-            .collect()
-    }
+    use nickel_ui::{Application, SemanticAction, SemanticRole, SemanticValueInput};
 
     #[test]
-    fn disruptive_session_actions_require_confirmation_but_lock_is_immediate() {
-        let actions = session_actions(ControlViewState::default());
-        assert!(actions.contains(&ControlAction::SessionAction(SessionAction::Lock)));
-        for action in [
+    fn idle_control_center_declares_no_poll_deadline() {
+        let app = ControlCenterApp::new(
+            NetworkStatus::default(),
+            BluetoothStatus::default(),
+            AudioStatus::default(),
+            Vec::new(),
+        );
+        assert_eq!(Application::poll_interval(&app), None);
+    }
+
+    fn build(workspaces: &[WorkspaceSummary]) -> ControlCenterHost {
+        ControlCenterHost::new(
+            ControlCenterApp::new(
+                NetworkStatus::default(),
+                BluetoothStatus::default(),
+                AudioStatus::default(),
+                workspaces.to_vec(),
+            ),
+            380,
+            650,
+        )
+    }
+    fn has_action(host: &ControlCenterHost, action: &ControlAction) -> bool {
+        !host.semantic_targets_for_message(action).is_empty()
+    }
+    #[test]
+    fn disruptive_actions_require_confirmation_but_lock_is_immediate() {
+        let host = build(&[]);
+        assert!(has_action(
+            &host,
+            &ControlAction::SessionAction(SessionAction::Lock)
+        ));
+        for value in [
             SessionAction::RestartShell,
             SessionAction::Suspend,
             SessionAction::LogOut,
             SessionAction::Reboot,
             SessionAction::PowerOff,
         ] {
-            assert!(actions.contains(&ControlAction::RequestSessionAction(action)));
-            assert!(!actions.contains(&ControlAction::SessionAction(action)));
+            assert!(has_action(
+                &host,
+                &ControlAction::RequestSessionAction(value)
+            ));
+            assert!(!has_action(&host, &ControlAction::SessionAction(value)));
         }
     }
-
     #[test]
-    fn pending_session_action_exposes_only_cancel_and_confirm() {
-        let actions = session_actions(ControlViewState {
-            pending_session_action: Some(SessionAction::PowerOff),
-            ..ControlViewState::default()
-        });
-        assert!(actions.contains(&ControlAction::CancelSessionAction));
-        assert!(actions.contains(&ControlAction::ConfirmSessionAction));
-        assert!(!actions.iter().any(|action| matches!(
-            action,
-            ControlAction::SessionAction(_) | ControlAction::RequestSessionAction(_)
-        )));
+    fn pending_action_exposes_only_cancel_and_confirm() {
+        let mut host = build(&[]);
+        host.application_mut()
+            .request_session_action(SessionAction::PowerOff);
+        host.poll();
+        assert!(has_action(&host, &ControlAction::CancelSessionAction));
+        assert!(has_action(&host, &ControlAction::ConfirmSessionAction));
+        for action in [
+            SessionAction::Lock,
+            SessionAction::RestartShell,
+            SessionAction::Suspend,
+            SessionAction::LogOut,
+            SessionAction::Reboot,
+            SessionAction::PowerOff,
+        ] {
+            assert!(!has_action(&host, &ControlAction::SessionAction(action)));
+            assert!(!has_action(
+                &host,
+                &ControlAction::RequestSessionAction(action)
+            ));
+        }
     }
-
     #[test]
-    fn workspace_card_routes_switch_create_and_active_remove_actions() {
-        let frame = build_control_center(
-            &NetworkStatus::default(),
-            &BluetoothStatus::default(),
-            &AudioStatus::default(),
-            &[
-                WorkspaceSummary {
-                    id: 4,
-                    active: false,
-                },
-                WorkspaceSummary {
-                    id: 9,
-                    active: true,
-                },
-            ],
-            ControlViewState::default(),
-            (380.0, 650.0),
+    fn workspace_buttons_route_typed_actions() {
+        let host = build(&[
+            WorkspaceSummary {
+                id: 4,
+                active: false,
+            },
+            WorkspaceSummary {
+                id: 9,
+                active: true,
+            },
+        ]);
+        for expected in [
+            ControlAction::SwitchWorkspace(4),
+            ControlAction::SwitchWorkspace(9),
+            ControlAction::CreateWorkspace,
+            ControlAction::RemoveWorkspace(9),
+        ] {
+            assert!(has_action(&host, &expected));
+        }
+        assert!(!has_action(&host, &ControlAction::RemoveWorkspace(4)));
+    }
+    #[test]
+    fn volume_is_a_semantic_value_control() {
+        let mut host = build(&[]);
+        let slider = host
+            .semantic_nodes()
+            .into_iter()
+            .find(|node| node.role == Some(SemanticRole::Slider))
+            .unwrap();
+        host.perform_semantic_action(
+            slider.id,
+            SemanticAction::SetValue(SemanticValueInput::Number(0.73)),
         );
-        let actions = frame
-            .hit_targets
-            .iter()
-            .map(|target| target.action.clone())
-            .collect::<Vec<_>>();
-        assert!(actions.contains(&ControlAction::SwitchWorkspace(4)));
-        assert!(actions.contains(&ControlAction::SwitchWorkspace(9)));
-        assert!(actions.contains(&ControlAction::CreateWorkspace));
-        assert!(actions.contains(&ControlAction::RemoveWorkspace(9)));
-        assert!(!actions.contains(&ControlAction::RemoveWorkspace(4)));
+        assert_eq!(
+            host.application_mut().take_effects(),
+            vec![ControlAction::SetAudioVolume(73)]
+        );
     }
 }

@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "captured_at": "2026-08-31T23:13:30-07:00",
+  "environment": {
+    "backend": "nested_winit",
+    "compositor_renderer": "llvmpipe (LLVM 21.1.8, 256 bits)",
+    "shell_presenter": "wgpu",
+    "hardware_claim": false
+  },
+  "samples": {
+    "warm_present_us": [37959, 14, 10, 15, 10, 13, 10, 12, 13, 15, 13, 15, 12, 19, 14, 10, 11, 11, 11, 13, 16, 13, 10, 17, 15, 11, 13, 12, 9, 11, 10, 10, 15, 30, 11, 14, 11, 10, 10, 10, 18, 11, 17, 11, 14, 10, 16, 11, 9, 10, 10, 13, 17, 11, 10, 12, 11, 14, 12, 32, 17, 17, 12, 11],
+    "input_to_visible_us": [48435, 5757, 5332, 5229, 5474, 5334, 5238, 5374, 5592, 5519, 5419, 5512, 5492, 7583, 5871, 5911, 5474, 5504, 5555, 5543, 6162, 6487, 5356, 5911, 6268, 6605, 5571, 4964, 5190, 5304, 5093, 5227, 5413, 6314, 5273, 5396, 5371, 5251, 5215, 5357, 6292, 6225, 6342, 5250, 5285, 5187, 5310, 5356, 5227, 5140, 4972, 5395, 5416, 5285, 5214, 5486, 5281, 5191, 6232, 6484, 6696, 6590, 5303, 5365]
+  },
+  "summary": {
+    "warm_present_samples": 64,
+    "warm_present_p95_us": 19,
+    "input_to_visible_samples": 64,
+    "input_to_visible_p95_us": 6605,
+    "retained_presenter_bytes": 6457628,
+    "frame_allocations": { "count": 0, "scope": "unavailable" }
+  },
+  "budgets": {
+    "warm_present_p95_us": 16700,
+    "input_to_visible_p95_us": 50000,
+    "retained_presenter_bytes": 8388608
+  },
+  "result": {
+    "warm_present": true,
+    "input_to_visible": true,
+    "retained_presenter_bytes": true,
+    "frame_allocations": false
+  }
+}

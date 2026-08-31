@@ -601,23 +601,30 @@ fn window_frame_elements(
             .and_then(|id| state.windows.title(id))
             .unwrap_or_default();
         let foreground = if active { palette.text } else { palette.muted };
-        if let Some(titlebar) =
-            crate::window_frame::render_titlebar(bounds.size.w, title, palette.panel, foreground)
-            && let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
-                renderer,
-                (
-                    f64::from(bounds.loc.x - output_geometry.loc.x),
-                    f64::from(
-                        bounds.loc.y - output_geometry.loc.y - crate::window_frame::TITLEBAR_HEIGHT,
-                    ),
-                ),
-                &titlebar,
-                None,
-                None,
-                Some((bounds.size.w, crate::window_frame::TITLEBAR_HEIGHT).into()),
-                Kind::Unspecified,
-            )
-        {
+        let titlebar_geometry =
+            crate::window_frame::titlebar_geometry(crate::shell_layout::Geometry {
+                x: bounds.loc.x,
+                y: bounds.loc.y,
+                width: bounds.size.w,
+                height: bounds.size.h,
+            });
+        if let Some(titlebar) = crate::window_frame::render_titlebar(
+            titlebar_geometry.width,
+            title,
+            palette.panel,
+            foreground,
+        ) && let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
+            renderer,
+            (
+                f64::from(titlebar_geometry.x - output_geometry.loc.x),
+                f64::from(titlebar_geometry.y - output_geometry.loc.y),
+            ),
+            &titlebar,
+            None,
+            None,
+            Some((titlebar_geometry.width, titlebar_geometry.height).into()),
+            Kind::Unspecified,
+        ) {
             frame.push(WinitFrameElement::from(element));
         }
         if let Some(icons) = icons {

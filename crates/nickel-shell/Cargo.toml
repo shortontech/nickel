@@ -7,6 +7,10 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+default = []
+workbench-fixtures = ["dep:nickel-ui-testkit", "nickel-codex-ui/workbench-fixtures"]
+
 [dependencies]
 image.workspace = true
 jiff.workspace = true
@@ -25,6 +29,7 @@ sdl3.workspace = true
 softbuffer.workspace = true
 tracing.workspace = true
 zeroize.workspace = true
+nickel-ui-testkit = { path = "../nickel-ui-testkit", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 arboard = { version = "3.6.1", default-features = false, features = ["image-data", "wayland-data-control"] }

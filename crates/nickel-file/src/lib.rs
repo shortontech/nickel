@@ -6,6 +6,14 @@ use std::{
     path::{Path, PathBuf},
 };
 
+extern crate self as nickel_file;
+
+#[path = "main.rs"]
+#[allow(dead_code)]
+mod app;
+
+pub use app::{FileApp, FileFixtureProvider, FileMessage, run};
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FileEntry {
     pub name: OsString,
@@ -30,6 +38,16 @@ pub struct DirectoryBrowser {
 }
 
 impl DirectoryBrowser {
+    #[doc(hidden)]
+    pub fn fixture(entries: Vec<FileEntry>) -> Self {
+        Self {
+            current: PathBuf::from("/fixture"),
+            history: Vec::new(),
+            forward_history: Vec::new(),
+            entries,
+            show_hidden: true,
+        }
+    }
     pub fn open(path: impl Into<PathBuf>) -> io::Result<Self> {
         Self::open_with_hidden(path, true)
     }

@@ -1,5 +1,3 @@
-#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
-
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
@@ -19,15 +17,11 @@ use nickel_input::{
     AggregateModifier, InputEvent, KeyCode, KeyEdge, PhysicalKey, PointerButton, PointerEvent,
 };
 use nickel_ui::{
-    AnyView, Component, Insets, LinearGradient, PaintCommand, Point, Rect, SdlCanvasPresenter,
-    TextAlign, UiStateStore, UiTree, ui,
+    AdapterOutcome, AnyView, Application, Component, ComponentBuilderExt, FrameOverlay,
+    HostAdapter, HostServices, Insets, LinearGradient, NavigationScope, OverlayAnchor, OverlayMenu,
+    OverlayMenuItem, Point, Rect, UiHost, UiId, ViewContext, ui,
 };
-use sdl3::{
-    event::{Event, WindowEvent},
-    pixels::PixelFormat,
-    surface::Surface,
-    video::Window,
-};
+use sdl3::{event::Event, pixels::PixelFormat, surface::Surface, video::Window};
 
 const DEFAULT_SIDEBAR_WIDTH: f32 = 190.0;
 const MIN_SIDEBAR_WIDTH: f32 = 150.0;
@@ -58,7 +52,9 @@ fn set_nickel_file_icon(window: &mut Window) {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum FileMessage {
+pub enum FileMessage {
+    ContextEntry(usize),
+    ContextBackground,
     ContextOpen,
     ContextOpenNewTab,
     ContextRefresh,
@@ -75,15 +71,12 @@ enum FileMessage {
     ToggleFolder(PathBuf),
     OpenFolder(PathBuf),
     Entry(usize),
+    SelectionSurface,
     FileScroll,
 }
 
-struct FileApp {
-    input: nickel_input::sdl::Adapter,
-    presenter: Option<SdlCanvasPresenter>,
-    dirty: bool,
+pub struct FileApp {
     browser: DirectoryBrowser,
-    ui: UiTree<FileMessage>,
     cursor: Point,
     selected: Option<usize>,
     selected_entries: HashSet<usize>,
@@ -94,20 +87,107 @@ struct FileApp {
     last_click: Option<(usize, Instant)>,
     icons: HashMap<PathBuf, (u16, Arc<image::RgbaImage>)>,
     icon_rx: Option<Receiver<(PathBuf, Option<image::RgbaImage>)>>,
+    icon_poll_delay: std::time::Duration,
     next_icon_id: u16,
     sidebar_width: f32,
     expanded_folders: HashSet<PathBuf>,
-    ui_state: UiStateStore,
     control_down: bool,
     shift_down: bool,
     selection_drag: Option<Point>,
-    context_menu: Option<(Point, Option<usize>)>,
-    resize_deadline: Option<Instant>,
+    resizing_sidebar: bool,
     tile_width: f32,
     tab_icon: Option<(u16, Arc<image::RgbaImage>)>,
     tabs: Vec<Option<FileTab>>,
     active_tab: usize,
+    pending_ensure_visible: bool,
+    pending_scroll_reset: bool,
+    resolved_grid_columns: usize,
     exit_requested: bool,
+}
+
+pub struct FileFixtureProvider;
+
+pub struct FileWorkbenchFixture;
+
+const FILE_FIXTURE_VARIANTS: &[nickel_ui_testkit::FixtureVariant] = &[
+    nickel_ui_testkit::FixtureVariant {
+        id: "wide",
+        title: "Wide",
+        viewport: nickel_ui_testkit::ViewportPreset {
+            id: "wide",
+            width: 960,
+            height: 640,
+        },
+        theme: nickel_ui_testkit::FixtureTheme::Dark,
+        locale: nickel_ui_testkit::DEFAULT_LOCALE,
+        scale: nickel_ui_testkit::DEFAULT_SCALE,
+        controller_family: nickel_ui::ControllerFamily::Generic,
+        accessibility: nickel_ui_testkit::DEFAULT_ACCESSIBILITY,
+    },
+    nickel_ui_testkit::FixtureVariant {
+        id: "narrow-200",
+        title: "Narrow 200%",
+        viewport: nickel_ui_testkit::ViewportPreset {
+            id: "narrow",
+            width: 540,
+            height: 420,
+        },
+        theme: nickel_ui_testkit::FixtureTheme::Dark,
+        locale: nickel_ui_testkit::DEFAULT_LOCALE,
+        scale: nickel_ui_testkit::ScalePreset {
+            id: "2x",
+            factor: 2.0,
+        },
+        controller_family: nickel_ui::ControllerFamily::Generic,
+        accessibility: nickel_ui_testkit::DEFAULT_ACCESSIBILITY,
+    },
+];
+
+static FILE_FIXTURE_METADATA: nickel_ui_testkit::FixtureMetadata =
+    nickel_ui_testkit::FixtureMetadata {
+        id: "file.browser",
+        title: "Nickel File",
+        description: "Production Nickel File browser surface",
+        tags: &["file", "browser", "collection", "context-menu"],
+        source: nickel_ui_testkit::FixtureSource {
+            crate_name: "nickel-file",
+            file: file!(),
+            line: line!(),
+        },
+        variants: FILE_FIXTURE_VARIANTS,
+        assets: &[],
+        simulated_effects: &[],
+    };
+
+impl nickel_ui_testkit::Fixture for FileWorkbenchFixture {
+    type App = FileApp;
+    fn metadata() -> &'static nickel_ui_testkit::FixtureMetadata {
+        &FILE_FIXTURE_METADATA
+    }
+    fn create() -> Self::App {
+        FileApp::fixture()
+    }
+    fn create_variant(_: &nickel_ui_testkit::FixtureVariant) -> Self::App {
+        FileApp::fixture()
+    }
+    fn surface_size() -> (u32, u32) {
+        (960, 640)
+    }
+    fn default_activation() -> Option<nickel_ui_testkit::Selector> {
+        Some(nickel_ui_testkit::Selector::role_name(
+            nickel_ui::SemanticRole::Button,
+            "report.txt",
+        ))
+    }
+}
+
+impl nickel_ui_testkit::FixtureProvider for FileFixtureProvider {
+    fn register(
+        &self,
+        registry: &mut nickel_ui_testkit::FixtureRegistry,
+    ) -> Result<(), nickel_ui_testkit::RegistryError> {
+        registry.register::<FileWorkbenchFixture>()
+    }
 }
 
 struct FileTab {
@@ -122,37 +202,11 @@ struct FileTab {
 }
 
 impl FileApp {
-    fn scroll_state_id(tab_id: u64) -> nickel_ui::UiId {
-        nickel_ui::UiId::new(format!("file-tab-{tab_id}-scroll"))
-    }
-
-    fn scroll_offset(&self) -> f32 {
-        self.ui_state
-            .state(&Self::scroll_state_id(self.active_tab_id))
-            .map(|state| state.scroll_offset)
-            .unwrap_or(0.0)
-    }
-
-    fn set_scroll_offset(&mut self, offset: f32) {
-        self.ui_state
-            .state_mut(Self::scroll_state_id(self.active_tab_id))
-            .scroll_offset = offset.max(0.0);
-    }
-
-    fn hovered_message(&self) -> Option<&FileMessage> {
-        self.ui_state
-            .hovered()
-            .and_then(|id| self.ui.message_for_id(id))
-    }
-
     fn is_resizing_sidebar(&self) -> bool {
-        self.ui_state
-            .captured()
-            .and_then(|id| self.ui.message_for_id(id))
-            == Some(&FileMessage::ResizeSidebar)
+        self.resizing_sidebar
     }
 
-    fn new(path: PathBuf) -> Self {
+    pub fn new(path: PathBuf) -> Self {
         let show_hidden = nickel_platform::show_hidden_files();
         let (browser, status) = match DirectoryBrowser::open_with_hidden(&path, show_hidden) {
             Ok(browser) => (browser, String::new()),
@@ -169,12 +223,12 @@ impl FileApp {
                 )
             }
         };
+        Self::with_browser(browser, status)
+    }
+
+    fn with_browser(browser: DirectoryBrowser, status: String) -> Self {
         let mut app = Self {
-            input: nickel_input::sdl::Adapter::default(),
-            presenter: None,
-            dirty: true,
             browser,
-            ui: UiTree::default(),
             cursor: Point { x: 0.0, y: 0.0 },
             selected: None,
             selected_entries: HashSet::new(),
@@ -185,24 +239,49 @@ impl FileApp {
             last_click: None,
             icons: HashMap::new(),
             icon_rx: None,
+            icon_poll_delay: std::time::Duration::from_millis(16),
             next_icon_id: 1,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             expanded_folders: HashSet::new(),
-            ui_state: UiStateStore::default(),
             control_down: false,
             shift_down: false,
             selection_drag: None,
-            context_menu: None,
-            resize_deadline: None,
+            resizing_sidebar: false,
             tile_width: DEFAULT_TILE_WIDTH,
             tab_icon: None,
             tabs: vec![None],
             active_tab: 0,
+            pending_ensure_visible: false,
+            pending_scroll_reset: false,
+            resolved_grid_columns: 1,
             exit_requested: false,
         };
         app.refresh_icons();
         app.refresh_tab_icon();
         app
+    }
+
+    fn fixture() -> Self {
+        let entries = [
+            ("Documents", true, None),
+            ("report.txt", false, Some(128)),
+            ("notes.md", false, Some(512)),
+        ]
+        .into_iter()
+        .map(|(name, is_directory, size)| FileEntry {
+            name: name.into(),
+            path: PathBuf::from("/fixture").join(name),
+            is_directory,
+            size,
+        })
+        .collect();
+        Self::with_browser(DirectoryBrowser::fixture(entries), String::new())
+    }
+
+    fn set_scroll_offset(&mut self, offset: f32) {
+        if offset <= 0.0 {
+            self.pending_scroll_reset = true;
+        }
     }
 
     fn inactive_tab(&self, index: usize) -> Option<&FileTab> {
@@ -227,8 +306,6 @@ impl FileApp {
         self.tabs[self.active_tab] = Some(target);
         self.active_tab = index;
         self.refresh_icons();
-        self.update_window_title();
-        self.request_redraw();
     }
 
     fn new_tab(&mut self) {
@@ -268,7 +345,6 @@ impl FileApp {
             if index < self.active_tab {
                 self.active_tab -= 1;
             }
-            self.request_redraw();
             return;
         }
         let target = if index + 1 < self.tabs.len() {
@@ -281,41 +357,15 @@ impl FileApp {
         if index < self.active_tab {
             self.active_tab -= 1;
         }
-        self.request_redraw();
     }
 
-    fn update_window_title(&mut self) {
-        if let Some(presenter) = &mut self.presenter {
-            let _ = presenter.window_mut().set_title(&format!(
-                "Nickel File — {}",
-                self.browser.current().display()
-            ));
-        }
-    }
-
-    fn request_redraw(&mut self) {
-        self.dirty = true;
-    }
-
-    fn finish_resize_if_due(&mut self) {
-        let Some(deadline) = self.resize_deadline else {
-            return;
-        };
-        if Instant::now() < deadline {
-            return;
-        }
-        self.resize_deadline = None;
-        self.ensure_selection_visible();
-        self.request_redraw();
-    }
-
-    fn build_ui(
+    fn build_view(
         &self,
-        width: f32,
+        _width: f32,
         height: f32,
         palette: ThemePalette,
         light_mode: bool,
-    ) -> UiTree<FileMessage> {
+    ) -> AnyView<FileMessage> {
         let tabs = (0..self.tabs.len()).map(|index| {
             let active = index == self.active_tab;
             let tab = if active {
@@ -344,13 +394,14 @@ impl FileApp {
         });
         let breadcrumbs = breadcrumb_paths(self.browser.current());
         let tab_strip = ui! {
-            <Container height={32.0} background={palette.panel} padding={Insets {
+            <Container id={"tab-strip"} height={32.0} background={palette.panel} padding={Insets {
                 top: 5.0, right: 10.0, bottom: 0.0, left: 12.0,
             }}>
                 <Row gap={3.0} children={tabs}>
-                    <Container width={28.0} on_press={FileMessage::NewTab} padding={Insets {
+                    <Container width={28.0} on_press={FileMessage::NewTab}
+                        focus_border={palette.accent} controller_focus_border={palette.complement} padding={Insets {
                         top: 1.0, right: 4.0, bottom: 0.0, left: 4.0,
-                    }}>
+                    }} accessibility_label={"New tab"}>
                         <Text width={20.0} scale={1.25} color={palette.muted}>{"+"}</Text>
                     </Container>
                 </Row>
@@ -365,9 +416,10 @@ impl FileApp {
                         } else {
                             ui! { <></> }
                         }}
-                        <Container on_press={FileMessage::Breadcrumb(path.clone())} padding={Insets {
+                        <Container on_press={FileMessage::Breadcrumb(path.clone())}
+                            focus_border={palette.accent} controller_focus_border={palette.complement} padding={Insets {
                             top: 4.0, right: 2.0, bottom: 3.0, left: 2.0,
-                        }}>
+                        }} accessibility_label={format!("Open {label}")}>
                             <Text scale={1.05} color={palette.text}>{label}</Text>
                         </Container>
                     </Row>
@@ -375,30 +427,36 @@ impl FileApp {
             </Row>
         };
         let navigation = ui! {
-            <Container height={46.0} background={palette.surface} padding={Insets {
+            <Container id={"navigation-toolbar"} height={46.0} background={palette.surface} padding={Insets {
                 top: 6.0, right: 12.0, bottom: 6.0, left: 10.0,
             }}>
                 <Row gap={4.0}>
                     <Button on_press={FileMessage::Back} width={34.0} height={34.0}
-                        color={if self.browser.can_go_back() { palette.text } else { palette.muted }}>
+                        focus_border={palette.accent} controller_focus_border={palette.complement}
+                        color={if self.browser.can_go_back() { palette.text } else { palette.muted }} accessibility_label={"Back"}>
                         {"←"}
                     </Button>
                     <Button on_press={FileMessage::Forward} width={34.0} height={34.0}
-                        color={if self.browser.can_go_forward() { palette.text } else { palette.muted }}>
+                        focus_border={palette.accent} controller_focus_border={palette.complement}
+                        color={if self.browser.can_go_forward() { palette.text } else { palette.muted }} accessibility_label={"Forward"}>
                         {"→"}
                     </Button>
-                    <Button on_press={FileMessage::Up} width={34.0} height={34.0} color={palette.text}>{"↑"}</Button>
+                    <Button on_press={FileMessage::Up} width={34.0} height={34.0} color={palette.text}
+                        focus_border={palette.accent} controller_focus_border={palette.complement} accessibility_label={"Up one folder"}>{"↑"}</Button>
                     <Container grow={1.0} background={palette.background} padding={Insets {
                         top: 5.0, right: 12.0, bottom: 4.0, left: 10.0,
                     }}>
                         {breadcrumb_row}
                     </Container>
-                    <Button on_press={FileMessage::Refresh} width={34.0} height={34.0} color={palette.text}>{"↻"}</Button>
+                    <Button on_press={FileMessage::Refresh} width={34.0} height={34.0} color={palette.text}
+                        focus_border={palette.accent} controller_focus_border={palette.complement} accessibility_label={"Refresh"}>{"↻"}</Button>
                 </Row>
             </Container>
         };
         let toolbar = ui! {
-            <Container height={TOOLBAR_HEIGHT} background={LinearGradient::vertical(palette.panel, palette.surface)}>
+            <Container id={"toolbar-pane"} height={TOOLBAR_HEIGHT}
+                navigation_scope={NavigationScope::pane(false)} navigation_scope_highlight={palette.complement}
+                background={LinearGradient::vertical(palette.panel, palette.surface)}>
                 <Column>{tab_strip}{navigation}</Column>
             </Container>
         };
@@ -406,7 +464,7 @@ impl FileApp {
             &places(),
             &self.expanded_folders,
             self.browser.current(),
-            self.hovered_message(),
+            None,
             palette,
         );
         let sidebar = ui! {
@@ -436,18 +494,24 @@ impl FileApp {
             });
         let files = if self.browser.entries().is_empty() {
             ui! {
-                <Column grow={1.0} padding={Insets::all(28.0)}>
+                <Container id={"file-content"} grow={1.0} padding={Insets::all(28.0)}
+                    on_press={FileMessage::SelectionSurface} context_message={FileMessage::ContextBackground}
+                    focus_border={palette.accent} controller_focus_border={palette.complement}
+                    accessibility_label={"Files"}>
                     <Text color={palette.muted}>{"This folder is empty."}</Text>
-                </Column>
+                </Container>
             }
         } else {
             ui! {
                 <Column grow={1.0} padding={Insets {
                     top: 14.0, right: 16.0, bottom: 14.0, left: 16.0,
                 }}>
-                    <VerticalScroll id={"file-list"} on_scroll={FileMessage::FileScroll} offset={self.scroll_offset()}>
+                    <VerticalScroll id={"file-list"} on_scroll={FileMessage::FileScroll} offset={0.0}>
                         <FileGrid min_width={self.tile_width} gap={10.0} items={tiles} />
                     </VerticalScroll>
+                    <Container id={"file-content"} height={1.0} on_press={FileMessage::SelectionSurface}
+                        context_message={FileMessage::ContextBackground} focus_border={palette.accent}
+                        controller_focus_border={palette.complement} accessibility_label={"Files background"} />
                 </Column>
             }
         };
@@ -472,114 +536,23 @@ impl FileApp {
             </Container>
         };
         let resize_handle = ui! {
-            <Container width={SIDEBAR_RESIZE_WIDTH} shrink={0.0}
+            <Container id={"sidebar-resize"} width={SIDEBAR_RESIZE_WIDTH} shrink={0.0}
                 background={if self.is_resizing_sidebar() { palette.accent } else { palette.surface_hover }}
-                on_press={FileMessage::ResizeSidebar} />
+                on_press={FileMessage::ResizeSidebar} focus_border={palette.accent}
+                controller_focus_border={palette.complement} accessibility_label={"Resize sidebar"} />
         };
-        let content = ui! { <Row grow={1.0}>{sidebar}{resize_handle}{files}</Row> };
+        let content = ui! {
+            <Container id={"file-layout"} grow={1.0} accessibility_label={"Files"}>
+                <Row grow={1.0}><Container id={"sidebar-pane"} navigation_scope={NavigationScope::pane(false)}
+                    navigation_scope_highlight={palette.complement}><Row>{sidebar}{resize_handle}</Row></Container>
+                    <Container id={"files-pane"} grow={1.0}
+                    navigation_scope={NavigationScope::pane(true)} navigation_scope_highlight={palette.complement}>{files}</Container></Row>
+            </Container>
+        };
         let root = ui! {
             <Column height={height} background={palette.background}>{toolbar}{content}{footer}</Column>
         };
-        let mut tree = UiTree::layout(root, Rect::new(0.0, 0.0, width, height));
-        if let Some(start) = self.selection_drag {
-            let rect = rect_between(start, self.cursor);
-            tree.push_overlay_command(PaintCommand::OverlayFill {
-                rect,
-                color: 0x4068_b8ff,
-            });
-            tree.push_overlay_command(PaintCommand::OverlayStroke {
-                rect,
-                color: palette.accent,
-                width: 1.0,
-            });
-        }
-        if let Some((point, entry)) = self.context_menu {
-            let labels: [(FileMessage, &str); 2] = if entry.is_some() {
-                [
-                    (FileMessage::ContextOpen, "Open"),
-                    (FileMessage::ContextOpenNewTab, "Open in New Tab"),
-                ]
-            } else {
-                [
-                    (FileMessage::ContextRefresh, "Refresh"),
-                    (FileMessage::ContextSelectAll, "Select All"),
-                ]
-            };
-            let menu_width = 170.0;
-            let row_height = 34.0;
-            let menu_height = labels.len() as f32 * row_height + 8.0;
-            let origin = Point {
-                x: point.x.min((width - menu_width - 4.0).max(4.0)),
-                y: point.y.min((height - menu_height - 4.0).max(4.0)),
-            };
-            let menu = Rect::new(origin.x, origin.y, menu_width, menu_height);
-            tree.push_overlay_command(PaintCommand::OverlayFill {
-                rect: menu,
-                color: palette.surface,
-            });
-            tree.push_overlay_command(PaintCommand::OverlayStroke {
-                rect: menu,
-                color: palette.muted,
-                width: 1.0,
-            });
-            for (row, (message, label)) in labels.into_iter().enumerate() {
-                let bounds = Rect::new(
-                    origin.x + 8.0,
-                    origin.y + 4.0 + row as f32 * row_height,
-                    menu_width - 16.0,
-                    row_height,
-                );
-                tree.push_overlay_command(PaintCommand::Text {
-                    bounds,
-                    text: label.to_owned(),
-                    scale: 1.2,
-                    color: palette.text,
-                    align: TextAlign::Start,
-                    bold: false,
-                    wrap: false,
-                });
-                tree.push_overlay_message(bounds, message);
-            }
-        }
-        tree
-    }
-
-    fn render(&mut self, _events: &sdl3::EventPump) {
-        let Some(size) = self
-            .presenter
-            .as_ref()
-            .map(|presenter| presenter.window().size())
-        else {
-            return;
-        };
-        let appearance =
-            ShellSettings::load_default().resolve_appearance(nickel_platform::appearance());
-        let palette = ThemePalette::from_appearance(appearance);
-        let ui = self.build_ui(
-            size.0 as f32,
-            size.1 as f32,
-            palette,
-            appearance.mode == ThemeMode::Light,
-        );
-        let retained_scrolls = std::iter::once(self.active_tab_id)
-            .chain(
-                self.tabs
-                    .iter()
-                    .filter_map(|tab| tab.as_ref().map(|tab| tab.tab_id)),
-            )
-            .map(Self::scroll_state_id)
-            .collect::<Vec<_>>();
-        ui.reconcile_state_with(&mut self.ui_state, retained_scrolls);
-        self.ui = ui;
-        if let Some(presenter) = &mut self.presenter {
-            let pixel_width = presenter.window().size_in_pixels().0;
-            let scale = pixel_width as f32 / size.0.max(1) as f32;
-            let result = presenter.present_accelerated(self.ui.commands(), scale);
-            if let Err(error) = result {
-                tracing::warn!(%error, "failed to render Nickel File");
-            }
-        }
-        self.dirty = false;
+        AnyView::new(root)
     }
 
     fn activate_selected(&mut self) {
@@ -600,7 +573,6 @@ impl FileApp {
             self.navigate_to(entry.path);
         } else if let Err(error) = open_path(&entry.path) {
             self.status = format!("Could not open {}: {error}", entry.display_name());
-            self.request_redraw();
         }
     }
 
@@ -615,7 +587,6 @@ impl FileApp {
             Ok(()) => self.navigation_changed(),
             Err(error) => {
                 self.status = format!("Could not open folder: {error}");
-                self.request_redraw();
             }
         }
     }
@@ -626,7 +597,6 @@ impl FileApp {
             Ok(false) => {}
             Err(error) => self.status = format!("Could not go back: {error}"),
         }
-        self.request_redraw();
     }
 
     fn go_forward(&mut self) {
@@ -635,7 +605,6 @@ impl FileApp {
             Ok(false) => {}
             Err(error) => self.status = format!("Could not go forward: {error}"),
         }
-        self.request_redraw();
     }
 
     fn go_up(&mut self) {
@@ -644,7 +613,6 @@ impl FileApp {
             Ok(false) => {}
             Err(error) => self.status = format!("Could not open parent: {error}"),
         }
-        self.request_redraw();
     }
 
     fn navigation_changed(&mut self) {
@@ -655,8 +623,6 @@ impl FileApp {
         self.status.clear();
         self.refresh_icons();
         self.refresh_tab_icon();
-        self.update_window_title();
-        self.request_redraw();
     }
 
     fn refresh_icons(&mut self) {
@@ -674,6 +640,7 @@ impl FileApp {
         paths.push(self.browser.current().to_path_buf());
         let (tx, rx) = mpsc::channel();
         self.icon_rx = Some(rx);
+        self.icon_poll_delay = std::time::Duration::from_millis(16);
         let _ = std::thread::Builder::new()
             .name("nickel-file-icons".into())
             .spawn(move || {
@@ -694,6 +661,7 @@ impl FileApp {
             };
             match result {
                 Ok((path, Some(image))) => {
+                    self.icon_poll_delay = std::time::Duration::from_millis(16);
                     let id = self.next_icon_id;
                     self.next_icon_id = self.next_icon_id.checked_add(1).unwrap_or(1);
                     if path == self.browser.current() {
@@ -706,10 +674,15 @@ impl FileApp {
                     {
                         self.icons.insert(path, (id, Arc::new(image)));
                     }
-                    self.request_redraw();
                 }
                 Ok((_, None)) => {}
-                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Empty) => {
+                    self.icon_poll_delay = self
+                        .icon_poll_delay
+                        .saturating_mul(2)
+                        .min(std::time::Duration::from_millis(250));
+                    return;
+                }
                 Err(TryRecvError::Disconnected) => {
                     self.icon_rx = None;
                     return;
@@ -744,70 +717,31 @@ impl FileApp {
             self.selection_anchor = Some(next);
         }
         self.ensure_selection_visible();
-        self.request_redraw();
     }
 
     fn ensure_selection_visible(&mut self) {
-        let Some(selected) = self.selected else {
-            return;
-        };
-        let Some(item) = self.ui.message_layout_rect(&FileMessage::Entry(selected)) else {
-            return;
-        };
-        let Some(viewport) = self.ui.scroll_viewport(&FileMessage::FileScroll) else {
-            return;
-        };
-        if item.origin.y < viewport.origin.y {
-            self.set_scroll_offset(
-                (self.scroll_offset() - (viewport.origin.y - item.origin.y)).max(0.0),
-            );
-        } else {
-            let item_bottom = item.origin.y + item.size.height;
-            let viewport_bottom = viewport.origin.y + viewport.size.height;
-            if item_bottom > viewport_bottom {
-                self.set_scroll_offset(self.scroll_offset() + item_bottom - viewport_bottom);
-            }
-        }
-    }
-
-    fn scroll(&mut self, delta: f32) {
-        let maximum = self
-            .ui
-            .scroll_extent(&FileMessage::FileScroll)
-            .map(|extent| (extent.content.height - extent.viewport.height).max(0.0))
-            .unwrap_or(0.0);
-        self.set_scroll_offset((self.scroll_offset() + delta).clamp(0.0, maximum));
-        self.request_redraw();
+        self.pending_ensure_visible = self.selected.is_some();
     }
 
     fn resolved_grid_columns(&self) -> usize {
-        self.ui.resolved_grid_columns().unwrap_or(1).max(1)
+        self.resolved_grid_columns.max(1)
     }
 
-    fn pointer_pressed(&mut self) {
-        let Some(message) = self.ui.message_at(self.cursor).cloned() else {
-            self.context_menu = None;
-            self.selection_drag = Some(self.cursor);
-            if !self.control_down && !self.shift_down {
-                self.selected = None;
-                self.selected_entries.clear();
-                self.selection_anchor = None;
-            }
-            self.request_redraw();
-            return;
-        };
-        if !matches!(
-            message,
-            FileMessage::ContextOpen
-                | FileMessage::ContextOpenNewTab
-                | FileMessage::ContextRefresh
-                | FileMessage::ContextSelectAll
-        ) {
-            self.context_menu = None;
-        }
+    fn update_message(&mut self, message: FileMessage) {
         match message {
+            FileMessage::ContextEntry(index) => {
+                if !self.selected_entries.contains(&index) {
+                    self.selected_entries.clear();
+                    self.selected_entries.insert(index);
+                    self.selected = Some(index);
+                    self.selection_anchor = Some(index);
+                }
+                self.selection_drag = None;
+            }
+            FileMessage::ContextBackground => {
+                self.selection_drag = None;
+            }
             FileMessage::ContextOpen => {
-                self.context_menu = None;
                 self.activate_selected();
             }
             FileMessage::ContextOpenNewTab => {
@@ -815,7 +749,6 @@ impl FileApp {
                     .selected
                     .and_then(|index| self.browser.entries().get(index))
                     .cloned();
-                self.context_menu = None;
                 if let Some(entry) = entry {
                     if entry.is_directory || entry.path.is_dir() {
                         self.new_tab_at(entry.path);
@@ -825,26 +758,18 @@ impl FileApp {
                 }
             }
             FileMessage::ContextRefresh => {
-                self.context_menu = None;
                 if let Err(error) = self.browser.refresh() {
                     self.status = format!("Could not refresh: {error}");
                 }
                 self.refresh_icons();
-                self.request_redraw();
             }
             FileMessage::ContextSelectAll => {
-                self.context_menu = None;
                 self.selected_entries = (0..self.browser.entries().len()).collect();
                 self.selected = (!self.browser.entries().is_empty()).then_some(0);
                 self.selection_anchor = self.selected;
-                self.request_redraw();
             }
             FileMessage::ResizeSidebar => {
-                self.context_menu = None;
-                let id = self.ui.id_for_message(&FileMessage::ResizeSidebar).cloned();
-                self.ui_state.set_pressed(id.clone());
-                self.ui_state.set_capture(id);
-                self.request_redraw();
+                self.resizing_sidebar = true;
             }
             FileMessage::NewTab => self.new_tab(),
             FileMessage::Back => self.go_back(),
@@ -862,7 +787,6 @@ impl FileApp {
                 self.selected_entries.clear();
                 self.selection_anchor = None;
                 self.set_scroll_offset(0.0);
-                self.request_redraw();
             }
             FileMessage::CloseTab(index) => self.close_tab(index),
             FileMessage::SwitchTab(index) => self.switch_tab(index),
@@ -870,7 +794,6 @@ impl FileApp {
                 if !self.expanded_folders.remove(&path) {
                     self.expanded_folders.insert(path);
                 }
-                self.request_redraw();
             }
             FileMessage::OpenFolder(path) | FileMessage::Breadcrumb(path) => {
                 self.navigate_to(path);
@@ -900,204 +823,328 @@ impl FileApp {
                 if activate && !self.control_down && !self.shift_down {
                     self.activate_selected();
                     self.last_click = None;
-                } else {
-                    self.request_redraw();
                 }
             }
-            FileMessage::FileScroll => {
+            FileMessage::SelectionSurface => {
                 self.selection_drag = Some(self.cursor);
                 if !self.control_down && !self.shift_down {
                     self.selected = None;
                     self.selected_entries.clear();
                     self.selection_anchor = None;
                 }
-                self.request_redraw();
             }
+            FileMessage::FileScroll => {}
         }
     }
 }
 
-impl FileApp {
-    fn attach_window(&mut self, window: Window) {
-        self.presenter =
-            Some(SdlCanvasPresenter::new(window).expect("create accelerated presenter"));
-        self.request_redraw();
+impl Application for FileApp {
+    type Message = FileMessage;
+
+    fn update(&mut self, message: Self::Message) {
+        self.update_message(message);
     }
 
-    fn handle_event(&mut self, event: Event) -> bool {
-        if let Some(event) = self.input.normalize(&event) {
-            self.handle_input(event);
-            return !self.exit_requested;
-        }
-        match event {
-            Event::Quit { .. }
-            | Event::Window {
-                win_event: WindowEvent::CloseRequested,
-                ..
-            } => return false,
-            Event::Window {
-                win_event: WindowEvent::Exposed,
-                ..
-            } => self.request_redraw(),
-            Event::Window {
-                win_event: WindowEvent::Resized(_, _),
-                ..
-            } => {}
-            Event::Window {
-                win_event: WindowEvent::PixelSizeChanged(_, _),
-                ..
-            } => {
-                self.resize_deadline = Some(Instant::now() + Duration::from_millis(24));
+    fn view(&self, context: ViewContext) -> impl nickel_ui::View<Self::Message> {
+        let appearance =
+            ShellSettings::load_default().resolve_appearance(nickel_platform::appearance());
+        self.build_view(
+            context.viewport.size.width,
+            context.viewport.size.height,
+            ThemePalette::from_appearance(appearance),
+            appearance.mode == ThemeMode::Light,
+        )
+    }
+
+    fn frame_overlays(&self, context: ViewContext) -> Vec<FrameOverlay<Self::Message>> {
+        let appearance =
+            ShellSettings::load_default().resolve_appearance(nickel_platform::appearance());
+        let palette = ThemePalette::from_appearance(appearance);
+        let invocation_anchor = |target: UiId| match context.modality {
+            nickel_ui::InputModality::Pointer => OverlayAnchor::Point {
+                invocation_target: target,
+                point: self.cursor,
+            },
+            nickel_ui::InputModality::Keyboard
+            | nickel_ui::InputModality::Controller
+            | nickel_ui::InputModality::Accessibility => {
+                OverlayAnchor::InvocationTargetCenter(target)
             }
-            _ => {}
+        };
+        let configure = |mut menu: OverlayMenu<FileMessage>| {
+            menu.width = 170.0;
+            menu.row_height = 34.0;
+            menu.padding = Insets::all(4.0);
+            menu.radius = 7.0;
+            menu.background = palette.surface;
+            menu.foreground = palette.text;
+            menu.text_scale = 1.2;
+            menu.item_hover = Some(palette.surface_hover);
+            menu.item_pressed = Some(palette.accent_soft);
+            menu.item_selected = Some(palette.accent_soft);
+            menu.item_radius = 5.0;
+            menu
+        };
+        let mut overlays = self
+            .browser
+            .entries()
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                FrameOverlay::Menu(configure(
+                    OverlayMenu::new(
+                        format!("file-entry-{index}-context"),
+                        invocation_anchor(UiId::new(format!("file-entry-{index}"))),
+                    )
+                    .item(OverlayMenuItem::action(
+                        "open",
+                        "Open",
+                        FileMessage::ContextOpen,
+                    ))
+                    .item(OverlayMenuItem::action(
+                        "open-new-tab",
+                        "Open in New Tab",
+                        FileMessage::ContextOpenNewTab,
+                    )),
+                ))
+            })
+            .collect::<Vec<_>>();
+        overlays.push(FrameOverlay::Menu(configure(
+            OverlayMenu::new(
+                "file-background-context",
+                invocation_anchor(UiId::from("file-content")),
+            )
+            .item(OverlayMenuItem::action(
+                "refresh",
+                "Refresh",
+                FileMessage::ContextRefresh,
+            ))
+            .item(OverlayMenuItem::action(
+                "select-all",
+                "Select All",
+                FileMessage::ContextSelectAll,
+            )),
+        )));
+        if let Some(start) = self.selection_drag {
+            overlays.push(FrameOverlay::SelectionMarquee {
+                rect: rect_between(start, self.cursor),
+                fill: Some(0x4068_b8ff),
+                stroke: palette.accent,
+                width: 1.0,
+            });
         }
-        true
+        overlays
     }
 
-    fn handle_input(&mut self, event: InputEvent) {
+    fn poll(&mut self) -> bool {
+        let before = self.next_icon_id;
+        self.poll_icons();
+        before != self.next_icon_id
+    }
+
+    fn poll_interval(&self) -> Option<std::time::Duration> {
+        self.icon_rx.as_ref().map(|_| self.icon_poll_delay)
+    }
+
+    fn title(&self) -> &str {
+        "Nickel File"
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        (860, 620)
+    }
+}
+
+struct FileHostAdapter {
+    input: nickel_input::sdl::Adapter,
+    sync_requested: bool,
+}
+
+impl Default for FileHostAdapter {
+    fn default() -> Self {
+        Self {
+            input: nickel_input::sdl::Adapter::default(),
+            sync_requested: true,
+        }
+    }
+}
+
+impl HostAdapter<FileApp> for FileHostAdapter {
+    fn next_deadline(&self, now: Instant) -> Option<Instant> {
+        self.sync_requested.then_some(now)
+    }
+
+    fn started(
+        &mut self,
+        _host: &mut UiHost<FileApp>,
+        mut services: HostServices<'_>,
+    ) -> Result<AdapterOutcome, Box<dyn std::error::Error>> {
+        services.window().set_minimum_size(560, 360)?;
+        set_nickel_file_icon(services.window());
+        Ok(AdapterOutcome::default())
+    }
+
+    fn event(
+        &mut self,
+        host: &mut UiHost<FileApp>,
+        event: &Event,
+        _services: HostServices<'_>,
+    ) -> Result<AdapterOutcome, Box<dyn std::error::Error>> {
+        let Some(event) = self.input.normalize(event) else {
+            return Ok(AdapterOutcome::default());
+        };
+        let mut changed = false;
         match event {
             InputEvent::Key(key) => {
-                self.control_down = key.modifiers.aggregate(AggregateModifier::Control);
-                self.shift_down = key.modifiers.aggregate(AggregateModifier::Shift);
+                let app = host.application_mut();
+                app.control_down = key.modifiers.aggregate(AggregateModifier::Control);
+                app.shift_down = key.modifiers.aggregate(AggregateModifier::Shift);
                 if key.edge != KeyEdge::Pressed || key.repeat {
-                    return;
+                    return Ok(AdapterOutcome::default());
                 }
                 let PhysicalKey::Code(key) = key.physical else {
-                    return;
+                    return Ok(AdapterOutcome::default());
                 };
                 match key {
-                    KeyCode::ArrowDown => {
-                        self.select_relative(self.resolved_grid_columns() as isize)
-                    }
+                    KeyCode::ArrowDown => app.select_relative(app.resolved_grid_columns() as isize),
                     KeyCode::ArrowUp => {
-                        self.select_relative(-(self.resolved_grid_columns() as isize))
+                        app.select_relative(-(app.resolved_grid_columns() as isize))
                     }
-                    KeyCode::ArrowRight => self.select_relative(1),
-                    KeyCode::ArrowLeft => self.select_relative(-1),
-                    KeyCode::Enter | KeyCode::NumpadEnter => self.activate_selected(),
-                    KeyCode::Backspace => self.go_back(),
+                    KeyCode::ArrowRight => app.select_relative(1),
+                    KeyCode::ArrowLeft => app.select_relative(-1),
+                    KeyCode::Backspace => app.go_back(),
                     KeyCode::Escape => {
-                        self.selected = None;
-                        self.selected_entries.clear();
-                        self.selection_anchor = None;
-                        self.request_redraw();
+                        app.selected = None;
+                        app.selected_entries.clear();
+                        app.selection_anchor = None;
                     }
-                    KeyCode::KeyA if self.control_down => {
-                        self.selected_entries = (0..self.browser.entries().len()).collect();
-                        self.selected = self
+                    KeyCode::KeyA if app.control_down => {
+                        app.selected_entries = (0..app.browser.entries().len()).collect();
+                        app.selected = app
                             .selected
-                            .or_else(|| (!self.browser.entries().is_empty()).then_some(0));
-                        self.selection_anchor = self.selected;
-                        self.request_redraw();
+                            .or_else(|| (!app.browser.entries().is_empty()).then_some(0));
+                        app.selection_anchor = app.selected;
                     }
                     KeyCode::F5 => {
-                        if let Err(error) = self.browser.refresh() {
-                            self.status = format!("Could not refresh: {error}");
+                        if let Err(error) = app.browser.refresh() {
+                            app.status = format!("Could not refresh: {error}");
                         }
-                        self.request_redraw();
                     }
                     _ => {}
                 }
+                changed = true;
             }
             InputEvent::Pointer(PointerEvent::Motion { position, .. }) => {
-                self.cursor = Point {
+                let cursor = Point {
                     x: position.x as f32,
                     y: position.y as f32,
                 };
-                if let Some(start) = self.selection_drag {
-                    let selection = rect_between(start, self.cursor);
-                    self.selected_entries = self
-                        .ui
-                        .messages_intersecting(selection)
+                let selection_drag = host.application().selection_drag;
+                let resizing = host.application().is_resizing_sidebar();
+                let selected_entries = selection_drag.map(|start| {
+                    let selection = rect_between(start, cursor);
+                    host.semantic_nodes()
                         .into_iter()
-                        .filter_map(|message| match message {
-                            FileMessage::Entry(index) => Some(*index),
-                            _ => None,
+                        .filter_map(|node| {
+                            node.id
+                                .as_str()
+                                .rsplit('/')
+                                .next()
+                                .unwrap_or_default()
+                                .strip_prefix("file-entry-")
+                                .and_then(|value| value.parse::<usize>().ok())
+                                .filter(|_| rects_intersect(selection, node.bounds))
                         })
-                        .collect();
-                    self.selected = self.selected_entries.iter().copied().min();
-                    self.request_redraw();
+                        .collect::<HashSet<_>>()
+                });
+                let app = host.application_mut();
+                app.cursor = cursor;
+                if let Some(entries) = selected_entries {
+                    app.selected_entries = entries;
+                    app.selected = app.selected_entries.iter().copied().min();
                 }
-                if self.is_resizing_sidebar() {
-                    self.sidebar_width = self.cursor.x.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
-                    self.ensure_selection_visible();
-                    self.request_redraw();
+                if resizing {
+                    app.sidebar_width = cursor.x.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
+                    app.ensure_selection_visible();
                 }
-                if self
-                    .ui_state
-                    .set_hovered(self.ui.id_at(self.cursor).cloned())
-                    != nickel_ui::Invalidation::None
-                {
-                    self.request_redraw();
-                }
+                changed = selection_drag.is_some() || resizing;
             }
-            InputEvent::Pointer(PointerEvent::Leave { .. }) => {
-                self.ui_state.set_hovered(None);
-                self.request_redraw();
-            }
-            InputEvent::Pointer(PointerEvent::Button {
-                button: PointerButton::Primary,
-                edge: KeyEdge::Pressed,
-                ..
-            }) => self.pointer_pressed(),
             InputEvent::Pointer(PointerEvent::Button {
                 button: PointerButton::Secondary,
                 edge: KeyEdge::Pressed,
+                position: Some(position),
                 ..
             }) => {
-                let entry = self
-                    .ui
-                    .message_at(self.cursor)
-                    .and_then(|message| match message {
-                        FileMessage::Entry(index) => Some(*index),
-                        _ => None,
-                    });
-                if let Some(index) = entry
-                    && !self.selected_entries.contains(&index)
-                {
-                    self.selected_entries.clear();
-                    self.selected_entries.insert(index);
-                    self.selected = Some(index);
-                    self.selection_anchor = Some(index);
-                }
-                self.context_menu = Some((self.cursor, entry));
-                self.selection_drag = None;
-                self.request_redraw();
+                host.application_mut().cursor = Point {
+                    x: position.x as f32,
+                    y: position.y as f32,
+                };
+                changed = true;
             }
             InputEvent::Pointer(PointerEvent::Button {
                 button: PointerButton::Primary,
                 edge: KeyEdge::Released,
                 ..
             }) => {
-                self.ui_state.set_pressed(None);
-                self.ui_state.set_capture(None);
-                self.selection_drag = None;
-                self.request_redraw();
+                let app = host.application_mut();
+                app.resizing_sidebar = false;
+                app.selection_drag = None;
+                changed = true;
             }
             InputEvent::Pointer(PointerEvent::Axis { delta, .. }) => {
                 let y = delta.y as f32;
-                if self.control_down {
-                    self.tile_width =
-                        (self.tile_width + y.signum() * 12.0).clamp(MIN_TILE_WIDTH, MAX_TILE_WIDTH);
-                    self.ensure_selection_visible();
-                    self.request_redraw();
-                } else {
-                    self.scroll(-y * 80.0);
+                let app = host.application_mut();
+                if app.control_down {
+                    app.tile_width =
+                        (app.tile_width + y.signum() * 12.0).clamp(MIN_TILE_WIDTH, MAX_TILE_WIDTH);
+                    app.ensure_selection_visible();
+                    changed = true;
                 }
             }
             InputEvent::FocusLost { .. } | InputEvent::DeviceRemoved { .. } => {
-                self.control_down = false;
-                self.shift_down = false;
-                self.ui_state.set_pressed(None);
-                self.ui_state.set_capture(None);
-                self.selection_drag = None;
+                let app = host.application_mut();
+                app.control_down = false;
+                app.shift_down = false;
+                app.resizing_sidebar = false;
+                app.selection_drag = None;
             }
-            InputEvent::FocusGained { .. }
-            | InputEvent::Text(_)
-            | InputEvent::Touch(_)
-            | InputEvent::Pointer(PointerEvent::Enter { .. })
-            | InputEvent::Pointer(PointerEvent::Button { .. }) => {}
+            _ => {}
         }
+        self.sync_requested |= changed;
+        Ok(AdapterOutcome {
+            changed,
+            consume: false,
+            exit: host.application().exit_requested,
+        })
+    }
+
+    fn poll(
+        &mut self,
+        host: &mut UiHost<FileApp>,
+        mut services: HostServices<'_>,
+    ) -> Result<AdapterOutcome, Box<dyn std::error::Error>> {
+        self.sync_requested = false;
+        host.application_mut().resolved_grid_columns =
+            host.resolved_grid_columns().unwrap_or(1).max(1);
+        let pending_reset = std::mem::take(&mut host.application_mut().pending_scroll_reset);
+        if pending_reset {
+            host.reset_scroll(&FileMessage::FileScroll);
+        }
+        let pending_ensure = std::mem::take(&mut host.application_mut().pending_ensure_visible);
+        let selected = host.application().selected;
+        if pending_ensure && let Some(selected) = selected {
+            host.ensure_message_visible(&FileMessage::Entry(selected), &FileMessage::FileScroll);
+        }
+        let title = format!(
+            "Nickel File — {}",
+            host.application().browser.current().display()
+        );
+        let _ = services.window().set_title(&title);
+        Ok(if host.application().exit_requested {
+            AdapterOutcome::exit()
+        } else {
+            AdapterOutcome::default()
+        })
     }
 }
 
@@ -1115,7 +1162,7 @@ fn file_tab_element(
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| browser.current().display().to_string());
     ui! {
-        <Container width={170.0} on_press={FileMessage::SwitchTab(index)} background={if active {
+        <Container width={170.0} background={if active {
             if light_mode {
                 0xffffff
             } else {
@@ -1125,19 +1172,24 @@ fn file_tab_element(
             mix_rgb(palette.panel, 0xffffff)
         } else {
             palette.panel
-        }} top_corner_radius={5.0}>
+        }} top_corner_radius={5.0} accessibility_label={format!("Tab {label}")}>
             <Column>
                 <Row height={25.0} gap={6.0} padding={Insets {
                     top: 4.0, right: 4.0, bottom: 3.0, left: 9.0,
                 }}>
-                    {if let Some((id, image)) = icon {
-                        ui! { <Image asset_id={*id} image={image.clone()} width={16.0} height={16.0} /> }
-                    } else {
-                        ui! { <Container width={16.0} /> }
-                    }}
-                    <Text width={108.0} height={18.0} scale={1.05}
-                        color={if active { palette.text } else { palette.muted }}>{label}</Text>
-                    <Container width={20.0} on_press={FileMessage::CloseTab(index)}>
+                    <Container width={125.0} height={25.0} on_press={FileMessage::SwitchTab(index)}
+                        focus_border={palette.accent} controller_focus_border={palette.complement}
+                        accessibility_label={format!("Tab {label}")}><Row gap={6.0}>
+                        {if let Some((id, image)) = icon {
+                            ui! { <Image asset_id={*id} image={image.clone()} width={16.0} height={16.0} /> }
+                        } else {
+                            ui! { <Container width={16.0} /> }
+                        }}
+                        <Text width={97.0} height={18.0} scale={1.05}
+                            color={if active { palette.text } else { palette.muted }}>{label.clone()}</Text>
+                        </Row></Container>
+                    <Container width={20.0} on_press={FileMessage::CloseTab(index)}
+                        focus_border={palette.accent} controller_focus_border={palette.complement} accessibility_label={format!("Close {label}")}>
                         <Text width={20.0} color={palette.muted}>{"×"}</Text>
                     </Container>
                 </Row>
@@ -1204,7 +1256,9 @@ fn sidebar_folder_elements(
         let is_hovered =
             hovered_message == Some(&toggle_message) || hovered_message == Some(&open_message);
         rows.push(AnyView::new(ui! {
-            <SidebarFolder on_toggle={toggle_message} on_open={open_message} label={label}
+            <SidebarFolder on_toggle={toggle_message} on_open={open_message} label={label.clone()}
+                accessibility_labels={(format!("Toggle {label}"), format!("Open {label}"))}
+                focus_borders={(palette.accent, palette.complement)}
                 expanded={is_expanded} foreground={if is_active { palette.text } else { palette.muted }}
                 indent={depth} background={if is_active {
                     palette.accent_soft
@@ -1294,7 +1348,10 @@ fn file_tile(
                 0xffffff
             } else {
                 palette.background
-            }, palette.text)} icon_size={icon_size} />
+            }, palette.text)} icon_size={icon_size} focus_border={palette.accent}
+            controller_focus_border={palette.complement} id={format!("file-entry-{index}")}
+            context_message={FileMessage::ContextEntry(index)} semantic_role={nickel_ui::SemanticRole::Button}
+            accessibility_label={entry.display_name()} />
     }
 }
 
@@ -1436,60 +1493,110 @@ fn rect_between(start: Point, end: Point) -> Rect {
     )
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let started = Instant::now();
+fn rects_intersect(left: Rect, right: Rect) -> bool {
+    left.origin.x < right.origin.x + right.size.width
+        && left.origin.x + left.size.width > right.origin.x
+        && left.origin.y < right.origin.y + right.size.height
+        && left.origin.y + left.size.height > right.origin.y
+}
+
+pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let _log_path = nickel_logging::init("nickel-file").ok();
     let path = std::env::args_os()
         .nth(1)
         .map(PathBuf::from)
         .unwrap_or_else(home_directory);
-    let sdl = sdl3::init()?;
-    let video = sdl.video()?;
-    let mut events = sdl.event_pump()?;
-    let title = format!("Nickel File — {}", path.display());
-    let mut window = video
-        .window(&title, 860, 620)
-        .position_centered()
-        .resizable()
-        .high_pixel_density()
-        .build()?;
-    window.set_minimum_size(560, 360)?;
-    set_nickel_file_icon(&mut window);
-
-    let mut app = FileApp::new(path);
-    app.attach_window(window);
-    app.update_window_title();
-    app.render(&events);
-    tracing::info!(
-        target: "nickel",
-        elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0,
-        "Nickel File first frame presented"
-    );
-    while !app.exit_requested {
-        app.poll_icons();
-        app.finish_resize_if_due();
-        if app.dirty {
-            app.render(&events);
-        }
-        let Some(event) = events.wait_event_timeout(Duration::from_millis(16)) else {
-            continue;
-        };
-        if !app.handle_event(event) {
-            break;
-        }
-        for event in events.poll_iter() {
-            if !app.handle_event(event) {
-                app.exit_requested = true;
-                break;
-            }
-        }
-    }
-    Ok(())
+    sdl3::hint::set("SDL_APP_ID", "nickel-file");
+    nickel_ui::run_with_adapter(FileApp::new(path), FileHostAdapter::default())
 }
 
 #[cfg(test)]
 mod ui_layout_tests {
     use super::*;
+    use nickel_ui::ActionKind;
+    use nickel_ui_testkit::{FocusDirection, Scenario, ScenarioBudget, Selector};
+
+    #[test]
+    fn idle_file_host_declares_no_poll_deadline() {
+        let mut app = FileApp::new(home_directory());
+        app.icon_rx = None;
+        assert_eq!(Application::poll_interval(&app), None);
+    }
+
+    #[test]
+    fn pending_icon_work_uses_bounded_backoff() {
+        let mut app = FileApp::new(home_directory());
+        let (_sender, receiver) = std::sync::mpsc::channel();
+        app.icon_rx = Some(receiver);
+        app.icon_poll_delay = std::time::Duration::from_millis(16);
+        app.poll_icons();
+        assert_eq!(app.icon_poll_delay, std::time::Duration::from_millis(32));
+        for _ in 0..8 {
+            app.poll_icons();
+        }
+        assert_eq!(app.icon_poll_delay, std::time::Duration::from_millis(250));
+    }
+
+    #[test]
+    fn component_owned_fixture_registers_the_production_file_app() {
+        use nickel_ui_testkit::FixtureProvider;
+        let mut registry = nickel_ui_testkit::FixtureRegistry::new();
+        FileFixtureProvider.register(&mut registry).unwrap();
+        let entries = registry.finish();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].metadata.id, "file.browser");
+        let session = entries[0].open();
+        assert!(
+            session
+                .semantic_nodes()
+                .iter()
+                .any(|node| node.id.as_str().ends_with("/file-entry-0"))
+        );
+    }
+
+    #[test]
+    fn every_advertised_controller_action_has_a_bounded_production_path() {
+        use nickel_ui_testkit::{FixtureProvider, ReachabilityModality, ReachabilityPolicy};
+
+        let mut registry = nickel_ui_testkit::FixtureRegistry::new();
+        FileFixtureProvider.register(&mut registry).unwrap();
+        let session = registry.finish().remove(0).open();
+        let report = session.reachability_report(&ReachabilityPolicy {
+            modalities: [ReachabilityModality::Controller].into_iter().collect(),
+            ..ReachabilityPolicy::default()
+        });
+
+        assert!(report.issues.is_empty(), "{:#?}", report.issues);
+        assert!(
+            report.paths.iter().all(|path| path.reached),
+            "unreached controller paths: {:#?}",
+            report
+                .paths
+                .iter()
+                .filter(|path| !path.reached)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    fn pixel(raster: &nickel_ui_testkit::HeadlessRaster, x: u32, y: u32) -> [u8; 4] {
+        let offset = ((y * raster.width + x) * 4) as usize;
+        raster.rgba[offset..offset + 4].try_into().unwrap()
+    }
+
+    fn changed_pixels_in(
+        before: &nickel_ui_testkit::HeadlessRaster,
+        after: &nickel_ui_testkit::HeadlessRaster,
+        rect: Rect,
+    ) -> usize {
+        let x0 = rect.origin.x.max(0.0) as u32;
+        let y0 = rect.origin.y.max(0.0) as u32;
+        let x1 = (rect.origin.x + rect.size.width).min(before.width as f32) as u32;
+        let y1 = (rect.origin.y + rect.size.height).min(before.height as f32) as u32;
+        (y0..y1)
+            .flat_map(|y| (x0..x1).map(move |x| (x, y)))
+            .filter(|(x, y)| pixel(before, *x, *y) != pixel(after, *x, *y))
+            .count()
+    }
 
     #[test]
     fn file_grid_resolves_responsively_without_application_column_arithmetic() {
@@ -1498,9 +1605,17 @@ mod ui_layout_tests {
             std::fs::write(directory.path().join(format!("item-{index}.txt")), b"x").unwrap();
         }
         let app = FileApp::new(directory.path().to_path_buf());
-        let palette = ThemePalette::from_appearance(nickel_core::theme::Appearance::default());
-        let narrow = app.build_ui(560.0, 420.0, palette, false);
-        let wide = app.build_ui(1280.0, 720.0, palette, false);
+        let palette = ThemePalette::from_appearance(
+            ShellSettings::load_default().resolve_appearance(nickel_platform::appearance()),
+        );
+        let narrow = nickel_ui::UiFrame::layout(
+            app.build_view(560.0, 420.0, palette, false),
+            Rect::new(0.0, 0.0, 560.0, 420.0),
+        );
+        let wide = nickel_ui::UiFrame::layout(
+            app.build_view(1280.0, 720.0, palette, false),
+            Rect::new(0.0, 0.0, 1280.0, 720.0),
+        );
 
         assert!(
             narrow.resolved_grid_columns().unwrap() < wide.resolved_grid_columns().unwrap(),
@@ -1512,5 +1627,313 @@ mod ui_layout_tests {
                 .is_some_and(|extent| extent.can_scroll()),
             "all files should be measured and remain reachable through scrolling"
         );
+    }
+
+    #[test]
+    fn context_menu_is_one_semantic_controller_and_accessibility_surface() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("report.txt"), b"x").unwrap();
+        let mut host = UiHost::new(FileApp::new(directory.path().to_path_buf()), 860, 620);
+        let entry = host
+            .semantic_nodes()
+            .into_iter()
+            .find(|node| node.id.as_str().ends_with("/file-entry-0"))
+            .expect("entry must retain its explicit local identity")
+            .id;
+
+        assert!(
+            host.inspect().overlay_failures.is_empty(),
+            "{:?}",
+            host.inspect().overlay_failures
+        );
+        assert!(
+            host.resolve_effective_target(&entry, ActionKind::ContextMenu)
+                .is_ok()
+        );
+        host.handle_event(nickel_ui::UiEvent::AccessibilityContextMenu(entry.clone()));
+
+        let menu_items = host.query(&nickel_ui::SemanticSelector::Role(
+            nickel_ui::SemanticRole::MenuItem,
+        ));
+        assert_eq!(menu_items.len(), 2);
+        assert!(menu_items.iter().all(|item| {
+            item.actions.contains(&ActionKind::Activate)
+                && host
+                    .accessibility_nodes()
+                    .iter()
+                    .any(|node| node.id == item.id)
+        }));
+
+        host.handle_event(nickel_ui::UiEvent::ControllerDown);
+        assert!(host.inspect().controller_target.is_some());
+        host.handle_event(nickel_ui::UiEvent::ControllerBack);
+        assert!(host.inspect().open_overlay.is_none());
+    }
+
+    #[test]
+    fn controller_context_uses_target_geometry_not_stale_pointer_position() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("report.txt"), b"x").unwrap();
+        let mut host = UiHost::new(FileApp::new(directory.path().to_path_buf()), 860, 620);
+        host.handle_event(nickel_ui::UiEvent::FocusGained);
+        host.handle_event(nickel_ui::UiEvent::ControllerDown);
+        assert_eq!(
+            host.inspect().modality,
+            nickel_ui::InputModality::Controller
+        );
+        let background = host
+            .semantic_nodes()
+            .into_iter()
+            .find(|node| node.id.as_str().ends_with("/file-content"))
+            .unwrap()
+            .id;
+        host.perform_semantic_action(
+            background,
+            nickel_ui::SemanticAction::Invoke(ActionKind::ContextMenu),
+        );
+
+        let menu = host
+            .query(&nickel_ui::SemanticSelector::Role(
+                nickel_ui::SemanticRole::Menu,
+            ))
+            .pop()
+            .unwrap();
+        assert!(menu.bounds.origin.x > 100.0 && menu.bounds.origin.y > 100.0);
+        let items = host.query(&nickel_ui::SemanticSelector::Role(
+            nickel_ui::SemanticRole::MenuItem,
+        ));
+        let selected = items
+            .iter()
+            .find(|item| item.controller_selected)
+            .expect("controller menu must visibly select its first action");
+        let unselected = items
+            .iter()
+            .find(|item| !item.controller_selected)
+            .expect("menu fixture has a second unselected action");
+        let raster = nickel_ui_testkit::render_host(&host, 860, 620, 1.0);
+        let first_id = selected.id.clone();
+        let second_id = unselected.id.clone();
+        let first_point = (
+            selected.bounds.origin.x as u32 + 8,
+            selected.bounds.origin.y as u32 + 8,
+        );
+        let second_point = (
+            unselected.bounds.origin.x as u32 + 8,
+            unselected.bounds.origin.y as u32 + 8,
+        );
+        let first_selected_color = pixel(&raster, first_point.0, first_point.1);
+        let unselected_color = pixel(&raster, second_point.0, second_point.1);
+        assert_ne!(
+            first_selected_color, unselected_color,
+            "controller-selected menu row must have a distinct raster fill"
+        );
+
+        host.handle_event(nickel_ui::UiEvent::ControllerDown);
+        assert_eq!(
+            host.inspect().controller_target,
+            Some(second_id.clone()),
+            "items after navigation: {:?}",
+            host.query(&nickel_ui::SemanticSelector::Role(
+                nickel_ui::SemanticRole::MenuItem
+            ))
+        );
+        assert_ne!(host.inspect().controller_target, Some(first_id.clone()));
+        let moved_items = host.query(&nickel_ui::SemanticSelector::Role(
+            nickel_ui::SemanticRole::MenuItem,
+        ));
+        assert!(
+            moved_items
+                .iter()
+                .any(|item| item.id == first_id && !item.focused && !item.controller_selected)
+        );
+        assert!(
+            moved_items
+                .iter()
+                .any(|item| item.id == second_id && item.focused && item.controller_selected)
+        );
+        let moved = nickel_ui_testkit::render_host(&host, 860, 620, 1.0);
+        assert!(
+            changed_pixels_in(&raster, &moved, selected.bounds) > 0,
+            "the former menu target must visibly lose its selected treatment"
+        );
+        assert!(
+            changed_pixels_in(&raster, &moved, unselected.bounds) > 0,
+            "the new controller target must visibly gain selected treatment"
+        );
+    }
+
+    #[test]
+    fn ordinary_controller_target_has_a_distinct_visible_focus_ring() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("report.txt"), b"x").unwrap();
+        let mut host = UiHost::new(FileApp::new(directory.path().to_path_buf()), 860, 620);
+        host.handle_event(nickel_ui::UiEvent::FocusGained);
+        let before = nickel_ui_testkit::render_host(&host, 860, 620, 1.0);
+        let selected = (0..8)
+            .find_map(|_| {
+                host.handle_event(nickel_ui::UiEvent::ControllerDown);
+                let target = host.inspect().controller_target?;
+                if let Some(node) = host
+                    .semantic_nodes()
+                    .into_iter()
+                    .find(|node| node.id == target)
+                {
+                    return Some(node);
+                }
+                host.handle_event(nickel_ui::UiEvent::ControllerActivate);
+                None
+            })
+            .expect("controller must enter a pane and select an ordinary semantic target");
+        let after = nickel_ui_testkit::render_host(&host, 860, 620, 1.0);
+        assert!(
+            changed_pixels_in(&before, &after, selected.bounds) > 0,
+            "controller focus must visibly change pixels inside {selected:?}"
+        );
+    }
+
+    fn entry_selector(scenario: &Scenario<FileApp>, suffix: &str) -> Selector {
+        Selector::id(
+            scenario
+                .semantic_nodes()
+                .into_iter()
+                .find(|node| node.id.as_str().ends_with(suffix))
+                .unwrap_or_else(|| panic!("missing semantic File target {suffix}"))
+                .id,
+        )
+    }
+
+    #[test]
+    fn semantic_scenario_covers_context_routes_dismiss_scroll_and_resize() {
+        let directory = tempfile::tempdir().unwrap();
+        for index in 0..30 {
+            std::fs::write(directory.path().join(format!("item-{index:02}.txt")), b"x").unwrap();
+        }
+        let mut scenario = Scenario::with_budget(
+            FileApp::new(directory.path().to_path_buf()),
+            960,
+            640,
+            ScenarioBudget {
+                operations: 160,
+                frames: 160,
+                trace_steps: 160,
+            },
+        );
+        let entry = entry_selector(&scenario, "/file-entry-0");
+
+        scenario
+            .accessibility_action(&entry, ActionKind::ContextMenu)
+            .unwrap();
+        assert!(scenario.host().inspect().open_overlay.is_some());
+        scenario
+            .controller(nickel_ui::ControllerAction::Cancel)
+            .unwrap();
+        assert!(scenario.host().inspect().open_overlay.is_none());
+
+        for _ in 0..64 {
+            if scenario.host().inspect().keyboard_focus.as_ref()
+                == match &entry {
+                    Selector::Id(id) => Some(id),
+                    _ => None,
+                }
+            {
+                break;
+            }
+            scenario.keyboard_focus(FocusDirection::Next).unwrap();
+        }
+        scenario.keyboard_context_focused().unwrap();
+        assert!(scenario.host().inspect().open_overlay.is_some());
+        scenario
+            .controller(nickel_ui::ControllerAction::Cancel)
+            .unwrap();
+
+        scenario
+            .controller(nickel_ui::ControllerAction::ContextMenu)
+            .unwrap();
+        assert!(scenario.host().inspect().open_overlay.is_some());
+        scenario
+            .controller(nickel_ui::ControllerAction::Cancel)
+            .unwrap();
+
+        let content = entry_selector(&scenario, "/file-content");
+        scenario.pointer_scroll(&content, 0.0, 240.0).unwrap();
+        scenario.resize(540, 420, 1.0).unwrap();
+        scenario
+            .assert_accessibility()
+            .unwrap()
+            .assert_no_diagnostics()
+            .unwrap();
+        let narrow_width = scenario
+            .semantic_nodes()
+            .into_iter()
+            .find(|node| node.id.as_str().ends_with("/file-content"))
+            .unwrap()
+            .bounds
+            .size
+            .width;
+        scenario.resize(1280, 720, 2.0).unwrap();
+        let wide_width = scenario
+            .semantic_nodes()
+            .into_iter()
+            .find(|node| node.id.as_str().ends_with("/file-content"))
+            .unwrap()
+            .bounds
+            .size
+            .width;
+        assert!(wide_width > narrow_width);
+        let operations = scenario.operation_trace();
+        assert!(operations.iter().any(|step| matches!(
+            step.operation,
+            nickel_ui_testkit::ScenarioOperation::KeyboardContext
+        )));
+        assert!(operations.iter().any(|step| matches!(
+            step.operation,
+            nickel_ui_testkit::ScenarioOperation::Controller { .. }
+        )));
+        assert!(operations.iter().any(|step| matches!(
+            step.operation,
+            nickel_ui_testkit::ScenarioOperation::Accessibility { .. }
+        )));
+    }
+
+    #[test]
+    fn semantic_scenarios_cover_empty_and_failure_states() {
+        let empty = tempfile::tempdir().unwrap();
+        let empty_scenario = Scenario::new(FileApp::new(empty.path().to_path_buf()), 720, 480);
+        assert!(
+            empty_scenario
+                .host()
+                .accessibility_nodes()
+                .iter()
+                .any(|node| { node.label.as_deref() == Some("This folder is empty.") })
+        );
+        empty_scenario.assert_accessibility().unwrap();
+
+        let missing = empty.path().join("does-not-exist");
+        let failed = Scenario::new(FileApp::new(missing.clone()), 720, 480);
+        let status = format!("Could not open {}:", missing.display());
+        assert!(failed.host().accessibility_nodes().iter().any(|node| {
+            node.label
+                .as_deref()
+                .is_some_and(|name| name.starts_with(&status))
+        }));
+        failed.assert_accessibility().unwrap();
+    }
+
+    #[test]
+    fn scenario_resource_lifecycle_releases_build_scratch_and_suspend_state() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("report.txt"), b"x").unwrap();
+        let mut scenario = Scenario::new(FileApp::new(directory.path().to_path_buf()), 860, 620);
+        let before = scenario.host().inspect().resources;
+        assert_eq!(before.retained_build_scratch_bytes, 0);
+        assert!(before.node_count > 0 && before.accessibility_node_count > 0);
+        scenario.window_focus(false).unwrap();
+        scenario.platform_capability("controller", false).unwrap();
+        scenario.suspend().unwrap();
+        let after = scenario.host().inspect();
+        assert!(after.keyboard_focus.is_none());
+        assert!(after.controller_target.is_none());
+        assert!(after.pointer_capture.is_none());
+        assert_eq!(after.resources.retained_build_scratch_bytes, 0);
     }
 }

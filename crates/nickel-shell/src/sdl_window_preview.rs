@@ -1,7 +1,13 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use nickel_core::theme::ThemePalette;
-use nickel_ui::{PaintCommand, Point, Rect, TextAlign};
+use nickel_ui::backend::PaintCommand;
+use nickel_ui::{
+    Align, AnyView, Application, Button, Collection, CollectionPresentation, CollectionState,
+    ComponentBuilderExt, Container, HostBatch, HostChangeToken, HostEvent, HostEventOutcome, Image,
+    Insets, NavigationScope, Point, Rect, Row, SemanticRole, Text, TextAlign, UiEvent, UiHost,
+    ViewContext,
+};
 
 use crate::{
     model::{WindowGroup, WindowId},
@@ -23,6 +29,7 @@ pub enum PreviewAction {
     Activate(WindowId),
     Close(WindowId),
     OpenMenu(WindowId),
+    Dismiss,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -33,83 +40,269 @@ pub enum MenuAction {
     MoveToWorkspace(WindowId, u64),
 }
 
-#[derive(Clone, Debug)]
+pub struct WindowMenuApp {
+    window: WindowId,
+    workspaces: Vec<WorkspaceSummary>,
+    selected: Option<usize>,
+    palette: ThemePalette,
+    effects: Vec<MenuAction>,
+    dirty: bool,
+}
+
+impl WindowMenuApp {
+    pub fn new(
+        window: WindowId,
+        workspaces: Vec<WorkspaceSummary>,
+        selected: Option<usize>,
+        palette: ThemePalette,
+    ) -> Self {
+        Self {
+            window,
+            workspaces,
+            selected,
+            palette,
+            effects: Vec::new(),
+            dirty: false,
+        }
+    }
+
+    pub fn sync(
+        &mut self,
+        window: WindowId,
+        workspaces: &[WorkspaceSummary],
+        selected: Option<usize>,
+        palette: ThemePalette,
+    ) {
+        self.window = window;
+        self.workspaces = workspaces.to_vec();
+        self.selected = selected;
+        self.palette = palette;
+        self.dirty = true;
+    }
+
+    pub fn take_effects(&mut self) -> Vec<MenuAction> {
+        std::mem::take(&mut self.effects)
+    }
+}
+
+impl Application for WindowMenuApp {
+    type Message = MenuAction;
+
+    fn update(&mut self, message: Self::Message) {
+        self.effects.push(message);
+    }
+
+    fn view(&self, _context: ViewContext) -> impl nickel_ui::View<Self::Message> {
+        let entries = window_menu_entries(self.window, &self.workspaces);
+        let content = entries.into_iter().enumerate().fold(
+            nickel_ui::Column::new().gap(MENU_ROW_GAP),
+            |column, (index, (label, action))| {
+                column.child(
+                    Button::new(action, label)
+                        .id(format!("window-menu-action-{index}"))
+                        .height(MENU_ROW_HEIGHT)
+                        .background(if self.selected == Some(index) {
+                            self.palette.surface_hover
+                        } else {
+                            self.palette.panel
+                        })
+                        .color(self.palette.text),
+                )
+            },
+        );
+        Container::new()
+            .id("window-menu-anchor")
+            .width(MENU_WIDTH)
+            .height(menu_height(&self.workspaces))
+            .padding(Insets::all(MENU_PADDING))
+            .background(self.palette.panel)
+            .radius(10.0)
+            .child(content)
+    }
+
+    fn poll(&mut self) -> bool {
+        std::mem::take(&mut self.dirty)
+    }
+}
+
+fn window_menu_entries(
+    window: WindowId,
+    workspaces: &[WorkspaceSummary],
+) -> Vec<(String, MenuAction)> {
+    let mut entries = vec![
+        ("Close".to_owned(), MenuAction::Close(window)),
+        (
+            "Maximize / Restore".to_owned(),
+            MenuAction::MaximizeRestore(window),
+        ),
+        ("Minimize".to_owned(), MenuAction::Minimize(window)),
+    ];
+    entries.extend(
+        workspace_move_destinations(workspaces)
+            .into_iter()
+            .map(|(label, workspace)| (label, MenuAction::MoveToWorkspace(window, workspace))),
+    );
+    entries
+}
+
 pub struct WindowPreviewFrame {
-    pub commands: Vec<PaintCommand>,
-    cards: Vec<(WindowId, Rect, Rect)>,
+    host: UiHost<WindowPreviewApp>,
+    change_token: HostChangeToken,
+    next_deadline: Option<Instant>,
+    windows: Vec<WindowId>,
+}
+
+pub struct WindowPreviewApp {
+    group: WindowGroup,
+    previews: HashMap<WindowId, Arc<image::RgbaImage>>,
+    hovered: Option<WindowId>,
+    palette: ThemePalette,
+    effects: Vec<PreviewAction>,
+    dirty: bool,
+}
+
+impl Application for WindowPreviewApp {
+    type Message = PreviewAction;
+
+    fn update(&mut self, message: Self::Message) {
+        self.effects.push(message);
+    }
+
+    fn view(&self, _context: ViewContext) -> impl nickel_ui::View<Self::Message> {
+        preview_view(&self.group, &self.previews, self.hovered, self.palette)
+    }
+
+    fn poll(&mut self) -> bool {
+        std::mem::take(&mut self.dirty)
+    }
+
+    fn shortcut(&mut self, shortcut: nickel_ui::Shortcut) -> bool {
+        if shortcut == nickel_ui::Shortcut::Escape {
+            self.effects.push(PreviewAction::Dismiss);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+#[cfg(any(test, feature = "workbench-fixtures"))]
+impl WindowPreviewApp {
+    #[allow(dead_code)] // Binary and fixture library compile this shared module separately.
+    pub fn fixture(
+        group: WindowGroup,
+        previews: HashMap<WindowId, Arc<image::RgbaImage>>,
+        palette: ThemePalette,
+    ) -> Self {
+        Self {
+            group,
+            previews,
+            hovered: None,
+            palette,
+            effects: Vec::new(),
+            dirty: false,
+        }
+    }
 }
 
 impl WindowPreviewFrame {
     pub fn window(&self, index: usize) -> Option<WindowId> {
-        self.cards.get(index).map(|(window, _, _)| *window)
+        self.windows.get(index).copied()
     }
 
     pub fn window_count(&self) -> usize {
-        self.cards.len()
+        self.windows.len()
     }
 
-    pub fn action_at(&self, point: Point, right_click: bool) -> Option<PreviewAction> {
-        self.cards.iter().find_map(|(window, card, close)| {
-            if contains(*close, point) {
-                Some(PreviewAction::Close(*window))
-            } else if contains(*card, point) {
-                Some(if right_click {
-                    PreviewAction::OpenMenu(*window)
-                } else {
-                    PreviewAction::Activate(*window)
-                })
-            } else {
-                None
-            }
-        })
+    pub fn transition_pointer(&mut self, point: Point, right_click: bool) -> Option<PreviewAction> {
+        let events = if right_click {
+            vec![HostEvent::Ui(UiEvent::PointerContext(point))]
+        } else {
+            vec![
+                HostEvent::Ui(UiEvent::PointerPressed(point)),
+                HostEvent::Ui(UiEvent::PointerReleased(point)),
+            ]
+        };
+        self.step(HostBatch {
+            events,
+            ..HostBatch::default()
+        });
+        self.host.application_mut().effects.drain(..).next()
     }
 
     pub fn window_at(&self, point: Point) -> Option<WindowId> {
-        self.cards
-            .iter()
-            .find_map(|(window, card, _)| contains(*card, point).then_some(*window))
+        self.windows.iter().copied().find(|window| {
+            [
+                PreviewAction::Activate(*window),
+                PreviewAction::OpenMenu(*window),
+            ]
+            .into_iter()
+            .flat_map(|action| self.host.semantic_targets_for_message(&action))
+            .any(|target| {
+                point.x >= target.bounds.origin.x
+                    && point.x <= target.bounds.origin.x + target.bounds.size.width
+                    && point.y >= target.bounds.origin.y
+                    && point.y <= target.bounds.origin.y + target.bounds.size.height
+            })
+        })
     }
 
-    pub fn target_point(&self, action: PreviewAction) -> Option<Point> {
-        let (window, close) = match action {
-            PreviewAction::Activate(window) | PreviewAction::OpenMenu(window) => (window, false),
-            PreviewAction::Close(window) => (window, true),
+    pub fn semantic_bounds(&self, action: PreviewAction) -> Option<Rect> {
+        let action = match action {
+            PreviewAction::OpenMenu(window) => PreviewAction::Activate(window),
+            action => action,
         };
-        let (_, card, close_bounds) = self
-            .cards
-            .iter()
-            .find(|(candidate, _, _)| *candidate == window)?;
-        Some(center(if close { *close_bounds } else { *card }))
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct WindowMenuFrame {
-    pub commands: Vec<PaintCommand>,
-    rows: Vec<(Rect, MenuAction)>,
-}
-
-impl WindowMenuFrame {
-    pub fn action(&self, index: usize) -> Option<MenuAction> {
-        self.rows.get(index).map(|(_, action)| *action)
+        self.host
+            .semantic_targets_for_message(&action)
+            .into_iter()
+            .next()
+            .map(|target| target.bounds)
     }
 
-    pub fn action_count(&self) -> usize {
-        self.rows.len()
+    pub fn commands(&self) -> &[PaintCommand] {
+        self.host.commands()
     }
 
-    pub fn action_at(&self, point: Point) -> Option<MenuAction> {
-        self.rows
-            .iter()
-            .find_map(|(row, action)| contains(*row, point).then_some(*action))
+    pub fn sync(
+        &mut self,
+        group: &WindowGroup,
+        previews: &HashMap<WindowId, Arc<image::RgbaImage>>,
+        hovered: Option<WindowId>,
+        palette: ThemePalette,
+    ) -> HostEventOutcome {
+        let (width, height) = preview_dimensions(group.windows.len());
+        let app = self.host.application_mut();
+        app.group = group.clone();
+        app.previews = previews.clone();
+        app.hovered = hovered;
+        app.palette = palette;
+        app.dirty = true;
+        self.windows = group.windows.iter().map(|window| window.id).collect();
+        self.windows.sort_by_key(|window| window.0);
+        self.step(HostBatch {
+            surface_size: Some((width, height)),
+            events: vec![HostEvent::Poll],
+            ..HostBatch::default()
+        })
     }
 
-    pub fn target_point(&self, action: MenuAction) -> Option<Point> {
-        let (row, _) = self
-            .rows
-            .iter()
-            .find(|(_, candidate)| *candidate == action)?;
-        Some(center(*row))
+    pub fn step(&mut self, batch: HostBatch) -> HostEventOutcome {
+        let outcome = self.host.step(batch);
+        self.change_token = outcome.change_token;
+        self.next_deadline = outcome.next_deadline;
+        outcome
+    }
+
+    pub fn take_actions(&mut self) -> Vec<PreviewAction> {
+        std::mem::take(&mut self.host.application_mut().effects)
+    }
+
+    pub fn change_token(&self) -> HostChangeToken {
+        self.change_token
+    }
+
+    pub fn next_deadline(&self) -> Option<Instant> {
+        self.next_deadline
     }
 }
 
@@ -128,62 +321,139 @@ pub fn build_preview_frame(
     palette: ThemePalette,
 ) -> WindowPreviewFrame {
     let (width, height) = preview_dimensions(group.windows.len());
-    let mut commands = vec![PaintCommand::RoundedFill {
-        rect: Rect::new(0.0, 0.0, width as f32, height as f32),
-        color: palette.panel,
-        radius: 14.0,
-    }];
+    let mut windows = group
+        .windows
+        .iter()
+        .map(|window| window.id)
+        .collect::<Vec<_>>();
+    windows.sort_by_key(|window| window.0);
+    WindowPreviewFrame {
+        host: UiHost::new(
+            WindowPreviewApp {
+                group: group.clone(),
+                previews: previews.clone(),
+                hovered,
+                palette,
+                effects: Vec::new(),
+                dirty: false,
+            },
+            width,
+            height,
+        ),
+        change_token: HostChangeToken::default(),
+        next_deadline: None,
+        windows,
+    }
+}
+
+fn preview_view(
+    group: &WindowGroup,
+    previews: &HashMap<WindowId, Arc<image::RgbaImage>>,
+    hovered: Option<WindowId>,
+    palette: ThemePalette,
+) -> impl nickel_ui::View<PreviewAction> {
+    let (width, height) = preview_dimensions(group.windows.len());
     let mut windows = group.windows.iter().collect::<Vec<_>>();
     windows.sort_by_key(|window| window.id.0);
-    let mut cards = Vec::with_capacity(windows.len());
-    for (index, window) in windows.into_iter().enumerate() {
-        let x = PADDING + index as f32 * (CARD_WIDTH + GAP);
-        let card = Rect::new(x, PADDING, CARD_WIDTH, PREVIEW_HEIGHT - PADDING * 2.0);
-        let close = Rect::new(
-            x + CARD_WIDTH - CLOSE_SIZE - 6.0,
-            PADDING + 6.0,
-            CLOSE_SIZE,
-            CLOSE_SIZE,
-        );
-        commands.push(PaintCommand::RoundedFill {
-            rect: card,
-            color: if hovered == Some(window.id) {
-                palette.surface_hover
-            } else {
-                palette.surface
-            },
-            radius: 10.0,
-        });
-        let image_bounds = Rect::new(x + 8.0, PADDING + 42.0, CARD_WIDTH - 16.0, 116.0);
-        if let Some(image) = previews.get(&window.id) {
-            commands.push(PaintCommand::Image {
-                bounds: image_bounds,
-                id: preview_image_id(window.id),
-                image: Arc::clone(image),
-                high_density: None,
-            });
-        } else {
-            commands.push(PaintCommand::RoundedFill {
-                rect: image_bounds,
-                color: palette.background,
-                radius: 6.0,
-            });
-        }
-        commands.push(text(
-            Rect::new(x + 10.0, PADDING + 8.0, CARD_WIDTH - 54.0, 28.0),
-            window_title(&window.title, &group.application_name),
-            0.85,
-            palette.text,
-        ));
-        commands.push(PaintCommand::RoundedFill {
-            rect: close,
-            color: palette.surface_hover,
-            radius: CLOSE_SIZE / 2.0,
-        });
-        commands.push(text(close, "×", 1.1, palette.text));
-        cards.push((window.id, card, close));
-    }
-    WindowPreviewFrame { commands, cards }
+    let window_ids = windows.iter().map(|window| window.id).collect::<Vec<_>>();
+    let cards = windows
+        .into_iter()
+        .map(|window| {
+            let image = previews.get(&window.id).cloned();
+            (
+                window.id,
+                window_title(&window.title, &group.application_name).to_owned(),
+                image,
+            )
+        })
+        .collect::<Vec<_>>();
+    let collection = Collection::try_new(
+        CollectionState::Ready(cards),
+        |(window, _, _)| window.0,
+        move |(window, title, image)| {
+            let preview: AnyView<PreviewAction> = image.map_or_else(
+                || {
+                    AnyView::new(
+                        Container::new()
+                            .width(CARD_WIDTH - 16.0)
+                            .height(116.0)
+                            .background(palette.background)
+                            .radius(6.0),
+                    )
+                },
+                |image| {
+                    AnyView::new(
+                        Image::new(preview_image_id(window), image)
+                            .width(CARD_WIDTH - 16.0)
+                            .height(116.0),
+                    )
+                },
+            );
+            let card = Container::new()
+                .width(CARD_WIDTH)
+                .height(PREVIEW_HEIGHT - PADDING * 2.0)
+                .padding(Insets::all(8.0))
+                .gap(2.0)
+                .background(if hovered == Some(window) {
+                    palette.surface_hover
+                } else {
+                    palette.surface
+                })
+                .radius(10.0)
+                .child(
+                    Row::new()
+                        .height(CLOSE_SIZE)
+                        .align_items(Align::Center)
+                        .child(
+                            Text::new(title.clone())
+                                .scale(0.85)
+                                .color(palette.text)
+                                .align(TextAlign::Center)
+                                .grow(1.0),
+                        )
+                        .child(
+                            Container::new()
+                                .width(CLOSE_SIZE)
+                                .height(CLOSE_SIZE)
+                                .background(palette.surface_hover)
+                                .radius(CLOSE_SIZE / 2.0)
+                                .message(PreviewAction::Close(window))
+                                .semantic_role(SemanticRole::Button)
+                                .accessibility_label(format!("Close {title}"))
+                                .child(
+                                    Text::new("×")
+                                        .scale(1.1)
+                                        .color(palette.text)
+                                        .align(TextAlign::Center),
+                                ),
+                        ),
+                )
+                .child(
+                    Container::new()
+                        .message(PreviewAction::Activate(window))
+                        .context_message(PreviewAction::OpenMenu(window))
+                        .semantic_role(SemanticRole::Button)
+                        .accessibility_label(title.clone())
+                        .child(preview),
+                );
+            Container::new()
+                .navigation_scope(NavigationScope::group())
+                .child(card)
+        },
+    )
+    .expect("window ids must be unique")
+    .id("window-previews")
+    .presentation(CollectionPresentation::UniformGrid {
+        columns: window_ids.len().max(1),
+    })
+    .gap(GAP);
+    Container::new()
+        .width(width as f32)
+        .height(height as f32)
+        .padding(Insets::all(PADDING))
+        .background(palette.panel)
+        .radius(14.0)
+        .child(collection)
 }
 
 pub fn menu_height(workspaces: &[WorkspaceSummary]) -> f32 {
@@ -192,58 +462,6 @@ pub fn menu_height(workspaces: &[WorkspaceSummary]) -> f32 {
     MENU_PADDING * 2.0
         + row_count as f32 * MENU_ROW_HEIGHT
         + row_count.saturating_sub(1) as f32 * MENU_ROW_GAP
-}
-
-pub fn build_menu_frame(
-    window: WindowId,
-    workspaces: &[WorkspaceSummary],
-    selected: Option<usize>,
-    palette: ThemePalette,
-) -> WindowMenuFrame {
-    let mut entries = vec![
-        ("Close".to_owned(), MenuAction::Close(window)),
-        (
-            "Maximize / Restore".to_owned(),
-            MenuAction::MaximizeRestore(window),
-        ),
-        ("Minimize".to_owned(), MenuAction::Minimize(window)),
-    ];
-    entries.extend(
-        workspace_move_destinations(workspaces)
-            .into_iter()
-            .map(|(label, workspace)| (label, MenuAction::MoveToWorkspace(window, workspace))),
-    );
-    let rows = entries
-        .iter()
-        .enumerate()
-        .map(|(index, (_, action))| {
-            (
-                Rect::new(
-                    MENU_PADDING,
-                    MENU_PADDING + index as f32 * (MENU_ROW_HEIGHT + MENU_ROW_GAP),
-                    MENU_WIDTH - MENU_PADDING * 2.0,
-                    MENU_ROW_HEIGHT,
-                ),
-                *action,
-            )
-        })
-        .collect::<Vec<_>>();
-    let mut commands = vec![PaintCommand::RoundedFill {
-        rect: Rect::new(0.0, 0.0, MENU_WIDTH, menu_height(workspaces)),
-        color: palette.panel,
-        radius: 10.0,
-    }];
-    for (index, ((row, _), (label, _))) in rows.iter().zip(&entries).enumerate() {
-        if selected == Some(index) {
-            commands.push(PaintCommand::RoundedFill {
-                rect: *row,
-                color: palette.surface_hover,
-                radius: 7.0,
-            });
-        }
-        commands.push(text(*row, label, 0.9, palette.text));
-    }
-    WindowMenuFrame { commands, rows }
 }
 
 fn workspace_move_destinations(workspaces: &[WorkspaceSummary]) -> Vec<(String, u64)> {
@@ -274,34 +492,8 @@ pub fn window_title<'a>(title: &'a str, application_name: &'a str) -> &'a str {
     }
 }
 
-fn contains(rect: Rect, point: Point) -> bool {
-    point.x >= rect.origin.x
-        && point.y >= rect.origin.y
-        && point.x < rect.origin.x + rect.size.width
-        && point.y < rect.origin.y + rect.size.height
-}
-
-fn center(rect: Rect) -> Point {
-    Point {
-        x: rect.origin.x + rect.size.width / 2.0,
-        y: rect.origin.y + rect.size.height / 2.0,
-    }
-}
-
 fn preview_image_id(window: WindowId) -> u16 {
     0x7000 | (window.0 as u16 & 0x0fff)
-}
-
-fn text(bounds: Rect, value: &str, scale: f32, color: u32) -> PaintCommand {
-    PaintCommand::Text {
-        bounds,
-        text: value.to_owned(),
-        scale,
-        color,
-        align: TextAlign::Center,
-        bold: false,
-        wrap: false,
-    }
 }
 
 #[cfg(test)]
@@ -309,6 +501,14 @@ mod tests {
     use super::*;
     use crate::model::OpenWindow;
     use nickel_core::theme::Appearance;
+    use nickel_ui::{ActionKind, SemanticAction};
+
+    fn center(rect: Rect) -> Point {
+        Point {
+            x: rect.origin.x + rect.size.width / 2.0,
+            y: rect.origin.y + rect.size.height / 2.0,
+        }
+    }
 
     fn group() -> WindowGroup {
         WindowGroup {
@@ -333,7 +533,7 @@ mod tests {
 
     #[test]
     fn semantic_targets_resolve_through_production_preview_geometry() {
-        let frame = build_preview_frame(
+        let mut frame = build_preview_frame(
             &group(),
             &HashMap::new(),
             None,
@@ -344,11 +544,16 @@ mod tests {
             PreviewAction::Close(WindowId(9)),
             PreviewAction::OpenMenu(WindowId(9)),
         ] {
-            let point = frame.target_point(action).expect("preview target exists");
+            let point = center(
+                frame
+                    .semantic_bounds(action)
+                    .unwrap_or_else(|| panic!("preview target exists for {action:?}")),
+            );
             assert_eq!(
-                frame.action_at(point, matches!(action, PreviewAction::OpenMenu(_))),
+                frame.transition_pointer(point, matches!(action, PreviewAction::OpenMenu(_))),
                 Some(action)
             );
+            assert!(frame.change_token().frame_generation > 0);
         }
         assert_eq!(frame.window_count(), 2);
         assert_eq!(frame.window(0), Some(WindowId(4)));
@@ -367,8 +572,8 @@ mod tests {
 
         for window in [WindowId(4), WindowId(9)] {
             assert_eq!(
-                first.target_point(PreviewAction::Close(window)),
-                second.target_point(PreviewAction::Close(window))
+                first.semantic_bounds(PreviewAction::Close(window)),
+                second.semantic_bounds(PreviewAction::Close(window))
             );
         }
     }
@@ -389,11 +594,15 @@ mod tests {
                 active: false,
             },
         ];
-        let frame = build_menu_frame(
-            WindowId(9),
-            &workspaces,
-            None,
-            ThemePalette::from_appearance(Appearance::default()),
+        let mut host = UiHost::new(
+            WindowMenuApp::new(
+                WindowId(9),
+                workspaces.to_vec(),
+                None,
+                ThemePalette::from_appearance(Appearance::default()),
+            ),
+            MENU_WIDTH as u32,
+            menu_height(&workspaces) as u32,
         );
         for action in [
             MenuAction::Close(WindowId(9)),
@@ -402,18 +611,15 @@ mod tests {
             MenuAction::MoveToWorkspace(WindowId(9), 1),
             MenuAction::MoveToWorkspace(WindowId(9), 8),
         ] {
-            assert_eq!(
-                frame.action_at(frame.target_point(action).expect("menu target exists")),
-                Some(action)
-            );
+            let target = host
+                .semantic_targets_for_message(&action)
+                .into_iter()
+                .next()
+                .expect("menu target exists");
+            host.perform_semantic_action(target.id, SemanticAction::Invoke(ActionKind::Activate));
+            assert_eq!(host.application_mut().take_effects(), vec![action]);
         }
-        assert_eq!(frame.action_count(), 5);
-        assert_eq!(frame.action(0), Some(MenuAction::Close(WindowId(9))));
-        assert_eq!(
-            frame.action(4),
-            Some(MenuAction::MoveToWorkspace(WindowId(9), 8))
-        );
-        assert_eq!(frame.action(5), None);
+        assert_eq!(host.semantic_nodes().len(), 5);
     }
 
     #[test]

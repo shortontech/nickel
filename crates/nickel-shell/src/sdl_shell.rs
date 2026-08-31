@@ -10,7 +10,8 @@ use std::time::Instant;
 
 use nickel_input::InputEvent;
 use nickel_session_protocol::ShellRole as SessionShellRole;
-use nickel_ui::{DamageRegion, PaintCommand};
+use nickel_ui::backend::PaintCommand;
+use nickel_ui::{AggregatePresenterCacheDiagnostics, DamageRegion, HostChangeToken};
 use sdl3::event::{Event, WindowEvent};
 use sdl3::video::{Window, WindowPos};
 
@@ -27,9 +28,34 @@ pub const CODEX_PROJECT_MENU_TITLE: &str = "Nickel Codex Projects";
 pub const LOCK_TITLE: &str = "Nickel Lock";
 pub const SCREENSHOT_TITLE: &str = "Nickel Screenshot";
 pub const PANEL_HEIGHT: u32 = 56;
+const RUNTIME_SAMPLE_CAPACITY: usize = 64;
+
+fn push_bounded(samples: &mut VecDeque<u64>, sample: u64) {
+    if samples.len() == RUNTIME_SAMPLE_CAPACITY {
+        samples.pop_front();
+    }
+    samples.push_back(sample);
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct SurfaceId(u32);
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ShellMemoryDiagnostics {
+    /// Cache-owned bytes reported by every currently instantiated surface presenter.
+    pub presenter_caches: AggregatePresenterCacheDiagnostics,
+    /// Allocator/process-visible resident bytes from the operating system.
+    /// This is intentionally independent of `presenter_caches.live_bytes`.
+    pub process_rss_bytes: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ShellRuntimeDiagnostics {
+    /// Completed presents after the presenter was initialized, in microseconds.
+    pub warm_present_us: Vec<u64>,
+    /// Input receipt through the first synchronous present it caused, in microseconds.
+    pub input_to_present_us: Vec<u64>,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SurfaceRole {
@@ -59,7 +85,7 @@ pub struct DisplayGeometry {
 pub enum ShellEvent {
     GlobalShortcut(crate::platform::GlobalShortcut),
     #[cfg(target_os = "linux")]
-    SemanticTarget(crate::platform::SemanticTargetRequest),
+    TestControl(crate::platform::ShellTestRequest),
     Quit,
     Input {
         surface: SurfaceId,
@@ -99,6 +125,7 @@ pub struct ShellSurface {
     display_connected: bool,
     // Drop the GPU surface before the native window whose handles it borrows.
     presenter: Option<SdlGpuPresenter>,
+    last_host_change_token: Option<HostChangeToken>,
     window: Window,
 }
 
@@ -137,6 +164,9 @@ pub struct SdlShell {
     events: sdl3::EventPump,
     pending_events: VecDeque<ShellEvent>,
     input_adapter: nickel_input::sdl::Adapter,
+    warm_present_us: VecDeque<u64>,
+    input_to_present_us: VecDeque<u64>,
+    pending_input_started: Option<Instant>,
     video: sdl3::VideoSubsystem,
     _sdl: sdl3::Sdl,
     started: Instant,
@@ -158,7 +188,7 @@ impl SdlShell {
         #[cfg(target_os = "linux")]
         sdl.event()
             .map_err(|error| error.to_string())?
-            .register_custom_event::<crate::platform::SemanticTargetRequest>()
+            .register_custom_event::<crate::platform::ShellTestRequest>()
             .map_err(|error| error.to_string())?;
         let events = sdl.event_pump().map_err(|error| error.to_string())?;
         tracing::info!(
@@ -180,6 +210,9 @@ impl SdlShell {
             events,
             pending_events: VecDeque::new(),
             input_adapter: nickel_input::sdl::Adapter::default(),
+            warm_present_us: VecDeque::with_capacity(RUNTIME_SAMPLE_CAPACITY),
+            input_to_present_us: VecDeque::with_capacity(RUNTIME_SAMPLE_CAPACITY),
+            pending_input_started: None,
             video,
             _sdl: sdl,
             started,
@@ -247,7 +280,7 @@ impl SdlShell {
                     surface.display_connected = false;
                     let _ = surface.window.hide();
                     if let Some(presenter) = surface.presenter.as_mut() {
-                        presenter.invalidate();
+                        presenter.suspend();
                     }
                 }
             }
@@ -395,6 +428,7 @@ impl SdlShell {
             output_name: String::new(),
             display_connected: true,
             presenter: None,
+            last_host_change_token: None,
             window,
         });
         Ok(id)
@@ -406,6 +440,42 @@ impl SdlShell {
         };
         self.surfaces.remove(index);
         self.rebuild_surface_indices();
+        let diagnostics = self.memory_diagnostics();
+        tracing::debug!(
+            presenters = diagnostics.presenter_caches.presenters,
+            cache_live_bytes = diagnostics.presenter_caches.live_bytes,
+            process_rss_bytes = diagnostics.process_rss_bytes,
+            "shell surface closed and presenter accounting refreshed"
+        );
+    }
+
+    pub fn memory_diagnostics(&self) -> ShellMemoryDiagnostics {
+        ShellMemoryDiagnostics {
+            presenter_caches: AggregatePresenterCacheDiagnostics::from_presenters(
+                self.surfaces
+                    .iter()
+                    .filter_map(|surface| surface.presenter.as_ref())
+                    .map(SdlGpuPresenter::cache_diagnostics),
+            ),
+            process_rss_bytes: process_rss_bytes(),
+        }
+    }
+
+    pub fn runtime_diagnostics(&self) -> ShellRuntimeDiagnostics {
+        ShellRuntimeDiagnostics {
+            warm_present_us: self.warm_present_us.iter().copied().collect(),
+            input_to_present_us: self.input_to_present_us.iter().copied().collect(),
+        }
+    }
+
+    /// Starts a bounded input-to-visible observation. Call `finish_input_observation`
+    /// after routing the input so inputs that do not paint cannot contaminate a later sample.
+    pub fn begin_input_observation(&mut self, now: Instant) {
+        self.pending_input_started = Some(now);
+    }
+
+    pub fn finish_input_observation(&mut self) {
+        self.pending_input_started = None;
     }
 
     pub fn clipboard_text(&self) -> Option<String> {
@@ -434,18 +504,52 @@ impl SdlShell {
             .expect("shared GPU initialized")
             .clone();
         let entry = &mut self.surfaces[index];
+        let warm = entry.presenter.is_some();
         if entry.presenter.is_none() {
             entry.presenter = Some(SdlGpuPresenter::new(&entry.window, graphics)?);
         }
-        entry
+        let started = Instant::now();
+        let damage = entry
             .presenter
             .as_mut()
             .expect("shell presenter initialized")
-            .present(&entry.window, commands)
+            .present(&entry.window, commands)?;
+        let elapsed_us = started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+        if warm {
+            push_bounded(&mut self.warm_present_us, elapsed_us);
+        }
+        if let Some(input_started) = self.pending_input_started.take() {
+            let input_us = input_started
+                .elapsed()
+                .as_micros()
+                .min(u128::from(u64::MAX)) as u64;
+            push_bounded(&mut self.input_to_present_us, input_us);
+        }
+        Ok(damage)
+    }
+
+    /// Presents a canonical UI host frame only when its semantic or paint generation changed.
+    pub fn present_host_frame(
+        &mut self,
+        id: SurfaceId,
+        token: HostChangeToken,
+        commands: &[PaintCommand],
+    ) -> Result<Option<DamageRegion>, String> {
+        let index = *self
+            .surface_indices
+            .get(&id.0)
+            .ok_or_else(|| "unknown SDL shell surface".to_owned())?;
+        if self.surfaces[index].last_host_change_token == Some(token) {
+            return Ok(None);
+        }
+        let damage = self.present(id, commands)?;
+        self.surfaces[index].last_host_change_token = Some(token);
+        Ok(Some(damage))
     }
 
     pub fn show(&mut self, id: SurfaceId) -> bool {
         self.surface_mut(id).is_some_and(|surface| {
+            surface.last_host_change_token = None;
             if let Some(presenter) = surface.presenter.as_mut() {
                 presenter.invalidate();
             }
@@ -454,8 +558,13 @@ impl SdlShell {
     }
 
     pub fn hide(&mut self, id: SurfaceId) -> bool {
-        self.surface_mut(id)
-            .is_some_and(|surface| surface.window_mut().hide())
+        self.surface_mut(id).is_some_and(|surface| {
+            let hidden = surface.window_mut().hide();
+            if hidden && let Some(presenter) = surface.presenter.as_mut() {
+                presenter.suspend();
+            }
+            hidden
+        })
     }
 
     pub fn raise(&mut self, id: SurfaceId) -> bool {
@@ -633,6 +742,7 @@ impl SdlShell {
             output_name: output_name.to_owned(),
             display_connected: true,
             presenter: None,
+            last_host_change_token: None,
             window,
         });
         Ok(())
@@ -643,9 +753,8 @@ impl SdlShell {
             return Some(ShellEvent::GlobalShortcut(shortcut));
         }
         #[cfg(target_os = "linux")]
-        if let Some(request) = event.as_user_event_type::<crate::platform::SemanticTargetRequest>()
-        {
-            return Some(ShellEvent::SemanticTarget(request));
+        if let Some(request) = event.as_user_event_type::<crate::platform::ShellTestRequest>() {
+            return Some(ShellEvent::TestControl(request));
         }
         let surface = event
             .get_window_id()
@@ -845,6 +954,23 @@ fn require_displays(displays: Vec<DisplayGeometry>) -> Result<Vec<DisplayGeometr
     }
 }
 
+#[cfg(test)]
+mod runtime_diagnostics_tests {
+    use super::{RUNTIME_SAMPLE_CAPACITY, push_bounded};
+    use std::collections::VecDeque;
+
+    #[test]
+    fn runtime_samples_are_bounded_and_keep_the_newest_observations() {
+        let mut samples = VecDeque::new();
+        for sample in 0..(RUNTIME_SAMPLE_CAPACITY as u64 + 7) {
+            push_bounded(&mut samples, sample);
+        }
+        assert_eq!(samples.len(), RUNTIME_SAMPLE_CAPACITY);
+        assert_eq!(samples.front(), Some(&7));
+        assert_eq!(samples.back(), Some(&(RUNTIME_SAMPLE_CAPACITY as u64 + 6)));
+    }
+}
+
 fn surface_is_borderless(role: SurfaceRole) -> bool {
     // Linux shell roles are compositor-owned chrome. In particular, allowing SDL to decorate the
     // screenshot utility adds client-side shadow/titlebar extents to its Wayland geometry, so the
@@ -853,11 +979,32 @@ fn surface_is_borderless(role: SurfaceRole) -> bool {
     role != SurfaceRole::Screenshot || cfg!(target_os = "linux")
 }
 
+#[cfg(target_os = "linux")]
+fn process_rss_bytes() -> Option<usize> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    parse_proc_status_rss(&status)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_rss_bytes() -> Option<usize> {
+    None
+}
+
+pub(crate) fn parse_proc_status_rss(status: &str) -> Option<usize> {
+    let kibibytes = status.lines().find_map(|line| {
+        let value = line.strip_prefix("VmRSS:")?.trim();
+        let number = value.strip_suffix("kB")?.trim().parse::<usize>().ok()?;
+        Some(number)
+    })?;
+    kibibytes.checked_mul(1024)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        DESKTOP_TITLE, DisplayGeometry, LAUNCHER_TITLE, PANEL_TITLE, SurfaceRole, require_displays,
-        shell_surface_title, surface_geometry, surface_is_borderless,
+        DESKTOP_TITLE, DisplayGeometry, LAUNCHER_TITLE, PANEL_TITLE, SurfaceRole,
+        parse_proc_status_rss, require_displays, shell_surface_title, surface_geometry,
+        surface_is_borderless,
     };
 
     #[test]
@@ -903,6 +1050,16 @@ mod tests {
             scale: 1.0,
         };
         assert_eq!(require_displays(vec![display]).unwrap(), vec![display]);
+    }
+
+    #[test]
+    fn proc_rss_is_allocator_visible_and_parsed_independently() {
+        assert_eq!(
+            parse_proc_status_rss("Name:\tnickel\nVmRSS:\t   12345 kB\nThreads:\t1\n"),
+            Some(12_641_280)
+        );
+        assert_eq!(parse_proc_status_rss("VmRSS:\tunknown kB\n"), None);
+        assert_eq!(parse_proc_status_rss("VmSize:\t123 kB\n"), None);
     }
 
     #[test]

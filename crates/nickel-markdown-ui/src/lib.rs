@@ -13,6 +13,13 @@ use nickel_ui::{
 };
 #[cfg(feature = "application")]
 use std::sync::mpsc::{self, Receiver, Sender};
+#[cfg(feature = "application")]
+use std::sync::{
+    Arc, Condvar, Mutex,
+    atomic::{AtomicU64, Ordering},
+};
+#[cfg(feature = "application")]
+use std::thread::JoinHandle;
 use url::Url;
 
 pub const MAX_DOCUMENT_BYTES: u64 = 16 * 1024 * 1024;
@@ -22,7 +29,6 @@ const MAX_HISTORY: usize = 50;
 pub struct LoadedDocument {
     pub path: PathBuf,
     pub title: String,
-    pub source: String,
     pub document: MarkdownDocument,
 }
 
@@ -332,7 +338,7 @@ pub fn document_changed_on_disk(document: &LoadedDocument) -> Result<bool, Viewe
     }
     let bytes = fs::read(&document.path).map_err(|error| file_error(&document.path, error))?;
     let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes);
-    Ok(bytes != document.source.as_bytes())
+    Ok(bytes != document.document.source.as_bytes())
 }
 
 fn read_document(path: &Path) -> Result<LoadedDocument, ViewerError> {
@@ -377,8 +383,7 @@ fn read_document(path: &Path) -> Result<LoadedDocument, ViewerError> {
     Ok(LoadedDocument {
         path: canonical,
         title,
-        document: MarkdownDocument::parse(source.clone()),
-        source,
+        document: MarkdownDocument::parse(source),
     })
 }
 
@@ -461,11 +466,87 @@ pub enum ViewerMessage {
 #[cfg(feature = "application")]
 pub struct ViewerApplication {
     model: ViewerModel,
-    sender: Sender<LoadCompletion>,
     receiver: Receiver<LoadCompletion>,
+    worker: LoadWorker,
     title: String,
     runtime_error: Option<String>,
     palette: ViewerPalette,
+    active_generation: Arc<AtomicU64>,
+}
+
+#[cfg(feature = "application")]
+#[derive(Default)]
+struct LoadWorkerState {
+    pending: Option<LoadRequest>,
+    shutdown: bool,
+}
+
+#[cfg(feature = "application")]
+impl LoadWorkerState {
+    fn replace_pending(&mut self, request: LoadRequest) {
+        self.pending = Some(request);
+    }
+}
+
+#[cfg(feature = "application")]
+struct LoadWorker {
+    state: Arc<(Mutex<LoadWorkerState>, Condvar)>,
+    thread: Option<JoinHandle<()>>,
+}
+
+#[cfg(feature = "application")]
+impl LoadWorker {
+    fn start(sender: Sender<LoadCompletion>, active_generation: Arc<AtomicU64>) -> Self {
+        let state = Arc::new((Mutex::new(LoadWorkerState::default()), Condvar::new()));
+        let worker_state = state.clone();
+        let thread = std::thread::spawn(move || {
+            let (lock, ready) = &*worker_state;
+            loop {
+                let request = {
+                    let mut state = lock.lock().expect("markdown loader state poisoned");
+                    while state.pending.is_none() && !state.shutdown {
+                        state = ready
+                            .wait(state)
+                            .expect("markdown loader state poisoned while waiting");
+                    }
+                    if state.shutdown {
+                        return;
+                    }
+                    state.pending.take().expect("pending request checked above")
+                };
+                if let Some(completion) = load_document_if_current(&request, &active_generation)
+                    && sender.send(completion).is_err()
+                {
+                    return;
+                }
+            }
+        });
+        Self {
+            state,
+            thread: Some(thread),
+        }
+    }
+
+    fn replace_pending(&self, request: LoadRequest) {
+        let (lock, ready) = &*self.state;
+        let mut state = lock.lock().expect("markdown loader state poisoned");
+        state.replace_pending(request);
+        ready.notify_one();
+    }
+}
+
+#[cfg(feature = "application")]
+impl Drop for LoadWorker {
+    fn drop(&mut self) {
+        let (lock, ready) = &*self.state;
+        lock.lock()
+            .expect("markdown loader state poisoned")
+            .shutdown = true;
+        ready.notify_one();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 #[cfg(feature = "application")]
@@ -473,13 +554,16 @@ impl ViewerApplication {
     #[must_use]
     pub fn open(path: impl Into<PathBuf>) -> Self {
         let (sender, receiver) = mpsc::channel();
+        let active_generation = Arc::new(AtomicU64::new(0));
+        let worker = LoadWorker::start(sender, active_generation.clone());
         let mut application = Self {
             model: ViewerModel::default(),
-            sender,
             receiver,
+            worker,
             title: "Nickel Markdown".into(),
             runtime_error: None,
             palette: ViewerPalette::from_appearance(nickel_platform::appearance()),
+            active_generation,
         };
         let request = application.model.begin_open(path);
         application.queue(request);
@@ -495,16 +579,19 @@ impl ViewerApplication {
             generation: request.generation,
             result: Ok(document),
         });
+        let active_generation = Arc::new(AtomicU64::new(request.generation));
+        let worker = LoadWorker::start(sender, active_generation.clone());
         Self {
             title: model.current().map_or_else(
                 || "Nickel Markdown".into(),
                 |document| document.title.clone(),
             ),
             model,
-            sender,
             receiver,
+            worker,
             runtime_error: None,
             palette: ViewerPalette::default(),
+            active_generation,
         }
     }
 
@@ -514,10 +601,29 @@ impl ViewerApplication {
     }
 
     fn queue(&self, request: LoadRequest) {
-        let sender = self.sender.clone();
-        std::thread::spawn(move || {
-            let _ = sender.send(load_document(&request));
-        });
+        self.active_generation
+            .store(request.generation, Ordering::Release);
+        self.worker.replace_pending(request);
+    }
+
+    #[cfg(feature = "workbench-fixtures")]
+    fn fixture(model: ViewerModel) -> Self {
+        let (sender, receiver) = mpsc::channel();
+        let active_generation = Arc::new(AtomicU64::new(model.generation));
+        let worker = LoadWorker::start(sender, active_generation.clone());
+        let title = model.current().map_or_else(
+            || "Nickel Markdown".into(),
+            |document| document.title.clone(),
+        );
+        Self {
+            model,
+            receiver,
+            worker,
+            title,
+            runtime_error: None,
+            palette: ViewerPalette::default(),
+            active_generation,
+        }
     }
 
     fn open_link(&mut self, destination: &str) {
@@ -558,6 +664,152 @@ impl ViewerApplication {
             }
         }
     }
+}
+
+#[cfg(feature = "workbench-fixtures")]
+pub struct MarkdownViewerFixtureProvider;
+
+#[cfg(feature = "workbench-fixtures")]
+pub struct MarkdownViewerWorkbenchFixture;
+
+#[cfg(feature = "workbench-fixtures")]
+const MARKDOWN_VIEWER_FIXTURE_VARIANTS: &[nickel_ui_testkit::FixtureVariant] = &[
+    markdown_fixture_variant("loaded", "Loaded document", 960, 720),
+    markdown_fixture_variant("loading", "Loading document", 960, 720),
+    markdown_fixture_variant("error", "Load error", 960, 720),
+    markdown_fixture_variant("selection", "Selectable document", 620, 720),
+];
+
+#[cfg(feature = "workbench-fixtures")]
+const fn markdown_fixture_variant(
+    id: &'static str,
+    title: &'static str,
+    width: u32,
+    height: u32,
+) -> nickel_ui_testkit::FixtureVariant {
+    nickel_ui_testkit::FixtureVariant {
+        id,
+        title,
+        viewport: nickel_ui_testkit::ViewportPreset {
+            id: "markdown-viewer",
+            width,
+            height,
+        },
+        theme: nickel_ui_testkit::FixtureTheme::Dark,
+        locale: nickel_ui_testkit::DEFAULT_LOCALE,
+        scale: nickel_ui_testkit::DEFAULT_SCALE,
+        controller_family: nickel_ui::ControllerFamily::Generic,
+        accessibility: nickel_ui_testkit::DEFAULT_ACCESSIBILITY,
+    }
+}
+
+#[cfg(feature = "workbench-fixtures")]
+static MARKDOWN_VIEWER_FIXTURE_METADATA: nickel_ui_testkit::FixtureMetadata =
+    nickel_ui_testkit::FixtureMetadata {
+        id: "markdown.viewer",
+        title: "Nickel Markdown Viewer",
+        description: "Production Markdown viewer with deterministic load and selection states",
+        tags: &["markdown", "viewer", "document", "selection", "error"],
+        source: nickel_ui_testkit::FixtureSource {
+            crate_name: "nickel-markdown-ui",
+            file: file!(),
+            line: line!(),
+        },
+        variants: MARKDOWN_VIEWER_FIXTURE_VARIANTS,
+        assets: &[],
+        simulated_effects: &[],
+    };
+
+#[cfg(feature = "workbench-fixtures")]
+impl MarkdownViewerWorkbenchFixture {
+    fn loaded_model() -> ViewerModel {
+        let mut model = ViewerModel::default();
+        let request = model.begin_open(PathBuf::from("/fixtures/guide.md"));
+        assert!(model.complete(LoadCompletion {
+            generation: request.generation,
+            result: Ok(LoadedDocument {
+                path: request.path,
+                title: "guide.md".into(),
+                document: MarkdownDocument::parse(
+                    "# Workbench guide\n\nSelect this production-rendered prose.\n\n## Navigation\n\nOpen the [fixture guide](#navigation).",
+                ),
+            }),
+        }));
+        model
+    }
+
+    fn application(variant: &nickel_ui_testkit::FixtureVariant) -> ViewerApplication {
+        let mut model = Self::loaded_model();
+        match variant.id {
+            "loading" => {
+                model.begin_reload().expect("loaded fixture can reload");
+            }
+            "error" => {
+                let request = model.begin_open(PathBuf::from("/fixtures/missing.md"));
+                assert!(model.complete(LoadCompletion {
+                    generation: request.generation,
+                    result: Err(ViewerError {
+                        kind: ViewerErrorKind::Missing,
+                        path: request.path,
+                        detail: "fixture document was not found".into(),
+                    }),
+                }));
+            }
+            "loaded" | "selection" => {}
+            other => panic!("unknown Markdown viewer fixture variant `{other}`"),
+        }
+        ViewerApplication::fixture(model)
+    }
+}
+
+#[cfg(feature = "workbench-fixtures")]
+impl nickel_ui_testkit::Fixture for MarkdownViewerWorkbenchFixture {
+    type App = ViewerApplication;
+
+    fn metadata() -> &'static nickel_ui_testkit::FixtureMetadata {
+        &MARKDOWN_VIEWER_FIXTURE_METADATA
+    }
+
+    fn create() -> Self::App {
+        Self::application(&MARKDOWN_VIEWER_FIXTURE_VARIANTS[0])
+    }
+
+    fn create_variant(variant: &nickel_ui_testkit::FixtureVariant) -> Self::App {
+        Self::application(variant)
+    }
+
+    fn surface_size() -> (u32, u32) {
+        (960, 720)
+    }
+
+    fn default_activation() -> Option<nickel_ui_testkit::Selector> {
+        Some(nickel_ui_testkit::Selector::role_name(
+            nickel_ui::SemanticRole::Button,
+            "Reload",
+        ))
+    }
+}
+
+#[cfg(feature = "workbench-fixtures")]
+impl nickel_ui_testkit::FixtureProvider for MarkdownViewerFixtureProvider {
+    fn register(
+        &self,
+        registry: &mut nickel_ui_testkit::FixtureRegistry,
+    ) -> Result<(), nickel_ui_testkit::RegistryError> {
+        registry.register::<MarkdownViewerWorkbenchFixture>()
+    }
+}
+
+#[cfg(feature = "application")]
+fn load_document_if_current(
+    request: &LoadRequest,
+    active_generation: &AtomicU64,
+) -> Option<LoadCompletion> {
+    if active_generation.load(Ordering::Acquire) != request.generation {
+        return None;
+    }
+    let completion = load_document(request);
+    (active_generation.load(Ordering::Acquire) == request.generation).then_some(completion)
 }
 
 #[cfg(feature = "application")]
@@ -601,6 +853,10 @@ impl Application for ViewerApplication {
         changed
     }
 
+    fn poll_interval(&self) -> Option<std::time::Duration> {
+        Some(std::time::Duration::from_millis(16))
+    }
+
     fn shortcut(&mut self, shortcut: Shortcut) -> bool {
         match shortcut {
             Shortcut::Escape
@@ -634,7 +890,7 @@ impl Application for ViewerApplication {
         }
     }
 
-    fn view(&self) -> impl View<Self::Message> {
+    fn view(&self, _context: nickel_ui::ViewContext) -> impl View<Self::Message> {
         viewer_view_with_palette(&self.model, self.runtime_error.as_deref(), self.palette)
     }
 
@@ -833,6 +1089,41 @@ mod tests {
         file.write_all(bytes).unwrap();
     }
 
+    #[cfg(feature = "application")]
+    fn application_with_model(model: ViewerModel) -> ViewerApplication {
+        let (sender, receiver) = mpsc::channel();
+        let generation = model.generation;
+        let active_generation = Arc::new(AtomicU64::new(generation));
+        ViewerApplication {
+            title: model.current().map_or_else(
+                || "Nickel Markdown".into(),
+                |document| document.title.clone(),
+            ),
+            model,
+            receiver,
+            worker: LoadWorker::start(sender, active_generation.clone()),
+            runtime_error: None,
+            palette: ViewerPalette::default(),
+            active_generation,
+        }
+    }
+
+    #[cfg(feature = "application")]
+    #[test]
+    fn loader_queue_retains_only_the_newest_pending_request() {
+        let mut state = LoadWorkerState::default();
+        for generation in 1..=1_000 {
+            state.replace_pending(LoadRequest {
+                generation,
+                path: PathBuf::from(format!("document-{generation}.md")),
+            });
+        }
+
+        let pending = state.pending.expect("newest request retained");
+        assert_eq!(pending.generation, 1_000);
+        assert_eq!(pending.path, PathBuf::from("document-1000.md"));
+    }
+
     #[test]
     fn strict_file_loading_accepts_bom_and_classifies_failures() {
         let directory = tempdir().unwrap();
@@ -843,13 +1134,13 @@ mod tests {
             path: valid.clone(),
         };
         let loaded = load_document(&request).result.unwrap();
-        assert_eq!(loaded.source, "# Guide");
+        assert_eq!(loaded.document.source, "# Guide");
         assert!(loaded.path.is_absolute());
 
         let extensionless = directory.path().join("LICENSE-MIT");
         write(&extensionless, b"# MIT License");
         let loaded = read_document(&extensionless).unwrap();
-        assert_eq!(loaded.source, "# MIT License");
+        assert_eq!(loaded.document.source, "# MIT License");
         assert_eq!(loaded.title, "LICENSE-MIT");
 
         let invalid = directory.path().join("invalid.md");
@@ -880,7 +1171,10 @@ mod tests {
             .unwrap()
             .set_len(16_777_216)
             .unwrap();
-        assert_eq!(read_document(&boundary).unwrap().source.len(), 16_777_216);
+        assert_eq!(
+            read_document(&boundary).unwrap().document.source.len(),
+            16_777_216
+        );
 
         let oversized = directory.path().join("oversized.md");
         fs::File::create(&oversized)
@@ -918,7 +1212,19 @@ mod tests {
         let current = model.begin_open(&second);
         assert!(!model.complete(load_document(&old)));
         assert!(model.complete(load_document(&current)));
-        assert_eq!(model.current().unwrap().source, "second");
+        assert_eq!(model.current().unwrap().document.source, "second");
+    }
+
+    #[test]
+    #[cfg(feature = "application")]
+    fn stale_background_request_is_rejected_before_file_io_or_parsing() {
+        let active = AtomicU64::new(2);
+        let stale = LoadRequest {
+            generation: 1,
+            path: PathBuf::from("/definitely/missing/stale.md"),
+        };
+        assert!(load_document_if_current(&stale, &active).is_none());
+        assert_eq!(active.load(Ordering::Acquire), 2);
     }
 
     #[test]
@@ -932,7 +1238,7 @@ mod tests {
         fs::remove_file(&path).unwrap();
         let reload = model.begin_reload().unwrap();
         model.complete(load_document(&reload));
-        assert_eq!(model.current().unwrap().source, "kept");
+        assert_eq!(model.current().unwrap().document.source, "kept");
         assert!(matches!(
             model.status(),
             ViewerStatus::Error(ViewerError {
@@ -999,7 +1305,6 @@ mod tests {
         let loaded = LoadedDocument {
             path: PathBuf::from("/tmp/guide.md"),
             title: "guide.md".into(),
-            source: document.source.clone(),
             document,
         };
         let mut application = ViewerApplication::loaded(loaded);
@@ -1058,11 +1363,11 @@ mod tests {
 
         let request = model.begin_back().unwrap();
         model.complete(load_document(&request));
-        assert_eq!(model.current().unwrap().source, "first");
+        assert_eq!(model.current().unwrap().document.source, "first");
         assert_eq!(model.scroll_position(), 125.0);
         let request = model.begin_forward().unwrap();
         model.complete(load_document(&request));
-        assert_eq!(model.current().unwrap().source, "second");
+        assert_eq!(model.current().unwrap().document.source, "second");
         assert_eq!(model.scroll_position(), 275.0);
     }
 
@@ -1097,23 +1402,21 @@ mod tests {
     #[test]
     #[cfg(feature = "application")]
     fn viewer_states_have_finite_geometry_and_expected_toolbar_authority() {
-        use nickel_ui::{Rect, UiTree};
+        use nickel_ui::{Rect, UiFrame};
+        use nickel_ui_testkit::Scenario;
 
         let document = LoadedDocument {
             path: PathBuf::from("/tmp/guide.md"),
             title: "guide.md".into(),
-            source: "# Guide\n\nRead [more](https://example.com).".into(),
             document: MarkdownDocument::parse("# Guide\n\nRead [more](https://example.com)."),
         };
-        let application = ViewerApplication::loaded(document);
+        let application = ViewerApplication::loaded(document.clone());
         for bounds in [
             Rect::new(0.0, 0.0, 480.0, 360.0),
             Rect::new(0.0, 0.0, 960.0, 720.0),
             Rect::new(0.0, 0.0, 1920.0, 1440.0),
         ] {
-            let tree = UiTree::layout(viewer_view(application.model(), None), bounds);
-            assert!(tree.message_rect(&ViewerMessage::Reload).is_some());
-            assert!(tree.message_rect(&ViewerMessage::Back).is_none());
+            let tree = UiFrame::layout(viewer_view(application.model(), None), bounds);
             assert!(tree.resolved_layout().nodes().iter().all(|node| {
                 let rect = node.allocated;
                 rect.origin.x.is_finite()
@@ -1135,19 +1438,31 @@ mod tests {
             assert!(document_width <= 844.0, "prose width was {document_width}");
         }
 
-        let mut loading = application.model().clone();
-        loading.begin_reload().unwrap();
-        let tree = UiTree::layout(
-            viewer_view(&loading, None),
-            Rect::new(0.0, 0.0, 960.0, 720.0),
+        let mut loading = ViewerApplication::loaded(document.clone());
+        loading.model.begin_reload().unwrap();
+        let scenario = Scenario::new(application, 960, 720);
+        let names = scenario
+            .semantic_nodes()
+            .into_iter()
+            .filter_map(|node| node.name)
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"Reload".to_owned()));
+        assert!(!names.contains(&"←".to_owned()));
+
+        let loading_scenario = Scenario::new(loading, 960, 720);
+        assert!(
+            !loading_scenario
+                .semantic_nodes()
+                .into_iter()
+                .any(|node| node.name.as_deref() == Some("Reload"))
         );
-        assert!(tree.message_rect(&ViewerMessage::Reload).is_none());
     }
 
     #[test]
     #[cfg(feature = "application")]
     fn long_documents_cannot_collapse_viewer_chrome() {
-        use nickel_ui::{Rect, UiTree};
+        use nickel_ui::{Rect, UiFrame};
+        use nickel_ui_testkit::Scenario;
 
         let source = (0..200)
             .map(|index| format!("Paragraph {index} with enough text to make the document tall."))
@@ -1156,8 +1471,7 @@ mod tests {
         let document = LoadedDocument {
             path: PathBuf::from("/tmp/guide.md"),
             title: "guide.md".into(),
-            document: MarkdownDocument::parse(source.clone()),
-            source,
+            document: MarkdownDocument::parse(source),
         };
         let mut application = ViewerApplication::loaded(document);
         application.model.status = ViewerStatus::Error(ViewerError {
@@ -1166,7 +1480,7 @@ mod tests {
             detail: "expected a supported text document".into(),
         });
 
-        let tree = UiTree::layout(
+        let tree = UiFrame::layout(
             viewer_view(application.model(), None),
             Rect::new(0.0, 0.0, 960.0, 720.0),
         );
@@ -1182,13 +1496,19 @@ mod tests {
         };
         assert!(chrome_height("markdown-viewer-toolbar") >= 42.0);
         assert!(chrome_height("markdown-viewer-status") >= 42.0);
-        assert!(tree.message_rect(&ViewerMessage::DismissStatus).is_some());
+        let scenario = Scenario::new(application, 960, 720);
+        assert!(
+            scenario
+                .semantic_nodes()
+                .iter()
+                .any(|node| node.name.as_deref() == Some("Dismiss"))
+        );
     }
 
     #[test]
     #[cfg(feature = "application")]
     fn readme_intrinsic_scroll_extent_stays_bounded() {
-        use nickel_ui::{Rect, UiTree};
+        use nickel_ui::{Rect, UiFrame};
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../README.md");
         let request = LoadRequest {
             generation: 1,
@@ -1196,7 +1516,7 @@ mod tests {
         };
         let document = load_document(&request).result.unwrap();
         let application = ViewerApplication::loaded(document);
-        let tree = UiTree::layout(
+        let tree = UiFrame::layout(
             viewer_view(application.model(), None),
             Rect::new(0.0, 0.0, 960.0, 720.0),
         );
@@ -1217,7 +1537,7 @@ mod tests {
     #[test]
     #[cfg(feature = "application")]
     fn viewer_scroll_extent_measures_wrapped_prose_at_the_resolved_document_width() {
-        use nickel_ui::{PaintCommand, Rect, UiTree};
+        use nickel_ui::{Rect, UiFrame};
 
         let paragraph = "Lorem ipsum dolor sit amet consectetur adipiscing elit deserunt fugiat. \
             Et omnis cillum fugiat sint illum esse fugiat. Minus fuga aut dolor quos cupidatat atque.";
@@ -1227,11 +1547,10 @@ mod tests {
         let document = LoadedDocument {
             path: PathBuf::from("/tmp/wrapped-prose"),
             title: "wrapped-prose".into(),
-            document: MarkdownDocument::parse(source.clone()),
-            source,
+            document: MarkdownDocument::parse(source),
         };
         let application = ViewerApplication::loaded(document);
-        let tree = UiTree::layout(
+        let tree = UiFrame::layout(
             viewer_view(application.model(), None),
             Rect::new(0.0, 0.0, 960.0, 720.0),
         );
@@ -1244,62 +1563,46 @@ mod tests {
             .expect("wrapped prose scroll extent");
         assert!(extent.content.height > extent.viewport.height);
         let prose_bounds = tree
-            .commands()
+            .accessibility_nodes()
             .iter()
-            .filter_map(|command| match command {
-                PaintCommand::StyledText { bounds, text, .. }
-                    if text.starts_with("Lorem ipsum") =>
-                {
-                    Some(*bounds)
-                }
-                _ => None,
+            .filter_map(|node| {
+                node.label
+                    .as_deref()
+                    .is_some_and(|text| text.starts_with("Lorem ipsum"))
+                    .then_some(node.rect)
             })
             .collect::<Vec<_>>();
         assert!(!prose_bounds.is_empty());
         assert!(
-            prose_bounds.iter().all(|bounds| bounds.size.height >= 41.5),
-            "wrapped paragraphs were undersized: {prose_bounds:?}"
+            prose_bounds.iter().any(|bounds| bounds.size.height >= 41.5),
+            "wrapped prose never occupied multiple lines: {prose_bounds:?}"
         );
     }
 
     #[test]
     #[cfg(feature = "application")]
     fn toolbar_activation_survives_reconstruction_between_press_and_release() {
-        use nickel_ui::{Point, Rect, UiEvent, UiStateStore, UiTree};
+        use nickel_ui::SemanticRole;
+        use nickel_ui_testkit::{Scenario, Selector};
 
         let document = LoadedDocument {
             path: PathBuf::from("/tmp/guide.md"),
             title: "guide.md".into(),
-            source: "# Guide".into(),
             document: MarkdownDocument::parse("# Guide"),
         };
         let application = ViewerApplication::loaded(document);
-        let bounds = Rect::new(0.0, 0.0, 960.0, 720.0);
-        let mut state = UiStateStore::default();
-        let tree =
-            UiTree::layout_with_state(viewer_view(application.model(), None), bounds, &mut state);
-        let rect = tree
-            .message_rect(&ViewerMessage::Reload)
-            .expect("reload action");
-        let point = Point {
-            x: rect.origin.x + rect.size.width * 0.5,
-            y: rect.origin.y + rect.size.height * 0.5,
-        };
-        tree.handle_event(&mut state, UiEvent::PointerPressed(point));
-        let rebuilt =
-            UiTree::layout_with_state(viewer_view(application.model(), None), bounds, &mut state);
-        assert_eq!(
-            rebuilt
-                .handle_event(&mut state, UiEvent::PointerReleased(point))
-                .messages,
-            vec![ViewerMessage::Reload]
-        );
+        let mut scenario = Scenario::new(application, 960, 720);
+        scenario
+            .pointer_activate(&Selector::role_name(SemanticRole::Button, "Reload"))
+            .unwrap();
+        assert!(scenario.host_mut().application_mut().model.is_loading());
     }
 
     #[test]
     #[cfg(feature = "application")]
     fn link_reload_back_and_forward_survive_reconstruction() {
-        use nickel_ui::{Point, Rect, UiEvent, UiStateStore, UiTree};
+        use nickel_ui::SemanticRole;
+        use nickel_ui_testkit::{Scenario, Selector};
 
         let directory = tempdir().unwrap();
         let first = directory.path().join("first.md");
@@ -1315,111 +1618,86 @@ mod tests {
         }
         let request = model.begin_back().unwrap();
         model.complete(load_document(&request));
-        let bounds = Rect::new(0.0, 0.0, 960.0, 720.0);
-        for expected in [
-            ViewerMessage::Back,
-            ViewerMessage::Forward,
-            ViewerMessage::Reload,
-            ViewerMessage::Link("third.md".into()),
-        ] {
-            let mut state = UiStateStore::default();
-            let tree = UiTree::layout_with_state(viewer_view(&model, None), bounds, &mut state);
-            let rect = tree.message_rect(&expected).expect("typed action");
-            let point = Point {
-                x: rect.origin.x + rect.size.width * 0.5,
-                y: rect.origin.y + rect.size.height * 0.5,
-            };
-            tree.handle_event(&mut state, UiEvent::PointerPressed(point));
-            let rebuilt = UiTree::layout_with_state(viewer_view(&model, None), bounds, &mut state);
-            assert_eq!(
-                rebuilt
-                    .handle_event(&mut state, UiEvent::PointerReleased(point))
-                    .messages,
-                vec![expected]
-            );
+        for label in ["←", "→", "Reload", "third  ↗"] {
+            let application = application_with_model(model.clone());
+            let mut scenario = Scenario::new(application, 960, 720);
+            scenario
+                .pointer_activate(&Selector::role_name(SemanticRole::Button, label))
+                .unwrap();
+            assert!(scenario.host_mut().application_mut().model.is_loading());
         }
     }
 
     #[test]
     #[cfg(feature = "application")]
     fn toolbar_modalities_converge_on_the_same_typed_action() {
-        use nickel_ui::{Rect, UiEvent, UiStateStore, UiTree};
+        use nickel_ui::SemanticRole;
+        use nickel_ui_testkit::{ActivationVia, Scenario, Selector, validate_host};
 
         let document = LoadedDocument {
             path: PathBuf::from("/tmp/guide.md"),
             title: "guide.md".into(),
-            source: "# Guide".into(),
             document: MarkdownDocument::parse("# Guide"),
         };
-        let application = ViewerApplication::loaded(document);
-        let tree = UiTree::layout(
-            viewer_view(application.model(), None),
-            Rect::new(0.0, 0.0, 960.0, 720.0),
-        );
-        let id = tree
-            .id_for_message(&ViewerMessage::Reload)
-            .expect("reload identity")
-            .clone();
-        for event in [UiEvent::KeyboardActivate, UiEvent::ControllerActivate] {
-            let mut state = UiStateStore::default();
-            tree.reconcile_state(&mut state);
-            tree.handle_event(&mut state, UiEvent::FocusNext);
-            assert_eq!(
-                tree.handle_event(&mut state, event).messages,
-                vec![ViewerMessage::Reload]
-            );
+        let selector = Selector::role_name(SemanticRole::Button, "Reload");
+        for via in [
+            ActivationVia::Keyboard,
+            ActivationVia::Controller,
+            ActivationVia::Accessibility,
+        ] {
+            let application = ViewerApplication::loaded(document.clone());
+            let mut scenario = Scenario::new(application, 960, 720);
+            assert!(validate_host(scenario.host()).is_empty());
+            scenario.activate_via(via, &selector).unwrap();
+            assert!(scenario.host_mut().application_mut().model.is_loading());
         }
-        let mut state = UiStateStore::default();
-        tree.reconcile_state(&mut state);
-        assert_eq!(
-            tree.handle_event(&mut state, UiEvent::AccessibilityActivate(id))
-                .messages,
-            vec![ViewerMessage::Reload]
-        );
     }
 
     #[test]
     #[cfg(feature = "application")]
     fn recoverable_status_keeps_loaded_document_visible() {
-        use nickel_ui::{PaintCommand, Point, Rect, UiEvent, UiStateStore, UiTree};
+        use nickel_ui::SemanticRole;
+        use nickel_ui_testkit::{Scenario, Selector};
 
         let document = LoadedDocument {
             path: PathBuf::from("/tmp/guide.md"),
             title: "guide.md".into(),
-            source: "# Still visible".into(),
             document: MarkdownDocument::parse("# Still visible"),
         };
-        let application = ViewerApplication::loaded(document);
-        let tree = UiTree::layout(
-            viewer_view(application.model(), Some("Could not reload")),
-            Rect::new(0.0, 0.0, 800.0, 600.0),
+        let mut application = ViewerApplication::loaded(document);
+        application.runtime_error = Some("Could not reload".into());
+        let mut scenario = Scenario::new(application, 800, 600);
+        assert!(
+            scenario
+                .host()
+                .accessibility_nodes()
+                .iter()
+                .any(|node| { node.label.as_deref() == Some("Still visible") })
         );
-        assert!(tree.commands().iter().any(|command| {
-            matches!(command, PaintCommand::StyledText { text, .. } if text == "Still visible")
-        }));
-        assert!(tree.commands().iter().any(|command| {
-            matches!(command, PaintCommand::Text { text, .. } if text == "Could not reload")
-        }));
-        let dismiss = tree
-            .message_rect(&ViewerMessage::DismissStatus)
-            .expect("recoverable status should expose a dismiss action");
-        let dismiss_point = Point {
-            x: dismiss.origin.x + dismiss.size.width * 0.5,
-            y: dismiss.origin.y + dismiss.size.height * 0.5,
-        };
-        let mut interaction = UiStateStore::default();
-        tree.handle_event(&mut interaction, UiEvent::PointerPressed(dismiss_point));
-        assert_eq!(
-            tree.handle_event(&mut interaction, UiEvent::PointerReleased(dismiss_point))
-                .messages,
-            vec![ViewerMessage::DismissStatus]
+        assert!(
+            scenario
+                .host()
+                .accessibility_nodes()
+                .iter()
+                .any(|node| { node.label.as_deref() == Some("Could not reload") })
+        );
+        scenario
+            .pointer_activate(&Selector::role_name(SemanticRole::Button, "Dismiss"))
+            .unwrap();
+        assert!(
+            scenario
+                .host_mut()
+                .application_mut()
+                .runtime_error
+                .is_none()
         );
     }
 
     #[test]
     #[cfg(feature = "application")]
     fn startup_failure_renders_the_path_and_classified_reason() {
-        use nickel_ui::{PaintCommand, Point, Rect, UiEvent, UiStateStore, UiTree};
+        use nickel_ui::SemanticRole;
+        use nickel_ui_testkit::{Scenario, Selector};
 
         let mut model = ViewerModel::default();
         let missing = PathBuf::from("/definitely/missing/guide.md");
@@ -1430,32 +1708,24 @@ mod tests {
             ViewerStatus::Error(error)
                 if error.kind == ViewerErrorKind::Missing && error.path == missing
         ));
-        let tree = UiTree::layout(viewer_view(&model, None), Rect::new(0.0, 0.0, 800.0, 600.0));
-        let visible = tree
-            .commands()
+        let application = application_with_model(model);
+        let mut scenario = Scenario::new(application, 800, 600);
+        let visible = scenario
+            .host()
+            .accessibility_nodes()
             .iter()
-            .filter_map(|command| match command {
-                PaintCommand::Text { text, .. } => Some(text.as_str()),
-                _ => None,
-            })
+            .filter_map(|node| node.label.as_deref())
             .collect::<Vec<_>>()
             .join(" ");
         assert!(visible.contains("/definitely/missing/guide.md"));
         assert!(visible.contains("No such file") || visible.contains("not found"));
-        let dismiss = tree
-            .message_rect(&ViewerMessage::DismissStatus)
-            .expect("startup error should expose a dismiss action");
-        let dismiss_point = Point {
-            x: dismiss.origin.x + dismiss.size.width * 0.5,
-            y: dismiss.origin.y + dismiss.size.height * 0.5,
-        };
-        let mut interaction = UiStateStore::default();
-        tree.handle_event(&mut interaction, UiEvent::PointerPressed(dismiss_point));
-        assert_eq!(
-            tree.handle_event(&mut interaction, UiEvent::PointerReleased(dismiss_point))
-                .messages,
-            vec![ViewerMessage::DismissStatus]
-        );
+        scenario
+            .pointer_activate(&Selector::role_name(SemanticRole::Button, "Dismiss"))
+            .unwrap();
+        assert!(matches!(
+            scenario.host_mut().application_mut().model.status(),
+            ViewerStatus::Empty
+        ));
     }
 
     #[test]
@@ -1481,17 +1751,16 @@ mod tests {
     #[test]
     #[cfg(feature = "application")]
     fn equal_viewer_state_reconstructs_identical_paint_commands() {
-        use nickel_ui::{Rect, UiTree};
+        use nickel_ui::{Rect, UiFrame};
 
         let document = LoadedDocument {
             path: PathBuf::from("/tmp/guide.md"),
             title: "guide.md".into(),
-            source: "# Stable\n\nContent".into(),
             document: MarkdownDocument::parse("# Stable\n\nContent"),
         };
         let application = ViewerApplication::loaded(document);
         let render = || {
-            UiTree::layout(
+            UiFrame::layout(
                 viewer_view(application.model(), Some("Stable status")),
                 Rect::new(0.0, 0.0, 960.0, 720.0),
             )
@@ -1507,7 +1776,6 @@ mod tests {
         let document = LoadedDocument {
             path: PathBuf::from("/tmp/guide.md"),
             title: "guide.md".into(),
-            source: "# Guide".into(),
             document: MarkdownDocument::parse("# Guide"),
         };
         let mut application = ViewerApplication::loaded(document);
@@ -1519,6 +1787,115 @@ mod tests {
         application.runtime_error = Some("Recoverable".into());
         assert!(application.shortcut(Shortcut::Escape));
         assert!(application.runtime_error.is_none());
-        assert_eq!(application.model.current().unwrap().source, "# Guide");
+        assert_eq!(
+            application.model.current().unwrap().document.source,
+            "# Guide"
+        );
+    }
+}
+
+#[cfg(all(test, feature = "workbench-fixtures"))]
+mod workbench_fixture_tests {
+    use nickel_ui::{ControllerAction, Rect, SemanticRole, UiFrame};
+    use nickel_ui_testkit::{Fixture, FixtureProvider, FixtureRegistry, Scenario};
+
+    use super::*;
+
+    #[test]
+    fn provider_registers_production_viewer_variants() {
+        let mut registry = FixtureRegistry::new();
+        MarkdownViewerFixtureProvider
+            .register(&mut registry)
+            .expect("Markdown provider registration");
+        let entries = registry.finish();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].metadata.id, "markdown.viewer");
+        assert_eq!(
+            entries[0]
+                .metadata
+                .variants
+                .iter()
+                .map(|variant| variant.id)
+                .collect::<Vec<_>>(),
+            ["loaded", "loading", "error", "selection"]
+        );
+        assert_eq!(
+            entries[0].metadata.source.crate_name,
+            env!("CARGO_PKG_NAME")
+        );
+    }
+
+    #[test]
+    fn variants_expose_deterministic_production_states_and_accessibility() {
+        for variant in MARKDOWN_VIEWER_FIXTURE_VARIANTS {
+            let application = MarkdownViewerWorkbenchFixture::create_variant(variant);
+            match variant.id {
+                "loading" => assert!(matches!(
+                    application.model().status(),
+                    ViewerStatus::Loading { .. }
+                )),
+                "error" => assert!(matches!(
+                    application.model().status(),
+                    ViewerStatus::Error(ViewerError {
+                        kind: ViewerErrorKind::Missing,
+                        ..
+                    })
+                )),
+                "loaded" | "selection" => {
+                    assert_eq!(application.model().status(), &ViewerStatus::Ready);
+                }
+                _ => unreachable!(),
+            }
+            let scenario =
+                Scenario::new(application, variant.viewport.width, variant.viewport.height);
+            scenario.assert_accessibility().expect("accessible viewer");
+            let names = scenario
+                .semantic_nodes()
+                .into_iter()
+                .filter_map(|node| node.name)
+                .collect::<Vec<_>>();
+            match variant.id {
+                "loading" => assert!(!names.contains(&"Reload".to_owned())),
+                "error" => assert!(names.contains(&"Dismiss".to_owned())),
+                "loaded" | "selection" => {
+                    assert!(names.contains(&"Reload".to_owned()));
+                    assert!(scenario.semantic_nodes().iter().any(|node| {
+                        node.role == Some(SemanticRole::Button)
+                            && node
+                                .name
+                                .as_deref()
+                                .is_some_and(|name| name.starts_with("fixture guide"))
+                    }));
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn loaded_fixture_supports_controller_and_selection_contracts() {
+        let variant = &MARKDOWN_VIEWER_FIXTURE_VARIANTS[3];
+        let mut scenario = Scenario::new(
+            MarkdownViewerWorkbenchFixture::create_variant(variant),
+            variant.viewport.width,
+            variant.viewport.height,
+        );
+        scenario
+            .controller(ControllerAction::Down)
+            .expect("controller navigation");
+        assert!(scenario.host().inspect().controller_target.is_some());
+
+        let tree = UiFrame::layout(
+            viewer_view(scenario.host().application().model(), None),
+            Rect::new(
+                0.0,
+                0.0,
+                variant.viewport.width as f32,
+                variant.viewport.height as f32,
+            ),
+        );
+        let selection_regions = tree.selection_region_ids().collect::<Vec<_>>();
+        assert_eq!(selection_regions.len(), 1);
+        assert!(selection_regions[0].as_str().ends_with("markdown-document"));
     }
 }

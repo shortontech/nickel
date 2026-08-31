@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::{collections::BTreeMap, time::Instant};
 
 use gilrs::Gilrs;
 use nickel_input::{
@@ -18,36 +18,43 @@ pub enum ControllerAction {
     Right,
     Confirm,
     Cancel,
+    ContextMenu,
     PreviousPane,
     NextPane,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum NavigationPane {
-    Sidebar,
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum ControllerFamily {
+    PlayStation,
+    Xbox,
+    Switch,
     #[default]
-    Content,
+    Generic,
 }
 
-#[derive(Default)]
-pub struct PaneNavigation {
-    pane: NavigationPane,
-}
-
-impl PaneNavigation {
-    pub fn pane(&self) -> NavigationPane {
-        self.pane
-    }
-
-    pub fn handle(&mut self, action: ControllerAction) -> bool {
-        let next = match action {
-            ControllerAction::PreviousPane => NavigationPane::Sidebar,
-            ControllerAction::NextPane => NavigationPane::Content,
-            _ => return false,
-        };
-        let changed = self.pane != next;
-        self.pane = next;
-        changed
+impl ControllerFamily {
+    /// Resolves only backend-reported identity. Button layout is deliberately
+    /// not used as a branding guess.
+    pub fn from_reported_name(name: &str) -> Self {
+        let name = name.to_ascii_lowercase();
+        if ["playstation", "dualshock", "dualsense", "sony"]
+            .iter()
+            .any(|needle| name.contains(needle))
+        {
+            Self::PlayStation
+        } else if ["xbox", "xinput", "microsoft"]
+            .iter()
+            .any(|needle| name.contains(needle))
+        {
+            Self::Xbox
+        } else if ["nintendo", "joy-con", "switch pro"]
+            .iter()
+            .any(|needle| name.contains(needle))
+        {
+            Self::Switch
+        } else {
+            Self::Generic
+        }
     }
 }
 
@@ -56,6 +63,8 @@ pub struct ControllerInput {
     normalizer: ControllerNormalizer,
     epoch: Instant,
     connected: bool,
+    families: BTreeMap<ControllerId, ControllerFamily>,
+    active_family: Option<ControllerFamily>,
 }
 
 impl ControllerInput {
@@ -67,17 +76,20 @@ impl ControllerInput {
             .as_ref()
             .is_some_and(|gilrs| gilrs.gamepads().any(|(_, gamepad)| gamepad.is_connected()));
         let mut normalizer = ControllerNormalizer::default();
+        let mut families = BTreeMap::new();
         if let Some(gilrs) = &gilrs {
             for (id, gamepad) in gilrs
                 .gamepads()
                 .filter(|(_, gamepad)| gamepad.is_connected())
             {
+                let id = ControllerId(usize::from(id) as u64);
+                families.insert(id, ControllerFamily::from_reported_name(gamepad.name()));
                 normalizer.handle(
                     ControllerEvent::Connected {
-                        id: ControllerId(usize::from(id) as u64),
+                        id,
                         identity: ControllerIdentity {
                             backend: "gilrs".into(),
-                            native: NativeCode::Numeric(usize::from(id) as u64),
+                            native: NativeCode::Numeric(id.0),
                             fingerprint: Some(uuid_fingerprint(gamepad.uuid())),
                         },
                     },
@@ -90,11 +102,19 @@ impl ControllerInput {
             normalizer,
             epoch: Instant::now(),
             connected,
+            families,
+            active_family: None,
         }
     }
 
     pub fn connected(&self) -> bool {
         self.connected
+    }
+
+    /// Family of the controller that most recently produced meaningful input.
+    /// Merely connecting a device does not choose a family or input modality.
+    pub fn active_family(&self) -> Option<ControllerFamily> {
+        self.active_family
     }
 
     /// Polls controller input for a window. Events are drained but never emitted while the
@@ -114,32 +134,43 @@ impl ControllerInput {
         while let Some(event) = gilrs.next_event() {
             let identity = matches!(event.event, gilrs::EventType::Connected).then(|| {
                 let gamepad = gilrs.gamepad(event.id);
+                self.families.insert(
+                    ControllerId(usize::from(event.id) as u64),
+                    ControllerFamily::from_reported_name(gamepad.name()),
+                );
                 ControllerIdentity {
                     backend: "gilrs".into(),
                     native: NativeCode::Numeric(usize::from(event.id) as u64),
                     fingerprint: Some(uuid_fingerprint(gamepad.uuid())),
                 }
             });
+            let disconnected = matches!(event.event, gilrs::EventType::Disconnected)
+                .then_some(ControllerId(usize::from(event.id) as u64));
             if let Some(event) = nickel_input::gilrs::event(&event, identity) {
                 let now_ms = now.saturating_duration_since(self.epoch).as_millis() as u64;
-                for action in self
-                    .normalizer
-                    .handle(event, now_ms)
-                    .into_iter()
-                    .filter_map(signal_action)
-                {
-                    actions.push(action);
+                for signal in self.normalizer.handle(event, now_ms) {
+                    if let Some(action) = signal_action(signal.clone()) {
+                        self.active_family = signal_id(&signal)
+                            .and_then(|id| self.families.get(&id).copied())
+                            .or(Some(ControllerFamily::Generic));
+                        actions.push(action);
+                    }
                 }
+            }
+            if let Some(id) = disconnected {
+                self.families.remove(&id);
             }
         }
         self.connected = gilrs.gamepads().any(|(_, gamepad)| gamepad.is_connected());
         let now_ms = now.saturating_duration_since(self.epoch).as_millis() as u64;
-        actions.extend(
-            self.normalizer
-                .tick(now_ms)
-                .into_iter()
-                .filter_map(signal_action),
-        );
+        for signal in self.normalizer.tick(now_ms) {
+            if let Some(action) = signal_action(signal.clone()) {
+                self.active_family = signal_id(&signal)
+                    .and_then(|id| self.families.get(&id).copied())
+                    .or(Some(ControllerFamily::Generic));
+                actions.push(action);
+            }
+        }
         actions
     }
 }
@@ -168,6 +199,7 @@ fn button_action(button: &ControllerButton) -> Option<ControllerAction> {
         ControllerButton::DPadRight => Some(ControllerAction::Right),
         ControllerButton::South => Some(ControllerAction::Confirm),
         ControllerButton::East | ControllerButton::Select => Some(ControllerAction::Cancel),
+        ControllerButton::Start => Some(ControllerAction::ContextMenu),
         ControllerButton::LeftShoulder => Some(ControllerAction::PreviousPane),
         ControllerButton::RightShoulder => Some(ControllerAction::NextPane),
         ControllerButton::Guide => Some(ControllerAction::Launcher),
@@ -196,22 +228,19 @@ fn signal_action(signal: ControllerSignal) -> Option<ControllerAction> {
     }
 }
 
+fn signal_id(signal: &ControllerSignal) -> Option<ControllerId> {
+    match signal {
+        ControllerSignal::Button { id, .. } | ControllerSignal::Direction { id, .. } => Some(*id),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ControllerAction, NavigationPane, PaneNavigation, signal_action};
+    use super::{ControllerAction, ControllerFamily, signal_action};
     use nickel_input::controller::{
         AxisDirection, ControllerButton, ControllerId, ControllerSignal,
     };
-
-    #[test]
-    fn shoulder_actions_select_panes() {
-        let mut navigation = PaneNavigation::default();
-        assert_eq!(navigation.pane(), NavigationPane::Content);
-        assert!(navigation.handle(ControllerAction::PreviousPane));
-        assert_eq!(navigation.pane(), NavigationPane::Sidebar);
-        assert!(navigation.handle(ControllerAction::NextPane));
-        assert_eq!(navigation.pane(), NavigationPane::Content);
-    }
 
     #[test]
     fn normalized_directions_remain_consumer_owned_actions() {
@@ -236,6 +265,39 @@ mod tests {
                 repeat: false,
             }),
             Some(ControllerAction::Launcher)
+        );
+    }
+
+    #[test]
+    fn start_button_is_the_semantic_context_menu_action() {
+        assert_eq!(
+            signal_action(ControllerSignal::Button {
+                id: ControllerId(1),
+                button: ControllerButton::Start,
+                edge: nickel_input::KeyEdge::Pressed,
+                repeat: false,
+            }),
+            Some(ControllerAction::ContextMenu)
+        );
+    }
+
+    #[test]
+    fn reported_controller_names_resolve_without_layout_guessing() {
+        assert_eq!(
+            ControllerFamily::from_reported_name("Sony Interactive Entertainment DualSense"),
+            ControllerFamily::PlayStation
+        );
+        assert_eq!(
+            ControllerFamily::from_reported_name("Microsoft X-Box One pad"),
+            ControllerFamily::Xbox
+        );
+        assert_eq!(
+            ControllerFamily::from_reported_name("Nintendo Switch Pro Controller"),
+            ControllerFamily::Switch
+        );
+        assert_eq!(
+            ControllerFamily::from_reported_name("USB game controller"),
+            ControllerFamily::Generic
         );
     }
 }

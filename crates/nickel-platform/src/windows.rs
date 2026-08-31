@@ -347,3 +347,18 @@ fn string_length(value: &[u16]) -> usize {
         .position(|character| *character == 0)
         .unwrap_or(value.len())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::{string_length, terminated};
+
+    #[test]
+    fn utf16_helpers_terminate_and_measure_paths() {
+        let value = terminated(Path::new(r"C:\Program Files\Nickel\nickel.exe"));
+        assert_eq!(value.last(), Some(&0));
+        assert_eq!(string_length(&value), value.len() - 1);
+        assert_eq!(string_length(&[b'N' as u16, 0, b'X' as u16]), 1);
+    }
+}

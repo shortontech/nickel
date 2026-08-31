@@ -45,16 +45,18 @@ application owns only domain state, typed messages, `update`, and `view`. See
 ## Controller navigation
 
 Controller structure is declarative and renderer-owned. Mark shoulder-switchable regions with
-`controller_pane`, choose the initial pane with `controller_pane_default`, and mark nested levels
-with `controller_group`. `ControllerActivate` enters a group or begins editing a slider;
+`NavigationScope::pane`, and mark nested levels with `NavigationScope::group`. Each scope declares
+its traversal, entry, exit, peer, direction, retained-focus, and scroll-owner policy. Stable tree
+parentage supplies scope topology; identifier prefixes never do. `ControllerActivate` enters a group or begins editing a slider;
 `ControllerBack` exits one level; `ControllerAdjust` changes an active slider by its
 `controller_step`. Navigation automatically reveals off-screen semantic targets.
 
 ~~~rust,ignore
 ui! {
-    <Container controller_pane={true} controller_pane_default={true}
-        controller_pane_highlight={theme.colors.secondary_accent}>
-        <Container controller_group={true} controller_focus_border={theme.borders.controller_focus}>
+    <Container navigation_scope={NavigationScope::pane(true)}
+        navigation_scope_highlight={theme.surfaces.selected}>
+        <Container navigation_scope={NavigationScope::group()}
+            controller_focus_border={theme.borders.controller_focus}>
             <Slider value={volume} on_change={set_volume} controller_step={0.05}
                 controller_focus_border={theme.borders.controller_focus} />
         </Container>
@@ -85,10 +87,11 @@ call `max_lines` when wrapping is intentional.
 
 ## Settings composition
 
-`SettingsShell` combines independent navigation and content viewports. Use
-`SettingsShell::responsive` with `SettingsNarrowPane` when a narrow application needs a reversible
-navigation page; the owning application retains the selected destination and pane state. Locale
-direction can be passed to the directional constructor without reversing numerals or artwork.
+`ResponsiveNavigation` is the shared settings navigation contract. Give it keyed destinations and
+the application-owned active destination; it derives wide sidebar and narrow reversible navigation
+presentations, independent navigation/content controller scopes, headers, section labels, and
+leading visuals from the same declaration. Applications retain only meaningful destination state,
+not a parallel pane mode. Locale direction can be passed without reversing numerals or artwork.
 
 `SettingsSection`, `SettingsCard`, `SettingsListCard`, `SettingsRow`, `SliderField`, `SelectField`,
 `FieldGroup`, and `InlineButtonGroup` provide the shared hierarchy and form grammar. A row is not
@@ -134,10 +137,40 @@ Rows and columns enforce basis, grow, shrink, minimums, maximums, alignment, jus
 and overflow without negative geometry. Grids support fixed, automatic, fractional, min/max,
 repeated, and responsive auto-fit tracks.
 
-`UiTree::layout_with_diagnostics` records bounded, deduplicated structured diagnostics and a
+`UiFrame::layout_with_diagnostics` records bounded, deduplicated structured diagnostics and a
 read-only `ResolvedLayout`. `enable_diagnostic_overlay` appends a separate inspection paint phase
 without altering placement or hit testing. `deterministic_snapshot` provides headless geometry
 snapshots with native handles, pointers, timestamps, and cache identities omitted.
+
+## Bounded custom painting
+
+Ordinary application UI uses the components in the prelude. Genuinely graphical content uses
+`CustomPaint`; its callback receives only the allocated rectangle, and frame resolution discards
+commands outside that rectangle as well as clip-stack and overlay commands. Identity, semantics,
+accessibility, pointer/controller actions, and context actions remain declarations on the component.
+Raw commands are intentionally available only through the explicit `backend` module used by custom
+painters and platform presenters.
+
+~~~rust
+use nickel_ui::backend::PaintCommand;
+use nickel_ui::prelude::*;
+use nickel_ui::Rect;
+
+#[derive(Clone)]
+enum Message { Activate }
+
+fn paint(bounds: Rect) -> Vec<PaintCommand> {
+    vec![PaintCommand::Fill { rect: bounds, color: 0x8b5cf6 }]
+}
+
+let _graph = CustomPaint::new(paint)
+    .id("graph")
+    .width(160.0)
+    .height(80.0)
+    .semantic_role(nickel_ui::SemanticRole::Button)
+    .accessibility_label("Open graph")
+    .message(Message::Activate);
+~~~
 
 ## Source-local compile errors
 
@@ -182,4 +215,68 @@ let _ = ui! { <Slider value={0.5} on_change={set} /> };
 use nickel_ui::prelude::*;
 struct NotAnId;
 let _ = ui! { <Text id={NotAnId}>{"No"}</Text> };
+~~~
+
+Custom-paint callbacks must accept the allocated rectangle and return only backend paint commands:
+
+~~~compile_fail
+use nickel_ui::prelude::*;
+use nickel_ui::Rect;
+fn invalid_paint(_: Rect) -> u32 { 7 }
+let _ = CustomPaint::<()>::new(invalid_paint);
+~~~
+
+Semantic selectors are typed; renderer strings cannot stand in for semantic roles:
+
+~~~compile_fail
+use nickel_ui::{SemanticSelector};
+let _ = SemanticSelector::RoleAndName {
+    role: "button",
+    name: "Save".into(),
+};
+~~~
+
+Ordinary consumers cannot import the renderer command stream from the authoring root:
+
+~~~compile_fail
+use nickel_ui::PaintCommand;
+let _ = std::mem::size_of::<PaintCommand>();
+~~~
+
+~~~compile_fail
+use nickel_ui::ui::PaintCommand;
+let _ = std::mem::size_of::<PaintCommand>();
+~~~
+
+Accessibility and action declarations retain their exact public types:
+
+~~~compile_fail
+use nickel_ui::prelude::*;
+let _ = Container::<()>::new().semantic_role("button");
+~~~
+
+Consumer crates cannot bypass production navigation transitions by mutating focus or scope state:
+
+~~~compile_fail
+use nickel_ui::{NavigationScope, UiId, UiStateStore};
+let mut state = UiStateStore::default();
+state.navigation_mut().set_controller_scope(Some(UiId::from("private-scope")));
+~~~
+
+Navigation topology cannot be inferred from identifier-string prefixes:
+
+~~~compile_fail
+use nickel_ui::NavigationScope;
+let _ = NavigationScope::group().parent_prefix("root/sidebar");
+~~~
+
+~~~compile_fail
+use nickel_ui::backend::PaintCommand;
+use nickel_ui::prelude::*;
+use nickel_ui::Rect;
+#[derive(Clone)] enum Message { Activate }
+fn paint(bounds: Rect) -> Vec<PaintCommand> {
+    vec![PaintCommand::Fill { rect: bounds, color: 0 }]
+}
+let _ = CustomPaint::<Message>::new(paint).message("Activate");
 ~~~

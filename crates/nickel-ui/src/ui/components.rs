@@ -165,15 +165,14 @@ impl<Message> VerticalScroll<Message> {
             },
             style: Style::default(),
             message: Some(message),
+            context_message: None,
             message_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
             children: Vec::new(),
-            controller_group: false,
-            controller_pane: false,
-            controller_pane_default: false,
-            controller_step: 0.05,
+            navigation_scope: None,
+            adjustment_step: 0.05,
         })
     }
 
@@ -242,15 +241,14 @@ impl<Message> Grid<Message> {
             },
             style: Style::default(),
             message: None,
+            context_message: None,
             message_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
             children: Vec::new(),
-            controller_group: false,
-            controller_pane: false,
-            controller_pane_default: false,
-            controller_step: 0.05,
+            navigation_scope: None,
+            adjustment_step: 0.05,
         })
     }
 
@@ -278,15 +276,14 @@ impl<Message> Grid<Message> {
             },
             style: Style::default(),
             message: None,
+            context_message: None,
             message_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
             children: Vec::new(),
-            controller_group: false,
-            controller_pane: false,
-            controller_pane_default: false,
-            controller_step: 0.05,
+            navigation_scope: None,
+            adjustment_step: 0.05,
         })
     }
 
@@ -299,15 +296,14 @@ impl<Message> Grid<Message> {
             },
             style: Style::default(),
             message: None,
+            context_message: None,
             message_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
             children: Vec::new(),
-            controller_group: false,
-            controller_pane: false,
-            controller_pane_default: false,
-            controller_step: 0.05,
+            navigation_scope: None,
+            adjustment_step: 0.05,
         })
     }
 
@@ -328,8 +324,8 @@ impl<Message> Grid<Message> {
         self
     }
 
-    pub fn semantic_role(mut self, role: impl Into<String>) -> Self {
-        self.0 = self.0.accessibility_role(role);
+    pub fn semantic_role(mut self, role: SemanticRole) -> Self {
+        self.0 = self.0.semantic_role(role);
         self
     }
 
@@ -417,18 +413,18 @@ pub struct FileGrid<Message = String> {
 
 impl<Message> FileGrid<Message> {
     pub fn columns(columns: usize) -> Self {
-        Self {
-            grid: Grid::fixed(columns),
-        }
+        let mut grid = Grid::fixed(columns);
+        grid.0.navigation_scope = Some(crate::NavigationScope::group());
+        Self { grid }
     }
 
     pub fn auto_fit(minimum_width: f32) -> Self {
-        Self {
-            grid: Grid::auto_fit(Track::minmax(
-                Track::px(minimum_width.max(1.0)),
-                Track::fr(1.0),
-            )),
-        }
+        let mut grid = Grid::auto_fit(Track::minmax(
+            Track::px(minimum_width.max(1.0)),
+            Track::fr(1.0),
+        ));
+        grid.0.navigation_scope = Some(crate::NavigationScope::group());
+        Self { grid }
     }
 
     pub fn items<C>(mut self, items: impl IntoIterator<Item = C>) -> Self
@@ -477,6 +473,7 @@ impl<Message> FileGridItem<Message> {
         icon_id: u16,
         icon: Arc<RgbaImage>,
     ) -> Self {
+        let label = label.into();
         Self(
             Container::new()
                 .padding(Insets {
@@ -532,6 +529,16 @@ impl<Message> FileGridItem<Message> {
         }
         self
     }
+
+    pub fn focus_border(mut self, color: Color) -> Self {
+        self.0 = self.0.focus_border(color);
+        self
+    }
+
+    pub fn controller_focus_border(mut self, color: Color) -> Self {
+        self.0 = self.0.controller_focus_border(color);
+        self
+    }
 }
 
 impl<Message> Component<Message> for FileGridItem<Message> {
@@ -544,9 +551,10 @@ pub struct StyledText<Message = String>(Element<Message>);
 
 impl<Message> StyledText<Message> {
     pub fn new(value: impl Into<String>, spans: Vec<StyledTextSpan>) -> Self {
+        let value = value.into();
         Self(Element {
             kind: Kind::StyledText {
-                value: value.into(),
+                value: value.clone(),
                 spans,
                 scale: 2.0,
                 wrap: false,
@@ -554,17 +562,19 @@ impl<Message> StyledText<Message> {
             },
             id: None,
             source: None,
-            style: Style::default(),
+            style: Style {
+                accessibility_label: Some(value),
+                ..Style::default()
+            },
             message: None,
+            context_message: None,
             message_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
             children: Vec::new(),
-            controller_group: false,
-            controller_pane: false,
-            controller_pane_default: false,
-            controller_step: 0.05,
+            navigation_scope: None,
+            adjustment_step: 0.05,
         })
     }
 
@@ -618,7 +628,8 @@ pub struct Text<Message = String>(Element<Message>);
 
 impl<Message> Text<Message> {
     pub fn new(value: impl Into<String>) -> Self {
-        Self(Element::text(value, 2.0))
+        let value = value.into();
+        Self(Element::text(value.clone(), 2.0).accessibility_label(value))
     }
 
     pub fn id(mut self, id: impl Into<UiId>) -> Self {
@@ -786,13 +797,96 @@ impl<Message> Component<Message> for SelectionRegion<Message> {
 
 pub struct Image<Message = String>(Element<Message>);
 
+/// A bounded custom painter for exceptional visuals that cannot be expressed
+/// by semantic primitives. The callback receives only its allocated rectangle;
+/// commands outside it and clip-stack commands are discarded by resolution.
+pub struct CustomPaint<Message = String>(Element<Message>);
+
+impl<Message> CustomPaint<Message> {
+    pub fn new(paint: fn(Rect) -> Vec<PaintCommand>) -> Self {
+        Self(Element {
+            id: None,
+            source: None,
+            kind: Kind::CustomPaint { paint },
+            style: Style::default(),
+            message: None,
+            context_message: None,
+            message_mapper: None,
+            text_mapper: None,
+            option_messages: Vec::new(),
+            inline_messages: Vec::new(),
+            children: Vec::new(),
+            navigation_scope: None,
+            adjustment_step: 0.05,
+        })
+    }
+
+    pub fn id(mut self, id: impl Into<UiId>) -> Self {
+        self.0 = self.0.id(id);
+        self
+    }
+
+    pub fn width(mut self, width: f32) -> Self {
+        self.0 = self.0.width(width);
+        self
+    }
+
+    pub fn height(mut self, height: f32) -> Self {
+        self.0 = self.0.height(height);
+        self
+    }
+
+    pub fn message(mut self, message: Message) -> Self {
+        self.0 = self.0.message(message);
+        self
+    }
+
+    pub fn context_message(mut self, message: Message) -> Self {
+        self.0 = self.0.context_message(message);
+        self
+    }
+
+    pub fn semantic_role(mut self, role: SemanticRole) -> Self {
+        self.0 = self.0.semantic_role(role);
+        self
+    }
+
+    pub fn accessibility_label(mut self, label: impl Into<String>) -> Self {
+        self.0 = self.0.accessibility_label(label);
+        self
+    }
+
+    pub fn accessibility_description(mut self, description: impl Into<String>) -> Self {
+        self.0 = self.0.accessibility_description(description);
+        self
+    }
+
+    pub fn accessibility_state(mut self, state: impl Into<String>) -> Self {
+        self.0 = self.0.accessibility_state(state);
+        self
+    }
+}
+
+impl<Message> Component<Message> for CustomPaint<Message> {
+    fn into_element(self) -> Element<Message> {
+        self.0
+    }
+}
+
 impl<Message> Image<Message> {
     pub fn new(id: u16, image: Arc<RgbaImage>) -> Self {
+        use std::hash::{Hash, Hasher};
+        let mut fingerprint = std::collections::hash_map::DefaultHasher::new();
+        image.width().hash(&mut fingerprint);
+        image.height().hash(&mut fingerprint);
+        image.as_raw().hash(&mut fingerprint);
+        let generation = fingerprint.finish();
         Self(Element {
             id: None,
             source: None,
             kind: Kind::Image {
                 id,
+                generation,
                 image,
                 high_density: None,
                 presentation: ImagePresentation::default(),
@@ -803,16 +897,27 @@ impl<Message> Image<Message> {
                 ..Style::default()
             },
             message: None,
+            context_message: None,
             message_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
             children: Vec::new(),
-            controller_group: false,
-            controller_pane: false,
-            controller_pane_default: false,
-            controller_step: 0.05,
+            navigation_scope: None,
+            adjustment_step: 0.05,
         })
+    }
+
+    /// Supplies the source-owned content generation used by presenter caches.
+    /// Increment it whenever pixels for the stable image id change.
+    pub fn generation(mut self, generation: u64) -> Self {
+        if let Kind::Image {
+            generation: value, ..
+        } = &mut self.0.kind
+        {
+            *value = generation;
+        }
+        self
     }
 
     pub fn width(mut self, width: f32) -> Self {
@@ -957,6 +1062,9 @@ impl<Message> TextField<Message> {
             text: Text::new(value),
             displayed: value.to_owned(),
         };
+        if let Kind::Text { input_value, .. } = &mut field.text.0.kind {
+            *input_value = Some(value.to_owned());
+        }
         field.text.0.text_mapper = Some(map);
         field
     }
@@ -970,6 +1078,43 @@ impl<Message> TextField<Message> {
             placeholder.into()
         } else {
             value.to_owned()
+        };
+        let mut field = Self {
+            text: Text::new(&displayed),
+            displayed,
+        };
+        if let Kind::Text { input_value, .. } = &mut field.text.0.kind {
+            *input_value = Some(value.to_owned());
+        }
+        field.text.0.text_mapper = Some(map);
+        field
+    }
+
+    /// Creates an editable field whose painted value is masked while edits are
+    /// still applied to the unmasked application-owned value.
+    pub fn on_change_masked(value: &str, mask: char, map: fn(String) -> Message) -> Self {
+        let displayed = std::iter::repeat_n(mask, value.chars().count()).collect::<String>();
+        let mut field = Self {
+            text: Text::new(&displayed),
+            displayed,
+        };
+        if let Kind::Text { input_value, .. } = &mut field.text.0.kind {
+            *input_value = Some(value.to_owned());
+        }
+        field.text.0.text_mapper = Some(map);
+        field
+    }
+
+    pub fn on_change_masked_with_placeholder(
+        value: &str,
+        placeholder: impl Into<String>,
+        mask: char,
+        map: fn(String) -> Message,
+    ) -> Self {
+        let displayed = if value.is_empty() {
+            placeholder.into()
+        } else {
+            std::iter::repeat_n(mask, value.chars().count()).collect()
         };
         let mut field = Self {
             text: Text::new(&displayed),
@@ -1014,7 +1159,9 @@ impl<Message> TextField<Message> {
 
 impl<Message> Component<Message> for TextField<Message> {
     fn into_element(self) -> Element<Message> {
-        self.text.into_element()
+        self.text
+            .into_element()
+            .semantic_role(SemanticRole::TextField)
     }
 }
 
@@ -1060,6 +1207,16 @@ impl<Message> Container<Message> {
         self
     }
 
+    pub fn hover_background(mut self, background: impl Into<Background>) -> Self {
+        self.0.style.hover_background = Some(background.into());
+        self
+    }
+
+    pub fn pressed_background(mut self, background: impl Into<Background>) -> Self {
+        self.0.style.pressed_background = Some(background.into());
+        self
+    }
+
     pub fn focus_border(mut self, color: Color) -> Self {
         self.0 = self.0.focus_border(color);
         self
@@ -1070,23 +1227,13 @@ impl<Message> Container<Message> {
         self
     }
 
-    pub fn controller_group(mut self, enabled: bool) -> Self {
-        self.0 = self.0.controller_group(enabled);
+    pub fn navigation_scope(mut self, scope: crate::NavigationScope) -> Self {
+        self.0 = self.0.navigation_scope(scope);
         self
     }
 
-    pub fn controller_pane(mut self, enabled: bool) -> Self {
-        self.0 = self.0.controller_pane(enabled);
-        self
-    }
-
-    pub fn controller_pane_default(mut self, default: bool) -> Self {
-        self.0 = self.0.controller_pane_default(default);
-        self
-    }
-
-    pub fn controller_pane_highlight(mut self, highlight: Color) -> Self {
-        self.0 = self.0.controller_pane_highlight(highlight);
+    pub fn navigation_scope_highlight(mut self, highlight: Color) -> Self {
+        self.0 = self.0.navigation_scope_highlight(highlight);
         self
     }
 
@@ -1220,6 +1367,11 @@ impl<Message> Container<Message> {
         self
     }
 
+    pub fn context_message(mut self, message: Message) -> Self {
+        self.0 = self.0.context_message(message);
+        self
+    }
+
     pub fn enabled(mut self, enabled: bool) -> Self {
         if !enabled {
             self.0.message = None;
@@ -1232,8 +1384,8 @@ impl<Message> Container<Message> {
         self
     }
 
-    pub fn semantic_role(mut self, role: impl Into<String>) -> Self {
-        self.0 = self.0.accessibility_role(role);
+    pub fn semantic_role(mut self, role: SemanticRole) -> Self {
+        self.0 = self.0.semantic_role(role);
         self
     }
 
@@ -1421,6 +1573,8 @@ impl<Message> SidebarFolder<Message> {
         expanded: bool,
         foreground: Color,
     ) -> Self {
+        let label = label.into();
+        let toggle_label = format!("Toggle {label}");
         Self(
             Container::new().height(36.0).child(
                 Row::new()
@@ -1429,6 +1583,7 @@ impl<Message> SidebarFolder<Message> {
                             .width(28.0)
                             .height(36.0)
                             .message(toggle_message)
+                            .accessibility_label(toggle_label)
                             .padding(Insets {
                                 top: 8.0,
                                 right: 3.0,
@@ -1446,6 +1601,7 @@ impl<Message> SidebarFolder<Message> {
                             .grow(1.0)
                             .height(36.0)
                             .message(open_message)
+                            .accessibility_label(label.clone())
                             .padding(Insets {
                                 top: 8.0,
                                 right: 8.0,
@@ -1465,6 +1621,34 @@ impl<Message> SidebarFolder<Message> {
 
     pub fn indent(mut self, depth: usize) -> Self {
         self.0.0.style.padding.left = depth as f32 * 16.0;
+        self
+    }
+
+    /// Applies modality-specific focus rings to both semantic actions in the
+    /// folder row without turning the noninteractive wrapper into a target.
+    pub fn focus_borders(mut self, colors: (Color, Color)) -> Self {
+        if let Some(row) = self.0.0.children.first_mut() {
+            for action in &mut row.children {
+                action.style.focus_border = Some(colors.0);
+                action.style.controller_focus_border = Some(colors.1);
+            }
+        }
+        self
+    }
+
+    pub fn accessibility_labels<T: Into<String>, O: Into<String>>(
+        mut self,
+        labels: (T, O),
+    ) -> Self {
+        let (toggle, open) = labels;
+        if let Some(row) = self.0.0.children.first_mut() {
+            if let Some(action) = row.children.first_mut() {
+                action.style.accessibility_label = Some(toggle.into());
+            }
+            if let Some(action) = row.children.get_mut(1) {
+                action.style.accessibility_label = Some(open.into());
+            }
+        }
         self
     }
 }
@@ -1648,6 +1832,7 @@ impl<Message> Button<Message> {
                     left: 12.0,
                 })
                 .height(42.0)
+                .semantic_role(SemanticRole::Button)
                 .message(message)
                 .child(label),
         )
@@ -1915,7 +2100,7 @@ impl<Message> Component<Message> for RadioOption<Message> {
             .controller_focus_border(self.theme.borders.controller_focus)
             .message(self.message)
             .enabled(self.enabled)
-            .semantic_role("radio")
+            .semantic_role(SemanticRole::Radio)
             .accessibility_label(self.label)
             .accessibility_description(self.description.unwrap_or_default())
             .accessibility_state(state)
@@ -1935,7 +2120,7 @@ impl<Message> RadioGroup<Message> {
         Self(
             Container::new()
                 .fill_width()
-                .semantic_role("radiogroup")
+                .semantic_role(SemanticRole::RadioGroup)
                 .child(Column::new().fill_width().gap(10.0).children(options)),
         )
     }
@@ -2124,17 +2309,17 @@ impl<Message> Slider<Message> {
             },
             style: Style::default(),
             message: Some(message),
+            context_message: None,
             message_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
             children: Vec::new(),
-            controller_group: false,
-            controller_pane: false,
-            controller_pane_default: false,
-            controller_step: 0.05,
+            navigation_scope: None,
+            adjustment_step: 0.05,
         };
         element.style.height = Length::Px(24.0);
+        element.style.semantic_role = Some(SemanticRole::Slider);
         Self(element)
     }
 
@@ -2173,8 +2358,8 @@ impl<Message> Slider<Message> {
         self
     }
 
-    pub fn controller_step(mut self, step: f32) -> Self {
-        self.0 = self.0.controller_step(step);
+    pub fn adjustment_step(mut self, step: f32) -> Self {
+        self.0 = self.0.adjustment_step(step);
         self
     }
 
@@ -2221,15 +2406,14 @@ impl<Message> Dropdown<Message> {
             },
             style: Style::default(),
             message: Some(toggle_message),
+            context_message: None,
             message_mapper: None,
             text_mapper: None,
             option_messages,
             inline_messages: Vec::new(),
             children: Vec::new(),
-            controller_group: false,
-            controller_pane: false,
-            controller_pane_default: false,
-            controller_step: 0.05,
+            navigation_scope: None,
+            adjustment_step: 0.05,
         };
         element.style.height = Length::Px(42.0);
         Self(element)
@@ -2334,17 +2518,17 @@ impl<Message> Menu<Message> {
             },
             style: Style::default(),
             message: Some(toggle_message),
+            context_message: None,
             message_mapper: None,
             text_mapper: None,
             option_messages: items.into_iter().map(|item| item.message).collect(),
             inline_messages: Vec::new(),
             children: Vec::new(),
-            controller_group: false,
-            controller_pane: false,
-            controller_pane_default: false,
-            controller_step: 0.05,
+            navigation_scope: Some(crate::NavigationScope::group()),
+            adjustment_step: 0.05,
         };
         element.style.height = Length::Px(30.0);
+        element.style.semantic_role = Some(SemanticRole::Menu);
         Self(element)
     }
 
@@ -2419,7 +2603,7 @@ impl<Message> Component<Message> for MenuBar<Message> {
 #[cfg(test)]
 mod semantic_control_tests {
     use super::*;
-    use crate::{SemanticColors, UiStateStore, UiTree};
+    use crate::{SemanticColors, UiFrame, UiStateStore};
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     enum Message {
@@ -2597,7 +2781,7 @@ mod semantic_control_tests {
         ] {
             let bounds = Rect::new(0.0, 0.0, 720.0, 360.0);
             let mut state = UiStateStore::default();
-            let initial = UiTree::layout_with_state(state_sheet(theme), bounds, &mut state);
+            let initial = UiFrame::layout_with_state(state_sheet(theme), bounds, &mut state);
             let id = |suffix: &str| {
                 initial
                     .resolved_layout()
@@ -2610,8 +2794,10 @@ mod semantic_control_tests {
             let _ = state.set_hovered(Some(id("button-hovered")));
             let _ = state.set_pressed(Some(id("button-pressed")));
             let _ = state.set_focus(Some(id("button-focused")));
-            let _ = state.set_controller_selected(Some(id("button-controller")));
-            let tree = UiTree::layout_with_state_and_diagnostics(
+            let _ = state
+                .navigation_mut()
+                .set_controller_selected(Some(id("button-controller")));
+            let tree = UiFrame::layout_with_state_and_diagnostics(
                 state_sheet(theme),
                 bounds,
                 &mut state,
@@ -2699,24 +2885,27 @@ mod semantic_control_tests {
         };
         let bounds = Rect::new(0.0, 0.0, 180.0, 60.0);
         let mut state = UiStateStore::default();
-        let mut tree = UiTree::layout_with_state(view(), bounds, &mut state);
+        let mut tree = UiFrame::layout_with_state(view(), bounds, &mut state);
         let target = tree
-            .message_rect(&Message::Activate)
-            .expect("semantic button has a hit region");
+            .semantic_targets_for_message(&Message::Activate)
+            .into_iter()
+            .next()
+            .expect("semantic button has a target")
+            .bounds;
         let point = Point {
             x: target.origin.x + target.size.width / 2.0,
             y: target.origin.y + target.size.height / 2.0,
         };
 
         let _ = tree.handle_event(&mut state, UiEvent::PointerMoved(point));
-        tree = UiTree::layout_with_state(view(), bounds, &mut state);
+        tree = UiFrame::layout_with_state(view(), bounds, &mut state);
         assert!(tree.commands().iter().any(|command| matches!(
             command,
             PaintCommand::RoundedFill { color, .. } if *color == theme.surfaces.hover
         )));
 
         let _ = tree.handle_event(&mut state, UiEvent::PointerPressed(point));
-        tree = UiTree::layout_with_state(view(), bounds, &mut state);
+        tree = UiFrame::layout_with_state(view(), bounds, &mut state);
         assert!(tree.commands().iter().any(|command| matches!(
             command,
             PaintCommand::RoundedFill { color, .. } if *color == theme.surfaces.pressed
@@ -2724,7 +2913,7 @@ mod semantic_control_tests {
 
         let _ = tree.handle_event(&mut state, UiEvent::PointerReleased(point));
         let _ = tree.handle_event(&mut state, UiEvent::FocusNext);
-        tree = UiTree::layout_with_state(view(), bounds, &mut state);
+        tree = UiFrame::layout_with_state(view(), bounds, &mut state);
         assert!(tree.commands().iter().any(|command| matches!(
             command,
             PaintCommand::Stroke { color, width, .. }
@@ -2735,7 +2924,7 @@ mod semantic_control_tests {
     #[test]
     fn disabled_button_has_no_hit_region_or_message() {
         let theme = theme();
-        let tree = UiTree::layout(
+        let tree = UiFrame::layout(
             Button::semantic(
                 theme,
                 Message::Activate,
@@ -2746,7 +2935,10 @@ mod semantic_control_tests {
             Rect::new(0.0, 0.0, 180.0, 60.0),
         );
 
-        assert_eq!(tree.message_rect(&Message::Activate), None);
+        assert!(
+            tree.semantic_targets_for_message(&Message::Activate)
+                .is_empty()
+        );
         let node = tree
             .resolved_layout()
             .nodes()
@@ -2758,7 +2950,7 @@ mod semantic_control_tests {
     #[test]
     fn semantic_icon_tints_alpha_and_excludes_decorative_nodes() {
         let source = Arc::new(RgbaImage::from_pixel(2, 2, image::Rgba([10, 20, 30, 128])));
-        let labeled = UiTree::layout(
+        let labeled = UiFrame::layout(
             Icon::<Message>::new(7, Arc::clone(&source), 0x804020, 18.0).label("Settings"),
             Rect::new(0.0, 0.0, 24.0, 24.0),
         );
@@ -2774,7 +2966,7 @@ mod semantic_control_tests {
                 if image.get_pixel(0, 0).0 == [0x80, 0x40, 0x20, 128]
         )));
 
-        let decorative = UiTree::layout(
+        let decorative = UiFrame::layout(
             Icon::<Message>::new(8, source, 0xffffff, 18.0).decorative(),
             Rect::new(0.0, 0.0, 24.0, 24.0),
         );
@@ -2784,7 +2976,7 @@ mod semantic_control_tests {
     #[test]
     fn radio_indicator_is_drawn_without_unicode_and_keeps_typed_activation() {
         let theme = theme();
-        let tree = UiTree::layout(
+        let tree = UiFrame::layout(
             RadioButton::semantic(theme, Message::Select, "Dark", true).id("dark"),
             Rect::new(0.0, 0.0, 180.0, 44.0),
         );
@@ -2798,12 +2990,16 @@ mod semantic_control_tests {
         assert!(!tree.commands().iter().any(|command| {
             matches!(command, PaintCommand::Text { text, .. } if text == "●" || text == "○")
         }));
-        assert!(tree.message_rect(&Message::Select).is_some());
+        assert!(
+            !tree
+                .semantic_targets_for_message(&Message::Select)
+                .is_empty()
+        );
     }
 
     #[test]
     fn unselected_radio_has_no_inner_selection_mark() {
-        let tree = UiTree::layout(
+        let tree = UiFrame::layout(
             RadioButton::semantic(theme(), Message::Select, "Light", false),
             Rect::new(0.0, 0.0, 180.0, 44.0),
         );
@@ -2822,7 +3018,7 @@ mod semantic_control_tests {
     #[test]
     fn radio_group_owns_semantics_rows_and_typed_selection() {
         let theme = theme();
-        let tree = UiTree::layout(
+        let tree = UiFrame::layout(
             RadioGroup::new([
                 RadioOption::new(theme, Message::Select, "Headphones", true)
                     .description("Active")
@@ -2850,6 +3046,10 @@ mod semantic_control_tests {
         assert_eq!(radios.len(), 2);
         assert_eq!(radios[0].state.as_deref(), Some("selected"));
         assert_eq!(radios[1].state.as_deref(), Some("unselected"));
-        assert!(tree.message_rect(&Message::SelectOther).is_some());
+        assert!(
+            !tree
+                .semantic_targets_for_message(&Message::SelectOther)
+                .is_empty()
+        );
     }
 }

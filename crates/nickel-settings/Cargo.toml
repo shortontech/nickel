@@ -36,3 +36,6 @@ windows = { workspace = true, features = [
 ico.workspace = true
 image.workspace = true
 winresource.workspace = true
+
+[dev-dependencies]
+nickel-ui-testkit = { path = "../nickel-ui-testkit" }

@@ -29,6 +29,7 @@ Usage:
   nickel-test-input session restart-shell|lock|unlock|suspend|logout|reboot|power-off
   nickel-test-input idle-inhibition
   nickel-test-input caches
+  nickel-test-input runtime-diagnostics
   nickel-test-input semantic panel-app APPLICATION_ID hover|click [OUTPUT]
   nickel-test-input semantic preview WINDOW_ID hover|activate|close|menu
   nickel-test-input semantic menu WINDOW_ID close|maximize|minimize
@@ -79,6 +80,7 @@ enum Parsed {
     Unlock,
     IdleInhibition,
     Caches,
+    RuntimeDiagnostics,
     Help,
 }
 
@@ -173,6 +175,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, String> {
         }
         [command] if command == "idle-inhibition" => Ok(Parsed::IdleInhibition),
         [command] if command == "caches" => Ok(Parsed::Caches),
+        [command] if command == "runtime-diagnostics" => Ok(Parsed::RuntimeDiagnostics),
         [command, operation] if command == "controller" && operation == "connect" => {
             Ok(Parsed::Input(TestInput::ControllerConnect))
         }
@@ -618,6 +621,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     use std::{env, fs, os::unix::net::UnixDatagram, path::PathBuf, process, time::Duration};
 
     let parsed = parse(env::args_os().skip(1))?;
+    let shell_runtime_query = matches!(&parsed, Parsed::RuntimeDiagnostics);
     if let Parsed::GroupedWindowsScenario(application_id) = &parsed {
         return run_grouped_windows_scenario(application_id);
     }
@@ -723,6 +727,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )),
             None,
         ),
+        Parsed::RuntimeDiagnostics => (
+            Some(Request::Query(
+                nickel_session_protocol::Query::ShellRuntimeDiagnostics,
+            )),
+            None,
+        ),
     };
     let control = env::var_os("NICKEL_SESSION_CONTROL")
         .map(PathBuf::from)
@@ -743,6 +753,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         (
             destination,
             Request::Query(nickel_session_protocol::Query::ShellSemanticTarget { target }),
+        )
+    } else if shell_runtime_query {
+        (
+            env::var_os("NICKEL_SHELL_TEST_CONTROL")
+                .map(PathBuf::from)
+                .ok_or("NICKEL_SHELL_TEST_CONTROL is not set")?,
+            request.expect("runtime diagnostics request exists"),
         )
     } else {
         (
@@ -829,6 +846,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 diagnostics.preview_capacity,
                 diagnostics.preview_bytes
             );
+            Ok(())
+        }
+        ServerMessage::ShellRuntimeDiagnostics(diagnostics) => {
+            diagnostics.validate()?;
+            println!("{}", serde_json::to_string(&diagnostics)?);
             Ok(())
         }
         ServerMessage::Workspaces(state) => {
@@ -936,6 +958,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err("nested compositor test input is only available on Unix".into())
         }
         Parsed::Caches => Err("nested compositor diagnostics are only available on Unix".into()),
+        Parsed::RuntimeDiagnostics => {
+            Err("shell runtime diagnostics are only available on Unix".into())
+        }
     }
 }
 
@@ -962,6 +987,10 @@ mod tests {
             }))
         ));
         assert!(matches!(parse(["caches".into()]), Ok(Parsed::Caches)));
+        assert!(matches!(
+            parse(["runtime-diagnostics".into()]),
+            Ok(Parsed::RuntimeDiagnostics)
+        ));
         assert!(matches!(parse(["readiness".into()]), Ok(Parsed::Readiness)));
         assert!(matches!(
             parse(["workspaces".into()]),

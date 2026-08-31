@@ -14,6 +14,7 @@ nickel-input = { path = "../nickel-input" }
 nickel-session-protocol = { path = "../nickel-session-protocol" }
 nix.workspace = true
 resvg.workspace = true
+serde_json.workspace = true
 smithay.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

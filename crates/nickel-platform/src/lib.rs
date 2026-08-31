@@ -1,8 +1,12 @@
 //! Shared native platform adapters used by Nickel applications.
 
 mod media;
+mod platform_contract;
 
 pub use media::{DecodedPreview, PreviewDecodeError, decode_image_preview};
+pub use platform_contract::{
+    AdapterCapability, ContractEvidence, PLATFORM_CONTRACTS, PlatformContract, PlatformFamily,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FileDialogOutcome {
@@ -55,6 +59,9 @@ mod windows;
 
 #[cfg(target_os = "linux")]
 mod linux;
+
+#[cfg(target_os = "macos")]
+mod macos;
 
 #[cfg(target_os = "windows")]
 pub use windows::{appearance, apply_window_appearance, path_icon, show_hidden_files};
@@ -148,11 +155,7 @@ pub fn open_external_url(url: &str) -> Result<(), String> {
 
 #[cfg(target_os = "macos")]
 pub fn open_external_url(url: &str) -> Result<(), String> {
-    std::process::Command::new("open")
-        .arg(url)
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| format!("could not start the system URL handler: {error}"))
+    macos::open_external_url(url)
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]

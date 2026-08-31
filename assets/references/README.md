@@ -14,9 +14,11 @@ The 2026-08-28 Appearance comparison used FFmpeg 8.0.1. It cropped the reference
 `target/nickel-ui-snapshots/appearance-dark-en-difference.png`; the original reference and render,
 not this aid, remain the acceptance oracle.
 
-Start Menu review uses the reference as a hierarchy oracle: compare pane proportions, section order,
-footer and search attachment, row density, taskbar relationship, icon alignment, and visual hierarchy.
-Names, counts, wallpaper, date, accent, and installed applications are deliberately excluded from
+Start Menu review uses the 2026-08-31 controller-launcher reference as a hierarchy oracle: compare
+the bounded sidebar and flexible content panes, Home/Applications/Places relationship, favorites
+grid, recent-application rows, attached action legend, search placement, row density, taskbar
+relationship, icon alignment, and visual hierarchy. Names, counts, wallpaper, date, accent,
+controller-family labels, account tier, and installed applications are deliberately excluded from
 pixel acceptance.
 
 For a rough image-difference aid, crop both images to the menu bounds, resize the live crop to the
@@ -25,9 +27,7 @@ tool version and crop rectangles with the result. This aid can expose drift in p
 rhythm, but it cannot accept the design: the original-resolution live render still requires visual
 inspection because theme, font rasterization, content, and translucency legitimately differ.
 
-The 2026-08-28 live Start Menu comparison used FFmpeg 8.0.1. It cropped the admitted reference to
-`1092:980:56:24`, cropped the 1280x800 nested-session capture to `920:680:18:56`, scaled that live
-crop to the reference crop, converted both to grayscale, and applied `blend=all_mode=difference`.
-The ignored inputs and aid are `target/nickel-ui-snapshots/start-menu-live-1280x800.png` and
-`target/nickel-ui-snapshots/start-menu-live-difference.png`. The original live capture was inspected
-at its native resolution; the stretched difference aid is not an acceptance oracle.
+The previous 2026-08-28 comparison described the superseded project-oriented reference and must not
+be reused as acceptance evidence for the controller-first composition. Record fresh crop geometry
+and tool versions when a live implementation is ready for comparison. The original live capture and
+the admitted reference, not a stretched difference aid, remain the acceptance oracle.

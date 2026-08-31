@@ -1,7 +1,8 @@
-use crate::{Align, Insets, Justify, SemanticTheme};
+use crate::{Align, ControllerFamily, Insets, Justify, SemanticTheme};
 
 use super::{
-    AnyView, Button, ButtonPresentation, Column, Component, Container, Row, Spacer, Text, TextField,
+    AnyView, Button, ButtonPresentation, Column, Component, ComponentBuilderExt, Container,
+    Element, Row, Spacer, Text, TextField,
 };
 
 pub const START_MENU_SINGLE_PANE_BREAKPOINT: f32 = 620.0;
@@ -11,6 +12,169 @@ pub enum ReadingDirection {
     #[default]
     LeftToRight,
     RightToLeft,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum SemanticControllerAction {
+    Confirm,
+    Cancel,
+    ContextMenu,
+    Pin,
+    Unpin,
+    PreviousSection,
+    NextSection,
+    ToggleLauncher,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ControllerControlPresentation {
+    pub glyph: &'static str,
+    pub spoken_name: &'static str,
+}
+
+impl ControllerFamily {
+    pub fn presentation(self, action: SemanticControllerAction) -> ControllerControlPresentation {
+        use ControllerFamily::{Generic, PlayStation, Switch, Xbox};
+        use SemanticControllerAction::{
+            Cancel, Confirm, ContextMenu, NextSection, Pin, PreviousSection, ToggleLauncher, Unpin,
+        };
+
+        match (self, action) {
+            (PlayStation, Confirm) => control("×", "Cross"),
+            (PlayStation, Cancel) => control("○", "Circle"),
+            (PlayStation, ContextMenu) => control("☰", "Options"),
+            (PlayStation, Pin | Unpin) => control("□", "Square"),
+            (PlayStation, PreviousSection) => control("L1", "L1"),
+            (PlayStation, NextSection) => control("R1", "R1"),
+            (PlayStation, ToggleLauncher) => control("PS", "PS button"),
+            (Xbox, Confirm) => control("A", "A button"),
+            (Xbox, Cancel) => control("B", "B button"),
+            (Xbox, ContextMenu) => control("☰", "Menu button"),
+            (Xbox, Pin | Unpin) => control("X", "X button"),
+            (Xbox, PreviousSection) => control("LB", "left bumper"),
+            (Xbox, NextSection) => control("RB", "right bumper"),
+            (Xbox, ToggleLauncher) => control("X", "Xbox button"),
+            (Switch, Confirm) => control("A", "A button"),
+            (Switch, Cancel) => control("B", "B button"),
+            (Switch, ContextMenu) => control("+", "Plus button"),
+            (Switch, Pin | Unpin) => control("Y", "Y button"),
+            (Switch, PreviousSection) => control("L", "L button"),
+            (Switch, NextSection) => control("R", "R button"),
+            (Switch, ToggleLauncher) => control("⌂", "Home button"),
+            (Generic, Confirm) => control("OK", "confirm control"),
+            (Generic, Cancel) => control("←", "cancel control"),
+            (Generic, ContextMenu) => control("…", "menu control"),
+            (Generic, Pin | Unpin) => control("◇", "secondary action control"),
+            (Generic, PreviousSection) => control("L", "previous section control"),
+            (Generic, NextSection) => control("R", "next section control"),
+            (Generic, ToggleLauncher) => control("⌂", "launcher control"),
+        }
+    }
+}
+
+const fn control(glyph: &'static str, spoken_name: &'static str) -> ControllerControlPresentation {
+    ControllerControlPresentation { glyph, spoken_name }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActionLegendEntry {
+    pub action: SemanticControllerAction,
+    pub label: String,
+    pub available: bool,
+}
+
+impl ActionLegendEntry {
+    pub fn available(action: SemanticControllerAction, label: impl Into<String>) -> Self {
+        Self {
+            action,
+            label: label.into(),
+            available: true,
+        }
+    }
+
+    pub fn unavailable(action: SemanticControllerAction, label: impl Into<String>) -> Self {
+        Self {
+            action,
+            label: label.into(),
+            available: false,
+        }
+    }
+}
+
+/// Stable, non-interactive presentation of the semantic actions accepted by
+/// the active controller navigation scope.
+pub struct ActionLegend<Message = String>(Container<Message>);
+
+impl<Message> ActionLegend<Message> {
+    pub fn new(
+        theme: SemanticTheme,
+        family: ControllerFamily,
+        entries: impl IntoIterator<Item = ActionLegendEntry>,
+    ) -> Self {
+        Self::new_directional(theme, family, entries, ReadingDirection::LeftToRight)
+    }
+
+    pub fn new_directional(
+        theme: SemanticTheme,
+        family: ControllerFamily,
+        entries: impl IntoIterator<Item = ActionLegendEntry>,
+        direction: ReadingDirection,
+    ) -> Self {
+        let items = entries
+            .into_iter()
+            .filter(|entry| entry.available)
+            .map(|entry| {
+                let presentation = family.presentation(entry.action);
+                let accessible = format!("{}: {}", presentation.spoken_name, entry.label);
+                Row::new()
+                    .min_height(theme.sizing.control_height)
+                    .padding(Insets::symmetric(
+                        theme.spacing.control,
+                        theme.spacing.compact,
+                    ))
+                    .gap(theme.spacing.compact)
+                    .align_items(Align::Center)
+                    .accessibility_label(accessible)
+                    .child(
+                        Container::new()
+                            .min_width(26.0)
+                            .min_height(26.0)
+                            .radius(theme.radii.control)
+                            .border(theme.borders.controller_focus, 1.5)
+                            .align_items(Align::Center)
+                            .justify_content(Justify::Center)
+                            .child(
+                                Text::new(presentation.glyph)
+                                    .color(theme.borders.controller_focus)
+                                    .scale(0.82),
+                            ),
+                    )
+                    .child(Text::new(entry.label).color(theme.text.secondary))
+            })
+            .collect::<Vec<Element<Message>>>();
+        let mut row = Row::new()
+            .fill_width()
+            .min_height(theme.sizing.control_height + theme.spacing.control * 2.0)
+            .gap(theme.spacing.content)
+            .align_items(Align::Center)
+            .children(items);
+        if direction == ReadingDirection::RightToLeft {
+            row = row.reverse();
+        }
+        Self(
+            Container::new()
+                .fill_width()
+                .background(theme.surfaces.raised)
+                .border(theme.borders.subtle, 1.0)
+                .child(row),
+        )
+    }
+}
+
+impl<Message> Component<Message> for ActionLegend<Message> {
+    fn into_element(self) -> Element<Message> {
+        self.0.into_element()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -49,6 +213,7 @@ pub struct StartMenuShell<Message = String> {
     detail: AnyView<Message>,
     primary_footer: Option<AnyView<Message>>,
     detail_footer: Option<AnyView<Message>>,
+    legend: Option<AnyView<Message>>,
     direction: ReadingDirection,
     narrow_pane: StartMenuNarrowPane,
 }
@@ -68,6 +233,7 @@ impl<Message> StartMenuShell<Message> {
             detail: AnyView::new(detail),
             primary_footer: None,
             detail_footer: None,
+            legend: None,
             direction: ReadingDirection::LeftToRight,
             narrow_pane: StartMenuNarrowPane::Primary,
         }
@@ -85,6 +251,12 @@ impl<Message> StartMenuShell<Message> {
 
     pub fn detail_footer(mut self, footer: impl Component<Message>) -> Self {
         self.detail_footer = Some(AnyView::new(footer));
+        self
+    }
+
+    /// Adds a stable surface-level action legend below both navigation panes.
+    pub fn legend(mut self, legend: impl Component<Message>) -> Self {
+        self.legend = Some(AnyView::new(legend));
         self
     }
 
@@ -109,6 +281,7 @@ impl<Message> Component<Message> for StartMenuShell<Message> {
             detail,
             primary_footer,
             detail_footer,
+            legend,
             direction,
             narrow_pane,
         } = self;
@@ -132,10 +305,20 @@ impl<Message> Component<Message> for StartMenuShell<Message> {
                 .fill_width()
                 .fill_height()
                 .gap(theme.spacing.content)
-                .child(Container::new().width(280.0).child(primary))
                 .child(
                     Container::new()
+                        .id("start-menu-primary-pane")
+                        .width(280.0)
+                        .navigation_scope(crate::NavigationScope::pane(false))
+                        .navigation_scope_highlight(theme.borders.controller_focus)
+                        .child(primary),
+                )
+                .child(
+                    Container::new()
+                        .id("start-menu-detail-pane")
                         .grow(1.0)
+                        .navigation_scope(crate::NavigationScope::pane(true))
+                        .navigation_scope_highlight(theme.borders.controller_focus)
                         .border(theme.borders.subtle, theme.sizing.border)
                         .child(detail),
                 );
@@ -155,6 +338,9 @@ impl<Message> Component<Message> for StartMenuShell<Message> {
             root = root.child(header);
         }
         root = root.child(content);
+        if let Some(legend) = legend {
+            root = root.child(legend);
+        }
         Container::new()
             .fill_width()
             .fill_height()
@@ -333,6 +519,7 @@ impl<Message> ShortcutRow<Message> {
             .accessibility_description(&supporting)
             .accessibility_state(semantic_state)
             .enabled(state.enabled)
+            .controller_focus_border(theme.borders.controller_focus)
             .child(content);
         if state.focused {
             row = row.border(theme.borders.focus, 2.0);
@@ -347,6 +534,11 @@ impl<Message> ShortcutRow<Message> {
 
     pub fn accessibility_state(mut self, state: impl Into<String>) -> Self {
         self.0 = self.0.accessibility_state(state);
+        self
+    }
+
+    pub fn context_message(mut self, message: Message) -> Self {
+        self.0 = self.0.context_message(message);
         self
     }
 }
@@ -667,7 +859,7 @@ impl<Message> Component<Message> for CompactIconTile<Message> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{PaintCommand, Point, Rect, SemanticColors, UiEvent, UiStateStore, UiTree};
+    use crate::{PaintCommand, Point, Rect, SemanticColors, UiEvent, UiFrame, UiStateStore};
 
     use super::*;
 
@@ -830,11 +1022,19 @@ mod tests {
                 Some(Message::Open),
                 false,
             ));
-        let tree = UiTree::layout(view, Rect::new(0.0, 0.0, 480.0, 160.0));
-        let open = tree.message_rect(&Message::Open).expect("row action");
+        let tree = UiFrame::layout(view, Rect::new(0.0, 0.0, 480.0, 160.0));
+        let open = tree
+            .semantic_targets_for_message(&Message::Open)
+            .into_iter()
+            .next()
+            .expect("row action")
+            .bounds;
         let see_all = tree
-            .message_rect(&Message::SeeAll)
-            .expect("trailing action");
+            .semantic_targets_for_message(&Message::SeeAll)
+            .into_iter()
+            .next()
+            .expect("trailing action")
+            .bounds;
         assert!(open.origin.y >= see_all.origin.y + see_all.size.height);
         assert!(
             tree.accessibility_nodes()
@@ -848,8 +1048,13 @@ mod tests {
         let bounds = Rect::new(0.0, 0.0, 420.0, 80.0);
 
         let mut pointer_state = UiStateStore::default();
-        let pointer_tree = UiTree::layout_with_state(actionable_row(), bounds, &mut pointer_state);
-        let target = pointer_tree.message_rect(&Message::Open).expect("row hit");
+        let pointer_tree = UiFrame::layout_with_state(actionable_row(), bounds, &mut pointer_state);
+        let target = pointer_tree
+            .semantic_targets_for_message(&Message::Open)
+            .into_iter()
+            .next()
+            .expect("row hit")
+            .bounds;
         let point = Point {
             x: target.origin.x + target.size.width / 2.0,
             y: target.origin.y + target.size.height / 2.0,
@@ -864,7 +1069,7 @@ mod tests {
 
         let mut keyboard_state = UiStateStore::default();
         let keyboard_tree =
-            UiTree::layout_with_state(actionable_row(), bounds, &mut keyboard_state);
+            UiFrame::layout_with_state(actionable_row(), bounds, &mut keyboard_state);
         let _ = keyboard_tree.handle_event(&mut keyboard_state, UiEvent::FocusNext);
         assert_eq!(
             keyboard_tree
@@ -875,7 +1080,7 @@ mod tests {
 
         let mut controller_state = UiStateStore::default();
         let controller_tree =
-            UiTree::layout_with_state(actionable_row(), bounds, &mut controller_state);
+            UiFrame::layout_with_state(actionable_row(), bounds, &mut controller_state);
         let _ = controller_tree.handle_event(&mut controller_state, UiEvent::ControllerNext);
         assert_eq!(
             controller_tree
@@ -886,7 +1091,7 @@ mod tests {
 
         let mut accessibility_state = UiStateStore::default();
         let accessibility_tree =
-            UiTree::layout_with_state(actionable_row(), bounds, &mut accessibility_state);
+            UiFrame::layout_with_state(actionable_row(), bounds, &mut accessibility_state);
         let id = accessibility_tree
             .accessibility_nodes()
             .iter()
@@ -904,7 +1109,7 @@ mod tests {
 
     #[test]
     fn unavailable_row_has_no_action_and_project_state_is_textual() {
-        let tree = UiTree::layout(
+        let tree = UiFrame::layout(
             ProjectStatusRow::new(
                 theme(),
                 Text::new("□"),
@@ -916,7 +1121,7 @@ mod tests {
             ),
             Rect::new(0.0, 0.0, 420.0, 100.0),
         );
-        assert!(tree.message_rect(&Message::Open).is_none());
+        assert!(tree.semantic_targets_for_message(&Message::Open).is_empty());
         assert!(tree.accessibility_nodes().iter().any(|node| {
             node.label.as_deref() == Some("Nickel")
                 && node.state.as_deref() == Some("Status unknown")
@@ -928,10 +1133,61 @@ mod tests {
     }
 
     #[test]
+    fn action_legend_resolves_family_controls_and_omits_unavailable_actions() {
+        let entries = [
+            ActionLegendEntry::available(SemanticControllerAction::Confirm, "Launch"),
+            ActionLegendEntry::available(SemanticControllerAction::ContextMenu, "Actions"),
+            ActionLegendEntry::unavailable(SemanticControllerAction::Pin, "Pin"),
+            ActionLegendEntry::available(SemanticControllerAction::Cancel, "Close"),
+        ];
+        let tree = UiFrame::<Message>::layout(
+            ActionLegend::new(theme(), ControllerFamily::PlayStation, entries),
+            Rect::new(0.0, 0.0, 640.0, 72.0),
+        );
+
+        let labels = tree
+            .accessibility_nodes()
+            .iter()
+            .filter_map(|node| node.label.as_deref())
+            .collect::<Vec<_>>();
+        assert!(labels.contains(&"Cross: Launch"));
+        assert!(labels.contains(&"Options: Actions"));
+        assert!(labels.contains(&"Circle: Close"));
+        assert!(!labels.iter().any(|label| label.contains("Pin")));
+        assert!(
+            tree.commands()
+                .iter()
+                .any(|command| matches!(command, PaintCommand::Text { text, .. } if text == "×"))
+        );
+    }
+
+    #[test]
+    fn controller_family_presentations_are_semantic_and_have_truthful_fallbacks() {
+        assert_eq!(
+            ControllerFamily::Xbox
+                .presentation(SemanticControllerAction::PreviousSection)
+                .glyph,
+            "LB"
+        );
+        assert_eq!(
+            ControllerFamily::Switch
+                .presentation(SemanticControllerAction::ContextMenu)
+                .spoken_name,
+            "Plus button"
+        );
+        assert_eq!(
+            ControllerFamily::Generic
+                .presentation(SemanticControllerAction::Confirm)
+                .spoken_name,
+            "confirm control"
+        );
+    }
+
+    #[test]
     fn search_field_presents_preedit_without_committing_it() {
         let field =
             LauncherSearchField::new(theme(), Text::new("Search"), "ni", "ck", "Search", query);
-        let tree = UiTree::layout(field, Rect::new(0.0, 0.0, 420.0, 60.0));
+        let tree = UiFrame::layout(field, Rect::new(0.0, 0.0, 420.0, 60.0));
         assert!(tree.commands().iter().any(|command| matches!(
             command,
             PaintCommand::Text { text, .. } if text == "nick"
@@ -940,7 +1196,7 @@ mod tests {
 
     #[test]
     fn shell_switches_to_single_pane_below_breakpoint() {
-        let narrow = UiTree::layout(
+        let narrow = UiFrame::layout(
             StartMenuShell::new(
                 theme(),
                 619.0,
@@ -959,7 +1215,7 @@ mod tests {
             PaintCommand::Text { text, .. } if text == "Detail"
         )));
 
-        let detail = UiTree::layout(
+        let detail = UiFrame::layout(
             StartMenuShell::new(
                 theme(),
                 619.0,
@@ -978,7 +1234,7 @@ mod tests {
             PaintCommand::Text { text, .. } if text == "Detail"
         )));
 
-        let boundary = UiTree::layout(
+        let boundary = UiFrame::layout(
             StartMenuShell::new(
                 theme(),
                 620.0,
@@ -997,7 +1253,7 @@ mod tests {
 
     #[test]
     fn right_to_left_rows_and_wide_shells_mirror_semantic_order() {
-        let rtl_row = UiTree::layout(
+        let rtl_row = UiFrame::layout(
             ShortcutRow::new_directional(
                 theme(),
                 Text::new("ICON"),
@@ -1009,7 +1265,7 @@ mod tests {
             ),
             Rect::new(0.0, 0.0, 420.0, 80.0),
         );
-        let text_x = |tree: &UiTree<Message>, wanted: &str| {
+        let text_x = |tree: &UiFrame<Message>, wanted: &str| {
             tree.commands()
                 .iter()
                 .find_map(|command| match command {
@@ -1022,7 +1278,7 @@ mod tests {
         };
         assert!(text_x(&rtl_row, "Label") < text_x(&rtl_row, "ICON"));
 
-        let rtl_shell = UiTree::layout(
+        let rtl_shell = UiFrame::layout(
             StartMenuShell::new(
                 theme(),
                 900.0,
@@ -1034,7 +1290,7 @@ mod tests {
         );
         assert!(text_x(&rtl_shell, "Detail") < text_x(&rtl_shell, "Primary"));
 
-        let rtl_header = UiTree::layout(
+        let rtl_header = UiFrame::layout(
             SectionHeader::new(theme(), "المشاريع")
                 .action(theme(), "عرض الكل", Message::SeeAll)
                 .direction(ReadingDirection::RightToLeft),
@@ -1052,7 +1308,7 @@ mod tests {
 
     #[test]
     fn interaction_states_are_visual_textual_and_disable_activation() {
-        let focused = UiTree::layout(
+        let focused = UiFrame::layout(
             ShortcutRow::new_directional(
                 theme(),
                 Text::new("□"),
@@ -1076,7 +1332,7 @@ mod tests {
             node.label.as_deref() == Some("Focused") && node.state.as_deref() == Some("focused")
         }));
 
-        let disabled = UiTree::layout(
+        let disabled = UiFrame::layout(
             ShortcutRow::new_directional(
                 theme(),
                 Text::new("□"),
@@ -1091,7 +1347,11 @@ mod tests {
             ),
             Rect::new(0.0, 0.0, 420.0, 80.0),
         );
-        assert!(disabled.message_rect(&Message::Open).is_none());
+        assert!(
+            disabled
+                .semantic_targets_for_message(&Message::Open)
+                .is_empty()
+        );
         assert!(disabled.accessibility_nodes().iter().any(|node| {
             node.label.as_deref() == Some("Disabled")
                 && node.state.as_deref() == Some("disabled")
@@ -1105,11 +1365,11 @@ mod tests {
         assert_eq!(fallback_avatar_initials("nickel"), "N");
         assert_eq!(fallback_avatar_initials("  "), "•");
 
-        let first = UiTree::layout(
+        let first = UiFrame::layout(
             FallbackAvatar::<Message>::new(theme(), "Steven Shorton"),
             Rect::new(0.0, 0.0, 40.0, 40.0),
         );
-        let second = UiTree::layout(
+        let second = UiFrame::layout(
             FallbackAvatar::<Message>::new(theme(), "Steven Shorton"),
             Rect::new(0.0, 0.0, 40.0, 40.0),
         );
@@ -1146,7 +1406,7 @@ mod tests {
             ("high-contrast", high_contrast),
             ("reduced-transparency", reduced_transparency),
         ] {
-            let tree = UiTree::layout_with_diagnostics(
+            let tree = UiFrame::layout_with_diagnostics(
                 component_state_sheet(
                     theme,
                     "Nickel",
@@ -1215,7 +1475,7 @@ mod tests {
                 ReadingDirection::RightToLeft,
             ),
         ] {
-            let tree = UiTree::layout_with_diagnostics(
+            let tree = UiFrame::layout_with_diagnostics(
                 component_state_sheet(dark, project, supporting, direction),
                 bounds,
             );

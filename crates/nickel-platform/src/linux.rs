@@ -266,7 +266,7 @@ fn load_icon(path: &Path) -> Option<RgbaImage> {
 mod tests {
     use std::path::Path;
 
-    use super::decode_file_uri;
+    use super::{decode_file_uri, icon_name};
 
     #[test]
     fn portal_file_uris_preserve_unix_paths_and_percent_escapes() {
@@ -278,5 +278,16 @@ mod tests {
         assert!(decode_file_uri("file://remote/image.png").is_err());
         assert!(decode_file_uri("file:///tmp/bad%2").is_err());
         assert!(decode_file_uri("file:///tmp/nul%00byte").is_err());
+    }
+
+    #[test]
+    fn icon_names_follow_path_kind() {
+        let root = tempfile::tempdir().unwrap();
+        let pictures = root.path().join("Pictures");
+        std::fs::create_dir(&pictures).unwrap();
+        assert_eq!(icon_name(&pictures), "folder-pictures");
+        assert_eq!(icon_name(Path::new("report.pdf")), "application-pdf");
+        assert_eq!(icon_name(Path::new("archive.tar")), "package-x-generic");
+        assert_eq!(icon_name(Path::new("README")), "text-x-generic");
     }
 }

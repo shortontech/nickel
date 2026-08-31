@@ -122,6 +122,19 @@ enum SnapshotScope {
 }
 
 impl ChatController {
+    #[cfg(feature = "workbench-fixtures")]
+    pub(crate) fn fixture_idle(generation: u64) -> Self {
+        let (commands, command_receiver) = mpsc::channel();
+        let (_event_sender, events) = mpsc::channel();
+        drop(command_receiver);
+        Self {
+            generation,
+            commands,
+            events,
+            worker: None,
+        }
+    }
+
     pub fn spawn(mode: BackendMode) -> Self {
         Self::spawn_generation_with_scope(mode, 1, SnapshotScope::Full)
     }

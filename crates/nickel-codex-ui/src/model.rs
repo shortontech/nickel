@@ -14,6 +14,7 @@ use nickel_ui::{SelectionDocument, SelectionRun};
 use crate::ControllerEvent;
 
 const MAX_ITEMS: usize = 2_000;
+const MAX_ITEM_ALIASES: usize = 2_000;
 const MAX_DIAGNOSTICS: usize = 100;
 const MAX_THREADS: usize = 200;
 const MAX_PENDING: usize = 32;
@@ -87,14 +88,15 @@ pub struct ChatState {
     pub expanded_projects: HashSet<String>,
     pub collapsed_projects: HashSet<String>,
     local_sequence: u64,
-    item_indexes: HashMap<String, usize>,
+    /// Backend item IDs that intentionally route into a differently named merged transcript item.
+    /// Ordinary item IDs are resolved directly from `items` instead of mirrored in an index.
+    item_aliases: VecDeque<(String, String)>,
     turn_agent_index: Option<usize>,
     exploration_index: Option<usize>,
     exploration_item_ids: HashSet<String>,
     exploration_reads: HashSet<String>,
     exploration_lists: HashSet<String>,
     exploration_searches: HashSet<String>,
-    item_height_estimates: VecDeque<f32>,
     item_selection_runs: VecDeque<Vec<SelectionRun>>,
     selection_revision: u64,
     selection_document_cache: RefCell<(u64, usize, Arc<SelectionDocument>)>,
@@ -128,14 +130,13 @@ impl Default for ChatState {
             expanded_projects: HashSet::new(),
             collapsed_projects: HashSet::new(),
             local_sequence: 0,
-            item_indexes: HashMap::new(),
+            item_aliases: VecDeque::new(),
             turn_agent_index: None,
             exploration_index: None,
             exploration_item_ids: HashSet::new(),
             exploration_reads: HashSet::new(),
             exploration_lists: HashSet::new(),
             exploration_searches: HashSet::new(),
-            item_height_estimates: VecDeque::new(),
             item_selection_runs: VecDeque::new(),
             selection_revision: 0,
             selection_document_cache: RefCell::new((0, 0, Arc::new(SelectionDocument::default()))),
@@ -238,10 +239,9 @@ impl ChatState {
         self.active_turn = None;
         self.interrupt_requested = false;
         self.items.clear();
-        self.item_height_estimates.clear();
         self.item_selection_runs.clear();
-        self.selection_revision = self.selection_revision.wrapping_add(1);
-        self.item_indexes.clear();
+        self.invalidate_selection_projection();
+        self.item_aliases.clear();
         self.turn_agent_index = None;
         self.clear_exploration();
         self.pending.clear();
@@ -260,10 +260,9 @@ impl ChatState {
                 .clone_from(&thread.reasoning_effort);
         }
         self.items.clear();
-        self.item_height_estimates.clear();
         self.item_selection_runs.clear();
-        self.selection_revision = self.selection_revision.wrapping_add(1);
-        self.item_indexes.clear();
+        self.invalidate_selection_projection();
+        self.item_aliases.clear();
         self.pending.clear();
         self.active_turn = None;
         self.interrupt_requested = false;
@@ -290,7 +289,7 @@ impl ChatState {
                         }
                         self.items[index].text.push_str(&item.text);
                     }
-                    self.item_indexes.insert(item.id.clone(), index);
+                    self.register_item_alias(item.id.clone(), index);
                     self.refresh_item_projection(index);
                 } else {
                     self.push_item(ChatItem {
@@ -365,7 +364,7 @@ impl ChatState {
                         let index = self.turn_agent_index.expect("checked above");
                         self.items[index].text.push_str("\n\n");
                         self.items[index].complete = false;
-                        self.item_indexes.insert(item_id, index);
+                        self.register_item_alias(item_id, index);
                         self.refresh_item_projection(index);
                     } else {
                         self.push_item(ChatItem {
@@ -384,14 +383,13 @@ impl ChatState {
                 if self.exploration_item_ids.contains(&item_id) {
                     return;
                 }
-                if let Some(index) = self.item_indexes.get(&item_id).copied() {
+                if let Some(index) = self.resolve_item_index(&item_id) {
                     if self.items[index].text.is_empty() {
-                        self.reconcile_height_estimates();
+                        self.reconcile_selection_runs();
                         self.items.remove(index);
-                        self.item_height_estimates.remove(index);
                         self.item_selection_runs.remove(index);
-                        self.selection_revision = self.selection_revision.wrapping_add(1);
-                        self.reindex();
+                        self.invalidate_selection_projection();
+                        self.reconcile_item_aliases();
                     } else {
                         self.items[index].complete = true;
                     }
@@ -488,7 +486,7 @@ impl ChatState {
             self.exploration_index = Some(index);
             index
         };
-        self.item_indexes.insert(item_id.to_owned(), index);
+        self.register_item_alias(item_id.to_owned(), index);
         self.refresh_exploration_text();
     }
 
@@ -526,25 +524,25 @@ impl ChatState {
     }
 
     fn push_item(&mut self, item: ChatItem) {
-        self.reconcile_height_estimates();
+        self.reconcile_selection_runs();
         if self.items.len() == MAX_ITEMS {
-            self.items.pop_front();
-            self.item_height_estimates.pop_front();
+            let removed = self
+                .items
+                .pop_front()
+                .expect("bounded transcript is non-empty");
             self.item_selection_runs.pop_front();
+            self.item_aliases
+                .retain(|(_, canonical_id)| canonical_id != &removed.id);
         }
-        self.item_height_estimates
-            .push_back(estimate_item_height(&item));
         self.item_selection_runs
             .push_back(selection_runs_for_item(&item));
-        self.selection_revision = self.selection_revision.wrapping_add(1);
+        self.invalidate_selection_projection();
         self.items.push_back(item);
-        self.reindex();
     }
 
     fn refresh_item_projection(&mut self, index: usize) {
-        self.item_height_estimates[index] = estimate_item_height(&self.items[index]);
         self.item_selection_runs[index] = selection_runs_for_item(&self.items[index]);
-        self.selection_revision = self.selection_revision.wrapping_add(1);
+        self.invalidate_selection_projection();
     }
 
     fn record_selected_thread(&mut self, thread: Thread) {
@@ -563,10 +561,10 @@ impl ChatState {
         };
         self.items[index].id = item_id.to_owned();
         self.items[index].complete = false;
-        self.reconcile_height_estimates();
+        self.reconcile_selection_runs();
         self.item_selection_runs[index] = selection_runs_for_item(&self.items[index]);
-        self.selection_revision = self.selection_revision.wrapping_add(1);
-        self.reindex();
+        self.invalidate_selection_projection();
+        self.reconcile_item_aliases();
         true
     }
 
@@ -579,12 +577,11 @@ impl ChatState {
     }
 
     fn append_delta(&mut self, item_id: String, delta: String, inferred_kind: ChatItemKind) {
-        if let Some(index) = self.item_indexes.get(&item_id).copied() {
-            self.reconcile_height_estimates();
+        if let Some(index) = self.resolve_item_index(&item_id) {
+            self.reconcile_selection_runs();
             self.items[index].text.push_str(&delta);
-            self.item_height_estimates[index] = estimate_item_height(&self.items[index]);
             self.item_selection_runs[index] = selection_runs_for_item(&self.items[index]);
-            self.selection_revision = self.selection_revision.wrapping_add(1);
+            self.invalidate_selection_projection();
         } else {
             self.push_item(ChatItem {
                 id: item_id,
@@ -595,13 +592,41 @@ impl ChatState {
         }
     }
 
-    fn reindex(&mut self) {
-        self.item_indexes = self
-            .items
+    fn resolve_item_index(&self, item_id: &str) -> Option<usize> {
+        self.items
             .iter()
-            .enumerate()
-            .map(|(index, item)| (item.id.clone(), index))
-            .collect();
+            .position(|item| item.id == item_id)
+            .or_else(|| {
+                let canonical_id = self
+                    .item_aliases
+                    .iter()
+                    .rev()
+                    .find_map(|(alias, canonical)| (alias == item_id).then_some(canonical))?;
+                self.items.iter().position(|item| &item.id == canonical_id)
+            })
+    }
+
+    fn register_item_alias(&mut self, item_id: String, index: usize) {
+        let canonical_id = &self.items[index].id;
+        if &item_id != canonical_id {
+            if let Some((_, target)) = self
+                .item_aliases
+                .iter_mut()
+                .find(|(alias, _)| alias == &item_id)
+            {
+                target.clone_from(canonical_id);
+                return;
+            }
+            if self.item_aliases.len() == MAX_ITEM_ALIASES {
+                self.item_aliases.pop_front();
+            }
+            self.item_aliases.push_back((item_id, canonical_id.clone()));
+        }
+    }
+
+    fn reconcile_item_aliases(&mut self) {
+        self.item_aliases
+            .retain(|(_, canonical_id)| self.items.iter().any(|item| &item.id == canonical_id));
     }
 
     fn push_diagnostic(&mut self, message: String) {
@@ -615,22 +640,22 @@ impl ChatState {
         self.push_diagnostic(message.into());
     }
 
-    fn reconcile_height_estimates(&mut self) {
-        if self.item_height_estimates.len() != self.items.len() {
-            self.item_height_estimates = self.items.iter().map(estimate_item_height).collect();
-        }
+    fn reconcile_selection_runs(&mut self) {
         if self.item_selection_runs.len() != self.items.len() {
             self.item_selection_runs = self.items.iter().map(selection_runs_for_item).collect();
-            self.selection_revision = self.selection_revision.wrapping_add(1);
+            self.invalidate_selection_projection();
         }
     }
 
+    /// Drops the state's reference to the previous transcript-sized projection. A frame that is
+    /// still being presented may keep its `Arc`, but mutations do not retain a second stale copy.
+    fn invalidate_selection_projection(&mut self) {
+        self.selection_revision = self.selection_revision.wrapping_add(1);
+        *self.selection_document_cache.get_mut() = (0, 0, Arc::new(SelectionDocument::default()));
+    }
+
     pub fn estimated_item_heights(&self) -> Vec<f32> {
-        if self.item_height_estimates.len() == self.items.len() {
-            self.item_height_estimates.iter().copied().collect()
-        } else {
-            self.items.iter().map(estimate_item_height).collect()
-        }
+        self.items.iter().map(estimate_item_height).collect()
     }
 
     pub fn transcript_selection_document(&self) -> Arc<SelectionDocument> {
@@ -743,4 +768,273 @@ fn sanitize_diagnostic(message: &str) -> String {
         return "Sensitive backend diagnostic redacted".into();
     }
     message.chars().take(512).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{hint::black_box, mem::size_of, time::Instant};
+
+    use super::*;
+
+    const TINY_DERIVED_OPERATION_P95_ADDITION: std::time::Duration =
+        std::time::Duration::from_micros(100);
+
+    fn representative_long_transcript() -> ChatState {
+        let mut state = ChatState::default();
+        for index in 0..MAX_ITEMS {
+            state.push_item(ChatItem {
+                id: format!("item-{index}"),
+                kind: if index % 4 == 0 {
+                    ChatItemKind::User
+                } else {
+                    ChatItemKind::Agent
+                },
+                text: format!(
+                    "## Transcript item {index}\n\nThis is representative prose with **formatting**, \
+                     a [link](https://example.invalid/{index}), and enough content to exercise \
+                     Markdown selection projection.\n\n- first result\n- second result\n\n```text\n\
+                     deterministic output {index}\n```"
+                ),
+                complete: true,
+            });
+        }
+        state
+    }
+
+    fn p95(samples: &mut [std::time::Duration]) -> std::time::Duration {
+        samples.sort_unstable();
+        samples[samples.len() * 95 / 100]
+    }
+
+    fn selection_run_retained_bytes(state: &ChatState) -> usize {
+        state
+            .item_selection_runs
+            .iter()
+            .flatten()
+            .map(|run| size_of::<SelectionRun>() + run.id.capacity() + run.text.len())
+            .sum()
+    }
+
+    fn item_index_retained_bytes(index: &HashMap<String, usize>) -> usize {
+        index.capacity() * (size_of::<String>() + size_of::<usize>() + size_of::<usize>())
+            + index.keys().map(|key| key.capacity()).sum::<usize>()
+    }
+
+    #[test]
+    #[ignore = "release-profile cache admission measurement; run explicitly"]
+    fn recomputing_2k_item_heights_is_within_tiny_operation_budget() {
+        let items = (0..MAX_ITEMS)
+            .map(|index| ChatItem {
+                id: format!("item-{index}"),
+                kind: if index % 3 == 0 {
+                    ChatItemKind::User
+                } else {
+                    ChatItemKind::Agent
+                },
+                text: format!(
+                    "Measured transcript item {index}: deterministic text spanning a representative chat line."
+                ),
+                complete: true,
+            })
+            .collect::<Vec<_>>();
+        let cached = items.iter().map(estimate_item_height).collect::<Vec<_>>();
+        let recomputed = items.iter().map(estimate_item_height).collect::<Vec<_>>();
+        assert_eq!(cached, recomputed, "cached and recomputed heights differ");
+
+        let mut cached_samples = Vec::with_capacity(200);
+        let mut recomputed_samples = Vec::with_capacity(200);
+        for _ in 0..200 {
+            let start = Instant::now();
+            let cached_result = black_box(&cached).to_vec();
+            black_box(cached_result);
+            cached_samples.push(start.elapsed());
+
+            let start = Instant::now();
+            let recomputed_result = black_box(&items)
+                .iter()
+                .map(estimate_item_height)
+                .collect::<Vec<_>>();
+            black_box(recomputed_result);
+            recomputed_samples.push(start.elapsed());
+        }
+        cached_samples.sort_unstable();
+        recomputed_samples.sort_unstable();
+        let p95_index = cached_samples.len() * 95 / 100;
+        let cached_p95 = cached_samples[p95_index];
+        let recomputed_p95 = recomputed_samples[p95_index];
+        let addition = recomputed_p95.saturating_sub(cached_p95);
+        eprintln!(
+            "2k item heights: cached_p95={cached_p95:?} recomputed_p95={recomputed_p95:?} addition={addition:?}"
+        );
+        assert!(
+            addition <= TINY_DERIVED_OPERATION_P95_ADDITION,
+            "recomputation added {addition:?}, exceeding the predeclared {:?} p95 budget",
+            TINY_DERIVED_OPERATION_P95_ADDITION
+        );
+    }
+
+    #[test]
+    fn selection_projections_are_bounded_released_and_equivalent() {
+        let mut state = representative_long_transcript();
+        for index in MAX_ITEMS..MAX_ITEMS + 20 {
+            state.push_item(ChatItem {
+                id: format!("item-{index}"),
+                kind: ChatItemKind::Agent,
+                text: format!("replacement {index}"),
+                complete: true,
+            });
+        }
+
+        assert_eq!(state.items.len(), MAX_ITEMS);
+        assert!(state.item_aliases.is_empty());
+        assert_eq!(state.item_selection_runs.len(), MAX_ITEMS);
+        assert_eq!(state.resolve_item_index("item-0"), None);
+        assert_eq!(state.resolve_item_index("item-2019"), Some(MAX_ITEMS - 1));
+
+        let cached = state.transcript_selection_document();
+        let recomputed =
+            SelectionDocument::new(state.items.iter().flat_map(selection_runs_for_item));
+        assert_eq!(&*cached, &recomputed);
+
+        state.clear_conversation();
+        assert!(state.items.is_empty());
+        assert!(state.item_aliases.is_empty());
+        assert!(state.item_selection_runs.is_empty());
+        assert!(state.selection_document_cache.borrow().2.runs().is_empty());
+    }
+
+    #[test]
+    fn transcript_mutation_drops_stale_cached_document() {
+        let mut state = representative_long_transcript();
+        let stale = state.transcript_selection_document();
+        assert!(!stale.runs().is_empty());
+        assert_eq!(Arc::strong_count(&stale), 2);
+
+        state.append_delta("item-1999".into(), " tail".into(), ChatItemKind::Agent);
+
+        assert!(state.selection_document_cache.borrow().2.runs().is_empty());
+        assert_eq!(Arc::strong_count(&stale), 1);
+        let current = state.transcript_selection_document();
+        assert_ne!(&*current, &*stale);
+    }
+
+    #[test]
+    fn merged_item_alias_routing_is_bounded_and_reconciled() {
+        let mut state = ChatState::default();
+        state.push_item(ChatItem {
+            id: "canonical".into(),
+            kind: ChatItemKind::Agent,
+            text: "first".into(),
+            complete: true,
+        });
+        for index in 0..MAX_ITEM_ALIASES + 20 {
+            state.register_item_alias(format!("alias-{index}"), 0);
+        }
+        assert_eq!(state.item_aliases.len(), MAX_ITEM_ALIASES);
+        assert_eq!(state.resolve_item_index("alias-0"), None);
+        assert_eq!(
+            state.resolve_item_index(&format!("alias-{}", MAX_ITEM_ALIASES + 19)),
+            Some(0)
+        );
+
+        state.clear_conversation();
+        assert!(state.item_aliases.is_empty());
+    }
+
+    #[test]
+    #[ignore = "release-profile cache admission measurement; run explicitly"]
+    fn long_transcript_cache_admission_measurement() {
+        let state = representative_long_transcript();
+        let cached_document = state.transcript_selection_document();
+        let expected_runs = cached_document.runs().len();
+        let cached_index = state
+            .items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| (item.id.clone(), index))
+            .collect::<HashMap<_, _>>();
+        let index_bytes = item_index_retained_bytes(&cached_index);
+        let selection_run_bytes = selection_run_retained_bytes(&state);
+        let document_bytes = expected_runs
+            * (size_of::<SelectionRun>() + size_of::<String>() + size_of::<usize>() * 2)
+            + cached_document
+                .runs()
+                .iter()
+                .map(|run| run.id.capacity() * 2)
+                .sum::<usize>();
+
+        let mut indexed = Vec::with_capacity(400);
+        let mut linear = Vec::with_capacity(400);
+        for sample in 0..400 {
+            let id = format!("item-{}", (sample * 1543) % MAX_ITEMS);
+            let start = Instant::now();
+            black_box(cached_index.get(black_box(&id)).copied());
+            indexed.push(start.elapsed());
+            let start = Instant::now();
+            black_box(state.items.iter().position(|item| item.id == id));
+            linear.push(start.elapsed());
+        }
+
+        let mut cached_runs = Vec::with_capacity(40);
+        let mut rebuilt_runs = Vec::with_capacity(40);
+        for _ in 0..40 {
+            let start = Instant::now();
+            let runs = state
+                .item_selection_runs
+                .iter()
+                .flatten()
+                .cloned()
+                .collect::<Vec<_>>();
+            assert_eq!(runs.len(), expected_runs);
+            black_box(runs);
+            cached_runs.push(start.elapsed());
+
+            let start = Instant::now();
+            let runs = state
+                .items
+                .iter()
+                .flat_map(selection_runs_for_item)
+                .collect::<Vec<_>>();
+            assert_eq!(runs.len(), expected_runs);
+            black_box(runs);
+            rebuilt_runs.push(start.elapsed());
+        }
+
+        let mut cached_documents = Vec::with_capacity(100);
+        let mut rebuilt_documents = Vec::with_capacity(100);
+        for _ in 0..100 {
+            let start = Instant::now();
+            black_box(state.transcript_selection_document());
+            cached_documents.push(start.elapsed());
+
+            let start = Instant::now();
+            let document =
+                SelectionDocument::new(state.item_selection_runs.iter().flatten().cloned());
+            assert_eq!(document.runs().len(), expected_runs);
+            black_box(document);
+            rebuilt_documents.push(start.elapsed());
+        }
+
+        let indexed_p95 = p95(&mut indexed);
+        let linear_p95 = p95(&mut linear);
+        let cached_runs_p95 = p95(&mut cached_runs);
+        let rebuilt_runs_p95 = p95(&mut rebuilt_runs);
+        let cached_document_p95 = p95(&mut cached_documents);
+        let rebuilt_document_p95 = p95(&mut rebuilt_documents);
+        eprintln!(
+            "long transcript ({MAX_ITEMS} items, {expected_runs} runs): \
+             item_index cached_p95={indexed_p95:?} linear_p95={linear_p95:?} retained={index_bytes}B; \
+             selection_runs cached_p95={cached_runs_p95:?} rebuilt_p95={rebuilt_runs_p95:?} retained={selection_run_bytes}B; \
+             selection_document cached_p95={cached_document_p95:?} rebuilt_p95={rebuilt_document_p95:?} retained={document_bytes}B"
+        );
+
+        assert!(linear_p95.saturating_sub(indexed_p95) <= TINY_DERIVED_OPERATION_P95_ADDITION);
+        assert!(
+            rebuilt_runs_p95.saturating_sub(cached_runs_p95) > TINY_DERIVED_OPERATION_P95_ADDITION
+        );
+        assert!(
+            rebuilt_document_p95.saturating_sub(cached_document_p95)
+                > TINY_DERIVED_OPERATION_P95_ADDITION
+        );
+    }
 }

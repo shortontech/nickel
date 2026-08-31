@@ -2,8 +2,13 @@
 name = "nickel-file"
 version = "0.1.0"
 edition.workspace = true
+autobins = false
 license.workspace = true
 rust-version.workspace = true
+
+[[bin]]
+name = "nickel-file"
+path = "src/bin/nickel-file.rs"
 
 [dependencies]
 image.workspace = true
@@ -12,6 +17,7 @@ nickel-core = { path = "../nickel-core" }
 nickel-input = { path = "../nickel-input", features = ["sdl"] }
 nickel-logging = { path = "../nickel-logging" }
 nickel-platform = { path = "../nickel-platform" }
+nickel-ui-testkit = { path = "../nickel-ui-testkit" }
 tracing.workspace = true
 sdl3.workspace = true
 

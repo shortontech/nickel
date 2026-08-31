@@ -5,6 +5,8 @@ members = [
     "crates/nickel-codex-ui",
     "crates/nickel-input",
     "crates/nickel-ui",
+    "crates/nickel-ui-testkit",
+    "crates/nickel-ui-workbench",
     "crates/ui-declarative-macros",
     "crates/nickel-shell",
     "crates/nickel-core",

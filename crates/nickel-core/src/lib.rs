@@ -2,6 +2,7 @@ pub mod focus;
 pub mod hotkeys;
 pub mod idle;
 pub mod launcher;
+pub mod launcher_preferences;
 pub mod output_layout;
 pub mod quick_settings;
 pub mod run;

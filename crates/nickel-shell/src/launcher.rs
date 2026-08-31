@@ -4,6 +4,7 @@ use std::{
 };
 
 use nickel_codex::{Project, Thread, ThreadId, ThreadRuntime, ThreadRuntimeStatus};
+use nickel_core::launcher_preferences::LauncherPreferences;
 
 use nucleo_matcher::{
     Config, Matcher,
@@ -25,14 +26,14 @@ impl AsRef<str> for Candidate<'_> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Launcher {
     query: String,
     preedit: String,
     search_open: bool,
     applications: Vec<Application>,
     results: Vec<usize>,
-    pins: HashMap<String, u64>,
+    preferences: LauncherPreferences,
     place_ids: HashSet<String>,
     view: LauncherView,
     selected: usize,
@@ -182,8 +183,8 @@ pub fn normalize_dashboard_projects(
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum LauncherView {
-    Favorites,
     #[default]
+    Favorites,
     Applications,
     Places,
 }
@@ -230,7 +231,7 @@ impl Launcher {
             search_open: false,
             applications,
             results: Vec::new(),
-            pins: HashMap::new(),
+            preferences: LauncherPreferences::default(),
             place_ids: HashSet::new(),
             view: LauncherView::default(),
             selected: 0,
@@ -317,20 +318,40 @@ impl Launcher {
     }
 
     pub fn favorite_applications(&self) -> Vec<&Application> {
-        let mut favorites = self
-            .applications
+        self.preferences
+            .favorites()
             .iter()
-            .filter_map(|application| {
-                self.pins
-                    .get(application.id())
-                    .map(|order| (*order, application))
+            .filter_map(|id| {
+                self.applications
+                    .iter()
+                    .find(|application| application.id() == id)
             })
-            .collect::<Vec<_>>();
-        favorites.sort_by_key(|(order, _)| *order);
-        favorites
-            .into_iter()
-            .map(|(_, application)| application)
             .collect()
+    }
+
+    pub fn recent_applications(&self) -> Vec<&Application> {
+        self.preferences
+            .recents()
+            .iter()
+            .filter_map(|id| {
+                self.applications
+                    .iter()
+                    .find(|application| application.id() == id)
+            })
+            .collect()
+    }
+
+    pub fn preferences(&self) -> &LauncherPreferences {
+        &self.preferences
+    }
+
+    pub fn set_preferences(&mut self, preferences: LauncherPreferences) {
+        self.preferences = preferences;
+        self.refresh();
+    }
+
+    pub fn record_launch(&mut self, application_id: &str) {
+        self.preferences.record_launch(application_id);
     }
 
     pub fn dashboard_projects(&self) -> &DashboardSection<Vec<DashboardProject>> {
@@ -405,25 +426,18 @@ impl Launcher {
     }
 
     pub fn is_pinned(&self, application_id: &str) -> bool {
-        self.pins.contains_key(application_id)
+        self.preferences.is_favorite(application_id)
     }
 
     pub fn toggle_pin(&mut self, application_id: &str) {
-        if self.pins.remove(application_id).is_none() {
-            let order = self
-                .pins
-                .values()
-                .copied()
-                .max()
-                .unwrap_or_default()
-                .saturating_add(1);
-            self.pins.insert(application_id.to_owned(), order);
-        }
+        self.preferences.toggle_favorite(application_id);
         self.refresh();
     }
 
-    pub fn set_pins(&mut self, pins: Vec<(String, u64)>) {
-        self.pins = pins.into_iter().collect();
+    pub fn set_pins(&mut self, mut pins: Vec<(String, u64)>) {
+        pins.sort_by_key(|(_, order)| *order);
+        self.preferences
+            .replace_favorites(pins.into_iter().map(|(id, _)| id));
         self.refresh();
     }
 
@@ -566,22 +580,46 @@ impl Launcher {
     fn refresh(&mut self) {
         let mode = self.mode();
         if mode == LauncherMode::Dashboard {
-            let mut results: Vec<_> = self
-                .applications
-                .iter()
-                .enumerate()
-                .filter(|(_, application)| match self.view {
-                    LauncherView::Favorites => self.pins.contains_key(application.id()),
-                    LauncherView::Applications => !self.place_ids.contains(application.id()),
-                    LauncherView::Places => self.place_ids.contains(application.id()),
-                })
-                .map(|(index, _)| index)
-                .collect();
-            results.sort_by_key(|index| {
-                self.pins
-                    .get(self.applications[*index].id())
-                    .map_or((1, *index as u64), |order| (0, *order))
-            });
+            let results: Vec<_> = match self.view {
+                LauncherView::Favorites => {
+                    let mut ids = self.preferences.favorites().to_vec();
+                    for id in self.preferences.recents() {
+                        if !ids.contains(id) {
+                            ids.push(id.clone());
+                        }
+                    }
+                    if ids.is_empty() {
+                        self.applications
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, application)| !self.place_ids.contains(application.id()))
+                            .map(|(index, _)| index)
+                            .collect()
+                    } else {
+                        ids.into_iter()
+                            .filter_map(|id| {
+                                self.applications
+                                    .iter()
+                                    .position(|application| application.id() == id)
+                            })
+                            .collect()
+                    }
+                }
+                LauncherView::Applications => self
+                    .applications
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, application)| !self.place_ids.contains(application.id()))
+                    .map(|(index, _)| index)
+                    .collect(),
+                LauncherView::Places => self
+                    .applications
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, application)| self.place_ids.contains(application.id()))
+                    .map(|(index, _)| index)
+                    .collect(),
+            };
             self.results = results;
             self.selected = self
                 .dashboard_selected

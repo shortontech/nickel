@@ -2622,6 +2622,7 @@ dependencies = [
  "nickel-markdown",
  "nickel-platform",
  "nickel-ui",
+ "nickel-ui-testkit",
  "serde",
  "serde_json",
  "tempfile",
@@ -2633,6 +2634,7 @@ name = "nickel-core"
 version = "0.1.0"
 dependencies = [
  "nickel-input",
+ "tempfile",
 ]
 
 [[package]]
@@ -2646,6 +2648,7 @@ dependencies = [
  "nickel-logging",
  "nickel-platform",
  "nickel-ui",
+ "nickel-ui-testkit",
  "sdl3",
  "tempfile",
  "tracing",
@@ -2661,6 +2664,7 @@ dependencies = [
  "image",
  "nickel-input",
  "nickel-ui",
+ "nickel-ui-testkit",
  "nokhwa",
  "ort",
  "sdl3",
@@ -2728,6 +2732,7 @@ dependencies = [
  "nickel-markdown",
  "nickel-platform",
  "nickel-ui",
+ "nickel-ui-testkit",
  "tempfile",
  "url",
 ]
@@ -2768,6 +2773,7 @@ dependencies = [
  "nickel-session-protocol",
  "nix 0.31.3",
  "resvg",
+ "serde_json",
  "smithay",
  "smithay-client-toolkit 0.20.0",
  "softbuffer",
@@ -2804,6 +2810,7 @@ dependencies = [
  "nickel-platform",
  "nickel-session-protocol",
  "nickel-ui",
+ "nickel-ui-testkit",
  "resvg",
  "sdl3",
  "tracing",
@@ -2846,6 +2853,7 @@ dependencies = [
  "nickel-platform",
  "nickel-session-protocol",
  "nickel-ui",
+ "nickel-ui-testkit",
  "nucleo-matcher",
  "pollster",
  "raw-window-handle",
@@ -2879,6 +2887,34 @@ dependencies = [
  "tracing",
  "ui-declarative-macros",
  "unicode-segmentation",
+]
+
+[[package]]
+name = "nickel-ui-testkit"
+version = "0.1.0"
+dependencies = [
+ "nickel-input",
+ "nickel-ui",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nickel-ui-workbench"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "nickel-file",
+ "nickel-gaze",
+ "nickel-markdown",
+ "nickel-markdown-ui",
+ "nickel-shell",
+ "nickel-ui",
+ "nickel-ui-testkit",
+ "serde",
+ "serde_json",
+ "sha2",
+ "toml 0.9.12+spec-1.1.0",
 ]
 
 [[package]]

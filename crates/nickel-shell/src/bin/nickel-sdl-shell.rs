@@ -1,9 +1,10 @@
 use nickel_codex::ThreadId;
 use nickel_codex_ui::{ChatApplication, ConnectionStatus, ShellRequest, shell_application};
-use nickel_input::{
-    InputEvent, KeyCode, KeyEdge, LogicalKey, ModifierState, NamedKey, PointerButton, PointerEvent,
+use nickel_input::{InputEvent, KeyEdge, LogicalKey, NamedKey, PointerButton, PointerEvent};
+use nickel_ui::{
+    Application, ControllerAction, ControllerInput, HostBatch, HostChangeToken, HostEvent,
+    HostEventOutcome, HostFailure, HostFailureStage, UiHost,
 };
-use nickel_ui::{ApplicationHost, ControllerAction, ControllerInput, UiEvent};
 use std::{
     collections::HashSet,
     path::{Component, Path},
@@ -59,6 +60,8 @@ mod sdl_gpu;
 mod sdl_launcher_view;
 #[path = "../sdl_live_shell.rs"]
 mod sdl_live_shell;
+#[path = "../sdl_notification_view.rs"]
+mod sdl_notification_view;
 #[path = "../sdl_screenshot.rs"]
 mod sdl_screenshot;
 #[path = "../sdl_shell.rs"]
@@ -78,7 +81,7 @@ const SHELL_STARTUP_BARRIER_MAGIC: &[u8; 8] = b"NIKREADY";
 struct CodexSurfaces {
     project_menu: SurfaceId,
     project_menu_cwd: std::path::PathBuf,
-    project_menu_host: Option<ApplicationHost<ChatApplication>>,
+    project_menu_host: Option<EmbeddedUiSurface<ChatApplication>>,
     chats: Vec<CodexChatSurface>,
     writer_leases: WriterLeases,
 }
@@ -86,8 +89,53 @@ struct CodexSurfaces {
 struct CodexChatSurface {
     id: SurfaceId,
     project_id: String,
-    host: ApplicationHost<ChatApplication>,
+    host: EmbeddedUiSurface<ChatApplication>,
     thread_id: Option<ThreadId>,
+}
+
+struct EmbeddedUiSurface<A: Application> {
+    host: UiHost<A>,
+    change_token: HostChangeToken,
+}
+
+impl<A: Application> EmbeddedUiSurface<A> {
+    fn new(application: A, width: u32, height: u32, now: Instant) -> Self {
+        Self {
+            host: UiHost::new_at(application, width, height, now),
+            change_token: HostChangeToken::default(),
+        }
+    }
+
+    fn application_mut(&mut self) -> &mut A {
+        self.host.application_mut()
+    }
+
+    fn commands(&self) -> &[nickel_ui::backend::PaintCommand] {
+        self.host.commands()
+    }
+
+    fn step(&mut self, batch: HostBatch) -> HostEventOutcome {
+        let outcome = self.host.step(batch);
+        self.change_token = outcome.change_token;
+        outcome
+    }
+
+    fn deadline(&self) -> Option<Instant> {
+        self.host.next_deadline()
+    }
+
+    fn poll_due(&mut self, now: Instant) -> Option<HostEventOutcome> {
+        let deadline = self.host.next_deadline()?;
+        if now < deadline {
+            return None;
+        }
+        let outcome = self.step(HostBatch {
+            now: Some(now),
+            events: vec![HostEvent::Poll],
+            ..HostBatch::default()
+        });
+        Some(outcome)
+    }
 }
 
 #[derive(Default)]
@@ -136,6 +184,15 @@ fn codex_project_application_id(project_id: Option<&str>, root: &Path) -> String
 }
 
 impl CodexSurfaces {
+    fn next_deadline(&self) -> Option<Instant> {
+        self.project_menu_host
+            .as_ref()
+            .and_then(EmbeddedUiSurface::deadline)
+            .into_iter()
+            .chain(self.chats.iter().filter_map(|chat| chat.host.deadline()))
+            .min()
+    }
+
     fn new(shell: &SdlShell) -> Result<Self, String> {
         let project_menu = shell
             .surfaces()
@@ -159,27 +216,52 @@ impl CodexSurfaces {
             .map(|surface| surface.window().size())
             .ok_or_else(|| "Codex project_menu surface is missing".to_owned())?;
         let application = shell_application(self.project_menu_cwd.clone(), true, None, None)?;
-        self.project_menu_host = Some(ApplicationHost::new(application, width, height));
+        self.project_menu_host = Some(EmbeddedUiSurface::new(
+            application,
+            width,
+            height,
+            Instant::now(),
+        ));
         Ok(())
     }
 
-    fn present(&mut self, shell: &mut SdlShell, surface: SurfaceId) -> Result<(), String> {
+    fn present(&mut self, shell: &mut SdlShell, surface: SurfaceId) -> Result<(), HostFailure> {
         if surface == self.project_menu {
-            self.ensure_project_menu(shell)?;
-            shell.present(
-                surface,
-                self.project_menu_host
-                    .as_ref()
-                    .expect("Codex project_menu initialized")
-                    .commands(),
-            )?;
+            self.ensure_project_menu(shell)
+                .map_err(|detail| HostFailure {
+                    surface: format!("{surface:?}"),
+                    stage: HostFailureStage::DomainService,
+                    optional: true,
+                    detail,
+                })?;
+            shell
+                .present(
+                    surface,
+                    self.project_menu_host
+                        .as_ref()
+                        .expect("Codex project_menu initialized")
+                        .commands(),
+                )
+                .map_err(|detail| HostFailure {
+                    surface: format!("{surface:?}"),
+                    stage: HostFailureStage::Presenter,
+                    optional: false,
+                    detail,
+                })?;
         } else if let Some(chat) = self.chats.iter().find(|chat| chat.id == surface) {
-            shell.present(surface, chat.host.commands())?;
+            shell
+                .present(surface, chat.host.commands())
+                .map_err(|detail| HostFailure {
+                    surface: format!("{surface:?}"),
+                    stage: HostFailureStage::Presenter,
+                    optional: false,
+                    detail,
+                })?;
         }
         Ok(())
     }
 
-    fn host_mut(&mut self, surface: SurfaceId) -> Option<&mut ApplicationHost<ChatApplication>> {
+    fn host_mut(&mut self, surface: SurfaceId) -> Option<&mut EmbeddedUiSurface<ChatApplication>> {
         if surface == self.project_menu {
             self.project_menu_host.as_mut()
         } else {
@@ -301,10 +383,11 @@ impl CodexSurfaces {
                 .surface(id)
                 .map(|surface| surface.window().size())
                 .unwrap_or((1120, 760));
-            let host = ApplicationHost::new(
+            let host = EmbeddedUiSurface::new(
                 shell_application(cwd, false, initial_thread.clone(), Some(project_id.clone()))?,
                 width,
                 height,
+                Instant::now(),
             );
             self.chats.push(CodexChatSurface {
                 id,
@@ -312,7 +395,8 @@ impl CodexSurfaces {
                 host,
                 thread_id: initial_thread.clone(),
             });
-            self.present(shell, id)?;
+            self.present(shell, id)
+                .map_err(|error| format!("{error:?}"))?;
             shell.show(id);
             Ok(())
         })();
@@ -371,11 +455,44 @@ impl CodexSurfaces {
     }
 }
 
-#[cfg(target_os = "macos")]
-const REFRESH_INTERVAL: Duration = Duration::from_millis(500);
-#[cfg(not(target_os = "macos"))]
-const REFRESH_INTERVAL: Duration = Duration::from_millis(100);
-const SYSTEM_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DomainSubscriptionSchedule {
+    minimum: Duration,
+    maximum: Duration,
+    interval: Duration,
+    deadline: Instant,
+    change_token: u64,
+}
+
+impl DomainSubscriptionSchedule {
+    fn new(now: Instant, minimum: Duration, maximum: Duration) -> Self {
+        Self {
+            minimum,
+            maximum: maximum.max(minimum),
+            interval: minimum,
+            deadline: now + minimum,
+            change_token: 0,
+        }
+    }
+
+    fn deadline(self) -> Instant {
+        self.deadline
+    }
+
+    fn is_due(self, now: Instant) -> bool {
+        now >= self.deadline
+    }
+
+    fn observed(&mut self, now: Instant, changed: bool) {
+        if changed {
+            self.change_token = self.change_token.saturating_add(1);
+            self.interval = self.minimum;
+        } else {
+            self.interval = self.interval.saturating_mul(2).min(self.maximum);
+        }
+        self.deadline = now + self.interval;
+    }
+}
 
 fn render_all(shell: &mut SdlShell, state: &mut LiveShell) -> Result<(), String> {
     let surfaces = shell
@@ -392,7 +509,12 @@ fn render_all(shell: &mut SdlShell, state: &mut LiveShell) -> Result<(), String>
         if !state.surface_visible(role) {
             continue;
         }
-        shell.present(id, &state.scene(role, logical_width, logical_height))?;
+        let commands = state.scene(role, logical_width, logical_height);
+        if let Some(token) = state.scene_change_token(role) {
+            shell.present_host_frame(id, token, &commands)?;
+        } else {
+            shell.present(id, &commands)?;
+        }
     }
     Ok(())
 }
@@ -414,7 +536,12 @@ fn render_role(
         if !state.surface_visible(role) {
             continue;
         }
-        shell.present(id, &state.scene(role, logical_width, logical_height))?;
+        let commands = state.scene(role, logical_width, logical_height);
+        if let Some(token) = state.scene_change_token(role) {
+            shell.present_host_frame(id, token, &commands)?;
+        } else {
+            shell.present(id, &commands)?;
+        }
     }
     Ok(())
 }
@@ -433,7 +560,12 @@ fn prewarm_role(
         })
         .collect::<Vec<_>>();
     for (id, logical_width, logical_height) in surfaces {
-        shell.present(id, &state.scene(wanted, logical_width, logical_height))?;
+        let commands = state.scene(wanted, logical_width, logical_height);
+        if let Some(token) = state.scene_change_token(wanted) {
+            shell.present_host_frame(id, token, &commands)?;
+        } else {
+            shell.present(id, &commands)?;
+        }
     }
     Ok(())
 }
@@ -547,30 +679,49 @@ fn handle_codex_event(
             .map(|entry| entry.window().size())
             .unwrap_or((1, 1));
         if let Some(host) = codex.host_mut(surface) {
-            host.resize(width, height);
-            codex.present(shell, surface)?;
+            host.step(HostBatch {
+                surface_size: Some((width, height)),
+                ..HostBatch::default()
+            });
+            codex
+                .present(shell, surface)
+                .map_err(|error| format!("{error:?}"))?;
         }
         return Ok(true);
     }
     let outcome = match event {
-        ShellEvent::Input { event, .. } => {
-            let clipboard_text = shell.clipboard_text();
-            codex
-                .host_mut(surface)
-                .expect("Codex host exists")
-                .handle_input(event, clipboard_text.as_deref())
-        }
-        ShellEvent::FocusChanged { focused: false, .. } => codex
+        ShellEvent::Input { event, .. } => codex
             .host_mut(surface)
             .expect("Codex host exists")
-            .handle_event(UiEvent::FocusLost),
-        _ => nickel_ui::HostEventOutcome::default(),
+            .step(HostBatch {
+                events: vec![HostEvent::Normalized {
+                    input: event.clone(),
+                    clipboard_text: shell.clipboard_text(),
+                }],
+                ..HostBatch::default()
+            }),
+        ShellEvent::FocusChanged { focused, .. } => codex
+            .host_mut(surface)
+            .expect("Codex host exists")
+            .step(HostBatch {
+                window_focused: Some(*focused),
+                ..HostBatch::default()
+            }),
+        _ => HostEventOutcome::default(),
     };
+    for failure in &outcome.failures {
+        tracing::warn!(
+            ?failure,
+            "embedded UI transition reported recoverable failure"
+        );
+    }
     if let Some(text) = outcome.clipboard_text {
         shell.set_clipboard_text(&text);
     }
     if outcome.changed {
-        codex.present(shell, surface)?;
+        codex
+            .present(shell, surface)
+            .map_err(|error| format!("{error:?}"))?;
     }
     if codex.open_requests(shell)? {
         state.hide_overlay(SurfaceRole::CodexProjectMenu);
@@ -592,36 +743,61 @@ fn handle_shell_input(
     let Some(role) = shell.surface(surface).map(|entry| entry.role()) else {
         return Ok(());
     };
-    match event {
-        InputEvent::Text(nickel_input::TextEvent::Commit { text, .. }) => {
-            if role == SurfaceRole::Lock {
-                if state.insert_lock_text(&text) {
-                    render_role(shell, state, SurfaceRole::Lock)?;
-                }
-                return Ok(());
-            }
-            if role != SurfaceRole::Launcher {
-                log_unroutable_launcher_input(role, "text-commit", "non-launcher-surface");
-                return Ok(());
-            }
-            let started = Instant::now();
-            let was_dashboard = state.launcher_is_dashboard();
-            if state.insert_launcher_text(&text) {
-                render_role(shell, state, role)?;
-                if was_dashboard && std::env::var_os("NICKEL_PERF_METRICS").is_some() {
-                    eprintln!(
-                        "launcher_first_character_ms={:.3}",
-                        started.elapsed().as_secs_f64() * 1_000.0
-                    );
-                }
-            }
+    if role == SurfaceRole::Lock {
+        let (width, height) = shell
+            .surface(surface)
+            .map(|entry| entry.window().size())
+            .unwrap_or_default();
+        if state.lock_host_input(event, width, height) {
+            render_role(shell, state, SurfaceRole::Lock)?;
         }
-        InputEvent::Text(nickel_input::TextEvent::Preedit { text, .. }) => {
-            if role != SurfaceRole::Launcher {
-                log_unroutable_launcher_input(role, "text-preedit", "non-launcher-surface");
-            } else if state.set_launcher_preedit(&text) {
-                render_role(shell, state, SurfaceRole::Launcher)?;
-            }
+        return Ok(());
+    }
+    if role == SurfaceRole::Launcher {
+        let (width, height) = shell
+            .surface(surface)
+            .map(|entry| entry.window().size())
+            .unwrap_or_default();
+        let outcome = state.launcher_host_input(event, shell.clipboard_text(), width, height);
+        if let Some(text) = outcome.clipboard_text {
+            shell.set_clipboard_text(&text);
+        }
+        if outcome.changed {
+            sync_visibility(shell, state);
+            render_role(shell, state, role)?;
+        }
+        return Ok(());
+    }
+    if role == SurfaceRole::WindowContextMenu {
+        let (width, height) = shell
+            .surface(surface)
+            .map(|entry| entry.window().size())
+            .unwrap_or_default();
+        if state.window_menu_host_input(event, width, height) {
+            sync_visibility(shell, state);
+            render_role(shell, state, role)?;
+        }
+        return Ok(());
+    }
+    if role == SurfaceRole::WindowPreview {
+        let outcome = state.preview_host_input(event);
+        for failure in &outcome.failures {
+            eprintln!("window preview host failure: {failure:?}");
+        }
+        if outcome.changed {
+            sync_visibility(shell, state);
+            state.sync_transient_overlays();
+            render_role(shell, state, SurfaceRole::WindowPreview)?;
+            render_role(shell, state, SurfaceRole::WindowContextMenu)?;
+        }
+        return Ok(());
+    }
+    match event {
+        InputEvent::Text(nickel_input::TextEvent::Commit { .. }) => {
+            log_unroutable_launcher_input(role, "text-commit", "non-launcher-surface");
+        }
+        InputEvent::Text(nickel_input::TextEvent::Preedit { .. }) => {
+            log_unroutable_launcher_input(role, "text-preedit", "non-launcher-surface");
         }
         InputEvent::Key(key) if key.edge == KeyEdge::Pressed => {
             let keycode = match key.physical {
@@ -633,13 +809,13 @@ fn handle_shell_input(
                 .map(|entry| entry.window().size())
                 .unwrap_or_default();
             let changed = match role {
-                SurfaceRole::Lock => state.lock_key(keycode),
+                SurfaceRole::Lock => false,
                 SurfaceRole::ControlCenter => state.control_key(keycode, width, height),
                 SurfaceRole::WindowPreview => state.preview_key(keycode),
-                SurfaceRole::WindowContextMenu => state.window_menu_key(keycode),
+                SurfaceRole::WindowContextMenu => false,
                 SurfaceRole::Notification => state.notification_key(keycode),
                 SurfaceRole::Panel => state.preview_key(keycode),
-                SurfaceRole::Launcher => state.launcher_key(keycode, &key.modifiers),
+                SurfaceRole::Launcher => false,
                 SurfaceRole::Screenshot => state.screenshot_key(keycode),
                 _ => false,
             };
@@ -680,10 +856,6 @@ fn handle_shell_input(
                     render_role(shell, state, SurfaceRole::WindowPreview)?;
                     render_role(shell, state, SurfaceRole::WindowContextMenu)?;
                 }
-            } else if edge == KeyEdge::Pressed && role == SurfaceRole::WindowContextMenu {
-                if state.window_menu_click(x, y) {
-                    sync_visibility(shell, state);
-                }
             } else if edge == KeyEdge::Pressed && role == SurfaceRole::Panel {
                 if let Some(display) = shell.surface_display_geometry(surface) {
                     state.set_panel_origin_x(display.x);
@@ -699,7 +871,9 @@ fn handle_shell_input(
                     render_role(shell, state, SurfaceRole::ControlCenter)?;
                     render_role(shell, state, SurfaceRole::WindowPreview)?;
                     if state.surface_visible(SurfaceRole::CodexProjectMenu) {
-                        codex.present(shell, codex.project_menu)?;
+                        codex
+                            .present(shell, codex.project_menu)
+                            .map_err(|error| format!("{error:?}"))?;
                     }
                 }
             } else if edge == KeyEdge::Pressed && role == SurfaceRole::Notification {
@@ -710,15 +884,12 @@ fn handle_shell_input(
                 if state.notification_click(x, y, width, height) {
                     sync_visibility(shell, state);
                 }
-            } else if edge == KeyEdge::Pressed
-                && matches!(role, SurfaceRole::Launcher | SurfaceRole::ControlCenter)
-            {
+            } else if edge == KeyEdge::Pressed && role == SurfaceRole::ControlCenter {
                 let (width, height) = shell
                     .surface(surface)
                     .map(|entry| entry.window().size())
                     .unwrap_or_default();
                 let changed = match role {
-                    SurfaceRole::Launcher => state.launcher_click(x, y),
                     SurfaceRole::ControlCenter => state.control_click(x, y, width, height),
                     _ => false,
                 };
@@ -756,21 +927,15 @@ fn handle_shell_input(
                         Instant::now() + Duration::from_millis(24),
                     ));
                 }
-            } else if role == SurfaceRole::WindowPreview {
-                if state.preview_pointer_moved(x, y) {
-                    *hover_repaint = Some((
-                        SurfaceRole::WindowPreview,
-                        Instant::now() + Duration::from_millis(24),
-                    ));
-                }
-            } else if matches!(role, SurfaceRole::Launcher | SurfaceRole::ControlCenter)
-                && state.pointer_moved(x, y)
-            {
-                *hover_repaint = Some((role, Instant::now() + Duration::from_millis(24)));
+            } else if role == SurfaceRole::WindowPreview && state.preview_pointer_moved(x, y) {
+                *hover_repaint = Some((
+                    SurfaceRole::WindowPreview,
+                    Instant::now() + Duration::from_millis(24),
+                ));
             }
         }
         InputEvent::Pointer(PointerEvent::Axis { delta, .. }) => {
-            if matches!(role, SurfaceRole::Launcher | SurfaceRole::ControlCenter) {
+            if role == SurfaceRole::ControlCenter {
                 let started = Instant::now();
                 if state.scroll(delta.y as f32) {
                     render_role(shell, state, role)?;
@@ -816,18 +981,6 @@ fn log_unroutable_launcher_input(
     );
 }
 
-fn controller_navigation_key(action: ControllerAction) -> Option<KeyCode> {
-    Some(match action {
-        ControllerAction::Up => KeyCode::ArrowUp,
-        ControllerAction::Down => KeyCode::ArrowDown,
-        ControllerAction::Left => KeyCode::ArrowLeft,
-        ControllerAction::Right => KeyCode::ArrowRight,
-        ControllerAction::Confirm => KeyCode::Enter,
-        ControllerAction::Cancel => KeyCode::Escape,
-        _ => return None,
-    })
-}
-
 fn controller_launcher_shortcut(action: ControllerAction) -> Option<platform::GlobalShortcut> {
     (action == ControllerAction::Launcher).then_some(platform::GlobalShortcut::ToggleLauncher)
 }
@@ -836,6 +989,7 @@ fn handle_controller_action(
     shell: &mut SdlShell,
     state: &mut LiveShell,
     action: ControllerAction,
+    family: nickel_ui::ControllerFamily,
 ) -> Result<(), String> {
     if controller_launcher_shortcut(action).is_some() {
         let changed = state.request_launcher_toggle();
@@ -846,9 +1000,6 @@ fn handle_controller_action(
         }
         return Ok(());
     }
-    let Some(key) = controller_navigation_key(action) else {
-        return Ok(());
-    };
     let Some(surface) = shell
         .surfaces()
         .find(|surface| surface.window().has_input_focus())
@@ -860,16 +1011,23 @@ fn handle_controller_action(
         return Ok(());
     };
     let role = entry.role();
+    if role == SurfaceRole::Launcher {
+        if state.launcher_host_controller(action, family) {
+            sync_visibility(shell, state);
+            render_role(shell, state, role)?;
+        }
+        return Ok(());
+    }
     let (width, height) = entry.window().size();
     let changed = match role {
-        SurfaceRole::Lock => state.lock_key(Some(key)),
-        SurfaceRole::ControlCenter => state.control_key(Some(key), width, height),
-        SurfaceRole::WindowPreview => state.preview_key(Some(key)),
-        SurfaceRole::WindowContextMenu => state.window_menu_key(Some(key)),
-        SurfaceRole::Notification => state.notification_key(Some(key)),
-        SurfaceRole::Panel => state.preview_key(Some(key)),
-        SurfaceRole::Launcher => state.launcher_key(Some(key), &ModifierState::default()),
-        SurfaceRole::Screenshot => state.screenshot_key(Some(key)),
+        SurfaceRole::Lock => state.lock_host_controller(action),
+        SurfaceRole::ControlCenter => state.control_controller(action, width, height),
+        SurfaceRole::WindowPreview => state.preview_controller(action),
+        SurfaceRole::WindowContextMenu => state.window_menu_host_controller(action),
+        SurfaceRole::Notification => state.notification_controller(action),
+        SurfaceRole::Panel => state.panel_controller(action, width),
+        SurfaceRole::Launcher => unreachable!("launcher controller input is handled semantically"),
+        SurfaceRole::Screenshot => state.screenshot_controller(action),
         _ => false,
     };
     if changed {
@@ -1049,6 +1207,24 @@ fn main() -> Result<(), String> {
     }
     sync_visibility(&mut shell, &state);
     render_all(&mut shell, &mut state)?;
+    let memory = shell.memory_diagnostics();
+    let images = state.image_cache_diagnostics();
+    tracing::info!(
+        presenters = memory.presenter_caches.presenters,
+        cache_live_entries = memory.presenter_caches.live_entries,
+        cache_live_bytes = memory.presenter_caches.live_bytes,
+        cache_peak_bytes = memory.presenter_caches.peak_cache_bytes,
+        process_rss_bytes = memory.process_rss_bytes,
+        launcher_icon_entries = images.launcher_icon_entries,
+        launcher_icon_bytes = images.launcher_icon_bytes,
+        wallpaper_entries = images.wallpaper_entries,
+        wallpaper_bytes = images.wallpaper_bytes,
+        tray_entries = images.tray_entries,
+        tray_bytes = images.tray_bytes,
+        preview_entries = images.preview_entries,
+        preview_bytes = images.preview_bytes,
+        "shell presenter cache and allocator-visible memory accounting"
+    );
     println!(
         "time_to_first_shell_ms={:.3}",
         started.elapsed().as_secs_f64() * 1_000.0
@@ -1067,20 +1243,53 @@ fn main() -> Result<(), String> {
     if let Err(error) = codex.ensure_project_menu(&shell) {
         tracing::warn!(%error, "Codex integration is unavailable");
     }
-    let mut refresh_deadline = Instant::now() + REFRESH_INTERVAL;
-    let mut system_refresh_deadline = Instant::now() + SYSTEM_REFRESH_INTERVAL;
+    let schedule_now = Instant::now();
+    let mut fast_subscription = DomainSubscriptionSchedule::new(
+        schedule_now,
+        Duration::from_millis(100),
+        Duration::from_secs(2),
+    );
+    let mut system_subscription = DomainSubscriptionSchedule::new(
+        schedule_now,
+        Duration::from_secs(1),
+        Duration::from_secs(10),
+    );
     let mut hover_repaint: Option<(SurfaceRole, Instant)> = None;
     let mut controller = ControllerInput::new();
+    let mut controller_schedule = nickel_ui::ControllerPollSchedule::new(Instant::now());
     let mut initial_exposures = HashSet::new();
     #[cfg(not(target_os = "linux"))]
     let mut focused_overlays = HashSet::new();
     #[cfg(not(target_os = "linux"))]
     let mut overlay_focus_loss: Option<(SurfaceId, SurfaceRole, Instant)> = None;
     loop {
-        for action in controller.poll_global(Instant::now()) {
-            handle_controller_action(&mut shell, &mut state, action)?;
+        let now = Instant::now();
+        if controller_schedule.is_due(now) {
+            for action in controller.poll_global(now) {
+                shell.begin_input_observation(Instant::now());
+                let result = handle_controller_action(
+                    &mut shell,
+                    &mut state,
+                    action,
+                    controller.active_family().unwrap_or_default(),
+                );
+                shell.finish_input_observation();
+                result?;
+            }
+            controller_schedule.mark_polled(now, controller.connected());
         }
-        let next_deadline = refresh_deadline.min(system_refresh_deadline);
+        let next_deadline = fast_subscription
+            .deadline()
+            .min(system_subscription.deadline())
+            .min(controller_schedule.deadline());
+        let next_deadline = codex
+            .next_deadline()
+            .map(|deadline| deadline.min(next_deadline))
+            .unwrap_or(next_deadline);
+        let next_deadline = state
+            .next_host_deadline()
+            .map(|deadline| deadline.min(next_deadline))
+            .unwrap_or(next_deadline);
         let next_deadline = hover_repaint
             .map(|(_, deadline)| deadline.min(next_deadline))
             .unwrap_or(next_deadline);
@@ -1088,9 +1297,7 @@ fn main() -> Result<(), String> {
         let next_deadline = overlay_focus_loss
             .map(|(_, _, deadline)| deadline.min(next_deadline))
             .unwrap_or(next_deadline);
-        let timeout = next_deadline
-            .saturating_duration_since(Instant::now())
-            .min(Duration::from_millis(8));
+        let timeout = next_deadline.saturating_duration_since(Instant::now());
         let event = shell.wait_event_timeout(timeout);
         if let Some(ref event) = event
             && handle_codex_event(&mut codex, &mut shell, &mut state, event)?
@@ -1099,11 +1306,38 @@ fn main() -> Result<(), String> {
         }
         match event {
             #[cfg(target_os = "linux")]
-            Some(ShellEvent::SemanticTarget(request)) => {
-                let target = state.resolve_semantic_target(&request.target);
-                platform::respond_semantic_target(request, target);
-            }
+            Some(ShellEvent::TestControl(request)) => match request {
+                platform::ShellTestRequest::SemanticTarget {
+                    request_id,
+                    target,
+                    reply_path,
+                } => {
+                    let target = state.resolve_semantic_target(&target);
+                    platform::respond_semantic_target(request_id, &reply_path, target);
+                }
+                platform::ShellTestRequest::RuntimeDiagnostics {
+                    request_id,
+                    reply_path,
+                } => {
+                    let runtime = shell.runtime_diagnostics();
+                    let memory = shell.memory_diagnostics();
+                    platform::respond_runtime_diagnostics(
+                        request_id,
+                        &reply_path,
+                        nickel_session_protocol::ShellRuntimeDiagnostics {
+                            warm_present_us: runtime.warm_present_us,
+                            input_to_visible_us: runtime.input_to_present_us,
+                            retained_presenter_bytes: memory.presenter_caches.live_bytes as u64,
+                            frame_allocations: nickel_session_protocol::AllocationMeasurement {
+                                count: 0,
+                                scope: nickel_session_protocol::AllocationScope::Unavailable,
+                            },
+                        },
+                    );
+                }
+            },
             Some(ShellEvent::GlobalShortcut(shortcut)) => {
+                shell.begin_input_observation(Instant::now());
                 if state.global_shortcut(shortcut) {
                     sync_visibility(&mut shell, &state);
                     focus_visible_overlay(&mut shell, &state);
@@ -1112,16 +1346,20 @@ fn main() -> Result<(), String> {
                     render_role(&mut shell, &mut state, SurfaceRole::Lock)?;
                     render_role(&mut shell, &mut state, SurfaceRole::Screenshot)?;
                 }
+                shell.finish_input_observation();
             }
             Some(ShellEvent::Input { surface, event }) => {
-                handle_shell_input(
+                shell.begin_input_observation(Instant::now());
+                let result = handle_shell_input(
                     &mut shell,
                     &mut state,
                     &mut codex,
                     surface,
                     event,
                     &mut hover_repaint,
-                )?;
+                );
+                shell.finish_input_observation();
+                result?;
             }
             Some(ShellEvent::CloseRequested(surface))
                 if shell
@@ -1257,6 +1495,11 @@ fn main() -> Result<(), String> {
             focus_visible_overlay(&mut shell, &state);
             render_role(&mut shell, &mut state, SurfaceRole::Screenshot)?;
         }
+        if state.poll_host_deadlines(Instant::now())
+            && state.surface_visible(SurfaceRole::ControlCenter)
+        {
+            render_role(&mut shell, &mut state, SurfaceRole::ControlCenter)?;
+        }
         if hover_repaint.is_some_and(|(_, deadline)| Instant::now() >= deadline)
             && let Some((role, _)) = hover_repaint.take()
         {
@@ -1269,12 +1512,15 @@ fn main() -> Result<(), String> {
         {
             sync_visibility(&mut shell, &state);
         }
-        if Instant::now() >= refresh_deadline {
+        if fast_subscription.is_due(Instant::now()) {
+            let refresh_now = Instant::now();
+            let poll_now = Instant::now();
             let mut codex_redraw = Vec::new();
             let project_menu_changed = codex
                 .project_menu_host
                 .as_mut()
-                .is_some_and(|host| host.poll());
+                .and_then(|host| host.poll_due(poll_now))
+                .is_some_and(|outcome| outcome.changed);
             if project_menu_changed {
                 codex_redraw.push(codex.project_menu);
                 if let Some(host) = codex.project_menu_host.as_mut() {
@@ -1340,30 +1586,41 @@ fn main() -> Result<(), String> {
                 }
             }
             for chat in &mut codex.chats {
-                if chat.host.poll() {
+                if chat
+                    .host
+                    .poll_due(poll_now)
+                    .is_some_and(|outcome| outcome.changed)
+                {
                     codex_redraw.push(chat.id);
                 }
             }
             codex.release_failed_resumes();
+            let codex_changed = !codex_redraw.is_empty();
             for surface in codex_redraw {
-                codex.present(&mut shell, surface)?;
+                codex
+                    .present(&mut shell, surface)
+                    .map_err(|error| format!("{error:?}"))?;
             }
-            if codex.open_requests(&mut shell)? {
+            let opened_codex = codex.open_requests(&mut shell)?;
+            if opened_codex {
                 state.hide_overlay(SurfaceRole::CodexProjectMenu);
                 shell.hide(codex.project_menu);
             }
-            if state.refresh_fast() {
+            let fast_changed = state.refresh_fast();
+            if fast_changed {
                 sync_visibility(&mut shell, &state);
                 render_all(&mut shell, &mut state)?;
             }
-            refresh_deadline = Instant::now() + REFRESH_INTERVAL;
+            fast_subscription.observed(refresh_now, fast_changed || codex_changed || opened_codex);
         }
-        if Instant::now() >= system_refresh_deadline {
-            if state.refresh_system() {
+        if system_subscription.is_due(Instant::now()) {
+            let refresh_now = Instant::now();
+            let system_changed = state.refresh_system();
+            if system_changed {
                 sync_visibility(&mut shell, &state);
                 render_all(&mut shell, &mut state)?;
             }
-            system_refresh_deadline = Instant::now() + SYSTEM_REFRESH_INTERVAL;
+            system_subscription.observed(refresh_now, system_changed);
         }
     }
     Ok(())
@@ -1372,6 +1629,48 @@ fn main() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use nickel_ui::ControllerAction;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn unchanged_domain_subscriptions_back_off_and_changes_reset_the_deadline() {
+        let started = Instant::now();
+        let mut schedule = super::DomainSubscriptionSchedule::new(
+            started,
+            Duration::from_millis(10),
+            Duration::from_millis(40),
+        );
+        schedule.observed(started, false);
+        assert_eq!(schedule.deadline(), started + Duration::from_millis(20));
+        schedule.observed(started, false);
+        assert_eq!(schedule.deadline(), started + Duration::from_millis(40));
+        schedule.observed(started, false);
+        assert_eq!(schedule.deadline(), started + Duration::from_millis(40));
+        assert_eq!(schedule.change_token, 0);
+        schedule.observed(started, true);
+        assert_eq!(schedule.deadline(), started + Duration::from_millis(10));
+        assert_eq!(schedule.change_token, 1);
+    }
+
+    #[test]
+    fn independent_domain_schedules_isolate_unchanged_services() {
+        let started = Instant::now();
+        let mut fast = super::DomainSubscriptionSchedule::new(
+            started,
+            Duration::from_millis(10),
+            Duration::from_millis(80),
+        );
+        let mut system = super::DomainSubscriptionSchedule::new(
+            started,
+            Duration::from_millis(50),
+            Duration::from_millis(200),
+        );
+        fast.observed(started, true);
+        system.observed(started, false);
+        assert_eq!(fast.change_token, 1);
+        assert_eq!(system.change_token, 0);
+        assert_eq!(fast.deadline(), started + Duration::from_millis(10));
+        assert_eq!(system.deadline(), started + Duration::from_millis(100));
+    }
 
     #[test]
     fn controller_launcher_action_toggles_launcher() {
@@ -1387,6 +1686,32 @@ mod tests {
             super::controller_launcher_shortcut(ControllerAction::Confirm),
             None
         );
+    }
+
+    #[test]
+    fn ordinary_controller_surfaces_do_not_translate_actions_to_keys() {
+        let source = include_str!("nickel-sdl-shell.rs");
+        let handler = source
+            .split("fn handle_controller_action(")
+            .nth(1)
+            .and_then(|source| source.split("fn handle_input_event(").next())
+            .expect("controller handler remains inspectable");
+
+        assert!(!handler.contains("KeyCode"));
+        assert!(!handler.contains("_key("));
+        for direct_dispatch in [
+            "control_controller(action, width, height)",
+            "preview_controller(action)",
+            "window_menu_host_controller(action)",
+            "notification_controller(action)",
+            "panel_controller(action, width)",
+            "screenshot_controller(action)",
+        ] {
+            assert!(
+                handler.contains(direct_dispatch),
+                "missing direct controller dispatch: {direct_dispatch}"
+            );
+        }
     }
 
     use std::path::Path;

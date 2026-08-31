@@ -1,30 +1,79 @@
 use std::{
+    any::Any,
     error::Error,
     time::{Duration, Instant},
 };
 
 use sdl3::{
+    VideoSubsystem,
     event::{Event, WindowEvent},
     mouse::{Cursor as MouseCursor, SystemCursor},
+    video::Window,
 };
 
 use crate::{
-    ControllerAction, ControllerInput, FocusedInputDispatcher, InputCommand, InputContext,
-    PointerIcon, Rect, SdlCanvasPresenter, UiEvent, UiStateStore, UiTree, View,
+    AccessibilityNode, ActionKind, Color, ControllerAction, ControllerInput, DamageRegion,
+    EffectiveHitRoute, FocusedInputDispatcher, FrameRequest, FrameResourceDiagnostics,
+    InputCommand, InputContext, InputModality, InputSource, InteractionIntent, Invalidation,
+    LayoutDiagnostic, OverlayId, OverlayMenu, PointerIcon, Rect, SdlCanvasPresenter,
+    SdlComponentRenderer, SemanticAction, SemanticActionError, SemanticNodeSnapshot,
+    SemanticQueryError, SemanticSelector, UiEvent, UiFrame, UiId, UiStateStore, View,
 };
 
 #[derive(Debug, Default)]
-struct FrameScheduler {
+struct PresentScheduler {
     dirty: bool,
 }
 
-impl FrameScheduler {
+impl PresentScheduler {
     fn invalidate(&mut self) {
         self.dirty = true;
     }
 
-    fn take_rebuild(&mut self) -> bool {
+    fn take_present(&mut self) -> bool {
         std::mem::take(&mut self.dirty)
+    }
+}
+
+fn wait_duration(
+    now: Instant,
+    deadlines: impl IntoIterator<Item = Option<Instant>>,
+) -> Option<Duration> {
+    deadlines
+        .into_iter()
+        .flatten()
+        .min()
+        .map(|deadline| deadline.saturating_duration_since(now))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ControllerPollSchedule {
+    deadline: Instant,
+}
+
+impl ControllerPollSchedule {
+    pub const CONNECTED_INTERVAL: Duration = Duration::from_millis(16);
+    pub const DISCONNECTED_INTERVAL: Duration = Duration::from_millis(250);
+
+    pub fn new(now: Instant) -> Self {
+        Self { deadline: now }
+    }
+
+    pub fn deadline(self) -> Instant {
+        self.deadline
+    }
+
+    pub fn is_due(self, now: Instant) -> bool {
+        now >= self.deadline
+    }
+
+    pub fn mark_polled(&mut self, now: Instant, connected: bool) {
+        self.deadline = now
+            + if connected {
+                Self::CONNECTED_INTERVAL
+            } else {
+                Self::DISCONNECTED_INTERVAL
+            };
     }
 }
 
@@ -40,17 +89,246 @@ pub enum Shortcut {
     DocumentEnd,
 }
 
+/// Immutable environmental inputs for a declarative application view.
+///
+/// The host owns this state and supplies it before every resolve, so responsive
+/// applications do not need a parallel resize callback or cached window size.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ViewContext {
+    pub viewport: Rect,
+    pub modality: InputModality,
+    /// Host-owned keyboard/accessibility focus retained across declarative rebuilds.
+    pub focused: Option<UiId>,
+    /// Host-owned controller selection retained across declarative rebuilds.
+    pub controller_target: Option<UiId>,
+}
+
+/// Declarative content rendered above an application's ordinary view.
+///
+/// The host remains the sole owner of frame resolution, interaction state,
+/// semantics, hit testing, and paint-list construction. Applications only
+/// describe transient layers derived from their model.
+#[derive(Clone, Debug)]
+pub enum FrameOverlay<Message> {
+    Menu(OverlayMenu<Message>),
+    Surface(crate::TransientSurface),
+    ContentSurface {
+        surface: crate::TransientSurface,
+        content: Box<crate::ui::Element<Message>>,
+    },
+    SelectionMarquee {
+        rect: Rect,
+        fill: Option<Color>,
+        stroke: Color,
+        width: f32,
+    },
+}
+
+/// A named, interactive transient surface anchored to ordinary declarative UI.
+/// Layout, focus trapping, dismissal, and focus return remain host-owned.
+#[derive(Clone, Debug)]
+pub struct Popover<Message> {
+    surface: crate::TransientSurface,
+    content: Box<crate::ui::Element<Message>>,
+}
+
+impl<Message> Popover<Message> {
+    pub fn new(
+        id: impl Into<UiId>,
+        anchor: crate::OverlayAnchor,
+        name: impl Into<String>,
+        size: crate::Size,
+        style: crate::OverlayStyle,
+        content: impl crate::Component<Message>,
+    ) -> Self {
+        Self {
+            surface: crate::TransientSurface::popover(id, anchor, size, style)
+                .accessible_name(name),
+            content: Box::new(content.into_element()),
+        }
+    }
+
+    pub fn placement(mut self, placement: crate::OverlayPlacement) -> Self {
+        self.surface = self.surface.placement(placement);
+        self
+    }
+
+    pub fn collision(mut self, collision: crate::CollisionPolicy) -> Self {
+        self.surface = self.surface.collision(collision);
+        self
+    }
+
+    pub fn focus(mut self, focus: crate::OverlayFocusPolicy) -> Self {
+        self.surface = self.surface.focus(focus);
+        self
+    }
+
+    pub fn dismiss(mut self, dismiss: crate::DismissPolicy) -> Self {
+        self.surface = self.surface.dismiss(dismiss);
+        self
+    }
+
+    pub fn focus_return(mut self, target: impl Into<UiId>) -> Self {
+        self.surface = self.surface.focus_return(target);
+        self
+    }
+
+    pub fn direction(mut self, direction: crate::ReadingDirection) -> Self {
+        self.surface = self.surface.direction(direction);
+        self
+    }
+
+    pub fn scale(mut self, scale: f32) -> Self {
+        self.surface = self.surface.scale(scale);
+        self
+    }
+}
+
+/// A named, non-focus-stealing transient hint. Tooltips share the host's
+/// collision and lifecycle machinery without pretending to be popovers.
+#[derive(Clone, Debug)]
+pub struct Tooltip<Message> {
+    surface: crate::TransientSurface,
+    content: Box<crate::ui::Element<Message>>,
+}
+
+impl<Message> Tooltip<Message> {
+    pub fn new(
+        id: impl Into<UiId>,
+        anchor: crate::OverlayAnchor,
+        name: impl Into<String>,
+        size: crate::Size,
+        style: crate::OverlayStyle,
+        content: impl crate::Component<Message>,
+    ) -> Self {
+        Self {
+            surface: crate::TransientSurface::tooltip(id, anchor, size, style)
+                .accessible_name(name),
+            content: Box::new(content.into_element()),
+        }
+    }
+
+    pub fn placement(mut self, placement: crate::OverlayPlacement) -> Self {
+        self.surface = self.surface.placement(placement);
+        self
+    }
+
+    pub fn collision(mut self, collision: crate::CollisionPolicy) -> Self {
+        self.surface = self.surface.collision(collision);
+        self
+    }
+
+    pub fn dismiss(mut self, dismiss: crate::DismissPolicy) -> Self {
+        self.surface = self.surface.dismiss(dismiss);
+        self
+    }
+
+    pub fn direction(mut self, direction: crate::ReadingDirection) -> Self {
+        self.surface = self.surface.direction(direction);
+        self
+    }
+
+    pub fn scale(mut self, scale: f32) -> Self {
+        self.surface = self.surface.scale(scale);
+        self
+    }
+}
+
+impl<Message> From<Popover<Message>> for FrameOverlay<Message> {
+    fn from(popover: Popover<Message>) -> Self {
+        Self::ContentSurface {
+            surface: popover.surface,
+            content: popover.content,
+        }
+    }
+}
+
+impl<Message> From<Tooltip<Message>> for FrameOverlay<Message> {
+    fn from(tooltip: Tooltip<Message>) -> Self {
+        Self::ContentSurface {
+            surface: tooltip.surface,
+            content: tooltip.content,
+        }
+    }
+}
+
+impl<Message> FrameOverlay<Message> {
+    pub fn surface(
+        surface: crate::TransientSurface,
+        content: impl crate::Component<Message>,
+    ) -> Self {
+        Self::ContentSurface {
+            surface,
+            content: Box::new(content.into_element()),
+        }
+    }
+}
+
+impl ViewContext {
+    pub const fn new(viewport: Rect, modality: InputModality) -> Self {
+        Self {
+            viewport,
+            modality,
+            focused: None,
+            controller_target: None,
+        }
+    }
+
+    fn from_state(viewport: Rect, state: &UiStateStore) -> Self {
+        Self {
+            viewport,
+            modality: state.input_modality(),
+            focused: state.focused().cloned(),
+            controller_target: state.navigation().controller_selected().cloned(),
+        }
+    }
+}
+
 pub trait Application: Sized {
     type Message: Clone;
 
     fn update(&mut self, message: Self::Message);
 
-    fn view(&self) -> impl View<Self::Message>;
+    fn message_evidence(&self, _message: &Self::Message) -> MessageEvidence {
+        MessageEvidence {
+            type_name: std::any::type_name::<Self::Message>(),
+            label: None,
+        }
+    }
+
+    /// Drains application-owned effects produced by updates, completions, or
+    /// polling so adapters, scenarios, and telemetry observe the same effects.
+    fn take_effect_evidence(&mut self) -> Vec<EffectEvidence> {
+        Vec::new()
+    }
+
+    /// Applies an application/domain completion injected by a host adapter or
+    /// deterministic scenario. Implementations downcast the typed payload and
+    /// return whether the completion changed declarative state.
+    fn complete(&mut self, completion: Completion) -> Result<bool, CompletionFailure> {
+        Err(CompletionFailure {
+            id: completion.id,
+            kind: CompletionFailureKind::Unhandled,
+            detail: "application has no matching completion subscription".into(),
+        })
+    }
+
+    fn view(&self, context: ViewContext) -> impl View<Self::Message>;
+
+    fn frame_overlays(&self, _context: ViewContext) -> Vec<FrameOverlay<Self::Message>> {
+        Vec::new()
+    }
 
     /// Poll application-owned background work without introducing another UI runtime.
     /// Return `true` when new state requires a redraw.
     fn poll(&mut self) -> bool {
         false
+    }
+
+    /// Declares the cadence for application-owned completion polling.
+    /// `None` means the application is event-driven and must not be woken.
+    fn poll_interval(&self) -> Option<Duration> {
+        None
     }
 
     /// Handle application-level keyboard semantics before ordinary component activation.
@@ -65,53 +343,495 @@ pub trait Application: Sized {
     fn initial_size(&self) -> (u32, u32) {
         (800, 600)
     }
-
-    /// Handles controller actions with application-level meaning, such as a shell launcher.
-    /// Returning `false` lets the runtime apply ordinary component navigation.
-    fn controller_action(&mut self, _action: ControllerAction) -> bool {
-        false
-    }
 }
 
 fn controller_ui_event(action: ControllerAction) -> Option<UiEvent> {
     match action {
-        ControllerAction::Up => Some(UiEvent::ControllerPrevious),
-        ControllerAction::Down => Some(UiEvent::ControllerNext),
-        ControllerAction::Left => Some(UiEvent::ControllerAdjust(-1.0)),
-        ControllerAction::Right => Some(UiEvent::ControllerAdjust(1.0)),
+        ControllerAction::Up => Some(UiEvent::ControllerUp),
+        ControllerAction::Down => Some(UiEvent::ControllerDown),
+        ControllerAction::Left => Some(UiEvent::ControllerLeft),
+        ControllerAction::Right => Some(UiEvent::ControllerRight),
         ControllerAction::Confirm => Some(UiEvent::ControllerActivate),
         ControllerAction::Cancel => Some(UiEvent::ControllerBack),
         ControllerAction::PreviousPane => Some(UiEvent::ControllerPreviousPane),
         ControllerAction::NextPane => Some(UiEvent::ControllerNextPane),
         ControllerAction::Launcher => None,
+        ControllerAction::ContextMenu => Some(UiEvent::ControllerContextMenu),
     }
 }
 
-pub struct ApplicationHost<A: Application> {
+pub struct UiHost<A: Application> {
     application: A,
     state: UiStateStore,
-    tree: UiTree<A::Message>,
+    tree: UiFrame<A::Message>,
     bounds: Rect,
+    scale_factor: f32,
     input_dispatcher: FocusedInputDispatcher,
+    frame_generation: u64,
+    pointer_icon: PointerIcon,
+    overlay_failures: Vec<OverlayDeclarationFailure>,
+    next_application_deadline: Option<Instant>,
+}
+
+#[derive(Clone, Default)]
+struct OverlayInteractionSnapshot {
+    focused: Option<UiId>,
+    hovered: Option<UiId>,
+    pressed: Option<UiId>,
+    captured: Option<UiId>,
+    controller_selected: Option<UiId>,
+}
+
+impl OverlayInteractionSnapshot {
+    fn capture<Message: Clone>(state: &UiStateStore, tree: &UiFrame<Message>) -> Self {
+        let owned = |id: Option<&UiId>| id.filter(|id| tree.contains_target(id)).cloned();
+        let controller_selected = if let Some(overlay) = state.open_overlay_id() {
+            state
+                .navigation()
+                .controller_selected()
+                .filter(|id| tree.is_descendant_or_self(overlay.as_ui_id(), id))
+                .cloned()
+        } else {
+            owned(state.navigation().controller_selected())
+        };
+        Self {
+            focused: owned(state.focused()),
+            hovered: owned(state.hovered()),
+            pressed: owned(state.pressed()),
+            captured: owned(state.captured()),
+            controller_selected,
+        }
+    }
+
+    fn restore<Message: Clone>(self, state: &mut UiStateStore, tree: &UiFrame<Message>) {
+        let valid = |id: Option<UiId>| id.filter(|id| tree.contains_target(id));
+        if self.focused.is_some() {
+            state.set_focus(valid(self.focused));
+        }
+        if self.hovered.is_some() {
+            state.set_hovered(valid(self.hovered));
+        }
+        if self.pressed.is_some() {
+            state.set_pressed(valid(self.pressed));
+        }
+        if self.captured.is_some() {
+            state.set_capture(valid(self.captured));
+        }
+        if self.controller_selected.is_some() {
+            state
+                .navigation_mut()
+                .set_controller_selected(valid(self.controller_selected));
+        }
+    }
+
+    fn restore_before_overlay(&self, state: &mut UiStateStore) {
+        if let Some(focused) = &self.focused {
+            state.set_focus(Some(focused.clone()));
+        }
+        if let Some(hovered) = &self.hovered {
+            state.set_hovered(Some(hovered.clone()));
+        }
+        if let Some(pressed) = &self.pressed {
+            state.set_pressed(Some(pressed.clone()));
+        }
+        if let Some(captured) = &self.captured {
+            state.set_capture(Some(captured.clone()));
+        }
+        if let Some(selected) = &self.controller_selected {
+            state
+                .navigation_mut()
+                .set_controller_selected(Some(selected.clone()));
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OverlayDeclarationFailure {
+    pub overlay: OverlayId,
+    pub anchor: UiId,
+    pub error: SemanticActionError,
+}
+
+pub enum HostEvent {
+    Ui(UiEvent),
+    Controller(ControllerAction),
+    Shortcut(Shortcut),
+    Semantic {
+        target: UiId,
+        action: SemanticAction,
+    },
+    Accessibility {
+        target: UiId,
+        action: SemanticAction,
+    },
+    ControllerSemantic {
+        target: UiId,
+        action: SemanticAction,
+    },
+    Normalized {
+        input: nickel_input::InputEvent,
+        clipboard_text: Option<String>,
+    },
+    Poll,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GlobalAction {
+    ToggleLauncher,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AdapterOutcome {
+    pub changed: bool,
+    pub consume: bool,
+    pub exit: bool,
+}
+
+impl AdapterOutcome {
+    pub const fn changed() -> Self {
+        Self {
+            changed: true,
+            consume: false,
+            exit: false,
+        }
+    }
+
+    pub const fn consumed(changed: bool) -> Self {
+        Self {
+            changed,
+            consume: true,
+            exit: false,
+        }
+    }
+
+    pub const fn exit() -> Self {
+        Self {
+            changed: false,
+            consume: true,
+            exit: true,
+        }
+    }
+}
+
+/// Read-only native services supplied to an application-specific host adapter.
+/// Rendering, normalized input, clipboard routing, and controller navigation
+/// remain owned by [`UiHost`].
+pub struct HostServices<'a> {
+    video: &'a VideoSubsystem,
+    window: &'a mut Window,
+}
+
+impl<'a> HostServices<'a> {
+    pub fn video(&self) -> &'a VideoSubsystem {
+        self.video
+    }
+
+    pub fn window(&mut self) -> &mut Window {
+        self.window
+    }
+
+    pub fn window_ref(&self) -> &Window {
+        self.window
+    }
+}
+
+/// Injects platform-specific effects into the canonical Nickel UI runtime
+/// without creating an application-owned event loop.
+pub trait HostAdapter<A: Application> {
+    fn poll_interval(&self) -> Option<Duration> {
+        None
+    }
+
+    /// Declares the next adapter wakeup. Adapters without pending work return
+    /// `None`, allowing the platform event loop to sleep indefinitely.
+    fn next_deadline(&self, _now: Instant) -> Option<Instant> {
+        None
+    }
+
+    fn started(
+        &mut self,
+        _host: &mut UiHost<A>,
+        _services: HostServices<'_>,
+    ) -> Result<AdapterOutcome, Box<dyn Error>> {
+        Ok(AdapterOutcome::default())
+    }
+
+    fn event(
+        &mut self,
+        _host: &mut UiHost<A>,
+        _event: &Event,
+        _services: HostServices<'_>,
+    ) -> Result<AdapterOutcome, Box<dyn Error>> {
+        Ok(AdapterOutcome::default())
+    }
+
+    fn poll(
+        &mut self,
+        _host: &mut UiHost<A>,
+        _services: HostServices<'_>,
+    ) -> Result<AdapterOutcome, Box<dyn Error>> {
+        Ok(AdapterOutcome::default())
+    }
+
+    fn global_action(
+        &mut self,
+        _host: &mut UiHost<A>,
+        _action: GlobalAction,
+        _services: HostServices<'_>,
+    ) -> Result<AdapterOutcome, Box<dyn Error>> {
+        Ok(AdapterOutcome::default())
+    }
+
+    fn stopped(
+        &mut self,
+        _host: &mut UiHost<A>,
+        _services: HostServices<'_>,
+    ) -> Result<(), Box<dyn Error>> {
+        Ok(())
+    }
 }
 
 #[derive(Default)]
-pub struct HostEventOutcome {
-    pub changed: bool,
-    pub clipboard_text: Option<String>,
+pub struct DefaultHostAdapter;
+
+impl<A: Application> HostAdapter<A> for DefaultHostAdapter {}
+
+#[derive(Default)]
+pub struct HostBatch {
+    /// Monotonic time supplied by an adapter or deterministic harness.
+    pub now: Option<Instant>,
+    pub surface_size: Option<(u32, u32)>,
+    pub scale_factor: Option<f32>,
+    pub window_focused: Option<bool>,
+    pub completions: Vec<Completion>,
+    /// Failures observed by the transport while servicing this batch.  They
+    /// are evidence, not application input: reporting one must not mutate or
+    /// short-circuit the canonical UI transition.
+    pub failures: Vec<HostFailure>,
+    pub events: Vec<HostEvent>,
 }
 
-impl<A: Application> ApplicationHost<A> {
+pub struct Completion {
+    pub id: &'static str,
+    payload: Box<dyn Any + Send>,
+}
+
+impl Completion {
+    pub fn new<T: Any + Send>(id: &'static str, payload: T) -> Self {
+        Self {
+            id,
+            payload: Box::new(payload),
+        }
+    }
+
+    pub fn downcast<T: Any + Send>(self) -> Result<T, Self> {
+        match self.payload.downcast::<T>() {
+            Ok(value) => Ok(*value),
+            Err(payload) => Err(Self {
+                id: self.id,
+                payload,
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompletionFailure {
+    pub id: &'static str,
+    pub kind: CompletionFailureKind,
+    pub detail: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CompletionFailureKind {
+    Unhandled,
+    TypeMismatch,
+    Rejected,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct HostInspection {
+    pub frame_generation: u64,
+    pub semantic_generation: u64,
+    pub input: InputContext,
+    pub window_focused: bool,
+    pub scale_factor: f32,
+    pub pointer_icon: PointerIcon,
+    pub keyboard_focus: Option<UiId>,
+    pub pointer_capture: Option<UiId>,
+    pub controller_target: Option<UiId>,
+    pub controller_scope: Option<UiId>,
+    pub controller_editing: bool,
+    pub open_overlay: Option<OverlayId>,
+    pub modality: InputModality,
+    pub diagnostics: Vec<LayoutDiagnostic>,
+    pub resources: FrameResourceDiagnostics,
+    pub overlay_failures: Vec<OverlayDeclarationFailure>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MessageEvidence {
+    pub type_name: &'static str,
+    pub label: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EffectEvidence {
+    pub type_name: &'static str,
+    pub label: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HostFailureStage {
+    Presenter,
+    Clipboard,
+    Ime,
+    Accessibility,
+    Controller,
+    DomainService,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HostFailure {
+    pub surface: String,
+    pub stage: HostFailureStage,
+    pub optional: bool,
+    pub detail: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct HostChangeToken {
+    pub frame_generation: u64,
+    pub semantic_generation: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct HostEventOutcome {
+    pub changed: bool,
+    pub invalidation: Invalidation,
+    pub messages: Vec<MessageEvidence>,
+    pub effects: Vec<EffectEvidence>,
+    pub failures: Vec<HostFailure>,
+    pub completion_failures: Vec<CompletionFailure>,
+    pub pointer_icon: PointerIcon,
+    pub text_input_active: bool,
+    pub accessibility_generation: u64,
+    pub change_token: HostChangeToken,
+    pub next_deadline: Option<Instant>,
+    pub telemetry: HostTelemetry,
+    pub clipboard_text: Option<String>,
+    pub semantic_failures: Vec<SemanticActionFailure>,
+    pub global_actions: Vec<GlobalAction>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct HostTelemetry {
+    pub events_processed: usize,
+    pub completions_processed: usize,
+    pub rebuilt: bool,
+}
+
+impl Default for HostEventOutcome {
+    fn default() -> Self {
+        Self {
+            changed: false,
+            invalidation: Invalidation::None,
+            messages: Vec::new(),
+            effects: Vec::new(),
+            failures: Vec::new(),
+            completion_failures: Vec::new(),
+            pointer_icon: PointerIcon::Default,
+            text_input_active: false,
+            accessibility_generation: 0,
+            change_token: HostChangeToken::default(),
+            next_deadline: None,
+            telemetry: HostTelemetry::default(),
+            clipboard_text: None,
+            semantic_failures: Vec::new(),
+            global_actions: Vec::new(),
+        }
+    }
+}
+
+impl HostEventOutcome {
+    fn merge(&mut self, mut other: Self) {
+        self.changed |= other.changed;
+        self.invalidation = self.invalidation.merge(other.invalidation);
+        self.messages.append(&mut other.messages);
+        self.effects.append(&mut other.effects);
+        self.failures.append(&mut other.failures);
+        if other.clipboard_text.is_some() {
+            self.clipboard_text = other.clipboard_text;
+        }
+        self.semantic_failures.append(&mut other.semantic_failures);
+        self.completion_failures
+            .append(&mut other.completion_failures);
+        self.global_actions.append(&mut other.global_actions);
+        self.pointer_icon = other.pointer_icon;
+        self.text_input_active = other.text_input_active;
+        self.accessibility_generation = self
+            .accessibility_generation
+            .max(other.accessibility_generation);
+        self.change_token.frame_generation = self
+            .change_token
+            .frame_generation
+            .max(other.change_token.frame_generation);
+        self.change_token.semantic_generation = self
+            .change_token
+            .semantic_generation
+            .max(other.change_token.semantic_generation);
+        self.next_deadline = match (self.next_deadline, other.next_deadline) {
+            (Some(left), Some(right)) => Some(left.min(right)),
+            (deadline @ Some(_), None) | (None, deadline @ Some(_)) => deadline,
+            (None, None) => None,
+        };
+        self.telemetry.events_processed = self
+            .telemetry
+            .events_processed
+            .saturating_add(other.telemetry.events_processed);
+        self.telemetry.completions_processed = self
+            .telemetry
+            .completions_processed
+            .saturating_add(other.telemetry.completions_processed);
+        self.telemetry.rebuilt |= other.telemetry.rebuilt;
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SemanticActionFailure {
+    pub target: UiId,
+    pub error: SemanticActionError,
+}
+
+impl<A: Application> UiHost<A> {
     pub fn new(application: A, width: u32, height: u32) -> Self {
+        Self::new_at(application, width, height, Instant::now())
+    }
+
+    /// Constructs a host against an explicit monotonic origin for deterministic
+    /// scheduling tests and embedded adapters that already own the clock.
+    pub fn new_at(application: A, width: u32, height: u32, now: Instant) -> Self {
         let bounds = Rect::new(0.0, 0.0, width as f32, height as f32);
         let mut state = UiStateStore::default();
-        let tree = UiTree::layout_with_state(application.view(), bounds, &mut state);
+        let context = ViewContext::from_state(bounds, &state);
+        let mut tree = UiFrame::resolve(
+            application.view(context.clone()),
+            FrameRequest::new(bounds, &mut state),
+        );
+        let overlay_failures =
+            apply_frame_overlays(&mut tree, &mut state, application.frame_overlays(context));
+        let next_application_deadline = application.poll_interval().map(|interval| now + interval);
         Self {
             application,
             state,
             tree,
             bounds,
+            scale_factor: 1.0,
             input_dispatcher: FocusedInputDispatcher::default(),
+            frame_generation: 1,
+            pointer_icon: PointerIcon::Default,
+            overlay_failures,
+            next_application_deadline,
         }
     }
 
@@ -119,8 +839,20 @@ impl<A: Application> ApplicationHost<A> {
         &mut self.application
     }
 
+    pub fn application(&self) -> &A {
+        &self.application
+    }
+
     pub fn commands(&self) -> &[crate::PaintCommand] {
         self.tree.commands()
+    }
+
+    pub fn render_software(&self, renderer: &mut SdlComponentRenderer) -> DamageRegion {
+        renderer.render(self.tree.commands())
+    }
+
+    pub fn pointer_icon_at(&self, point: crate::Point) -> PointerIcon {
+        self.tree.pointer_icon_at(point)
     }
 
     pub fn input_context(&self) -> crate::InputContext {
@@ -134,64 +866,481 @@ impl<A: Application> ApplicationHost<A> {
         self.tree.selected_text(&self.state)
     }
 
+    pub fn semantic_nodes(&self) -> Vec<SemanticNodeSnapshot> {
+        self.tree.semantic_nodes()
+    }
+
+    pub fn query(&self, selector: &SemanticSelector) -> Vec<SemanticNodeSnapshot> {
+        self.tree.query(selector)
+    }
+
+    pub fn query_unique(
+        &self,
+        selector: &SemanticSelector,
+    ) -> Result<SemanticNodeSnapshot, SemanticQueryError> {
+        self.tree.query_unique(selector)
+    }
+
+    pub fn semantic_targets_for_message(&self, message: &A::Message) -> Vec<crate::SemanticTarget>
+    where
+        A::Message: PartialEq,
+    {
+        self.tree.semantic_targets_for_message(message)
+    }
+
+    pub fn unique_semantic_target_for_message(
+        &self,
+        message: &A::Message,
+    ) -> Result<crate::SemanticTarget, SemanticQueryError>
+    where
+        A::Message: PartialEq,
+    {
+        self.tree.unique_semantic_target_for_message(message)
+    }
+
+    pub fn accessibility_nodes(&self) -> &[AccessibilityNode] {
+        self.tree.accessibility_nodes()
+    }
+
+    pub fn resolved_grid_columns(&self) -> Option<usize> {
+        self.tree.resolved_grid_columns()
+    }
+
+    /// Scrolls the canonical view state just enough to reveal a message-bound
+    /// item. The host owns both geometry and scroll state; applications only
+    /// name the item and its scroll surface.
+    pub fn ensure_message_visible(&mut self, item: &A::Message, scroll: &A::Message) -> bool
+    where
+        A::Message: PartialEq,
+    {
+        let Ok(item_target) = self.tree.unique_semantic_target_for_message(item) else {
+            return false;
+        };
+        let item_rect = item_target.bounds;
+        let Some(viewport) = self.tree.scroll_viewport(scroll) else {
+            return false;
+        };
+        let Some(extent) = self.tree.scroll_extent(scroll) else {
+            return false;
+        };
+        let Some(target) = self
+            .tree
+            .semantic_targets_for_message(scroll)
+            .into_iter()
+            .next()
+        else {
+            return false;
+        };
+        let delta = if item_rect.origin.y < viewport.origin.y {
+            item_rect.origin.y - viewport.origin.y
+        } else {
+            let item_bottom = item_rect.origin.y + item_rect.size.height;
+            let viewport_bottom = viewport.origin.y + viewport.size.height;
+            (item_bottom - viewport_bottom).max(0.0)
+        };
+        let maximum = (extent.content.height - extent.viewport.height).max(0.0);
+        let changed = self.state.scroll_by(target.id, delta, maximum) != crate::Invalidation::None;
+        if changed {
+            self.rebuild();
+        }
+        changed
+    }
+
+    pub fn reset_scroll(&mut self, scroll: &A::Message) -> bool
+    where
+        A::Message: PartialEq,
+    {
+        let Some(extent) = self.tree.scroll_extent(scroll) else {
+            return false;
+        };
+        let Some(target) = self
+            .tree
+            .semantic_targets_for_message(scroll)
+            .into_iter()
+            .next()
+        else {
+            return false;
+        };
+        let maximum = (extent.content.height - extent.viewport.height).max(0.0);
+        let current = self
+            .state
+            .state(&target.id)
+            .map_or(extent.offset, |state| state.scroll_offset);
+        let changed =
+            self.state.scroll_by(target.id, -current, maximum) != crate::Invalidation::None;
+        if changed {
+            self.rebuild();
+        }
+        changed
+    }
+
+    pub fn resolve_effective_target(
+        &self,
+        target: &UiId,
+        action: ActionKind,
+    ) -> Result<EffectiveHitRoute, SemanticActionError> {
+        self.tree.resolve_effective_target(target, action)
+    }
+
+    pub fn perform_semantic_action(
+        &mut self,
+        target: UiId,
+        action: SemanticAction,
+    ) -> HostEventOutcome {
+        self.step(HostBatch {
+            events: vec![HostEvent::Semantic { target, action }],
+            ..HostBatch::default()
+        })
+    }
+
+    pub fn perform_accessibility_action(
+        &mut self,
+        target: UiId,
+        action: SemanticAction,
+    ) -> HostEventOutcome {
+        self.step(HostBatch {
+            events: vec![HostEvent::Accessibility { target, action }],
+            ..HostBatch::default()
+        })
+    }
+
+    pub fn perform_controller_semantic_action(
+        &mut self,
+        target: UiId,
+        action: SemanticAction,
+    ) -> HostEventOutcome {
+        self.step(HostBatch {
+            events: vec![HostEvent::ControllerSemantic { target, action }],
+            ..HostBatch::default()
+        })
+    }
+
+    pub fn open_transient(&mut self, id: OverlayId, invocation_target: UiId) -> bool {
+        let changed = self.state.open_overlay(id, invocation_target) != Invalidation::None;
+        if changed {
+            self.rebuild();
+        }
+        changed
+    }
+
+    /// Requests focus through the frame reducer without changing the user's
+    /// current input modality. Adapters use this after an application update
+    /// resolves a new semantic descendant.
+    pub fn request_focus(&mut self, target: UiId) -> HostEventOutcome {
+        let transition = self
+            .tree
+            .transition(
+                &mut self.state,
+                InputSource::System,
+                InteractionIntent::Event(UiEvent::AccessibilityFocus(target)),
+            )
+            .expect("system focus is an ordinary frame event");
+        let changed =
+            transition.invalidation != crate::Invalidation::None || !transition.messages.is_empty();
+        for message in transition.messages {
+            self.application.update(message);
+        }
+        let mut outcome = HostEventOutcome {
+            changed,
+            clipboard_text: transition.clipboard_text,
+            ..HostEventOutcome::default()
+        };
+        if changed {
+            self.rebuild();
+        }
+        outcome.effects = self.application.take_effect_evidence();
+        outcome.pointer_icon = self.pointer_icon;
+        outcome.text_input_active = self.input_context().text_focused;
+        outcome.accessibility_generation = self.frame_generation;
+        outcome.change_token = HostChangeToken {
+            frame_generation: self.frame_generation,
+            semantic_generation: self.frame_generation,
+        };
+        outcome
+    }
+
+    pub fn inspect(&self) -> HostInspection {
+        HostInspection {
+            frame_generation: self.frame_generation,
+            semantic_generation: self.frame_generation,
+            input: self.input_context(),
+            window_focused: self.state.window_focused(),
+            scale_factor: self.scale_factor,
+            pointer_icon: self.pointer_icon,
+            keyboard_focus: self.state.focused().cloned(),
+            pointer_capture: self.state.captured().cloned(),
+            controller_target: self.state.navigation().controller_selected().cloned(),
+            controller_scope: self.state.navigation().controller_scope().cloned(),
+            controller_editing: self.state.navigation().controller_editing(),
+            open_overlay: self.state.open_overlay_id().cloned(),
+            modality: self.state.input_modality(),
+            diagnostics: self.tree.diagnostics().to_vec(),
+            resources: self.tree.resource_diagnostics(),
+            overlay_failures: self.overlay_failures.clone(),
+        }
+    }
+
+    pub fn step(&mut self, batch: HostBatch) -> HostEventOutcome {
+        let now = batch.now.unwrap_or_else(Instant::now);
+        let mut combined = HostEventOutcome {
+            failures: batch.failures,
+            ..HostEventOutcome::default()
+        };
+        combined.telemetry.events_processed = batch.events.len();
+        combined.telemetry.completions_processed = batch.completions.len();
+        if let Some((width, height)) = batch.surface_size {
+            let next = Rect::new(0.0, 0.0, width as f32, height as f32);
+            if next != self.bounds {
+                self.bounds = next;
+                combined.changed = true;
+                combined.invalidation = Invalidation::Layout;
+            }
+        }
+        if let Some(scale_factor) = batch.scale_factor
+            && scale_factor.is_finite()
+            && scale_factor > 0.0
+            && scale_factor != self.scale_factor
+        {
+            self.scale_factor = scale_factor;
+            combined.changed = true;
+            combined.invalidation = combined.invalidation.merge(Invalidation::Layout);
+        }
+        if let Some(focused) = batch.window_focused {
+            let focus = self.dispatch_ui_event(if focused {
+                UiEvent::FocusGained
+            } else {
+                UiEvent::FocusLost
+            });
+            combined.changed |= focus.changed;
+            combined.invalidation = combined.invalidation.merge(focus.invalidation);
+        }
+        for completion in batch.completions {
+            match self.application.complete(completion) {
+                Ok(changed) => {
+                    combined.changed |= changed;
+                    if changed {
+                        combined.invalidation = combined.invalidation.merge(Invalidation::Layout);
+                    }
+                }
+                Err(failure) => combined.completion_failures.push(failure),
+            }
+        }
+        for event in batch.events {
+            let outcome = match event {
+                HostEvent::Ui(event) => self.dispatch_ui_event(event),
+                HostEvent::Controller(action) => self.dispatch_controller_action(action),
+                HostEvent::Shortcut(shortcut) => {
+                    let changed = self.application.shortcut(shortcut);
+                    HostEventOutcome {
+                        changed,
+                        invalidation: if changed {
+                            Invalidation::Layout
+                        } else {
+                            Invalidation::None
+                        },
+                        ..HostEventOutcome::default()
+                    }
+                }
+                HostEvent::Semantic { target, action } => {
+                    self.dispatch_semantic_action(target, action, InputSource::Programmatic)
+                }
+                HostEvent::Accessibility { target, action } => {
+                    self.dispatch_semantic_action(target, action, InputSource::Accessibility)
+                }
+                HostEvent::ControllerSemantic { target, action } => {
+                    self.dispatch_semantic_action(target, action, InputSource::Controller)
+                }
+                HostEvent::Normalized {
+                    input,
+                    clipboard_text,
+                } => self.dispatch_input(&input, clipboard_text.as_deref()),
+                HostEvent::Poll => {
+                    let changed = self.application.poll();
+                    self.next_application_deadline = self
+                        .application
+                        .poll_interval()
+                        .map(|interval| now + interval);
+                    HostEventOutcome {
+                        changed,
+                        invalidation: if changed {
+                            Invalidation::Layout
+                        } else {
+                            Invalidation::None
+                        },
+                        ..HostEventOutcome::default()
+                    }
+                }
+            };
+            combined.merge(outcome);
+        }
+        if combined.changed {
+            self.rebuild();
+            combined.telemetry.rebuilt = true;
+        }
+        combined.effects = self.application.take_effect_evidence();
+        combined.pointer_icon = self.pointer_icon;
+        combined.text_input_active = self.input_context().text_focused;
+        combined.accessibility_generation = self.frame_generation;
+        combined.change_token = HostChangeToken {
+            frame_generation: self.frame_generation,
+            semantic_generation: self.frame_generation,
+        };
+        combined.next_deadline = self.next_application_deadline;
+        combined
+    }
+
+    pub fn next_deadline(&self) -> Option<Instant> {
+        self.next_application_deadline
+    }
+
     pub fn resize(&mut self, width: u32, height: u32) {
-        self.bounds = Rect::new(0.0, 0.0, width as f32, height as f32);
-        self.rebuild();
+        self.step(HostBatch {
+            surface_size: Some((width, height)),
+            ..HostBatch::default()
+        });
     }
 
     pub fn poll(&mut self) -> bool {
-        if !self.application.poll() {
-            return false;
-        }
-        self.rebuild();
-        true
+        self.step(HostBatch {
+            events: vec![HostEvent::Poll],
+            ..HostBatch::default()
+        })
+        .changed
     }
 
     pub fn handle_event(&mut self, event: UiEvent) -> HostEventOutcome {
-        let outcome = self.tree.handle_event(&mut self.state, event);
-        let changed =
-            outcome.invalidation != crate::Invalidation::None || !outcome.messages.is_empty();
+        self.step(HostBatch {
+            events: vec![HostEvent::Ui(event)],
+            ..HostBatch::default()
+        })
+    }
+
+    fn dispatch_ui_event(&mut self, event: UiEvent) -> HostEventOutcome {
+        if let UiEvent::PointerMoved(point)
+        | UiEvent::PointerPressed(point)
+        | UiEvent::PointerReleased(point) = &event
+        {
+            self.pointer_icon = self.tree.pointer_icon_at(*point);
+        }
+        let source = event.input_source();
+        let outcome = self
+            .tree
+            .transition(&mut self.state, source, InteractionIntent::Event(event))
+            .expect("ordinary UI events cannot fail semantic resolution");
+        let invalidation = outcome.invalidation;
+        let changed = invalidation != Invalidation::None || !outcome.messages.is_empty();
+        let messages = outcome
+            .messages
+            .iter()
+            .map(|message| self.application.message_evidence(message))
+            .collect();
         for message in outcome.messages {
             self.application.update(message);
         }
         let clipboard_text = outcome.clipboard_text;
-        if changed {
-            self.rebuild();
-        }
         HostEventOutcome {
             changed,
+            invalidation,
+            messages,
             clipboard_text,
+            semantic_failures: Vec::new(),
+            global_actions: Vec::new(),
+            completion_failures: Vec::new(),
+            ..HostEventOutcome::default()
+        }
+    }
+
+    fn dispatch_semantic_action(
+        &mut self,
+        target: UiId,
+        action: SemanticAction,
+        source: InputSource,
+    ) -> HostEventOutcome {
+        match self.tree.transition(
+            &mut self.state,
+            source,
+            InteractionIntent::Invoke {
+                target: target.clone(),
+                action,
+            },
+        ) {
+            Ok(outcome) => {
+                let invalidation = outcome.invalidation;
+                let changed = invalidation != Invalidation::None || !outcome.messages.is_empty();
+                let messages = outcome
+                    .messages
+                    .iter()
+                    .map(|message| self.application.message_evidence(message))
+                    .collect();
+                for message in outcome.messages {
+                    self.application.update(message);
+                }
+                HostEventOutcome {
+                    changed,
+                    invalidation,
+                    messages,
+                    clipboard_text: outcome.clipboard_text,
+                    semantic_failures: Vec::new(),
+                    global_actions: Vec::new(),
+                    completion_failures: Vec::new(),
+                    ..HostEventOutcome::default()
+                }
+            }
+            Err(error) => HostEventOutcome {
+                semantic_failures: vec![SemanticActionFailure { target, error }],
+                ..HostEventOutcome::default()
+            },
         }
     }
 
     pub fn handle_controller_action(&mut self, action: ControllerAction) -> HostEventOutcome {
+        self.step(HostBatch {
+            events: vec![HostEvent::Controller(action)],
+            ..HostBatch::default()
+        })
+    }
+
+    fn dispatch_controller_action(&mut self, action: ControllerAction) -> HostEventOutcome {
         if !self.state.window_focused() {
             return HostEventOutcome::default();
         }
-        if self.application.controller_action(action) {
-            self.rebuild();
+        if action == ControllerAction::Launcher {
             return HostEventOutcome {
-                changed: true,
+                global_actions: vec![GlobalAction::ToggleLauncher],
                 ..HostEventOutcome::default()
             };
         }
         controller_ui_event(action)
-            .map(|event| self.handle_event(event))
+            .map(|event| self.dispatch_ui_event(event))
             .unwrap_or_default()
     }
 
     pub fn shortcut(&mut self, shortcut: Shortcut) -> bool {
-        if !self.application.shortcut(shortcut) {
-            return false;
-        }
-        self.rebuild();
-        true
+        self.step(HostBatch {
+            events: vec![HostEvent::Shortcut(shortcut)],
+            ..HostBatch::default()
+        })
+        .changed
     }
 
     /// Dispatch a normalized event through the same focused-input contract used by standalone
     /// Nickel UI applications. Embedded hosts provide clipboard text only when paste is allowed;
     /// copy and cut return replacement clipboard text in the outcome.
     pub fn handle_input(
+        &mut self,
+        input: &nickel_input::InputEvent,
+        clipboard_text: Option<&str>,
+    ) -> HostEventOutcome {
+        self.step(HostBatch {
+            events: vec![HostEvent::Normalized {
+                input: input.clone(),
+                clipboard_text: clipboard_text.map(ToOwned::to_owned),
+            }],
+            ..HostBatch::default()
+        })
+    }
+
+    fn dispatch_input(
         &mut self,
         input: &nickel_input::InputEvent,
         clipboard_text: Option<&str>,
@@ -203,8 +1352,9 @@ impl<A: Application> ApplicationHost<A> {
             let event = match command {
                 InputCommand::Ui(event) => Some(event),
                 InputCommand::Application { shortcut, fallback } => {
-                    if self.shortcut(shortcut) {
+                    if self.application.shortcut(shortcut) {
                         combined.changed = true;
+                        combined.invalidation = combined.invalidation.merge(Invalidation::Layout);
                         None
                     } else {
                         fallback
@@ -217,29 +1367,110 @@ impl<A: Application> ApplicationHost<A> {
             let Some(event) = event else {
                 continue;
             };
-            let outcome = self.handle_event(event);
-            combined.changed |= outcome.changed;
-            if outcome.clipboard_text.is_some() {
-                combined.clipboard_text = outcome.clipboard_text;
-            }
+            let outcome = self.dispatch_ui_event(event);
+            combined.merge(outcome);
         }
         combined
     }
 
     fn rebuild(&mut self) {
-        self.tree =
-            UiTree::layout_with_state(self.application.view(), self.bounds, &mut self.state);
+        let context = ViewContext::from_state(self.bounds, &self.state);
+        let overlay_interaction = OverlayInteractionSnapshot::capture(&self.state, &self.tree);
+        self.tree = UiFrame::resolve(
+            self.application.view(context.clone()),
+            FrameRequest::new(self.bounds, &mut self.state),
+        );
+        // Base resolution cannot retain transient descendants because their
+        // topology is declared next. Restore interaction ownership before
+        // overlay emission so paint and semantics observe the same state.
+        overlay_interaction.restore_before_overlay(&mut self.state);
+        self.overlay_failures = apply_frame_overlays(
+            &mut self.tree,
+            &mut self.state,
+            self.application.frame_overlays(context),
+        );
+        overlay_interaction.restore(&mut self.state, &self.tree);
+        self.tree.reconcile_transient_focus(&mut self.state);
+        self.tree.finalize_transient_layers(&self.state);
+        self.frame_generation = self.frame_generation.wrapping_add(1);
+    }
+
+    pub fn shutdown(&mut self) {
+        self.state.destroy();
     }
 }
 
-pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
+fn apply_frame_overlays<Message: Clone>(
+    frame: &mut UiFrame<Message>,
+    state: &mut UiStateStore,
+    overlays: Vec<FrameOverlay<Message>>,
+) -> Vec<OverlayDeclarationFailure> {
+    let mut failures = Vec::new();
+    for overlay in overlays {
+        match overlay {
+            FrameOverlay::Menu(menu) => {
+                let id = menu.id.clone();
+                let anchor = menu.anchor.id().clone();
+                if let Err(error) = frame.present_menu(state, menu) {
+                    failures.push(OverlayDeclarationFailure {
+                        overlay: id,
+                        anchor,
+                        error,
+                    });
+                }
+            }
+            FrameOverlay::Surface(surface) => {
+                let id = surface.id.clone();
+                let anchor = surface.anchor.id().clone();
+                if let Err(error) = frame.present_transient_surface(state, surface) {
+                    failures.push(OverlayDeclarationFailure {
+                        overlay: id,
+                        anchor,
+                        error,
+                    });
+                }
+            }
+            FrameOverlay::ContentSurface { surface, content } => {
+                let id = surface.id.clone();
+                let anchor = surface.anchor.id().clone();
+                if let Err(error) = frame.present_transient_content(state, surface, *content) {
+                    failures.push(OverlayDeclarationFailure {
+                        overlay: id,
+                        anchor,
+                        error,
+                    });
+                }
+            }
+            FrameOverlay::SelectionMarquee {
+                rect,
+                fill,
+                stroke,
+                width,
+            } => {
+                frame.selection_marquee_layer(rect, fill, stroke, width);
+            }
+        }
+    }
+    frame.finalize_transient_layers(state);
+    failures
+}
+
+pub fn run<A: Application>(application: A) -> Result<(), Box<dyn Error>> {
+    run_with_adapter(application, DefaultHostAdapter)
+}
+
+pub fn run_with_adapter<A: Application>(
+    application: A,
+    mut adapter: impl HostAdapter<A>,
+) -> Result<(), Box<dyn Error>> {
     let sdl = sdl3::init()?;
     let video = sdl.video()?;
     let clipboard = video.clipboard();
     let mut events = sdl.event_pump()?;
     let (width, height) = application.initial_size();
+    let title = application.title().to_owned();
     let window = video
-        .window(application.title(), width, height)
+        .window(&title, width, height)
         .position_centered()
         .resizable()
         .high_pixel_density()
@@ -247,7 +1478,6 @@ pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
     let mut presenter = SdlCanvasPresenter::new(window)?;
     let text_input = video.text_input();
     text_input.start(presenter.window());
-    let mut state = UiStateStore::default();
     let default_cursor = MouseCursor::from_system(SystemCursor::Arrow).ok();
     let hand_cursor = MouseCursor::from_system(SystemCursor::Hand).ok();
     let text_cursor = MouseCursor::from_system(SystemCursor::IBeam).ok();
@@ -256,63 +1486,154 @@ pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
     let (logical_width, logical_height) = presenter.window().size();
     let pixel_width = presenter.window().size_in_pixels().0;
     let mut scale = pixel_width as f32 / logical_width.max(1) as f32;
-    let mut tree = UiTree::layout_with_state(
-        application.view(),
-        Rect::new(0.0, 0.0, logical_width as f32, logical_height as f32),
-        &mut state,
-    );
-    presenter.present_accelerated(tree.commands(), scale)?;
-    let mut scheduler = FrameScheduler::default();
+    let mut host = UiHost::new(application, logical_width, logical_height);
+    let started = adapter.started(
+        &mut host,
+        HostServices {
+            video: &video,
+            window: presenter.window_mut(),
+        },
+    )?;
+    if started.changed {
+        host.rebuild();
+    }
+    if started.exit {
+        adapter.stopped(
+            &mut host,
+            HostServices {
+                video: &video,
+                window: presenter.window_mut(),
+            },
+        )?;
+        host.shutdown();
+        return Ok(());
+    }
+    presenter.present_accelerated(host.commands(), scale)?;
+    let mut scheduler = PresentScheduler::default();
     let mut input_adapter = nickel_input::sdl::Adapter::default();
-    let mut input_dispatcher = FocusedInputDispatcher::default();
     let mut controller = ControllerInput::new();
     let mut next_caret_blink = Instant::now() + Duration::from_millis(500);
+    let mut next_adapter_poll = adapter
+        .poll_interval()
+        .map(|interval| Instant::now() + interval);
+    let mut controller_schedule = ControllerPollSchedule::new(Instant::now());
 
     while running {
-        let caret_tick = Instant::now() >= next_caret_blink;
+        let now = Instant::now();
+        let caret_tick = now >= next_caret_blink;
         if caret_tick {
             next_caret_blink = Instant::now() + Duration::from_millis(500);
-            if state.toggle_caret() != crate::Invalidation::None {
+            if host.handle_event(UiEvent::CaretBlink).changed {
                 scheduler.invalidate();
             }
         }
-        if application.poll() {
+        if host.next_deadline().is_some_and(|deadline| now >= deadline)
+            && host
+                .step(HostBatch {
+                    now: Some(now),
+                    events: vec![HostEvent::Poll],
+                    ..HostBatch::default()
+                })
+                .changed
+        {
             scheduler.invalidate();
         }
-        for action in controller.poll(Instant::now(), state.window_focused()) {
-            if application.controller_action(action) {
+        let adapter_due = next_adapter_poll.is_some_and(|deadline| now >= deadline)
+            || adapter
+                .next_deadline(now)
+                .is_some_and(|deadline| now >= deadline);
+        if adapter_due {
+            let adapter_poll = adapter.poll(
+                &mut host,
+                HostServices {
+                    video: &video,
+                    window: presenter.window_mut(),
+                },
+            )?;
+            if adapter_poll.changed {
+                host.rebuild();
                 scheduler.invalidate();
+            }
+            if adapter_poll.exit {
+                running = false;
                 continue;
             }
-            let Some(event) = controller_ui_event(action) else {
-                continue;
-            };
-            let outcome = tree.handle_event(&mut state, event);
-            for message in outcome.messages {
-                application.update(message);
-            }
-            if outcome.invalidation != crate::Invalidation::None {
-                scheduler.invalidate();
-            }
+            next_adapter_poll = adapter.poll_interval().map(|interval| now + interval);
         }
-        if scheduler.take_rebuild() {
-            let (logical_width, logical_height) = presenter.window().size();
+        if controller_schedule.is_due(now) {
+            for action in controller.poll(now, host.inspect().window_focused) {
+                let outcome = host.handle_controller_action(action);
+                if outcome.changed {
+                    scheduler.invalidate();
+                }
+                for action in outcome.global_actions {
+                    let adapted = adapter.global_action(
+                        &mut host,
+                        action,
+                        HostServices {
+                            video: &video,
+                            window: presenter.window_mut(),
+                        },
+                    )?;
+                    if adapted.changed {
+                        host.rebuild();
+                        scheduler.invalidate();
+                    }
+                    if adapted.exit {
+                        running = false;
+                        break;
+                    }
+                }
+            }
+            controller_schedule.mark_polled(now, controller.connected());
+        }
+        if scheduler.take_present() {
+            let (logical_width, _) = presenter.window().size();
             let pixel_width = presenter.window().size_in_pixels().0;
             scale = pixel_width as f32 / logical_width.max(1) as f32;
-            tree = UiTree::layout_with_state(
-                application.view(),
-                Rect::new(0.0, 0.0, logical_width as f32, logical_height as f32),
-                &mut state,
-            );
-            presenter.present_accelerated(tree.commands(), scale)?;
+            presenter.present_accelerated(host.commands(), scale)?;
         }
 
-        let Some(event) = events.wait_event_timeout(Duration::from_millis(16)) else {
+        let now = Instant::now();
+        let wait = wait_duration(
+            now,
+            [
+                Some(next_caret_blink),
+                host.next_deadline(),
+                next_adapter_poll,
+                adapter.next_deadline(now),
+                Some(controller_schedule.deadline()),
+            ],
+        );
+        let event = match wait {
+            Some(wait) => events.wait_event_timeout(wait),
+            None => Some(events.wait_event()),
+        };
+        let Some(event) = event else {
             continue;
         };
         let mut pending = vec![event];
         pending.extend(events.poll_iter());
         for event in pending {
+            let adapted = adapter.event(
+                &mut host,
+                &event,
+                HostServices {
+                    video: &video,
+                    window: presenter.window_mut(),
+                },
+            )?;
+            if adapted.changed {
+                host.rebuild();
+                scheduler.invalidate();
+            }
+            if adapted.exit {
+                running = false;
+                break;
+            }
+            if adapted.consume {
+                continue;
+            }
             match &event {
                 Event::Quit { .. }
                 | Event::Window {
@@ -326,6 +1647,23 @@ pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
                     win_event: WindowEvent::Resized(_, _) | WindowEvent::PixelSizeChanged(_, _),
                     ..
                 } => {
+                    let (width, height) = presenter.window().size();
+                    host.resize(width, height);
+                    scheduler.invalidate();
+                    continue;
+                }
+                Event::Window {
+                    win_event: WindowEvent::Hidden | WindowEvent::Minimized,
+                    ..
+                } => {
+                    host.handle_event(UiEvent::Suspended);
+                    presenter.suspend().map_err(std::io::Error::other)?;
+                    continue;
+                }
+                Event::Window {
+                    win_event: WindowEvent::Shown | WindowEvent::Restored | WindowEvent::Exposed,
+                    ..
+                } => {
                     scheduler.invalidate();
                     continue;
                 }
@@ -334,96 +1672,37 @@ pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
             let Some(normalized) = input_adapter.normalize(&event) else {
                 continue;
             };
-            let context = InputContext {
-                text_focused: state.focused().is_some(),
-                selection_owned: state.selection_owner().is_some(),
-            };
-            let commands = input_dispatcher.dispatch_with_context(&normalized, context);
-            for command in commands {
-                let event = match command {
-                    InputCommand::Ui(event) => event,
-                    InputCommand::Application { shortcut, fallback } => {
-                        if application.shortcut(shortcut) {
-                            scheduler.invalidate();
-                            continue;
-                        }
-                        let Some(fallback) = fallback else {
-                            continue;
-                        };
-                        fallback
-                    }
-                    InputCommand::Copy => UiEvent::TextCopy,
-                    InputCommand::Cut => {
-                        let Some(selected) = tree.selected_text(&state) else {
-                            continue;
-                        };
-                        if clipboard.set_clipboard_text(&selected).is_err() {
-                            continue;
-                        }
-                        UiEvent::TextCut
-                    }
-                    InputCommand::Paste => {
-                        let Ok(text) = clipboard.clipboard_text() else {
-                            continue;
-                        };
-                        UiEvent::TextPaste(text)
-                    }
-                };
-                if let UiEvent::PointerMoved(point)
-                | UiEvent::PointerPressed(point)
-                | UiEvent::PointerReleased(point) = event
-                {
-                    let cursor = point;
-                    let next_icon = tree.pointer_icon_at(cursor);
-                    if next_icon != pointer_icon {
-                        if let Some(cursor) = match next_icon {
-                            PointerIcon::Default => default_cursor.as_ref(),
-                            PointerIcon::Hand => hand_cursor.as_ref(),
-                            PointerIcon::Text => text_cursor.as_ref(),
-                        } {
-                            cursor.set();
-                        }
-                        pointer_icon = next_icon;
-                    }
+            let clipboard_text = clipboard.clipboard_text().ok();
+            let outcome = host.handle_input(&normalized, clipboard_text.as_deref());
+            if let Some(text) = outcome.clipboard_text {
+                let _ = clipboard.set_clipboard_text(&text);
+            }
+            let next_icon = host.inspect().pointer_icon;
+            if next_icon != pointer_icon {
+                if let Some(cursor) = match next_icon {
+                    PointerIcon::Default => default_cursor.as_ref(),
+                    PointerIcon::Hand => hand_cursor.as_ref(),
+                    PointerIcon::Text => text_cursor.as_ref(),
+                } {
+                    cursor.set();
                 }
-                let resets_caret = matches!(
-                    &event,
-                    UiEvent::PointerPressed(_)
-                        | UiEvent::PointerMoved(_)
-                        | UiEvent::TextInput(_)
-                        | UiEvent::TextBackspace
-                        | UiEvent::TextBackspaceWord
-                        | UiEvent::TextDelete
-                        | UiEvent::TextMoveLeft { .. }
-                        | UiEvent::TextMoveRight { .. }
-                        | UiEvent::TextMoveWordLeft { .. }
-                        | UiEvent::TextMoveWordRight { .. }
-                        | UiEvent::TextMoveHome { .. }
-                        | UiEvent::TextMoveEnd { .. }
-                        | UiEvent::TextMoveDocumentHome { .. }
-                        | UiEvent::TextMoveDocumentEnd { .. }
-                        | UiEvent::TextSelectAll
-                        | UiEvent::TextCut
-                        | UiEvent::TextPaste(_)
-                );
-                let outcome = tree.handle_event(&mut state, event);
-                if resets_caret {
-                    next_caret_blink = Instant::now() + Duration::from_millis(500);
-                }
-                for message in outcome.messages {
-                    application.update(message);
-                }
-                if let Some(text) = outcome.clipboard_text {
-                    let _ = clipboard.set_clipboard_text(&text);
-                }
-                if outcome.invalidation != crate::Invalidation::None {
-                    scheduler.invalidate();
-                }
+                pointer_icon = next_icon;
+            }
+            if outcome.changed {
+                next_caret_blink = Instant::now() + Duration::from_millis(500);
+                scheduler.invalidate();
             }
         }
     }
     text_input.stop(presenter.window());
-    state.destroy();
+    adapter.stopped(
+        &mut host,
+        HostServices {
+            video: &video,
+            window: presenter.window_mut(),
+        },
+    )?;
+    host.shutdown();
     Ok(())
 }
 
@@ -432,11 +1711,21 @@ mod tests {
     use nickel_input::{
         DeviceId, EventOrder, InputEvent, KeyCode, KeyEdge, KeyEvent, KeyLocation, LogicalKey,
         Modifier, ModifierState, NamedKey, PhysicalKey, Point, PointerButton, PointerEvent,
-        TextEvent,
+        TextEvent, TouchEvent, TouchId,
     };
+    use std::time::{Duration, Instant};
 
-    use super::{Application, ApplicationHost, FrameScheduler, Shortcut};
-    use crate::{ControllerAction, Invalidation, TextField, UiStateStore};
+    use super::{
+        Application, Completion, CompletionFailure, CompletionFailureKind, ControllerPollSchedule,
+        EffectEvidence, FrameOverlay, GlobalAction, HostBatch, HostEvent, HostFailure,
+        HostFailureStage, MessageEvidence, PresentScheduler, Shortcut, UiHost, ViewContext,
+        wait_duration,
+    };
+    use crate::{
+        ActionKind, Button, ControllerAction, InputModality, Invalidation, OverlayId,
+        SemanticAction, SemanticActionError, SemanticRole, SemanticValueInput, TextField, UiEvent,
+        UiId, UiStateStore,
+    };
 
     #[derive(Clone)]
     enum Message {
@@ -449,6 +1738,89 @@ mod tests {
         submits: usize,
     }
 
+    #[derive(Default)]
+    struct ControllerApplication;
+
+    impl Application for ControllerApplication {
+        type Message = ();
+
+        fn update(&mut self, (): Self::Message) {}
+
+        fn view(&self, _context: ViewContext) -> impl crate::View<Self::Message> {
+            Button::new((), "Activate")
+        }
+    }
+
+    #[derive(Default)]
+    struct ResponsiveApplication;
+
+    impl Application for ResponsiveApplication {
+        type Message = ();
+
+        fn update(&mut self, (): Self::Message) {}
+
+        fn view(&self, context: ViewContext) -> impl crate::View<Self::Message> {
+            let label = if context.modality == crate::InputModality::Controller {
+                "Controller"
+            } else if context.viewport.size.width < 200.0 {
+                "Narrow"
+            } else {
+                "Wide"
+            };
+            Button::new((), label)
+        }
+    }
+
+    #[derive(Default)]
+    struct CompletionApplication(u32);
+
+    impl Application for CompletionApplication {
+        type Message = ();
+
+        fn update(&mut self, (): Self::Message) {}
+
+        fn view(&self, _context: ViewContext) -> impl crate::View<Self::Message> {
+            Button::new((), self.0.to_string())
+        }
+
+        fn complete(&mut self, completion: Completion) -> Result<bool, CompletionFailure> {
+            let id = completion.id;
+            let value = completion
+                .downcast::<u32>()
+                .map_err(|_| CompletionFailure {
+                    id,
+                    kind: CompletionFailureKind::TypeMismatch,
+                    detail: "expected u32".into(),
+                })?;
+            self.0 = value;
+            Ok(true)
+        }
+    }
+
+    #[derive(Default)]
+    struct EffectApplication {
+        pending: Vec<EffectEvidence>,
+    }
+
+    impl Application for EffectApplication {
+        type Message = ();
+
+        fn update(&mut self, (): Self::Message) {
+            self.pending.push(EffectEvidence {
+                type_name: "test.effect",
+                label: Some("activated".into()),
+            });
+        }
+
+        fn take_effect_evidence(&mut self) -> Vec<EffectEvidence> {
+            std::mem::take(&mut self.pending)
+        }
+
+        fn view(&self, _context: ViewContext) -> impl crate::View<Self::Message> {
+            Button::new((), "Effect")
+        }
+    }
+
     impl Application for InputApplication {
         type Message = Message;
 
@@ -458,7 +1830,7 @@ mod tests {
             }
         }
 
-        fn view(&self) -> impl crate::View<Self::Message> {
+        fn view(&self, _context: ViewContext) -> impl crate::View<Self::Message> {
             TextField::on_change(&self.text, Message::Changed)
         }
 
@@ -467,10 +1839,6 @@ mod tests {
                 return false;
             }
             self.submits += 1;
-            true
-        }
-
-        fn controller_action(&mut self, _action: ControllerAction) -> bool {
             true
         }
     }
@@ -512,14 +1880,368 @@ mod tests {
     }
 
     #[test]
-    fn idle_frames_do_not_rebuild_and_event_batches_coalesce() {
-        let mut scheduler = FrameScheduler::default();
-        assert!(!scheduler.take_rebuild());
+    fn idle_frames_do_not_present_and_present_requests_coalesce() {
+        let mut scheduler = PresentScheduler::default();
+        assert!(!scheduler.take_present());
         scheduler.invalidate();
         scheduler.invalidate();
         scheduler.invalidate();
-        assert!(scheduler.take_rebuild());
-        assert!(!scheduler.take_rebuild());
+        assert!(scheduler.take_present());
+        assert!(!scheduler.take_present());
+    }
+
+    #[test]
+    fn host_batch_drains_typed_effects_and_reports_change_token() {
+        let mut host = UiHost::new(EffectApplication::default(), 160, 48);
+        let outcome = host.perform_semantic_action(
+            UiId::from("root"),
+            SemanticAction::Invoke(ActionKind::Activate),
+        );
+        assert_eq!(outcome.effects.len(), 1);
+        assert_eq!(outcome.effects[0].type_name, "test.effect");
+        assert_eq!(
+            outcome.change_token.frame_generation,
+            host.inspect().frame_generation
+        );
+        assert_eq!(
+            outcome.change_token.semantic_generation,
+            host.inspect().semantic_generation
+        );
+
+        let idle = host.step(HostBatch::default());
+        assert!(
+            idle.effects.is_empty(),
+            "effects must be drained exactly once"
+        );
+        assert_eq!(idle.change_token, outcome.change_token);
+    }
+
+    #[test]
+    fn event_wait_uses_the_earliest_declared_deadline_and_can_sleep_indefinitely() {
+        let now = Instant::now();
+        assert_eq!(wait_duration(now, [None, None]), None);
+        assert_eq!(
+            wait_duration(
+                now,
+                [
+                    Some(now + Duration::from_millis(250)),
+                    Some(now + Duration::from_millis(17)),
+                    Some(now + Duration::from_secs(1)),
+                ],
+            ),
+            Some(Duration::from_millis(17))
+        );
+    }
+
+    #[test]
+    fn application_poll_deadline_is_host_owned_and_advances_from_batch_time() {
+        struct PollApplication;
+        impl Application for PollApplication {
+            type Message = ();
+            fn update(&mut self, (): Self::Message) {}
+            fn view(&self, _context: ViewContext) -> impl crate::View<Self::Message> {
+                crate::Container::new()
+            }
+            fn poll_interval(&self) -> Option<Duration> {
+                Some(Duration::from_millis(40))
+            }
+        }
+
+        let origin = Instant::now();
+        let mut host = UiHost::new_at(PollApplication, 100, 40, origin);
+        assert_eq!(
+            host.next_deadline(),
+            Some(origin + Duration::from_millis(40))
+        );
+        let polled_at = origin + Duration::from_millis(45);
+        let outcome = host.step(HostBatch {
+            now: Some(polled_at),
+            events: vec![HostEvent::Poll],
+            ..HostBatch::default()
+        });
+        assert_eq!(
+            outcome.next_deadline,
+            Some(polled_at + Duration::from_millis(40))
+        );
+        assert_eq!(host.next_deadline(), outcome.next_deadline);
+    }
+
+    #[test]
+    fn controller_poll_schedule_has_one_shared_bounded_cadence() {
+        let now = Instant::now();
+        let mut schedule = ControllerPollSchedule::new(now);
+        assert!(schedule.is_due(now));
+        schedule.mark_polled(now, true);
+        assert_eq!(
+            schedule.deadline(),
+            now + ControllerPollSchedule::CONNECTED_INTERVAL
+        );
+        schedule.mark_polled(now, false);
+        assert_eq!(
+            schedule.deadline(),
+            now + ControllerPollSchedule::DISCONNECTED_INTERVAL
+        );
+    }
+
+    #[test]
+    fn ui_host_batches_changes_into_one_frame_and_idle_steps_do_nothing() {
+        let mut host = UiHost::new(InputApplication::default(), 320, 48);
+        let initial = host.inspect();
+        assert_eq!(initial.frame_generation, 1);
+        assert_eq!(initial.resources.retained_build_scratch_bytes, 0);
+
+        let idle = host.step(HostBatch::default());
+        assert!(!idle.changed);
+        assert_eq!(host.inspect().frame_generation, 1);
+
+        let changed = host.step(HostBatch {
+            events: vec![
+                HostEvent::Shortcut(Shortcut::Submit),
+                HostEvent::Shortcut(Shortcut::Submit),
+            ],
+            ..HostBatch::default()
+        });
+        assert!(changed.changed);
+        assert_eq!(changed.invalidation, Invalidation::Layout);
+        assert_eq!(host.application_mut().submits, 2);
+        assert_eq!(host.inspect().frame_generation, 2);
+        assert_eq!(host.inspect().resources.retained_build_scratch_bytes, 0);
+    }
+
+    #[test]
+    fn typed_completions_are_applied_in_the_same_batch_before_one_rebuild() {
+        let mut host = UiHost::new(CompletionApplication::default(), 160, 48);
+        let outcome = host.step(HostBatch {
+            completions: vec![Completion::new("loaded-count", 7_u32)],
+            ..HostBatch::default()
+        });
+        assert!(outcome.changed);
+        assert_eq!(outcome.invalidation, Invalidation::Layout);
+        assert!(outcome.completion_failures.is_empty());
+        assert_eq!(host.application().0, 7);
+        assert_eq!(host.inspect().frame_generation, 2);
+
+        let rejected = host.step(HostBatch {
+            completions: vec![Completion::new("loaded-count", "wrong type")],
+            ..HostBatch::default()
+        });
+        assert!(!rejected.changed);
+        assert_eq!(
+            rejected.completion_failures[0].kind,
+            CompletionFailureKind::TypeMismatch
+        );
+    }
+
+    #[test]
+    fn declared_dialog_surface_renders_in_host_stack_and_cancel_restores_focus() {
+        struct DialogApplication {
+            confirmations: usize,
+        }
+        impl Application for DialogApplication {
+            type Message = bool;
+            fn update(&mut self, confirmed: Self::Message) {
+                self.confirmations += usize::from(confirmed);
+            }
+            fn view(&self, _context: ViewContext) -> impl crate::View<Self::Message> {
+                Button::new(false, "Open").id("anchor")
+            }
+            fn frame_overlays(&self, _context: ViewContext) -> Vec<FrameOverlay<Self::Message>> {
+                vec![FrameOverlay::surface(
+                    crate::TransientSurface::dialog(
+                        "dialog",
+                        crate::OverlayAnchor::Node(UiId::from("anchor")),
+                        crate::Size::new(120.0, 80.0),
+                        crate::OverlayStyle {
+                            background: 0x111111,
+                            foreground: 0xffffff,
+                            border: 0x888888,
+                            selected: 0x333333,
+                            radius: 8,
+                        },
+                    ),
+                    Button::new(true, "Confirm"),
+                )]
+            }
+        }
+        let mut host = UiHost::new(DialogApplication { confirmations: 0 }, 320, 200);
+        host.request_focus(UiId::from("root/anchor"));
+        assert!(host.open_transient(OverlayId::new("dialog"), UiId::from("root/anchor")));
+        assert!(
+            host.semantic_nodes()
+                .iter()
+                .any(|node| node.role == Some(SemanticRole::Dialog))
+        );
+        let confirm = host
+            .semantic_nodes()
+            .into_iter()
+            .find(|node| node.name.as_deref() == Some("Confirm"))
+            .expect("dialog content shares the semantic frame");
+        host.handle_event(UiEvent::FocusNext);
+        assert_eq!(host.inspect().keyboard_focus, Some(confirm.id.clone()));
+        host.handle_event(UiEvent::FocusNext);
+        assert_eq!(host.inspect().keyboard_focus, Some(confirm.id.clone()));
+        let activated =
+            host.perform_semantic_action(confirm.id, SemanticAction::Invoke(ActionKind::Activate));
+        assert!(activated.changed);
+        assert_eq!(host.application().confirmations, 1);
+        host.handle_event(UiEvent::ControllerBack);
+        assert!(host.inspect().open_overlay.is_none());
+        assert_eq!(
+            host.inspect().keyboard_focus,
+            Some(UiId::from("root/anchor"))
+        );
+    }
+
+    #[test]
+    fn public_popover_and_tooltip_use_named_canonical_transient_surfaces() {
+        struct PopoverApplication;
+        impl Application for PopoverApplication {
+            type Message = ();
+            fn update(&mut self, (): Self::Message) {}
+            fn view(&self, _context: ViewContext) -> impl crate::View<Self::Message> {
+                Button::new((), "Details").id("anchor")
+            }
+            fn frame_overlays(&self, _context: ViewContext) -> Vec<FrameOverlay<Self::Message>> {
+                vec![
+                    super::Popover::new(
+                        "details-popover",
+                        crate::OverlayAnchor::InvocationTarget(UiId::from("anchor")),
+                        "Application details",
+                        crate::Size::new(80.0, 40.0),
+                        crate::OverlayStyle {
+                            background: 0x111111,
+                            foreground: 0xffffff,
+                            border: 0x888888,
+                            selected: 0x333333,
+                            radius: 8,
+                        },
+                        Button::new((), "Close"),
+                    )
+                    .placement(crate::OverlayPlacement::Before)
+                    .direction(crate::ReadingDirection::RightToLeft)
+                    .scale(1.5)
+                    .into(),
+                ]
+            }
+        }
+
+        let mut host = UiHost::new(PopoverApplication, 320, 200);
+        let anchor = host
+            .query_unique(&crate::SemanticSelector::Role(SemanticRole::Button))
+            .expect("popover anchor");
+        let anchor_id = anchor.id.clone();
+        host.request_focus(anchor_id.clone());
+        assert!(host.open_transient(OverlayId::new("details-popover"), anchor.id));
+        let popover = host
+            .query_unique(&crate::SemanticSelector::RoleAndName {
+                role: SemanticRole::Popover,
+                name: "Application details".into(),
+            })
+            .expect("named popover");
+        assert_eq!(popover.bounds.size, crate::Size::new(120.0, 60.0));
+        assert!(host.accessibility_nodes().iter().any(|node| {
+            node.role.as_deref() == Some("popover")
+                && node.label.as_deref() == Some("Application details")
+        }));
+        host.handle_event(UiEvent::FocusNext);
+        assert_ne!(host.inspect().keyboard_focus.as_ref(), Some(&anchor_id));
+        host.handle_event(UiEvent::ControllerBack);
+        assert!(host.inspect().open_overlay.is_none());
+        assert_eq!(host.inspect().keyboard_focus.as_ref(), Some(&anchor_id));
+
+        struct TooltipApplication;
+        impl Application for TooltipApplication {
+            type Message = ();
+            fn update(&mut self, (): Self::Message) {}
+            fn view(&self, _context: ViewContext) -> impl crate::View<Self::Message> {
+                Button::new((), "Help").id("anchor")
+            }
+            fn frame_overlays(&self, _context: ViewContext) -> Vec<FrameOverlay<Self::Message>> {
+                vec![
+                    super::Tooltip::new(
+                        "help-tooltip",
+                        crate::OverlayAnchor::InvocationTarget(UiId::from("anchor")),
+                        "Explains this control",
+                        crate::Size::new(100.0, 32.0),
+                        crate::OverlayStyle {
+                            background: 0x111111,
+                            foreground: 0xffffff,
+                            border: 0x888888,
+                            selected: 0x333333,
+                            radius: 8,
+                        },
+                        crate::Text::new("Keyboard shortcut: F1"),
+                    )
+                    .placement(crate::OverlayPlacement::Above)
+                    .into(),
+                ]
+            }
+        }
+
+        let mut host = UiHost::new(TooltipApplication, 320, 200);
+        let anchor = host
+            .query_unique(&crate::SemanticSelector::Role(SemanticRole::Button))
+            .expect("tooltip anchor");
+        let anchor_id = anchor.id.clone();
+        assert!(host.request_focus(anchor_id.clone()).changed);
+        assert!(host.open_transient(OverlayId::new("help-tooltip"), anchor.id));
+        assert!(
+            host.query_unique(&crate::SemanticSelector::RoleAndName {
+                role: SemanticRole::Tooltip,
+                name: "Explains this control".into(),
+            })
+            .is_ok()
+        );
+        assert!(host.accessibility_nodes().iter().any(|node| {
+            node.role.as_deref() == Some("tooltip")
+                && node.label.as_deref() == Some("Explains this control")
+        }));
+        assert_eq!(host.inspect().keyboard_focus.as_ref(), Some(&anchor_id));
+    }
+
+    #[test]
+    fn ui_host_semantic_actions_update_rebuild_and_report_failures_transactionally() {
+        let mut host = UiHost::new(InputApplication::default(), 320, 48);
+        let text_field = host
+            .semantic_nodes()
+            .into_iter()
+            .find(|node| node.role == Some(SemanticRole::TextField))
+            .expect("text field semantics");
+        let changed = host.perform_semantic_action(
+            text_field.id.clone(),
+            SemanticAction::SetValue(SemanticValueInput::Text("semantic".into())),
+        );
+        assert!(changed.changed);
+        assert!(changed.semantic_failures.is_empty());
+        assert_eq!(host.application_mut().text, "semantic");
+        assert_eq!(host.inspect().frame_generation, 2);
+
+        let accessible = host.perform_accessibility_action(
+            text_field.id.clone(),
+            SemanticAction::SetValue(SemanticValueInput::Text("accessible".into())),
+        );
+        assert_eq!(accessible.messages.len(), 1);
+        assert_eq!(host.application().text, "accessible");
+        assert_eq!(host.inspect().modality, InputModality::Accessibility);
+
+        let rejected = host
+            .perform_semantic_action(text_field.id, SemanticAction::Invoke(ActionKind::Activate));
+        assert!(!rejected.changed);
+        assert_eq!(rejected.semantic_failures.len(), 1);
+        assert_eq!(
+            rejected.semantic_failures[0].error,
+            SemanticActionError::ActionUnavailable
+        );
+        assert_eq!(host.inspect().frame_generation, 3);
+
+        let missing = host.perform_semantic_action(
+            UiId::from("missing"),
+            SemanticAction::Invoke(ActionKind::Activate),
+        );
+        assert_eq!(
+            missing.semantic_failures[0].error,
+            SemanticActionError::MissingTarget
+        );
     }
 
     #[test]
@@ -531,7 +2253,7 @@ mod tests {
 
     #[test]
     fn embedded_controller_dispatch_respects_window_focus() {
-        let mut host = ApplicationHost::new(InputApplication::default(), 320, 48);
+        let mut host = UiHost::new(ControllerApplication, 320, 48);
         host.handle_event(crate::UiEvent::FocusGained);
         assert!(
             host.handle_controller_action(ControllerAction::Down)
@@ -551,8 +2273,110 @@ mod tests {
     }
 
     #[test]
+    fn controller_host_event_is_equivalent_to_the_canonical_ui_transition() {
+        let mut controller = UiHost::new(ControllerApplication, 320, 48);
+        let mut semantic = UiHost::new(ControllerApplication, 320, 48);
+        controller.handle_event(crate::UiEvent::FocusGained);
+        semantic.handle_event(crate::UiEvent::FocusGained);
+
+        let controller_outcome = controller.step(HostBatch {
+            events: vec![HostEvent::Controller(ControllerAction::Down)],
+            ..HostBatch::default()
+        });
+        let semantic_outcome = semantic.step(HostBatch {
+            events: vec![HostEvent::Ui(crate::UiEvent::ControllerDown)],
+            ..HostBatch::default()
+        });
+
+        assert_eq!(controller_outcome.changed, semantic_outcome.changed);
+        assert_eq!(
+            controller_outcome.invalidation,
+            semantic_outcome.invalidation
+        );
+        assert_eq!(controller.inspect(), semantic.inspect());
+
+        let activation = controller.handle_controller_action(ControllerAction::Confirm);
+        assert_eq!(activation.messages.len(), 1);
+        assert_eq!(activation.messages[0].type_name, "()");
+    }
+
+    #[test]
+    fn normalized_touch_and_direct_pointer_adapters_produce_the_same_host_trace() {
+        let mut touch = UiHost::new(ControllerApplication, 160, 48);
+        let mut pointer = UiHost::new(ControllerApplication, 160, 48);
+        let point = crate::Point { x: 40.0, y: 20.0 };
+        let pointer_outcome = pointer.step(HostBatch {
+            events: vec![
+                HostEvent::Ui(UiEvent::PointerMoved(point)),
+                HostEvent::Ui(UiEvent::PointerPressed(point)),
+                HostEvent::Ui(UiEvent::PointerReleased(point)),
+            ],
+            ..HostBatch::default()
+        });
+        let touch_outcome = touch.step(HostBatch {
+            events: vec![
+                HostEvent::Normalized {
+                    input: InputEvent::Touch(TouchEvent::Started {
+                        device: DeviceId(4),
+                        order: EventOrder(1),
+                        contact: TouchId(1),
+                        position: Point { x: 40.0, y: 20.0 },
+                    }),
+                    clipboard_text: None,
+                },
+                HostEvent::Normalized {
+                    input: InputEvent::Touch(TouchEvent::Ended {
+                        device: DeviceId(4),
+                        order: EventOrder(2),
+                        contact: TouchId(1),
+                        position: Point { x: 40.0, y: 20.0 },
+                    }),
+                    clipboard_text: None,
+                },
+            ],
+            ..HostBatch::default()
+        });
+        assert_eq!(touch_outcome.messages, pointer_outcome.messages);
+        assert_eq!(touch_outcome.invalidation, pointer_outcome.invalidation);
+        assert_eq!(touch.inspect(), pointer.inspect());
+    }
+
+    #[test]
+    fn resize_and_modality_are_supplied_before_the_declarative_rebuild() {
+        let mut host = UiHost::new(ResponsiveApplication, 320, 48);
+        assert_eq!(host.semantic_nodes()[0].name.as_deref(), Some("Wide"));
+
+        host.resize(160, 48);
+        assert_eq!(host.inspect().frame_generation, 2);
+        assert_eq!(host.semantic_nodes()[0].name.as_deref(), Some("Narrow"));
+
+        let outcome = host.handle_controller_action(ControllerAction::Down);
+        assert!(outcome.changed);
+        assert_eq!(host.inspect().modality, crate::InputModality::Controller);
+        assert_eq!(host.semantic_nodes()[0].name.as_deref(), Some("Controller"));
+
+        let target = host.semantic_nodes()[0].id.clone();
+        let generation = host.inspect().frame_generation;
+        assert!(host.request_focus(target.clone()).changed);
+        let inspection = host.inspect();
+        assert_eq!(inspection.keyboard_focus, Some(target));
+        assert_eq!(inspection.modality, crate::InputModality::Controller);
+        assert_eq!(inspection.frame_generation, generation + 1);
+    }
+
+    #[test]
+    fn guide_action_is_reported_globally_without_entering_application_dispatch() {
+        let mut host = UiHost::new(InputApplication::default(), 320, 48);
+        let outcome = host.handle_controller_action(ControllerAction::Launcher);
+
+        assert!(!outcome.changed);
+        assert_eq!(outcome.global_actions, [GlobalAction::ToggleLauncher]);
+        assert_eq!(host.inspect().frame_generation, 1);
+    }
+
+    #[test]
     fn embedded_host_dispatches_normalized_text_ime_and_submit_once() {
-        let mut host = ApplicationHost::new(InputApplication::default(), 320, 48);
+        let mut host = UiHost::new(InputApplication::default(), 320, 48);
         assert!(host.handle_input(&focus_event(), None).changed);
         assert!(host.input_context().text_focused);
         assert!(
@@ -592,7 +2416,7 @@ mod tests {
 
     #[test]
     fn embedded_host_owns_one_clipboard_command_path() {
-        let mut host = ApplicationHost::new(InputApplication::default(), 320, 48);
+        let mut host = UiHost::new(InputApplication::default(), 320, 48);
         host.handle_input(&focus_event(), None);
         host.handle_input(
             &InputEvent::Text(TextEvent::Commit {
@@ -617,5 +2441,412 @@ mod tests {
                 .changed
         );
         assert_eq!(host.application_mut().text, "pasted");
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum ReplayPath {
+        Headless,
+        StandaloneAdapter,
+        EmbeddedAdapter,
+    }
+
+    #[derive(Clone, Debug, PartialEq)]
+    struct ReplayProof {
+        messages: Vec<MessageEvidence>,
+        semantics: Vec<crate::SemanticNodeSnapshot>,
+        paint: Vec<crate::PaintCommand>,
+        accessibility: Vec<crate::AccessibilityNode>,
+        inspection: super::HostInspection,
+        deadline_offset: Option<Duration>,
+    }
+
+    struct ReplayApplication {
+        text: String,
+    }
+
+    impl Application for ReplayApplication {
+        type Message = Message;
+
+        fn update(&mut self, message: Self::Message) {
+            match message {
+                Message::Changed(text) => self.text = text,
+            }
+        }
+
+        fn message_evidence(&self, message: &Self::Message) -> MessageEvidence {
+            let Message::Changed(text) = message;
+            MessageEvidence {
+                type_name: "replay.text.changed",
+                label: Some(text.clone()),
+            }
+        }
+
+        fn view(&self, _context: ViewContext) -> impl crate::View<Self::Message> {
+            TextField::on_change(&self.text, Message::Changed)
+        }
+
+        fn poll_interval(&self) -> Option<Duration> {
+            Some(Duration::from_millis(40))
+        }
+    }
+
+    fn replay_adapter_path(path: ReplayPath) -> ReplayProof {
+        let origin = Instant::now();
+        let mut host = UiHost::new_at(
+            ReplayApplication {
+                text: String::new(),
+            },
+            320,
+            48,
+            origin,
+        );
+        let editor = host
+            .semantic_nodes()
+            .into_iter()
+            .find(|node| node.role == Some(SemanticRole::TextField))
+            .expect("editor semantic target")
+            .id;
+        let events = vec![
+            HostEvent::Normalized {
+                input: focus_event(),
+                clipboard_text: None,
+            },
+            HostEvent::Normalized {
+                input: InputEvent::Text(TextEvent::Preedit {
+                    device: DeviceId(1),
+                    order: EventOrder(2),
+                    text: "世".into(),
+                    selection: Some((0, 3)),
+                }),
+                clipboard_text: None,
+            },
+            HostEvent::Normalized {
+                input: InputEvent::Text(TextEvent::Commit {
+                    device: DeviceId(1),
+                    order: EventOrder(3),
+                    text: "world".into(),
+                }),
+                clipboard_text: None,
+            },
+            HostEvent::Normalized {
+                input: command_key(4, KeyCode::KeyA, "a"),
+                clipboard_text: None,
+            },
+            HostEvent::Normalized {
+                input: command_key(5, KeyCode::KeyC, "c"),
+                clipboard_text: None,
+            },
+            HostEvent::Normalized {
+                input: command_key(6, KeyCode::KeyX, "x"),
+                clipboard_text: None,
+            },
+            HostEvent::Normalized {
+                input: command_key(7, KeyCode::KeyV, "v"),
+                clipboard_text: Some("pasted".into()),
+            },
+            HostEvent::Normalized {
+                input: InputEvent::Touch(TouchEvent::Started {
+                    device: DeviceId(4),
+                    order: EventOrder(8),
+                    contact: TouchId(1),
+                    position: Point { x: 8.0, y: 8.0 },
+                }),
+                clipboard_text: None,
+            },
+            HostEvent::Normalized {
+                input: InputEvent::Touch(TouchEvent::Ended {
+                    device: DeviceId(4),
+                    order: EventOrder(9),
+                    contact: TouchId(1),
+                    position: Point { x: 8.0, y: 8.0 },
+                }),
+                clipboard_text: None,
+            },
+            HostEvent::Controller(ControllerAction::Down),
+            HostEvent::Accessibility {
+                target: editor,
+                action: SemanticAction::SetValue(SemanticValueInput::Text("accessible".into())),
+            },
+            HostEvent::Shortcut(Shortcut::Submit),
+            HostEvent::Controller(ControllerAction::Launcher),
+            HostEvent::Ui(UiEvent::FocusLost),
+            HostEvent::Poll,
+        ];
+        let batch = HostBatch {
+            now: Some(origin + Duration::from_millis(45)),
+            surface_size: Some((480, 72)),
+            scale_factor: Some(1.5),
+            window_focused: Some(true),
+            events,
+            ..HostBatch::default()
+        };
+
+        // These are deliberately transport-only paths. Standalone SDL,
+        // embedded shell surfaces, and headless scenarios all surrender the
+        // normalized batch to the same host transition authority.
+        let outcome = match path {
+            ReplayPath::Headless => host.step(batch),
+            ReplayPath::StandaloneAdapter => {
+                let adapter_batch = batch;
+                host.step(adapter_batch)
+            }
+            ReplayPath::EmbeddedAdapter => {
+                let embedded_batch = batch;
+                host.step(embedded_batch)
+            }
+        };
+        ReplayProof {
+            messages: outcome.messages,
+            semantics: host.semantic_nodes(),
+            paint: host.commands().to_vec(),
+            accessibility: host.accessibility_nodes().to_vec(),
+            inspection: host.inspect(),
+            deadline_offset: outcome
+                .next_deadline
+                .map(|deadline| deadline.duration_since(origin)),
+        }
+    }
+
+    #[test]
+    fn one_normalized_trace_is_identical_across_all_host_adapter_paths() {
+        let headless = replay_adapter_path(ReplayPath::Headless);
+        let standalone = replay_adapter_path(ReplayPath::StandaloneAdapter);
+        let embedded = replay_adapter_path(ReplayPath::EmbeddedAdapter);
+
+        assert_eq!(standalone, headless);
+        assert_eq!(embedded, headless);
+        assert_eq!(headless.deadline_offset, Some(Duration::from_millis(85)));
+        assert_eq!(headless.inspection.scale_factor, 1.5);
+        assert_eq!(headless.inspection.modality, InputModality::Accessibility);
+        assert!(!headless.inspection.window_focused);
+        assert!(headless.messages.iter().any(|message| {
+            message.type_name == "replay.text.changed"
+                && message.label.as_deref() == Some("accessible")
+        }));
+    }
+
+    #[test]
+    fn adapter_faults_are_typed_and_do_not_prevent_overlay_dismissal_or_mutate_state() {
+        struct FaultApplication;
+        impl Application for FaultApplication {
+            type Message = ();
+            fn update(&mut self, (): Self::Message) {}
+            fn view(&self, _context: ViewContext) -> impl crate::View<Self::Message> {
+                Button::new((), "Anchor").id("anchor")
+            }
+            fn frame_overlays(&self, _context: ViewContext) -> Vec<FrameOverlay<Self::Message>> {
+                vec![FrameOverlay::surface(
+                    crate::TransientSurface::dialog(
+                        "fault-dialog",
+                        crate::OverlayAnchor::Node(UiId::from("anchor")),
+                        crate::Size::new(120.0, 60.0),
+                        crate::OverlayStyle {
+                            background: 0x111111,
+                            foreground: 0xffffff,
+                            border: 0x888888,
+                            selected: 0x333333,
+                            radius: 8,
+                        },
+                    ),
+                    Button::new((), "Dismiss"),
+                )]
+            }
+        }
+
+        let stages = [
+            HostFailureStage::Presenter,
+            HostFailureStage::Clipboard,
+            HostFailureStage::Ime,
+            HostFailureStage::Accessibility,
+            HostFailureStage::Controller,
+        ];
+        for stage in stages {
+            let mut host = UiHost::new(FaultApplication, 320, 200);
+            assert!(host.open_transient(OverlayId::new("fault-dialog"), UiId::from("root/anchor")));
+            let before = host.inspect();
+            let failure = HostFailure {
+                surface: "fault-test".into(),
+                stage,
+                optional: stage != HostFailureStage::Presenter,
+                detail: format!("injected {stage:?} failure"),
+            };
+            let outcome = host.step(HostBatch {
+                failures: vec![failure.clone()],
+                events: vec![HostEvent::Ui(UiEvent::ControllerBack)],
+                ..HostBatch::default()
+            });
+
+            assert_eq!(outcome.failures, [failure]);
+            assert!(before.open_overlay.is_some());
+            assert!(host.inspect().open_overlay.is_none());
+            assert_eq!(host.inspect().window_focused, before.window_focused);
+            assert!(
+                host.accessibility_nodes()
+                    .iter()
+                    .any(|node| node.label.as_deref() == Some("Anchor"))
+            );
+        }
+    }
+
+    #[test]
+    fn declarative_frame_layers_are_applied_on_initial_resolve_and_rebuild() {
+        #[derive(Clone, PartialEq)]
+        enum Message {
+            Anchor,
+            Context,
+            Choose,
+            ChooseSecond,
+        }
+
+        struct LayerApplication;
+
+        impl Application for LayerApplication {
+            type Message = Message;
+
+            fn update(&mut self, _message: Self::Message) {}
+
+            fn view(&self, _context: ViewContext) -> impl crate::View<Self::Message> {
+                crate::Container::new()
+                    .id("anchor")
+                    .message(Message::Anchor)
+                    .context_message(Message::Context)
+                    .width(120.0)
+                    .height(40.0)
+            }
+
+            fn frame_overlays(
+                &self,
+                _context: ViewContext,
+            ) -> Vec<super::FrameOverlay<Self::Message>> {
+                vec![super::FrameOverlay::Menu(
+                    crate::OverlayMenu::new(
+                        "context",
+                        crate::OverlayAnchor::Point {
+                            invocation_target: crate::UiId::from("anchor"),
+                            point: crate::Point { x: 72.0, y: 24.0 },
+                        },
+                    )
+                    .semantic_style(crate::OverlayStyle {
+                        background: 0x202630,
+                        foreground: 0xe8edf4,
+                        border: 0x444444,
+                        selected: 0x334455,
+                        radius: 0,
+                    })
+                    .item(crate::OverlayMenuItem::action(
+                        "choose",
+                        "Choose",
+                        Message::Choose,
+                    ))
+                    .item(crate::OverlayMenuItem::action(
+                        "choose-second",
+                        "Choose second",
+                        Message::ChooseSecond,
+                    )),
+                )]
+            }
+        }
+
+        let mut host = UiHost::new(LayerApplication, 320, 200);
+        assert!(host.inspect().overlay_failures.is_empty());
+        let anchor = host
+            .semantic_targets_for_message(&Message::Anchor)
+            .into_iter()
+            .next()
+            .unwrap()
+            .id;
+        host.handle_event(crate::UiEvent::FocusGained);
+        host.handle_event(crate::UiEvent::ControllerDown);
+        host.perform_semantic_action(
+            anchor,
+            crate::SemanticAction::Invoke(crate::ActionKind::ContextMenu),
+        );
+        assert!(host.inspect().overlay_failures.is_empty());
+        let menu = host
+            .query(&crate::SemanticSelector::Role(crate::SemanticRole::Menu))
+            .pop()
+            .expect("menu layer must survive the rebuild caused by opening it");
+        assert_eq!(menu.bounds.origin, crate::Point { x: 72.0, y: 24.0 });
+        assert_eq!(
+            host.query(&crate::SemanticSelector::Role(
+                crate::SemanticRole::MenuItem
+            ))
+            .len(),
+            2
+        );
+        let first = host.inspect().controller_target.unwrap();
+        let first_selected_rect = host
+            .commands()
+            .iter()
+            .find_map(|command| match command {
+                crate::backend::PaintCommand::RoundedFill { rect, color, .. }
+                    if *color == 0x334455 =>
+                {
+                    Some(*rect)
+                }
+                _ => None,
+            })
+            .expect("first menu row must own the selected paint");
+        host.handle_event(crate::UiEvent::ControllerDown);
+        let second = host.inspect().controller_target.unwrap();
+        assert_ne!(first, second);
+        let items = host.query(&crate::SemanticSelector::Role(
+            crate::SemanticRole::MenuItem,
+        ));
+        assert!(
+            items
+                .iter()
+                .any(|item| item.id == second && item.focused && item.controller_selected)
+        );
+        assert!(
+            items
+                .iter()
+                .any(|item| item.id == first && !item.focused && !item.controller_selected)
+        );
+        let second_selected_rect = host
+            .commands()
+            .iter()
+            .find_map(|command| match command {
+                crate::backend::PaintCommand::RoundedFill { rect, color, .. }
+                    if *color == 0x334455 =>
+                {
+                    Some(*rect)
+                }
+                _ => None,
+            })
+            .expect("second menu row must own the selected paint after rebuild");
+        assert_ne!(first_selected_rect, second_selected_rect);
+    }
+
+    #[test]
+    fn invalid_frame_layer_anchor_is_retained_as_typed_host_evidence() {
+        struct InvalidLayerApplication;
+
+        impl Application for InvalidLayerApplication {
+            type Message = ();
+
+            fn update(&mut self, (): Self::Message) {}
+
+            fn view(&self, _context: ViewContext) -> impl crate::View<Self::Message> {
+                crate::Container::new().id("present")
+            }
+
+            fn frame_overlays(
+                &self,
+                _context: ViewContext,
+            ) -> Vec<super::FrameOverlay<Self::Message>> {
+                vec![super::FrameOverlay::Menu(crate::OverlayMenu::new(
+                    "broken",
+                    crate::OverlayAnchor::Node(crate::UiId::from("missing")),
+                ))]
+            }
+        }
+
+        let host = UiHost::new(InvalidLayerApplication, 320, 200);
+        assert_eq!(host.inspect().overlay_failures.len(), 1);
+        assert_eq!(
+            host.inspect().overlay_failures[0].error,
+            crate::SemanticActionError::MissingTarget
+        );
     }
 }

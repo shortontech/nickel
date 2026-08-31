@@ -1107,7 +1107,8 @@ mod tests {
     use super::*;
     #[cfg(feature = "view")]
     use nickel_ui::{
-        PaintCommand, Point, PointerIcon, Rect, SdlComponentRenderer, UiEvent, UiStateStore, UiTree,
+        ActionKind, Point, Rect, SdlComponentRenderer, SemanticAction, SemanticRole, UiEvent,
+        UiFrame, UiStateStore,
     };
 
     #[cfg(feature = "view")]
@@ -1213,7 +1214,7 @@ mod tests {
             "# Stable\n\n**bold** *italic* ~~strike~~ `code` [link](guide.md)",
         );
         let render = || {
-            UiTree::layout(
+            UiFrame::layout(
                 markdown_view(&document, MarkdownPalette::default(), |destination| {
                     Message::Link(destination.to_owned())
                 }),
@@ -1231,20 +1232,10 @@ mod tests {
         let document = MarkdownDocument::parse(
             "**bold** *italic* ~~strike~~ `code` [link](https://example.com)",
         );
-        let tree = UiTree::layout(
-            markdown_view(&document, MarkdownPalette::default(), |destination| {
-                Message::Link(destination.to_owned())
-            }),
-            Rect::new(0.0, 0.0, 640.0, 200.0),
-        );
-        let (text, spans) = tree
-            .commands()
-            .iter()
-            .find_map(|command| match command {
-                PaintCommand::StyledText { text, spans, .. } => Some((text, spans)),
-                _ => None,
-            })
-            .expect("styled prose");
+        let Block::Paragraph { inlines } = &document.blocks[0] else {
+            panic!("styled source must parse as a paragraph");
+        };
+        let (text, spans) = styled_inline_text(inlines, MarkdownPalette::default(), false);
         assert_eq!(text, "bold italic strike code link");
         assert!(spans.iter().any(|span| span.bold));
         assert!(spans.iter().any(|span| span.italic));
@@ -1262,29 +1253,25 @@ mod tests {
     #[cfg(feature = "view")]
     fn link_activation_emits_one_unmodified_typed_destination() {
         let document = MarkdownDocument::parse("Read [the guide](../guide.md#start).");
-        let mut state = UiStateStore::default();
-        let build = |state: &mut UiStateStore| {
-            UiTree::layout_with_state(
-                markdown_view(&document, MarkdownPalette::default(), |destination| {
-                    Message::Link(destination.to_owned())
-                }),
-                Rect::new(0.0, 0.0, 640.0, 480.0),
-                state,
-            )
-        };
-        let tree = build(&mut state);
+        let tree = UiFrame::layout(
+            markdown_view(&document, MarkdownPalette::default(), |destination| {
+                Message::Link(destination.to_owned())
+            }),
+            Rect::new(0.0, 0.0, 640.0, 480.0),
+        );
         let message = Message::Link("../guide.md#start".into());
-        let rect = tree.message_rect(&message).expect("link control");
-        let point = Point {
-            x: rect.origin.x + 2.0,
-            y: rect.origin.y + 2.0,
-        };
-        assert_eq!(tree.pointer_icon_at(point), PointerIcon::Hand);
-        tree.handle_event(&mut state, UiEvent::PointerPressed(point));
-        let rebuilt = build(&mut state);
+        let target = tree
+            .semantic_nodes()
+            .into_iter()
+            .find(|node| {
+                node.role == Some(SemanticRole::Button)
+                    && node.name.as_deref() == Some("the guide  ↗")
+            })
+            .expect("semantic link control");
+        assert_eq!(target.actions, vec![ActionKind::Activate]);
         assert_eq!(
-            rebuilt
-                .handle_event(&mut state, UiEvent::PointerReleased(point))
+            tree.perform_semantic_action(&target.id, SemanticAction::Invoke(ActionKind::Activate),)
+                .expect("advertised link activation")
                 .messages,
             vec![message]
         );
@@ -1297,7 +1284,7 @@ mod tests {
             "# Heading\n\nFirst *paragraph*.\n\n- One\n- Two\n\n> Quoted\n\n```text\ncode();\n```",
         );
         let mut state = UiStateStore::default();
-        let tree = UiTree::layout_with_state(
+        let tree = UiFrame::layout_with_state(
             markdown_view(&document, MarkdownPalette::default(), |destination| {
                 Message::Link(destination.to_owned())
             }),
@@ -1305,12 +1292,9 @@ mod tests {
             &mut state,
         );
         let first_text = tree
-            .commands()
+            .accessibility_nodes()
             .iter()
-            .find_map(|command| match command {
-                PaintCommand::StyledText { bounds, text, .. } if text == "Heading" => Some(*bounds),
-                _ => None,
-            })
+            .find_map(|node| (node.label.as_deref() == Some("Heading")).then_some(node.rect))
             .expect("heading text");
         tree.handle_event(
             &mut state,
@@ -1343,7 +1327,7 @@ mod tests {
         let selection_document = std::sync::Arc::new(nickel_ui::SelectionDocument::new(runs));
         let mut state = UiStateStore::default();
         let build = |state: &mut UiStateStore| {
-            UiTree::layout_with_state(
+            UiFrame::layout_with_state(
                 SelectionRegion::new(selection_document.clone())
                     .id("test-markdown-region")
                     .child(markdown_content_view(
@@ -1365,13 +1349,14 @@ mod tests {
         state.set_selection_owner(Some(region_id.clone()));
         *state.document_selection_mut(region_id) = selection_document.select_all();
         let tree = build(&mut state);
-        assert!(tree.commands().iter().any(|command| matches!(
-            command,
-            PaintCommand::Fill {
-                color: 0x315a8f,
-                ..
-            }
-        )));
+        let mut renderer = SdlComponentRenderer::new_pixel_buffer(640, 480, 1.0);
+        renderer.render(tree.commands());
+        assert!(
+            renderer
+                .pixels()
+                .iter()
+                .any(|pixel| [pixel.r, pixel.g, pixel.b] == [0x31, 0x5a, 0x8f])
+        );
     }
 
     #[test]
@@ -1385,7 +1370,7 @@ mod tests {
             Rect::new(0.0, 0.0, 1024.0, 768.0),
             Rect::new(0.0, 0.0, 2048.0, 1536.0),
         ] {
-            let tree = UiTree::layout(
+            let tree = UiFrame::layout(
                 markdown_view(&document, MarkdownPalette::default(), |destination| {
                     Message::Link(destination.to_owned())
                 }),
@@ -1409,25 +1394,25 @@ mod tests {
         let document = MarkdownDocument::parse(
             "- **Nickel UI** — the desktop shell, taskbar, launcher, task switcher, and system controls",
         );
-        let tree = UiTree::layout(
+        let tree = UiFrame::layout(
             markdown_view(&document, MarkdownPalette::default(), |destination| {
                 Message::Link(destination.to_owned())
             }),
             Rect::new(0.0, 0.0, 900.0, 200.0),
         );
-        let (bounds, text, spans) = tree
-            .commands()
+        let Block::List { items, .. } = &document.blocks[0] else {
+            panic!("styled source must parse as a list");
+        };
+        let Block::Paragraph { inlines } = &items[0][0] else {
+            panic!("list item must contain prose");
+        };
+        let (text, spans) = styled_inline_text(inlines, MarkdownPalette::default(), false);
+        let bounds = tree
+            .accessibility_nodes()
             .iter()
-            .find_map(|command| match command {
-                PaintCommand::StyledText {
-                    bounds,
-                    text,
-                    spans,
-                    ..
-                } if text.starts_with("Nickel UI") => Some((bounds, text, spans)),
-                _ => None,
-            })
-            .expect("styled list text");
+            .find(|node| node.label.as_deref() == Some(text.as_str()))
+            .expect("styled list text")
+            .rect;
         assert_eq!(
             text,
             "Nickel UI — the desktop shell, taskbar, launcher, task switcher, and system controls"
@@ -1446,7 +1431,7 @@ mod tests {
         let document = MarkdownDocument::parse(
             "1. Definitions. License shall mean the terms and conditions for use, reproduction, and distribution as defined by this document and all following sections.\n2. Grant. Each contributor hereby grants a perpetual worldwide license under these terms.\n",
         );
-        let tree = UiTree::layout(
+        let tree = UiFrame::layout(
             markdown_view(&document, MarkdownPalette::default(), |destination| {
                 Message::Link(destination.to_owned())
             }),
@@ -1480,7 +1465,7 @@ mod tests {
         )
         .expect("Apache license fixture");
         let document = MarkdownDocument::parse(source);
-        let tree = UiTree::layout(
+        let tree = UiFrame::layout(
             markdown_view(&document, MarkdownPalette::default(), |destination| {
                 Message::Link(destination.to_owned())
             }),
@@ -1488,12 +1473,9 @@ mod tests {
         );
         let nodes = tree.resolved_layout().nodes();
         let styled = tree
-            .commands()
+            .accessibility_nodes()
             .iter()
-            .filter_map(|command| match command {
-                PaintCommand::StyledText { bounds, text, .. } => Some((*bounds, text.as_str())),
-                _ => None,
-            })
+            .filter_map(|node| node.label.as_deref().map(|text| (node.rect, text)))
             .collect::<Vec<_>>();
         for (index, (left, left_text)) in styled.iter().enumerate() {
             for (right, right_text) in &styled[index + 1..] {
@@ -1553,7 +1535,7 @@ mod tests {
             "# Raster hierarchy\n\n**Bold**, *italic*, ~~strike~~, `code`, and [link](guide.md).\n\n> Quote\n\n```rust\nfn main() {}\n```",
         );
         for (width, height, scale) in [(640, 480, 1.0), (1024, 768, 1.0), (2048, 1536, 2.0)] {
-            let tree = UiTree::layout(
+            let tree = UiFrame::layout(
                 markdown_view(&document, MarkdownPalette::default(), |destination| {
                     Message::Link(destination.to_owned())
                 }),
@@ -1565,14 +1547,9 @@ mod tests {
                 tree.diagnostics()
             );
             let text = tree
-                .commands()
+                .accessibility_nodes()
                 .iter()
-                .filter_map(|command| match command {
-                    PaintCommand::Text { text, .. } | PaintCommand::StyledText { text, .. } => {
-                        Some(text.as_str())
-                    }
-                    _ => None,
-                })
+                .filter_map(|node| node.label.as_deref())
                 .collect::<Vec<_>>();
             for expected in ["Raster hierarchy", "Bold", "Quote", "fn main"] {
                 assert!(
@@ -1598,22 +1575,20 @@ mod tests {
             "wrapping prose ".repeat(40),
             "code_without_breaks_".repeat(80)
         ));
-        let tree = UiTree::layout(
+        let tree = UiFrame::layout(
             markdown_view(&document, MarkdownPalette::default(), |destination| {
                 Message::Link(destination.to_owned())
             }),
             Rect::new(0.0, 0.0, 320.0, 600.0),
         );
         let prose = tree
-            .commands()
+            .accessibility_nodes()
             .iter()
-            .find_map(|command| match command {
-                PaintCommand::StyledText { bounds, text, .. }
-                    if text.starts_with("wrapping prose") =>
-                {
-                    Some(*bounds)
-                }
-                _ => None,
+            .find_map(|node| {
+                node.label
+                    .as_deref()
+                    .is_some_and(|text| text.starts_with("wrapping prose"))
+                    .then_some(node.rect)
             })
             .expect("prose bounds");
         assert!(prose.size.height > 40.0, "long prose did not wrap");

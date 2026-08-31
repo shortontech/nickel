@@ -7,25 +7,45 @@ pub mod document_selection;
 pub mod gpu;
 pub mod input;
 pub mod layout;
+pub mod overlay;
+pub mod primitives;
 mod runtime;
 pub mod state;
 pub mod text_editor;
 pub mod theme;
-pub mod ui;
+mod ui;
 
-pub use controller::{ControllerAction, ControllerInput, NavigationPane, PaneNavigation};
+pub use controller::{ControllerAction, ControllerFamily, ControllerInput};
 pub use document_selection::{
     DocumentSelection, SelectionAffinity, SelectionDocument, SelectionEndpoint, SelectionRun,
     TextBoundary,
 };
-pub use gpu::{ComponentGpu, DamageRegion, Pixel, SdlCanvasPresenter, SdlComponentRenderer};
+pub use gpu::{
+    AggregatePresenterCacheDiagnostics, DamageRegion, Pixel, PresenterCacheDiagnostics,
+    PresenterCacheMode, SdlCanvasPresenter, SdlComponentRenderer,
+};
 pub use input::{FocusedInputDispatcher, InputCommand, InputContext};
 pub use layout::{
     Align, Axis, Constraints, FlexItem, Insets, Justify, Length, Overflow, Point, Rect, Size,
     Track, layout_flex,
 };
-pub use runtime::{Application, ApplicationHost, HostEventOutcome, Shortcut, run};
-pub use state::{Invalidation, TransientState, UiId, UiStateStore};
+pub use overlay::{
+    CollisionPolicy, DismissPolicy, DismissReason, FocusReturn, OverlayAnchor, OverlayFocusPolicy,
+    OverlayId, OverlayMenu, OverlayMenuItem, OverlayPlacement, OverlayStyle, TransientKind,
+    TransientSurface, TransientTone, place_transient,
+};
+pub use primitives::{
+    ActionRegion, ArtworkPresentation, ItemPresentation, StatusRegion, SurfaceScaffold, ToolRegion,
+};
+pub use runtime::{
+    AdapterOutcome, Application, Completion, CompletionFailure, CompletionFailureKind,
+    ControllerPollSchedule, DefaultHostAdapter, EffectEvidence, FrameOverlay, GlobalAction,
+    HostAdapter, HostBatch, HostChangeToken, HostEvent, HostEventOutcome, HostFailure,
+    HostFailureStage, HostInspection, HostServices, HostTelemetry, MessageEvidence,
+    OverlayDeclarationFailure, Popover, SemanticActionFailure, Shortcut, Tooltip, UiHost,
+    ViewContext, run, run_with_adapter,
+};
+pub use state::{InputModality, Invalidation, NavigationState, TransientState, UiId, UiStateStore};
 pub use text_editor::TextEditor;
 pub use theme::{
     AccentColors, AccessibilityPreferences, AppearancePreference, BorderColors, ContrastPreference,
@@ -35,25 +55,43 @@ pub use theme::{
     TransparencyPreference, TypographyScale,
 };
 pub use ui::{
-    AccessibilityNode, AccountSummaryRow, AnyView, Background, Border, Button, ButtonLabel,
-    ButtonPresentation, ChoiceCard, ChoiceCardGroup, Color, ColorSwatch, Column, CompactIconTile,
-    Component, ComponentBuilderExt, Container, ContentPane, DiagnosticKind, Dropdown, EventOutcome,
-    FallbackAvatar, FieldGroup, FileGrid, FileGridItem, GradientAxis, Grid, GridColumnSpec, Header,
-    HorizontalRule, Icon, Image, ImageAlignment, ImageFit, ImagePresentation, InlineButtonGroup,
-    InteractionState, LauncherSearchField, LayoutDiagnostic, LinearGradient, Menu, MenuBar,
-    MenuItem, NavigationItem, NavigationSectionLabel, PageHeader, PaintCommand, PointerIcon,
-    PreviewState, PreviewTile, ProjectStatusRow, RadioButton, ReadingDirection, ResolvedGrid,
-    ResolvedLayout, ResolvedNode, Row, SETTINGS_SHELL_NARROW_BREAKPOINT,
-    START_MENU_SINGLE_PANE_BREAKPOINT, ScrollExtent, SectionHeader, SelectField,
-    SelectionIndicator, SelectionRegion, SessionActionRow, SettingsCard, SettingsListCard,
-    SettingsNarrowPane, SettingsNavigation, SettingsRow, SettingsSearchEntry, SettingsSearchField,
-    SettingsSection, SettingsShell, SettingsStatus, SettingsStatusKind, ShortcutRow, ShortcutState,
-    ShoulderHints, Sidebar, SidebarFolder, SidebarItem, SidebarSection, Slider, SliderField,
-    SourceLocation, Spacer, StartMenuNarrowPane, StartMenuShell, StyledText, StyledTextSpan,
-    Surface, SurfaceRole, Switch, SwitchState, TabList, Text, TextAlign, TextField, Tone, UiEvent,
-    UiTree, VerticalScroll, VirtualColumn, VirtualWindow, search_settings,
+    AccessibilityNode, AccountSummaryRow, ActionKind, ActionLegend, ActionLegendEntry, AnyView,
+    Background, Border, Button, ButtonLabel, ButtonPresentation, ChoiceCard, ChoiceCardGroup,
+    Collection, CollectionError, CollectionPresentation, CollectionState, Color, ColorSwatch,
+    Column, CompactIconTile, Component, ComponentBuilderExt, Container, ContentPane, CustomPaint,
+    DiagnosticKind, DiagnosticMode, Dropdown, EffectiveHitRoute, EventOutcome, FallbackAvatar,
+    FieldGroup, FileGrid, FileGridItem, FrameRequest, FrameResourceDiagnostics, GradientAxis, Grid,
+    GridColumnSpec, Header, HorizontalRule, Icon, Image, ImageAlignment, ImageFit,
+    ImagePresentation, InlineButtonGroup, InputSource, InteractionIntent, InteractionState,
+    LauncherSearchField, LayoutDiagnostic, LinearGradient, Menu, MenuBar, MenuItem,
+    NavigationEntry, NavigationExit, NavigationItem, NavigationScope, NavigationSectionLabel,
+    NavigationTraversal, PageHeader, PointerIcon, PreviewState, PreviewTile, ProjectStatusRow,
+    RESPONSIVE_NAVIGATION_BREAKPOINT, RadioButton, RadioGroup, RadioOption, ReadingDirection,
+    ResolvedGrid, ResolvedLayout, ResolvedNode, ResponsiveNavigation,
+    ResponsiveNavigationDestination, ResponsiveNavigationError, ResponsiveNavigationPresentation,
+    Row, SETTINGS_SHELL_NARROW_BREAKPOINT, START_MENU_SINGLE_PANE_BREAKPOINT, ScrollExtent,
+    SectionHeader, SelectField, SelectionIndicator, SelectionRegion, SemanticAction,
+    SemanticActionError, SemanticControllerAction, SemanticNodeSnapshot, SemanticQueryError,
+    SemanticRole, SemanticSelector, SemanticTarget, SemanticValueInput, SemanticValueSnapshot,
+    SessionActionRow, SettingsCard, SettingsListCard, SettingsNavigation, SettingsRow,
+    SettingsSearchEntry, SettingsSearchField, SettingsSection, SettingsShell, SettingsStatus,
+    SettingsStatusKind, ShortcutRow, ShortcutState, ShoulderHints, Sidebar, SidebarFolder,
+    SidebarItem, SidebarSection, Slider, SliderField, SourceLocation, Spacer, StartMenuNarrowPane,
+    StartMenuShell, StyledText, StyledTextSpan, Surface, SurfaceRole, Switch, SwitchState, TabList,
+    Text, TextAlign, TextField, TextMeasureCacheMode, Tone, UiEvent, UiFrame, VerticalScroll,
+    VirtualColumn, VirtualWindow, search_settings, with_text_measure_cache_mode,
 };
 pub use ui_declarative_macros::{component, id, ui};
+
+// Internal implementation shorthand. The application-facing root deliberately
+// does not export this type; graphical exceptions and presenters use `backend`.
+pub(crate) use ui::PaintCommand;
+
+/// Renderer-facing command stream. Application UI should use declarative
+/// components or [`CustomPaint`]; platform presenters consume this module.
+pub mod backend {
+    pub use crate::ui::PaintCommand;
+}
 
 pub type Fragment<Message = String> = Column<Message>;
 
@@ -63,34 +101,40 @@ impl<Message, T: Component<Message>> View<Message> for T {}
 
 pub mod prelude {
     pub use crate::{
-        AccentColors, AccessibilityPreferences, AccountSummaryRow, Align, AnyView,
-        AppearancePreference, Application, Background, Border, BorderColors, Button,
-        ButtonPresentation, ChoiceCard, ChoiceCardGroup, Color, ColorSwatch, Column,
+        AccentColors, AccessibilityPreferences, AccountSummaryRow, ActionRegion, Align, AnyView,
+        AppearancePreference, Application, ArtworkPresentation, Background, Border, BorderColors,
+        Button, ButtonPresentation, ChoiceCard, ChoiceCardGroup, Collection, CollectionError,
+        CollectionPresentation, CollectionState, CollisionPolicy, Color, ColorSwatch, Column,
         CompactIconTile, Component, ComponentBuilderExt, Container, ContrastPreference,
-        DiagnosticKind, Dropdown, EasingCurve, FallbackAvatar, FieldGroup, FontWeight, Fragment,
-        Grid, GridColumnSpec, Icon, Image, ImageAlignment, ImageFit, ImagePresentation,
-        InlineButtonGroup, Insets, Justify, LauncherSearchField, Length, Menu, MenuBar, MenuItem,
-        MotionPreference, MotionScale, NavigationItem, NavigationSectionLabel, Overflow,
-        PageHeader, PlatformThemePreferences, PointerIcon, PreviewState, PreviewTile,
-        ProjectStatusRow, RadioButton, RadiusScale, ReadingDirection, ResolvedAppearance,
-        ResolvedThemePreferences, Row, SETTINGS_SHELL_NARROW_BREAKPOINT,
+        CustomPaint, DiagnosticKind, DismissPolicy, DismissReason, Dropdown, EasingCurve,
+        FallbackAvatar, FieldGroup, FontWeight, Fragment, Grid, GridColumnSpec, Icon, Image,
+        ImageAlignment, ImageFit, ImagePresentation, InlineButtonGroup, Insets, ItemPresentation,
+        Justify, LauncherSearchField, Length, Menu, MenuBar, MenuItem, MotionPreference,
+        MotionScale, NavigationEntry, NavigationExit, NavigationItem, NavigationScope,
+        NavigationSectionLabel, NavigationTraversal, Overflow, OverlayAnchor, OverlayFocusPolicy,
+        OverlayId, OverlayMenu, OverlayMenuItem, OverlayPlacement, OverlayStyle, PageHeader,
+        PlatformThemePreferences, PointerIcon, Popover, PreviewState, PreviewTile,
+        ProjectStatusRow, RESPONSIVE_NAVIGATION_BREAKPOINT, RadioButton, RadioGroup, RadioOption,
+        RadiusScale, ReadingDirection, ResolvedAppearance, ResolvedThemePreferences,
+        ResponsiveNavigation, ResponsiveNavigationDestination, ResponsiveNavigationError,
+        ResponsiveNavigationPresentation, Row, SETTINGS_SHELL_NARROW_BREAKPOINT,
         START_MENU_SINGLE_PANE_BREAKPOINT, SectionHeader, SelectField, SelectionIndicator,
         SelectionRegion, SemanticColors, SemanticTheme, SemanticTokenSet, SessionActionRow,
-        SettingsCard, SettingsListCard, SettingsNarrowPane, SettingsNavigation, SettingsRow,
-        SettingsSearchEntry, SettingsSection, SettingsShell, SettingsStatus, SettingsStatusKind,
-        Shortcut, ShortcutRow, ShortcutState, SizingScale, Slider, SliderField, Spacer,
-        SpacingScale, StartMenuNarrowPane, StartMenuShell, Surface, SurfaceColors, SurfaceRole,
-        Switch, SwitchState, TabList, Text, TextAlign, TextBoundary, TextColors, TextField,
-        TextStyle, ThemePreferences, Tone, Track, TransparencyPreference, TypographyScale, UiEvent,
-        UiId, UiStateStore, View, VirtualColumn, VirtualWindow, component, id, run,
-        search_settings, ui,
+        SettingsCard, SettingsListCard, SettingsNavigation, SettingsRow, SettingsSearchEntry,
+        SettingsSection, SettingsShell, SettingsStatus, SettingsStatusKind, Shortcut, ShortcutRow,
+        ShortcutState, SizingScale, Slider, SliderField, Spacer, SpacingScale, StartMenuNarrowPane,
+        StartMenuShell, StatusRegion, Surface, SurfaceColors, SurfaceRole, SurfaceScaffold, Switch,
+        SwitchState, TabList, Text, TextAlign, TextBoundary, TextColors, TextField, TextStyle,
+        ThemePreferences, Tone, ToolRegion, Tooltip, Track, TransientKind, TransientSurface,
+        TransientTone, TransparencyPreference, TypographyScale, UiEvent, UiId, UiStateStore, View,
+        VirtualColumn, VirtualWindow, component, id, place_transient, run, search_settings, ui,
     };
 }
 
 #[cfg(test)]
 mod declarative_tests {
     use super::prelude::*;
-    use super::{Rect, UiTree};
+    use super::{Rect, UiFrame};
 
     #[derive(Clone, Debug, PartialEq)]
     enum Message {
@@ -103,7 +147,7 @@ mod declarative_tests {
 
     #[test]
     fn declarative_menu_preserves_typed_item_messages() {
-        let tree = UiTree::layout(
+        let tree = UiFrame::layout(
             ui! {
                 <MenuBar>
                     <Menu id={id!(file_menu)} on_toggle={Message::ToggleMenu} label={"File"}>
@@ -114,7 +158,11 @@ mod declarative_tests {
             },
             Rect::new(0.0, 0.0, 240.0, 120.0),
         );
-        assert!(tree.message_rect(&Message::ToggleMenu).is_some());
+        assert!(
+            !tree
+                .semantic_targets_for_message(&Message::ToggleMenu)
+                .is_empty()
+        );
     }
 
     fn volume(value: f32) -> Message {
@@ -129,54 +177,56 @@ mod declarative_tests {
     fn declarative_controller_panes_groups_and_adjustment_share_one_state_machine() {
         let view = ui! {
             <Row>
-                <Container id={"sidebar"} controller_pane={true}
-                    controller_pane_default={false} controller_pane_highlight={0x8b5cf6}>
+                <Container id={"sidebar"} navigation_scope={NavigationScope::pane(false)}
+                    navigation_scope_highlight={0x8b5cf6}>
                     <Button on_press={Message::Save}>{"Save"}</Button>
                 </Container>
-                <Container id={"content"} controller_pane={true}
-                    controller_pane_default={true} controller_pane_highlight={0x8b5cf6}>
-                    <Container id={"audio"} controller_group={true}
+                <Container id={"content"} navigation_scope={NavigationScope::pane(true)}
+                    navigation_scope_highlight={0x8b5cf6}>
+                    <Container id={"audio"} navigation_scope={NavigationScope::group()}
                         controller_focus_border={0x55d98b}>
                         <Slider id={"volume"} value={0.5} on_change={volume}
-                            controller_step={0.1} controller_focus_border={0x55d98b} />
+                            adjustment_step={0.1} controller_focus_border={0x55d98b} />
                     </Container>
                 </Container>
             </Row>
         };
         let mut state = UiStateStore::default();
-        let tree = UiTree::layout_with_state(view, Rect::new(0.0, 0.0, 480.0, 240.0), &mut state);
+        let tree = UiFrame::layout_with_state(view, Rect::new(0.0, 0.0, 480.0, 240.0), &mut state);
 
         tree.handle_event(&mut state, UiEvent::ControllerNext);
         assert!(
             state
+                .navigation()
                 .controller_selected()
                 .is_some_and(|id| id.as_str().ends_with("/audio"))
         );
         tree.handle_event(&mut state, UiEvent::ControllerActivate);
-        assert!(state.controller_scope().is_some());
+        assert!(state.navigation().controller_scope().is_some());
         tree.handle_event(&mut state, UiEvent::ControllerActivate);
-        assert!(state.controller_editing());
+        assert!(state.navigation().controller_editing());
         let adjusted = tree.handle_event(&mut state, UiEvent::ControllerAdjust(1.0));
         assert_eq!(adjusted.messages, vec![Message::Volume(0.6)]);
         tree.handle_event(&mut state, UiEvent::ControllerBack);
-        assert!(!state.controller_editing());
+        assert!(!state.navigation().controller_editing());
 
         tree.handle_event(&mut state, UiEvent::ControllerPreviousPane);
         assert!(
             state
+                .navigation()
                 .controller_selected()
                 .is_some_and(|id| id.as_str().contains("sidebar"))
         );
 
         tree.handle_event(&mut state, UiEvent::FocusLost);
         assert!(!state.window_focused());
-        assert!(state.controller_selected().is_none());
+        assert!(state.navigation().controller_selected().is_none());
         tree.handle_event(&mut state, UiEvent::ControllerNext);
-        assert!(state.controller_selected().is_none());
+        assert!(state.navigation().controller_selected().is_none());
 
         tree.handle_event(&mut state, UiEvent::FocusGained);
         tree.handle_event(&mut state, UiEvent::ControllerNext);
-        assert!(state.controller_selected().is_some());
+        assert!(state.navigation().controller_selected().is_some());
     }
 
     #[component]
@@ -225,20 +275,26 @@ mod declarative_tests {
                 </Grid>
             </Column>
         };
-        let tree = UiTree::layout(view, Rect::new(0.0, 0.0, 480.0, 320.0));
+        let tree = UiFrame::layout(view, Rect::new(0.0, 0.0, 480.0, 320.0));
         let save_id = tree
-            .id_for_message(&Message::Save)
-            .expect("declarative save id");
+            .semantic_targets_for_message(&Message::Save)
+            .into_iter()
+            .next()
+            .expect("declarative save target")
+            .id;
         assert!(save_id.as_str().ends_with("/save"));
-        let save = tree.resolved_layout().find(save_id).expect("resolved save");
+        let save = tree
+            .resolved_layout()
+            .find(&save_id)
+            .expect("resolved save");
         assert_eq!(save.source.expect("declarative source").component, "Button");
         assert!(tree.commands().iter().any(|command| matches!(
             command,
-            super::PaintCommand::Text { text, .. } if text == "Nickel"
+            super::backend::PaintCommand::Text { text, .. } if text == "Nickel"
         )));
         assert!(tree.commands().iter().any(|command| matches!(
             command,
-            super::PaintCommand::RoundedFill { radius, .. } if *radius == 6.0
+            super::backend::PaintCommand::RoundedFill { radius, .. } if *radius == 6.0
         )));
         let query_id = tree
             .resolved_layout()
@@ -269,11 +325,11 @@ mod declarative_tests {
                 }}
             </>
         };
-        let tree: UiTree<Message> = UiTree::layout(view, Rect::new(0.0, 0.0, 200.0, 80.0));
+        let tree: UiFrame<Message> = UiFrame::layout(view, Rect::new(0.0, 0.0, 200.0, 80.0));
         assert_eq!(
             tree.commands()
                 .iter()
-                .filter(|command| matches!(command, super::PaintCommand::Text { .. }))
+                .filter(|command| matches!(command, super::backend::PaintCommand::Text { .. }))
                 .count(),
             2
         );
@@ -287,11 +343,11 @@ mod declarative_tests {
                 <Frame tone={0x202020}><Text>{"two"}</Text></Frame>
             </Stack>
         };
-        let tree: UiTree<Message> = UiTree::layout(view, Rect::new(0.0, 0.0, 200.0, 80.0));
+        let tree: UiFrame<Message> = UiFrame::layout(view, Rect::new(0.0, 0.0, 200.0, 80.0));
         assert_eq!(
             tree.commands()
                 .iter()
-                .filter(|command| matches!(command, super::PaintCommand::Text { .. }))
+                .filter(|command| matches!(command, super::backend::PaintCommand::Text { .. }))
                 .count(),
             2
         );
@@ -311,15 +367,15 @@ mod declarative_tests {
                 </Row>
             </Container>
         };
-        let tree: UiTree<Message> = UiTree::layout(view, Rect::new(0.0, 0.0, 480.0, 160.0));
+        let tree: UiFrame<Message> = UiFrame::layout(view, Rect::new(0.0, 0.0, 480.0, 160.0));
         assert!(tree.commands().iter().any(
-            |command| matches!(command, super::PaintCommand::Text { text, .. } if text == "Settings")
+            |command| matches!(command, super::backend::PaintCommand::Text { text, .. } if text == "Settings")
         ));
     }
 
     #[test]
     fn declarative_source_locations_flow_into_layout_diagnostics() {
-        let tree = UiTree::<Message>::layout_with_diagnostics(
+        let tree = UiFrame::<Message>::layout_with_diagnostics(
             ui! { <Column id={id!(broken)} min_width={200.0} max_width={10.0} /> },
             Rect::new(0.0, 0.0, 100.0, 40.0),
         );

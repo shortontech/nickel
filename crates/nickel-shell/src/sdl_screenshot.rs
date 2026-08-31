@@ -1,5 +1,4 @@
 use std::{
-    cell::Cell,
     env, fs,
     path::PathBuf,
     sync::Arc,
@@ -7,9 +6,12 @@ use std::{
 };
 
 use image::RgbaImage;
+use nickel_ui::backend::PaintCommand;
 use nickel_ui::{
-    Align, Button, ButtonPresentation, Insets, PaintCommand, Point, Rect, Row, SemanticColors,
-    SemanticTheme, Spacer, Text, Tone, UiEvent, UiStateStore, UiTree,
+    ActionKind, Align, Application, Button, ButtonPresentation, Column, Completion,
+    CompletionFailure, CompletionFailureKind, Container, EffectEvidence, FrameOverlay, HostBatch,
+    HostEvent, Image, ImageFit, Insets, Point, Rect, Row, SemanticColors, SemanticTheme, Spacer,
+    Text, Tone, UiEvent, UiHost, ViewContext,
 };
 
 use crate::platform;
@@ -18,14 +20,44 @@ const TOOLBAR_HEIGHT: f32 = 70.0;
 const PREVIEW_PADDING: f32 = 20.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ToolbarAction {
+pub enum ToolbarAction {
     Copy,
     Save,
     TemporaryPath,
     Cancel,
 }
 
-pub struct ScreenshotTool {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ScreenshotMessage {
+    Toolbar(ToolbarAction),
+}
+
+#[derive(Clone, Debug)]
+enum ScreenshotCompletion {
+    PointerMoved {
+        x: f32,
+        y: f32,
+    },
+    PointerPressed {
+        x: f32,
+        y: f32,
+    },
+    PointerReleased,
+    Platform {
+        effect: ScreenshotEffect,
+        result: Result<String, String>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScreenshotEffect {
+    Copy,
+    Save,
+    TemporaryPath,
+    Cancel,
+}
+
+pub struct ScreenshotApp {
     image: Option<Arc<RgbaImage>>,
     cursor: (f32, f32),
     drag_start: Option<(f32, f32)>,
@@ -34,15 +66,16 @@ pub struct ScreenshotTool {
     last_click: Option<(Instant, f32, f32)>,
     status: String,
     error_visible: bool,
-    capture_deadline: Option<Instant>,
     save_after_confirmation: bool,
-    viewport: Cell<Option<(u32, u32)>>,
-    toolbar: UiTree<ToolbarAction>,
-    toolbar_state: UiStateStore,
+    palette: nickel_core::theme::ThemePalette,
+    viewport: (u32, u32),
+    effects: Vec<ScreenshotEffect>,
+    effect_evidence: Vec<EffectEvidence>,
+    dirty: bool,
 }
 
-impl Default for ScreenshotTool {
-    fn default() -> Self {
+impl ScreenshotApp {
+    fn new(width: u32, height: u32) -> Self {
         Self {
             image: None,
             cursor: (0.0, 0.0),
@@ -52,100 +85,68 @@ impl Default for ScreenshotTool {
             last_click: None,
             status: instructions(),
             error_visible: false,
-            capture_deadline: None,
             save_after_confirmation: false,
-            viewport: Cell::new(None),
-            toolbar: UiTree::default(),
-            toolbar_state: UiStateStore::default(),
-        }
-    }
-}
-
-impl ScreenshotTool {
-    pub fn request_capture(&mut self) {
-        self.hide();
-        self.save_after_confirmation = false;
-        self.capture_deadline = Some(Instant::now() + Duration::from_millis(75));
-    }
-
-    pub fn request_capture_to_file(&mut self) {
-        self.hide();
-        self.save_after_confirmation = true;
-        self.capture_deadline = Some(Instant::now() + Duration::from_millis(75));
-    }
-
-    pub fn capture_ready(&mut self) -> bool {
-        if self
-            .capture_deadline
-            .is_some_and(|deadline| Instant::now() >= deadline)
-        {
-            self.capture_deadline = None;
-            true
-        } else {
-            false
+            palette: nickel_core::theme::ThemePalette::from_appearance(Default::default()),
+            viewport: (width, height),
+            effects: Vec::new(),
+            effect_evidence: Vec::new(),
+            dirty: false,
         }
     }
 
-    pub fn show(&mut self, image: RgbaImage) {
-        self.image = Some(Arc::new(image));
-        self.status = instructions();
-        self.error_visible = false;
-    }
-
-    pub fn show_error(&mut self, error: impl Into<String>) {
-        self.hide();
-        self.status = format!("SCREENSHOT FAILED · {} · ESC TO CLOSE", error.into());
-        self.error_visible = true;
-    }
-
-    pub fn visible(&self) -> bool {
-        self.image.is_some() || self.error_visible
-    }
-
-    pub fn hide(&mut self) {
-        self.image = None;
-        self.drag_start = None;
-        self.selection = None;
-        self.confirmed = false;
-        self.last_click = None;
-        self.error_visible = false;
-        self.save_after_confirmation = false;
-    }
-
-    pub fn pointer_moved(&mut self, x: f32, y: f32, width: u32, height: u32) -> bool {
-        self.cursor = (x, y);
-        if self.confirmed {
-            let outcome = self.toolbar.handle_event(
-                &mut self.toolbar_state,
-                UiEvent::PointerMoved(Point { x, y }),
-            );
-            if outcome.invalidation != nickel_ui::Invalidation::None {
-                return true;
+    #[cfg(any(test, feature = "workbench-fixtures"))]
+    #[allow(dead_code)] // Binary and fixture library compile this shared module separately.
+    pub fn fixture(width: u32, height: u32, state: &str) -> Self {
+        let mut app = Self::new(width, height);
+        match state {
+            "idle" => {}
+            "selecting" => {
+                app.image = Some(Arc::new(RgbaImage::from_pixel(
+                    width.max(1),
+                    height.max(1),
+                    image::Rgba([38, 46, 66, 255]),
+                )));
+                app.selection = Some(Rect {
+                    origin: nickel_ui::Point { x: 64.0, y: 72.0 },
+                    size: nickel_ui::Size {
+                        width: 240.0,
+                        height: 160.0,
+                    },
+                });
             }
+            "confirmed" => {
+                app = Self::fixture(width, height, "selecting");
+                app.confirmed = true;
+                app.status = "SELECTION CONFIRMED".into();
+            }
+            "error" => {
+                app.status = "SCREENSHOT FAILED · fixture failure · ESC TO CLOSE".into();
+                app.error_visible = true;
+            }
+            other => panic!("unknown screenshot fixture state `{other}`"),
         }
+        app
+    }
+
+    fn image_rect(&self) -> Rect {
+        image_rect(self.image.as_deref(), self.viewport.0, self.viewport.1)
+    }
+
+    fn pointer_moved(&mut self, x: f32, y: f32) -> bool {
+        self.cursor = (x, y);
         let Some(start) = self.drag_start else {
             return false;
         };
         self.selection = Some(normalized(
             start,
-            clamp_to_rect(self.cursor, self.image_rect(width, height)),
+            clamp_to_rect(self.cursor, self.image_rect()),
         ));
         true
     }
 
-    pub fn pointer_pressed(&mut self, x: f32, y: f32, width: u32, height: u32) -> bool {
+    fn pointer_pressed(&mut self, x: f32, y: f32) -> bool {
         self.cursor = (x, y);
-        if self.confirmed {
-            let point = Point { x, y };
-            let over_toolbar = self.toolbar.id_at(point).is_some();
-            let _ = self
-                .toolbar
-                .handle_event(&mut self.toolbar_state, UiEvent::PointerPressed(point));
-            if over_toolbar {
-                return true;
-            }
-        }
-        let image_rect = self.image_rect(width, height);
+        let image_rect = self.image_rect();
         if !contains(image_rect, self.cursor) {
             return false;
         }
@@ -161,10 +162,9 @@ impl ScreenshotTool {
                 self.confirmed = true;
                 self.drag_start = None;
                 self.last_click = None;
+                self.status = "SELECTION CONFIRMED".into();
                 if self.save_after_confirmation {
-                    self.save(width, height);
-                } else {
-                    self.status = "SELECTION CONFIRMED".into();
+                    self.push_effect(ScreenshotEffect::Save);
                 }
             } else {
                 self.last_click = Some((Instant::now(), self.cursor.0, self.cursor.1));
@@ -179,20 +179,7 @@ impl ScreenshotTool {
         true
     }
 
-    pub fn pointer_released(&mut self) -> bool {
-        if self.confirmed {
-            let outcome = self.toolbar.handle_event(
-                &mut self.toolbar_state,
-                UiEvent::PointerReleased(Point {
-                    x: self.cursor.0,
-                    y: self.cursor.1,
-                }),
-            );
-            if let Some(action) = outcome.messages.into_iter().next() {
-                self.apply_toolbar_action(action);
-                return true;
-            }
-        }
+    fn pointer_released(&mut self) -> bool {
         let changed = self.drag_start.take().is_some();
         if changed {
             self.last_click = None;
@@ -206,16 +193,251 @@ impl ScreenshotTool {
         changed
     }
 
+    fn push_effect(&mut self, effect: ScreenshotEffect) {
+        self.effects.push(effect);
+        self.effect_evidence.push(EffectEvidence {
+            type_name: std::any::type_name::<ScreenshotEffect>(),
+            label: Some(format!("{effect:?}")),
+        });
+    }
+}
+
+impl Application for ScreenshotApp {
+    type Message = ScreenshotMessage;
+
+    fn update(&mut self, message: Self::Message) {
+        match message {
+            ScreenshotMessage::Toolbar(action) => self.push_effect(match action {
+                ToolbarAction::Copy => ScreenshotEffect::Copy,
+                ToolbarAction::Save => ScreenshotEffect::Save,
+                ToolbarAction::TemporaryPath => ScreenshotEffect::TemporaryPath,
+                ToolbarAction::Cancel => ScreenshotEffect::Cancel,
+            }),
+        }
+    }
+
+    fn complete(&mut self, completion: Completion) -> Result<bool, CompletionFailure> {
+        let id = completion.id;
+        let input =
+            completion
+                .downcast::<ScreenshotCompletion>()
+                .map_err(|_| CompletionFailure {
+                    id,
+                    kind: CompletionFailureKind::TypeMismatch,
+                    detail: "screenshot completion payload type mismatch".into(),
+                })?;
+        Ok(match input {
+            ScreenshotCompletion::PointerMoved { x, y } => self.pointer_moved(x, y),
+            ScreenshotCompletion::PointerPressed { x, y } => self.pointer_pressed(x, y),
+            ScreenshotCompletion::PointerReleased => self.pointer_released(),
+            ScreenshotCompletion::Platform { effect, result } => {
+                match (effect, result) {
+                    (ScreenshotEffect::Copy, Ok(status)) => {
+                        self.image = None;
+                        self.selection = None;
+                        self.confirmed = false;
+                        self.status = status;
+                    }
+                    (_, Ok(status)) => self.status = status,
+                    (_, Err(failure)) => self.status = failure,
+                }
+                true
+            }
+        })
+    }
+
+    fn view(&self, context: ViewContext) -> impl nickel_ui::View<Self::Message> {
+        screenshot_view(self, context)
+    }
+
+    fn frame_overlays(&self, _context: ViewContext) -> Vec<FrameOverlay<Self::Message>> {
+        self.selection
+            .into_iter()
+            .map(|rect| FrameOverlay::SelectionMarquee {
+                rect,
+                fill: None,
+                stroke: self.palette.accent,
+                width: if self.confirmed { 5.0 } else { 3.0 },
+            })
+            .collect()
+    }
+
+    fn take_effect_evidence(&mut self) -> Vec<EffectEvidence> {
+        std::mem::take(&mut self.effect_evidence)
+    }
+
+    fn poll(&mut self) -> bool {
+        std::mem::take(&mut self.dirty)
+    }
+
+    fn shortcut(&mut self, shortcut: nickel_ui::Shortcut) -> bool {
+        if shortcut == nickel_ui::Shortcut::Escape && (self.image.is_some() || self.error_visible) {
+            self.push_effect(ScreenshotEffect::Cancel);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+pub struct ScreenshotTool {
+    host: UiHost<ScreenshotApp>,
+    capture_deadline: Option<Instant>,
+}
+
+impl Default for ScreenshotTool {
+    fn default() -> Self {
+        Self {
+            host: UiHost::new(ScreenshotApp::new(1, 1), 1, 1),
+            capture_deadline: None,
+        }
+    }
+}
+
+impl ScreenshotTool {
+    pub fn change_token(&self) -> nickel_ui::HostChangeToken {
+        let inspection = self.host.inspect();
+        nickel_ui::HostChangeToken {
+            frame_generation: inspection.frame_generation,
+            semantic_generation: inspection.semantic_generation,
+        }
+    }
+
+    pub fn request_capture(&mut self) {
+        self.hide();
+        self.host.application_mut().save_after_confirmation = false;
+        self.capture_deadline = Some(Instant::now() + Duration::from_millis(75));
+    }
+
+    pub fn request_capture_to_file(&mut self) {
+        self.hide();
+        self.host.application_mut().save_after_confirmation = true;
+        self.capture_deadline = Some(Instant::now() + Duration::from_millis(75));
+    }
+
+    pub fn capture_ready(&mut self) -> bool {
+        if self
+            .capture_deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            self.capture_deadline = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn next_deadline(&self) -> Option<Instant> {
+        self.capture_deadline
+    }
+
+    pub fn show(&mut self, image: RgbaImage) {
+        let app = self.host.application_mut();
+        app.image = Some(Arc::new(image));
+        app.status = instructions();
+        app.error_visible = false;
+        app.dirty = true;
+        self.host.poll();
+    }
+
+    pub fn show_error(&mut self, error: impl Into<String>) {
+        self.hide();
+        let app = self.host.application_mut();
+        app.status = format!("SCREENSHOT FAILED · {} · ESC TO CLOSE", error.into());
+        app.error_visible = true;
+        app.dirty = true;
+        self.host.poll();
+    }
+
+    pub fn visible(&self) -> bool {
+        self.host.application().image.is_some() || self.host.application().error_visible
+    }
+
+    pub fn hide(&mut self) {
+        let app = self.host.application_mut();
+        app.image = None;
+        app.drag_start = None;
+        app.selection = None;
+        app.confirmed = false;
+        app.last_click = None;
+        app.error_visible = false;
+        app.save_after_confirmation = false;
+        app.dirty = true;
+        self.host.poll();
+    }
+
+    pub fn pointer_moved(&mut self, x: f32, y: f32, width: u32, height: u32) -> bool {
+        self.resize(width, height, None);
+        let outcome = self.host.step(HostBatch {
+            completions: vec![Completion::new(
+                "screenshot-pointer",
+                ScreenshotCompletion::PointerMoved { x, y },
+            )],
+            events: vec![HostEvent::Ui(UiEvent::PointerMoved(Point { x, y }))],
+            ..HostBatch::default()
+        });
+        outcome.changed
+    }
+
+    pub fn pointer_pressed(&mut self, x: f32, y: f32, width: u32, height: u32) -> bool {
+        self.resize(width, height, None);
+        let outcome = self.host.step(HostBatch {
+            completions: vec![Completion::new(
+                "screenshot-pointer",
+                ScreenshotCompletion::PointerPressed { x, y },
+            )],
+            events: vec![HostEvent::Ui(UiEvent::PointerPressed(Point { x, y }))],
+            ..HostBatch::default()
+        });
+        self.apply_effects();
+        outcome.changed
+    }
+
+    pub fn pointer_released(&mut self) -> bool {
+        let cursor = self.host.application().cursor;
+        let outcome = self.host.step(HostBatch {
+            completions: vec![Completion::new(
+                "screenshot-pointer",
+                ScreenshotCompletion::PointerReleased,
+            )],
+            events: vec![HostEvent::Ui(UiEvent::PointerReleased(Point {
+                x: cursor.0,
+                y: cursor.1,
+            }))],
+            ..HostBatch::default()
+        });
+        self.apply_effects();
+        outcome.changed
+    }
+
+    pub fn escape(&mut self) -> bool {
+        let outcome = self.host.step(HostBatch {
+            events: vec![HostEvent::Shortcut(nickel_ui::Shortcut::Escape)],
+            ..HostBatch::default()
+        });
+        self.apply_effects();
+        outcome.changed
+    }
+
+    pub fn controller_action(&mut self, action: nickel_ui::ControllerAction) -> bool {
+        let outcome = self.host.step(HostBatch {
+            events: vec![HostEvent::Controller(action)],
+            ..HostBatch::default()
+        });
+        self.apply_effects();
+        outcome.changed
+    }
+
     pub fn semantic_target(
         &self,
         action: nickel_session_protocol::ScreenshotTargetAction,
     ) -> Option<(i32, i32, nickel_session_protocol::PointerInteraction)> {
         use nickel_session_protocol::{PointerInteraction, ScreenshotTargetAction};
 
-        let (width, height) = self.viewport.get()?;
+        let app = self.host.application();
         let point = match action {
             ScreenshotTargetAction::SelectionStart => {
-                let preview = self.image_rect(width, height);
+                let preview = app.image_rect();
                 (
                     preview.origin.x + preview.size.width * 0.25,
                     preview.origin.y + preview.size.height * 0.25,
@@ -223,7 +445,7 @@ impl ScreenshotTool {
                 )
             }
             ScreenshotTargetAction::SelectionEnd => {
-                let preview = self.image_rect(width, height);
+                let preview = app.image_rect();
                 (
                     preview.origin.x + preview.size.width * 0.75,
                     preview.origin.y + preview.size.height * 0.75,
@@ -231,30 +453,30 @@ impl ScreenshotTool {
                 )
             }
             ScreenshotTargetAction::Confirm => {
-                let selection = self.selection?;
+                let selection = app.selection?;
                 (
                     selection.origin.x + selection.size.width / 2.0,
                     selection.origin.y + selection.size.height / 2.0,
                     PointerInteraction::LeftDoubleClick,
                 )
             }
-            ScreenshotTargetAction::CopyImage if self.confirmed => message_center(
-                &self.toolbar,
+            ScreenshotTargetAction::CopyImage if app.confirmed => message_center(
+                &self.host,
                 ToolbarAction::Copy,
                 PointerInteraction::LeftClick,
             )?,
-            ScreenshotTargetAction::SaveImage if self.confirmed => message_center(
-                &self.toolbar,
+            ScreenshotTargetAction::SaveImage if app.confirmed => message_center(
+                &self.host,
                 ToolbarAction::Save,
                 PointerInteraction::LeftClick,
             )?,
-            ScreenshotTargetAction::CopyTemporaryPath if self.confirmed => message_center(
-                &self.toolbar,
+            ScreenshotTargetAction::CopyTemporaryPath if app.confirmed => message_center(
+                &self.host,
                 ToolbarAction::TemporaryPath,
                 PointerInteraction::LeftClick,
             )?,
-            ScreenshotTargetAction::Cancel if self.confirmed => message_center(
-                &self.toolbar,
+            ScreenshotTargetAction::Cancel if app.confirmed => message_center(
+                &self.host,
                 ToolbarAction::Cancel,
                 PointerInteraction::LeftClick,
             )?,
@@ -272,53 +494,15 @@ impl ScreenshotTool {
         height: u32,
         palette: nickel_core::theme::ThemePalette,
     ) -> Vec<PaintCommand> {
-        self.viewport.set(Some((width, height)));
-        let mut commands = vec![PaintCommand::Fill {
-            rect: Rect::new(0.0, 0.0, width as f32, height as f32),
-            color: palette.background,
-        }];
-        if let Some(image) = &self.image {
-            commands.push(PaintCommand::Image {
-                bounds: self.image_rect(width, height),
-                id: 65_000,
-                image: image.clone(),
-                high_density: None,
-            });
-        }
-        if let Some(rect) = self.selection {
-            commands.push(PaintCommand::OverlayStroke {
-                rect,
-                color: palette.accent,
-                width: if self.confirmed { 5.0 } else { 3.0 },
-            });
-        }
-        self.toolbar = screenshot_toolbar(width, palette, &self.status, self.confirmed);
-        commands.extend_from_slice(self.toolbar.commands());
-        commands
-    }
-
-    fn image_rect(&self, width: u32, height: u32) -> Rect {
-        let Some(image) = &self.image else {
-            return Rect::new(0.0, TOOLBAR_HEIGHT, 1.0, 1.0);
-        };
-        let available_width = (width as f32 - PREVIEW_PADDING * 2.0).max(1.0);
-        let available_height = (height as f32 - TOOLBAR_HEIGHT - PREVIEW_PADDING * 2.0).max(1.0);
-        let scale =
-            (available_width / image.width() as f32).min(available_height / image.height() as f32);
-        let image_width = image.width() as f32 * scale;
-        let image_height = image.height() as f32 * scale;
-        Rect::new(
-            (width as f32 - image_width) / 2.0,
-            TOOLBAR_HEIGHT + PREVIEW_PADDING + (available_height - image_height) / 2.0,
-            image_width,
-            image_height,
-        )
+        self.resize(width, height, Some(palette));
+        self.host.commands().to_vec()
     }
 
     fn cropped(&self, width: u32, height: u32) -> Option<RgbaImage> {
-        let image = self.image.as_ref()?;
-        let selection = self.selection?;
-        let preview = self.image_rect(width, height);
+        let app = self.host.application();
+        let image = app.image.as_ref()?;
+        let selection = app.selection?;
+        let preview = image_rect(Some(image), width, height);
         let sx = image.width() as f32 / preview.size.width.max(1.0);
         let sy = image.height() as f32 / preview.size.height.max(1.0);
         let x = ((selection.origin.x - preview.origin.x) * sx)
@@ -343,54 +527,59 @@ impl ScreenshotTool {
         )
     }
 
-    fn copy(&mut self, width: u32, height: u32) -> bool {
-        let copied = self
-            .cropped(width, height)
-            .is_some_and(|image| platform::copy_image_to_clipboard(&image).is_ok());
-        self.status = if copied {
-            "IMAGE COPIED".into()
-        } else {
-            "COPY FAILED".into()
-        };
-        copied
+    fn copy(&self, width: u32, height: u32) -> Result<String, String> {
+        self.cropped(width, height)
+            .ok_or_else(|| "COPY FAILED · NO SELECTION".to_owned())
+            .and_then(|image| {
+                platform::copy_image_to_clipboard(&image)
+                    .map(|()| "IMAGE COPIED".to_owned())
+                    .map_err(|error| format!("COPY FAILED · {error}"))
+            })
     }
 
-    fn apply_toolbar_action(&mut self, action: ToolbarAction) {
-        let Some((width, height)) = self.viewport.get() else {
-            return;
-        };
-        match action {
-            ToolbarAction::Copy => {
-                if self.copy(width, height) {
-                    self.hide();
-                }
+    fn apply_effects(&mut self) {
+        let (width, height) = self.host.application().viewport;
+        let effects = std::mem::take(&mut self.host.application_mut().effects);
+        for effect in effects {
+            if effect == ScreenshotEffect::Cancel {
+                self.hide();
+                continue;
             }
-            ToolbarAction::Save => self.save(width, height),
-            ToolbarAction::TemporaryPath => self.temp(width, height),
-            ToolbarAction::Cancel => self.hide(),
+            let result = match effect {
+                ScreenshotEffect::Copy => self.copy(width, height),
+                ScreenshotEffect::Save => self.save(width, height),
+                ScreenshotEffect::TemporaryPath => self.temp(width, height),
+                ScreenshotEffect::Cancel => unreachable!(),
+            };
+            let _ = self.host.step(HostBatch {
+                completions: vec![Completion::new(
+                    "screenshot-platform",
+                    ScreenshotCompletion::Platform { effect, result },
+                )],
+                ..HostBatch::default()
+            });
         }
     }
 
-    fn temp(&mut self, width: u32, height: u32) {
-        self.status = match self
-            .cropped(width, height)
-            .and_then(|image| platform::copy_temp_image_path(&image).ok())
-        {
-            Some(path) => format!("TEMP PATH COPIED · {}", path.display()),
-            None => "TEMP SAVE FAILED".into(),
-        };
+    fn temp(&self, width: u32, height: u32) -> Result<String, String> {
+        self.cropped(width, height)
+            .ok_or_else(|| "TEMP SAVE FAILED · NO SELECTION".to_owned())
+            .and_then(|image| {
+                platform::copy_temp_image_path(&image)
+                    .map(|path| format!("TEMP PATH COPIED · {}", path.display()))
+                    .map_err(|error| format!("TEMP SAVE FAILED · {error}"))
+            })
     }
 
-    fn save(&mut self, width: u32, height: u32) {
+    fn save(&self, width: u32, height: u32) -> Result<String, String> {
         let Some(image) = self.cropped(width, height) else {
-            return;
+            return Err("SAVE FAILED · NO SELECTION".into());
         };
         let Some(home) = env::var_os("USERPROFILE")
             .or_else(|| env::var_os("HOME"))
             .map(PathBuf::from)
         else {
-            self.status = "SAVE FAILED · HOME DIRECTORY IS UNKNOWN".into();
-            return;
+            return Err("SAVE FAILED · HOME DIRECTORY IS UNKNOWN".into());
         };
         let directory = home.join("Pictures").join("Screenshots");
         let stamp = SystemTime::now()
@@ -398,23 +587,47 @@ impl ScreenshotTool {
             .unwrap_or_default()
             .as_secs();
         let path = directory.join(format!("Nickel Screenshot {stamp}.png"));
-        self.status = if fs::create_dir_all(&directory)
+        if fs::create_dir_all(&directory)
             .and_then(|_| image.save(&path).map_err(std::io::Error::other))
             .is_ok()
         {
-            format!("SAVED · {}", path.display())
+            Ok(format!("SAVED · {}", path.display()))
         } else {
-            "SAVE FAILED".into()
-        };
+            Err("SAVE FAILED".into())
+        }
+    }
+
+    fn resize(
+        &mut self,
+        width: u32,
+        height: u32,
+        palette: Option<nickel_core::theme::ThemePalette>,
+    ) {
+        let app = self.host.application_mut();
+        if app.viewport != (width, height) {
+            app.viewport = (width, height);
+            app.dirty = true;
+        }
+        if let Some(palette) = palette
+            && app.palette != palette
+        {
+            app.palette = palette;
+            app.dirty = true;
+        }
+        let _ = self.host.step(HostBatch {
+            surface_size: Some((width, height)),
+            events: vec![HostEvent::Poll],
+            ..HostBatch::default()
+        });
     }
 }
 
-fn screenshot_toolbar(
-    width: u32,
-    palette: nickel_core::theme::ThemePalette,
-    status: &str,
-    confirmed: bool,
-) -> UiTree<ToolbarAction> {
+fn screenshot_view(
+    app: &ScreenshotApp,
+    context: ViewContext,
+) -> impl nickel_ui::View<ScreenshotMessage> {
+    let width = context.viewport.size.width as u32;
+    let palette = app.palette;
     let theme = SemanticTheme::new(SemanticColors {
         window: palette.background,
         sidebar: palette.panel,
@@ -439,48 +652,77 @@ fn screenshot_toolbar(
         .gap(8.0)
         .align_items(Align::Center)
         .background(palette.panel)
-        .child(Text::new(status).tone(Tone::Muted).ellipsis(true))
+        .child(Text::new(&app.status).tone(Tone::Muted).ellipsis(true))
         .child(Spacer::flex());
-    if confirmed {
+    if app.confirmed {
         toolbar = toolbar
             .child(
                 Button::semantic(
                     theme,
-                    ToolbarAction::Copy,
+                    ScreenshotMessage::Toolbar(ToolbarAction::Copy),
                     "Copy",
                     ButtonPresentation::Primary,
                 )
+                .id(toolbar_key(ToolbarAction::Copy))
                 .width(112.0),
             )
             .child(
                 Button::semantic(
                     theme,
-                    ToolbarAction::Save,
+                    ScreenshotMessage::Toolbar(ToolbarAction::Save),
                     "Save",
                     ButtonPresentation::Secondary,
                 )
+                .id(toolbar_key(ToolbarAction::Save))
                 .width(104.0),
             )
             .child(
                 Button::semantic(
                     theme,
-                    ToolbarAction::TemporaryPath,
+                    ScreenshotMessage::Toolbar(ToolbarAction::TemporaryPath),
                     "Copy file path",
                     ButtonPresentation::Secondary,
                 )
+                .id(toolbar_key(ToolbarAction::TemporaryPath))
                 .width(158.0),
             )
             .child(
                 Button::semantic(
                     theme,
-                    ToolbarAction::Cancel,
+                    ScreenshotMessage::Toolbar(ToolbarAction::Cancel),
                     "Cancel",
                     ButtonPresentation::Quiet,
                 )
+                .id(toolbar_key(ToolbarAction::Cancel))
                 .width(96.0),
             );
     }
-    UiTree::layout(toolbar, Rect::new(0.0, 0.0, width as f32, TOOLBAR_HEIGHT))
+    let image_rect = app.image_rect();
+    let mut preview = Column::new()
+        .width(width as f32)
+        .height(context.viewport.size.height)
+        .child(toolbar)
+        .child(Spacer::vertical(
+            (image_rect.origin.y - TOOLBAR_HEIGHT).max(0.0),
+        ));
+    if let Some(image) = &app.image {
+        preview = preview.child(
+            Row::new()
+                .height(image_rect.size.height)
+                .child(Spacer::fixed(image_rect.origin.x))
+                .child(
+                    Image::new(65_000, image.clone())
+                        .width(image_rect.size.width)
+                        .height(image_rect.size.height)
+                        .fit(ImageFit::Stretch),
+                ),
+        );
+    }
+    Container::new()
+        .background(palette.background)
+        .width(width as f32)
+        .height(context.viewport.size.height)
+        .child(preview)
 }
 
 fn instructions() -> String {
@@ -488,16 +730,44 @@ fn instructions() -> String {
 }
 
 fn message_center(
-    toolbar: &UiTree<ToolbarAction>,
+    host: &UiHost<ScreenshotApp>,
     action: ToolbarAction,
     interaction: nickel_session_protocol::PointerInteraction,
 ) -> Option<(f32, f32, nickel_session_protocol::PointerInteraction)> {
-    let bounds = toolbar.message_rect(&action)?;
-    Some((
-        bounds.origin.x + bounds.size.width / 2.0,
-        bounds.origin.y + bounds.size.height / 2.0,
-        interaction,
-    ))
+    let target = host
+        .unique_semantic_target_for_message(&ScreenshotMessage::Toolbar(action))
+        .ok()?;
+    let route = host
+        .resolve_effective_target(&target.id, ActionKind::Activate)
+        .ok()?;
+    Some((route.point.x, route.point.y, interaction))
+}
+
+fn image_rect(image: Option<&RgbaImage>, width: u32, height: u32) -> Rect {
+    let Some(image) = image else {
+        return Rect::new(0.0, TOOLBAR_HEIGHT, 1.0, 1.0);
+    };
+    let available_width = (width as f32 - PREVIEW_PADDING * 2.0).max(1.0);
+    let available_height = (height as f32 - TOOLBAR_HEIGHT - PREVIEW_PADDING * 2.0).max(1.0);
+    let scale =
+        (available_width / image.width() as f32).min(available_height / image.height() as f32);
+    let image_width = image.width() as f32 * scale;
+    let image_height = image.height() as f32 * scale;
+    Rect::new(
+        (width as f32 - image_width) / 2.0,
+        TOOLBAR_HEIGHT + PREVIEW_PADDING + (available_height - image_height) / 2.0,
+        image_width,
+        image_height,
+    )
+}
+
+fn toolbar_key(action: ToolbarAction) -> &'static str {
+    match action {
+        ToolbarAction::Copy => "screenshot-toolbar-copy",
+        ToolbarAction::Save => "screenshot-toolbar-save",
+        ToolbarAction::TemporaryPath => "screenshot-toolbar-temporary-path",
+        ToolbarAction::Cancel => "screenshot-toolbar-cancel",
+    }
 }
 
 fn normalized(a: (f32, f32), b: (f32, f32)) -> Rect {
@@ -531,37 +801,63 @@ fn clamp_to_rect(point: (f32, f32), rect: Rect) -> (f32, f32) {
 mod tests {
     use image::{Rgba, RgbaImage};
 
-    use super::{ScreenshotTool, ToolbarAction, normalized, screenshot_toolbar};
+    use super::{ScreenshotApp, ScreenshotMessage, ScreenshotTool, ToolbarAction, normalized};
+
+    fn toolbar_host() -> nickel_ui::UiHost<ScreenshotApp> {
+        let mut app = ScreenshotApp::new(1200, 760);
+        app.confirmed = true;
+        app.status = "SELECTION CONFIRMED".into();
+        nickel_ui::UiHost::new(app, 1200, 760)
+    }
 
     #[test]
-    fn toolbar_components_own_layout_hit_testing_and_messages() {
-        let toolbar = screenshot_toolbar(
-            1200,
-            nickel_core::theme::ThemePalette::from_appearance(Default::default()),
-            "SELECTION CONFIRMED",
-            true,
-        );
+    fn toolbar_frame_exposes_typed_actions_to_controller_input() {
+        let mut toolbar = toolbar_host();
         for action in [
             ToolbarAction::Copy,
             ToolbarAction::Save,
             ToolbarAction::TemporaryPath,
             ToolbarAction::Cancel,
         ] {
-            let bounds = toolbar
-                .message_rect(&action)
-                .expect("button message rectangle");
-            let point = nickel_ui::Point {
-                x: bounds.origin.x + bounds.size.width / 2.0,
-                y: bounds.origin.y + bounds.size.height / 2.0,
-            };
-            let mut state = nickel_ui::UiStateStore::default();
-            let _ = toolbar.handle_event(&mut state, nickel_ui::UiEvent::PointerPressed(point));
             assert_eq!(
                 toolbar
-                    .handle_event(&mut state, nickel_ui::UiEvent::PointerReleased(point))
+                    .perform_controller_semantic_action(
+                        toolbar
+                            .unique_semantic_target_for_message(&ScreenshotMessage::Toolbar(action))
+                            .expect("toolbar action target")
+                            .id,
+                        nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+                    )
                     .messages,
-                vec![action]
+                vec![nickel_ui::MessageEvidence {
+                    type_name: std::any::type_name::<ScreenshotMessage>(),
+                    label: None,
+                }]
             );
+        }
+    }
+
+    #[test]
+    fn toolbar_frame_publishes_accessible_button_authority() {
+        let toolbar = toolbar_host();
+        let nodes = toolbar.semantic_nodes();
+
+        for (action, label) in [
+            (ToolbarAction::Copy, "Copy"),
+            (ToolbarAction::Save, "Save"),
+            (ToolbarAction::TemporaryPath, "Copy file path"),
+            (ToolbarAction::Cancel, "Cancel"),
+        ] {
+            let target = toolbar
+                .unique_semantic_target_for_message(&ScreenshotMessage::Toolbar(action))
+                .expect("toolbar action target");
+            let node = nodes
+                .iter()
+                .find(|node| node.id == target.id)
+                .expect("toolbar action has a semantic node");
+            assert_eq!(node.name.as_deref(), Some(label));
+            assert_eq!(node.role, Some(nickel_ui::SemanticRole::Button));
+            assert_eq!(node.actions, vec![nickel_ui::ActionKind::Activate]);
         }
     }
 
@@ -584,8 +880,9 @@ mod tests {
         }
         let mut tool = ScreenshotTool::default();
         tool.show(image);
-        let preview = tool.image_rect(1200, 760);
-        tool.selection = Some(nickel_ui::Rect::new(
+        tool.host.application_mut().viewport = (1200, 760);
+        let preview = tool.host.application().image_rect();
+        tool.host.application_mut().selection = Some(nickel_ui::Rect::new(
             preview.origin.x + preview.size.width / 4.0,
             preview.origin.y,
             preview.size.width / 2.0,
@@ -603,7 +900,7 @@ mod tests {
         let mut tool = ScreenshotTool::default();
         tool.show_error("permission denied");
         assert!(tool.visible());
-        assert!(tool.status.contains("permission denied"));
+        assert!(tool.host.application().status.contains("permission denied"));
         assert!(
             !tool
                 .scene(
@@ -621,10 +918,53 @@ mod tests {
     fn interactive_file_capture_is_an_explicit_mode() {
         let mut tool = ScreenshotTool::default();
         tool.request_capture_to_file();
-        assert!(tool.save_after_confirmation);
+        assert!(tool.host.application().save_after_confirmation);
         assert!(tool.capture_deadline.is_some());
         tool.request_capture();
-        assert!(!tool.save_after_confirmation);
+        assert!(!tool.host.application().save_after_confirmation);
+        assert!(tool.next_deadline().is_some());
+    }
+
+    #[test]
+    fn host_batch_owns_selection_completions_effects_failures_and_escape() {
+        let mut app = ScreenshotApp::new(800, 600);
+        app.image = Some(std::sync::Arc::new(RgbaImage::new(400, 200)));
+        let mut host = nickel_ui::UiHost::new(app, 800, 600);
+        let preview = host.application().image_rect();
+        let outcome = host.step(nickel_ui::HostBatch {
+            completions: vec![nickel_ui::Completion::new(
+                "screenshot-pointer",
+                super::ScreenshotCompletion::PointerPressed {
+                    x: preview.origin.x + 10.0,
+                    y: preview.origin.y + 10.0,
+                },
+            )],
+            ..nickel_ui::HostBatch::default()
+        });
+        assert!(outcome.changed);
+        assert!(outcome.telemetry.rebuilt);
+        assert_eq!(outcome.telemetry.completions_processed, 1);
+
+        let failure = host.step(nickel_ui::HostBatch {
+            completions: vec![nickel_ui::Completion::new("screenshot-pointer", 42_u32)],
+            ..nickel_ui::HostBatch::default()
+        });
+        assert_eq!(failure.completion_failures.len(), 1);
+        assert_eq!(
+            failure.completion_failures[0].kind,
+            nickel_ui::CompletionFailureKind::TypeMismatch
+        );
+
+        let escaped = host.step(nickel_ui::HostBatch {
+            events: vec![nickel_ui::HostEvent::Shortcut(nickel_ui::Shortcut::Escape)],
+            ..nickel_ui::HostBatch::default()
+        });
+        assert!(escaped.changed);
+        assert_eq!(escaped.effects.len(), 1);
+        assert_eq!(
+            host.application_mut().effects,
+            [super::ScreenshotEffect::Cancel]
+        );
     }
 
     #[test]
@@ -655,7 +995,7 @@ mod tests {
         assert_eq!(confirm_edge, PointerInteraction::LeftDoubleClick);
         assert!(tool.pointer_pressed(confirm_x as f32, confirm_y as f32, 800, 600));
         assert!(tool.pointer_pressed(confirm_x as f32, confirm_y as f32, 800, 600));
-        assert!(tool.confirmed);
+        assert!(tool.host.application().confirmed);
         let _ = tool.scene(
             800,
             600,

@@ -13,9 +13,9 @@ use image::RgbaImage;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
-    Align, Axis, Constraints, FlexItem, Insets, Invalidation, Justify, Length, Overflow, Point,
-    Rect, SelectionDocument, SelectionEndpoint, SelectionRun, Size, TextBoundary, TextEditor,
-    Track, UiId, UiStateStore, layout_flex,
+    Align, Axis, Constraints, FlexItem, InputModality, Insets, Invalidation, Justify, Length,
+    Overflow, Point, Rect, SelectionDocument, SelectionEndpoint, SelectionRun, Size, TextBoundary,
+    TextEditor, Track, UiId, UiStateStore, layout_flex,
 };
 
 pub type Color = u32;
@@ -171,6 +171,8 @@ pub enum UiEvent {
     PointerMoved(Point),
     PointerPressed(Point),
     PointerReleased(Point),
+    PointerCancelled,
+    PointerContext(Point),
     Scroll {
         point: Point,
         delta_y: f32,
@@ -181,6 +183,11 @@ pub enum UiEvent {
     },
     FocusNext,
     FocusPrevious,
+    ControllerUp,
+    ControllerDown,
+    ControllerLeft,
+    ControllerRight,
+    /// Legacy linear traversal retained for callers without directional input.
     ControllerNext,
     ControllerPrevious,
     ControllerPreviousPane,
@@ -190,10 +197,13 @@ pub enum UiEvent {
     ActivateFocused,
     KeyboardActivate,
     ControllerActivate,
+    ControllerContextMenu,
+    KeyboardContextMenu,
     /// Moves accessibility focus through the same production focus state used
     /// by keyboard navigation, so the visible focus treatment cannot diverge.
     AccessibilityFocus(UiId),
     AccessibilityActivate(UiId),
+    AccessibilityContextMenu(UiId),
     TextInput(String),
     ImePreedit(String),
     TextBackspace,
@@ -327,6 +337,266 @@ pub enum Tone {
     Danger,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum SemanticRole {
+    ApplicationPresentation,
+    Button,
+    Checkbox,
+    Dialog,
+    Grid,
+    GridCell,
+    Group,
+    Image,
+    Link,
+    List,
+    ListItem,
+    Menu,
+    MenuItem,
+    NavigationItem,
+    Option,
+    Pane,
+    Popover,
+    Radio,
+    RadioGroup,
+    Slider,
+    Status,
+    Switch,
+    Tab,
+    TabList,
+    TabPanel,
+    Text,
+    TextField,
+    Tooltip,
+    GraphicalCustomControl,
+}
+
+impl SemanticRole {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ApplicationPresentation => "application",
+            Self::Button => "button",
+            Self::Checkbox => "checkbox",
+            Self::Dialog => "dialog",
+            Self::Grid => "grid",
+            Self::GridCell => "gridcell",
+            Self::Group => "group",
+            Self::Image => "image",
+            Self::Link => "link",
+            Self::List => "list",
+            Self::ListItem => "listitem",
+            Self::Menu => "menu",
+            Self::MenuItem => "menuitem",
+            Self::NavigationItem => "navigation-item",
+            Self::Option => "option",
+            Self::Pane => "pane",
+            Self::Popover => "popover",
+            Self::Radio => "radio",
+            Self::RadioGroup => "radiogroup",
+            Self::Slider => "slider",
+            Self::Status => "status",
+            Self::Switch => "switch",
+            Self::Tab => "tab",
+            Self::TabList => "tablist",
+            Self::TabPanel => "tabpanel",
+            Self::Text => "text",
+            Self::TextField => "textbox",
+            Self::Tooltip => "tooltip",
+            Self::GraphicalCustomControl => "graphics-object",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ActionKind {
+    Activate,
+    Cancel,
+    ContextMenu,
+    Increment,
+    Decrement,
+    SetValue,
+    Expand,
+    Collapse,
+    Select,
+    Dismiss,
+    Scroll,
+    EnterNavigation,
+    ExitNavigation,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum NavigationTraversal {
+    Linear,
+    #[default]
+    Spatial,
+    Grid,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum NavigationExit {
+    #[default]
+    Parent,
+    Dismiss,
+    Contain,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum NavigationEntry {
+    #[default]
+    First,
+    Last,
+    Target(UiId),
+}
+
+/// Explicit modality-neutral navigation topology declared by a component.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NavigationScope {
+    pub traversal: NavigationTraversal,
+    pub entry: NavigationEntry,
+    pub exit: NavigationExit,
+    pub peer: Option<UiId>,
+    pub direction: ReadingDirection,
+    pub retain_focus: bool,
+    pub scroll_owner: Option<UiId>,
+    pub pane: bool,
+    pub default_pane: bool,
+}
+
+impl Default for NavigationScope {
+    fn default() -> Self {
+        Self {
+            traversal: NavigationTraversal::Spatial,
+            entry: NavigationEntry::First,
+            exit: NavigationExit::Parent,
+            peer: None,
+            direction: ReadingDirection::LeftToRight,
+            retain_focus: true,
+            scroll_owner: None,
+            pane: false,
+            default_pane: false,
+        }
+    }
+}
+
+impl NavigationScope {
+    pub fn group() -> Self {
+        Self::default()
+    }
+
+    pub fn pane(default_pane: bool) -> Self {
+        Self {
+            pane: true,
+            default_pane,
+            ..Self::default()
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum SemanticValueInput {
+    Boolean(bool),
+    Number(f64),
+    Text(String),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum SemanticAction {
+    Invoke(ActionKind),
+    SetValue(SemanticValueInput),
+}
+
+/// The production input channel that originated an interaction transition.
+///
+/// Tooling selects a real channel when it is proving modality behavior. `Programmatic` is reserved
+/// for direct semantic automation and deliberately does not change the user's current modality.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InputSource {
+    Keyboard,
+    Pointer,
+    Controller,
+    Accessibility,
+    Programmatic,
+    System,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum InteractionIntent {
+    Event(UiEvent),
+    Invoke {
+        target: UiId,
+        action: SemanticAction,
+    },
+}
+
+impl UiEvent {
+    pub const fn input_source(&self) -> InputSource {
+        match self {
+            Self::PointerMoved(_)
+            | Self::PointerPressed(_)
+            | Self::PointerReleased(_)
+            | Self::PointerCancelled
+            | Self::PointerContext(_)
+            | Self::Scroll { .. }
+            | Self::ScrollHorizontal { .. } => InputSource::Pointer,
+            Self::ControllerUp
+            | Self::ControllerDown
+            | Self::ControllerLeft
+            | Self::ControllerRight
+            | Self::ControllerNext
+            | Self::ControllerPrevious
+            | Self::ControllerPreviousPane
+            | Self::ControllerNextPane
+            | Self::ControllerAdjust(_)
+            | Self::ControllerBack
+            | Self::ControllerActivate
+            | Self::ControllerContextMenu => InputSource::Controller,
+            Self::AccessibilityFocus(_)
+            | Self::AccessibilityActivate(_)
+            | Self::AccessibilityContextMenu(_) => InputSource::Accessibility,
+            Self::FocusNext
+            | Self::FocusPrevious
+            | Self::ActivateFocused
+            | Self::KeyboardActivate
+            | Self::KeyboardContextMenu
+            | Self::TextInput(_)
+            | Self::ImePreedit(_)
+            | Self::TextBackspace
+            | Self::TextBackspaceWord
+            | Self::TextDelete
+            | Self::TextMoveLeft { .. }
+            | Self::TextMoveRight { .. }
+            | Self::TextMoveWordLeft { .. }
+            | Self::TextMoveWordRight { .. }
+            | Self::TextMoveHome { .. }
+            | Self::TextMoveEnd { .. }
+            | Self::TextMoveDocumentHome { .. }
+            | Self::TextMoveDocumentEnd { .. }
+            | Self::TextSelectAll
+            | Self::TextCopy
+            | Self::TextCut
+            | Self::TextPaste(_)
+            | Self::SelectionClear
+            | Self::Dismiss => InputSource::Keyboard,
+            Self::CaretBlink
+            | Self::FocusGained
+            | Self::FocusLost
+            | Self::Suspended
+            | Self::DeviceRemoved => InputSource::System,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum SemanticValueSnapshot {
+    Boolean(bool),
+    Number {
+        value: f64,
+        minimum: f64,
+        maximum: f64,
+        step: f64,
+    },
+    Text(String),
+}
+
 impl Tone {
     const fn color(self) -> Option<Color> {
         match self {
@@ -392,6 +662,7 @@ pub enum PaintCommand {
     Image {
         bounds: Rect,
         id: u16,
+        generation: u64,
         image: Arc<RgbaImage>,
         high_density: Option<Arc<RgbaImage>>,
     },
@@ -441,6 +712,10 @@ pub struct Style {
     /// Stable id of the surface controlled by this element, when applicable.
     pub accessibility_controls: Option<UiId>,
     pub accessibility_hidden: bool,
+    /// Explicit exemption for visual-only semantic content. A declared role
+    /// without a name is otherwise rejected from semantic/accessibility output.
+    pub semantic_decorative: bool,
+    pub semantic_role: Option<SemanticRole>,
     #[doc(hidden)]
     pub scroll_offset_x: f32,
     #[doc(hidden)]
@@ -495,6 +770,8 @@ impl Default for Style {
             accessibility_state: None,
             accessibility_controls: None,
             accessibility_hidden: false,
+            semantic_decorative: false,
+            semantic_role: None,
             scroll_offset_x: 0.0,
             scroll_offset: 0.0,
             corner_radius: 0.0,
@@ -508,7 +785,7 @@ impl Default for Style {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 enum Kind {
     Flex(Axis),
     VerticalScroll {
@@ -517,6 +794,9 @@ enum Kind {
     },
     Grid {
         columns: GridColumnSpec,
+    },
+    CustomPaint {
+        paint: fn(Rect) -> Vec<PaintCommand>,
     },
     Text {
         value: String,
@@ -539,6 +819,7 @@ enum Kind {
     },
     Image {
         id: u16,
+        generation: u64,
         image: Arc<RgbaImage>,
         high_density: Option<Arc<RgbaImage>>,
         presentation: ImagePresentation,
@@ -567,6 +848,7 @@ impl Kind {
             Self::Flex(Axis::Vertical) => "Column",
             Self::VerticalScroll { .. } => "VerticalScroll",
             Self::Grid { .. } => "Grid",
+            Self::CustomPaint { .. } => "CustomPaint",
             Self::Text { .. } => "Text",
             Self::StyledText { .. } => "StyledText",
             Self::Image { .. } => "Image",
@@ -611,15 +893,14 @@ pub struct Element<Message = String> {
     kind: Kind,
     style: Style,
     message: Option<Message>,
+    context_message: Option<Message>,
     message_mapper: Option<fn(f32) -> Message>,
     text_mapper: Option<fn(String) -> Message>,
     option_messages: Vec<Option<Message>>,
     inline_messages: Vec<(Range<usize>, Message)>,
     children: Vec<Element<Message>>,
-    controller_group: bool,
-    controller_pane: bool,
-    controller_pane_default: bool,
-    controller_step: f32,
+    navigation_scope: Option<NavigationScope>,
+    adjustment_step: f32,
 }
 
 impl<Message> Element<Message> {
@@ -630,15 +911,14 @@ impl<Message> Element<Message> {
             source: None,
             style: Style::default(),
             message: None,
+            context_message: None,
             message_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
             children: Vec::new(),
-            controller_group: false,
-            controller_pane: false,
-            controller_pane_default: false,
-            controller_step: 0.05,
+            navigation_scope: None,
+            adjustment_step: 0.05,
         }
     }
 
@@ -660,15 +940,14 @@ impl<Message> Element<Message> {
             source: None,
             style: Style::default(),
             message: None,
+            context_message: None,
             message_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
             children: Vec::new(),
-            controller_group: false,
-            controller_pane: false,
-            controller_pane_default: false,
-            controller_step: 0.05,
+            navigation_scope: None,
+            adjustment_step: 0.05,
         }
     }
 
@@ -745,31 +1024,19 @@ impl<Message> Element<Message> {
         self
     }
 
-    /// Makes this element a controller navigation level entered with Activate.
-    pub fn controller_group(mut self, enabled: bool) -> Self {
-        self.controller_group = enabled;
+    pub fn navigation_scope(mut self, scope: NavigationScope) -> Self {
+        self.navigation_scope = Some(scope);
         self
     }
 
-    /// Marks whether this element is a shoulder-switchable controller pane.
-    pub fn controller_pane(mut self, enabled: bool) -> Self {
-        self.controller_pane = enabled;
-        self
-    }
-
-    pub fn controller_pane_default(mut self, default: bool) -> Self {
-        self.controller_pane_default = default;
-        self
-    }
-
-    pub fn controller_pane_highlight(mut self, highlight: Color) -> Self {
+    pub fn navigation_scope_highlight(mut self, highlight: Color) -> Self {
         self.style.controller_pane_border = Some(highlight);
         self
     }
 
     /// Sets the normalized left/right adjustment step for sliders.
-    pub fn controller_step(mut self, step: f32) -> Self {
-        self.controller_step = step.max(0.0);
+    pub fn adjustment_step(mut self, step: f32) -> Self {
+        self.adjustment_step = step.max(0.0);
         self
     }
 
@@ -899,6 +1166,11 @@ impl<Message> Element<Message> {
         self
     }
 
+    pub fn context_message(mut self, message: Message) -> Self {
+        self.context_message = Some(message);
+        self
+    }
+
     pub fn accessibility_label(mut self, label: impl Into<String>) -> Self {
         self.style.accessibility_label = Some(label.into());
         self
@@ -929,6 +1201,16 @@ impl<Message> Element<Message> {
         self
     }
 
+    pub fn decorative(mut self) -> Self {
+        self.style.semantic_decorative = true;
+        self
+    }
+
+    pub fn semantic_role(mut self, role: SemanticRole) -> Self {
+        self.style.semantic_role = Some(role);
+        self
+    }
+
     pub fn map_message<ParentMessage, Map>(self, mut map: Map) -> Element<ParentMessage>
     where
         Map: FnMut(Message) -> ParentMessage,
@@ -954,6 +1236,7 @@ impl<Message> Element<Message> {
             source: self.source,
             style: self.style,
             message: self.message.map(&mut *map),
+            context_message: self.context_message.map(&mut *map),
             message_mapper: None,
             text_mapper: None,
             option_messages: self
@@ -971,10 +1254,8 @@ impl<Message> Element<Message> {
                 .into_iter()
                 .map(|child| child.map_message_with(map))
                 .collect(),
-            controller_group: self.controller_group,
-            controller_pane: self.controller_pane,
-            controller_pane_default: self.controller_pane_default,
-            controller_step: self.controller_step,
+            navigation_scope: self.navigation_scope,
+            adjustment_step: self.adjustment_step,
         }
     }
 }
@@ -1004,18 +1285,81 @@ struct StyledTextMeasureKey {
 
 struct TextMeasurer {
     font_system: FontSystem,
+    cache_enabled: bool,
     plain: HashMap<TextMeasureKey, Size>,
     styled: HashMap<StyledTextMeasureKey, Size>,
+    plain_bytes: usize,
+    styled_bytes: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TextMeasureCacheMode {
+    #[default]
+    Enabled,
+    BypassDerived,
+}
+
+/// Runs one diagnostic or verification operation with a thread-local text
+/// measurement cache policy. Entering and leaving bypass mode clears both
+/// plain and styled derived entries, so results cannot leak across modes.
+pub fn with_text_measure_cache_mode<R>(
+    mode: TextMeasureCacheMode,
+    operation: impl FnOnce() -> R,
+) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TEXT_MEASURER.with(|measurer| {
+                let mut measurer = measurer.borrow_mut();
+                measurer.cache_enabled = self.0;
+                measurer.plain.clear();
+                measurer.styled.clear();
+                measurer.plain_bytes = 0;
+                measurer.styled_bytes = 0;
+            });
+        }
+    }
+    let previous = TEXT_MEASURER.with(|measurer| {
+        let mut measurer = measurer.borrow_mut();
+        let previous = measurer.cache_enabled;
+        measurer.cache_enabled = mode == TextMeasureCacheMode::Enabled;
+        measurer.plain.clear();
+        measurer.styled.clear();
+        measurer.plain_bytes = 0;
+        measurer.styled_bytes = 0;
+        previous
+    });
+    let restore = Restore(previous);
+    let result = operation();
+    drop(restore);
+    result
 }
 
 impl Default for TextMeasurer {
     fn default() -> Self {
         Self {
             font_system: FontSystem::new(),
+            cache_enabled: true,
             plain: HashMap::new(),
             styled: HashMap::new(),
+            plain_bytes: 0,
+            styled_bytes: 0,
         }
     }
+}
+
+const TEXT_MEASURE_CACHE_CAPACITY: usize = 2048;
+const TEXT_MEASURE_CACHE_BYTE_BUDGET: usize = 2 * 1024 * 1024;
+
+fn plain_measure_key_bytes(key: &TextMeasureKey) -> usize {
+    std::mem::size_of::<TextMeasureKey>() + key.text.len() + key.locale.len()
+}
+
+fn styled_measure_key_bytes(key: &StyledTextMeasureKey) -> usize {
+    std::mem::size_of::<StyledTextMeasureKey>()
+        + key.text.len()
+        + key.locale.len()
+        + key.spans.len() * std::mem::size_of::<StyledTextSpan>()
 }
 
 thread_local! {
@@ -1050,7 +1394,9 @@ fn measure_text(
             line_height: line_height.to_bits(),
             max_lines,
         };
-        if let Some(size) = measurer.plain.get(&key).copied() {
+        if measurer.cache_enabled
+            && let Some(size) = measurer.plain.get(&key).copied()
+        {
             return size;
         }
         let font_system = &mut measurer.font_system;
@@ -1071,10 +1417,17 @@ fn measure_text(
         if measured.height == 0.0 {
             measured.height = line_height;
         }
-        if measurer.plain.len() >= 2048 {
+        let key_bytes = plain_measure_key_bytes(&key);
+        if measurer.plain.len() >= TEXT_MEASURE_CACHE_CAPACITY
+            || measurer.plain_bytes.saturating_add(key_bytes) > TEXT_MEASURE_CACHE_BYTE_BUDGET
+        {
             measurer.plain.clear();
+            measurer.plain_bytes = 0;
         }
-        measurer.plain.insert(key, measured);
+        if measurer.cache_enabled && key_bytes <= TEXT_MEASURE_CACHE_BYTE_BUDGET {
+            measurer.plain_bytes += key_bytes;
+            measurer.plain.insert(key, measured);
+        }
         measured
     })
 }
@@ -1143,7 +1496,9 @@ fn measure_styled_text(
             wrap,
             line_height: line_height.to_bits(),
         };
-        if let Some(size) = measurer.styled.get(&key).copied() {
+        if measurer.cache_enabled
+            && let Some(size) = measurer.styled.get(&key).copied()
+        {
             return size;
         }
         let font_system = &mut measurer.font_system;
@@ -1166,10 +1521,17 @@ fn measure_styled_text(
         if measured.height == 0.0 {
             measured.height = line_height;
         }
-        if measurer.styled.len() >= 2048 {
+        let key_bytes = styled_measure_key_bytes(&key);
+        if measurer.styled.len() >= TEXT_MEASURE_CACHE_CAPACITY
+            || measurer.styled_bytes.saturating_add(key_bytes) > TEXT_MEASURE_CACHE_BYTE_BUDGET
+        {
             measurer.styled.clear();
+            measurer.styled_bytes = 0;
         }
-        measurer.styled.insert(key, measured);
+        if measurer.cache_enabled && key_bytes <= TEXT_MEASURE_CACHE_BYTE_BUDGET {
+            measurer.styled_bytes += key_bytes;
+            measurer.styled.insert(key, measured);
+        }
         measured
     })
 }
@@ -1206,6 +1568,7 @@ pub trait Component<Message = String> {
 }
 
 /// Type-erased declarative view used when a collection needs one concrete item type.
+#[derive(Clone)]
 pub struct AnyView<Message = String>(Element<Message>);
 
 impl<Message> AnyView<Message> {
@@ -1234,6 +1597,10 @@ pub trait ComponentBuilderExt<Message>: Component<Message> + Sized {
         self.into_element().padding(padding)
     }
 
+    fn context_message(self, message: Message) -> Element<Message> {
+        self.into_element().context_message(message)
+    }
+
     fn accessibility_label(self, label: impl Into<String>) -> Element<Message> {
         self.into_element().accessibility_label(label)
     }
@@ -1246,6 +1613,10 @@ pub trait ComponentBuilderExt<Message>: Component<Message> + Sized {
         self.into_element().accessibility_role(role)
     }
 
+    fn semantic_role(self, role: SemanticRole) -> Element<Message> {
+        self.into_element().semantic_role(role)
+    }
+
     fn accessibility_state(self, state: impl Into<String>) -> Element<Message> {
         self.into_element().accessibility_state(state)
     }
@@ -1256,6 +1627,10 @@ pub trait ComponentBuilderExt<Message>: Component<Message> + Sized {
 
     fn accessibility_hidden(self, hidden: bool) -> Element<Message> {
         self.into_element().accessibility_hidden(hidden)
+    }
+
+    fn decorative(self) -> Element<Message> {
+        self.into_element().decorative()
     }
 
     fn background(self, background: impl Into<Background>) -> Element<Message> {
@@ -1551,6 +1926,11 @@ flex_component!(Row, Axis::Horizontal);
 
 mod components;
 pub use components::*;
+mod collection;
+pub use collection::*;
+
+mod responsive_navigation;
+pub use responsive_navigation::*;
 
 mod settings_components;
 pub use settings_components::*;

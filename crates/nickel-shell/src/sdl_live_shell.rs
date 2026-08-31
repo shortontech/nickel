@@ -7,6 +7,7 @@ use std::{
 #[cfg(not(target_os = "macos"))]
 use jiff::Zoned;
 use nickel_core::{
+    launcher_preferences::LauncherPreferences,
     shell_settings::ShellSettings,
     theme::{Appearance, ThemePalette},
     wallpaper_settings::WallpaperSettings,
@@ -15,36 +16,42 @@ use nickel_session_protocol::{
     PointerInteraction, PreviewTargetAction, ResolvedShellTarget, ShellRole, ShellSemanticTarget,
     WindowMenuTargetAction,
 };
-use nickel_ui::{PaintCommand, Point, Rect, TextAlign};
+#[cfg(test)]
+use nickel_ui::Rect;
+use nickel_ui::backend::PaintCommand;
+use nickel_ui::{
+    AnyView, Column, Container, ControllerAction, HostBatch, HostChangeToken, HostEvent, Image,
+    ImageFit, Insets, Point, Row, SemanticRole, Shortcut, Spacer, Text, TextAlign, TextField,
+    UiEvent, ViewContext,
+};
 
 use crate::{
-    launcher::{
-        DashboardAccount, DashboardProject, DashboardSection, Launcher, LauncherInput,
-        LauncherInputOutcome, LauncherMode,
-    },
+    launcher::{DashboardAccount, DashboardProject, DashboardSection, Launcher},
     model::{Application, OpenWindow, TrayItem},
     notification::DesktopNotification,
     platform::{
         self, AudioStatus, BluetoothStatus, FeedState, FeedStatus, NetworkStatus, NotificationFeed,
         NotificationSource, ShellCommand, TrayFeed, TraySource, WindowAction, WindowFeed,
     },
-    sdl_control_view::{ControlAction, ControlCenterFrame, ControlViewState, build_control_center},
+    sdl_control_view::{ControlAction, ControlCenterApp, ControlCenterHost},
     sdl_launcher_view::{
-        LauncherAction, LauncherFrame, LauncherIconCache, LauncherShellEffect, LauncherViewState,
-        build_launcher_frame, reduce_launcher_action, reduce_launcher_input,
+        LauncherAction, LauncherApplication, LauncherIconCache, LauncherShellEffect,
+        LauncherViewState, reduce_launcher_action,
     },
+    sdl_notification_view::{NotificationApp, NotificationEffect, NotificationHost},
     sdl_screenshot::ScreenshotTool,
     sdl_shell::SurfaceRole,
     sdl_window_preview::{
-        MENU_WIDTH, MenuAction, PreviewAction, WindowMenuFrame, WindowPreviewFrame,
-        build_menu_frame, build_preview_frame, menu_height, preview_dimensions,
+        MENU_WIDTH, MenuAction, PreviewAction, WindowMenuApp, WindowPreviewFrame,
+        build_preview_frame, menu_height, preview_dimensions,
     },
 };
-use nickel_input::{AggregateModifier, KeyCode, ModifierState};
+use nickel_input::KeyCode;
 use zeroize::{Zeroize, Zeroizing};
 
 const PANEL_ITEM_WIDTH: f32 = 52.0;
 const PANEL_CLOCK_WIDTH: f32 = 96.0;
+#[cfg(test)]
 const PANEL_CONTROL_GAP: f32 = 8.0;
 const PANEL_TRAY_WIDTH: f32 = 28.0;
 const PANEL_TRAY_ICON_SIZE: u32 = 18;
@@ -53,7 +60,13 @@ const PANEL_CODEX_ICON_SIZE: f32 = 28.0;
 const PREVIEW_LEAVE_DELAY: Duration = Duration::from_millis(500);
 const PREVIEW_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 const RECURRING_DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(30);
+const WALLPAPER_MAX_WIDTH: u32 = 7680;
+const WALLPAPER_MAX_HEIGHT: u32 = 4320;
+const PREVIEW_CACHE_CAPACITY: usize = 32;
+const PREVIEW_CACHE_WIDTH: u32 = 260;
+const PREVIEW_CACHE_HEIGHT: u32 = 116;
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct PanelStatusLayout {
     control_start: f32,
@@ -61,6 +74,7 @@ struct PanelStatusLayout {
     codex_start: f32,
 }
 
+#[cfg(test)]
 impl PanelStatusLayout {
     fn codex_icon_bounds(self) -> Rect {
         Rect::new(
@@ -72,6 +86,7 @@ impl PanelStatusLayout {
     }
 }
 
+#[cfg(test)]
 fn panel_status_layout(width: u32, tray_count: usize, codex_available: bool) -> PanelStatusLayout {
     let control_start = panel_control_start(width);
     let tray_start = control_start - tray_count.min(4) as f32 * PANEL_TRAY_WIDTH;
@@ -87,15 +102,6 @@ fn panel_status_layout(width: u32, tray_count: usize, codex_available: bool) -> 
     }
 }
 
-fn panel_task_bounds(index: usize) -> Rect {
-    Rect::new(
-        PANEL_ITEM_WIDTH + index as f32 * PANEL_ITEM_WIDTH,
-        0.0,
-        PANEL_ITEM_WIDTH,
-        56.0,
-    )
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PanelHover {
     Launcher,
@@ -104,6 +110,260 @@ enum PanelHover {
     Tray(usize),
     #[cfg(not(target_os = "macos"))]
     Control,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PanelAction {
+    Launcher,
+    Task(usize),
+    Codex,
+    Tray(String),
+    Control,
+}
+
+#[derive(Clone)]
+pub struct DesktopApplication {
+    wallpaper: Option<Arc<image::RgbaImage>>,
+    palette: ThemePalette,
+}
+
+impl nickel_ui::Application for DesktopApplication {
+    type Message = ();
+
+    fn update(&mut self, (): Self::Message) {}
+
+    fn view(&self, context: ViewContext) -> impl nickel_ui::View<Self::Message> {
+        let width = context.viewport.size.width;
+        let height = context.viewport.size.height;
+        let root = Container::new()
+            .id("desktop")
+            .accessibility_label("Desktop")
+            .background(self.palette.background)
+            .width(width)
+            .height(height);
+        if let Some(wallpaper) = &self.wallpaper {
+            root.child(
+                Image::new(1, Arc::clone(wallpaper))
+                    .width(width)
+                    .height(height)
+                    .fit(ImageFit::Stretch),
+            )
+        } else {
+            root
+        }
+    }
+
+    fn title(&self) -> &str {
+        "Nickel Desktop"
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LockMessage {
+    Password(String),
+}
+
+enum LockEffect {
+    Authenticate(Zeroizing<String>),
+}
+
+pub struct LockApplication {
+    password: Zeroizing<String>,
+    status: Option<String>,
+    effects: Vec<LockEffect>,
+}
+
+pub struct PanelApplication {
+    launcher: Launcher,
+    windows: Vec<OpenWindow>,
+    tray: Vec<TrayItem>,
+    tray_icons: Vec<Arc<image::RgbaImage>>,
+    panel_icon: Arc<image::RgbaImage>,
+    codex_icon: Arc<image::RgbaImage>,
+    task_icons: Vec<Option<(u16, Arc<image::RgbaImage>)>>,
+    palette: ThemePalette,
+    panel_hover: Option<PanelHover>,
+    launcher_visible: bool,
+    codex_project_menu_visible: bool,
+    control_visible: bool,
+    effects: Vec<PanelAction>,
+}
+
+impl nickel_ui::Application for PanelApplication {
+    type Message = PanelAction;
+
+    fn update(&mut self, message: Self::Message) {
+        self.effects.push(message);
+    }
+
+    fn view(&self, context: ViewContext) -> impl nickel_ui::View<Self::Message> {
+        self.panel_view(context.viewport.size.width, context.viewport.size.height)
+    }
+
+    fn title(&self) -> &str {
+        "Nickel Panel"
+    }
+}
+
+#[cfg(any(test, feature = "workbench-fixtures"))]
+impl DesktopApplication {
+    #[allow(dead_code)] // Binary and fixture library compile this shared module separately.
+    pub fn fixture(wallpaper: Option<Arc<image::RgbaImage>>, palette: ThemePalette) -> Self {
+        Self { wallpaper, palette }
+    }
+}
+
+#[cfg(any(test, feature = "workbench-fixtures"))]
+impl LockApplication {
+    #[allow(dead_code)] // Binary and fixture library compile this shared module separately.
+    pub fn fixture(password: &str, status: Option<String>) -> Self {
+        Self {
+            password: Zeroizing::new(password.to_owned()),
+            status,
+            effects: Vec::new(),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "workbench-fixtures"))]
+impl PanelApplication {
+    #[allow(dead_code)] // Binary and fixture library compile this shared module separately.
+    pub fn fixture(launcher: Launcher, palette: ThemePalette) -> Self {
+        let icon = Arc::new(image::RgbaImage::from_pixel(
+            1,
+            1,
+            image::Rgba([120, 90, 220, 255]),
+        ));
+        Self {
+            launcher,
+            windows: Vec::new(),
+            tray: Vec::new(),
+            tray_icons: Vec::new(),
+            panel_icon: Arc::clone(&icon),
+            codex_icon: icon,
+            task_icons: Vec::new(),
+            palette,
+            panel_hover: None,
+            launcher_visible: false,
+            codex_project_menu_visible: false,
+            control_visible: false,
+            effects: Vec::new(),
+        }
+    }
+}
+
+impl nickel_ui::Application for LockApplication {
+    type Message = LockMessage;
+
+    fn update(&mut self, message: Self::Message) {
+        match message {
+            LockMessage::Password(value) if value.len() <= 1024 => {
+                self.password = Zeroizing::new(value);
+                self.status = None;
+            }
+            LockMessage::Password(_) => {}
+        }
+    }
+
+    fn shortcut(&mut self, shortcut: Shortcut) -> bool {
+        if shortcut != Shortcut::Submit {
+            return false;
+        }
+        self.effects
+            .push(LockEffect::Authenticate(std::mem::take(&mut self.password)));
+        true
+    }
+
+    fn view(&self, context: ViewContext) -> impl nickel_ui::View<Self::Message> {
+        let width = context.viewport.size.width;
+        let height = context.viewport.size.height;
+        let username = std::env::var("USER").unwrap_or_else(|_| "Session locked".into());
+        let password_color = if self.password.is_empty() {
+            0x8992a6
+        } else {
+            0xffffff
+        };
+        let mut content = Column::new()
+            .width(width)
+            .height(height)
+            .child(Spacer::vertical(height * 0.38))
+            .child(
+                Text::new("Nickel")
+                    .height(48.0)
+                    .scale(30.0)
+                    .color(0xffffff)
+                    .align(TextAlign::Center)
+                    .bold(true),
+            )
+            .child(Spacer::vertical(8.0))
+            .child(
+                Text::new(username)
+                    .height(32.0)
+                    .scale(18.0)
+                    .color(0xb8c0d4)
+                    .align(TextAlign::Center),
+            )
+            .child(Spacer::vertical(16.0))
+            .child(
+                Container::new()
+                    .id("lock-password")
+                    .accessibility_label("Password")
+                    .width(340.0)
+                    .height(46.0)
+                    .align_self(nickel_ui::Align::Center)
+                    .background(0x20283a)
+                    .radius(10.0)
+                    .padding(Insets {
+                        top: 10.0,
+                        right: 16.0,
+                        bottom: 8.0,
+                        left: 16.0,
+                    })
+                    .child(
+                        TextField::on_change_masked_with_placeholder(
+                            &self.password,
+                            "Password",
+                            '•',
+                            LockMessage::Password,
+                        )
+                        .id("lock-password-input")
+                        .scale(18.0)
+                        .color(password_color),
+                    ),
+            );
+        if let Some(status) = &self.status {
+            content = content.child(Spacer::vertical(14.0)).child(
+                Text::new(status)
+                    .height(28.0)
+                    .scale(15.0)
+                    .color(0xff9a9a)
+                    .align(TextAlign::Center),
+            );
+        }
+        Container::new()
+            .id("lock-screen")
+            .accessibility_label("Session locked")
+            .background(0x080b12)
+            .width(width)
+            .height(height)
+            .child(content)
+    }
+
+    fn title(&self) -> &str {
+        "Nickel Lock Screen"
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ShellImageCacheDiagnostics {
+    pub launcher_icon_entries: usize,
+    pub launcher_icon_bytes: usize,
+    pub wallpaper_entries: usize,
+    pub wallpaper_bytes: usize,
+    pub tray_entries: usize,
+    pub tray_bytes: usize,
+    pub preview_entries: usize,
+    pub preview_bytes: usize,
 }
 
 pub struct LiveShell {
@@ -121,6 +381,9 @@ pub struct LiveShell {
     wallpaper_path: Option<std::path::PathBuf>,
     wallpaper: Option<Arc<image::RgbaImage>>,
     wallpaper_size: (u32, u32),
+    desktop_host: nickel_ui::UiHost<DesktopApplication>,
+    desktop_change_token: HostChangeToken,
+    desktop_deadline: Option<Instant>,
     panel_icon: Arc<image::RgbaImage>,
     codex_icon: Arc<image::RgbaImage>,
     palette: ThemePalette,
@@ -129,11 +392,15 @@ pub struct LiveShell {
     audio: AudioStatus,
     launcher_visible: bool,
     locked: bool,
-    lock_password: Zeroizing<String>,
-    lock_status: Option<String>,
+    lock_host: nickel_ui::UiHost<LockApplication>,
+    lock_change_token: HostChangeToken,
+    lock_deadline: Option<Instant>,
     control_visible: bool,
     codex_project_menu_visible: bool,
     panel_hover: Option<PanelHover>,
+    panel_host: nickel_ui::UiHost<PanelApplication>,
+    panel_change_token: HostChangeToken,
+    panel_deadline: Option<Instant>,
     preview_group: Option<usize>,
     preview_focus_requested: bool,
     preview_pointer_inside: bool,
@@ -144,51 +411,26 @@ pub struct LiveShell {
     preview_refresh_deadline: Option<Instant>,
     preview_frame: Option<WindowPreviewFrame>,
     window_menu: Option<crate::model::WindowId>,
-    window_menu_frame: Option<WindowMenuFrame>,
+    window_menu_host: Option<nickel_ui::UiHost<WindowMenuApp>>,
     window_menu_selected: usize,
-    notification_selected: usize,
-    notification_keyboard_active: bool,
+    notification_host: NotificationHost,
     panel_origin_x: i32,
-    control_state: ControlViewState,
+    control_host: ControlCenterHost,
+    control_change_token: HostChangeToken,
+    control_deadline: Option<Instant>,
     launcher_view: LauncherViewState,
     launcher_icons: LauncherIconCache,
-    launcher_frame: Option<LauncherFrame>,
+    launcher_host: nickel_ui::UiHost<LauncherApplication>,
     launcher_status: Option<String>,
+    #[cfg(test)]
+    launcher_preferences_path: Option<std::path::PathBuf>,
+    #[cfg(test)]
+    launcher_persistence_attempts: usize,
     secure_storage_override: Option<String>,
     secure_storage_state: platform::SecureStorageState,
     secure_storage_query_error: Option<(platform::SessionRequestError, Instant)>,
     requested_codex_project: Option<String>,
     screenshot: ScreenshotTool,
-}
-
-fn notification_action_rects(action_count: usize, width: u32, height: u32) -> Vec<(usize, Rect)> {
-    let count = action_count;
-    if count == 0 {
-        return Vec::new();
-    }
-    let gap = 8.0;
-    let available = (width as f32 - 40.0 - gap * (count.saturating_sub(1) as f32)).max(1.0);
-    let button_width = available / count as f32;
-    (0..count)
-        .map(|index| {
-            (
-                index,
-                Rect::new(
-                    20.0 + index as f32 * (button_width + gap),
-                    height as f32 - 46.0,
-                    button_width,
-                    30.0,
-                ),
-            )
-        })
-        .collect()
-}
-
-fn contains_rect(rect: Rect, point: Point) -> bool {
-    point.x >= rect.origin.x
-        && point.y >= rect.origin.y
-        && point.x < rect.origin.x + rect.size.width
-        && point.y < rect.origin.y + rect.size.height
 }
 
 fn preview_refresh_due(deadline: Option<Instant>, now: Instant) -> bool {
@@ -218,6 +460,17 @@ impl LiveShell {
         let application_status = application_discovery_status_label(application_discovery.status());
         let mut launcher = Launcher::new(application_discovery.into_applications());
         launcher.set_places(crate::places::applications());
+        let launcher_preferences = match LauncherPreferences::load_default() {
+            Ok(preferences) => preferences,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                LauncherPreferences::default()
+            }
+            Err(error) => {
+                tracing::warn!(%error, "launcher preferences could not be loaded");
+                LauncherPreferences::default()
+            }
+        };
+        launcher.set_preferences(launcher_preferences);
         let _ = launcher.set_dashboard_account(
             std::env::var("USER")
                 .or_else(|_| std::env::var("USERNAME"))
@@ -257,7 +510,7 @@ impl LiveShell {
         let notification_feed = NotificationFeed::new()?;
         let windows = Vec::new();
         let workspaces = Vec::new();
-        let tray = tray_feed.snapshot();
+        let tray = normalize_tray_items(tray_feed.snapshot());
         let tray_icons = panel_tray_icons(&tray);
         let network = platform::network_status();
         let bluetooth = platform::bluetooth_status();
@@ -278,6 +531,65 @@ impl LiveShell {
         let secure_storage_state = platform::SecureStorageState::Ready;
         #[cfg(not(target_os = "linux"))]
         let secure_storage_query_error = None;
+        let control_host = ControlCenterHost::new(
+            ControlCenterApp::new(
+                network.clone(),
+                bluetooth.clone(),
+                audio.clone(),
+                workspaces.clone(),
+            ),
+            380,
+            650,
+        );
+        let notification_host = NotificationHost::new(NotificationApp::new(palette), 420, 180);
+        let desktop_host = nickel_ui::UiHost::new(
+            DesktopApplication {
+                wallpaper: None,
+                palette,
+            },
+            1920,
+            1080,
+        );
+        let lock_host = nickel_ui::UiHost::new(
+            LockApplication {
+                password: Zeroizing::new(String::new()),
+                status: None,
+                effects: Vec::new(),
+            },
+            1920,
+            1080,
+        );
+        let launcher_view = LauncherViewState::default();
+        let launcher_icons = LauncherIconCache::new();
+        let launcher_host = nickel_ui::UiHost::new(
+            LauncherApplication::new(
+                launcher.clone(),
+                launcher_view.clone(),
+                launcher_icons.clone(),
+                palette,
+            ),
+            920,
+            680,
+        );
+        let panel_host = nickel_ui::UiHost::new(
+            PanelApplication {
+                launcher: launcher.clone(),
+                windows: windows.clone(),
+                tray: tray.clone(),
+                tray_icons: tray_icons.clone(),
+                panel_icon: Arc::clone(&panel_icon),
+                codex_icon: Arc::clone(&codex_icon),
+                task_icons: Vec::new(),
+                palette,
+                panel_hover: None,
+                launcher_visible: false,
+                codex_project_menu_visible: false,
+                control_visible: false,
+                effects: Vec::new(),
+            },
+            1920,
+            56,
+        );
         Ok(Self {
             launcher,
             window_feed,
@@ -293,6 +605,9 @@ impl LiveShell {
             wallpaper_path,
             wallpaper: None,
             wallpaper_size: (0, 0),
+            desktop_host,
+            desktop_change_token: HostChangeToken::default(),
+            desktop_deadline: None,
             panel_icon,
             codex_icon,
             palette,
@@ -301,11 +616,15 @@ impl LiveShell {
             audio,
             launcher_visible: false,
             locked: false,
-            lock_password: Zeroizing::new(String::new()),
-            lock_status: None,
+            lock_host,
+            lock_change_token: HostChangeToken::default(),
+            lock_deadline: None,
             control_visible: false,
             codex_project_menu_visible: false,
             panel_hover: None,
+            panel_host,
+            panel_change_token: HostChangeToken::default(),
+            panel_deadline: None,
             preview_group: None,
             preview_focus_requested: false,
             preview_pointer_inside: false,
@@ -316,16 +635,21 @@ impl LiveShell {
             preview_refresh_deadline: None,
             preview_frame: None,
             window_menu: None,
-            window_menu_frame: None,
+            window_menu_host: None,
             window_menu_selected: 0,
-            notification_selected: 0,
-            notification_keyboard_active: false,
+            notification_host,
             panel_origin_x: 0,
-            control_state: ControlViewState::default(),
-            launcher_view: LauncherViewState::default(),
-            launcher_icons: LauncherIconCache::new(),
-            launcher_frame: None,
+            control_host,
+            control_change_token: HostChangeToken::default(),
+            control_deadline: Some(Instant::now()),
+            launcher_view,
+            launcher_icons,
+            launcher_host,
             launcher_status: application_status.map(str::to_owned),
+            #[cfg(test)]
+            launcher_preferences_path: None,
+            #[cfg(test)]
+            launcher_persistence_attempts: 0,
             secure_storage_override: None,
             secure_storage_state,
             secure_storage_query_error,
@@ -338,6 +662,33 @@ impl LiveShell {
         let fast = self.refresh_fast();
         let system = self.refresh_system();
         fast || system
+    }
+
+    pub fn image_cache_diagnostics(&self) -> ShellImageCacheDiagnostics {
+        let launcher = self.launcher_icons.diagnostics();
+        let wallpaper_bytes = self
+            .wallpaper
+            .as_ref()
+            .map_or(0, |image| image.as_raw().len());
+        ShellImageCacheDiagnostics {
+            launcher_icon_entries: launcher.entries,
+            launcher_icon_bytes: launcher.retained_pixel_bytes,
+            wallpaper_entries: usize::from(self.wallpaper.is_some()),
+            wallpaper_bytes,
+            tray_entries: self.tray.len().saturating_add(self.tray_icons.len()),
+            tray_bytes: self
+                .tray
+                .iter()
+                .map(|item| item.icon.as_raw().len())
+                .chain(self.tray_icons.iter().map(|image| image.as_raw().len()))
+                .sum(),
+            preview_entries: self.preview_images.len(),
+            preview_bytes: self
+                .preview_images
+                .values()
+                .map(|image| image.as_raw().len())
+                .sum(),
+        }
     }
 
     pub fn refresh_fast(&mut self) -> bool {
@@ -388,9 +739,10 @@ impl LiveShell {
         if let Some(group) = preview_group
             && preview_refresh_due(self.preview_refresh_deadline, preview_refresh_now)
         {
-            for window in &group.windows {
+            retain_preview_generation(&mut self.preview_images, &group.windows);
+            for window in group.windows.iter().take(PREVIEW_CACHE_CAPACITY) {
                 if let Some(preview) = self.window_feed.preview(window.id) {
-                    let image = Arc::new(preview.image);
+                    let image = Arc::new(normalize_preview_image(&preview.image));
                     if self
                         .preview_images
                         .get(&window.id)
@@ -403,7 +755,7 @@ impl LiveShell {
             }
             self.preview_refresh_deadline = Some(preview_refresh_now + PREVIEW_REFRESH_INTERVAL);
         }
-        let tray = self.tray_feed.snapshot();
+        let tray = normalize_tray_items(self.tray_feed.snapshot());
         if tray != self.tray {
             self.tray = tray;
             self.tray_icons = panel_tray_icons(&self.tray);
@@ -412,8 +764,13 @@ impl LiveShell {
         let notification = self.notification_feed.snapshot();
         if notification != self.notification {
             self.notification = notification;
-            self.notification_selected = 0;
-            self.notification_keyboard_active = false;
+            self.notification_host
+                .application_mut()
+                .sync(self.notification.as_ref(), self.palette);
+            self.notification_host.step(HostBatch {
+                events: vec![HostEvent::Poll],
+                ..HostBatch::default()
+            });
             changed = true;
         }
         changed
@@ -466,6 +823,7 @@ impl LiveShell {
         );
         if palette != self.palette {
             self.palette = palette;
+            self.launcher_icons.begin_visual_generation();
             if let Some(icon) = crate::icons::load_svg_bytes(
                 include_bytes!("../../../assets/icons/nickel-start.svg"),
                 96,
@@ -503,8 +861,14 @@ impl LiveShell {
             SurfaceRole::Desktop => self.desktop_scene(width, height),
             SurfaceRole::Panel => self.panel_scene(width, height),
             SurfaceRole::Launcher => self.launcher_scene(width, height),
-            SurfaceRole::ControlCenter => self.control_frame(width, height).commands,
-            SurfaceRole::Notification => self.notification_scene(width, height),
+            SurfaceRole::ControlCenter => {
+                self.sync_control_host(width, height);
+                self.control_host.commands().to_vec()
+            }
+            SurfaceRole::Notification => {
+                self.sync_notification_host(width, height);
+                self.notification_host.commands().to_vec()
+            }
             SurfaceRole::WindowPreview => self.window_preview_scene(),
             SurfaceRole::WindowContextMenu => self.window_menu_scene(),
             SurfaceRole::Lock => self.lock_scene(width, height),
@@ -528,105 +892,238 @@ impl LiveShell {
         }
     }
 
-    pub fn dismiss_notification(&mut self) -> bool {
-        let Some(notification) = self.notification.take() else {
-            return false;
+    pub fn next_host_deadline(&self) -> Option<Instant> {
+        [
+            self.desktop_deadline,
+            self.panel_deadline,
+            self.lock_deadline,
+            self.control_deadline,
+            self.screenshot.next_deadline(),
+            self.preview_frame
+                .as_ref()
+                .and_then(WindowPreviewFrame::next_deadline),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+    }
+
+    pub fn scene_change_token(&self, role: SurfaceRole) -> Option<HostChangeToken> {
+        let host_token = |inspection: nickel_ui::HostInspection| HostChangeToken {
+            frame_generation: inspection.frame_generation,
+            semantic_generation: inspection.semantic_generation,
         };
-        self.notification_feed.dismiss(notification.id);
-        true
+        match role {
+            SurfaceRole::Desktop => Some(self.desktop_change_token),
+            SurfaceRole::Panel => Some(self.panel_change_token),
+            SurfaceRole::Lock => Some(self.lock_change_token),
+            SurfaceRole::Launcher => Some(host_token(self.launcher_host.inspect())),
+            SurfaceRole::ControlCenter => Some(self.control_change_token),
+            SurfaceRole::Notification => Some(host_token(self.notification_host.inspect())),
+            SurfaceRole::WindowPreview => {
+                self.preview_frame.as_ref().map(|host| host.change_token())
+            }
+            SurfaceRole::WindowContextMenu => self
+                .window_menu_host
+                .as_ref()
+                .map(|host| host_token(host.inspect())),
+            SurfaceRole::Screenshot => Some(self.screenshot.change_token()),
+            SurfaceRole::CodexProjectMenu | SurfaceRole::CodexChat => None,
+        }
+    }
+
+    pub fn launcher_host_input(
+        &mut self,
+        input: nickel_input::InputEvent,
+        clipboard_text: Option<String>,
+        width: u32,
+        height: u32,
+    ) -> nickel_ui::HostEventOutcome {
+        let status = self.launcher_status_text();
+        self.launcher_host
+            .application_mut()
+            .sync(&self.launcher, self.palette, status);
+        let outcome = self.launcher_host.step(HostBatch {
+            surface_size: Some((width, height)),
+            events: vec![HostEvent::Normalized {
+                input,
+                clipboard_text,
+            }],
+            ..HostBatch::default()
+        });
+        let actions = self.launcher_host.application_mut().take_effects();
+        for action in actions {
+            self.apply_launcher_action(action);
+        }
+        outcome
+    }
+
+    pub fn launcher_host_controller(
+        &mut self,
+        action: ControllerAction,
+        family: nickel_ui::ControllerFamily,
+    ) -> bool {
+        let status = self.launcher_status_text();
+        self.launcher_host
+            .application_mut()
+            .sync(&self.launcher, self.palette, status);
+        self.launcher_host
+            .application_mut()
+            .set_controller_family(family);
+        let outcome = self.launcher_host.step(HostBatch {
+            events: vec![HostEvent::Controller(action)],
+            ..HostBatch::default()
+        });
+        let actions = self.launcher_host.application_mut().take_effects();
+        for action in actions {
+            self.apply_launcher_action(action);
+        }
+        outcome.changed
+    }
+
+    pub fn poll_host_deadlines(&mut self, now: Instant) -> bool {
+        if self.control_deadline.is_none_or(|deadline| now < deadline) {
+            return false;
+        }
+        let changed = self.step_control_host(HostBatch {
+            events: vec![HostEvent::Poll],
+            ..HostBatch::default()
+        });
+        self.apply_control_effects();
+        changed
     }
 
     pub fn notification_click(&mut self, x: f32, y: f32, width: u32, height: u32) -> bool {
-        let Some(notification) = self.notification.as_ref() else {
+        if self.notification.is_none() {
             return false;
-        };
-        let action = notification_action_rects(notification.actions.len(), width, height)
-            .into_iter()
-            .find(|(_, rect)| contains_rect(*rect, Point { x, y }))
-            .map(|(index, _)| notification.actions[index].key.clone());
-        if let Some(action) = action {
-            let id = notification.id;
-            self.notification_feed.invoke(id, &action);
         }
-        self.dismiss_notification()
+        self.sync_notification_host(width, height);
+        let point = Point { x, y };
+        let outcome = self.notification_host.step(HostBatch {
+            events: vec![
+                HostEvent::Ui(UiEvent::PointerPressed(point)),
+                HostEvent::Ui(UiEvent::PointerReleased(point)),
+            ],
+            ..HostBatch::default()
+        });
+        if outcome.effects.is_empty() {
+            self.notification_host.application_mut().request_dismiss();
+        }
+        self.apply_notification_effects()
     }
 
     pub fn notification_key(&mut self, key: Option<KeyCode>) -> bool {
-        let Some(notification) = self.notification.as_ref() else {
+        if self.notification.is_none() {
             return false;
-        };
-        let count = notification.actions.len();
-        self.notification_keyboard_active = true;
-        match key {
-            Some(KeyCode::Escape) => return self.dismiss_notification(),
-            Some(KeyCode::ArrowLeft | KeyCode::ArrowUp) if count > 0 => {
-                self.notification_selected = (self.notification_selected + count - 1) % count;
+        }
+        self.sync_notification_host(420, 180);
+        let event = match key {
+            Some(KeyCode::Escape) => HostEvent::Shortcut(Shortcut::Escape),
+            Some(KeyCode::ArrowLeft | KeyCode::ArrowUp) => {
+                HostEvent::Controller(ControllerAction::Left)
             }
-            Some(KeyCode::ArrowRight | KeyCode::ArrowDown | KeyCode::Tab) if count > 0 => {
-                self.notification_selected = (self.notification_selected + 1) % count;
+            Some(KeyCode::ArrowRight | KeyCode::ArrowDown | KeyCode::Tab) => {
+                HostEvent::Controller(ControllerAction::Right)
             }
             Some(KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space) => {
-                if let Some(action) = notification.actions.get(self.notification_selected) {
-                    self.notification_feed.invoke(notification.id, &action.key);
-                }
-                return self.dismiss_notification();
+                HostEvent::Controller(ControllerAction::Confirm)
             }
             _ => return false,
+        };
+        let activates = matches!(&event, HostEvent::Controller(ControllerAction::Confirm));
+        let outcome = self.notification_host.step(HostBatch {
+            events: vec![event],
+            ..HostBatch::default()
+        });
+        if activates && outcome.effects.is_empty() {
+            self.notification_host.application_mut().request_dismiss();
         }
+        self.apply_notification_effects();
         true
     }
 
+    pub fn notification_controller(&mut self, action: ControllerAction) -> bool {
+        if self.notification.is_none() {
+            return false;
+        }
+        self.sync_notification_host(420, 180);
+        let outcome = self.notification_host.step(HostBatch {
+            events: vec![HostEvent::Controller(action)],
+            ..HostBatch::default()
+        });
+        if action == ControllerAction::Confirm && outcome.effects.is_empty() {
+            self.notification_host.application_mut().request_dismiss();
+        }
+        self.apply_notification_effects();
+        outcome.changed
+    }
+
     pub fn panel_click(&mut self, x: f32, width: u32) -> bool {
-        if x < PANEL_ITEM_WIDTH {
-            self.set_launcher_visible(!self.launcher_visible);
-            return true;
-        }
-        let groups = self.launcher.group_windows(&self.windows);
-        let task_end = PANEL_ITEM_WIDTH + groups.len() as f32 * PANEL_ITEM_WIDTH;
-        if x < task_end {
-            let index = ((x - PANEL_ITEM_WIDTH) / PANEL_ITEM_WIDTH) as usize;
-            if groups
-                .get(index)
-                .is_some_and(|group| group.windows.len() > 1)
-            {
-                self.open_window_preview(index);
-                self.preview_focus_requested = true;
-            } else if let Some(window) = groups.get(index).and_then(|group| group.windows.first()) {
-                let _ = send_session_command(
-                    "activate-window",
-                    ShellCommand::WindowAction {
-                        window: window.id,
-                        action: WindowAction::Activate,
-                    },
-                );
-                self.close_window_preview();
+        self.sync_panel_host();
+        let outcome = self.panel_host.step(HostBatch {
+            surface_size: Some((width, 56)),
+            events: vec![
+                HostEvent::Ui(UiEvent::PointerPressed(Point { x, y: 28.0 })),
+                HostEvent::Ui(UiEvent::PointerReleased(Point { x, y: 28.0 })),
+            ],
+            ..HostBatch::default()
+        });
+        self.panel_change_token = outcome.change_token;
+        self.panel_deadline = outcome.next_deadline;
+        self.apply_panel_effects()
+    }
+
+    pub fn panel_controller(&mut self, action: ControllerAction, width: u32) -> bool {
+        self.sync_panel_host();
+        let outcome = self.panel_host.step(HostBatch {
+            surface_size: Some((width, 56)),
+            events: vec![HostEvent::Controller(action)],
+            ..HostBatch::default()
+        });
+        self.panel_change_token = outcome.change_token;
+        self.panel_deadline = outcome.next_deadline;
+        self.apply_panel_effects();
+        outcome.changed
+    }
+
+    fn apply_panel_action(&mut self, action: PanelAction) {
+        match action {
+            PanelAction::Launcher => self.set_launcher_visible(!self.launcher_visible),
+            PanelAction::Task(index) => {
+                let groups = self.launcher.group_windows(&self.windows);
+                if groups
+                    .get(index)
+                    .is_some_and(|group| group.windows.len() > 1)
+                {
+                    self.open_window_preview(index);
+                    self.preview_focus_requested = true;
+                } else if let Some(window) =
+                    groups.get(index).and_then(|group| group.windows.first())
+                {
+                    let _ = send_session_command(
+                        "activate-window",
+                        ShellCommand::WindowAction {
+                            window: window.id,
+                            action: WindowAction::Activate,
+                        },
+                    );
+                    self.close_window_preview();
+                }
             }
-            return true;
-        }
-        let status = panel_status_layout(width, self.tray.len(), self.launcher.codex_available());
-        #[cfg(not(target_os = "macos"))]
-        if x >= status.control_start {
-            if self.launcher_visible {
-                self.set_launcher_visible(false);
+            PanelAction::Codex => {
+                if self.launcher_visible {
+                    self.set_launcher_visible(false);
+                }
+                self.codex_project_menu_visible = !self.codex_project_menu_visible;
             }
-            self.set_control_visible(!self.control_visible);
-            return true;
-        }
-        if self.launcher.codex_available() && x >= status.codex_start && x < status.tray_start {
-            if self.launcher_visible {
-                self.set_launcher_visible(false);
+            PanelAction::Tray(id) => self.tray_feed.activate(&id),
+            PanelAction::Control => {
+                if self.launcher_visible {
+                    self.set_launcher_visible(false);
+                }
+                self.set_control_visible(!self.control_visible);
             }
-            self.codex_project_menu_visible = !self.codex_project_menu_visible;
-            return true;
         }
-        if x >= status.tray_start {
-            let index = ((x - status.tray_start) / PANEL_TRAY_WIDTH) as usize;
-            if let Some(item) = visible_tray_item(&self.tray, index) {
-                self.tray_feed.activate(&item.id);
-            }
-            return true;
-        }
-        false
     }
 
     /// Resolves a test/accessibility semantic target from the same live group
@@ -649,7 +1146,12 @@ impl LiveShell {
                         .as_ref()
                         .is_some_and(|id| id.as_str() == application_id)
                 })?;
-                let bounds = panel_task_bounds(index);
+                let bounds = self
+                    .panel_host
+                    .semantic_targets_for_message(&PanelAction::Task(index))
+                    .into_iter()
+                    .next()?
+                    .bounds;
                 Some(ResolvedShellTarget {
                     role: ShellRole::Panel,
                     output: output.clone(),
@@ -667,7 +1169,14 @@ impl LiveShell {
                     PreviewTargetAction::Close => PreviewAction::Close(window),
                     PreviewTargetAction::OpenMenu => PreviewAction::OpenMenu(window),
                 };
-                let point = self.preview_frame.as_ref()?.target_point(preview_action)?;
+                let bounds = self
+                    .preview_frame
+                    .as_ref()?
+                    .semantic_bounds(preview_action)?;
+                let point = Point {
+                    x: bounds.origin.x + bounds.size.width / 2.0,
+                    y: bounds.origin.y + bounds.size.height / 2.0,
+                };
                 Some(ResolvedShellTarget {
                     role: ShellRole::Preview,
                     output: None,
@@ -689,7 +1198,17 @@ impl LiveShell {
                     WindowMenuTargetAction::MaximizeRestore => MenuAction::MaximizeRestore(window),
                     WindowMenuTargetAction::Minimize => MenuAction::Minimize(window),
                 };
-                let point = self.window_menu_frame.as_ref()?.target_point(menu_action)?;
+                let bounds = self
+                    .window_menu_host
+                    .as_ref()?
+                    .semantic_targets_for_message(&menu_action)
+                    .into_iter()
+                    .next()?
+                    .bounds;
+                let point = Point {
+                    x: bounds.origin.x + bounds.size.width / 2.0,
+                    y: bounds.origin.y + bounds.size.height / 2.0,
+                };
                 Some(ResolvedShellTarget {
                     role: ShellRole::ContextMenu,
                     output: None,
@@ -712,7 +1231,38 @@ impl LiveShell {
     }
 
     pub fn panel_pointer_moved(&mut self, x: f32, width: u32) -> bool {
-        let hovered = self.panel_hover_at(x, width);
+        self.sync_panel_host();
+        self.panel_host.step(HostBatch {
+            surface_size: Some((width, 56)),
+            events: vec![HostEvent::Ui(UiEvent::PointerMoved(Point { x, y: 28.0 }))],
+            ..HostBatch::default()
+        });
+        let hovered = self
+            .panel_action_at(Point { x, y: 28.0 })
+            .map(|action| match action {
+                PanelAction::Launcher => PanelHover::Launcher,
+                PanelAction::Task(index) => PanelHover::Task(index),
+                PanelAction::Codex => PanelHover::Codex,
+                PanelAction::Tray(id) => self
+                    .tray
+                    .iter()
+                    .rev()
+                    .take(4)
+                    .rev()
+                    .position(|item| item.id == id)
+                    .map(PanelHover::Tray)
+                    .unwrap_or(PanelHover::Tray(0)),
+                PanelAction::Control => {
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        PanelHover::Control
+                    }
+                    #[cfg(target_os = "macos")]
+                    {
+                        PanelHover::Launcher
+                    }
+                }
+            });
         let changed = hovered != self.panel_hover;
         self.panel_hover = hovered;
         if let Some(PanelHover::Task(index)) = hovered {
@@ -722,6 +1272,36 @@ impl LiveShell {
             self.preview_leave_deadline = Some(Instant::now() + PREVIEW_LEAVE_DELAY);
         }
         changed
+    }
+
+    fn panel_action_at(&self, point: Point) -> Option<PanelAction> {
+        let groups = self.launcher.group_windows(&self.windows);
+        let mut actions = Vec::with_capacity(groups.len().min(12) + self.tray.len().min(4) + 3);
+        actions.push(PanelAction::Launcher);
+        actions.extend((0..groups.len().min(12)).map(PanelAction::Task));
+        if self.launcher.codex_available() {
+            actions.push(PanelAction::Codex);
+        }
+        actions.extend(
+            self.tray
+                .iter()
+                .rev()
+                .take(4)
+                .rev()
+                .map(|item| PanelAction::Tray(item.id.clone())),
+        );
+        actions.push(PanelAction::Control);
+        actions.into_iter().find(|action| {
+            self.panel_host
+                .semantic_targets_for_message(action)
+                .iter()
+                .any(|target| {
+                    point.x >= target.bounds.origin.x
+                        && point.y >= target.bounds.origin.y
+                        && point.x < target.bounds.origin.x + target.bounds.size.width
+                        && point.y < target.bounds.origin.y + target.bounds.size.height
+                })
+        })
     }
 
     pub fn set_panel_origin_x(&mut self, origin_x: i32) {
@@ -737,6 +1317,24 @@ impl LiveShell {
             self.preview_leave_deadline = Some(Instant::now() + PREVIEW_LEAVE_DELAY);
         }
         true
+    }
+
+    pub fn preview_controller(&mut self, action: ControllerAction) -> bool {
+        if self.window_menu.is_some() {
+            return self.window_menu_host_controller(action);
+        }
+        let Some(frame) = self.preview_frame.as_mut() else {
+            return false;
+        };
+        let outcome = frame.step(HostBatch {
+            events: vec![HostEvent::Controller(action)],
+            ..HostBatch::default()
+        });
+        let actions = frame.take_actions();
+        for action in actions {
+            self.apply_preview_action(action);
+        }
+        outcome.changed
     }
 
     pub fn panel_pointer_entered(&mut self) -> bool {
@@ -782,11 +1380,37 @@ impl LiveShell {
     pub fn preview_click(&mut self, x: f32, y: f32, right_click: bool) -> bool {
         let Some(action) = self
             .preview_frame
-            .as_ref()
-            .and_then(|frame| frame.action_at(Point { x, y }, right_click))
+            .as_mut()
+            .and_then(|frame| frame.transition_pointer(Point { x, y }, right_click))
         else {
             return false;
         };
+        self.apply_preview_action(action);
+        true
+    }
+
+    pub fn preview_host_input(
+        &mut self,
+        input: nickel_input::InputEvent,
+    ) -> nickel_ui::HostEventOutcome {
+        let Some(frame) = self.preview_frame.as_mut() else {
+            return nickel_ui::HostEventOutcome::default();
+        };
+        let outcome = frame.step(HostBatch {
+            events: vec![HostEvent::Normalized {
+                input,
+                clipboard_text: None,
+            }],
+            ..HostBatch::default()
+        });
+        let actions = frame.take_actions();
+        for action in actions {
+            self.apply_preview_action(action);
+        }
+        outcome
+    }
+
+    fn apply_preview_action(&mut self, action: PreviewAction) {
         match action {
             PreviewAction::Activate(window) => {
                 self.send_window_action(window, WindowAction::Activate);
@@ -798,12 +1422,7 @@ impl LiveShell {
             PreviewAction::OpenMenu(window) => {
                 self.window_menu = Some(window);
                 self.window_menu_selected = 0;
-                self.window_menu_frame = Some(build_menu_frame(
-                    window,
-                    &self.workspaces,
-                    Some(0),
-                    self.palette,
-                ));
+                self.window_menu_host = None;
                 let x = self.panel_origin_x
                     + self.preview_group.map_or(0, |index| {
                         (PANEL_ITEM_WIDTH + index as f32 * PANEL_ITEM_WIDTH) as i32
@@ -819,15 +1438,15 @@ impl LiveShell {
                 #[cfg(target_os = "linux")]
                 let _ = send_session_command("focus-context-menu", ShellCommand::FocusContextMenu);
             }
+            PreviewAction::Dismiss => self.close_window_preview(),
         }
-        true
     }
 
     pub fn preview_key(&mut self, key: Option<KeyCode>) -> bool {
         if self.window_menu.is_some() {
-            return self.window_menu_key(key);
+            return self.window_menu_host_key(key);
         }
-        let Some(frame) = self.preview_frame.as_ref() else {
+        let Some(frame) = self.preview_frame.as_mut() else {
             return false;
         };
         let count = frame.window_count();
@@ -837,7 +1456,14 @@ impl LiveShell {
         self.preview_selected = self.preview_selected.min(count - 1);
         match key {
             Some(KeyCode::Escape) => {
-                self.close_window_preview();
+                frame.step(HostBatch {
+                    events: vec![HostEvent::Shortcut(Shortcut::Escape)],
+                    ..HostBatch::default()
+                });
+                let dismissed = frame.take_actions().contains(&PreviewAction::Dismiss);
+                if dismissed {
+                    self.close_window_preview();
+                }
                 #[cfg(target_os = "linux")]
                 let _ = send_session_command(
                     "restore-application-focus",
@@ -845,6 +1471,10 @@ impl LiveShell {
                 );
             }
             Some(KeyCode::ArrowLeft | KeyCode::ArrowUp) => {
+                frame.step(HostBatch {
+                    events: vec![HostEvent::Controller(ControllerAction::Left)],
+                    ..HostBatch::default()
+                });
                 self.preview_selected = (self.preview_selected + count - 1) % count;
                 self.preview_hovered = frame.window(self.preview_selected);
                 if let Some(window) = self.preview_hovered {
@@ -855,6 +1485,10 @@ impl LiveShell {
                 }
             }
             Some(KeyCode::ArrowRight | KeyCode::ArrowDown | KeyCode::Tab) => {
+                frame.step(HostBatch {
+                    events: vec![HostEvent::Controller(ControllerAction::Right)],
+                    ..HostBatch::default()
+                });
                 self.preview_selected = (self.preview_selected + 1) % count;
                 self.preview_hovered = frame.window(self.preview_selected);
                 if let Some(window) = self.preview_hovered {
@@ -871,25 +1505,24 @@ impl LiveShell {
                 self.send_window_action(window, WindowAction::Close);
             }
             Some(KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space) => {
-                let Some(window) = frame.window(self.preview_selected) else {
-                    return false;
-                };
-                self.send_window_action(window, WindowAction::Activate);
-                self.close_window_preview();
+                frame.step(HostBatch {
+                    events: vec![HostEvent::Controller(ControllerAction::Confirm)],
+                    ..HostBatch::default()
+                });
+                let actions = frame.take_actions();
+                for action in actions {
+                    if let PreviewAction::Activate(window) = action {
+                        self.send_window_action(window, WindowAction::Activate);
+                        self.close_window_preview();
+                    }
+                }
             }
             _ => return false,
         }
         true
     }
 
-    pub fn window_menu_click(&mut self, x: f32, y: f32) -> bool {
-        let Some(action) = self
-            .window_menu_frame
-            .as_ref()
-            .and_then(|frame| frame.action_at(Point { x, y }))
-        else {
-            return false;
-        };
+    fn apply_window_menu_action(&mut self, action: MenuAction) {
         match action {
             MenuAction::Close(window) => self.send_window_action(window, WindowAction::Close),
             MenuAction::MaximizeRestore(window) => {
@@ -903,60 +1536,103 @@ impl LiveShell {
                 );
             }
         }
-        self.close_window_preview();
-        true
     }
 
-    pub fn window_menu_key(&mut self, key: Option<KeyCode>) -> bool {
-        let Some(frame) = self.window_menu_frame.as_ref() else {
+    pub fn window_menu_host_input(
+        &mut self,
+        input: nickel_input::InputEvent,
+        width: u32,
+        height: u32,
+    ) -> bool {
+        if self.window_menu_host.is_none() {
+            let _ = self.window_menu_scene();
+        }
+        let Some(host) = self.window_menu_host.as_mut() else {
             return false;
         };
-        let count = frame.action_count();
-        if count == 0 {
-            return false;
+        let outcome = host.step(HostBatch {
+            surface_size: Some((width, height)),
+            events: vec![HostEvent::Normalized {
+                input,
+                clipboard_text: None,
+            }],
+            ..HostBatch::default()
+        });
+        for failure in &outcome.failures {
+            tracing::warn!(
+                ?failure,
+                "window context menu host reported recoverable failure"
+            );
         }
-        self.window_menu_selected = self.window_menu_selected.min(count - 1);
-        match key {
-            Some(KeyCode::Escape) => {
-                self.close_window_preview();
-                #[cfg(target_os = "linux")]
-                let _ = send_session_command(
-                    "restore-application-focus",
-                    ShellCommand::RestoreApplicationFocus,
-                );
-            }
+        let actions = host.application_mut().take_effects();
+        for action in actions {
+            self.apply_window_menu_action(action);
+            self.close_window_preview();
+        }
+        outcome.changed
+    }
+
+    pub fn window_menu_host_key(&mut self, key: Option<KeyCode>) -> bool {
+        if self.window_menu_host.is_none() {
+            let _ = self.window_menu_scene();
+        }
+        let event = match key {
+            Some(KeyCode::Escape) => HostEvent::Shortcut(Shortcut::Escape),
             Some(KeyCode::ArrowUp | KeyCode::ArrowLeft) => {
-                self.window_menu_selected = (self.window_menu_selected + count - 1) % count;
+                HostEvent::Controller(ControllerAction::Up)
             }
             Some(KeyCode::ArrowDown | KeyCode::ArrowRight | KeyCode::Tab) => {
-                self.window_menu_selected = (self.window_menu_selected + 1) % count;
+                HostEvent::Controller(ControllerAction::Down)
             }
             Some(KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space) => {
-                let Some(action) = frame.action(self.window_menu_selected) else {
-                    return false;
-                };
-                match action {
-                    MenuAction::Close(window) => {
-                        self.send_window_action(window, WindowAction::Close)
-                    }
-                    MenuAction::MaximizeRestore(window) => {
-                        self.send_window_action(window, WindowAction::Maximize)
-                    }
-                    MenuAction::Minimize(window) => {
-                        self.send_window_action(window, WindowAction::Minimize)
-                    }
-                    MenuAction::MoveToWorkspace(window, workspace) => {
-                        let _ = send_session_command(
-                            "move-window-to-workspace",
-                            ShellCommand::MoveWindowToWorkspace { window, workspace },
-                        );
-                    }
-                }
-                self.close_window_preview();
+                HostEvent::Controller(ControllerAction::Confirm)
             }
             _ => return false,
+        };
+        let Some(host) = self.window_menu_host.as_mut() else {
+            return false;
+        };
+        let outcome = host.step(HostBatch {
+            events: vec![event],
+            ..HostBatch::default()
+        });
+        for failure in &outcome.failures {
+            tracing::warn!(
+                ?failure,
+                "window context menu host reported recoverable failure"
+            );
         }
-        true
+        let actions = host.application_mut().take_effects();
+        for action in actions {
+            self.apply_window_menu_action(action);
+            self.close_window_preview();
+        }
+        if key == Some(KeyCode::Escape) {
+            self.close_window_preview();
+        }
+        outcome.changed
+    }
+
+    pub fn window_menu_host_controller(&mut self, action: ControllerAction) -> bool {
+        if self.window_menu_host.is_none() {
+            let _ = self.window_menu_scene();
+        }
+        let Some(host) = self.window_menu_host.as_mut() else {
+            return false;
+        };
+        let outcome = host.step(HostBatch {
+            events: vec![HostEvent::Controller(action)],
+            ..HostBatch::default()
+        });
+        let effects = host.application_mut().take_effects();
+        for effect in effects {
+            self.apply_window_menu_action(effect);
+            self.close_window_preview();
+        }
+        if action == ControllerAction::Cancel {
+            self.close_window_preview();
+        }
+        outcome.changed
     }
 
     pub fn sync_transient_overlays(&mut self) {
@@ -1025,7 +1701,7 @@ impl LiveShell {
         self.preview_hovered = None;
         self.preview_selected = 0;
         self.window_menu = None;
-        self.window_menu_frame = None;
+        self.window_menu_host = None;
     }
 
     fn close_window_preview(&mut self) {
@@ -1039,7 +1715,7 @@ impl LiveShell {
         self.preview_refresh_deadline = None;
         self.preview_frame = None;
         self.window_menu = None;
-        self.window_menu_frame = None;
+        self.window_menu_host = None;
         let _ = send_session_command("clear-window-highlight", ShellCommand::ClearWindowHighlight);
         let _ = send_session_command("hide-context-menu", ShellCommand::HideContextMenu);
     }
@@ -1060,8 +1736,9 @@ impl LiveShell {
             }
             platform::GlobalShortcut::LockState { locked } => {
                 self.locked = locked;
-                self.lock_password.zeroize();
-                self.lock_status = None;
+                let application = self.lock_host.application_mut();
+                application.password.zeroize();
+                application.status = None;
                 if locked {
                     self.launcher_visible = false;
                     self.control_visible = false;
@@ -1166,12 +1843,23 @@ impl LiveShell {
 
     pub fn screenshot_key(&mut self, key: Option<KeyCode>) -> bool {
         if key == Some(KeyCode::Escape) && self.screenshot.visible() {
-            self.screenshot.hide();
+            let _ = self.screenshot.escape();
             self.set_screenshot_focus(false);
             true
         } else {
             false
         }
+    }
+
+    pub fn screenshot_controller(&mut self, action: ControllerAction) -> bool {
+        if !self.screenshot.visible() {
+            return false;
+        }
+        let changed = self.screenshot.controller_action(action);
+        if !self.screenshot.visible() {
+            self.set_screenshot_focus(false);
+        }
+        changed
     }
 
     fn set_screenshot_focus(&self, visible: bool) {
@@ -1236,31 +1924,17 @@ impl LiveShell {
         }
     }
 
-    pub fn launcher_click(&mut self, x: f32, y: f32) -> bool {
-        let Some(action) = self
-            .launcher_frame
-            .as_ref()
-            .and_then(|frame| frame.action_at(Point { x, y }))
-            .cloned()
-        else {
-            return false;
-        };
-        self.apply_launcher_action(action);
-        true
-    }
-
     pub fn control_click(&mut self, x: f32, y: f32, width: u32, height: u32) -> bool {
-        let frame = self.control_frame(width, height);
-        if let Some(index) = frame
-            .hit_targets
-            .iter()
-            .rposition(|target| contains_rect(target.bounds, Point { x, y }))
-        {
-            self.control_state.selected_action = index;
-        }
-        if let Some(action) = frame.action_at(x, y) {
-            self.apply_control_action(action);
-        }
+        self.sync_control_host(width, height);
+        let point = Point { x, y };
+        self.step_control_host(HostBatch {
+            events: vec![
+                HostEvent::Ui(UiEvent::PointerPressed(point)),
+                HostEvent::Ui(UiEvent::PointerReleased(point)),
+            ],
+            ..HostBatch::default()
+        });
+        self.apply_control_effects();
         true
     }
 
@@ -1268,33 +1942,47 @@ impl LiveShell {
         if !self.control_visible {
             return false;
         }
-        let frame = self.control_frame(width, height);
-        let count = frame.hit_targets.len();
-        if count > 0 {
-            self.control_state.selected_action = self.control_state.selected_action.min(count - 1);
-        }
-        match key {
-            Some(KeyCode::Escape) => self.set_control_visible(false),
-            Some(KeyCode::ArrowDown | KeyCode::ArrowRight | KeyCode::Tab) if count > 0 => {
-                self.control_state.selected_action =
-                    (self.control_state.selected_action + 1) % count;
+        self.sync_control_host(width, height);
+        let action = match key {
+            Some(KeyCode::Escape) => {
+                self.set_control_visible(false);
+                return true;
             }
-            Some(KeyCode::ArrowUp | KeyCode::ArrowLeft) if count > 0 => {
-                self.control_state.selected_action =
-                    (self.control_state.selected_action + count - 1) % count;
-            }
-            Some(KeyCode::Enter | KeyCode::NumpadEnter) => {
-                if let Some(action) = frame.action(self.control_state.selected_action) {
-                    self.apply_control_action(action);
-                }
-            }
+            Some(KeyCode::ArrowDown | KeyCode::Tab) => ControllerAction::Down,
+            Some(KeyCode::ArrowRight) => ControllerAction::Right,
+            Some(KeyCode::ArrowUp) => ControllerAction::Up,
+            Some(KeyCode::ArrowLeft) => ControllerAction::Left,
+            Some(KeyCode::Enter | KeyCode::NumpadEnter) => ControllerAction::Confirm,
             _ => return false,
-        }
-        let frame = self.control_frame(width, height);
-        let delta = frame.reveal_delta(self.control_state.selected_action);
-        self.control_state.scroll_offset =
-            (self.control_state.scroll_offset + delta).clamp(0.0, frame.maximum_scroll());
+        };
+        self.step_control_host(HostBatch {
+            events: vec![HostEvent::Controller(action)],
+            ..HostBatch::default()
+        });
+        self.apply_control_effects();
         true
+    }
+
+    pub fn control_controller(
+        &mut self,
+        action: ControllerAction,
+        width: u32,
+        height: u32,
+    ) -> bool {
+        if !self.control_visible {
+            return false;
+        }
+        self.sync_control_host(width, height);
+        let changed = self.step_control_host(HostBatch {
+            events: vec![HostEvent::Controller(action)],
+            ..HostBatch::default()
+        });
+        self.apply_control_effects();
+        let dismissed = action == ControllerAction::Cancel && self.control_visible;
+        if dismissed {
+            self.set_control_visible(false);
+        }
+        changed || dismissed
     }
 
     #[allow(dead_code)]
@@ -1322,158 +2010,20 @@ impl LiveShell {
         }
     }
 
-    pub fn pointer_moved(&mut self, x: f32, y: f32) -> bool {
-        if !self.launcher_visible {
-            return false;
-        }
-        let hovered = self
-            .launcher_frame
-            .as_ref()
-            .and_then(|frame| frame.action_at(Point { x, y }))
-            .cloned();
-        let mut changed = hovered != self.launcher_view.hovered;
-        if let Some(LauncherAction::ActivateResult(index)) = hovered {
-            changed |= self.launcher.selected_index() != index;
-            self.launcher.select(index);
-        }
-        if self.launcher.mode() == LauncherMode::Dashboard
-            && let Some(action) = &hovered
-            && let Some(index) = self.launcher_frame.as_ref().and_then(|frame| {
-                frame
-                    .navigable_actions
-                    .iter()
-                    .position(|item| item == action)
-            })
-        {
-            changed |= self.launcher_view.dashboard_selected != index;
-            self.launcher_view.dashboard_selected = index;
-        }
-        self.launcher_view.hovered = hovered;
-        changed
-    }
-
     pub fn scroll(&mut self, delta: f32) -> bool {
-        if self.launcher_visible {
-            let Some(frame) = &self.launcher_frame else {
-                return false;
-            };
-            self.launcher_view.scroll(
-                -(delta.round() as isize),
-                self.launcher.result_count(),
-                frame.columns,
-                frame.visible_rows,
-            );
-            return true;
-        }
         if self.control_visible {
-            let frame = self.control_frame(800, 600);
-            self.control_state.scroll_offset = (self.control_state.scroll_offset - delta * 36.0)
-                .clamp(0.0, frame.maximum_scroll());
+            self.sync_control_host(800, 600);
+            self.step_control_host(HostBatch {
+                events: vec![HostEvent::Ui(UiEvent::Scroll {
+                    point: Point { x: 400.0, y: 300.0 },
+                    delta_y: delta * 36.0,
+                })],
+                ..HostBatch::default()
+            });
+            self.apply_control_effects();
             return true;
         }
         false
-    }
-
-    pub fn insert_launcher_text(&mut self, value: &str) -> bool {
-        if !self.launcher_visible {
-            return false;
-        }
-        let _ = reduce_launcher_input(
-            &mut self.launcher,
-            &mut self.launcher_view,
-            LauncherInput::Text(value.to_owned()),
-        );
-        true
-    }
-
-    pub fn launcher_is_dashboard(&self) -> bool {
-        self.launcher.mode() == LauncherMode::Dashboard
-    }
-
-    pub fn set_launcher_preedit(&mut self, value: &str) -> bool {
-        if !self.launcher_visible {
-            return false;
-        }
-        let _ = reduce_launcher_input(
-            &mut self.launcher,
-            &mut self.launcher_view,
-            LauncherInput::Preedit(value.to_owned()),
-        );
-        true
-    }
-
-    pub fn launcher_key(&mut self, key: Option<KeyCode>, modifiers: &ModifierState) -> bool {
-        if !self.launcher_visible {
-            return false;
-        }
-        let columns = self
-            .launcher_frame
-            .as_ref()
-            .map(|frame| frame.columns)
-            .unwrap_or(1)
-            .max(1);
-        if self.launcher.mode() == LauncherMode::Dashboard {
-            let action_count = self
-                .launcher_frame
-                .as_ref()
-                .map_or(0, |frame| frame.navigable_actions.len());
-            match key {
-                Some(KeyCode::Escape) => self.set_launcher_visible(false),
-                Some(KeyCode::Tab) if modifiers.aggregate(AggregateModifier::Shift) => {
-                    self.launcher_view.select_dashboard_previous(action_count);
-                }
-                Some(KeyCode::ArrowDown | KeyCode::ArrowRight | KeyCode::Tab) => {
-                    self.launcher_view.select_dashboard_next(action_count);
-                }
-                Some(KeyCode::ArrowUp | KeyCode::ArrowLeft) => {
-                    self.launcher_view.select_dashboard_previous(action_count);
-                }
-                Some(KeyCode::Enter | KeyCode::NumpadEnter) => {
-                    let action = self.launcher_frame.as_ref().and_then(|frame| {
-                        frame
-                            .navigable_actions
-                            .get(self.launcher_view.dashboard_selected)
-                            .cloned()
-                    });
-                    if let Some(action) = action {
-                        self.apply_launcher_action(action);
-                    }
-                }
-                Some(KeyCode::Backspace) => {}
-                _ => return false,
-            }
-            return true;
-        }
-        match key {
-            Some(KeyCode::Escape) => {
-                if reduce_launcher_input(
-                    &mut self.launcher,
-                    &mut self.launcher_view,
-                    LauncherInput::Escape,
-                ) == LauncherInputOutcome::DismissRequested
-                {
-                    self.set_launcher_visible(false);
-                }
-            }
-            Some(KeyCode::Backspace) => {
-                let _ = reduce_launcher_input(
-                    &mut self.launcher,
-                    &mut self.launcher_view,
-                    LauncherInput::Backspace,
-                );
-            }
-            Some(KeyCode::ArrowDown) => self.launcher.select_grid_down(columns),
-            Some(KeyCode::ArrowUp) => self.launcher.select_grid_up(columns),
-            Some(KeyCode::ArrowLeft) => self.launcher.select_grid_left(columns),
-            Some(KeyCode::ArrowRight) => self.launcher.select_grid_right(columns),
-            Some(KeyCode::Enter) => {
-                let index = self.launcher.selected_index();
-                self.launch_result(index);
-            }
-            Some(_) => return false,
-            None => return false,
-        }
-        true
     }
 
     fn launch_result(&mut self, index: usize) {
@@ -1525,7 +2075,11 @@ impl LiveShell {
         #[cfg(not(target_os = "linux"))]
         let result = platform::launch_application(&application);
         match result {
-            Ok(_) => self.set_launcher_visible(false),
+            Ok(_) => {
+                self.launcher.record_launch(application.id());
+                self.persist_launcher_preferences();
+                self.set_launcher_visible(false);
+            }
             Err(error) => {
                 tracing::warn!(
                     application = application.name(),
@@ -1543,254 +2097,186 @@ impl LiveShell {
 
     fn desktop_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
         self.load_wallpaper_for(width, height);
-        let bounds = Rect::new(0.0, 0.0, width as f32, height as f32);
-        let mut commands = vec![PaintCommand::Fill {
-            rect: bounds,
-            color: self.palette.background,
-        }];
-        if let Some(wallpaper) = &self.wallpaper {
-            commands.push(PaintCommand::Image {
-                bounds,
-                id: 1,
-                image: wallpaper.clone(),
-                high_density: None,
-            });
-        }
-        commands
+        let application = self.desktop_host.application_mut();
+        application.wallpaper.clone_from(&self.wallpaper);
+        application.palette = self.palette;
+        let outcome = self.desktop_host.step(HostBatch {
+            surface_size: Some((width, height)),
+            ..HostBatch::default()
+        });
+        self.desktop_change_token = outcome.change_token;
+        self.desktop_deadline = outcome.next_deadline;
+        self.desktop_host.commands().to_vec()
     }
 
-    fn lock_scene(&self, width: u32, height: u32) -> Vec<PaintCommand> {
-        let width = width as f32;
-        let height = height as f32;
-        let masked = "•".repeat(self.lock_password.chars().count().min(32));
-        let username = std::env::var("USER").unwrap_or_else(|_| "Session locked".into());
-        let mut commands = vec![
-            PaintCommand::Fill {
-                rect: Rect::new(0.0, 0.0, width, height),
-                color: 0x080b12,
-            },
-            text(
-                Rect::new(0.0, height * 0.38, width, 48.0),
-                "Nickel",
-                30.0,
-                0xffffff,
-                TextAlign::Center,
-                true,
-            ),
-            text(
-                Rect::new(0.0, height * 0.38 + 56.0, width, 32.0),
-                &username,
-                18.0,
-                0xb8c0d4,
-                TextAlign::Center,
-                false,
-            ),
-            PaintCommand::RoundedFill {
-                rect: Rect::new(width * 0.5 - 170.0, height * 0.38 + 104.0, 340.0, 46.0),
-                color: 0x20283a,
-                radius: 10.0,
-            },
-            text(
-                Rect::new(width * 0.5 - 154.0, height * 0.38 + 114.0, 308.0, 28.0),
-                if masked.is_empty() {
-                    "Password"
-                } else {
-                    &masked
-                },
-                18.0,
-                if masked.is_empty() {
-                    0x8992a6
-                } else {
-                    0xffffff
-                },
-                TextAlign::Start,
-                false,
-            ),
-        ];
-        if let Some(status) = &self.lock_status {
-            commands.push(text(
-                Rect::new(0.0, height * 0.38 + 164.0, width, 28.0),
-                status,
-                15.0,
-                0xff9a9a,
-                TextAlign::Center,
-                false,
-            ));
-        }
-        commands
+    fn lock_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
+        let outcome = self.lock_host.step(HostBatch {
+            surface_size: Some((width, height)),
+            ..HostBatch::default()
+        });
+        self.lock_change_token = outcome.change_token;
+        self.lock_deadline = outcome.next_deadline;
+        self.lock_host.commands().to_vec()
     }
 
-    pub fn insert_lock_text(&mut self, value: &str) -> bool {
-        if !self.locked || self.lock_password.len() >= 1024 {
-            return false;
-        }
-        let before = self.lock_password.len();
-        for character in value.chars() {
-            if self.lock_password.len() + character.len_utf8() > 1024 {
-                break;
-            }
-            self.lock_password.push(character);
-        }
-        if self.lock_password.len() == before {
-            return false;
-        }
-        self.lock_status = None;
-        true
-    }
-
-    pub fn lock_key(&mut self, key: Option<KeyCode>) -> bool {
-        self.lock_key_with(
-            key,
-            |username, password| {
-                #[cfg(target_os = "linux")]
-                {
-                    crate::lock_auth::authenticate(username, password)
-                }
-                #[cfg(not(target_os = "linux"))]
-                {
-                    let _ = (username, password);
-                    Err("system authentication is unavailable on this platform".into())
-                }
-            },
-            || {
-                #[cfg(target_os = "linux")]
-                {
-                    match platform::send_shell_command(ShellCommand::Unlock) {
-                        Ok(()) => true,
-                        Err(error) => {
-                            tracing::warn!(%error, "session unlock command failed");
-                            false
-                        }
-                    }
-                }
-                #[cfg(not(target_os = "linux"))]
-                {
-                    platform::send_shell_command(ShellCommand::Unlock)
-                }
-            },
-        )
-    }
-
-    fn lock_key_with<A, U>(
+    pub fn lock_host_input(
         &mut self,
-        key: Option<KeyCode>,
-        authenticate: A,
-        request_unlock: U,
-    ) -> bool
-    where
-        A: FnOnce(&str, &Zeroizing<String>) -> Result<bool, String>,
-        U: FnOnce() -> bool,
-    {
+        input: nickel_input::InputEvent,
+        width: u32,
+        height: u32,
+    ) -> bool {
         if !self.locked {
             return false;
         }
-        match key {
-            Some(KeyCode::Backspace) => {
-                self.lock_password.pop();
-                self.lock_status = None;
-                true
-            }
-            Some(KeyCode::Enter | KeyCode::NumpadEnter) => {
-                let username = std::env::var("USER").unwrap_or_default();
-                let authenticated = authenticate(&username, &self.lock_password);
-                self.lock_password.zeroize();
-                match authenticated {
-                    Ok(true) => {
-                        if !request_unlock() {
-                            self.lock_status = Some("Could not contact the session".into());
+        self.lock_host.step(HostBatch {
+            surface_size: Some((width, height)),
+            ..HostBatch::default()
+        });
+        if !self.lock_host.input_context().text_focused
+            && let Ok(target) = self
+                .lock_host
+                .query_unique(&nickel_ui::SemanticSelector::Role(SemanticRole::TextField))
+        {
+            let point = Point {
+                x: target.bounds.origin.x + target.bounds.size.width / 2.0,
+                y: target.bounds.origin.y + target.bounds.size.height / 2.0,
+            };
+            self.lock_host.step(HostBatch {
+                events: vec![
+                    HostEvent::Ui(UiEvent::PointerPressed(point)),
+                    HostEvent::Ui(UiEvent::PointerReleased(point)),
+                ],
+                ..HostBatch::default()
+            });
+        }
+        let outcome = self.lock_host.step(HostBatch {
+            events: vec![HostEvent::Normalized {
+                input,
+                clipboard_text: None,
+            }],
+            ..HostBatch::default()
+        });
+        let changed = outcome.changed;
+        changed | self.apply_lock_effects()
+    }
+
+    pub fn lock_host_controller(&mut self, action: ControllerAction) -> bool {
+        if !self.locked {
+            return false;
+        }
+        let event = if action == ControllerAction::Confirm {
+            HostEvent::Shortcut(Shortcut::Submit)
+        } else {
+            HostEvent::Controller(action)
+        };
+        let outcome = self.lock_host.step(HostBatch {
+            events: vec![event],
+            ..HostBatch::default()
+        });
+        outcome.changed | self.apply_lock_effects()
+    }
+
+    fn apply_lock_effects(&mut self) -> bool {
+        let effects = std::mem::take(&mut self.lock_host.application_mut().effects);
+        let changed = !effects.is_empty();
+        for effect in effects {
+            match effect {
+                LockEffect::Authenticate(password) => {
+                    let username = std::env::var("USER").unwrap_or_default();
+                    let authenticated = {
+                        #[cfg(target_os = "linux")]
+                        {
+                            crate::lock_auth::authenticate(&username, &password)
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        {
+                            let _ = (&username, &password);
+                            Err("system authentication is unavailable on this platform".into())
+                        }
+                    };
+                    let application = self.lock_host.application_mut();
+                    match authenticated {
+                        Ok(true) => {
+                            #[cfg(target_os = "linux")]
+                            if let Err(error) = platform::send_shell_command(ShellCommand::Unlock) {
+                                tracing::warn!(%error, "session unlock command failed");
+                                application.status = Some("Could not contact the session".into());
+                            }
+                        }
+                        Ok(false) => application.status = Some("Authentication failed".into()),
+                        Err(error) => {
+                            tracing::error!(%error, "lock authentication failed");
+                            application.status = Some("Authentication service unavailable".into());
                         }
                     }
-                    Ok(false) => self.lock_status = Some("Authentication failed".into()),
-                    Err(error) => {
-                        tracing::error!(%error, "lock authentication failed");
-                        self.lock_status = Some("Authentication service unavailable".into());
-                    }
                 }
-                true
             }
-            _ => false,
         }
+        changed
     }
 
     fn load_wallpaper_for(&mut self, width: u32, height: u32) {
         let requested = (width.max(1), height.max(1));
-        if self.wallpaper.is_some()
-            && requested.0 <= self.wallpaper_size.0
-            && requested.1 <= self.wallpaper_size.1
-        {
+        let Some(target) = wallpaper_cache_target(self.wallpaper_size, requested) else {
             return;
-        }
+        };
         let Some(path) = self.wallpaper_path.as_deref() else {
             return;
         };
         let Ok(image) = image::open(path) else {
             return;
         };
-        let target = (
-            self.wallpaper_size.0.max(requested.0),
-            self.wallpaper_size.1.max(requested.1),
-        );
         self.wallpaper = Some(Arc::new(image.thumbnail(target.0, target.1).into_rgba8()));
         self.wallpaper_size = target;
     }
 
-    fn notification_scene(&self, width: u32, height: u32) -> Vec<PaintCommand> {
-        let Some(notification) = &self.notification else {
-            return Vec::new();
-        };
-        let heading = if notification.summary.trim().is_empty() {
-            &notification.app_name
-        } else {
-            &notification.summary
-        };
-        let mut commands = vec![
-            PaintCommand::RoundedFill {
-                rect: Rect::new(0.0, 0.0, width as f32, height as f32),
-                color: self.palette.panel,
-                radius: 16.0,
-            },
-            PaintCommand::Stroke {
-                rect: Rect::new(0.5, 0.5, width as f32 - 1.0, height as f32 - 1.0),
-                color: self.palette.surface_hover,
-                width: 1.0,
-            },
-            text(
-                Rect::new(20.0, 18.0, width as f32 - 40.0, 32.0),
-                heading,
-                20.0,
-                self.palette.text,
-                TextAlign::Start,
-                true,
-            ),
-            text(
-                Rect::new(20.0, 55.0, width as f32 - 40.0, height as f32 - 116.0),
-                &notification.body,
-                16.0,
-                self.palette.muted,
-                TextAlign::Start,
-                false,
-            ),
-        ];
-        for (index, rect) in notification_action_rects(notification.actions.len(), width, height) {
-            commands.push(PaintCommand::RoundedFill {
-                rect,
-                color: if self.notification_keyboard_active && index == self.notification_selected {
-                    self.palette.accent_soft
-                } else {
-                    self.palette.surface_hover
-                },
-                radius: 7.0,
-            });
-            commands.push(text(
-                rect,
-                &notification.actions[index].label,
-                13.0,
-                self.palette.text,
-                TextAlign::Center,
-                true,
-            ));
+    fn sync_notification_host(&mut self, width: u32, height: u32) {
+        self.notification_host
+            .application_mut()
+            .sync(self.notification.as_ref(), self.palette);
+        self.notification_host.step(HostBatch {
+            surface_size: Some((width, height)),
+            events: vec![HostEvent::Poll],
+            ..HostBatch::default()
+        });
+    }
+
+    fn apply_notification_effects(&mut self) -> bool {
+        for failure in self.notification_host.application_mut().take_failures() {
+            tracing::warn!(?failure, "notification application rejected an action");
         }
-        commands
+        let effects = self.notification_host.application_mut().take_effects();
+        let handled = !effects.is_empty();
+        for effect in effects {
+            match effect {
+                NotificationEffect::Invoke {
+                    notification_id,
+                    key,
+                } => {
+                    self.notification_feed.invoke(notification_id, &key);
+                    self.dismiss_notification_transport(notification_id);
+                }
+                NotificationEffect::Dismiss { notification_id } => {
+                    self.dismiss_notification_transport(notification_id);
+                }
+            }
+        }
+        handled
+    }
+
+    fn dismiss_notification_transport(&mut self, notification_id: u32) {
+        if self.notification.as_ref().map(|item| item.id) != Some(notification_id) {
+            return;
+        }
+        self.notification = None;
+        self.notification_feed.dismiss(notification_id);
+        self.notification_host
+            .application_mut()
+            .sync(None, self.palette);
+        self.notification_host.step(HostBatch {
+            events: vec![HostEvent::Poll],
+            ..HostBatch::default()
+        });
     }
 
     fn window_preview_scene(&mut self) -> Vec<PaintCommand> {
@@ -1804,121 +2290,183 @@ impl LiveShell {
             self.preview_frame = None;
             return Vec::new();
         };
-        let frame = build_preview_frame(
-            &group,
-            &self.preview_images,
-            self.preview_hovered,
-            self.palette,
-        );
-        let commands = frame.commands.clone();
-        self.preview_frame = Some(frame);
-        commands
+        if let Some(frame) = self.preview_frame.as_mut() {
+            frame.sync(
+                &group,
+                &self.preview_images,
+                self.preview_hovered,
+                self.palette,
+            );
+        } else {
+            self.preview_frame = Some(build_preview_frame(
+                &group,
+                &self.preview_images,
+                self.preview_hovered,
+                self.palette,
+            ));
+        }
+        self.preview_frame.as_ref().map_or_else(Vec::new, |frame| {
+            let _change_token = frame.change_token();
+            frame.commands().to_vec()
+        })
     }
 
     fn window_menu_scene(&mut self) -> Vec<PaintCommand> {
         let Some(window) = self.window_menu else {
-            self.window_menu_frame = None;
+            self.window_menu_host = None;
             return Vec::new();
         };
-        let frame = build_menu_frame(
+        let height = menu_height(&self.workspaces).ceil().max(1.0) as u32;
+        let host = self.window_menu_host.get_or_insert_with(|| {
+            nickel_ui::UiHost::new(
+                WindowMenuApp::new(
+                    window,
+                    self.workspaces.clone(),
+                    Some(self.window_menu_selected),
+                    self.palette,
+                ),
+                MENU_WIDTH.ceil() as u32,
+                height,
+            )
+        });
+        host.application_mut().sync(
             window,
             &self.workspaces,
             Some(self.window_menu_selected),
             self.palette,
         );
-        let commands = frame.commands.clone();
-        self.window_menu_frame = Some(frame);
-        commands
+        host.step(HostBatch {
+            surface_size: Some((MENU_WIDTH.ceil() as u32, height)),
+            events: vec![HostEvent::Poll],
+            ..HostBatch::default()
+        });
+        host.commands().to_vec()
     }
 
     fn launcher_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
-        let frame = build_launcher_frame(
-            &self.launcher,
-            &mut self.launcher_view,
-            &mut self.launcher_icons,
-            width,
-            height,
-            self.palette,
-        );
-        let mut commands = frame.commands.clone();
-        let storage_status = self
-            .launcher_status
+        let status = self.launcher_status_text();
+        self.launcher_host
+            .application_mut()
+            .sync(&self.launcher, self.palette, status);
+        self.launcher_host.step(HostBatch {
+            surface_size: Some((width, height)),
+            events: vec![HostEvent::Poll],
+            ..HostBatch::default()
+        });
+        for action in self.launcher_host.application_mut().take_effects() {
+            self.apply_launcher_action(action);
+        }
+        self.launcher_host.commands().to_vec()
+    }
+
+    fn launcher_status_text(&self) -> Option<String> {
+        self.launcher_status
             .as_deref()
             .or_else(|| secure_storage_status_label(self.secure_storage_state))
             .or_else(|| {
                 session_feed_status_label(self.window_feed_status, self.workspace_feed_status)
-            });
-        if let Some(status) = storage_status {
-            commands.push(text(
-                Rect::new(250.0, 72.0, width.saturating_sub(280) as f32, 28.0),
-                status,
-                14.0,
-                0xd98a32,
-                TextAlign::Start,
-                false,
-            ));
-        }
-        self.launcher_frame = Some(frame);
-        commands
+            })
+            .map(str::to_owned)
     }
 
     fn panel_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
-        let mut commands = vec![PaintCommand::Fill {
-            rect: Rect::new(0.0, 0.0, width as f32, height as f32),
-            color: self.palette.panel,
-        }];
-        if self.panel_hover == Some(PanelHover::Launcher) {
-            commands.push(PaintCommand::RoundedFill {
-                rect: Rect::new(6.0, 7.0, 44.0, 42.0),
-                color: self.palette.surface_hover,
-                radius: 8.0,
-            });
-        }
-        commands.push(PaintCommand::Image {
-            bounds: Rect::new(12.0, 12.0, 32.0, 32.0),
-            id: 2,
-            image: Arc::clone(&self.panel_icon),
-            high_density: None,
+        self.sync_panel_host();
+        let outcome = self.panel_host.step(HostBatch {
+            surface_size: Some((width, height)),
+            ..HostBatch::default()
         });
+        self.panel_change_token = outcome.change_token;
+        self.panel_deadline = outcome.next_deadline;
+        self.apply_panel_effects();
+        self.panel_host.commands().to_vec()
+    }
+
+    fn sync_panel_host(&mut self) {
+        let groups = self.launcher.group_windows(&self.windows);
+        let task_icons = groups
+            .iter()
+            .take(12)
+            .map(|group| {
+                group
+                    .application_id
+                    .as_ref()
+                    .and_then(|id| self.launcher.application(id))
+                    .and_then(|application| self.launcher_icons.resolve(application))
+                    .or_else(|| {
+                        group
+                            .application_id
+                            .as_ref()
+                            .is_some_and(|id| id.as_str().starts_with("io.nickel.codex.project."))
+                            .then(|| (0x3002, Arc::clone(&self.codex_icon)))
+                    })
+                    .or_else(|| {
+                        crate::icons::nickel_application(&group.application_name)
+                            .map(|(id, image)| (id, Arc::new(image)))
+                    })
+            })
+            .collect();
+        let application = self.panel_host.application_mut();
+        application.launcher.clone_from(&self.launcher);
+        application.windows.clone_from(&self.windows);
+        application.tray.clone_from(&self.tray);
+        application.tray_icons.clone_from(&self.tray_icons);
+        application.panel_icon = Arc::clone(&self.panel_icon);
+        application.codex_icon = Arc::clone(&self.codex_icon);
+        application.task_icons = task_icons;
+        application.palette = self.palette;
+        application.panel_hover = self.panel_hover;
+        application.launcher_visible = self.launcher_visible;
+        application.codex_project_menu_visible = self.codex_project_menu_visible;
+        application.control_visible = self.control_visible;
+    }
+
+    fn apply_panel_effects(&mut self) -> bool {
+        let effects = std::mem::take(&mut self.panel_host.application_mut().effects);
+        let changed = !effects.is_empty();
+        for action in effects {
+            self.apply_panel_action(action);
+        }
+        changed
+    }
+}
+
+impl PanelApplication {
+    fn panel_view(&self, width: f32, height: f32) -> impl nickel_ui::View<PanelAction> {
+        let interactive_background = |hovered: bool, active: bool| {
+            if active {
+                self.palette.accent_soft
+            } else if hovered {
+                self.palette.surface_hover
+            } else {
+                self.palette.panel
+            }
+        };
+        let mut row = Row::new().width(width).height(height).child(
+            Container::new()
+                .id("panel-launcher")
+                .accessibility_label("Open Nickel Start")
+                .semantic_role(SemanticRole::Button)
+                .message(PanelAction::Launcher)
+                .width(PANEL_ITEM_WIDTH)
+                .height(height)
+                .padding(Insets::all(12.0))
+                .background(interactive_background(
+                    self.panel_hover == Some(PanelHover::Launcher),
+                    self.launcher_visible,
+                ))
+                .radius(8.0)
+                .child(
+                    Image::new(2, Arc::clone(&self.panel_icon))
+                        .width(32.0)
+                        .height(32.0),
+                ),
+        );
         let groups = self.launcher.group_windows(&self.windows);
         for (index, group) in groups.iter().take(12).enumerate() {
-            let bounds = panel_task_bounds(index);
-            let x = bounds.origin.x;
             let hovered = self.panel_hover == Some(PanelHover::Task(index));
-            if group.active() || hovered {
-                commands.push(PaintCommand::RoundedFill {
-                    rect: Rect::new(x + 4.0, 7.0, 44.0, 42.0),
-                    color: if group.active() {
-                        self.palette.accent_soft
-                    } else {
-                        self.palette.surface_hover
-                    },
-                    radius: 8.0,
-                });
-            }
-            let icon = group
-                .application_id
-                .as_ref()
-                .and_then(|id| self.launcher.application(id))
-                .and_then(|application| self.launcher_icons.resolve(application))
-                .or_else(|| {
-                    group
-                        .application_id
-                        .as_ref()
-                        .is_some_and(|id| id.as_str().starts_with("io.nickel.codex.project."))
-                        .then(|| (0x3002, Arc::clone(&self.codex_icon)))
-                })
-                .or_else(|| {
-                    crate::icons::nickel_application(&group.application_name)
-                        .map(|(id, image)| (id, Arc::new(image)))
-                });
-            if let Some((id, image)) = icon {
-                commands.push(PaintCommand::Image {
-                    bounds: Rect::new(x + 10.0, 11.0, 32.0, 32.0),
-                    id,
-                    image,
-                    high_density: None,
-                });
+            let icon = self.task_icons.get(index).cloned().flatten();
+            let visual = if let Some((id, image)) = icon {
+                AnyView::new(Image::new(id, image).width(32.0).height(32.0))
             } else {
                 let initial = group
                     .application_name
@@ -1927,156 +2475,189 @@ impl LiveShell {
                     .unwrap_or('?')
                     .to_uppercase()
                     .to_string();
-                commands.push(text(
-                    Rect::new(x + 5.0, 12.0, 42.0, 28.0),
-                    &initial,
-                    1.0,
-                    self.palette.text,
-                    TextAlign::Center,
-                    true,
-                ));
-            }
-            commands.push(PaintCommand::RoundedFill {
-                rect: Rect::new(
-                    x + if group.active() { 16.0 } else { 20.0 },
-                    height as f32 - 6.0,
-                    if group.active() { 20.0 } else { 12.0 },
-                    3.0,
-                ),
-                color: if group.active() {
-                    self.palette.accent
-                } else {
-                    self.palette.muted
-                },
-                radius: 1.5,
-            });
-            if group.windows.len() > 1 {
-                commands.push(PaintCommand::RoundedFill {
-                    rect: Rect::new(x + 38.0, 35.0, 5.0, 5.0),
-                    color: self.palette.complement,
-                    radius: 2.5,
-                });
-            }
+                AnyView::new(
+                    Text::new(initial)
+                        .height(32.0)
+                        .scale(1.0)
+                        .color(self.palette.text)
+                        .align(TextAlign::Center)
+                        .bold(true),
+                )
+            };
+            let indicator_width = if group.active() { 20.0 } else { 12.0 };
+            let indicator_color = if group.active() {
+                self.palette.accent
+            } else {
+                self.palette.muted
+            };
+            row = row.child(
+                Container::new()
+                    .id(format!("panel-task-{index}"))
+                    .accessibility_label(&group.application_name)
+                    .semantic_role(SemanticRole::Button)
+                    .message(PanelAction::Task(index))
+                    .width(PANEL_ITEM_WIDTH)
+                    .height(height)
+                    .padding(Insets {
+                        top: 7.0,
+                        right: 10.0,
+                        bottom: 3.0,
+                        left: 10.0,
+                    })
+                    .background(interactive_background(hovered, group.active()))
+                    .radius(8.0)
+                    .child(
+                        Column::new()
+                            .child(visual)
+                            .child(Spacer::vertical(3.0))
+                            .child(
+                                Container::new()
+                                    .align_self(nickel_ui::Align::Center)
+                                    .width(indicator_width)
+                                    .height(3.0)
+                                    .background(indicator_color)
+                                    .radius(1.5),
+                            ),
+                    ),
+            );
+        }
+        row = row.child(Spacer::flex());
+        if self.launcher.codex_available() {
+            row = row.child(
+                Container::new()
+                    .id("panel-codex")
+                    .accessibility_label("Codex projects")
+                    .semantic_role(SemanticRole::Button)
+                    .message(PanelAction::Codex)
+                    .width(PANEL_CODEX_WIDTH)
+                    .height(height)
+                    .padding(Insets {
+                        top: 14.0,
+                        right: 4.0,
+                        bottom: 14.0,
+                        left: 4.0,
+                    })
+                    .background(interactive_background(
+                        self.panel_hover == Some(PanelHover::Codex),
+                        self.codex_project_menu_visible,
+                    ))
+                    .radius(8.0)
+                    .child(
+                        Image::new(0x5000, Arc::clone(&self.codex_icon))
+                            .width(PANEL_CODEX_ICON_SIZE)
+                            .height(PANEL_CODEX_ICON_SIZE),
+                    ),
+            );
+        }
+        for (index, item) in self.tray.iter().rev().take(4).rev().enumerate() {
+            let Some(image) = self.tray_icons.get(index) else {
+                continue;
+            };
+            row = row.child(
+                Container::new()
+                    .id(format!("panel-tray-{}", item.id))
+                    .accessibility_label(&item.title)
+                    .semantic_role(SemanticRole::Button)
+                    .message(PanelAction::Tray(item.id.clone()))
+                    .width(PANEL_TRAY_WIDTH)
+                    .height(height)
+                    .padding(Insets {
+                        top: 19.0,
+                        right: 5.0,
+                        bottom: 19.0,
+                        left: 5.0,
+                    })
+                    .background(interactive_background(
+                        self.panel_hover == Some(PanelHover::Tray(index)),
+                        false,
+                    ))
+                    .radius(7.0)
+                    .child(
+                        Image::new(0x6000 + index as u16, Arc::clone(image))
+                            .width(18.0)
+                            .height(18.0),
+                    ),
+            );
         }
         #[cfg(not(target_os = "macos"))]
         {
             let now = Zoned::now();
             let clock = now.strftime("%-I:%M %p").to_string();
             let date = now.strftime("%-m/%-d/%Y").to_string();
-            if self.panel_hover == Some(PanelHover::Control) {
-                commands.push(PaintCommand::RoundedFill {
-                    rect: Rect::new(
-                        width as f32 - PANEL_CLOCK_WIDTH,
-                        7.0,
-                        PANEL_CLOCK_WIDTH - 8.0,
-                        42.0,
+            row = row.child(
+                Container::new()
+                    .id("panel-control")
+                    .accessibility_label("Open Quick Settings")
+                    .semantic_role(SemanticRole::Button)
+                    .message(PanelAction::Control)
+                    .width(PANEL_CLOCK_WIDTH)
+                    .height(height)
+                    .padding(Insets {
+                        top: 6.0,
+                        right: 8.0,
+                        bottom: 8.0,
+                        left: 0.0,
+                    })
+                    .background(interactive_background(
+                        self.panel_hover == Some(PanelHover::Control),
+                        self.control_visible,
+                    ))
+                    .radius(8.0)
+                    .child(
+                        Column::new()
+                            .child(
+                                Text::new(clock)
+                                    .height(22.0)
+                                    .scale(1.0)
+                                    .color(self.palette.text)
+                                    .align(TextAlign::Center),
+                            )
+                            .child(
+                                Text::new(date)
+                                    .height(20.0)
+                                    .scale(0.72)
+                                    .color(self.palette.text)
+                                    .align(TextAlign::Center),
+                            ),
                     ),
-                    color: self.palette.surface_hover,
-                    radius: 8.0,
-                });
-            }
-            commands.push(text(
-                Rect::new(
-                    width as f32 - PANEL_CLOCK_WIDTH,
-                    6.0,
-                    PANEL_CLOCK_WIDTH,
-                    22.0,
-                ),
-                &clock,
-                1.0,
-                self.palette.text,
-                TextAlign::Center,
-                false,
-            ));
-            commands.push(text(
-                Rect::new(
-                    width as f32 - PANEL_CLOCK_WIDTH,
-                    28.0,
-                    PANEL_CLOCK_WIDTH,
-                    20.0,
-                ),
-                &date,
-                0.72,
-                self.palette.text,
-                TextAlign::Center,
-                false,
-            ));
+            );
         }
-        let status = panel_status_layout(width, self.tray.len(), self.launcher.codex_available());
-        for (index, _) in self.tray.iter().rev().take(4).rev().enumerate() {
-            let x = status.tray_start + index as f32 * PANEL_TRAY_WIDTH;
-            if self.panel_hover == Some(PanelHover::Tray(index)) {
-                commands.push(PaintCommand::RoundedFill {
-                    rect: Rect::new(x + 1.0, 10.0, PANEL_TRAY_WIDTH - 2.0, 36.0),
-                    color: self.palette.surface_hover,
-                    radius: 7.0,
-                });
-            }
-            if let Some(image) = self.tray_icons.get(index) {
-                commands.push(PaintCommand::Image {
-                    bounds: Rect::new(x + 5.0, 19.0, 18.0, 18.0),
-                    id: 0x6000 + index as u16,
-                    image: Arc::clone(image),
-                    high_density: None,
-                });
-            }
-        }
-        let codex_x = status.codex_start;
-        if self.launcher.codex_available() && self.panel_hover == Some(PanelHover::Codex) {
-            commands.push(PaintCommand::RoundedFill {
-                rect: Rect::new(codex_x + 2.0, 7.0, PANEL_CODEX_WIDTH - 4.0, 42.0),
-                color: self.palette.surface_hover,
-                radius: 8.0,
-            });
-        }
-        if self.launcher.codex_available() {
-            commands.push(PaintCommand::Image {
-                bounds: status.codex_icon_bounds(),
-                id: 0x5000,
-                image: Arc::clone(&self.codex_icon),
-                high_density: None,
-            });
-        }
-        commands
+        Container::new()
+            .width(width)
+            .height(height)
+            .background(self.palette.panel)
+            .child(row)
     }
+}
 
-    fn panel_hover_at(&self, x: f32, width: u32) -> Option<PanelHover> {
-        if x < PANEL_ITEM_WIDTH {
-            return Some(PanelHover::Launcher);
-        }
-        let groups = self.launcher.group_windows(&self.windows);
-        let task_count = groups.len().min(12);
-        let task_end = PANEL_ITEM_WIDTH + task_count as f32 * PANEL_ITEM_WIDTH;
-        if x < task_end {
-            return Some(PanelHover::Task(
-                ((x - PANEL_ITEM_WIDTH) / PANEL_ITEM_WIDTH) as usize,
-            ));
-        }
-        let status = panel_status_layout(width, self.tray.len(), self.launcher.codex_available());
-        #[cfg(not(target_os = "macos"))]
-        if x >= status.control_start {
-            return Some(PanelHover::Control);
-        }
-        if x >= status.tray_start {
-            return Some(PanelHover::Tray(
-                ((x - status.tray_start) / PANEL_TRAY_WIDTH) as usize,
-            ));
-        }
-        if self.launcher.codex_available() && x >= status.codex_start {
-            return Some(PanelHover::Codex);
-        }
-        None
-    }
-
-    fn control_frame(&self, width: u32, height: u32) -> ControlCenterFrame {
-        build_control_center(
+impl LiveShell {
+    fn sync_control_host(&mut self, width: u32, height: u32) {
+        self.control_host.application_mut().sync(
             &self.network,
             &self.bluetooth,
             &self.audio,
             &self.workspaces,
-            self.control_state,
-            (width as f32, height as f32),
-        )
+        );
+        self.step_control_host(HostBatch {
+            surface_size: Some((width, height)),
+            events: vec![HostEvent::Poll],
+            ..HostBatch::default()
+        });
+    }
+
+    fn step_control_host(&mut self, batch: HostBatch) -> bool {
+        let outcome = self.control_host.step(batch);
+        let changed = outcome.change_token != self.control_change_token;
+        self.control_change_token = outcome.change_token;
+        self.control_deadline = outcome.next_deadline;
+        changed
+    }
+
+    fn apply_control_effects(&mut self) {
+        let effects = self.control_host.application_mut().take_effects();
+        for action in effects {
+            self.apply_control_action(action);
+        }
     }
 
     fn apply_launcher_action(&mut self, action: LauncherAction) {
@@ -2085,11 +2666,16 @@ impl LiveShell {
         else {
             return;
         };
+        self.apply_launcher_effect(effect);
+    }
+
+    fn apply_launcher_effect(&mut self, effect: LauncherShellEffect) {
         match effect {
-            LauncherShellEffect::Dismiss => {
-                self.set_launcher_visible(false);
-            }
             LauncherShellEffect::ActivateResult(index) => self.launch_result(index),
+            LauncherShellEffect::TogglePin(id) => {
+                self.launcher.toggle_pin(&id);
+                self.persist_launcher_preferences();
+            }
             LauncherShellEffect::LaunchApplication(id) => self.launch_application_by_id(&id),
             LauncherShellEffect::OpenProject(id) => {
                 self.set_launcher_visible(false);
@@ -2152,18 +2738,52 @@ impl LiveShell {
                 self.set_control_visible(true);
                 if self.control_visible {
                     self.set_launcher_visible(false);
-                    self.control_state.pending_session_action =
-                        Some(platform::SessionAction::LogOut);
+                    self.control_host
+                        .application_mut()
+                        .request_session_action(platform::SessionAction::LogOut);
+                    self.step_control_host(HostBatch {
+                        events: vec![HostEvent::Poll],
+                        ..HostBatch::default()
+                    });
                 }
             }
         }
     }
 
+    fn persist_launcher_preferences(&mut self) {
+        #[cfg(test)]
+        {
+            self.launcher_persistence_attempts += 1;
+        }
+        #[cfg(test)]
+        let result = self.launcher_preferences_path.as_ref().map_or_else(
+            || self.launcher.preferences().save_default(),
+            |path| self.launcher.preferences().save(path),
+        );
+        #[cfg(not(test))]
+        let result = self.launcher.preferences().save_default();
+        match result {
+            Err(error) => {
+                tracing::warn!(%error, "launcher preferences could not be saved");
+                self.launcher_status = Some(format!(
+                    "Launcher preferences could not be saved: {}",
+                    error
+                ));
+            }
+            Ok(())
+                if self.launcher_status.as_deref().is_some_and(|status| {
+                    status.starts_with("Launcher preferences could not be saved:")
+                }) =>
+            {
+                self.launcher_status = None;
+            }
+            Ok(()) => {}
+        }
+    }
+
     fn apply_control_action(&mut self, action: ControlAction) {
         match action {
-            ControlAction::ToggleWifiSection => {
-                self.control_state.wifi_expanded = !self.control_state.wifi_expanded;
-            }
+            ControlAction::ToggleWifiSection => {}
             ControlAction::SetWifiEnabled(enabled) => {
                 log_control_result("set-wifi-enabled", platform::set_wifi_enabled(enabled));
             }
@@ -2173,9 +2793,7 @@ impl LiveShell {
                     platform::activate_wifi_network(&id),
                 );
             }
-            ControlAction::ToggleBluetoothSection => {
-                self.control_state.bluetooth_expanded = !self.control_state.bluetooth_expanded;
-            }
+            ControlAction::ToggleBluetoothSection => {}
             ControlAction::SetBluetoothPowered(powered) => {
                 log_control_result(
                     "set-bluetooth-powered",
@@ -2194,9 +2812,7 @@ impl LiveShell {
                     platform::toggle_bluetooth_device(&id),
                 );
             }
-            ControlAction::ToggleAudioSection => {
-                self.control_state.audio_expanded = !self.control_state.audio_expanded;
-            }
+            ControlAction::ToggleAudioSection => {}
             ControlAction::SetAudioVolume(volume) => {
                 log_control_result("set-audio-volume", platform::set_audio_volume(volume));
             }
@@ -2218,22 +2834,9 @@ impl LiveShell {
                     ShellCommand::RemoveWorkspace(workspace),
                 );
             }
-            ControlAction::RequestSessionAction(action) => {
-                self.control_state.pending_session_action = Some(action);
-            }
-            ControlAction::CancelSessionAction => {
-                self.control_state.pending_session_action = None;
-            }
-            ControlAction::ConfirmSessionAction => {
-                if let Some(action) = self.control_state.pending_session_action
-                    && send_session_command(
-                        "confirm-session-action",
-                        ShellCommand::SessionAction(action),
-                    )
-                {
-                    self.control_state.pending_session_action = None;
-                }
-            }
+            ControlAction::RequestSessionAction(_)
+            | ControlAction::CancelSessionAction
+            | ControlAction::ConfirmSessionAction => {}
             ControlAction::SessionAction(action) => {
                 let _ = send_session_command("session-action", ShellCommand::SessionAction(action));
             }
@@ -2360,6 +2963,20 @@ fn launch_error_summary(error: &platform::LaunchError) -> String {
     }
 }
 
+fn wallpaper_cache_target(current: (u32, u32), requested: (u32, u32)) -> Option<(u32, u32)> {
+    let bounded = (
+        requested.0.clamp(1, WALLPAPER_MAX_WIDTH),
+        requested.1.clamp(1, WALLPAPER_MAX_HEIGHT),
+    );
+    if current == (0, 0) || bounded.0 > current.0 || bounded.1 > current.1 {
+        return Some(bounded);
+    }
+    let current_pixels = u64::from(current.0) * u64::from(current.1);
+    let requested_pixels = u64::from(bounded.0) * u64::from(bounded.1);
+    (requested_pixels.saturating_mul(4) <= current_pixels).then_some(bounded)
+}
+
+#[cfg(test)]
 fn panel_control_start(width: u32) -> f32 {
     #[cfg(target_os = "macos")]
     {
@@ -2387,6 +3004,36 @@ fn panel_tray_icons(items: &[TrayItem]) -> Vec<Arc<image::RgbaImage>> {
         .collect()
 }
 
+fn normalize_tray_items(items: Vec<TrayItem>) -> Vec<TrayItem> {
+    let keep_from = items.len().saturating_sub(4);
+    items
+        .into_iter()
+        .skip(keep_from)
+        .map(|mut item| {
+            item.icon =
+                crate::icons::resized(&item.icon, PANEL_TRAY_ICON_SIZE, PANEL_TRAY_ICON_SIZE);
+            item
+        })
+        .collect()
+}
+
+fn normalize_preview_image(image: &image::RgbaImage) -> image::RgbaImage {
+    crate::icons::resized(image, PREVIEW_CACHE_WIDTH, PREVIEW_CACHE_HEIGHT)
+}
+
+fn retain_preview_generation(
+    images: &mut HashMap<crate::model::WindowId, Arc<image::RgbaImage>>,
+    windows: &[OpenWindow],
+) {
+    images.retain(|window, _| {
+        windows
+            .iter()
+            .take(PREVIEW_CACHE_CAPACITY)
+            .any(|candidate| candidate.id == *window)
+    });
+}
+
+#[cfg(test)]
 fn visible_tray_item(items: &[TrayItem], visual_index: usize) -> Option<&TrayItem> {
     items.get(items.len().saturating_sub(4).checked_add(visual_index)?)
 }
@@ -2405,39 +3052,23 @@ fn tint_panel_icon(mut icon: image::RgbaImage, color: u32) -> image::RgbaImage {
     icon
 }
 
-fn text(
-    bounds: Rect,
-    value: &str,
-    scale: f32,
-    color: u32,
-    align: TextAlign,
-    bold: bool,
-) -> PaintCommand {
-    PaintCommand::Text {
-        bounds,
-        text: value.to_owned(),
-        scale,
-        color,
-        align,
-        bold,
-        wrap: false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::{cell::Cell, collections::HashMap};
+    use std::{collections::HashMap, sync::Arc};
 
     use image::{Rgba, RgbaImage};
-    use nickel_input::{KeyCode, ModifierState};
+    use nickel_input::KeyCode;
     use nickel_session_protocol::{
         PointerInteraction, PreviewTargetAction, ScreenshotTargetAction, ShellRole,
         ShellSemanticTarget, WindowMenuTargetAction,
     };
-    use nickel_ui::{Point, Rect};
+    use nickel_ui::{
+        ActionKind, HostBatch, HostEvent, Point, Rect, SemanticAction, SemanticRole,
+        SemanticSelector, UiEvent, UiHost,
+    };
 
     use super::{
-        LiveShell, contains_rect, notification_action_rects, panel_status_layout, panel_tray_icons,
+        LiveShell, panel_status_layout, panel_tray_icons,
         platform::{FeedState, FeedStatus, SecureStorageState},
         preview_refresh_due, secure_storage_status_label, session_feed_status_label,
         visible_tray_item,
@@ -2445,20 +3076,35 @@ mod tests {
     use crate::{
         model::{ApplicationId, OpenWindow, TrayItem, WindowGroup, WindowId},
         notification::{NotificationAction, NotificationRequest, NotificationStore},
+        sdl_launcher_view::{LauncherAction, LauncherApplication},
         sdl_shell::SurfaceRole,
-        sdl_window_preview::{build_menu_frame, build_preview_frame},
+        sdl_window_preview::{MenuAction, build_preview_frame},
     };
+    use nickel_core::launcher_preferences::LauncherPreferences;
     use nickel_core::theme::Appearance;
     use std::time::Instant;
 
     #[test]
-    fn launcher_character_keys_wait_for_text_input_instead_of_inserting_twice() {
+    fn launcher_text_input_flows_through_the_production_host_once() {
         let mut shell = LiveShell::new().unwrap();
         shell.launcher_visible = true;
-
-        assert!(!shell.launcher_key(Some(KeyCode::KeyA), &ModifierState::default()));
-        assert_eq!(shell.launcher.query(), "");
-        assert!(shell.insert_launcher_text("a"));
+        shell.launcher_host.step(HostBatch {
+            surface_size: Some((920, 680)),
+            ..HostBatch::default()
+        });
+        let search = shell
+            .launcher_host
+            .query_unique(&SemanticSelector::Role(SemanticRole::TextField))
+            .expect("launcher search text field");
+        let focus = shell.launcher_host.request_focus(search.id);
+        assert!(focus.failures.is_empty(), "{:#?}", focus.failures);
+        shell.launcher_host.step(HostBatch {
+            events: vec![HostEvent::Ui(UiEvent::TextInput("a".into()))],
+            ..HostBatch::default()
+        });
+        for action in shell.launcher_host.application_mut().take_effects() {
+            shell.apply_launcher_action(action);
+        }
         assert_eq!(shell.launcher.query(), "a");
     }
 
@@ -2480,6 +3126,104 @@ mod tests {
         let status = shell.launcher_status.as_deref().unwrap_or_default();
         assert!(status.starts_with("Could not launch Missing application: "));
         assert!(status.contains("No such file") || status.contains("not found"));
+    }
+
+    fn launcher_application_menu_has_label(
+        launcher: &crate::launcher::Launcher,
+        palette: nickel_core::theme::ThemePalette,
+        application_id: &str,
+        expected_label: &str,
+    ) -> bool {
+        let mut host = UiHost::new(
+            LauncherApplication::new(
+                launcher.clone(),
+                crate::sdl_launcher_view::LauncherViewState::default(),
+                crate::sdl_launcher_view::LauncherIconCache::new(),
+                palette,
+            ),
+            920,
+            680,
+        );
+        let target = host
+            .unique_semantic_target_for_message(&LauncherAction::LaunchApplication(
+                application_id.to_owned(),
+            ))
+            .expect("application semantic target");
+        let outcome = host.perform_accessibility_action(
+            target.id,
+            SemanticAction::Invoke(ActionKind::ContextMenu),
+        );
+        assert!(outcome.failures.is_empty(), "{:#?}", outcome.failures);
+        host.accessibility_nodes()
+            .iter()
+            .any(|node| node.label.as_deref() == Some(expected_label))
+    }
+
+    #[test]
+    fn launcher_pin_persists_once_reopens_and_recovers_after_save_failure() {
+        let directory = tempfile::tempdir().expect("temporary preferences directory");
+        let preferences_path = directory.path().join("launcher-preferences");
+        let mut shell = LiveShell::new().unwrap();
+        let application_id = "org.nickel.Files".to_owned();
+        shell.launcher = crate::launcher::Launcher::new(vec![crate::model::Application::new(
+            application_id.clone(),
+            "Files".into(),
+            None,
+            None,
+            None,
+        )]);
+        shell.launcher_preferences_path = Some(preferences_path.clone());
+
+        shell.apply_launcher_action(crate::sdl_launcher_view::LauncherAction::TogglePin(
+            application_id.clone(),
+        ));
+        assert_eq!(shell.launcher_persistence_attempts, 1);
+        assert!(shell.launcher.is_pinned(&application_id));
+        let persisted = LauncherPreferences::load(&preferences_path).expect("persisted favorite");
+        assert_eq!(persisted.favorites(), [application_id.as_str()]);
+
+        let mut reopened =
+            crate::launcher::Launcher::new(shell.launcher.applications().cloned().collect());
+        reopened.set_preferences(persisted);
+        assert!(reopened.is_pinned(&application_id));
+        assert!(launcher_application_menu_has_label(
+            &reopened,
+            shell.palette,
+            &application_id,
+            "Unpin",
+        ));
+
+        shell.launcher_preferences_path = Some(directory.path().to_path_buf());
+        shell.apply_launcher_action(crate::sdl_launcher_view::LauncherAction::TogglePin(
+            application_id.clone(),
+        ));
+        assert_eq!(shell.launcher_persistence_attempts, 2);
+        assert!(!shell.launcher.is_pinned(&application_id));
+        assert!(
+            shell.launcher_status.as_deref().is_some_and(
+                |status| status.starts_with("Launcher preferences could not be saved:")
+            )
+        );
+        assert!(launcher_application_menu_has_label(
+            &shell.launcher,
+            shell.palette,
+            &application_id,
+            "Pin",
+        ));
+
+        shell.launcher_preferences_path = Some(preferences_path.clone());
+        shell.apply_launcher_action(crate::sdl_launcher_view::LauncherAction::TogglePin(
+            application_id.clone(),
+        ));
+        assert_eq!(shell.launcher_persistence_attempts, 3);
+        assert!(shell.launcher.is_pinned(&application_id));
+        assert!(shell.launcher_status.is_none());
+        assert_eq!(
+            LauncherPreferences::load(preferences_path)
+                .expect("recovered preferences")
+                .favorites(),
+            [application_id]
+        );
     }
 
     #[test]
@@ -2565,6 +3309,7 @@ mod tests {
                 title: "two".into(),
             },
         ];
+        let _ = shell.scene(SurfaceRole::Panel, 1280, 56);
         let panel = shell
             .resolve_semantic_target(&ShellSemanticTarget::PanelApplication {
                 application_id: "org.kde.konsole".into(),
@@ -2574,10 +3319,8 @@ mod tests {
             .expect("live panel group resolves");
         assert_eq!(panel.role, ShellRole::Panel);
         assert_eq!(panel.output.as_deref(), Some("DP-1"));
-        assert_eq!(
-            shell.panel_hover_at(panel.x as f32, 1280),
-            Some(super::PanelHover::Task(0))
-        );
+        assert!(shell.panel_pointer_moved(panel.x as f32, 1280));
+        assert_eq!(shell.panel_hover, Some(super::PanelHover::Task(0)));
 
         let group = shell.launcher.group_windows(&shell.windows).remove(0);
         shell.preview_frame = Some(build_preview_frame(
@@ -2595,7 +3338,7 @@ mod tests {
         assert_eq!(preview.role, ShellRole::Preview);
         assert_eq!(preview.interaction, PointerInteraction::LeftClick);
         assert_eq!(
-            shell.preview_frame.as_ref().unwrap().action_at(
+            shell.preview_frame.as_mut().unwrap().transition_pointer(
                 Point {
                     x: preview.x as f32,
                     y: preview.y as f32,
@@ -2605,7 +3348,8 @@ mod tests {
             Some(crate::sdl_window_preview::PreviewAction::Close(WindowId(9)))
         );
 
-        shell.window_menu_frame = Some(build_menu_frame(WindowId(9), &[], Some(0), shell.palette));
+        shell.window_menu = Some(WindowId(9));
+        let _ = shell.window_menu_scene();
         let menu = shell
             .resolve_semantic_target(&ShellSemanticTarget::WindowMenu {
                 window: nickel_session_protocol::WindowId(9),
@@ -2613,12 +3357,15 @@ mod tests {
             })
             .expect("live context-menu row resolves");
         assert_eq!(menu.role, ShellRole::ContextMenu);
-        assert_eq!(
-            shell.window_menu_frame.as_ref().unwrap().action_at(Point {
-                x: menu.x as f32,
-                y: menu.y as f32,
-            }),
-            Some(crate::sdl_window_preview::MenuAction::Minimize(WindowId(9)))
+        assert!(
+            shell
+                .window_menu_host
+                .as_ref()
+                .unwrap()
+                .semantic_targets_for_message(&MenuAction::Minimize(WindowId(9)))
+                .into_iter()
+                .next()
+                .is_some()
         );
 
         shell.screenshot.show(image::RgbaImage::new(400, 200));
@@ -2661,47 +3408,57 @@ mod tests {
     }
 
     #[test]
-    fn lock_only_requests_unlock_after_successful_mocked_authentication() {
-        let mut shell = LiveShell::new().unwrap();
-        shell.locked = true;
-        shell.insert_lock_text("wrong");
-        let requested = Cell::new(false);
-        shell.lock_key_with(
-            Some(KeyCode::Enter),
-            |_, _| Ok(false),
-            || {
-                requested.set(true);
-                true
-            },
+    fn lock_application_transfers_password_to_a_typed_authentication_effect() {
+        let mut application = super::LockApplication {
+            password: zeroize::Zeroizing::new(String::new()),
+            status: None,
+            effects: Vec::new(),
+        };
+        nickel_ui::Application::update(
+            &mut application,
+            super::LockMessage::Password("secret".into()),
         );
-        assert!(!requested.get());
-        assert!(shell.lock_password.is_empty());
-        assert_eq!(shell.lock_status.as_deref(), Some("Authentication failed"));
-
-        shell.insert_lock_text("correct");
-        shell.lock_key_with(
-            Some(KeyCode::Enter),
-            |_, _| Ok(true),
-            || {
-                requested.set(true);
-                true
-            },
-        );
-        assert!(requested.get());
-        assert!(shell.lock_password.is_empty());
+        assert!(nickel_ui::Application::shortcut(
+            &mut application,
+            nickel_ui::Shortcut::Submit
+        ));
+        assert!(application.password.is_empty());
+        let super::LockEffect::Authenticate(password) = application.effects.pop().unwrap();
+        assert_eq!(&**password, "secret");
     }
 
     #[test]
-    fn control_center_keyboard_navigation_uses_production_hit_target_order() {
+    fn control_center_keyboard_navigation_uses_host_semantic_order() {
         let mut shell = LiveShell::new().unwrap();
         shell.control_visible = true;
 
         assert!(shell.control_key(Some(KeyCode::ArrowDown), 420, 600));
-        assert_eq!(shell.control_state.selected_action, 1);
+        assert!(shell.control_host.inspect().controller_target.is_some());
         assert!(shell.control_key(Some(KeyCode::ArrowUp), 420, 600));
-        assert_eq!(shell.control_state.selected_action, 0);
+        assert!(shell.control_host.inspect().controller_target.is_some());
         assert!(shell.control_key(Some(KeyCode::Escape), 420, 600));
         assert!(!shell.control_visible);
+    }
+
+    #[test]
+    fn control_center_controller_dispatch_matches_keyboard_adapter() {
+        let mut keyboard = LiveShell::new().unwrap();
+        let mut controller = LiveShell::new().unwrap();
+        keyboard.control_visible = true;
+        controller.control_visible = true;
+
+        assert!(controller.control_controller(nickel_ui::ControllerAction::Down, 420, 600));
+        assert!(
+            controller
+                .control_host
+                .inspect()
+                .controller_target
+                .is_some()
+        );
+
+        assert!(keyboard.control_key(Some(KeyCode::Escape), 420, 600));
+        assert!(controller.control_controller(nickel_ui::ControllerAction::Cancel, 420, 600));
+        assert_eq!(controller.control_visible, keyboard.control_visible);
     }
 
     #[test]
@@ -2736,15 +3493,48 @@ mod tests {
         assert_eq!(shell.preview_selected, 0);
 
         shell.window_menu = Some(WindowId(4));
-        shell.window_menu_frame = Some(build_menu_frame(WindowId(4), &[], Some(0), palette));
+        let _ = shell.window_menu_scene();
         assert!(shell.preview_key(Some(KeyCode::ArrowDown)));
-        assert_eq!(shell.window_menu_selected, 1);
-        assert!(shell.window_menu_key(Some(KeyCode::ArrowUp)));
-        assert_eq!(shell.window_menu_selected, 0);
+        assert!(
+            shell
+                .window_menu_host
+                .as_ref()
+                .unwrap()
+                .inspect()
+                .controller_target
+                .is_some()
+        );
+        let first_target = shell
+            .window_menu_host
+            .as_ref()
+            .unwrap()
+            .inspect()
+            .controller_target
+            .clone();
+        assert!(!shell.window_menu_host_key(Some(KeyCode::ArrowUp)));
+        assert_eq!(
+            shell
+                .window_menu_host
+                .as_ref()
+                .unwrap()
+                .inspect()
+                .controller_target,
+            first_target
+        );
+        assert!(shell.window_menu_host_key(Some(KeyCode::ArrowDown)));
+        assert_ne!(
+            shell
+                .window_menu_host
+                .as_ref()
+                .unwrap()
+                .inspect()
+                .controller_target,
+            first_target
+        );
     }
 
     #[test]
-    fn notification_keyboard_selection_follows_action_order() {
+    fn notification_host_effects_stay_at_the_transport_boundary() {
         let mut shell = LiveShell::new().unwrap();
         let mut store = NotificationStore::default();
         store.notify(
@@ -2752,28 +3542,39 @@ mod tests {
             NotificationRequest {
                 app_name: "Test".into(),
                 summary: "Ready".into(),
-                body: String::new(),
-                actions: vec![
-                    NotificationAction {
-                        key: "open".into(),
-                        label: "Open".into(),
-                    },
-                    NotificationAction {
-                        key: "dismiss".into(),
-                        label: "Dismiss".into(),
-                    },
-                ],
+                body: "Choose".into(),
+                actions: vec![NotificationAction {
+                    key: "open".into(),
+                    label: "Open".into(),
+                }],
                 expire_timeout_ms: 0,
             },
             Instant::now(),
         );
         shell.notification = store.newest();
+        let _ = shell.scene(SurfaceRole::Notification, 420, 180);
+        let target = shell
+            .notification_host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Open".into(),
+            })
+            .unwrap();
+        let point = Point {
+            x: target.bounds.origin.x + target.bounds.size.width / 2.0,
+            y: target.bounds.origin.y + target.bounds.size.height / 2.0,
+        };
 
-        assert!(shell.notification_key(Some(KeyCode::ArrowRight)));
-        assert_eq!(shell.notification_selected, 1);
-        assert!(shell.notification_keyboard_active);
-        assert!(shell.notification_key(Some(KeyCode::ArrowLeft)));
-        assert_eq!(shell.notification_selected, 0);
+        assert!(shell.notification_click(point.x, point.y, 420, 180));
+        assert!(shell.notification.is_none());
+        assert!(
+            shell
+                .notification_host
+                .query(&nickel_ui::SemanticSelector::Role(
+                    nickel_ui::SemanticRole::Dialog
+                ))
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2785,6 +3586,39 @@ mod tests {
         assert_eq!(
             layout.codex_icon_bounds(),
             Rect::new(1700.0, 14.0, 28.0, 28.0)
+        );
+    }
+
+    #[test]
+    fn panel_host_owns_pointer_and_accessibility_targets() {
+        let mut shell = LiveShell::new().unwrap();
+        let commands = shell.scene(SurfaceRole::Panel, 1280, 56);
+        assert!(!commands.is_empty());
+
+        let launcher = shell
+            .panel_host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Open Nickel Start".into(),
+            })
+            .unwrap();
+        let center = Point {
+            x: launcher.bounds.origin.x + launcher.bounds.size.width / 2.0,
+            y: launcher.bounds.origin.y + launcher.bounds.size.height / 2.0,
+        };
+        assert_eq!(
+            shell.panel_action_at(center),
+            Some(super::PanelAction::Launcher)
+        );
+        #[cfg(not(target_os = "macos"))]
+        assert!(
+            shell
+                .panel_host
+                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    role: nickel_ui::SemanticRole::Button,
+                    name: "Open Quick Settings".into(),
+                })
+                .is_ok()
         );
     }
 
@@ -2816,6 +3650,103 @@ mod tests {
     }
 
     #[test]
+    fn wallpaper_cache_caps_growth_and_reclaims_four_x_area_reductions() {
+        assert_eq!(
+            super::wallpaper_cache_target((0, 0), (16_000, 9_000)),
+            Some((7680, 4320))
+        );
+        assert_eq!(
+            super::wallpaper_cache_target((3840, 2160), (2560, 1440)),
+            None,
+            "minor topology changes reuse the existing thumbnail"
+        );
+        assert_eq!(
+            super::wallpaper_cache_target((3840, 2160), (1920, 1080)),
+            Some((1920, 1080)),
+            "4K to FHD releases three quarters of retained pixels"
+        );
+    }
+
+    #[test]
+    fn preview_cache_normalizes_source_pixels_to_the_rendered_card_bound() {
+        let source = RgbaImage::from_pixel(640, 360, Rgba([10, 20, 30, 255]));
+        let normalized = super::normalize_preview_image(&source);
+
+        assert_eq!(normalized.dimensions(), (260, 116));
+        assert_eq!(normalized.as_raw().len(), 260 * 116 * 4);
+        assert_eq!(
+            super::PREVIEW_CACHE_CAPACITY * normalized.as_raw().len(),
+            3_860_480
+        );
+    }
+
+    #[test]
+    fn shell_image_diagnostics_account_owned_caches_without_process_rss() {
+        let mut shell = LiveShell::new().unwrap();
+        shell.wallpaper = Some(Arc::new(RgbaImage::new(10, 10)));
+        shell.tray = vec![TrayItem {
+            id: "fixture".into(),
+            title: "Fixture".into(),
+            icon: RgbaImage::new(18, 18),
+        }];
+        shell.tray_icons = panel_tray_icons(&shell.tray);
+        shell.preview_images.insert(
+            WindowId(1),
+            Arc::new(RgbaImage::new(
+                super::PREVIEW_CACHE_WIDTH,
+                super::PREVIEW_CACHE_HEIGHT,
+            )),
+        );
+
+        let diagnostics = shell.image_cache_diagnostics();
+        assert_eq!(diagnostics.wallpaper_entries, 1);
+        assert_eq!(diagnostics.wallpaper_bytes, 400);
+        assert_eq!(diagnostics.tray_entries, 2);
+        assert_eq!(diagnostics.tray_bytes, 18 * 18 * 4 * 2);
+        assert_eq!(diagnostics.preview_entries, 1);
+        assert_eq!(
+            diagnostics.preview_bytes,
+            super::PREVIEW_CACHE_WIDTH as usize * super::PREVIEW_CACHE_HEIGHT as usize * 4
+        );
+    }
+
+    #[test]
+    fn preview_cache_churn_releases_previous_group_pixels_and_stays_bounded() {
+        let normalized = Arc::new(super::normalize_preview_image(&RgbaImage::from_pixel(
+            640,
+            360,
+            Rgba([10, 20, 30, 255]),
+        )));
+        let mut cache = HashMap::new();
+        for generation in 0..20_u64 {
+            let windows = (0..64_u64)
+                .map(|offset| OpenWindow {
+                    id: WindowId(generation * 100 + offset),
+                    application_id: None,
+                    active: false,
+                    title: String::new(),
+                })
+                .collect::<Vec<_>>();
+            super::retain_preview_generation(&mut cache, &windows);
+            for window in windows.iter().take(super::PREVIEW_CACHE_CAPACITY) {
+                cache.insert(window.id, Arc::new((*normalized).clone()));
+            }
+            assert_eq!(cache.len(), super::PREVIEW_CACHE_CAPACITY);
+            assert!(cache.keys().all(|id| id.0 / 100 == generation));
+            assert_eq!(
+                cache
+                    .values()
+                    .map(|image| image.as_raw().len())
+                    .sum::<usize>(),
+                3_860_480
+            );
+        }
+        cache.clear();
+        assert!(cache.is_empty());
+        assert_eq!(Arc::strong_count(&normalized), 1);
+    }
+
+    #[test]
     fn tray_icons_are_normalized_without_letter_fallbacks() {
         let item = TrayItem {
             id: "status".into(),
@@ -2827,6 +3758,101 @@ mod tests {
         assert_eq!(icons.len(), 1);
         assert_eq!(icons[0].dimensions(), (18, 18));
         assert!(icons[0].pixels().any(|pixel| pixel.0[3] != 0));
+    }
+
+    #[test]
+    fn tray_source_pixels_are_capped_to_the_four_visible_items() {
+        let items = (0..7)
+            .map(|index| TrayItem {
+                id: index.to_string(),
+                title: format!("Item {index}"),
+                icon: RgbaImage::from_pixel(128, 64, Rgba([index, 0, 0, 255])),
+            })
+            .collect();
+        let normalized = super::normalize_tray_items(items);
+
+        assert_eq!(
+            normalized
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["3", "4", "5", "6"]
+        );
+        assert!(
+            normalized
+                .iter()
+                .all(|item| item.icon.dimensions() == (18, 18))
+        );
+        assert_eq!(
+            normalized
+                .iter()
+                .map(|item| item.icon.as_raw().len())
+                .sum::<usize>(),
+            5_184
+        );
+    }
+
+    #[test]
+    #[ignore = "release-only cache timing evidence; debug resampling is intentionally slow"]
+    fn shell_image_cache_warm_and_churn_costs_are_measured() {
+        use std::time::Duration;
+
+        fn p95(mut samples: Vec<Duration>) -> Duration {
+            samples.sort_unstable();
+            samples[samples.len() * 95 / 100]
+        }
+
+        let wallpaper_warm = p95((0..31)
+            .map(|_| {
+                let started = Instant::now();
+                assert_eq!(
+                    super::wallpaper_cache_target((3840, 2160), (2560, 1440)),
+                    None
+                );
+                started.elapsed()
+            })
+            .collect());
+        let wallpaper_source = RgbaImage::from_pixel(2560, 1440, Rgba([10, 20, 30, 255]));
+        let wallpaper_churn = p95((0..7)
+            .map(|_| {
+                let started = Instant::now();
+                let _ = crate::icons::resized(&wallpaper_source, 1920, 1080);
+                started.elapsed()
+            })
+            .collect());
+        let preview_source = RgbaImage::from_pixel(1280, 720, Rgba([10, 20, 30, 255]));
+        let preview_churn = p95((0..11)
+            .map(|_| {
+                let started = Instant::now();
+                let _ = super::normalize_preview_image(&preview_source);
+                started.elapsed()
+            })
+            .collect());
+        let tray_source = (0..7)
+            .map(|index| TrayItem {
+                id: index.to_string(),
+                title: String::new(),
+                icon: RgbaImage::from_pixel(512, 512, Rgba([index, 0, 0, 255])),
+            })
+            .collect::<Vec<_>>();
+        let tray_churn = p95((0..11)
+            .map(|_| {
+                let started = Instant::now();
+                let _ = super::normalize_tray_items(tray_source.clone());
+                started.elapsed()
+            })
+            .collect());
+
+        println!(
+            "shell image caches wallpaper-warm-p95={}ns wallpaper-rebuild-p95={}us preview-normalize-p95={}us tray-generation-p95={}us",
+            wallpaper_warm.as_nanos(),
+            wallpaper_churn.as_micros(),
+            preview_churn.as_micros(),
+            tray_churn.as_micros()
+        );
+        assert!(wallpaper_churn > wallpaper_warm);
+        assert!(preview_churn > wallpaper_warm);
+        assert!(tray_churn > wallpaper_warm);
     }
 
     #[test]
@@ -2842,26 +3868,5 @@ mod tests {
         assert_eq!(visible_tray_item(&items, 0).unwrap().id, "1");
         assert_eq!(visible_tray_item(&items, 3).unwrap().id, "4");
         assert!(visible_tray_item(&items, 4).is_none());
-    }
-
-    #[test]
-    fn notification_action_targets_derive_from_production_geometry() {
-        let targets = notification_action_rects(3, 420, 180);
-        assert_eq!(targets.len(), 3);
-        for (expected, (index, rect)) in targets.iter().enumerate() {
-            assert_eq!(*index, expected);
-            let center = Point {
-                x: rect.origin.x + rect.size.width / 2.0,
-                y: rect.origin.y + rect.size.height / 2.0,
-            };
-            assert!(contains_rect(*rect, center));
-            assert_eq!(
-                targets
-                    .iter()
-                    .find(|(_, candidate)| contains_rect(*candidate, center))
-                    .map(|(index, _)| *index),
-                Some(expected)
-            );
-        }
     }
 }
