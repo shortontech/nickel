@@ -4,7 +4,7 @@ use std::{
     process::{Command, ExitStatus},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
         mpsc,
     },
     thread,
@@ -119,6 +119,86 @@ pub enum SecureStorageError {
     UnexpectedProvider { expected: String, actual: String },
 }
 
+#[derive(Clone, Copy)]
+#[repr(u8)]
+enum SecureStorageFailureReason {
+    None,
+    Connection,
+    Protocol,
+    MissingDefaultCollection,
+    PromptTimedOut,
+    ProviderDisappeared,
+    ProviderConfiguration,
+    UnexpectedProvider,
+    ReadinessCheck,
+}
+
+static SECURE_STORAGE_FAILURE_REASON: AtomicU8 =
+    AtomicU8::new(SecureStorageFailureReason::None as u8);
+
+fn record_secure_storage_failure_reason(reason: SecureStorageFailureReason) {
+    SECURE_STORAGE_FAILURE_REASON.store(reason as u8, Ordering::Release);
+}
+
+fn record_secure_storage_failure(error: &SecureStorageError) {
+    record_secure_storage_failure_reason(secure_storage_failure_reason(error));
+}
+
+fn secure_storage_failure_reason(error: &SecureStorageError) -> SecureStorageFailureReason {
+    match error {
+        SecureStorageError::Connect(_) => SecureStorageFailureReason::Connection,
+        SecureStorageError::Protocol(_) | SecureStorageError::Bus(_) => {
+            SecureStorageFailureReason::Protocol
+        }
+        SecureStorageError::MissingDefaultCollection => {
+            SecureStorageFailureReason::MissingDefaultCollection
+        }
+        SecureStorageError::PromptTimedOut => SecureStorageFailureReason::PromptTimedOut,
+        SecureStorageError::ProviderDisappeared => SecureStorageFailureReason::ProviderDisappeared,
+        SecureStorageError::ProviderConfiguration(_) => {
+            SecureStorageFailureReason::ProviderConfiguration
+        }
+        SecureStorageError::UnexpectedProvider { .. } => {
+            SecureStorageFailureReason::UnexpectedProvider
+        }
+        SecureStorageError::RemainedLocked | SecureStorageError::PromptDismissed => {
+            SecureStorageFailureReason::ReadinessCheck
+        }
+    }
+}
+
+pub fn secure_storage_unavailable_reason()
+-> Option<nickel_session_protocol::SecureStorageUnavailableReason> {
+    use nickel_session_protocol::SecureStorageUnavailableReason as ProtocolReason;
+    match SECURE_STORAGE_FAILURE_REASON.load(Ordering::Acquire) {
+        value if value == SecureStorageFailureReason::Connection as u8 => {
+            Some(ProtocolReason::Connection)
+        }
+        value if value == SecureStorageFailureReason::Protocol as u8 => {
+            Some(ProtocolReason::Protocol)
+        }
+        value if value == SecureStorageFailureReason::MissingDefaultCollection as u8 => {
+            Some(ProtocolReason::MissingDefaultCollection)
+        }
+        value if value == SecureStorageFailureReason::PromptTimedOut as u8 => {
+            Some(ProtocolReason::PromptTimedOut)
+        }
+        value if value == SecureStorageFailureReason::ProviderDisappeared as u8 => {
+            Some(ProtocolReason::ProviderDisappeared)
+        }
+        value if value == SecureStorageFailureReason::ProviderConfiguration as u8 => {
+            Some(ProtocolReason::ProviderConfiguration)
+        }
+        value if value == SecureStorageFailureReason::UnexpectedProvider as u8 => {
+            Some(ProtocolReason::UnexpectedProvider)
+        }
+        value if value == SecureStorageFailureReason::ReadinessCheck as u8 => {
+            Some(ProtocolReason::ReadinessCheck)
+        }
+        _ => None,
+    }
+}
+
 pub fn monitor_secure_storage(
     retry_requested: Arc<AtomicBool>,
     mut publish: impl FnMut(SecureStorageState),
@@ -134,11 +214,13 @@ pub fn monitor_secure_storage(
                     tracing::info!("Secret Service prompt dismissed; waiting for retry");
                 }
                 Err(error) => {
+                    record_secure_storage_failure(&error);
                     publish(SecureStorageState::Unavailable);
                     tracing::error!(%error, "secure storage unavailable");
                 }
             },
             Err(error) => {
+                record_secure_storage_failure(&error);
                 publish(SecureStorageState::Unavailable);
                 tracing::error!(%error, "secure storage unavailable");
             }
@@ -370,6 +452,7 @@ fn monitor_ready_provider(connection: &Connection, publish: &mut impl FnMut(Secu
     let dbus = match DBusProxy::new(connection) {
         Ok(proxy) => proxy,
         Err(error) => {
+            record_secure_storage_failure_reason(SecureStorageFailureReason::Protocol);
             publish(SecureStorageState::Unavailable);
             tracing::error!(%error, "could not monitor Secret Service owner");
             return;
@@ -381,11 +464,15 @@ fn monitor_ready_provider(connection: &Connection, publish: &mut impl FnMut(Secu
         match dbus.name_has_owner(SERVICE.try_into().expect("valid bus name")) {
             Ok(true) => {}
             Ok(false) => {
+                record_secure_storage_failure_reason(
+                    SecureStorageFailureReason::ProviderDisappeared,
+                );
                 publish(SecureStorageState::Unavailable);
                 tracing::warn!("Secret Service owner disappeared");
                 return;
             }
             Err(error) => {
+                record_secure_storage_failure_reason(SecureStorageFailureReason::Protocol);
                 publish(SecureStorageState::Unavailable);
                 tracing::error!(%error, "could not monitor Secret Service owner");
                 return;
@@ -401,6 +488,7 @@ fn monitor_ready_provider(connection: &Connection, publish: &mut impl FnMut(Secu
         }) {
             Ok(()) => {}
             Err(error) => {
+                record_secure_storage_failure(&error);
                 publish(SecureStorageState::Unavailable);
                 tracing::error!(%error, "Secret Service provider identity changed");
                 return;
@@ -416,6 +504,7 @@ fn monitor_ready_provider(connection: &Connection, publish: &mut impl FnMut(Secu
                 return;
             }
             Err(error) => {
+                record_secure_storage_failure(&error);
                 publish(SecureStorageState::Unavailable);
                 tracing::error!(%error, "Secret Service readiness check failed");
                 return;

@@ -28,6 +28,15 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(target_os = "linux")]
+use std::io::Write;
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::PermissionsExt;
+#[cfg(target_os = "linux")]
+use std::os::unix::net::{UnixListener, UnixStream};
+#[cfg(target_os = "linux")]
+use std::sync::{Condvar, Mutex, atomic::AtomicU64};
+
 use smithay::reexports::{
     calloop::{
         EventLoop,
@@ -164,8 +173,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    event_loop.run(None, &mut state, move |_| {
-        // NickelSession is running
+    event_loop.run(None, &mut state, move |state| {
+        state.log_shell_readiness_if_changed();
     })?;
 
     let _ = supervisor_tx.send(ShellSupervisorCommand::Stop);
@@ -229,6 +238,121 @@ fn secure_storage_startup_timed_out(
 
 const MAX_SHELL_RESTART_DELAY: Duration = Duration::from_secs(4);
 const STABLE_SHELL_RUNTIME: Duration = Duration::from_secs(30);
+
+#[cfg(target_os = "linux")]
+const SHELL_STARTUP_BARRIER_ENV: &str = "NICKEL_SHELL_STARTUP_BARRIER";
+#[cfg(target_os = "linux")]
+const SHELL_STARTUP_BARRIER_MAGIC: &[u8; 8] = b"NIKREADY";
+#[cfg(target_os = "linux")]
+static SHELL_STARTUP_BARRIER_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+#[cfg(target_os = "linux")]
+struct ShellStartupBarrier {
+    directory: std::path::PathBuf,
+    path: std::path::PathBuf,
+    state: Arc<(Mutex<Option<Option<u32>>>, Condvar)>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+#[cfg(target_os = "linux")]
+impl ShellStartupBarrier {
+    fn new() -> std::io::Result<Self> {
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(std::path::PathBuf::from)
+            .ok_or_else(|| std::io::Error::other("XDG_RUNTIME_DIR is missing"))?;
+        let directory = runtime.join(format!(
+            "nickel-shell-startup-{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos(),
+            SHELL_STARTUP_BARRIER_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&directory)?;
+        if let Err(error) =
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+        {
+            let _ = std::fs::remove_dir(&directory);
+            return Err(error);
+        }
+        let path = directory.join("ready.sock");
+        let listener = match UnixListener::bind(&path) {
+            Ok(listener) => listener,
+            Err(error) => {
+                let _ = std::fs::remove_dir(&directory);
+                return Err(error);
+            }
+        };
+        let state = Arc::new((Mutex::new(None::<Option<u32>>), Condvar::new()));
+        let worker_state = Arc::clone(&state);
+        let worker = thread::Builder::new()
+            .name("nickel-shell-startup-barrier".into())
+            .spawn(move || {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let (lock, condition) = &*worker_state;
+                let mut state = lock.lock().expect("startup barrier state is not poisoned");
+                while state.is_none() {
+                    state = condition
+                        .wait(state)
+                        .expect("startup barrier state is not poisoned");
+                }
+                let Some(Some(pid)) = *state else {
+                    return;
+                };
+                let mut token = Vec::with_capacity(SHELL_STARTUP_BARRIER_MAGIC.len() + 4);
+                token.extend_from_slice(SHELL_STARTUP_BARRIER_MAGIC);
+                token.extend_from_slice(&pid.to_ne_bytes());
+                let _ = stream.write_all(&token);
+            });
+        let worker = match worker {
+            Ok(worker) => worker,
+            Err(error) => {
+                let _ = std::fs::remove_file(&path);
+                let _ = std::fs::remove_dir(&directory);
+                return Err(error);
+            }
+        };
+        Ok(Self {
+            directory,
+            path,
+            state,
+            worker: Some(worker),
+        })
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    fn release(&self, pid: u32) {
+        let (lock, condition) = &*self.state;
+        let mut state = lock.lock().expect("startup barrier state is not poisoned");
+        if state.is_none() {
+            *state = Some(Some(pid));
+            condition.notify_one();
+        }
+    }
+
+    fn stop(mut self) {
+        let (lock, condition) = &*self.state;
+        let mut state = lock.lock().expect("startup barrier state is not poisoned");
+        if state.is_none() {
+            *state = Some(None);
+            condition.notify_one();
+        }
+        drop(state);
+        // Wake accept() when the child failed before reaching the barrier.
+        let _ = UnixStream::connect(&self.path);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+        let _ = std::fs::remove_file(&self.path);
+        let _ = std::fs::remove_dir(self.directory);
+    }
+}
 
 struct ShellSupervisorContext {
     secure_storage_state: Arc<AtomicU8>,
@@ -299,15 +423,32 @@ fn supervise_shell(program: OsString, arguments: Vec<OsString>, context: ShellSu
             return;
         }
         let started = Instant::now();
-        let status = match shell_command(&program, &arguments).spawn() {
+        #[cfg(target_os = "linux")]
+        let startup_barrier = match ShellStartupBarrier::new() {
+            Ok(barrier) => barrier,
+            Err(error) => {
+                tracing::error!(%error, "failed to create Nickel shell startup barrier");
+                let _ = shell_health.send(u8::try_from(consecutive_failures).unwrap_or(u8::MAX));
+                thread::sleep(shell_restart_delay(consecutive_failures));
+                continue;
+            }
+        };
+        let mut command = shell_command(&program, &arguments);
+        #[cfg(target_os = "linux")]
+        command.env(SHELL_STARTUP_BARRIER_ENV, startup_barrier.path());
+        let status = match command.spawn() {
             Ok(mut child) => {
                 expected_shell_pid.store(child.id(), Ordering::Release);
+                #[cfg(target_os = "linux")]
+                startup_barrier.release(child.id());
                 let result = wait_for_shell(
                     &mut child,
                     &supervisor,
                     secure_storage_required.then_some(secure_storage_state.as_ref()),
                 );
                 expected_shell_pid.store(0, Ordering::Release);
+                #[cfg(target_os = "linux")]
+                startup_barrier.stop();
                 match result {
                     ShellWait::Exited(status) => status,
                     ShellWait::Restarted => {
@@ -323,7 +464,11 @@ fn supervise_shell(program: OsString, arguments: Vec<OsString>, context: ShellSu
                     }
                 }
             }
-            Err(error) => Err(error),
+            Err(error) => {
+                #[cfg(target_os = "linux")]
+                startup_barrier.stop();
+                Err(error)
+            }
         };
         let runtime = started.elapsed();
         if runtime >= STABLE_SHELL_RUNTIME || status.as_ref().is_ok_and(ExitStatus::success) {
@@ -571,6 +716,39 @@ mod tests {
         assert!(command.get_envs().any(|(name, value)| {
             name == "SDL_VIDEODRIVER" && value.is_some_and(|value| value == "wayland")
         }));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn shell_startup_barrier_releases_only_after_expected_pid_publication() {
+        use std::{io::Read, os::unix::net::UnixStream, sync::atomic::AtomicU32};
+
+        use super::{SHELL_STARTUP_BARRIER_MAGIC, ShellStartupBarrier};
+
+        let barrier = ShellStartupBarrier::new().unwrap();
+        let path = barrier.path().to_owned();
+        let expected_pid = Arc::new(AtomicU32::new(0));
+        let child_expected_pid = Arc::clone(&expected_pid);
+        let child = thread::spawn(move || {
+            let mut stream = UnixStream::connect(path).unwrap();
+            let mut token = [0_u8; SHELL_STARTUP_BARRIER_MAGIC.len() + 4];
+            stream.read_exact(&mut token).unwrap();
+            assert_ne!(
+                child_expected_pid.load(Ordering::Acquire),
+                0,
+                "the shell must not receive readiness before PID publication"
+            );
+            u32::from_ne_bytes(
+                token[SHELL_STARTUP_BARRIER_MAGIC.len()..]
+                    .try_into()
+                    .unwrap(),
+            )
+        });
+
+        expected_pid.store(4242, Ordering::Release);
+        barrier.release(4242);
+        assert_eq!(child.join().unwrap(), 4242);
+        barrier.stop();
     }
 
     #[test]

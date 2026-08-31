@@ -704,6 +704,7 @@ mod tests {
             secondary_text: 0xa8abb2,
             accent: 0x9b62e8,
             accent_soft: 0x45305f,
+            secondary_accent: 0x55b982,
             positive: 0x55b982,
         })
     }
@@ -719,6 +720,7 @@ mod tests {
             secondary_text: 0x555b66,
             accent: 0x7440bd,
             accent_soft: 0xe5d8f7,
+            secondary_accent: 0x207a4b,
             positive: 0x207a4b,
         })
     }

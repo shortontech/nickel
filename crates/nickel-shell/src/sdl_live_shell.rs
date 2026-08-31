@@ -25,8 +25,8 @@ use crate::{
     model::{Application, OpenWindow, TrayItem},
     notification::DesktopNotification,
     platform::{
-        self, AudioStatus, BluetoothStatus, NetworkStatus, NotificationFeed, NotificationSource,
-        ShellCommand, TrayFeed, TraySource, WindowAction, WindowFeed,
+        self, AudioStatus, BluetoothStatus, FeedState, FeedStatus, NetworkStatus, NotificationFeed,
+        NotificationSource, ShellCommand, TrayFeed, TraySource, WindowAction, WindowFeed,
     },
     sdl_control_view::{ControlAction, ControlCenterFrame, ControlViewState, build_control_center},
     sdl_launcher_view::{
@@ -52,6 +52,7 @@ const PANEL_CODEX_WIDTH: f32 = 36.0;
 const PANEL_CODEX_ICON_SIZE: f32 = 28.0;
 const PREVIEW_LEAVE_DELAY: Duration = Duration::from_millis(500);
 const PREVIEW_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
+const RECURRING_DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct PanelStatusLayout {
@@ -112,6 +113,8 @@ pub struct LiveShell {
     notification_feed: NotificationFeed,
     windows: Vec<OpenWindow>,
     workspaces: Vec<platform::WorkspaceSummary>,
+    window_feed_status: FeedStatus,
+    workspace_feed_status: FeedStatus,
     tray: Vec<TrayItem>,
     tray_icons: Vec<Arc<image::RgbaImage>>,
     notification: Option<DesktopNotification>,
@@ -153,6 +156,7 @@ pub struct LiveShell {
     launcher_status: Option<String>,
     secure_storage_override: Option<String>,
     secure_storage_state: platform::SecureStorageState,
+    secure_storage_query_error: Option<(platform::SessionRequestError, Instant)>,
     requested_codex_project: Option<String>,
     screenshot: ScreenshotTool,
 }
@@ -210,7 +214,9 @@ impl LiveShell {
         self.requested_codex_project.take()
     }
     pub fn new() -> Result<Self, String> {
-        let mut launcher = Launcher::new(platform::applications());
+        let application_discovery = platform::application_discovery();
+        let application_status = application_discovery_status_label(application_discovery.status());
+        let mut launcher = Launcher::new(application_discovery.into_applications());
         launcher.set_places(crate::places::applications());
         let _ = launcher.set_dashboard_account(
             std::env::var("USER")
@@ -249,17 +255,29 @@ impl LiveShell {
         let window_feed = WindowFeed::new();
         let tray_feed = TrayFeed::new();
         let notification_feed = NotificationFeed::new()?;
-        let windows = window_feed.snapshot(&launcher).unwrap_or_default();
-        let workspaces = window_feed.workspaces().unwrap_or_default();
+        let windows = Vec::new();
+        let workspaces = Vec::new();
         let tray = tray_feed.snapshot();
         let tray_icons = panel_tray_icons(&tray);
         let network = platform::network_status();
         let bluetooth = platform::bluetooth_status();
         let audio = platform::audio_status();
         #[cfg(target_os = "linux")]
-        let secure_storage_state = platform::secure_storage_state();
+        let (secure_storage_state, secure_storage_query_error) =
+            match platform::secure_storage_state() {
+                Ok(state) => (state, None),
+                Err(error) => {
+                    tracing::warn!(%error, "secure-storage query failed during shell startup");
+                    (
+                        platform::SecureStorageState::ControlUnavailable,
+                        Some((error, Instant::now())),
+                    )
+                }
+            };
         #[cfg(not(target_os = "linux"))]
         let secure_storage_state = platform::SecureStorageState::Ready;
+        #[cfg(not(target_os = "linux"))]
+        let secure_storage_query_error = None;
         Ok(Self {
             launcher,
             window_feed,
@@ -267,6 +285,8 @@ impl LiveShell {
             notification_feed,
             windows,
             workspaces,
+            window_feed_status: FeedStatus::Loading,
+            workspace_feed_status: FeedStatus::Loading,
             tray,
             tray_icons,
             notification: None,
@@ -305,9 +325,10 @@ impl LiveShell {
             launcher_view: LauncherViewState::default(),
             launcher_icons: LauncherIconCache::new(),
             launcher_frame: None,
-            launcher_status: None,
+            launcher_status: application_status.map(str::to_owned),
             secure_storage_override: None,
             secure_storage_state,
+            secure_storage_query_error,
             requested_codex_project: None,
             screenshot: ScreenshotTool::default(),
         })
@@ -325,13 +346,25 @@ impl LiveShell {
         if self.launcher_visible || self.control_visible {
             return false;
         }
-        if let Some(windows) = self.window_feed.snapshot(&self.launcher)
+        let windows = self.window_feed.snapshot(&self.launcher);
+        if update_feed_status(&mut self.window_feed_status, windows.status(), "windows") {
+            changed = true;
+        }
+        if let FeedState::Ready(windows) = windows
             && windows != self.windows
         {
             self.windows = windows;
             changed = true;
         }
-        if let Some(workspaces) = self.window_feed.workspaces()
+        let workspaces = self.window_feed.workspaces();
+        if update_feed_status(
+            &mut self.workspace_feed_status,
+            workspaces.status(),
+            "workspaces",
+        ) {
+            changed = true;
+        }
+        if let FeedState::Ready(workspaces) = workspaces
             && workspaces != self.workspaces
         {
             self.workspaces = workspaces;
@@ -394,7 +427,28 @@ impl LiveShell {
         let mut changed = false;
         #[cfg(target_os = "linux")]
         {
-            let secure_storage_state = platform::secure_storage_state();
+            let secure_storage_state = match platform::secure_storage_state() {
+                Ok(state) => {
+                    if self.secure_storage_query_error.take().is_some() {
+                        tracing::info!("secure-storage session query recovered");
+                    }
+                    state
+                }
+                Err(error) => {
+                    let now = Instant::now();
+                    let should_log = self.secure_storage_query_error.as_ref().is_none_or(
+                        |(previous, logged)| {
+                            previous != &error
+                                || now.duration_since(*logged) >= RECURRING_DIAGNOSTIC_INTERVAL
+                        },
+                    );
+                    if should_log {
+                        tracing::warn!(%error, "secure-storage query failed during shell refresh");
+                        self.secure_storage_query_error = Some((error, now));
+                    }
+                    platform::SecureStorageState::ControlUnavailable
+                }
+            };
             if secure_storage_state != self.secure_storage_state {
                 self.secure_storage_state = secure_storage_state;
                 changed = true;
@@ -538,10 +592,13 @@ impl LiveShell {
                 self.open_window_preview(index);
                 self.preview_focus_requested = true;
             } else if let Some(window) = groups.get(index).and_then(|group| group.windows.first()) {
-                let _ = platform::send_shell_command(ShellCommand::WindowAction {
-                    window: window.id,
-                    action: WindowAction::Activate,
-                });
+                let _ = send_session_command(
+                    "activate-window",
+                    ShellCommand::WindowAction {
+                        window: window.id,
+                        action: WindowAction::Activate,
+                    },
+                );
                 self.close_window_preview();
             }
             return true;
@@ -696,7 +753,10 @@ impl LiveShell {
         } else {
             self.preview_leave_deadline = Some(Instant::now() + PREVIEW_LEAVE_DELAY);
             if self.preview_hovered.take().is_some() {
-                let _ = platform::send_shell_command(ShellCommand::ClearWindowHighlight);
+                let _ = send_session_command(
+                    "clear-window-highlight",
+                    ShellCommand::ClearWindowHighlight,
+                );
             }
         }
         true
@@ -715,7 +775,7 @@ impl LiveShell {
             ShellCommand::ClearWindowHighlight,
             ShellCommand::HighlightWindow,
         );
-        let _ = platform::send_shell_command(command);
+        let _ = send_session_command("highlight-preview-window", command);
         true
     }
 
@@ -748,13 +808,16 @@ impl LiveShell {
                     + self.preview_group.map_or(0, |index| {
                         (PANEL_ITEM_WIDTH + index as f32 * PANEL_ITEM_WIDTH) as i32
                     });
-                let _ = platform::send_shell_command(ShellCommand::ShowContextMenu {
-                    x,
-                    width: MENU_WIDTH as i32,
-                    height: menu_height(&self.workspaces) as i32,
-                });
+                let _ = send_session_command(
+                    "show-context-menu",
+                    ShellCommand::ShowContextMenu {
+                        x,
+                        width: MENU_WIDTH as i32,
+                        height: menu_height(&self.workspaces) as i32,
+                    },
+                );
                 #[cfg(target_os = "linux")]
-                let _ = platform::send_shell_command(ShellCommand::FocusContextMenu);
+                let _ = send_session_command("focus-context-menu", ShellCommand::FocusContextMenu);
             }
         }
         true
@@ -776,20 +839,29 @@ impl LiveShell {
             Some(KeyCode::Escape) => {
                 self.close_window_preview();
                 #[cfg(target_os = "linux")]
-                let _ = platform::send_shell_command(ShellCommand::RestoreApplicationFocus);
+                let _ = send_session_command(
+                    "restore-application-focus",
+                    ShellCommand::RestoreApplicationFocus,
+                );
             }
             Some(KeyCode::ArrowLeft | KeyCode::ArrowUp) => {
                 self.preview_selected = (self.preview_selected + count - 1) % count;
                 self.preview_hovered = frame.window(self.preview_selected);
                 if let Some(window) = self.preview_hovered {
-                    let _ = platform::send_shell_command(ShellCommand::HighlightWindow(window));
+                    let _ = send_session_command(
+                        "highlight-preview-window",
+                        ShellCommand::HighlightWindow(window),
+                    );
                 }
             }
             Some(KeyCode::ArrowRight | KeyCode::ArrowDown | KeyCode::Tab) => {
                 self.preview_selected = (self.preview_selected + 1) % count;
                 self.preview_hovered = frame.window(self.preview_selected);
                 if let Some(window) = self.preview_hovered {
-                    let _ = platform::send_shell_command(ShellCommand::HighlightWindow(window));
+                    let _ = send_session_command(
+                        "highlight-preview-window",
+                        ShellCommand::HighlightWindow(window),
+                    );
                 }
             }
             Some(KeyCode::Delete) => {
@@ -825,10 +897,10 @@ impl LiveShell {
             }
             MenuAction::Minimize(window) => self.send_window_action(window, WindowAction::Minimize),
             MenuAction::MoveToWorkspace(window, workspace) => {
-                let _ = platform::send_shell_command(ShellCommand::MoveWindowToWorkspace {
-                    window,
-                    workspace,
-                });
+                let _ = send_session_command(
+                    "move-window-to-workspace",
+                    ShellCommand::MoveWindowToWorkspace { window, workspace },
+                );
             }
         }
         self.close_window_preview();
@@ -848,7 +920,10 @@ impl LiveShell {
             Some(KeyCode::Escape) => {
                 self.close_window_preview();
                 #[cfg(target_os = "linux")]
-                let _ = platform::send_shell_command(ShellCommand::RestoreApplicationFocus);
+                let _ = send_session_command(
+                    "restore-application-focus",
+                    ShellCommand::RestoreApplicationFocus,
+                );
             }
             Some(KeyCode::ArrowUp | KeyCode::ArrowLeft) => {
                 self.window_menu_selected = (self.window_menu_selected + count - 1) % count;
@@ -871,10 +946,10 @@ impl LiveShell {
                         self.send_window_action(window, WindowAction::Minimize)
                     }
                     MenuAction::MoveToWorkspace(window, workspace) => {
-                        let _ = platform::send_shell_command(ShellCommand::MoveWindowToWorkspace {
-                            window,
-                            workspace,
-                        });
+                        let _ = send_session_command(
+                            "move-window-to-workspace",
+                            ShellCommand::MoveWindowToWorkspace { window, workspace },
+                        );
                     }
                 }
                 self.close_window_preview();
@@ -897,15 +972,18 @@ impl LiveShell {
                 let x = self.panel_origin_x
                     + (PANEL_ITEM_WIDTH + index as f32 * PANEL_ITEM_WIDTH + PANEL_ITEM_WIDTH / 2.0
                         - width as f32 / 2.0) as i32;
-                let _ = platform::send_shell_command(ShellCommand::ShowPreview {
-                    x,
-                    width: width as i32,
-                    height: height as i32,
-                    windows,
-                });
+                let _ = send_session_command(
+                    "show-preview",
+                    ShellCommand::ShowPreview {
+                        x,
+                        width: width as i32,
+                        height: height as i32,
+                        windows,
+                    },
+                );
                 if self.preview_focus_requested {
                     #[cfg(target_os = "linux")]
-                    let _ = platform::send_shell_command(ShellCommand::FocusPreview);
+                    let _ = send_session_command("focus-preview", ShellCommand::FocusPreview);
                     self.preview_focus_requested = false;
                 }
             }
@@ -915,16 +993,22 @@ impl LiveShell {
                 + self.preview_group.map_or(0, |index| {
                     (PANEL_ITEM_WIDTH + index as f32 * PANEL_ITEM_WIDTH) as i32
                 });
-            let _ = platform::send_shell_command(ShellCommand::ShowContextMenu {
-                x,
-                width: MENU_WIDTH as i32,
-                height: menu_height(&self.workspaces) as i32,
-            });
+            let _ = send_session_command(
+                "show-context-menu",
+                ShellCommand::ShowContextMenu {
+                    x,
+                    width: MENU_WIDTH as i32,
+                    height: menu_height(&self.workspaces) as i32,
+                },
+            );
         }
     }
 
     fn send_window_action(&self, window: crate::model::WindowId, action: WindowAction) {
-        let _ = platform::send_shell_command(ShellCommand::WindowAction { window, action });
+        let _ = send_session_command(
+            "window-action",
+            ShellCommand::WindowAction { window, action },
+        );
     }
 
     fn open_window_preview(&mut self, index: usize) {
@@ -956,8 +1040,8 @@ impl LiveShell {
         self.preview_frame = None;
         self.window_menu = None;
         self.window_menu_frame = None;
-        let _ = platform::send_shell_command(ShellCommand::ClearWindowHighlight);
-        let _ = platform::send_shell_command(ShellCommand::HideContextMenu);
+        let _ = send_session_command("clear-window-highlight", ShellCommand::ClearWindowHighlight);
+        let _ = send_session_command("hide-context-menu", ShellCommand::HideContextMenu);
     }
 
     pub fn global_shortcut(&mut self, shortcut: platform::GlobalShortcut) -> bool {
@@ -1032,6 +1116,17 @@ impl LiveShell {
         }
     }
 
+    /// Requests a launcher toggle initiated by shell-owned input such as a controller.
+    ///
+    /// Linux compositor shortcut notifications use [`Self::global_shortcut`] after the
+    /// compositor has already changed visibility. Shell-originated input must instead send the
+    /// visibility request to the compositor before mirroring the resulting state.
+    pub fn request_launcher_toggle(&mut self) -> bool {
+        let visible = !self.launcher_visible;
+        self.set_launcher_visible(visible);
+        self.launcher_visible == visible
+    }
+
     pub fn screenshot_capture_ready(&mut self) -> bool {
         self.screenshot.capture_ready()
     }
@@ -1081,33 +1176,48 @@ impl LiveShell {
 
     fn set_screenshot_focus(&self, visible: bool) {
         #[cfg(target_os = "linux")]
-        let _ = platform::send_shell_command(if visible {
-            ShellCommand::FocusScreenshot
-        } else {
-            ShellCommand::RestoreApplicationFocus
-        });
+        let _ = send_session_command(
+            "screenshot-focus",
+            if visible {
+                ShellCommand::FocusScreenshot
+            } else {
+                ShellCommand::RestoreApplicationFocus
+            },
+        );
         #[cfg(not(target_os = "linux"))]
         let _ = visible;
     }
 
     fn set_launcher_visible(&mut self, visible: bool) {
+        if !send_session_command(
+            "launcher-visibility",
+            if visible {
+                ShellCommand::Show
+            } else {
+                ShellCommand::Hide
+            },
+        ) {
+            self.launcher_status = Some("Nickel could not update the launcher.".to_owned());
+            return;
+        }
         self.apply_session_launcher_visibility(visible);
-        let _ = platform::send_shell_command(if visible {
-            ShellCommand::Show
-        } else {
-            ShellCommand::Hide
-        });
         platform::launcher_visibility_applied(visible);
     }
 
     fn set_control_visible(&mut self, visible: bool) {
-        self.control_visible = visible;
         #[cfg(target_os = "linux")]
-        let _ = platform::send_shell_command(if visible {
-            ShellCommand::FocusControlCenter
-        } else {
-            ShellCommand::RestoreApplicationFocus
-        });
+        if !send_session_command(
+            "control-center-focus",
+            if visible {
+                ShellCommand::FocusControlCenter
+            } else {
+                ShellCommand::RestoreApplicationFocus
+            },
+        ) {
+            self.launcher_status = Some("Nickel could not update Quick Settings.".to_owned());
+            return;
+        }
+        self.control_visible = visible;
     }
 
     fn apply_launcher_signal(&mut self, visible: bool) {
@@ -1192,7 +1302,7 @@ impl LiveShell {
         match role {
             SurfaceRole::Launcher if self.launcher_visible => {
                 self.apply_session_launcher_visibility(false);
-                let _ = platform::send_shell_command(ShellCommand::Hide);
+                let _ = send_session_command("hide-launcher", ShellCommand::Hide);
                 true
             }
             SurfaceRole::ControlCenter if self.control_visible => {
@@ -1388,10 +1498,15 @@ impl LiveShell {
     fn launch_application(&mut self, application: Application) {
         #[cfg(target_os = "linux")]
         if platform::application_requires_secure_storage(&application)
-            && platform::secure_storage_state() != platform::SecureStorageState::Ready
+            && platform::secure_storage_state().unwrap_or_else(|error| {
+                tracing::warn!(%error, "secure-storage query failed before application launch");
+                platform::SecureStorageState::ControlUnavailable
+            }) != platform::SecureStorageState::Ready
             && self.secure_storage_override.as_deref() != Some(application.id())
         {
-            let _ = platform::request_secure_storage_retry();
+            if let Err(error) = platform::request_secure_storage_retry() {
+                tracing::warn!(%error, "secure-storage retry command failed");
+            }
             self.secure_storage_override = Some(application.id().to_owned());
             self.launcher_status = Some(format!(
                 "Secure storage is not ready. Activate {} again to launch without credentials.",
@@ -1409,8 +1524,21 @@ impl LiveShell {
         };
         #[cfg(not(target_os = "linux"))]
         let result = platform::launch_application(&application);
-        let _ = result;
-        self.set_launcher_visible(false);
+        match result {
+            Ok(_) => self.set_launcher_visible(false),
+            Err(error) => {
+                tracing::warn!(
+                    application = application.name(),
+                    ?error,
+                    "failed to launch application from launcher"
+                );
+                self.launcher_status = Some(format!(
+                    "Could not launch {}: {}",
+                    application.name(),
+                    launch_error_summary(&error)
+                ));
+            }
+        }
     }
 
     fn desktop_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
@@ -1524,7 +1652,22 @@ impl LiveShell {
                     Err("system authentication is unavailable on this platform".into())
                 }
             },
-            || platform::send_shell_command(ShellCommand::Unlock),
+            || {
+                #[cfg(target_os = "linux")]
+                {
+                    match platform::send_shell_command(ShellCommand::Unlock) {
+                        Ok(()) => true,
+                        Err(error) => {
+                            tracing::warn!(%error, "session unlock command failed");
+                            false
+                        }
+                    }
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    platform::send_shell_command(ShellCommand::Unlock)
+                }
+            },
         )
     }
 
@@ -1701,7 +1844,10 @@ impl LiveShell {
         let storage_status = self
             .launcher_status
             .as_deref()
-            .or_else(|| secure_storage_status_label(self.secure_storage_state));
+            .or_else(|| secure_storage_status_label(self.secure_storage_state))
+            .or_else(|| {
+                session_feed_status_label(self.window_feed_status, self.workspace_feed_status)
+            });
         if let Some(status) = storage_status {
             commands.push(text(
                 Rect::new(250.0, 72.0, width.saturating_sub(280) as f32, 28.0),
@@ -1997,13 +2143,18 @@ impl LiveShell {
                 }
             }
             LauncherShellEffect::OpenAccount => {
-                self.set_launcher_visible(false);
                 self.set_control_visible(true);
+                if self.control_visible {
+                    self.set_launcher_visible(false);
+                }
             }
             LauncherShellEffect::RequestLogout => {
-                self.set_launcher_visible(false);
                 self.set_control_visible(true);
-                self.control_state.pending_session_action = Some(platform::SessionAction::LogOut);
+                if self.control_visible {
+                    self.set_launcher_visible(false);
+                    self.control_state.pending_session_action =
+                        Some(platform::SessionAction::LogOut);
+                }
             }
         }
     }
@@ -2014,40 +2165,58 @@ impl LiveShell {
                 self.control_state.wifi_expanded = !self.control_state.wifi_expanded;
             }
             ControlAction::SetWifiEnabled(enabled) => {
-                let _ = platform::set_wifi_enabled(enabled);
+                log_control_result("set-wifi-enabled", platform::set_wifi_enabled(enabled));
             }
             ControlAction::ActivateWifi { id } => {
-                let _ = platform::activate_wifi_network(&id);
+                log_control_result(
+                    "activate-wifi-network",
+                    platform::activate_wifi_network(&id),
+                );
             }
             ControlAction::ToggleBluetoothSection => {
                 self.control_state.bluetooth_expanded = !self.control_state.bluetooth_expanded;
             }
             ControlAction::SetBluetoothPowered(powered) => {
-                let _ = platform::set_bluetooth_powered(powered);
+                log_control_result(
+                    "set-bluetooth-powered",
+                    platform::set_bluetooth_powered(powered),
+                );
             }
             ControlAction::SetBluetoothDiscovery(discovering) => {
-                let _ = platform::set_bluetooth_discovery(discovering);
+                log_control_result(
+                    "set-bluetooth-discovery",
+                    platform::set_bluetooth_discovery(discovering),
+                );
             }
             ControlAction::ToggleBluetoothDevice { id } => {
-                let _ = platform::toggle_bluetooth_device(&id);
+                log_control_result(
+                    "toggle-bluetooth-device",
+                    platform::toggle_bluetooth_device(&id),
+                );
             }
             ControlAction::ToggleAudioSection => {
                 self.control_state.audio_expanded = !self.control_state.audio_expanded;
             }
             ControlAction::SetAudioVolume(volume) => {
-                let _ = platform::set_audio_volume(volume);
+                log_control_result("set-audio-volume", platform::set_audio_volume(volume));
             }
             ControlAction::SelectAudioDevice { id } => {
-                let _ = platform::select_audio_device(&id);
+                log_control_result("select-audio-device", platform::select_audio_device(&id));
             }
             ControlAction::SwitchWorkspace(workspace) => {
-                let _ = platform::send_shell_command(ShellCommand::SwitchWorkspace(workspace));
+                let _ = send_session_command(
+                    "switch-workspace",
+                    ShellCommand::SwitchWorkspace(workspace),
+                );
             }
             ControlAction::CreateWorkspace => {
-                let _ = platform::send_shell_command(ShellCommand::CreateWorkspace);
+                let _ = send_session_command("create-workspace", ShellCommand::CreateWorkspace);
             }
             ControlAction::RemoveWorkspace(workspace) => {
-                let _ = platform::send_shell_command(ShellCommand::RemoveWorkspace(workspace));
+                let _ = send_session_command(
+                    "remove-workspace",
+                    ShellCommand::RemoveWorkspace(workspace),
+                );
             }
             ControlAction::RequestSessionAction(action) => {
                 self.control_state.pending_session_action = Some(action);
@@ -2056,15 +2225,26 @@ impl LiveShell {
                 self.control_state.pending_session_action = None;
             }
             ControlAction::ConfirmSessionAction => {
-                if let Some(action) = self.control_state.pending_session_action.take() {
-                    let _ = platform::send_shell_command(ShellCommand::SessionAction(action));
+                if let Some(action) = self.control_state.pending_session_action
+                    && send_session_command(
+                        "confirm-session-action",
+                        ShellCommand::SessionAction(action),
+                    )
+                {
+                    self.control_state.pending_session_action = None;
                 }
             }
             ControlAction::SessionAction(action) => {
-                let _ = platform::send_shell_command(ShellCommand::SessionAction(action));
+                let _ = send_session_command("session-action", ShellCommand::SessionAction(action));
             }
         }
         let _ = self.refresh();
+    }
+}
+
+fn log_control_result(operation: &'static str, succeeded: bool) {
+    if !succeeded {
+        tracing::warn!(operation, "control action failed");
     }
 }
 
@@ -2076,7 +2256,107 @@ fn secure_storage_status_label(state: platform::SecureStorageState) -> Option<&'
             Some("Secure storage is waiting for its unlock prompt.")
         }
         platform::SecureStorageState::Unavailable => Some("Secure storage is unavailable."),
+        platform::SecureStorageState::UnavailableReason(reason) => Some(match reason {
+            nickel_session_protocol::SecureStorageUnavailableReason::Connection => {
+                "Secure storage cannot connect to the session bus."
+            }
+            nickel_session_protocol::SecureStorageUnavailableReason::MissingDefaultCollection => {
+                "Secure storage has no default collection."
+            }
+            nickel_session_protocol::SecureStorageUnavailableReason::PromptTimedOut => {
+                "The secure-storage unlock prompt timed out."
+            }
+            nickel_session_protocol::SecureStorageUnavailableReason::ProviderDisappeared => {
+                "The secure-storage provider disappeared."
+            }
+            nickel_session_protocol::SecureStorageUnavailableReason::ProviderConfiguration
+            | nickel_session_protocol::SecureStorageUnavailableReason::UnexpectedProvider => {
+                "The secure-storage provider configuration is invalid."
+            }
+            nickel_session_protocol::SecureStorageUnavailableReason::Protocol
+            | nickel_session_protocol::SecureStorageUnavailableReason::ReadinessCheck => {
+                "Secure storage failed its readiness check."
+            }
+        }),
+        platform::SecureStorageState::ControlUnavailable => {
+            Some("Nickel cannot reach the session service.")
+        }
         platform::SecureStorageState::Ready => None,
+    }
+}
+
+fn send_session_command(operation: &'static str, command: ShellCommand) -> bool {
+    #[cfg(test)]
+    {
+        let _ = (operation, command);
+        true
+    }
+    #[cfg(all(target_os = "linux", not(test)))]
+    {
+        match platform::send_shell_command(command) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(operation, %error, "session command failed");
+                false
+            }
+        }
+    }
+    #[cfg(all(not(target_os = "linux"), not(test)))]
+    {
+        let _ = operation;
+        platform::send_shell_command(command)
+    }
+}
+
+fn update_feed_status(current: &mut FeedStatus, next: FeedStatus, feed: &'static str) -> bool {
+    if *current == next {
+        return false;
+    }
+    tracing::info!(feed, status = ?next, "shell feed state changed");
+    *current = next;
+    true
+}
+
+fn session_feed_status_label(
+    window_status: FeedStatus,
+    workspace_status: FeedStatus,
+) -> Option<&'static str> {
+    match (window_status, workspace_status) {
+        (FeedStatus::Loading, FeedStatus::Loading) => Some("Loading session data…"),
+        (FeedStatus::Loading, _) => Some("Loading session windows…"),
+        (_, FeedStatus::Loading) => Some("Loading session workspaces…"),
+        (FeedStatus::Disconnected, _) => Some("Session window data is disconnected."),
+        (_, FeedStatus::Disconnected) => Some("Session workspace data is disconnected."),
+        (FeedStatus::Failed, _) => Some("Session window data failed to load."),
+        (_, FeedStatus::Failed) => Some("Session workspace data failed to load."),
+        (FeedStatus::Ready, FeedStatus::Ready) => None,
+    }
+}
+
+fn application_discovery_status_label(
+    status: crate::model::ApplicationDiscoveryStatus,
+) -> Option<&'static str> {
+    match status {
+        crate::model::ApplicationDiscoveryStatus::ReadyEmpty => Some("No applications found."),
+        crate::model::ApplicationDiscoveryStatus::Ready => None,
+        crate::model::ApplicationDiscoveryStatus::PartialFailure => {
+            Some("Some applications could not be loaded.")
+        }
+    }
+}
+
+fn launch_error_summary(error: &platform::LaunchError) -> String {
+    match error {
+        platform::LaunchError::EmptyCommand => "no launch command".into(),
+        platform::LaunchError::InvalidQuotes => "invalid launch command quoting".into(),
+        platform::LaunchError::MissingTarget(target) => format!("missing target {target}"),
+        platform::LaunchError::NotFound(target) => format!("target not found: {target}"),
+        platform::LaunchError::PathNotFound(path) => format!("path not found: {path}"),
+        platform::LaunchError::AccessDenied(target) => format!("access denied: {target}"),
+        platform::LaunchError::NoAssociation(target) => {
+            format!("no application association for {target}")
+        }
+        platform::LaunchError::Platform(message) => message.clone(),
     }
 }
 
@@ -2158,7 +2438,8 @@ mod tests {
 
     use super::{
         LiveShell, contains_rect, notification_action_rects, panel_status_layout, panel_tray_icons,
-        platform::SecureStorageState, preview_refresh_due, secure_storage_status_label,
+        platform::{FeedState, FeedStatus, SecureStorageState},
+        preview_refresh_due, secure_storage_status_label, session_feed_status_label,
         visible_tray_item,
     };
     use crate::{
@@ -2182,6 +2463,26 @@ mod tests {
     }
 
     #[test]
+    fn failed_application_launch_keeps_launcher_open_and_reports_error() {
+        let mut shell = LiveShell::new().unwrap();
+        shell.launcher_visible = true;
+        let application = crate::model::Application::new(
+            "org.example.missing".into(),
+            "Missing application".into(),
+            None,
+            None,
+            Some(vec!["nickel-test-command-that-does-not-exist".into()]),
+        );
+
+        shell.launch_application(application);
+
+        assert!(shell.launcher_visible);
+        let status = shell.launcher_status.as_deref().unwrap_or_default();
+        assert!(status.starts_with("Could not launch Missing application: "));
+        assert!(status.contains("No such file") || status.contains("not found"));
+    }
+
+    #[test]
     fn launcher_exposes_every_non_ready_secure_storage_state() {
         for (state, expected) in [
             (SecureStorageState::Starting, "Secure storage is starting…"),
@@ -2194,10 +2495,56 @@ mod tests {
                 SecureStorageState::Unavailable,
                 "Secure storage is unavailable.",
             ),
+            (
+                SecureStorageState::UnavailableReason(
+                    nickel_session_protocol::SecureStorageUnavailableReason::ProviderDisappeared,
+                ),
+                "The secure-storage provider disappeared.",
+            ),
+            (
+                SecureStorageState::ControlUnavailable,
+                "Nickel cannot reach the session service.",
+            ),
         ] {
             assert_eq!(secure_storage_status_label(state), Some(expected));
         }
         assert_eq!(secure_storage_status_label(SecureStorageState::Ready), None);
+    }
+
+    #[test]
+    fn session_feeds_start_loading_and_keep_failure_distinct_from_empty_ready() {
+        let shell = LiveShell::new().unwrap();
+        assert_eq!(shell.window_feed_status, FeedStatus::Loading);
+        assert_eq!(shell.workspace_feed_status, FeedStatus::Loading);
+        assert_eq!(
+            session_feed_status_label(shell.window_feed_status, shell.workspace_feed_status),
+            Some("Loading session data…")
+        );
+
+        assert_eq!(
+            FeedState::<Vec<OpenWindow>>::Ready(Vec::new()).status(),
+            FeedStatus::Ready
+        );
+        assert_eq!(
+            FeedState::<Vec<OpenWindow>>::Disconnected.status(),
+            FeedStatus::Disconnected
+        );
+        assert_eq!(
+            FeedState::<Vec<OpenWindow>>::Failed.status(),
+            FeedStatus::Failed
+        );
+        assert_eq!(
+            session_feed_status_label(FeedStatus::Ready, FeedStatus::Ready),
+            None
+        );
+        assert_eq!(
+            session_feed_status_label(FeedStatus::Disconnected, FeedStatus::Ready),
+            Some("Session window data is disconnected.")
+        );
+        assert_eq!(
+            session_feed_status_label(FeedStatus::Failed, FeedStatus::Ready),
+            Some("Session window data failed to load.")
+        );
     }
 
     #[test]

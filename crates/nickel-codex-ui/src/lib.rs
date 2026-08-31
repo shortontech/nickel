@@ -567,6 +567,17 @@ mod tests {
             )]
         );
 
+        tree.handle_event(&mut ui_state, UiEvent::ControllerNext);
+        tree.handle_event(&mut ui_state, UiEvent::ControllerNext);
+        assert_eq!(
+            tree.handle_event(&mut ui_state, UiEvent::ControllerActivate)
+                .messages,
+            vec![ChatMessage::NewChatIn(
+                "/projects/nickel".into(),
+                "nickel".into(),
+            )]
+        );
+
         let mut renderer = SdlComponentRenderer::new(360, 420, 1.0);
         renderer.render(tree.commands());
         let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

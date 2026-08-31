@@ -12,6 +12,8 @@ pub struct SemanticColors {
     pub secondary_text: Color,
     pub accent: Color,
     pub accent_soft: Color,
+    /// A contrasting, high-visibility accent for alternate interaction modalities.
+    pub secondary_accent: Color,
     pub positive: Color,
 }
 
@@ -32,6 +34,8 @@ pub struct BorderColors {
     pub ordinary: Color,
     pub strong: Color,
     pub focus: Color,
+    /// Distinct highlight for the control currently targeted by a controller.
+    pub controller_focus: Color,
     pub selected: Color,
 }
 
@@ -418,6 +422,7 @@ impl From<SemanticColors> for SemanticTokenSet {
                 ordinary: mix(colors.card, colors.primary_text, 22),
                 strong: mix(colors.card, colors.primary_text, 38),
                 focus: colors.accent,
+                controller_focus: colors.secondary_accent,
                 selected: colors.accent,
             },
             text: TextColors {
@@ -505,6 +510,7 @@ mod tests {
             secondary_text: 0xa0a0a0,
             accent: 0x9050e0,
             accent_soft: 0x402060,
+            secondary_accent: 0x50c080,
             positive: 0x50c080,
         }
     }
@@ -516,6 +522,8 @@ mod tests {
         assert_eq!(theme.colors, colors);
         assert_eq!(theme.surfaces.selected, colors.accent_soft);
         assert_eq!(theme.borders.focus, colors.accent);
+        assert_eq!(theme.borders.controller_focus, colors.secondary_accent);
+        assert_ne!(theme.borders.controller_focus, theme.borders.focus);
         assert_eq!(theme.text.success, colors.positive);
         assert_eq!(theme.accent.on_accent, 0xffffff);
         assert_ne!(theme.surfaces.hover, theme.surfaces.pressed);

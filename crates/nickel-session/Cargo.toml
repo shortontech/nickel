@@ -22,6 +22,9 @@ winit = { workspace = true, optional = true }
 xcursor.workspace = true
 zbus.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+evdev = "0.13.2"
+
 [dev-dependencies]
 smithay-client-toolkit = "0.20.0"
 softbuffer.workspace = true

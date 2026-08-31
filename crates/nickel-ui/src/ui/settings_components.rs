@@ -412,9 +412,14 @@ impl<Message> SettingsNavigation<Message> {
     pub fn new(theme: SemanticTheme, width: f32) -> Self {
         Self(
             Container::new()
+                .id("settings-navigation-pane")
                 .width(width)
                 .min_width(width)
                 .fill_height()
+                .border(theme.borders.subtle, 1.0)
+                .controller_pane(true)
+                .controller_pane_default(false)
+                .controller_pane_highlight(theme.colors.secondary_accent)
                 .padding(Insets::all(theme.spacing.content))
                 .gap(theme.spacing.compact)
                 .overflow_y(Overflow::Auto)
@@ -484,6 +489,15 @@ impl<Message> SettingsShell<Message> {
                 direction,
             );
         }
+        let content = Container::new()
+            .id("settings-content-pane")
+            .fill_width()
+            .fill_height()
+            .border(theme.borders.subtle, 1.0)
+            .controller_pane(true)
+            .controller_pane_default(true)
+            .controller_pane_highlight(theme.colors.secondary_accent)
+            .child(content);
         let root = match narrow_pane {
             SettingsNarrowPane::Navigation => Container::new().child(navigation),
             SettingsNarrowPane::Content => Container::new().child(
@@ -535,6 +549,15 @@ impl<Message> SettingsShell<Message> {
         content: impl Component<Message>,
         direction: ReadingDirection,
     ) -> Self {
+        let content = Container::new()
+            .id("settings-content-pane")
+            .fill_width()
+            .fill_height()
+            .border(theme.borders.subtle, 1.0)
+            .controller_pane(true)
+            .controller_pane_default(true)
+            .controller_pane_highlight(theme.colors.secondary_accent)
+            .child(content);
         let root = if viewport_width < SETTINGS_SHELL_NARROW_BREAKPOINT {
             Container::new().child(
                 Column::new()
@@ -727,6 +750,7 @@ impl<Message> Switch<Message> {
             })
             .interaction_backgrounds(theme.surfaces.hover, theme.surfaces.pressed)
             .focus_border(theme.borders.focus)
+            .controller_focus_border(theme.borders.controller_focus)
             .accessibility_state(match state {
                 SwitchState::Off => "off",
                 SwitchState::On => "on",
@@ -778,7 +802,9 @@ impl<Message> SettingsCard<Message> {
                 .padding(Insets::all(theme.spacing.content))
                 .background(theme.colors.card)
                 .border(theme.colors.raised, 1.0)
-                .radius(theme.radii.card),
+                .radius(theme.radii.card)
+                .controller_group(true)
+                .controller_focus_border(theme.borders.controller_focus),
         )
     }
 
@@ -999,6 +1025,8 @@ impl<Message> SliderField<Message> {
                         theme.colors.accent,
                         theme.colors.primary_text,
                     )
+                    .focus_border(theme.borders.focus)
+                    .controller_focus_border(theme.borders.controller_focus)
                     .width(330.0),
             )
             .child(
@@ -1178,6 +1206,9 @@ impl<Message> TabList<Message> {
                 Container::new()
                     .height(38.0)
                     .message(message)
+                    .interaction_backgrounds(theme.surfaces.hover, theme.surfaces.pressed)
+                    .focus_border(theme.borders.focus)
+                    .controller_focus_border(theme.borders.controller_focus)
                     .accessibility_role("tab")
                     .accessibility_label(&label)
                     .accessibility_state(if selected { "selected" } else { "unselected" })
@@ -1311,6 +1342,7 @@ impl<Message> ChoiceCard<Message> {
                 .background(theme.colors.card)
                 .interaction_backgrounds(theme.surfaces.hover, theme.surfaces.pressed)
                 .focus_border(theme.borders.focus)
+                .controller_focus_border(theme.borders.controller_focus)
                 .border(
                     if selected {
                         theme.colors.accent
@@ -1527,6 +1559,7 @@ impl<Message> ColorSwatch<Message> {
                 .message(message)
                 .interaction_backgrounds(theme.surfaces.hover, theme.surfaces.pressed)
                 .focus_border(theme.borders.focus)
+                .controller_focus_border(theme.borders.controller_focus)
                 .semantic_role("radio")
                 .accessibility_label(label)
                 .accessibility_state(if selected { "selected" } else { "unselected" })
@@ -1544,6 +1577,7 @@ impl<Message> ColorSwatch<Message> {
                 .message(message)
                 .interaction_backgrounds(theme.surfaces.hover, theme.surfaces.pressed)
                 .focus_border(theme.borders.focus)
+                .controller_focus_border(theme.borders.controller_focus)
                 .semantic_role("button")
                 .accessibility_label("Choose a custom color")
                 .child(
@@ -1613,6 +1647,7 @@ mod tests {
             secondary_text: 0xa8abb2,
             accent: 0x9b62e8,
             accent_soft: 0x45305f,
+            secondary_accent: 0x55b982,
             positive: 0x55b982,
         })
     }
@@ -1896,6 +1931,7 @@ mod tests {
             secondary_text: 0x555b68,
             accent: 0x7040bb,
             accent_soft: 0xe5d8fa,
+            secondary_accent: 0x247a50,
             positive: 0x247a50,
         });
         for (width, scale, palette, direction) in [
@@ -2479,6 +2515,38 @@ mod tests {
             0.0
         );
         assert_eq!(state.state(&rebuilt_content.id).unwrap().scroll_offset, 0.0);
+    }
+
+    #[test]
+    fn settings_navigation_owns_its_controller_pane_glow() {
+        let theme = theme();
+        let build = || {
+            SettingsNavigation::new(theme, 220.0).item(NavigationItem::new(
+                theme,
+                Message::Navigate(0),
+                "Display",
+                true,
+            ))
+        };
+        let bounds = Rect::new(0.0, 0.0, 220.0, 360.0);
+        let mut state = UiStateStore::default();
+        let initial = UiTree::layout_with_state(build(), bounds, &mut state);
+        let sidebar = initial
+            .resolved_layout()
+            .nodes()
+            .iter()
+            .find(|node| node.controller_pane)
+            .expect("SettingsNavigation should be a controller pane")
+            .id
+            .clone();
+        state.set_controller_pane(Some(sidebar));
+
+        let selected = UiTree::layout_with_state(build(), bounds, &mut state);
+        assert!(selected.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::Stroke { color, width, .. }
+                if *color == theme.colors.secondary_accent && *width == 3.0
+        )));
     }
 
     #[test]

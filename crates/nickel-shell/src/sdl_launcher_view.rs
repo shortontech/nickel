@@ -707,6 +707,7 @@ fn build_dashboard_frame_directional(
         secondary_text: palette.muted,
         accent: palette.accent,
         accent_soft: palette.accent_soft,
+        secondary_accent: palette.complement,
         positive: palette.complement,
     });
     let narrow = width < START_MENU_SINGLE_PANE_BREAKPOINT;

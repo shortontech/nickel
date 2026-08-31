@@ -9,8 +9,8 @@ use sdl3::{
 };
 
 use crate::{
-    FocusedInputDispatcher, InputCommand, InputContext, PointerIcon, Rect, SdlCanvasPresenter,
-    UiEvent, UiStateStore, UiTree, View,
+    ControllerAction, ControllerInput, FocusedInputDispatcher, InputCommand, InputContext,
+    PointerIcon, Rect, SdlCanvasPresenter, UiEvent, UiStateStore, UiTree, View,
 };
 
 #[derive(Debug, Default)]
@@ -64,6 +64,26 @@ pub trait Application: Sized {
 
     fn initial_size(&self) -> (u32, u32) {
         (800, 600)
+    }
+
+    /// Handles controller actions with application-level meaning, such as a shell launcher.
+    /// Returning `false` lets the runtime apply ordinary component navigation.
+    fn controller_action(&mut self, _action: ControllerAction) -> bool {
+        false
+    }
+}
+
+fn controller_ui_event(action: ControllerAction) -> Option<UiEvent> {
+    match action {
+        ControllerAction::Up => Some(UiEvent::ControllerPrevious),
+        ControllerAction::Down => Some(UiEvent::ControllerNext),
+        ControllerAction::Left => Some(UiEvent::ControllerAdjust(-1.0)),
+        ControllerAction::Right => Some(UiEvent::ControllerAdjust(1.0)),
+        ControllerAction::Confirm => Some(UiEvent::ControllerActivate),
+        ControllerAction::Cancel => Some(UiEvent::ControllerBack),
+        ControllerAction::PreviousPane => Some(UiEvent::ControllerPreviousPane),
+        ControllerAction::NextPane => Some(UiEvent::ControllerNextPane),
+        ControllerAction::Launcher => None,
     }
 }
 
@@ -142,6 +162,22 @@ impl<A: Application> ApplicationHost<A> {
             changed,
             clipboard_text,
         }
+    }
+
+    pub fn handle_controller_action(&mut self, action: ControllerAction) -> HostEventOutcome {
+        if !self.state.window_focused() {
+            return HostEventOutcome::default();
+        }
+        if self.application.controller_action(action) {
+            self.rebuild();
+            return HostEventOutcome {
+                changed: true,
+                ..HostEventOutcome::default()
+            };
+        }
+        controller_ui_event(action)
+            .map(|event| self.handle_event(event))
+            .unwrap_or_default()
     }
 
     pub fn shortcut(&mut self, shortcut: Shortcut) -> bool {
@@ -229,6 +265,7 @@ pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
     let mut scheduler = FrameScheduler::default();
     let mut input_adapter = nickel_input::sdl::Adapter::default();
     let mut input_dispatcher = FocusedInputDispatcher::default();
+    let mut controller = ControllerInput::new();
     let mut next_caret_blink = Instant::now() + Duration::from_millis(500);
 
     while running {
@@ -241,6 +278,22 @@ pub fn run<A: Application>(mut application: A) -> Result<(), Box<dyn Error>> {
         }
         if application.poll() {
             scheduler.invalidate();
+        }
+        for action in controller.poll(Instant::now(), state.window_focused()) {
+            if application.controller_action(action) {
+                scheduler.invalidate();
+                continue;
+            }
+            let Some(event) = controller_ui_event(action) else {
+                continue;
+            };
+            let outcome = tree.handle_event(&mut state, event);
+            for message in outcome.messages {
+                application.update(message);
+            }
+            if outcome.invalidation != crate::Invalidation::None {
+                scheduler.invalidate();
+            }
         }
         if scheduler.take_rebuild() {
             let (logical_width, logical_height) = presenter.window().size();
@@ -383,7 +436,7 @@ mod tests {
     };
 
     use super::{Application, ApplicationHost, FrameScheduler, Shortcut};
-    use crate::{Invalidation, TextField, UiStateStore};
+    use crate::{ControllerAction, Invalidation, TextField, UiStateStore};
 
     #[derive(Clone)]
     enum Message {
@@ -414,6 +467,10 @@ mod tests {
                 return false;
             }
             self.submits += 1;
+            true
+        }
+
+        fn controller_action(&mut self, _action: ControllerAction) -> bool {
             true
         }
     }
@@ -470,6 +527,27 @@ mod tests {
         let mut state = UiStateStore::default();
 
         assert_eq!(state.toggle_caret(), Invalidation::None);
+    }
+
+    #[test]
+    fn embedded_controller_dispatch_respects_window_focus() {
+        let mut host = ApplicationHost::new(InputApplication::default(), 320, 48);
+        host.handle_event(crate::UiEvent::FocusGained);
+        assert!(
+            host.handle_controller_action(ControllerAction::Down)
+                .changed
+        );
+        host.handle_event(crate::UiEvent::FocusLost);
+        assert!(
+            !host
+                .handle_controller_action(ControllerAction::Down)
+                .changed
+        );
+        host.handle_event(crate::UiEvent::FocusGained);
+        assert!(
+            host.handle_controller_action(ControllerAction::Down)
+                .changed
+        );
     }
 
     #[test]

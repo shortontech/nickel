@@ -183,6 +183,10 @@ pub enum UiEvent {
     FocusPrevious,
     ControllerNext,
     ControllerPrevious,
+    ControllerPreviousPane,
+    ControllerNextPane,
+    ControllerAdjust(f32),
+    ControllerBack,
     ActivateFocused,
     KeyboardActivate,
     ControllerActivate,
@@ -405,8 +409,11 @@ pub struct Style {
     pub hover_background: Option<Background>,
     /// Semantic background applied while an interactive element is pressed.
     pub pressed_background: Option<Background>,
-    /// Semantic border applied for keyboard, controller, or accessibility focus.
+    /// Semantic border applied for keyboard or accessibility focus.
     pub focus_border: Option<Color>,
+    /// Semantic border applied to the current controller target.
+    pub controller_focus_border: Option<Color>,
+    pub controller_pane_border: Option<Color>,
     pub text_align: TextAlign,
     pub padding: Insets,
     pub gap: f32,
@@ -462,6 +469,8 @@ impl Default for Style {
             hover_background: None,
             pressed_background: None,
             focus_border: None,
+            controller_focus_border: None,
+            controller_pane_border: None,
             text_align: TextAlign::Start,
             padding: Insets::default(),
             gap: 0.0,
@@ -607,6 +616,10 @@ pub struct Element<Message = String> {
     option_messages: Vec<Option<Message>>,
     inline_messages: Vec<(Range<usize>, Message)>,
     children: Vec<Element<Message>>,
+    controller_group: bool,
+    controller_pane: bool,
+    controller_pane_default: bool,
+    controller_step: f32,
 }
 
 impl<Message> Element<Message> {
@@ -622,6 +635,10 @@ impl<Message> Element<Message> {
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
             children: Vec::new(),
+            controller_group: false,
+            controller_pane: false,
+            controller_pane_default: false,
+            controller_step: 0.05,
         }
     }
 
@@ -648,6 +665,10 @@ impl<Message> Element<Message> {
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
             children: Vec::new(),
+            controller_group: false,
+            controller_pane: false,
+            controller_pane_default: false,
+            controller_step: 0.05,
         }
     }
 
@@ -716,6 +737,39 @@ impl<Message> Element<Message> {
 
     pub fn focus_border(mut self, color: Color) -> Self {
         self.style.focus_border = Some(color);
+        self
+    }
+
+    pub fn controller_focus_border(mut self, color: Color) -> Self {
+        self.style.controller_focus_border = Some(color);
+        self
+    }
+
+    /// Makes this element a controller navigation level entered with Activate.
+    pub fn controller_group(mut self, enabled: bool) -> Self {
+        self.controller_group = enabled;
+        self
+    }
+
+    /// Marks whether this element is a shoulder-switchable controller pane.
+    pub fn controller_pane(mut self, enabled: bool) -> Self {
+        self.controller_pane = enabled;
+        self
+    }
+
+    pub fn controller_pane_default(mut self, default: bool) -> Self {
+        self.controller_pane_default = default;
+        self
+    }
+
+    pub fn controller_pane_highlight(mut self, highlight: Color) -> Self {
+        self.style.controller_pane_border = Some(highlight);
+        self
+    }
+
+    /// Sets the normalized left/right adjustment step for sliders.
+    pub fn controller_step(mut self, step: f32) -> Self {
+        self.controller_step = step.max(0.0);
         self
     }
 
@@ -917,6 +971,10 @@ impl<Message> Element<Message> {
                 .into_iter()
                 .map(|child| child.map_message_with(map))
                 .collect(),
+            controller_group: self.controller_group,
+            controller_pane: self.controller_pane,
+            controller_pane_default: self.controller_pane_default,
+            controller_step: self.controller_step,
         }
     }
 }

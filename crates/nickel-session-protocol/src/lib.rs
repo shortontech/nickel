@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-pub const PROTOCOL_VERSION: u16 = 12;
+pub const PROTOCOL_VERSION: u16 = 14;
 pub const MAX_FRAME_BYTES: usize = 196_608;
 pub const MAX_PREVIEW_WIDTH: u16 = 256;
 pub const MAX_PREVIEW_HEIGHT: u16 = 144;
@@ -41,6 +41,7 @@ pub enum Query {
     Windows,
     Outputs,
     ShellSurfaces,
+    ShellReadiness,
     LauncherVisibility,
     SecureStorage,
     IdleInhibition,
@@ -147,6 +148,19 @@ pub enum SessionAction {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "input", rename_all = "snake_case")]
 pub enum TestInput {
+    ControllerConnect,
+    ControllerDisconnect,
+    ControllerButton {
+        button: TestControllerButton,
+        state: InputState,
+    },
+    ControllerTap {
+        button: TestControllerButton,
+    },
+    ControllerAxis {
+        axis: TestControllerAxis,
+        value: i16,
+    },
     Key {
         key: TestKey,
         state: InputState,
@@ -184,6 +198,33 @@ pub enum TestInput {
         window: WindowId,
         interaction: PointerInteraction,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TestControllerButton {
+    South,
+    East,
+    West,
+    North,
+    DPadUp,
+    DPadDown,
+    DPadLeft,
+    DPadRight,
+    LeftShoulder,
+    RightShoulder,
+    Select,
+    Start,
+    Guide,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TestControllerAxis {
+    LeftX,
+    LeftY,
+    RightX,
+    RightY,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -308,14 +349,25 @@ pub enum TestPointerButton {
 #[serde(tag = "response", content = "data", rename_all = "snake_case")]
 pub enum ServerMessage {
     Ack,
-    Error { code: ErrorCode, message: String },
+    Error {
+        code: ErrorCode,
+        message: String,
+    },
     Snapshot(Snapshot),
     Windows(Vec<WindowSnapshot>),
     Outputs(Vec<OutputSnapshot>),
     ShellSurfaces(Vec<ShellSurfaceSnapshot>),
-    LauncherVisibility { visible: bool },
-    SecureStorage { state: SecureStorageState },
-    IdleInhibition { surfaces: u16 },
+    ShellReadiness(ShellReadinessSnapshot),
+    LauncherVisibility {
+        visible: bool,
+    },
+    SecureStorage {
+        state: SecureStorageState,
+        reason: Option<SecureStorageUnavailableReason>,
+    },
+    IdleInhibition {
+        surfaces: u16,
+    },
     CacheDiagnostics(CacheDiagnostics),
     Workspaces(WorkspaceState),
     Preview(PreviewFrame),
@@ -447,6 +499,21 @@ pub struct ShellSurfaceSnapshot {
     pub output: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShellReadinessSnapshot {
+    pub expected_shell_pid: Option<u32>,
+    pub authenticated_shell_pid: Option<u32>,
+    pub outputs: u16,
+    pub desktops: u16,
+    pub panels: u16,
+    pub locks: u16,
+    pub launchers: u16,
+    pub required_singletons_ready: bool,
+    pub output_roles_ready: bool,
+    pub reserved_ordinary_windows: u16,
+    pub ready: bool,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutputTransform {
@@ -553,6 +620,19 @@ pub enum SecureStorageState {
     PromptRequired,
     Ready,
     Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecureStorageUnavailableReason {
+    Connection,
+    Protocol,
+    MissingDefaultCollection,
+    PromptTimedOut,
+    ProviderDisappeared,
+    ProviderConfiguration,
+    UnexpectedProvider,
+    ReadinessCheck,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -711,6 +791,19 @@ mod tests {
     #[test]
     fn nested_test_input_commands_round_trip() {
         for input in [
+            TestInput::ControllerConnect,
+            TestInput::ControllerButton {
+                button: TestControllerButton::South,
+                state: InputState::Pressed,
+            },
+            TestInput::ControllerTap {
+                button: TestControllerButton::Guide,
+            },
+            TestInput::ControllerAxis {
+                axis: TestControllerAxis::LeftX,
+                value: i16::MAX,
+            },
+            TestInput::ControllerDisconnect,
             TestInput::Key {
                 key: TestKey::LeftAlt,
                 state: InputState::Pressed,
@@ -1054,6 +1147,33 @@ mod tests {
         }]);
         let envelope = ServerEnvelope {
             request_id: 18,
+            message: message.clone(),
+        };
+        assert_eq!(
+            decode::<ServerEnvelope>(&encode(&envelope).unwrap())
+                .unwrap()
+                .message,
+            message
+        );
+    }
+
+    #[test]
+    fn shell_readiness_diagnostics_round_trip_generation_and_invariants() {
+        let message = ServerMessage::ShellReadiness(ShellReadinessSnapshot {
+            expected_shell_pid: Some(42),
+            authenticated_shell_pid: Some(42),
+            outputs: 2,
+            desktops: 2,
+            panels: 2,
+            locks: 2,
+            launchers: 1,
+            required_singletons_ready: true,
+            output_roles_ready: true,
+            reserved_ordinary_windows: 0,
+            ready: true,
+        });
+        let envelope = ServerEnvelope {
+            request_id: 19,
             message: message.clone(),
         };
         assert_eq!(

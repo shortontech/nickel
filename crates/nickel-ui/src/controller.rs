@@ -11,6 +11,7 @@ use nickel_input::{
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ControllerAction {
+    Launcher,
     Up,
     Down,
     Left,
@@ -96,7 +97,16 @@ impl ControllerInput {
         self.connected
     }
 
-    pub fn poll(&mut self, now: Instant) -> Vec<ControllerAction> {
+    /// Polls controller input for a window. Events are drained but never emitted while the
+    /// window is unfocused, preventing stale input from being replayed when focus returns.
+    pub fn poll(&mut self, now: Instant, window_focused: bool) -> Vec<ControllerAction> {
+        let actions = self.poll_global(now);
+        if window_focused { actions } else { Vec::new() }
+    }
+
+    /// Polls controller input for a session-global owner such as the desktop shell.
+    /// Ordinary applications should use [`Self::poll`] so background input is discarded.
+    pub fn poll_global(&mut self, now: Instant) -> Vec<ControllerAction> {
         let mut actions = Vec::new();
         let Some(gilrs) = &mut self.gilrs else {
             return actions;
@@ -112,12 +122,14 @@ impl ControllerInput {
             });
             if let Some(event) = nickel_input::gilrs::event(&event, identity) {
                 let now_ms = now.saturating_duration_since(self.epoch).as_millis() as u64;
-                actions.extend(
-                    self.normalizer
-                        .handle(event, now_ms)
-                        .into_iter()
-                        .filter_map(signal_action),
-                );
+                for action in self
+                    .normalizer
+                    .handle(event, now_ms)
+                    .into_iter()
+                    .filter_map(signal_action)
+                {
+                    actions.push(action);
+                }
             }
         }
         self.connected = gilrs.gamepads().any(|(_, gamepad)| gamepad.is_connected());
@@ -155,9 +167,10 @@ fn button_action(button: &ControllerButton) -> Option<ControllerAction> {
         ControllerButton::DPadLeft => Some(ControllerAction::Left),
         ControllerButton::DPadRight => Some(ControllerAction::Right),
         ControllerButton::South => Some(ControllerAction::Confirm),
-        ControllerButton::East => Some(ControllerAction::Cancel),
+        ControllerButton::East | ControllerButton::Select => Some(ControllerAction::Cancel),
         ControllerButton::LeftShoulder => Some(ControllerAction::PreviousPane),
         ControllerButton::RightShoulder => Some(ControllerAction::NextPane),
+        ControllerButton::Guide => Some(ControllerAction::Launcher),
         _ => None,
     }
 }
@@ -186,7 +199,9 @@ fn signal_action(signal: ControllerSignal) -> Option<ControllerAction> {
 #[cfg(test)]
 mod tests {
     use super::{ControllerAction, NavigationPane, PaneNavigation, signal_action};
-    use nickel_input::controller::{AxisDirection, ControllerId, ControllerSignal};
+    use nickel_input::controller::{
+        AxisDirection, ControllerButton, ControllerId, ControllerSignal,
+    };
 
     #[test]
     fn shoulder_actions_select_panes() {
@@ -208,6 +223,19 @@ mod tests {
                 repeat: false,
             }),
             Some(ControllerAction::Right)
+        );
+    }
+
+    #[test]
+    fn guide_button_is_a_launcher_action() {
+        assert_eq!(
+            signal_action(ControllerSignal::Button {
+                id: ControllerId(1),
+                button: ControllerButton::Guide,
+                edge: nickel_input::KeyEdge::Pressed,
+                repeat: false,
+            }),
+            Some(ControllerAction::Launcher)
         );
     }
 }

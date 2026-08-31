@@ -6,8 +6,8 @@
 use std::path::PathBuf;
 
 use nickel_session_protocol::{
-    InputState, PointerInteraction, RecoveryTargetAction, ResolvedShellTarget, TestInput, TestKey,
-    TestPointerButton,
+    InputState, PointerInteraction, RecoveryTargetAction, ResolvedShellTarget, TestControllerAxis,
+    TestControllerButton, TestInput, TestKey, TestPointerButton,
 };
 use smithay::backend::input::{
     AbsolutePositionEvent, Axis, AxisRelativeDirection, AxisSource, ButtonState, Device,
@@ -18,6 +18,116 @@ use smithay::backend::input::{
 use smithay::utils::{Logical, Rectangle};
 
 use crate::state::NickelSession;
+
+#[cfg(target_os = "linux")]
+pub(crate) struct TestController {
+    device: evdev::uinput::VirtualDevice,
+}
+
+#[cfg(target_os = "linux")]
+impl TestController {
+    fn connect() -> Result<Self, String> {
+        use evdev::{
+            AbsInfo, AbsoluteAxisCode, AttributeSet, BusType, InputId, KeyCode, UinputAbsSetup,
+            uinput::VirtualDevice,
+        };
+
+        let mut buttons = AttributeSet::<KeyCode>::new();
+        for button in [
+            TestControllerButton::South,
+            TestControllerButton::East,
+            TestControllerButton::West,
+            TestControllerButton::North,
+            TestControllerButton::DPadUp,
+            TestControllerButton::DPadDown,
+            TestControllerButton::DPadLeft,
+            TestControllerButton::DPadRight,
+            TestControllerButton::LeftShoulder,
+            TestControllerButton::RightShoulder,
+            TestControllerButton::Select,
+            TestControllerButton::Start,
+            TestControllerButton::Guide,
+        ] {
+            buttons.insert(controller_button_code(button));
+        }
+        let stick = AbsInfo::new(0, i16::MIN.into(), i16::MAX.into(), 128, 256, 1);
+        let mut builder = VirtualDevice::builder()
+            .map_err(|error| format!("cannot open /dev/uinput: {error}"))?
+            .name("Nickel nested test controller")
+            .input_id(InputId::new(BusType::BUS_VIRTUAL, 0x4e49, 0x434b, 1))
+            .with_keys(&buttons)
+            .map_err(|error| format!("cannot configure controller buttons: {error}"))?;
+        for axis in [
+            AbsoluteAxisCode::ABS_X,
+            AbsoluteAxisCode::ABS_Y,
+            AbsoluteAxisCode::ABS_RX,
+            AbsoluteAxisCode::ABS_RY,
+        ] {
+            builder = builder
+                .with_absolute_axis(&UinputAbsSetup::new(axis, stick))
+                .map_err(|error| format!("cannot configure controller axis: {error}"))?;
+        }
+        let device = builder
+            .build()
+            .map_err(|error| format!("cannot create virtual controller: {error}"))?;
+        Ok(Self { device })
+    }
+
+    fn button(&mut self, button: TestControllerButton, state: InputState) -> Result<(), String> {
+        use evdev::{EventType, InputEvent};
+        self.device
+            .emit(&[InputEvent::new(
+                EventType::KEY.0,
+                controller_button_code(button).code(),
+                i32::from(state == InputState::Pressed),
+            )])
+            .map_err(|error| format!("cannot emit controller button: {error}"))
+    }
+
+    fn tap(&mut self, button: TestControllerButton) -> Result<(), String> {
+        self.button(button, InputState::Pressed)?;
+        self.button(button, InputState::Released)
+    }
+
+    fn axis(&mut self, axis: TestControllerAxis, value: i16) -> Result<(), String> {
+        use evdev::{AbsoluteAxisEvent, InputEvent};
+        let event: InputEvent = *AbsoluteAxisEvent::new(controller_axis_code(axis), value.into());
+        self.device
+            .emit(&[event])
+            .map_err(|error| format!("cannot emit controller axis: {error}"))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn controller_button_code(button: TestControllerButton) -> evdev::KeyCode {
+    use evdev::KeyCode;
+    match button {
+        TestControllerButton::South => KeyCode::BTN_SOUTH,
+        TestControllerButton::East => KeyCode::BTN_EAST,
+        TestControllerButton::West => KeyCode::BTN_WEST,
+        TestControllerButton::North => KeyCode::BTN_NORTH,
+        TestControllerButton::DPadUp => KeyCode::BTN_DPAD_UP,
+        TestControllerButton::DPadDown => KeyCode::BTN_DPAD_DOWN,
+        TestControllerButton::DPadLeft => KeyCode::BTN_DPAD_LEFT,
+        TestControllerButton::DPadRight => KeyCode::BTN_DPAD_RIGHT,
+        TestControllerButton::LeftShoulder => KeyCode::BTN_TL,
+        TestControllerButton::RightShoulder => KeyCode::BTN_TR,
+        TestControllerButton::Select => KeyCode::BTN_SELECT,
+        TestControllerButton::Start => KeyCode::BTN_START,
+        TestControllerButton::Guide => KeyCode::BTN_MODE,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn controller_axis_code(axis: TestControllerAxis) -> evdev::AbsoluteAxisCode {
+    use evdev::AbsoluteAxisCode;
+    match axis {
+        TestControllerAxis::LeftX => AbsoluteAxisCode::ABS_X,
+        TestControllerAxis::LeftY => AbsoluteAxisCode::ABS_Y,
+        TestControllerAxis::RightX => AbsoluteAxisCode::ABS_RX,
+        TestControllerAxis::RightY => AbsoluteAxisCode::ABS_RY,
+    }
+}
 
 #[derive(Debug)]
 struct TestInputBackend;
@@ -278,6 +388,52 @@ impl InputBackend for TestInputBackend {
 
 impl NickelSession {
     pub(crate) fn inject_test_input(&mut self, input: TestInput) -> Result<(), String> {
+        #[cfg(target_os = "linux")]
+        match &input {
+            TestInput::ControllerConnect => {
+                if self.test_controller.is_none() {
+                    self.test_controller = Some(TestController::connect()?);
+                }
+                return Ok(());
+            }
+            TestInput::ControllerDisconnect => {
+                self.test_controller = None;
+                return Ok(());
+            }
+            TestInput::ControllerButton { button, state } => {
+                return self
+                    .test_controller
+                    .as_mut()
+                    .ok_or_else(|| "test controller is not connected".to_owned())?
+                    .button(*button, *state);
+            }
+            TestInput::ControllerTap { button } => {
+                return self
+                    .test_controller
+                    .as_mut()
+                    .ok_or_else(|| "test controller is not connected".to_owned())?
+                    .tap(*button);
+            }
+            TestInput::ControllerAxis { axis, value } => {
+                return self
+                    .test_controller
+                    .as_mut()
+                    .ok_or_else(|| "test controller is not connected".to_owned())?
+                    .axis(*axis, *value);
+            }
+            _ => {}
+        }
+        #[cfg(not(target_os = "linux"))]
+        if matches!(
+            input,
+            TestInput::ControllerConnect
+                | TestInput::ControllerDisconnect
+                | TestInput::ControllerButton { .. }
+                | TestInput::ControllerTap { .. }
+                | TestInput::ControllerAxis { .. }
+        ) {
+            return Err("virtual controller test input is available only on Linux".into());
+        }
         let time = InputTime::now();
         let event = match input {
             TestInput::Key { key, state } => InputEvent::Keyboard {
@@ -323,6 +479,11 @@ impl NickelSession {
                 window,
                 interaction,
             } => return self.inject_window_pointer(window, interaction),
+            TestInput::ControllerConnect
+            | TestInput::ControllerDisconnect
+            | TestInput::ControllerButton { .. }
+            | TestInput::ControllerTap { .. }
+            | TestInput::ControllerAxis { .. } => unreachable!(),
         };
         let _ = self.process_input_event::<TestInputBackend>(event);
         self.display_handle

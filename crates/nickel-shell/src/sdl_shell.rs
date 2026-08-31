@@ -8,15 +8,10 @@ use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 use std::time::Instant;
 
-use nickel_input::controller::{
-    ControllerEvent, ControllerIdentity, ControllerNormalizer, ControllerSignal,
-};
-use nickel_input::{InputEvent, NativeCode};
+use nickel_input::InputEvent;
 use nickel_session_protocol::ShellRole as SessionShellRole;
 use nickel_ui::{DamageRegion, PaintCommand};
-use sdl3::GamepadSubsystem;
 use sdl3::event::{Event, WindowEvent};
-use sdl3::gamepad::Gamepad;
 use sdl3::video::{Window, WindowPos};
 
 use crate::sdl_gpu::{SdlGpuPresenter, SharedSdlGraphics};
@@ -66,7 +61,6 @@ pub enum ShellEvent {
     #[cfg(target_os = "linux")]
     SemanticTarget(crate::platform::SemanticTargetRequest),
     Quit,
-    Controller(ControllerSignal),
     Input {
         surface: SurfaceId,
         event: InputEvent,
@@ -101,6 +95,7 @@ pub struct ShellSurface {
     id: SurfaceId,
     role: SurfaceRole,
     display_index: usize,
+    output_name: String,
     display_connected: bool,
     // Drop the GPU surface before the native window whose handles it borrows.
     presenter: Option<SdlGpuPresenter>,
@@ -120,6 +115,10 @@ impl ShellSurface {
         self.display_index
     }
 
+    pub fn output_name(&self) -> &str {
+        &self.output_name
+    }
+
     pub fn window(&self) -> &Window {
         &self.window
     }
@@ -136,11 +135,8 @@ pub struct SdlShell {
     graphics: Option<std::sync::Arc<SharedSdlGraphics>>,
     surface_indices: HashMap<u32, usize>,
     events: sdl3::EventPump,
-    gamepads: HashMap<u32, Gamepad>,
-    controller_normalizer: ControllerNormalizer,
     pending_events: VecDeque<ShellEvent>,
     input_adapter: nickel_input::sdl::Adapter,
-    gamepad: GamepadSubsystem,
     video: sdl3::VideoSubsystem,
     _sdl: sdl3::Sdl,
     started: Instant,
@@ -155,33 +151,6 @@ impl SdlShell {
         // idle inhibitor per shell surface. Nickel owns idle policy itself,
         // so its shell must never globally inhibit the compositor.
         video.enable_screen_saver();
-        let gamepad = sdl.gamepad().map_err(|error| error.to_string())?;
-        let gamepads: HashMap<u32, Gamepad> = gamepad
-            .gamepads()
-            .map_err(|error| error.to_string())?
-            .into_iter()
-            .filter_map(|id| match gamepad.open(id) {
-                Ok(opened) => Some((id.0, opened)),
-                Err(error) => {
-                    tracing::warn!(id = id.0, %error, "could not open SDL gamepad");
-                    None
-                }
-            })
-            .collect();
-        let mut controller_normalizer = ControllerNormalizer::default();
-        for (id, opened) in &gamepads {
-            controller_normalizer.handle(
-                ControllerEvent::Connected {
-                    id: nickel_input::controller::ControllerId(*id as u64),
-                    identity: ControllerIdentity {
-                        backend: "sdl".into(),
-                        native: NativeCode::Numeric(*id as u64),
-                        fingerprint: opened.serial_number(),
-                    },
-                },
-                0,
-            );
-        }
         sdl.event()
             .map_err(|error| error.to_string())?
             .register_custom_event::<crate::platform::GlobalShortcut>()
@@ -209,11 +178,8 @@ impl SdlShell {
             graphics: None,
             surface_indices: HashMap::new(),
             events,
-            gamepads,
-            controller_normalizer,
             pending_events: VecDeque::new(),
             input_adapter: nickel_input::sdl::Adapter::default(),
-            gamepad,
             video,
             _sdl: sdl,
             started,
@@ -231,21 +197,28 @@ impl SdlShell {
         self.surfaces.clear();
         self.surface_indices.clear();
         let displays = require_displays(self.display_geometries()?)?;
+        let output_names = self.display_names()?;
         for (display_index, geometry) in displays.iter().copied().enumerate() {
+            let output_name = output_names.get(display_index).ok_or_else(|| {
+                "SDL output identity count changed during shell startup".to_string()
+            })?;
             if crate::platform::renders_desktop_background() {
-                self.create_surface(SurfaceRole::Desktop, display_index, geometry)?;
+                self.create_surface(SurfaceRole::Desktop, display_index, geometry, output_name)?;
             }
-            self.create_surface(SurfaceRole::Panel, display_index, geometry)?;
-            self.create_surface(SurfaceRole::Lock, display_index, geometry)?;
+            self.create_surface(SurfaceRole::Panel, display_index, geometry, output_name)?;
+            self.create_surface(SurfaceRole::Lock, display_index, geometry, output_name)?;
         }
         let primary = displays[0];
-        self.create_surface(SurfaceRole::Launcher, 0, primary)?;
-        self.create_surface(SurfaceRole::ControlCenter, 0, primary)?;
-        self.create_surface(SurfaceRole::Notification, 0, primary)?;
-        self.create_surface(SurfaceRole::WindowPreview, 0, primary)?;
-        self.create_surface(SurfaceRole::WindowContextMenu, 0, primary)?;
-        self.create_surface(SurfaceRole::CodexProjectMenu, 0, primary)?;
-        self.create_surface(SurfaceRole::Screenshot, 0, primary)?;
+        let primary_name = output_names
+            .first()
+            .ok_or_else(|| "SDL reported no output identity for the primary display".to_string())?;
+        self.create_surface(SurfaceRole::Launcher, 0, primary, primary_name)?;
+        self.create_surface(SurfaceRole::ControlCenter, 0, primary, primary_name)?;
+        self.create_surface(SurfaceRole::Notification, 0, primary, primary_name)?;
+        self.create_surface(SurfaceRole::WindowPreview, 0, primary, primary_name)?;
+        self.create_surface(SurfaceRole::WindowContextMenu, 0, primary, primary_name)?;
+        self.create_surface(SurfaceRole::CodexProjectMenu, 0, primary, primary_name)?;
+        self.create_surface(SurfaceRole::Screenshot, 0, primary, primary_name)?;
         tracing::info!(
             elapsed_ms = self.started.elapsed().as_secs_f64() * 1_000.0,
             surface_count = self.surfaces.len(),
@@ -256,17 +229,20 @@ impl SdlShell {
 
     pub fn sync_display_geometry(&mut self) -> Result<(), String> {
         let displays = require_displays(self.display_geometries()?)?;
-        let panel_count = self
-            .surfaces
-            .iter()
-            .filter(|surface| surface.display_connected && surface.role == SurfaceRole::Panel)
-            .count();
-        if panel_count != displays.len() {
+        let output_names = self.display_names()?;
+        let panels_match_outputs = output_names.iter().all(|output_name| {
+            self.surfaces.iter().any(|surface| {
+                surface.display_connected
+                    && surface.role == SurfaceRole::Panel
+                    && surface.output_name == *output_name
+            })
+        });
+        if !panels_match_outputs {
             for surface in &mut self.surfaces {
                 if matches!(
                     surface.role,
                     SurfaceRole::Desktop | SurfaceRole::Panel | SurfaceRole::Lock
-                ) && surface.display_index >= displays.len()
+                ) && !output_names.iter().any(|name| name == &surface.output_name)
                 {
                     surface.display_connected = false;
                     let _ = surface.window.hide();
@@ -277,10 +253,13 @@ impl SdlShell {
             }
             self.rebuild_surface_indices();
             for (display_index, geometry) in displays.iter().copied().enumerate() {
+                let output_name = output_names.get(display_index).ok_or_else(|| {
+                    "SDL output identity count changed during shell sync".to_string()
+                })?;
                 let has_panel = self.surfaces.iter().any(|surface| {
                     surface.display_connected
                         && surface.role == SurfaceRole::Panel
-                        && surface.display_index == display_index
+                        && surface.output_name == *output_name
                 });
                 if has_panel {
                     continue;
@@ -294,8 +273,9 @@ impl SdlShell {
                     if let Some(surface) = self.surfaces.iter_mut().find(|surface| {
                         !surface.display_connected
                             && surface.role == role
-                            && surface.display_index == display_index
+                            && surface.output_name == *output_name
                     }) {
+                        surface.display_index = display_index;
                         surface.display_connected = true;
                         let (_, x, y, width, height, _) = surface_geometry(role, geometry);
                         surface
@@ -307,7 +287,7 @@ impl SdlShell {
                             .map_err(|error| error.to_string())?;
                         let _ = surface.window.show();
                     } else {
-                        self.create_surface(role, display_index, geometry)?;
+                        self.create_surface(role, display_index, geometry, output_name)?;
                     }
                 }
             }
@@ -326,7 +306,14 @@ impl SdlShell {
             ) {
                 continue;
             }
-            let Some(display) = displays.get(surface.display_index).copied() else {
+            let Some(display_index) = output_names
+                .iter()
+                .position(|name| name == &surface.output_name)
+            else {
+                continue;
+            };
+            surface.display_index = display_index;
+            let Some(display) = displays.get(display_index).copied() else {
                 continue;
             };
             let (_, x, y, width, height, _) = surface_geometry(surface.role, display);
@@ -405,6 +392,7 @@ impl SdlShell {
             id,
             role: SurfaceRole::CodexChat,
             display_index: 0,
+            output_name: String::new(),
             display_connected: true,
             presenter: None,
             window,
@@ -499,7 +487,6 @@ impl SdlShell {
     }
 
     pub fn poll_events(&mut self) -> Vec<ShellEvent> {
-        self.queue_controller_repeats();
         let mut translated = self.pending_events.drain(..).collect::<Vec<_>>();
         let raw = self.events.poll_iter().collect::<Vec<_>>();
         for event in raw {
@@ -513,7 +500,6 @@ impl SdlShell {
 
     pub fn wait_event(&mut self) -> Option<ShellEvent> {
         loop {
-            self.queue_controller_repeats();
             if let Some(event) = self.pending_events.pop_front() {
                 return Some(event);
             }
@@ -525,7 +511,6 @@ impl SdlShell {
     }
 
     pub fn wait_event_timeout(&mut self, timeout: Duration) -> Option<ShellEvent> {
-        self.queue_controller_repeats();
         if let Some(event) = self.pending_events.pop_front() {
             return Some(event);
         }
@@ -537,23 +522,12 @@ impl SdlShell {
                 return Some(event);
             }
             if Instant::now() >= deadline {
-                self.queue_controller_repeats();
                 if let Some(event) = self.pending_events.pop_front() {
                     return Some(event);
                 }
                 return None;
             }
         }
-    }
-
-    fn queue_controller_repeats(&mut self) {
-        let now_ms = self.started.elapsed().as_millis() as u64;
-        self.pending_events.extend(
-            self.controller_normalizer
-                .tick(now_ms)
-                .into_iter()
-                .map(ShellEvent::Controller),
-        );
     }
 
     pub fn display_geometries(&self) -> Result<Vec<DisplayGeometry>, String> {
@@ -575,13 +549,24 @@ impl SdlShell {
             .collect()
     }
 
+    fn display_names(&self) -> Result<Vec<String>, String> {
+        self.video
+            .displays()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|display| display.get_name().map_err(|error| error.to_string()))
+            .collect()
+    }
+
     fn create_surface(
         &mut self,
         role: SurfaceRole,
         display_index: usize,
         geometry: DisplayGeometry,
+        output_name: &str,
     ) -> Result<(), String> {
-        let (title, x, y, width, height, hidden) = surface_geometry(role, geometry);
+        let (base_title, x, y, width, height, hidden) = surface_geometry(role, geometry);
+        let title = shell_surface_title(role, base_title, output_name);
         let application_id = match role {
             SurfaceRole::Desktop => SessionShellRole::Desktop.application_id(),
             SurfaceRole::Panel => SessionShellRole::Panel.application_id(),
@@ -597,7 +582,7 @@ impl SdlShell {
         };
         let previous_app_id = sdl3::hint::get("SDL_APP_ID");
         sdl3::hint::set("SDL_APP_ID", application_id);
-        let mut builder = self.video.window(title, width, height);
+        let mut builder = self.video.window(&title, width, height);
         builder.position(x, y).high_pixel_density();
         if surface_is_borderless(role) {
             builder.borderless();
@@ -645,6 +630,7 @@ impl SdlShell {
             id,
             role,
             display_index,
+            output_name: output_name.to_owned(),
             display_connected: true,
             presenter: None,
             window,
@@ -660,35 +646,6 @@ impl SdlShell {
         if let Some(request) = event.as_user_event_type::<crate::platform::SemanticTargetRequest>()
         {
             return Some(ShellEvent::SemanticTarget(request));
-        }
-        let controller_fingerprint = if let Event::ControllerDeviceAdded { which, .. } = &event {
-            let id = sdl3::sys::joystick::SDL_JoystickID(*which);
-            match self.gamepad.open(id) {
-                Ok(gamepad) => {
-                    let fingerprint = gamepad.serial_number();
-                    self.gamepads.insert(*which, gamepad);
-                    fingerprint
-                }
-                Err(error) => {
-                    tracing::warn!(id = *which, %error, "could not open SDL gamepad");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-        if let Event::ControllerDeviceRemoved { which, .. } = &event {
-            self.gamepads.remove(which);
-        }
-        if let Some(event) = nickel_input::sdl::controller_event(&event, controller_fingerprint) {
-            let now_ms = self.started.elapsed().as_millis() as u64;
-            self.pending_events.extend(
-                self.controller_normalizer
-                    .handle(event, now_ms)
-                    .into_iter()
-                    .map(ShellEvent::Controller),
-            );
-            return self.pending_events.pop_front();
         }
         let surface = event
             .get_window_id()
@@ -775,6 +732,20 @@ fn configure_input_hints() {
     // therefore applies production hit testing and reducers identically for
     // mouse and single-touch activation, without a second geometry model.
     sdl3::hint::set("SDL_TOUCH_MOUSE_EVENTS", "1");
+}
+
+fn shell_surface_title(role: SurfaceRole, title: &str, output_name: &str) -> String {
+    if matches!(
+        role,
+        SurfaceRole::Desktop | SurfaceRole::Panel | SurfaceRole::Lock
+    ) {
+        let output_name = output_name
+            .chars()
+            .filter(|character| !character.is_control() && *character != ']')
+            .collect::<String>();
+        return format!("{title} [output={output_name}]");
+    }
+    title.to_owned()
 }
 
 fn surface_geometry(
@@ -885,7 +856,8 @@ fn surface_is_borderless(role: SurfaceRole) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        DisplayGeometry, SurfaceRole, require_displays, surface_geometry, surface_is_borderless,
+        DESKTOP_TITLE, DisplayGeometry, LAUNCHER_TITLE, PANEL_TITLE, SurfaceRole, require_displays,
+        shell_surface_title, surface_geometry, surface_is_borderless,
     };
 
     #[test]
@@ -949,6 +921,22 @@ mod tests {
         assert_eq!(
             surface_geometry(SurfaceRole::Panel, display),
             ("Nickel Panel", 40, 970, 1920, 56, false)
+        );
+    }
+
+    #[test]
+    fn per_output_shell_titles_carry_sanitized_output_identity() {
+        assert_eq!(
+            shell_surface_title(SurfaceRole::Desktop, DESKTOP_TITLE, "DP-1"),
+            "Nickel Desktop [output=DP-1]"
+        );
+        assert_eq!(
+            shell_surface_title(SurfaceRole::Panel, PANEL_TITLE, "HDMI A/1"),
+            "Nickel Panel [output=HDMI A/1]"
+        );
+        assert_eq!(
+            shell_surface_title(SurfaceRole::Launcher, LAUNCHER_TITLE, "DP-1"),
+            LAUNCHER_TITLE
         );
     }
 }

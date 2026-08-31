@@ -2,9 +2,8 @@ use nickel_codex::ThreadId;
 use nickel_codex_ui::{ChatApplication, ConnectionStatus, ShellRequest, shell_application};
 use nickel_input::{
     InputEvent, KeyCode, KeyEdge, LogicalKey, ModifierState, NamedKey, PointerButton, PointerEvent,
-    controller::{AxisDirection, ControllerButton, ControllerSignal},
 };
-use nickel_ui::{ApplicationHost, UiEvent};
+use nickel_ui::{ApplicationHost, ControllerAction, ControllerInput, UiEvent};
 use std::{
     collections::HashSet,
     path::{Component, Path},
@@ -70,6 +69,11 @@ mod sdl_window_preview;
 
 use sdl_live_shell::LiveShell;
 use sdl_shell::{SdlShell, ShellEvent, SurfaceId, SurfaceRole};
+
+#[cfg(target_os = "linux")]
+const SHELL_STARTUP_BARRIER_ENV: &str = "NICKEL_SHELL_STARTUP_BARRIER";
+#[cfg(target_os = "linux")]
+const SHELL_STARTUP_BARRIER_MAGIC: &[u8; 8] = b"NIKREADY";
 
 struct CodexSurfaces {
     project_menu: SurfaceId,
@@ -596,6 +600,10 @@ fn handle_shell_input(
                 }
                 return Ok(());
             }
+            if role != SurfaceRole::Launcher {
+                log_unroutable_launcher_input(role, "text-commit", "non-launcher-surface");
+                return Ok(());
+            }
             let started = Instant::now();
             let was_dashboard = state.launcher_is_dashboard();
             if state.insert_launcher_text(&text) {
@@ -609,7 +617,9 @@ fn handle_shell_input(
             }
         }
         InputEvent::Text(nickel_input::TextEvent::Preedit { text, .. }) => {
-            if role == SurfaceRole::Launcher && state.set_launcher_preedit(&text) {
+            if role != SurfaceRole::Launcher {
+                log_unroutable_launcher_input(role, "text-preedit", "non-launcher-surface");
+            } else if state.set_launcher_preedit(&text) {
                 render_role(shell, state, SurfaceRole::Launcher)?;
             }
         }
@@ -783,43 +793,225 @@ fn handle_shell_input(
     Ok(())
 }
 
-fn controller_navigation_key(signal: &ControllerSignal) -> Option<KeyCode> {
-    match signal {
-        ControllerSignal::Button {
-            button,
-            edge: KeyEdge::Pressed,
-            ..
-        } => Some(match button {
-            ControllerButton::DPadUp => KeyCode::ArrowUp,
-            ControllerButton::DPadDown => KeyCode::ArrowDown,
-            ControllerButton::DPadLeft => KeyCode::ArrowLeft,
-            ControllerButton::DPadRight => KeyCode::ArrowRight,
-            ControllerButton::South => KeyCode::Enter,
-            ControllerButton::East | ControllerButton::Select => KeyCode::Escape,
-            _ => return None,
-        }),
-        ControllerSignal::Direction {
-            direction,
-            edge: KeyEdge::Pressed,
-            ..
-        } => Some(match direction {
-            AxisDirection::Up => KeyCode::ArrowUp,
-            AxisDirection::Down => KeyCode::ArrowDown,
-            AxisDirection::Left => KeyCode::ArrowLeft,
-            AxisDirection::Right => KeyCode::ArrowRight,
-        }),
-        _ => None,
+fn log_unroutable_launcher_input(
+    role: SurfaceRole,
+    event_class: &'static str,
+    rejection_reason: &'static str,
+) {
+    static LAST_DIAGNOSTIC: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+    let Ok(mut last) = LAST_DIAGNOSTIC.lock() else {
+        return;
+    };
+    let now = Instant::now();
+    if last.is_some_and(|previous| now.duration_since(previous) < Duration::from_secs(30)) {
+        return;
     }
+    *last = Some(now);
+    tracing::warn!(
+        surface_role = ?role,
+        focus_ownership = "event-delivered-to-surface",
+        event_class,
+        rejection_reason,
+        "launcher input could not be routed"
+    );
+}
+
+fn controller_navigation_key(action: ControllerAction) -> Option<KeyCode> {
+    Some(match action {
+        ControllerAction::Up => KeyCode::ArrowUp,
+        ControllerAction::Down => KeyCode::ArrowDown,
+        ControllerAction::Left => KeyCode::ArrowLeft,
+        ControllerAction::Right => KeyCode::ArrowRight,
+        ControllerAction::Confirm => KeyCode::Enter,
+        ControllerAction::Cancel => KeyCode::Escape,
+        _ => return None,
+    })
+}
+
+fn controller_launcher_shortcut(action: ControllerAction) -> Option<platform::GlobalShortcut> {
+    (action == ControllerAction::Launcher).then_some(platform::GlobalShortcut::ToggleLauncher)
+}
+
+fn handle_controller_action(
+    shell: &mut SdlShell,
+    state: &mut LiveShell,
+    action: ControllerAction,
+) -> Result<(), String> {
+    if controller_launcher_shortcut(action).is_some() {
+        let changed = state.request_launcher_toggle();
+        if changed {
+            sync_visibility(shell, state);
+            focus_visible_overlay(shell, state);
+            render_role(shell, state, SurfaceRole::Launcher)?;
+        }
+        return Ok(());
+    }
+    let Some(key) = controller_navigation_key(action) else {
+        return Ok(());
+    };
+    let Some(surface) = shell
+        .surfaces()
+        .find(|surface| surface.window().has_input_focus())
+        .map(|surface| surface.id())
+    else {
+        return Ok(());
+    };
+    let Some(entry) = shell.surface(surface) else {
+        return Ok(());
+    };
+    let role = entry.role();
+    let (width, height) = entry.window().size();
+    let changed = match role {
+        SurfaceRole::Lock => state.lock_key(Some(key)),
+        SurfaceRole::ControlCenter => state.control_key(Some(key), width, height),
+        SurfaceRole::WindowPreview => state.preview_key(Some(key)),
+        SurfaceRole::WindowContextMenu => state.window_menu_key(Some(key)),
+        SurfaceRole::Notification => state.notification_key(Some(key)),
+        SurfaceRole::Panel => state.preview_key(Some(key)),
+        SurfaceRole::Launcher => state.launcher_key(Some(key), &ModifierState::default()),
+        SurfaceRole::Screenshot => state.screenshot_key(Some(key)),
+        _ => false,
+    };
+    if changed {
+        sync_visibility(shell, state);
+        render_role(shell, state, role)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn validate_supervisor_token(token: &[u8], pid: u32) -> Result<(), String> {
+    if token.len() != SHELL_STARTUP_BARRIER_MAGIC.len() + 4
+        || &token[..SHELL_STARTUP_BARRIER_MAGIC.len()] != SHELL_STARTUP_BARRIER_MAGIC
+    {
+        return Err("Nickel shell startup barrier token is invalid".to_owned());
+    }
+    let expected_pid = u32::from_ne_bytes(
+        token[SHELL_STARTUP_BARRIER_MAGIC.len()..]
+            .try_into()
+            .expect("startup barrier token has a fixed PID field"),
+    );
+    if expected_pid != pid {
+        return Err(format!(
+            "Nickel shell startup barrier belongs to PID {expected_pid}, not this shell"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_supervisor_readiness() -> Result<(), String> {
+    use std::{io::Read, os::unix::net::UnixStream};
+
+    let path = std::env::var_os(SHELL_STARTUP_BARRIER_ENV)
+        .ok_or_else(|| "Nickel shell startup barrier is missing".to_owned())?;
+    let mut stream = UnixStream::connect(&path)
+        .map_err(|error| format!("could not connect to Nickel shell startup barrier: {error}"))?;
+    let mut token = [0_u8; SHELL_STARTUP_BARRIER_MAGIC.len() + 4];
+    stream
+        .read_exact(&mut token)
+        .map_err(|error| format!("Nickel shell startup barrier was not released: {error}"))?;
+    validate_supervisor_token(&token, std::process::id())
+}
+
+#[cfg(target_os = "linux")]
+fn validate_shell_readiness(
+    readiness: &nickel_session_protocol::ShellReadinessSnapshot,
+) -> Result<(), String> {
+    let counts = format!(
+        "outputs={} desktops={} panels={} locks={} launchers={} singletons_ready={} output_roles_ready={} reserved_ordinary_windows={}",
+        readiness.outputs,
+        readiness.desktops,
+        readiness.panels,
+        readiness.locks,
+        readiness.launchers,
+        readiness.required_singletons_ready,
+        readiness.output_roles_ready,
+        readiness.reserved_ordinary_windows,
+    );
+    let roles_are_complete = readiness.outputs > 0
+        && readiness.desktops == readiness.outputs
+        && readiness.panels == readiness.outputs
+        && readiness.locks == readiness.outputs
+        && readiness.launchers == 1
+        && readiness.required_singletons_ready
+        && readiness.output_roles_ready
+        && readiness.reserved_ordinary_windows == 0;
+    let pids_are_authenticated = readiness.expected_shell_pid.is_some()
+        && readiness.expected_shell_pid == readiness.authenticated_shell_pid;
+    if readiness.ready && roles_are_complete && pids_are_authenticated {
+        return Ok(());
+    }
+    Err(format!(
+        "Nickel shell session is not ready ({counts}; expected_shell_pid={:?}; authenticated_shell_pid={:?})",
+        readiness.expected_shell_pid, readiness.authenticated_shell_pid,
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_shell_readiness_with<F>(
+    mut query: F,
+    timeout: Duration,
+    retry_interval: Duration,
+) -> Result<nickel_session_protocol::ShellReadinessSnapshot, String>
+where
+    F: FnMut() -> Result<nickel_session_protocol::ShellReadinessSnapshot, String>,
+{
+    let started = Instant::now();
+    loop {
+        let last_failure = match query() {
+            Ok(readiness) => match validate_shell_readiness(&readiness) {
+                Ok(()) => return Ok(readiness),
+                Err(error) => error,
+            },
+            Err(error) => error,
+        };
+        if started.elapsed() >= timeout {
+            return Err(format!(
+                "Nickel shell readiness did not converge within {} ms: {last_failure}",
+                timeout.as_millis()
+            ));
+        }
+        std::thread::sleep(retry_interval.min(timeout.saturating_sub(started.elapsed())));
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_shell_readiness() -> Result<(), String> {
+    wait_for_shell_readiness_with(
+        || {
+            platform::shell_readiness().map_err(|error| {
+                format!("Nickel shell could not verify session readiness: {error}")
+            })
+        },
+        Duration::from_secs(2),
+        Duration::from_millis(25),
+    )
+    .map(|_| ())
 }
 
 fn main() -> Result<(), String> {
     nickel_logging::init("nickel-sdl-shell").map_err(|error| error.to_string())?;
-    if !platform::register_session_shell() {
-        tracing::warn!("Nickel shell could not authenticate with the session protocol");
-    }
+    // The supervisor publishes its expected child PID and releases this
+    // barrier before the shell attempts registration. Creating any Wayland
+    // surfaces before authentication is unsafe: Linux shell surfaces are
+    // initially visible so SDL can obtain their first configure, and an
+    // unauthenticated surface is classified as an ordinary movable window.
+    #[cfg(target_os = "linux")]
+    wait_for_supervisor_readiness()?;
+    #[cfg(target_os = "linux")]
+    platform::register_session_shell().map_err(|error| {
+        format!("Nickel shell could not authenticate with the session protocol: {error}")
+    })?;
+    #[cfg(not(target_os = "linux"))]
+    platform::register_session_shell().map_err(|error| {
+        format!("Nickel shell could not authenticate with the session protocol: {error}")
+    })?;
     let started = Instant::now();
     let mut shell = SdlShell::new(started)?;
     shell.create_shell_surfaces()?;
+    #[cfg(target_os = "linux")]
+    wait_for_shell_readiness()?;
     let mut state = LiveShell::new()?;
     let mut codex = CodexSurfaces::new(&shell)?;
     let hotkey_feed = platform::launcher_hotkey_receiver();
@@ -878,12 +1070,16 @@ fn main() -> Result<(), String> {
     let mut refresh_deadline = Instant::now() + REFRESH_INTERVAL;
     let mut system_refresh_deadline = Instant::now() + SYSTEM_REFRESH_INTERVAL;
     let mut hover_repaint: Option<(SurfaceRole, Instant)> = None;
+    let mut controller = ControllerInput::new();
     let mut initial_exposures = HashSet::new();
     #[cfg(not(target_os = "linux"))]
     let mut focused_overlays = HashSet::new();
     #[cfg(not(target_os = "linux"))]
     let mut overlay_focus_loss: Option<(SurfaceId, SurfaceRole, Instant)> = None;
     loop {
+        for action in controller.poll_global(Instant::now()) {
+            handle_controller_action(&mut shell, &mut state, action)?;
+        }
         let next_deadline = refresh_deadline.min(system_refresh_deadline);
         let next_deadline = hover_repaint
             .map(|(_, deadline)| deadline.min(next_deadline))
@@ -892,7 +1088,9 @@ fn main() -> Result<(), String> {
         let next_deadline = overlay_focus_loss
             .map(|(_, _, deadline)| deadline.min(next_deadline))
             .unwrap_or(next_deadline);
-        let timeout = next_deadline.saturating_duration_since(Instant::now());
+        let timeout = next_deadline
+            .saturating_duration_since(Instant::now())
+            .min(Duration::from_millis(8));
         let event = shell.wait_event_timeout(timeout);
         if let Some(ref event) = event
             && handle_codex_event(&mut codex, &mut shell, &mut state, event)?
@@ -913,56 +1111,6 @@ fn main() -> Result<(), String> {
                     render_role(&mut shell, &mut state, SurfaceRole::ControlCenter)?;
                     render_role(&mut shell, &mut state, SurfaceRole::Lock)?;
                     render_role(&mut shell, &mut state, SurfaceRole::Screenshot)?;
-                }
-            }
-            Some(ShellEvent::Controller(signal)) => {
-                if matches!(
-                    signal,
-                    ControllerSignal::Button {
-                        button: ControllerButton::Guide,
-                        edge: KeyEdge::Pressed,
-                        repeat: false,
-                        ..
-                    }
-                ) {
-                    if state.global_shortcut(platform::GlobalShortcut::ShowLauncher) {
-                        sync_visibility(&mut shell, &state);
-                        focus_visible_overlay(&mut shell, &state);
-                        render_role(&mut shell, &mut state, SurfaceRole::Launcher)?;
-                    }
-                    continue;
-                }
-                let Some(key) = controller_navigation_key(&signal) else {
-                    continue;
-                };
-                let Some(surface) = shell
-                    .surfaces()
-                    .find(|surface| surface.window().has_input_focus())
-                    .map(|surface| surface.id())
-                else {
-                    continue;
-                };
-                let Some(entry) = shell.surface(surface) else {
-                    continue;
-                };
-                let role = entry.role();
-                let (width, height) = entry.window().size();
-                let changed = match role {
-                    SurfaceRole::Lock => state.lock_key(Some(key)),
-                    SurfaceRole::ControlCenter => state.control_key(Some(key), width, height),
-                    SurfaceRole::WindowPreview => state.preview_key(Some(key)),
-                    SurfaceRole::WindowContextMenu => state.window_menu_key(Some(key)),
-                    SurfaceRole::Notification => state.notification_key(Some(key)),
-                    SurfaceRole::Panel => state.preview_key(Some(key)),
-                    SurfaceRole::Launcher => {
-                        state.launcher_key(Some(key), &ModifierState::default())
-                    }
-                    SurfaceRole::Screenshot => state.screenshot_key(Some(key)),
-                    _ => false,
-                };
-                if changed {
-                    sync_visibility(&mut shell, &state);
-                    render_role(&mut shell, &mut state, role)?;
                 }
             }
             Some(ShellEvent::Input { surface, event }) => {
@@ -1223,11 +1371,137 @@ fn main() -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use nickel_ui::ControllerAction;
+
+    #[test]
+    fn controller_launcher_action_toggles_launcher() {
+        assert_eq!(
+            super::controller_launcher_shortcut(ControllerAction::Launcher),
+            Some(super::platform::GlobalShortcut::ToggleLauncher)
+        );
+    }
+
+    #[test]
+    fn controller_navigation_does_not_toggle_launcher() {
+        assert_eq!(
+            super::controller_launcher_shortcut(ControllerAction::Confirm),
+            None
+        );
+    }
+
     use std::path::Path;
 
     use nickel_codex::ThreadId;
 
     use super::{WriterLeases, codex_project_application_id};
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stale_startup_barrier_token_cannot_authorize_a_new_shell() {
+        let mut token = Vec::from(*super::SHELL_STARTUP_BARRIER_MAGIC);
+        token.extend_from_slice(&42_u32.to_ne_bytes());
+        assert!(super::validate_supervisor_token(&token, 42).is_ok());
+        let error = super::validate_supervisor_token(&token, 43).unwrap_err();
+        assert!(error.contains("PID 42"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn startup_barrier_token_requires_the_supervisor_magic() {
+        let token = [0_u8; super::SHELL_STARTUP_BARRIER_MAGIC.len() + 4];
+        assert_eq!(
+            super::validate_supervisor_token(&token, 42).unwrap_err(),
+            "Nickel shell startup barrier token is invalid"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    fn shell_readiness(
+        outputs: u16,
+        desktops: u16,
+        panels: u16,
+        launchers: u16,
+        reserved_ordinary_windows: u16,
+        ready: bool,
+    ) -> nickel_session_protocol::ShellReadinessSnapshot {
+        nickel_session_protocol::ShellReadinessSnapshot {
+            expected_shell_pid: Some(42),
+            authenticated_shell_pid: Some(42),
+            outputs,
+            desktops,
+            panels,
+            locks: outputs,
+            launchers,
+            required_singletons_ready: true,
+            output_roles_ready: true,
+            reserved_ordinary_windows,
+            ready,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn healthy_shell_readiness_snapshot_is_accepted() {
+        assert!(super::validate_shell_readiness(&shell_readiness(2, 2, 2, 1, 0, true)).is_ok());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn missing_shell_role_fails_closed_with_safe_counts() {
+        let error =
+            super::validate_shell_readiness(&shell_readiness(2, 1, 2, 1, 0, false)).unwrap_err();
+        assert!(error.contains("outputs=2 desktops=1 panels=2 locks=2 launchers=1"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn duplicate_shell_role_fails_closed_with_safe_counts() {
+        let error =
+            super::validate_shell_readiness(&shell_readiness(2, 2, 2, 2, 0, false)).unwrap_err();
+        assert!(error.contains("launchers=2"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn misclassified_shell_role_fails_closed_with_safe_counts() {
+        let error =
+            super::validate_shell_readiness(&shell_readiness(2, 2, 2, 1, 1, false)).unwrap_err();
+        assert!(error.contains("reserved_ordinary_windows=1"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn readiness_barrier_accepts_late_roles_without_exposing_interaction() {
+        let mut attempts = 0;
+        let readiness = super::wait_for_shell_readiness_with(
+            || {
+                attempts += 1;
+                Ok(if attempts < 3 {
+                    shell_readiness(2, 1, 1, 1, 0, false)
+                } else {
+                    shell_readiness(2, 2, 2, 1, 0, true)
+                })
+            },
+            std::time::Duration::from_secs(1),
+            std::time::Duration::ZERO,
+        )
+        .unwrap();
+        assert_eq!(attempts, 3);
+        assert!(readiness.ready);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn readiness_barrier_fails_closed_with_the_last_safe_snapshot() {
+        let error = super::wait_for_shell_readiness_with(
+            || Ok(shell_readiness(2, 1, 2, 1, 0, false)),
+            std::time::Duration::ZERO,
+            std::time::Duration::ZERO,
+        )
+        .unwrap_err();
+        assert!(error.contains("did not converge within 0 ms"));
+        assert!(error.contains("outputs=2 desktops=1 panels=2"));
+    }
 
     #[test]
     fn codex_project_identity_is_canonical_and_path_opaque() {

@@ -77,6 +77,7 @@ fn semantic_theme(palette: ThemePalette) -> SemanticTheme {
         secondary_text: palette.muted,
         accent: palette.accent,
         accent_soft: palette.accent_soft,
+        secondary_accent: palette.complement,
         positive: palette.complement,
     })
 }
@@ -261,32 +262,6 @@ enum AppearanceTab {
 enum AppearanceNotice {
     Confirmation(String),
     Error(String),
-}
-
-impl SettingsPage {
-    fn previous(self) -> Self {
-        match self {
-            Self::Display => Self::Display,
-            Self::Bar => Self::Display,
-            Self::Appearance => Self::Bar,
-            Self::Network => Self::Appearance,
-            Self::Bluetooth => Self::Network,
-            Self::KeyboardShortcuts => Self::Bluetooth,
-            Self::About => Self::KeyboardShortcuts,
-        }
-    }
-
-    fn next(self) -> Self {
-        match self {
-            Self::Display => Self::Bar,
-            Self::Bar => Self::Appearance,
-            Self::Appearance => Self::Network,
-            Self::Network => Self::Bluetooth,
-            Self::Bluetooth => Self::KeyboardShortcuts,
-            Self::KeyboardShortcuts => Self::About,
-            Self::About => Self::About,
-        }
-    }
 }
 
 struct NetworkAdapter {
@@ -830,8 +805,10 @@ impl SettingsApp {
         let (logical_width, logical_height) = presenter.window().size();
         let pixel_width = presenter.window().size_in_pixels().0;
         let scale = pixel_width as f32 / logical_width.max(1) as f32;
-        let ui = self.build_ui(logical_width as f32, logical_height as f32);
-        ui.reconcile_state(&mut self.ui_state);
+        let mut ui_state = std::mem::take(&mut self.ui_state);
+        let ui =
+            self.build_ui_with_state(logical_width as f32, logical_height as f32, &mut ui_state);
+        self.ui_state = ui_state;
         self.apply_pending_focus(&ui);
         self.ui = ui;
         self.sync_display_plane();
@@ -1111,7 +1088,7 @@ impl SettingsApp {
             self.persist_appearance();
             self.appearance_save_deadline = None;
         }
-        for action in self.controller.poll(now) {
+        for action in self.controller.poll(now, self.ui_state.window_focused()) {
             self.handle_controller_action(action);
         }
         if self.page == SettingsPage::Bluetooth && now >= self.next_bluetooth_refresh {
@@ -1469,9 +1446,9 @@ mod tests {
     };
 
     use super::{
-        BluetoothDevice, NetworkAdapter, PaintCommand, Rect, SIDEBAR_WIDTH, SettingsApp,
-        SettingsMessage, SettingsPage, ThemePreference, UiEvent, UiPoint, WallpaperSettings,
-        attach_rect_centered, constrain_center, snap_rect,
+        BluetoothDevice, ControllerAction, NavigationPane, NetworkAdapter, PaintCommand, Rect,
+        SIDEBAR_WIDTH, SettingsApp, SettingsMessage, SettingsPage, ThemePreference, UiEvent,
+        UiPoint, WallpaperSettings, attach_rect_centered, constrain_center, snap_rect,
     };
 
     fn enter_event() -> InputEvent {
@@ -2026,6 +2003,107 @@ mod tests {
             }
             assert_eq!(app.page, SettingsPage::Appearance, "{modality}");
         }
+    }
+
+    #[test]
+    fn shoulder_buttons_switch_controller_navigation_panes_and_paint_content_selection() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Appearance);
+        let mut state = std::mem::take(&mut app.ui_state);
+        app.ui = app.build_ui_with_state(850.0, 580.0, &mut state);
+        app.ui_state = state;
+
+        app.handle_controller_action(ControllerAction::PreviousPane);
+        assert_eq!(app.navigation.pane(), NavigationPane::Sidebar);
+        app.handle_controller_action(ControllerAction::Down);
+
+        app.handle_controller_action(ControllerAction::NextPane);
+        assert_eq!(app.navigation.pane(), NavigationPane::Content);
+
+        let selected = app.ui_state.controller_selected().cloned().unwrap();
+        assert!(!matches!(
+            app.ui.message_for_id(&selected),
+            Some(
+                SettingsMessage::Navigate(_)
+                    | SettingsMessage::NavigateTarget(_, _)
+                    | SettingsMessage::SidebarSearchChanged(_)
+            )
+        ));
+        let focus_border = app.ui_theme().borders.controller_focus;
+        let mut state = std::mem::take(&mut app.ui_state);
+        let rendered = app.build_ui_with_state(850.0, 580.0, &mut state);
+        app.ui_state = state;
+        let secondary_accent = app.ui_theme().colors.secondary_accent;
+        assert!(rendered.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::Stroke { color, width, .. }
+                if *color == secondary_accent && *width == 3.0
+        )));
+        assert!(rendered.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::Stroke { color, width, .. }
+                if *color == focus_border && *width >= 2.0
+        )));
+    }
+
+    #[test]
+    fn sidebar_dpad_previews_sections_and_confirm_selects_them() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Appearance);
+        let mut state = std::mem::take(&mut app.ui_state);
+        app.ui = app.build_ui_with_state(850.0, 580.0, &mut state);
+        app.ui_state = state;
+
+        app.handle_controller_action(ControllerAction::PreviousPane);
+        app.handle_controller_action(ControllerAction::Down);
+        let selected = app.ui_state.controller_selected().unwrap();
+        assert!(matches!(
+            app.ui.message_for_id(selected),
+            Some(SettingsMessage::Navigate(_))
+        ));
+        assert_eq!(app.page, SettingsPage::Appearance);
+
+        app.handle_controller_action(ControllerAction::Confirm);
+        assert_ne!(app.page, SettingsPage::Appearance);
+    }
+
+    #[test]
+    fn controller_reaches_offscreen_appearance_sliders_and_adjusts_them() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Appearance);
+        app.shell_settings.accent_intensity = Some(50);
+        let mut state = std::mem::take(&mut app.ui_state);
+        app.ui = app.build_ui_with_state(850.0, 580.0, &mut state);
+        app.ui_state = state;
+        let slider = app
+            .ui
+            .resolved_layout()
+            .nodes()
+            .iter()
+            .find(|node| {
+                node.id.as_str().contains("/appearance-intensity/")
+                    && node.controller_value.is_some()
+            })
+            .unwrap()
+            .id
+            .clone();
+        let group = app
+            .ui
+            .resolved_layout()
+            .nodes()
+            .iter()
+            .filter(|node| node.controller_group && slider.as_str().starts_with(node.id.as_str()))
+            .max_by_key(|node| node.id.as_str().len())
+            .unwrap()
+            .id
+            .clone();
+        app.ui_state.set_controller_selected(Some(group));
+        app.handle_controller_action(ControllerAction::Confirm);
+        assert!(app.ui_state.controller_scope().is_some());
+        app.ui_state.set_controller_selected(Some(slider));
+        app.handle_controller_action(ControllerAction::Confirm);
+        assert!(app.ui_state.controller_editing());
+        app.handle_controller_action(ControllerAction::Right);
+        assert_eq!(app.shell_settings.accent_intensity, Some(55));
+        app.handle_controller_action(ControllerAction::Cancel);
+        assert!(!app.ui_state.controller_editing());
     }
 
     #[test]

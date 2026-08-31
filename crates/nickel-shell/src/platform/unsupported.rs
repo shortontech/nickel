@@ -1,8 +1,8 @@
 use crate::{
     desktop::Wallpaper,
     launcher::Launcher,
-    model::{Application, OpenWindow, TrayItem, WindowId, WindowPreview},
-    platform::{GlobalShortcut, NotificationSource, ShellCommand, TraySource},
+    model::{Application, ApplicationDiscovery, OpenWindow, TrayItem, WindowId, WindowPreview},
+    platform::{FeedState, GlobalShortcut, NotificationSource, ShellCommand, TraySource},
 };
 
 pub fn wallpaper() -> Wallpaper {
@@ -69,6 +69,10 @@ pub fn applications() -> Vec<Application> {
     Vec::new()
 }
 
+pub fn application_discovery() -> ApplicationDiscovery {
+    ApplicationDiscovery::ready(applications())
+}
+
 pub fn launcher_hotkey_receiver() -> super::GlobalShortcutFeed {
     super::GlobalShortcutFeed::unavailable(
         nickel_input::global::UnavailableReason::UnsupportedPlatform,
@@ -128,8 +132,8 @@ pub fn send_shell_command(_: ShellCommand) -> bool {
     false
 }
 
-pub fn register_session_shell() -> bool {
-    true
+pub fn register_session_shell() -> Result<(), super::SessionRequestError> {
+    Ok(())
 }
 
 pub struct WindowFeed;
@@ -146,12 +150,12 @@ impl WindowFeed {
         Self
     }
 
-    pub fn snapshot(&self, _: &Launcher) -> Option<Vec<OpenWindow>> {
-        None
+    pub fn snapshot(&self, _: &Launcher) -> FeedState<Vec<OpenWindow>> {
+        FeedState::Disconnected
     }
 
-    pub fn workspaces(&self) -> Option<Vec<super::WorkspaceSummary>> {
-        None
+    pub fn workspaces(&self) -> FeedState<Vec<super::WorkspaceSummary>> {
+        FeedState::Disconnected
     }
 
     pub fn preview(&self, _: WindowId) -> Option<WindowPreview> {

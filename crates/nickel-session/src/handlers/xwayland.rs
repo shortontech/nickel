@@ -242,33 +242,6 @@ impl NickelSession {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn override_redirect_windows_use_the_client_configured_location() {
-        let surface_geometry = Rectangle::new((7, 0).into(), (320, 240).into());
-        let last_configure = Rectangle::new((843, 612).into(), (300, 200).into());
-
-        let mapped = x11_map_geometry(surface_geometry, last_configure, true);
-
-        assert_eq!(mapped.loc, (843, 612).into());
-        assert_eq!(mapped.size, (320, 240).into());
-    }
-
-    #[test]
-    fn managed_windows_keep_their_surface_geometry() {
-        let surface_geometry = Rectangle::new((7, 11).into(), (320, 240).into());
-        let last_configure = Rectangle::new((843, 612).into(), (300, 200).into());
-
-        assert_eq!(
-            x11_map_geometry(surface_geometry, last_configure, false),
-            surface_geometry
-        );
-    }
-}
-
 impl XWaylandShellHandler for NickelSession {
     fn xwayland_shell_state(&mut self) -> &mut XWaylandShellState {
         &mut self.xwayland_shell_state
@@ -593,5 +566,32 @@ impl XwmHandler for NickelSession {
         }
         self.request_output_redraw();
         self.schedule_xwayland_restart();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn override_redirect_windows_use_the_client_configured_location() {
+        let surface_geometry = Rectangle::new((7, 0).into(), (320, 240).into());
+        let last_configure = Rectangle::new((843, 612).into(), (300, 200).into());
+
+        let mapped = x11_map_geometry(surface_geometry, last_configure, true);
+
+        assert_eq!(mapped.loc, (843, 612).into());
+        assert_eq!(mapped.size, (320, 240).into());
+    }
+
+    #[test]
+    fn managed_windows_keep_their_surface_geometry() {
+        let surface_geometry = Rectangle::new((7, 11).into(), (320, 240).into());
+        let last_configure = Rectangle::new((843, 612).into(), (300, 200).into());
+
+        assert_eq!(
+            x11_map_geometry(surface_geometry, last_configure, false),
+            surface_geometry
+        );
     }
 }

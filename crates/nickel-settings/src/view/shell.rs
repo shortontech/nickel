@@ -2,49 +2,46 @@ use super::*;
 
 impl SettingsApp {
     pub(crate) fn handle_controller_action(&mut self, action: ControllerAction) {
+        if action == ControllerAction::Launcher {
+            if let Err(error) =
+                session_request(SessionRequest::Command(SessionCommand::ToggleLauncher))
+            {
+                tracing::warn!(%error, "controller could not toggle the Nickel launcher");
+            }
+            return;
+        }
+        let event = match action {
+            ControllerAction::Up => Some(UiEvent::ControllerPrevious),
+            ControllerAction::Down => Some(UiEvent::ControllerNext),
+            ControllerAction::Left => Some(UiEvent::ControllerAdjust(-1.0)),
+            ControllerAction::Right => Some(UiEvent::ControllerAdjust(1.0)),
+            ControllerAction::Confirm => Some(UiEvent::ControllerActivate),
+            ControllerAction::Cancel => Some(UiEvent::ControllerBack),
+            ControllerAction::PreviousPane => Some(UiEvent::ControllerPreviousPane),
+            ControllerAction::NextPane => Some(UiEvent::ControllerNextPane),
+            ControllerAction::Launcher => None,
+        };
         if self.navigation.handle(action) {
             self.controller_page = self.page;
             self.narrow_navigation = self.navigation.pane() == NavigationPane::Sidebar;
-            self.request_redraw();
-            return;
         }
-        if self.navigation.pane() == NavigationPane::Sidebar {
-            self.controller_page = match action {
-                ControllerAction::Up => self.controller_page.previous(),
-                ControllerAction::Down => self.controller_page.next(),
-                ControllerAction::Confirm => {
-                    self.page = self.controller_page;
-                    self.controller_page
-                }
-                ControllerAction::Cancel => {
-                    self.running = false;
-                    self.controller_page
-                }
-                _ => self.controller_page,
-            };
-            self.request_redraw();
-        } else {
-            let event = match action {
-                ControllerAction::Up | ControllerAction::Left => Some(UiEvent::ControllerPrevious),
-                ControllerAction::Down | ControllerAction::Right => Some(UiEvent::ControllerNext),
-                ControllerAction::Confirm => Some(UiEvent::ControllerActivate),
-                ControllerAction::Cancel => {
-                    self.navigation.handle(ControllerAction::PreviousPane);
-                    self.narrow_navigation = true;
-                    None
-                }
-                ControllerAction::PreviousPane | ControllerAction::NextPane => None,
-            };
-            if let Some(event) = event {
-                self.dispatch_ui_event(event);
-            } else {
-                self.request_redraw();
-            }
+        if let Some(event) = event {
+            self.dispatch_ui_event(event);
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn build_ui(&self, width: f32, height: f32) -> UiTree<SettingsMessage> {
-        self.build_ui_internal(width, height, false)
+        self.build_ui_internal(width, height, false, None)
+    }
+
+    pub(crate) fn build_ui_with_state(
+        &self,
+        width: f32,
+        height: f32,
+        state: &mut UiStateStore,
+    ) -> UiTree<SettingsMessage> {
+        self.build_ui_internal(width, height, false, Some(state))
     }
 
     #[cfg(test)]
@@ -53,7 +50,7 @@ impl SettingsApp {
         width: f32,
         height: f32,
     ) -> UiTree<SettingsMessage> {
-        self.build_ui_internal(width, height, true)
+        self.build_ui_internal(width, height, true, None)
     }
 
     fn build_ui_internal(
@@ -61,6 +58,7 @@ impl SettingsApp {
         width: f32,
         height: f32,
         diagnostics: bool,
+        state: Option<&mut UiStateStore>,
     ) -> UiTree<SettingsMessage> {
         let theme = self.ui_theme();
         let palette = self.palette();
@@ -378,7 +376,6 @@ impl SettingsApp {
                 </Container>
             });
         }
-
         let content = match self.page {
             SettingsPage::Display => AnyView::new(self.display_components()),
             SettingsPage::Bar => AnyView::new(self.bar_components()),
@@ -413,10 +410,12 @@ impl SettingsApp {
             },
         );
         let bounds = UiRect::new(0.0, 0.0, width, height);
-        if diagnostics {
-            UiTree::layout_with_diagnostics(root, bounds)
-        } else {
-            UiTree::layout(root, bounds)
+        match (state, diagnostics) {
+            (Some(state), diagnostics) => {
+                UiTree::layout_with_state_and_diagnostics(root, bounds, state, diagnostics)
+            }
+            (None, true) => UiTree::layout_with_diagnostics(root, bounds),
+            (None, false) => UiTree::layout(root, bounds),
         }
     }
 }

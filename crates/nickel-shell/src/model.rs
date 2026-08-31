@@ -34,6 +34,166 @@ pub struct Application {
     launch_command: Option<Vec<String>>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ApplicationDiscoveryStatus {
+    ReadyEmpty,
+    Ready,
+    PartialFailure,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ApplicationSkipReason {
+    ParseFailure,
+    UnsupportedType,
+    Hidden,
+    NoDisplay,
+    WrongDesktop,
+    MissingName,
+    EmptyName,
+    MissingExec,
+    InvalidExec,
+}
+
+impl ApplicationSkipReason {
+    const ALL: [Self; 9] = [
+        Self::ParseFailure,
+        Self::UnsupportedType,
+        Self::Hidden,
+        Self::NoDisplay,
+        Self::WrongDesktop,
+        Self::MissingName,
+        Self::EmptyName,
+        Self::MissingExec,
+        Self::InvalidExec,
+    ];
+
+    const fn index(self) -> usize {
+        match self {
+            Self::ParseFailure => 0,
+            Self::UnsupportedType => 1,
+            Self::Hidden => 2,
+            Self::NoDisplay => 3,
+            Self::WrongDesktop => 4,
+            Self::MissingName => 5,
+            Self::EmptyName => 6,
+            Self::MissingExec => 7,
+            Self::InvalidExec => 8,
+        }
+    }
+
+    const fn is_failure(self) -> bool {
+        matches!(
+            self,
+            Self::ParseFailure | Self::MissingName | Self::InvalidExec
+        )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ApplicationDiscoveryReport {
+    scanned: usize,
+    accepted: usize,
+    skipped: [usize; ApplicationSkipReason::ALL.len()],
+}
+
+impl ApplicationDiscoveryReport {
+    pub(crate) fn new() -> Self {
+        Self {
+            scanned: 0,
+            accepted: 0,
+            skipped: [0; ApplicationSkipReason::ALL.len()],
+        }
+    }
+
+    pub fn scanned(&self) -> usize {
+        self.scanned
+    }
+
+    pub fn accepted(&self) -> usize {
+        self.accepted
+    }
+
+    pub fn skipped(&self, reason: ApplicationSkipReason) -> usize {
+        self.skipped[reason.index()]
+    }
+
+    pub fn has_failures(&self) -> bool {
+        ApplicationSkipReason::ALL
+            .into_iter()
+            .any(|reason| reason.is_failure() && self.skipped(reason) > 0)
+    }
+
+    pub(crate) fn record_scanned(&mut self) {
+        self.scanned += 1;
+    }
+
+    pub(crate) fn record(&mut self, reason: ApplicationSkipReason) {
+        self.skipped[reason.index()] += 1;
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ApplicationDiscovery {
+    applications: Vec<Application>,
+    status: ApplicationDiscoveryStatus,
+    report: ApplicationDiscoveryReport,
+}
+
+impl ApplicationDiscovery {
+    pub fn ready(applications: Vec<Application>) -> Self {
+        let status = if applications.is_empty() {
+            ApplicationDiscoveryStatus::ReadyEmpty
+        } else {
+            ApplicationDiscoveryStatus::Ready
+        };
+        let report = ApplicationDiscoveryReport {
+            scanned: applications.len(),
+            accepted: applications.len(),
+            skipped: [0; ApplicationSkipReason::ALL.len()],
+        };
+        Self {
+            applications,
+            status,
+            report,
+        }
+    }
+
+    pub fn status(&self) -> ApplicationDiscoveryStatus {
+        self.status
+    }
+
+    pub fn report(&self) -> &ApplicationDiscoveryReport {
+        &self.report
+    }
+
+    pub fn applications(&self) -> &[Application] {
+        &self.applications
+    }
+
+    pub fn into_applications(self) -> Vec<Application> {
+        self.applications
+    }
+
+    pub(crate) fn from_report(
+        applications: Vec<Application>,
+        mut report: ApplicationDiscoveryReport,
+    ) -> Self {
+        report.accepted = applications.len();
+        let status = if report.has_failures() {
+            ApplicationDiscoveryStatus::PartialFailure
+        } else if applications.is_empty() {
+            ApplicationDiscoveryStatus::ReadyEmpty
+        } else {
+            ApplicationDiscoveryStatus::Ready
+        };
+        Self {
+            applications,
+            status,
+            report,
+        }
+    }
+}
+
 impl Application {
     pub fn new(
         id: String,

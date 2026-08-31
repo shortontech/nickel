@@ -170,6 +170,10 @@ impl<Message> VerticalScroll<Message> {
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
             children: Vec::new(),
+            controller_group: false,
+            controller_pane: false,
+            controller_pane_default: false,
+            controller_step: 0.05,
         })
     }
 
@@ -243,6 +247,10 @@ impl<Message> Grid<Message> {
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
             children: Vec::new(),
+            controller_group: false,
+            controller_pane: false,
+            controller_pane_default: false,
+            controller_step: 0.05,
         })
     }
 
@@ -275,6 +283,10 @@ impl<Message> Grid<Message> {
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
             children: Vec::new(),
+            controller_group: false,
+            controller_pane: false,
+            controller_pane_default: false,
+            controller_step: 0.05,
         })
     }
 
@@ -292,6 +304,10 @@ impl<Message> Grid<Message> {
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
             children: Vec::new(),
+            controller_group: false,
+            controller_pane: false,
+            controller_pane_default: false,
+            controller_step: 0.05,
         })
     }
 
@@ -545,6 +561,10 @@ impl<Message> StyledText<Message> {
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
             children: Vec::new(),
+            controller_group: false,
+            controller_pane: false,
+            controller_pane_default: false,
+            controller_step: 0.05,
         })
     }
 
@@ -788,6 +808,10 @@ impl<Message> Image<Message> {
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
             children: Vec::new(),
+            controller_group: false,
+            controller_pane: false,
+            controller_pane_default: false,
+            controller_step: 0.05,
         })
     }
 
@@ -1038,6 +1062,31 @@ impl<Message> Container<Message> {
 
     pub fn focus_border(mut self, color: Color) -> Self {
         self.0 = self.0.focus_border(color);
+        self
+    }
+
+    pub fn controller_focus_border(mut self, color: Color) -> Self {
+        self.0 = self.0.controller_focus_border(color);
+        self
+    }
+
+    pub fn controller_group(mut self, enabled: bool) -> Self {
+        self.0 = self.0.controller_group(enabled);
+        self
+    }
+
+    pub fn controller_pane(mut self, enabled: bool) -> Self {
+        self.0 = self.0.controller_pane(enabled);
+        self
+    }
+
+    pub fn controller_pane_default(mut self, default: bool) -> Self {
+        self.0 = self.0.controller_pane_default(default);
+        self
+    }
+
+    pub fn controller_pane_highlight(mut self, highlight: Color) -> Self {
+        self.0 = self.0.controller_pane_highlight(highlight);
         self
     }
 
@@ -1564,6 +1613,7 @@ impl<Message> Button<Message> {
         self.0.0.style.hover_background = Some(Background::Solid(theme.surfaces.hover));
         self.0.0.style.pressed_background = Some(Background::Solid(theme.surfaces.pressed));
         self.0.0.style.focus_border = Some(theme.borders.focus);
+        self.0.0.style.controller_focus_border = Some(theme.borders.controller_focus);
         if presentation == ButtonPresentation::Disabled {
             self.0.0.message = None;
         }
@@ -1575,6 +1625,16 @@ impl<Message> Button<Message> {
 
     pub fn id(mut self, id: impl Into<UiId>) -> Self {
         self.0 = self.0.id(id);
+        self
+    }
+
+    pub fn focus_border(mut self, color: Color) -> Self {
+        self.0 = self.0.focus_border(color);
+        self
+    }
+
+    pub fn controller_focus_border(mut self, color: Color) -> Self {
+        self.0 = self.0.controller_focus_border(color);
         self
     }
 
@@ -1738,6 +1798,160 @@ impl<Message> Component<Message> for ButtonLabel<Message> {
 
 pub struct RadioButton<Message = String>(Container<Message>);
 
+/// A full-row, single-selection option suitable for devices and settings lists.
+pub struct RadioOption<Message = String> {
+    theme: SemanticTheme,
+    message: Message,
+    label: String,
+    description: Option<String>,
+    selected: bool,
+    enabled: bool,
+    id: Option<UiId>,
+    leading: Option<Element<Message>>,
+    trailing: Option<Element<Message>>,
+}
+
+impl<Message> RadioOption<Message> {
+    pub fn new(
+        theme: SemanticTheme,
+        message: Message,
+        label: impl Into<String>,
+        selected: bool,
+    ) -> Self {
+        Self {
+            theme,
+            message,
+            label: label.into(),
+            description: None,
+            selected,
+            enabled: true,
+            id: None,
+            leading: None,
+            trailing: None,
+        }
+    }
+
+    pub fn description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    pub fn id(mut self, id: impl Into<UiId>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
+    pub fn leading(mut self, leading: impl Component<Message>) -> Self {
+        self.leading = Some(leading.into_element());
+        self
+    }
+
+    pub fn trailing(mut self, trailing: impl Component<Message>) -> Self {
+        self.trailing = Some(trailing.into_element());
+        self
+    }
+}
+
+impl<Message> Component<Message> for RadioOption<Message> {
+    fn into_element(self) -> Element<Message> {
+        let text_color = if self.enabled {
+            self.theme.text.primary
+        } else {
+            self.theme.text.disabled
+        };
+        let mut labels = Column::new()
+            .gap(self.theme.spacing.compact)
+            .grow(1.0)
+            .child(Text::new(self.label.clone()).color(text_color).wrap(true));
+        if let Some(description) = self.description.as_ref() {
+            labels = labels.child(
+                Text::new(description)
+                    .scale(0.9)
+                    .color(if self.enabled {
+                        self.theme.text.secondary
+                    } else {
+                        self.theme.text.disabled
+                    })
+                    .wrap(true),
+            );
+        }
+        let mut row = Row::new()
+            .gap(self.theme.spacing.control)
+            .align_items(Align::Center)
+            .child(SelectionIndicator::semantic(self.theme, self.selected));
+        if let Some(leading) = self.leading {
+            row = row.child(leading);
+        }
+        row = row.child(labels);
+        if let Some(trailing) = self.trailing {
+            row = row.child(trailing);
+        }
+        let state = match (self.enabled, self.selected) {
+            (false, _) => "disabled",
+            (true, true) => "selected",
+            (true, false) => "unselected",
+        };
+        let mut option = Container::new()
+            .min_height(58.0)
+            .fill_width()
+            .padding(Insets::all(self.theme.spacing.content))
+            .radius(self.theme.radii.control)
+            .background(self.theme.surfaces.card)
+            .border(
+                if self.selected {
+                    self.theme.accent.ordinary
+                } else {
+                    self.theme.borders.subtle
+                },
+                if self.selected { 2.0 } else { 1.0 },
+            )
+            .interaction_backgrounds(self.theme.surfaces.hover, self.theme.surfaces.pressed)
+            .focus_border(self.theme.borders.focus)
+            .controller_focus_border(self.theme.borders.controller_focus)
+            .message(self.message)
+            .enabled(self.enabled)
+            .semantic_role("radio")
+            .accessibility_label(self.label)
+            .accessibility_description(self.description.unwrap_or_default())
+            .accessibility_state(state)
+            .child(row);
+        if let Some(id) = self.id {
+            option = option.id(id);
+        }
+        option.into_element()
+    }
+}
+
+/// A semantic group of full-row radio options.
+pub struct RadioGroup<Message = String>(Container<Message>);
+
+impl<Message> RadioGroup<Message> {
+    pub fn new(options: impl IntoIterator<Item = RadioOption<Message>>) -> Self {
+        Self(
+            Container::new()
+                .fill_width()
+                .semantic_role("radiogroup")
+                .child(Column::new().fill_width().gap(10.0).children(options)),
+        )
+    }
+
+    pub fn id(mut self, id: impl Into<UiId>) -> Self {
+        self.0 = self.0.id(id);
+        self
+    }
+}
+
+impl<Message> Component<Message> for RadioGroup<Message> {
+    fn into_element(self) -> Element<Message> {
+        self.0.into_element()
+    }
+}
+
 /// A renderer-owned radio/selection mark that never depends on a font glyph.
 pub struct SelectionIndicator<Message = String>(Container<Message>);
 
@@ -1799,6 +2013,7 @@ impl<Message> RadioButton<Message> {
             0x202936,
             0x293545,
             0x68b8ff,
+            0x63d69a,
         )
     }
 
@@ -1822,6 +2037,7 @@ impl<Message> RadioButton<Message> {
             theme.surfaces.hover,
             theme.surfaces.pressed,
             theme.borders.focus,
+            theme.borders.controller_focus,
         )
     }
 
@@ -1836,6 +2052,7 @@ impl<Message> RadioButton<Message> {
         hover: Color,
         pressed: Color,
         focus: Color,
+        controller_focus: Color,
     ) -> Self {
         Self(
             Container::new()
@@ -1843,6 +2060,7 @@ impl<Message> RadioButton<Message> {
                 .message(message)
                 .interaction_backgrounds(hover, pressed)
                 .focus_border(focus)
+                .controller_focus_border(controller_focus)
                 .child(
                     Row::new()
                         .gap(10.0)
@@ -1911,6 +2129,10 @@ impl<Message> Slider<Message> {
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
             children: Vec::new(),
+            controller_group: false,
+            controller_pane: false,
+            controller_pane_default: false,
+            controller_step: 0.05,
         };
         element.style.height = Length::Px(24.0);
         Self(element)
@@ -1948,6 +2170,21 @@ impl<Message> Slider<Message> {
 
     pub fn width(mut self, width: f32) -> Self {
         self.0 = self.0.width(width);
+        self
+    }
+
+    pub fn controller_step(mut self, step: f32) -> Self {
+        self.0 = self.0.controller_step(step);
+        self
+    }
+
+    pub fn focus_border(mut self, color: Color) -> Self {
+        self.0 = self.0.focus_border(color);
+        self
+    }
+
+    pub fn controller_focus_border(mut self, color: Color) -> Self {
+        self.0 = self.0.controller_focus_border(color);
         self
     }
 }
@@ -1989,6 +2226,10 @@ impl<Message> Dropdown<Message> {
             option_messages,
             inline_messages: Vec::new(),
             children: Vec::new(),
+            controller_group: false,
+            controller_pane: false,
+            controller_pane_default: false,
+            controller_step: 0.05,
         };
         element.style.height = Length::Px(42.0);
         Self(element)
@@ -2098,6 +2339,10 @@ impl<Message> Menu<Message> {
             option_messages: items.into_iter().map(|item| item.message).collect(),
             inline_messages: Vec::new(),
             children: Vec::new(),
+            controller_group: false,
+            controller_pane: false,
+            controller_pane_default: false,
+            controller_step: 0.05,
         };
         element.style.height = Length::Px(30.0);
         Self(element)
@@ -2180,6 +2425,7 @@ mod semantic_control_tests {
     enum Message {
         Activate,
         Select,
+        SelectOther,
     }
 
     fn theme() -> SemanticTheme {
@@ -2193,6 +2439,7 @@ mod semantic_control_tests {
             secondary_text: 0xa0a0a0,
             accent: 0x9050e0,
             accent_soft: 0x402060,
+            secondary_accent: 0x50c080,
             positive: 0x50c080,
         })
     }
@@ -2208,6 +2455,7 @@ mod semantic_control_tests {
             secondary_text: 0x555b66,
             accent: 0x7440bd,
             accent_soft: 0xe5d8f7,
+            secondary_accent: 0x207a4b,
             positive: 0x207a4b,
         })
     }
@@ -2569,5 +2817,39 @@ mod semantic_control_tests {
             .collect::<Vec<_>>();
         assert!(radii.contains(&9.0));
         assert!(!radii.contains(&4.0));
+    }
+
+    #[test]
+    fn radio_group_owns_semantics_rows_and_typed_selection() {
+        let theme = theme();
+        let tree = UiTree::layout(
+            RadioGroup::new([
+                RadioOption::new(theme, Message::Select, "Headphones", true)
+                    .description("Active")
+                    .id("headphones"),
+                RadioOption::new(theme, Message::SelectOther, "Speakers", false)
+                    .description("Available")
+                    .id("speakers"),
+            ])
+            .id("outputs"),
+            Rect::new(0.0, 0.0, 360.0, 180.0),
+        );
+
+        assert_eq!(
+            tree.accessibility_nodes()
+                .iter()
+                .filter(|node| node.role.as_deref() == Some("radiogroup"))
+                .count(),
+            1
+        );
+        let radios = tree
+            .accessibility_nodes()
+            .iter()
+            .filter(|node| node.role.as_deref() == Some("radio"))
+            .collect::<Vec<_>>();
+        assert_eq!(radios.len(), 2);
+        assert_eq!(radios[0].state.as_deref(), Some("selected"));
+        assert_eq!(radios[1].state.as_deref(), Some("unselected"));
+        assert!(tree.message_rect(&Message::SelectOther).is_some());
     }
 }

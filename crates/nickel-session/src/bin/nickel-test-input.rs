@@ -2,18 +2,23 @@ use std::ffi::OsString;
 
 use nickel_session_protocol::{
     InputState, PointerInteraction, PreviewTargetAction, RecoveryTargetAction,
-    ScreenshotTargetAction, ShellSemanticTarget, TestInput, TestKey, TestPointerButton,
-    WindowMenuTargetAction,
+    ScreenshotTargetAction, ShellSemanticTarget, TestControllerAxis, TestControllerButton,
+    TestInput, TestKey, TestPointerButton, WindowMenuTargetAction,
 };
 
 const HELP: &str = "\
 Inject one input event into a Nickel nested session started with --test-control.
 
 Usage:
+  ni c connect|disconnect
+  ni c tap BUTTON
+  ni c button BUTTON pressed|released
+  ni c axis left-x|left-y|right-x|right-y VALUE
   nickel-test-input windows
   nickel-test-input workspaces
   nickel-test-input outputs
   nickel-test-input surfaces
+  nickel-test-input readiness
   nickel-test-input output-connect NAME WIDTH HEIGHT SCALE_120 normal|90|180|270
   nickel-test-input output-disconnect NAME
   nickel-test-input workspace-create
@@ -31,6 +36,10 @@ Usage:
   nickel-test-input semantic recovery retry|exit [OUTPUT]
   nickel-test-input semantic window WINDOW_ID hover|click|right-click
   nickel-test-input scenario grouped-windows APPLICATION_ID
+  nickel-test-input controller connect|disconnect
+  nickel-test-input controller tap BUTTON
+  nickel-test-input controller button BUTTON pressed|released
+  nickel-test-input controller axis left-x|left-y|right-x|right-y VALUE
   nickel-test-input move X Y
   nickel-test-input move-relative DX DY
   nickel-test-input wheel HORIZONTAL_V120 VERTICAL_V120
@@ -46,6 +55,7 @@ enum Parsed {
     Workspaces,
     Outputs,
     Surfaces,
+    Readiness,
     OutputConnect {
         name: String,
         width: i32,
@@ -73,7 +83,7 @@ enum Parsed {
 }
 
 fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, String> {
-    let args = args
+    let mut args = args
         .into_iter()
         .map(|value| {
             value
@@ -81,6 +91,9 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, String> {
                 .map_err(|_| "arguments must be UTF-8".to_owned())
         })
         .collect::<Result<Vec<_>, _>>()?;
+    if args.first().is_some_and(|command| command == "c") {
+        args[0] = "controller".into();
+    }
     if matches!(args.as_slice(), [value] if value == "-h" || value == "--help") {
         return Ok(Parsed::Help);
     }
@@ -89,6 +102,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, String> {
         [command] if command == "workspaces" => Ok(Parsed::Workspaces),
         [command] if command == "outputs" => Ok(Parsed::Outputs),
         [command] if command == "surfaces" => Ok(Parsed::Surfaces),
+        [command] if command == "readiness" => Ok(Parsed::Readiness),
         [command, name] if command == "output-disconnect" => {
             Ok(Parsed::OutputDisconnect(name.clone()))
         }
@@ -159,6 +173,31 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, String> {
         }
         [command] if command == "idle-inhibition" => Ok(Parsed::IdleInhibition),
         [command] if command == "caches" => Ok(Parsed::Caches),
+        [command, operation] if command == "controller" && operation == "connect" => {
+            Ok(Parsed::Input(TestInput::ControllerConnect))
+        }
+        [command, operation] if command == "controller" && operation == "disconnect" => {
+            Ok(Parsed::Input(TestInput::ControllerDisconnect))
+        }
+        [command, operation, button] if command == "controller" && operation == "tap" => {
+            Ok(Parsed::Input(TestInput::ControllerTap {
+                button: controller_button(button)?,
+            }))
+        }
+        [command, operation, button, state] if command == "controller" && operation == "button" => {
+            Ok(Parsed::Input(TestInput::ControllerButton {
+                button: controller_button(button)?,
+                state: parse_state(state)?,
+            }))
+        }
+        [command, operation, axis, value] if command == "controller" && operation == "axis" => {
+            Ok(Parsed::Input(TestInput::ControllerAxis {
+                axis: controller_axis(axis)?,
+                value: value
+                    .parse()
+                    .map_err(|_| format!("invalid controller axis value {value:?}"))?,
+            }))
+        }
         [command, kind, action] | [command, kind, action, _]
             if command == "semantic" && kind == "recovery" =>
         {
@@ -319,6 +358,35 @@ fn parse_state(value: &str) -> Result<InputState, String> {
         "pressed" => Ok(InputState::Pressed),
         "released" => Ok(InputState::Released),
         _ => Err(format!("unknown input state {value:?}")),
+    }
+}
+
+fn controller_button(value: &str) -> Result<TestControllerButton, String> {
+    match value {
+        "south" | "cross" | "a" => Ok(TestControllerButton::South),
+        "east" | "circle" | "b" => Ok(TestControllerButton::East),
+        "west" | "square" | "x" => Ok(TestControllerButton::West),
+        "north" | "triangle" | "y" => Ok(TestControllerButton::North),
+        "dpad-up" => Ok(TestControllerButton::DPadUp),
+        "dpad-down" => Ok(TestControllerButton::DPadDown),
+        "dpad-left" => Ok(TestControllerButton::DPadLeft),
+        "dpad-right" => Ok(TestControllerButton::DPadRight),
+        "left-shoulder" | "l1" => Ok(TestControllerButton::LeftShoulder),
+        "right-shoulder" | "r1" => Ok(TestControllerButton::RightShoulder),
+        "select" => Ok(TestControllerButton::Select),
+        "start" => Ok(TestControllerButton::Start),
+        "guide" | "home" => Ok(TestControllerButton::Guide),
+        _ => Err(format!("unknown controller button {value:?}")),
+    }
+}
+
+fn controller_axis(value: &str) -> Result<TestControllerAxis, String> {
+    match value {
+        "left-x" => Ok(TestControllerAxis::LeftX),
+        "left-y" => Ok(TestControllerAxis::LeftY),
+        "right-x" => Ok(TestControllerAxis::RightX),
+        "right-y" => Ok(TestControllerAxis::RightY),
+        _ => Err(format!("unknown controller axis {value:?}")),
     }
 }
 
@@ -579,6 +647,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )),
             None,
         ),
+        Parsed::Readiness => (
+            Some(Request::Query(
+                nickel_session_protocol::Query::ShellReadiness,
+            )),
+            None,
+        ),
         Parsed::OutputConnect {
             name,
             width,
@@ -814,6 +888,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Ok(())
         }
+        ServerMessage::ShellReadiness(readiness) => {
+            println!(
+                "ready={} expected_pid={:?} authenticated_pid={:?} outputs={} desktops={} panels={} locks={} launchers={} singletons_ready={} output_roles_ready={} reserved_ordinary_windows={}",
+                readiness.ready,
+                readiness.expected_shell_pid,
+                readiness.authenticated_shell_pid,
+                readiness.outputs,
+                readiness.desktops,
+                readiness.panels,
+                readiness.locks,
+                readiness.launchers,
+                readiness.required_singletons_ready,
+                readiness.output_roles_ready,
+                readiness.reserved_ordinary_windows,
+            );
+            Ok(())
+        }
         ServerMessage::Error { message, .. } => Err(message.into()),
         _ => Err("unexpected test input response".into()),
     }
@@ -833,6 +924,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         | Parsed::Workspaces
         | Parsed::Outputs
         | Parsed::Surfaces
+        | Parsed::Readiness
         | Parsed::OutputConnect { .. }
         | Parsed::OutputDisconnect(_)
         | Parsed::WorkspaceCreate
@@ -870,6 +962,7 @@ mod tests {
             }))
         ));
         assert!(matches!(parse(["caches".into()]), Ok(Parsed::Caches)));
+        assert!(matches!(parse(["readiness".into()]), Ok(Parsed::Readiness)));
         assert!(matches!(
             parse(["workspaces".into()]),
             Ok(Parsed::Workspaces)
@@ -970,6 +1063,46 @@ mod tests {
             Ok(Parsed::SessionAction(None))
         ));
         assert!(matches!(
+            parse(["controller".into(), "connect".into()]),
+            Ok(Parsed::Input(TestInput::ControllerConnect))
+        ));
+        assert!(matches!(
+            parse(["controller".into(), "tap".into(), "cross".into()]),
+            Ok(Parsed::Input(TestInput::ControllerTap {
+                button: TestControllerButton::South
+            }))
+        ));
+        assert!(matches!(
+            parse(["c".into(), "tap".into(), "l1".into()]),
+            Ok(Parsed::Input(TestInput::ControllerTap {
+                button: TestControllerButton::LeftShoulder
+            }))
+        ));
+        assert!(matches!(
+            parse([
+                "controller".into(),
+                "button".into(),
+                "r1".into(),
+                "pressed".into()
+            ]),
+            Ok(Parsed::Input(TestInput::ControllerButton {
+                button: TestControllerButton::RightShoulder,
+                state: InputState::Pressed
+            }))
+        ));
+        assert!(matches!(
+            parse([
+                "controller".into(),
+                "axis".into(),
+                "left-x".into(),
+                "32767".into()
+            ]),
+            Ok(Parsed::Input(TestInput::ControllerAxis {
+                axis: TestControllerAxis::LeftX,
+                value: 32767
+            }))
+        ));
+        assert!(matches!(
             parse(["move".into(), "64".into(), "700".into()]),
             Ok(Parsed::Input(TestInput::PointerMove { x: 64, y: 700 }))
         ));
@@ -1022,5 +1155,15 @@ mod tests {
         assert!(parse(["button".into(), "middle".into(), "pressed".into()]).is_err());
         assert!(parse(["key".into(), "home".into(), "pressed".into()]).is_err());
         assert!(parse(["wheel".into(), "sideways".into(), "120".into()]).is_err());
+        assert!(parse(["controller".into(), "tap".into(), "paddle".into()]).is_err());
+        assert!(
+            parse([
+                "controller".into(),
+                "axis".into(),
+                "left-x".into(),
+                "40000".into()
+            ])
+            .is_err()
+        );
     }
 }

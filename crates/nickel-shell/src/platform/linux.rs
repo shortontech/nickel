@@ -10,6 +10,7 @@ use std::{
     collections::HashMap,
     env,
     hash::{DefaultHasher, Hash, Hasher},
+    io,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, OnceLock,
@@ -17,21 +18,24 @@ use std::{
         mpsc,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crate::{
     desktop::Wallpaper,
     icons,
     launcher::Launcher,
-    model::{Application, ApplicationId, OpenWindow, TrayItem, WindowId, WindowPreview},
+    model::{
+        Application, ApplicationDiscovery, ApplicationId, OpenWindow, TrayItem, WindowId,
+        WindowPreview,
+    },
     notification::{
         ClosedNotification, DesktopNotification, MAX_NOTIFICATION_ACTIONS, NotificationAction,
         NotificationRequest, NotificationStore,
     },
     platform::{
-        GlobalShortcut, NotificationSource, ScreenshotAction, ShellCommand, TraySource,
-        WindowAction,
+        FeedState, GlobalShortcut, NotificationSource, ScreenshotAction, SessionRequestError,
+        ShellCommand, TraySource, WindowAction,
     },
 };
 
@@ -851,7 +855,8 @@ fn resolve_status_icon_name(name: &str) -> Option<image::RgbaImage> {
 
 fn resolve_status_application_icon(title: &str, tooltip_title: &str) -> Option<image::RgbaImage> {
     static APPLICATIONS: OnceLock<Vec<Application>> = OnceLock::new();
-    let applications = APPLICATIONS.get_or_init(desktop_entries::load_applications);
+    let applications =
+        APPLICATIONS.get_or_init(|| desktop_entries::load_applications().into_applications());
     [title, tooltip_title]
         .into_iter()
         .map(str::trim)
@@ -891,94 +896,275 @@ fn pixmap_to_rgba((width, height, bytes): (i32, i32, Vec<u8>)) -> Option<image::
 }
 
 pub fn applications() -> Vec<Application> {
+    application_discovery().into_applications()
+}
+
+pub fn application_discovery() -> ApplicationDiscovery {
     desktop_entries::load_applications()
 }
 
 fn session_request_on(
     socket: &std::os::unix::net::UnixDatagram,
     request: SessionRequest,
-) -> Option<ServerMessage> {
-    let server = env::var_os(SESSION_CONTROL_ENV)?;
+) -> Result<ServerMessage, SessionRequestError> {
     let request_id = SESSION_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+    session_request_on_with_id(socket, request, request_id)
+}
+
+fn session_request_on_with_id(
+    socket: &std::os::unix::net::UnixDatagram,
+    request: SessionRequest,
+    request_id: u64,
+) -> Result<ServerMessage, SessionRequestError> {
+    let server =
+        env::var_os(SESSION_CONTROL_ENV).ok_or(SessionRequestError::MissingControlSocket)?;
+    let token =
+        env::var(SESSION_TOKEN_ENV).map_err(|_| SessionRequestError::MissingSessionToken)?;
     let envelope = ClientEnvelope {
-        token: env::var(SESSION_TOKEN_ENV).ok()?,
+        token,
         request_id,
         request,
     };
+    let encoded = encode_session(&envelope).map_err(|_| SessionRequestError::Encoding)?;
     socket
-        .send_to(&encode_session(&envelope).ok()?, server)
-        .ok()?;
+        .send_to(&encoded, server)
+        .map_err(|_| SessionRequestError::Send)?;
     let mut response = vec![0_u8; nickel_session_protocol::MAX_FRAME_BYTES];
     loop {
-        let length = socket.recv(&mut response).ok()?;
-        let response = decode_session::<ServerEnvelope>(&response[..length]).ok()?;
+        let length = socket.recv(&mut response).map_err(session_receive_error)?;
+        let response = decode_session::<ServerEnvelope>(&response[..length])
+            .map_err(|_| SessionRequestError::Decoding)?;
         if let Some(message) = response_for_request(response, request_id) {
-            return Some(message);
+            return response_message(message);
         }
     }
+}
+
+fn session_receive_error(error: io::Error) -> SessionRequestError {
+    match error.kind() {
+        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => SessionRequestError::ReceiveTimeout,
+        _ => SessionRequestError::Receive,
+    }
+}
+
+fn response_message(message: ServerMessage) -> Result<ServerMessage, SessionRequestError> {
+    match message {
+        ServerMessage::Error {
+            code: nickel_session_protocol::ErrorCode::Unauthorized,
+            message,
+        } => Err(SessionRequestError::Authorization {
+            message: bounded_protocol_message(message),
+        }),
+        ServerMessage::Error { code, message } => Err(SessionRequestError::ServerRejection {
+            code,
+            message: bounded_protocol_message(message),
+        }),
+        message => Ok(message),
+    }
+}
+
+const MAX_PROTOCOL_ERROR_MESSAGE_CHARS: usize = 256;
+
+fn bounded_protocol_message(message: String) -> String {
+    let mut characters = message.chars().filter(|character| !character.is_control());
+    let mut bounded = characters
+        .by_ref()
+        .take(MAX_PROTOCOL_ERROR_MESSAGE_CHARS)
+        .collect::<String>();
+    if characters.next().is_some() {
+        bounded.push('…');
+    }
+    bounded
 }
 
 fn response_for_request(response: ServerEnvelope, request_id: u64) -> Option<ServerMessage> {
     (response.request_id == request_id).then_some(response.message)
 }
 
-fn one_shot_session_request(request: SessionRequest) -> Option<ServerMessage> {
+fn one_shot_session_request(request: SessionRequest) -> Result<ServerMessage, SessionRequestError> {
     use std::os::unix::net::UnixDatagram;
 
+    let operation = session_request_operation(&request);
+    let request_id = SESSION_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+    let started = Instant::now();
     let runtime = env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(env::temp_dir);
-    let path = runtime.join(format!(
-        "nickel-{}-{}.sock",
-        std::process::id(),
-        SESSION_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
-    ));
+    let path = runtime.join(format!("nickel-{}-{}.sock", std::process::id(), request_id));
     let _ = std::fs::remove_file(&path);
     let result = (|| {
-        let socket = UnixDatagram::bind(&path).ok()?;
+        let socket = UnixDatagram::bind(&path).map_err(|_| SessionRequestError::SocketBind)?;
         socket
             .set_read_timeout(Some(Duration::from_millis(250)))
-            .ok()?;
-        session_request_on(&socket, request)
+            .map_err(|_| SessionRequestError::SocketConfiguration)?;
+        session_request_on_with_id(&socket, request, request_id)
     })();
     let _ = std::fs::remove_file(path);
+    let elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
+    match &result {
+        Ok(_) => tracing::debug!(
+            operation,
+            correlation_id = request_id,
+            elapsed_ms,
+            retry_disposition = "none",
+            socket_identity = "session-control-env",
+            "session request completed"
+        ),
+        Err(error) if session_request_failure_log_admitted(operation, error.stage()) => {
+            tracing::warn!(
+                operation,
+                correlation_id = request_id,
+                stage = error.stage(),
+                elapsed_ms,
+                retry_disposition = "caller-policy",
+                socket_identity = "session-control-env",
+                error = %error,
+                "session request failed"
+            );
+        }
+        Err(_) => {}
+    }
     result
 }
 
-pub fn register_session_shell() -> bool {
-    matches!(
-        one_shot_session_request(SessionRequest::RegisterShell {
-            pid: std::process::id(),
-        }),
-        Some(ServerMessage::Snapshot(_))
-    )
+fn session_request_failure_log_admitted(operation: &'static str, stage: &'static str) -> bool {
+    static LAST_FAILURES: OnceLock<Mutex<HashMap<(&'static str, &'static str), Instant>>> =
+        OnceLock::new();
+    let Ok(mut failures) = LAST_FAILURES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+    else {
+        return false;
+    };
+    let now = Instant::now();
+    let admitted = failures
+        .get(&(operation, stage))
+        .is_none_or(|previous| now.duration_since(*previous) >= Duration::from_secs(30));
+    if admitted {
+        failures.insert((operation, stage), now);
+    }
+    admitted
 }
 
-pub fn secure_storage_state() -> super::SecureStorageState {
-    match one_shot_session_request(SessionRequest::Query(SessionQuery::SecureStorage)) {
-        Some(ServerMessage::SecureStorage { state }) => match state {
+fn session_request_operation(request: &SessionRequest) -> &'static str {
+    match request {
+        SessionRequest::RegisterShell { .. } => "register-shell",
+        SessionRequest::Subscribe => "subscribe",
+        SessionRequest::Query(query) => match query {
+            SessionQuery::Snapshot => "query-snapshot",
+            SessionQuery::Windows => "query-windows",
+            SessionQuery::Outputs => "query-outputs",
+            SessionQuery::ShellSurfaces => "query-shell-surfaces",
+            SessionQuery::ShellReadiness => "query-shell-readiness",
+            SessionQuery::LauncherVisibility => "query-launcher-visibility",
+            SessionQuery::SecureStorage => "query-secure-storage",
+            SessionQuery::IdleInhibition => "query-idle-inhibition",
+            SessionQuery::CacheDiagnostics => "query-cache-diagnostics",
+            SessionQuery::Workspaces => "query-workspaces",
+            SessionQuery::Preview { .. } => "query-preview",
+            SessionQuery::ShellSemanticTarget { .. } => "query-shell-semantic-target",
+        },
+        SessionRequest::Command(command) => match command {
+            SessionCommand::ToggleLauncher => "toggle-launcher",
+            SessionCommand::SetLauncherVisible { .. } => "set-launcher-visible",
+            SessionCommand::LogOut => "log-out",
+            SessionCommand::SessionAction { .. } => "session-action",
+            SessionCommand::Unlock => "unlock",
+            SessionCommand::RetrySecureStorage => "retry-secure-storage",
+            SessionCommand::HideOverlay => "hide-overlay",
+            SessionCommand::ShowOverlay { .. } => "show-overlay",
+            SessionCommand::FocusShellRole { .. } => "focus-shell-role",
+            SessionCommand::RestoreApplicationFocus => "restore-application-focus",
+            SessionCommand::IdentifyOutputs => "identify-outputs",
+            SessionCommand::CaptureOutput { .. } => "capture-output",
+            SessionCommand::ApplyOutputs { .. } => "apply-outputs",
+            SessionCommand::CreateWorkspace => "create-workspace",
+            SessionCommand::RemoveWorkspace { .. } => "remove-workspace",
+            SessionCommand::SwitchWorkspace { .. } => "switch-workspace",
+            SessionCommand::MoveWindowToWorkspace { .. } => "move-window-to-workspace",
+            SessionCommand::HighlightWindow { .. } => "highlight-window",
+            SessionCommand::WindowAction { .. } => "window-action",
+            SessionCommand::TestInput { .. } => "test-input",
+            SessionCommand::TestOutput { .. } => "test-output",
+        },
+    }
+}
+
+pub fn register_session_shell() -> Result<(), SessionRequestError> {
+    match one_shot_session_request(SessionRequest::RegisterShell {
+        pid: std::process::id(),
+    })? {
+        ServerMessage::Snapshot(_) => Ok(()),
+        _ => Err(SessionRequestError::UnexpectedResponse {
+            expected: "registration snapshot",
+        }),
+    }
+}
+
+pub fn shell_readiness()
+-> Result<nickel_session_protocol::ShellReadinessSnapshot, SessionRequestError> {
+    match one_shot_session_request(SessionRequest::Query(SessionQuery::ShellReadiness))? {
+        ServerMessage::ShellReadiness(snapshot) => Ok(snapshot),
+        _ => Err(SessionRequestError::UnexpectedResponse {
+            expected: "shell readiness snapshot",
+        }),
+    }
+}
+
+pub fn secure_storage_state() -> Result<super::SecureStorageState, SessionRequestError> {
+    secure_storage_response(one_shot_session_request(SessionRequest::Query(
+        SessionQuery::SecureStorage,
+    ))?)
+}
+
+fn secure_storage_response(
+    response: ServerMessage,
+) -> Result<super::SecureStorageState, SessionRequestError> {
+    match response {
+        ServerMessage::SecureStorage { state, reason } => Ok(match state {
             SessionSecureStorage::Starting => super::SecureStorageState::Starting,
             SessionSecureStorage::Locked => super::SecureStorageState::Locked,
             SessionSecureStorage::PromptRequired => super::SecureStorageState::PromptRequired,
             SessionSecureStorage::Ready => super::SecureStorageState::Ready,
-            SessionSecureStorage::Unavailable => super::SecureStorageState::Unavailable,
-        },
-        _ => super::SecureStorageState::Unavailable,
+            SessionSecureStorage::Unavailable => reason.map_or(
+                super::SecureStorageState::Unavailable,
+                super::SecureStorageState::UnavailableReason,
+            ),
+        }),
+        _ => Err(SessionRequestError::UnexpectedResponse {
+            expected: "secure-storage state",
+        }),
     }
 }
 
-pub fn request_secure_storage_retry() -> bool {
-    matches!(
-        one_shot_session_request(SessionRequest::Command(SessionCommand::RetrySecureStorage)),
-        Some(ServerMessage::Ack)
-    )
+pub fn request_secure_storage_retry() -> Result<(), SessionRequestError> {
+    secure_storage_retry_response(one_shot_session_request(SessionRequest::Command(
+        SessionCommand::RetrySecureStorage,
+    ))?)
 }
 
-pub fn send_shell_command(command: ShellCommand) -> bool {
-    matches!(
-        one_shot_session_request(SessionRequest::Command(shell_command_payload(command))),
-        Some(ServerMessage::Ack | ServerMessage::Workspaces(_))
-    )
+pub fn send_shell_command(command: ShellCommand) -> Result<(), SessionRequestError> {
+    command_response(one_shot_session_request(SessionRequest::Command(
+        shell_command_payload(command),
+    ))?)
+}
+
+fn secure_storage_retry_response(response: ServerMessage) -> Result<(), SessionRequestError> {
+    match response {
+        ServerMessage::Ack => Ok(()),
+        _ => Err(SessionRequestError::UnexpectedResponse {
+            expected: "secure-storage retry acknowledgement",
+        }),
+    }
+}
+
+fn command_response(response: ServerMessage) -> Result<(), SessionRequestError> {
+    match response {
+        ServerMessage::Ack | ServerMessage::Workspaces(_) => Ok(()),
+        _ => Err(SessionRequestError::UnexpectedResponse {
+            expected: "shell command acknowledgement",
+        }),
+    }
 }
 
 fn shell_command_payload(command: ShellCommand) -> SessionCommand {
@@ -1097,43 +1283,45 @@ impl WindowFeed {
         Self { socket, path }
     }
 
-    pub fn snapshot(&self, launcher: &Launcher) -> Option<Vec<OpenWindow>> {
-        let socket = self.socket.as_ref()?;
-        let ServerMessage::Windows(windows) =
-            session_request_on(socket, SessionRequest::Query(SessionQuery::Windows))?
-        else {
-            return None;
+    pub fn snapshot(&self, launcher: &Launcher) -> FeedState<Vec<OpenWindow>> {
+        let Some(socket) = self.socket.as_ref() else {
+            return FeedState::Disconnected;
         };
-        Some(
-            windows
-                .into_iter()
-                .map(|window| OpenWindow {
-                    id: WindowId(window.id.0),
-                    application_id: resolve_application_id(&window.application_id, launcher),
-                    active: window.active,
-                    title: window.title,
-                })
-                .collect(),
-        )
+        match session_request_on(socket, SessionRequest::Query(SessionQuery::Windows)) {
+            Ok(ServerMessage::Windows(windows)) => FeedState::Ready(
+                windows
+                    .into_iter()
+                    .map(|window| OpenWindow {
+                        id: WindowId(window.id.0),
+                        application_id: resolve_application_id(&window.application_id, launcher),
+                        active: window.active,
+                        title: window.title,
+                    })
+                    .collect(),
+            ),
+            Ok(_) => FeedState::Failed,
+            Err(error) => session_error_feed_state(error),
+        }
     }
 
-    pub fn workspaces(&self) -> Option<Vec<super::WorkspaceSummary>> {
-        let socket = self.socket.as_ref()?;
-        let ServerMessage::Workspaces(state) =
-            session_request_on(socket, SessionRequest::Query(SessionQuery::Workspaces))?
-        else {
-            return None;
+    pub fn workspaces(&self) -> FeedState<Vec<super::WorkspaceSummary>> {
+        let Some(socket) = self.socket.as_ref() else {
+            return FeedState::Disconnected;
         };
-        Some(
-            state
-                .ordered
-                .into_iter()
-                .map(|workspace| super::WorkspaceSummary {
-                    id: workspace.id.0,
-                    active: workspace.id == state.active,
-                })
-                .collect(),
-        )
+        match session_request_on(socket, SessionRequest::Query(SessionQuery::Workspaces)) {
+            Ok(ServerMessage::Workspaces(state)) => FeedState::Ready(
+                state
+                    .ordered
+                    .into_iter()
+                    .map(|workspace| super::WorkspaceSummary {
+                        id: workspace.id.0,
+                        active: workspace.id == state.active,
+                    })
+                    .collect(),
+            ),
+            Ok(_) => FeedState::Failed,
+            Err(error) => session_error_feed_state(error),
+        }
     }
 
     pub fn preview(&self, window: WindowId) -> Option<WindowPreview> {
@@ -1143,7 +1331,8 @@ impl WindowFeed {
             SessionRequest::Query(SessionQuery::Preview {
                 window: SessionWindowId(window.0),
             }),
-        )?
+        )
+        .ok()?
         else {
             return None;
         };
@@ -1161,6 +1350,23 @@ impl WindowFeed {
 
     pub fn icon(&self, _: WindowId) -> Option<image::RgbaImage> {
         None
+    }
+}
+
+fn session_error_feed_state<T>(error: SessionRequestError) -> FeedState<T> {
+    match error {
+        SessionRequestError::MissingControlSocket
+        | SessionRequestError::MissingSessionToken
+        | SessionRequestError::Send
+        | SessionRequestError::Receive
+        | SessionRequestError::ReceiveTimeout => FeedState::Disconnected,
+        SessionRequestError::SocketBind
+        | SessionRequestError::SocketConfiguration
+        | SessionRequestError::Encoding
+        | SessionRequestError::Decoding
+        | SessionRequestError::Authorization { .. }
+        | SessionRequestError::ServerRejection { .. }
+        | SessionRequestError::UnexpectedResponse { .. } => FeedState::Failed,
     }
 }
 
@@ -1503,20 +1709,22 @@ fn resolve_application_id(native_app_id: &str, launcher: &Launcher) -> Option<Ap
 
 #[cfg(test)]
 mod tests {
+    use std::io;
     use std::time::Duration;
 
     use crate::{
         launcher::Launcher,
         model::Application,
-        platform::{GlobalShortcut, ScreenshotAction, ShellCommand},
+        platform::{GlobalShortcut, ScreenshotAction, SessionRequestError, ShellCommand},
     };
 
     use super::{
-        SubscriptionState, bounded_notification_text, capture_active_window,
-        capture_active_window_to_file, crop_output_geometry, intersection_area,
-        notification_actions, notification_name_owned, parse_window, pixmap_to_rgba,
-        resolve_application_id, response_for_request, shell_command_payload, subscription_shortcut,
-        tray_retry_delay,
+        MAX_PROTOCOL_ERROR_MESSAGE_CHARS, SubscriptionState, bounded_notification_text,
+        capture_active_window, capture_active_window_to_file, command_response,
+        crop_output_geometry, intersection_area, notification_actions, notification_name_owned,
+        parse_window, pixmap_to_rgba, resolve_application_id, response_for_request,
+        response_message, secure_storage_response, secure_storage_retry_response,
+        session_receive_error, shell_command_payload, subscription_shortcut, tray_retry_delay,
     };
 
     #[test]
@@ -1676,6 +1884,134 @@ mod tests {
             response_for_request(response, 7),
             Some(nickel_session_protocol::ServerMessage::Ack)
         ));
+    }
+
+    #[test]
+    fn session_response_preserves_authorization_and_server_rejections() {
+        let authorization = response_message(nickel_session_protocol::ServerMessage::Error {
+            code: nickel_session_protocol::ErrorCode::Unauthorized,
+            message: "shell capability rejected".into(),
+        });
+        assert_eq!(
+            authorization,
+            Err(SessionRequestError::Authorization {
+                message: "shell capability rejected".into(),
+            })
+        );
+
+        let server_rejection = response_message(nickel_session_protocol::ServerMessage::Error {
+            code: nickel_session_protocol::ErrorCode::ResourceLimit,
+            message: "too many shell surfaces".into(),
+        });
+        assert_eq!(
+            server_rejection,
+            Err(SessionRequestError::ServerRejection {
+                code: nickel_session_protocol::ErrorCode::ResourceLimit,
+                message: "too many shell surfaces".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn session_response_error_details_are_bounded_and_control_free() {
+        let error = response_message(nickel_session_protocol::ServerMessage::Error {
+            code: nickel_session_protocol::ErrorCode::Internal,
+            message: format!("bad\n{}", "x".repeat(300)),
+        })
+        .expect_err("server error should remain an error");
+        let SessionRequestError::ServerRejection { message, .. } = error else {
+            panic!("expected server rejection");
+        };
+        assert_eq!(
+            message.chars().count(),
+            MAX_PROTOCOL_ERROR_MESSAGE_CHARS + 1
+        );
+        assert!(!message.chars().any(char::is_control));
+        assert!(message.ends_with('…'));
+    }
+
+    #[test]
+    fn session_receive_distinguishes_timeout_from_transport_failure() {
+        assert_eq!(
+            session_receive_error(io::Error::from(io::ErrorKind::TimedOut)),
+            SessionRequestError::ReceiveTimeout
+        );
+        assert_eq!(
+            session_receive_error(io::Error::from(io::ErrorKind::ConnectionReset)),
+            SessionRequestError::Receive
+        );
+    }
+
+    #[test]
+    fn session_command_acknowledgements_reject_unexpected_responses() {
+        assert_eq!(
+            command_response(nickel_session_protocol::ServerMessage::Ack),
+            Ok(())
+        );
+        assert_eq!(
+            command_response(nickel_session_protocol::ServerMessage::Workspaces(
+                Default::default()
+            )),
+            Ok(())
+        );
+        assert_eq!(
+            command_response(nickel_session_protocol::ServerMessage::Snapshot(
+                Default::default()
+            )),
+            Err(SessionRequestError::UnexpectedResponse {
+                expected: "shell command acknowledgement",
+            })
+        );
+        assert_eq!(
+            secure_storage_retry_response(nickel_session_protocol::ServerMessage::Snapshot(
+                Default::default(),
+            )),
+            Err(SessionRequestError::UnexpectedResponse {
+                expected: "secure-storage retry acknowledgement",
+            })
+        );
+    }
+
+    #[test]
+    fn secure_storage_response_preserves_provider_state_reason_and_malformed_response() {
+        use crate::platform::SecureStorageState;
+        use nickel_session_protocol::{
+            SecureStorageState as WireState, SecureStorageUnavailableReason as Reason,
+            ServerMessage,
+        };
+
+        for (wire, expected) in [
+            (WireState::Starting, SecureStorageState::Starting),
+            (WireState::Locked, SecureStorageState::Locked),
+            (
+                WireState::PromptRequired,
+                SecureStorageState::PromptRequired,
+            ),
+            (WireState::Ready, SecureStorageState::Ready),
+        ] {
+            assert_eq!(
+                secure_storage_response(ServerMessage::SecureStorage {
+                    state: wire,
+                    reason: None,
+                }),
+                Ok(expected)
+            );
+        }
+        assert_eq!(
+            secure_storage_response(ServerMessage::SecureStorage {
+                state: WireState::Unavailable,
+                reason: Some(Reason::PromptTimedOut),
+            }),
+            Ok(SecureStorageState::UnavailableReason(
+                Reason::PromptTimedOut
+            ))
+        );
+        assert_eq!(
+            secure_storage_response(ServerMessage::Ack),
+            Err(SessionRequestError::UnexpectedResponse {
+                expected: "secure-storage state",
+            })
+        );
     }
 
     #[test]

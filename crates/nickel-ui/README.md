@@ -42,14 +42,35 @@ the native window, event and redraw loops, presentation, and the per-window `UiS
 application owns only domain state, typed messages, `update`, and `view`. See
 `examples/standalone.rs` for the complete counter application.
 
+## Controller navigation
+
+Controller structure is declarative and renderer-owned. Mark shoulder-switchable regions with
+`controller_pane`, choose the initial pane with `controller_pane_default`, and mark nested levels
+with `controller_group`. `ControllerActivate` enters a group or begins editing a slider;
+`ControllerBack` exits one level; `ControllerAdjust` changes an active slider by its
+`controller_step`. Navigation automatically reveals off-screen semantic targets.
+
+~~~rust,ignore
+ui! {
+    <Container controller_pane={true} controller_pane_default={true}
+        controller_pane_highlight={theme.colors.secondary_accent}>
+        <Container controller_group={true} controller_focus_border={theme.borders.controller_focus}>
+            <Slider value={volume} on_change={set_volume} controller_step={0.05}
+                controller_focus_border={theme.borders.controller_focus} />
+        </Container>
+    </Container>
+}
+~~~
+
 ## Semantic visual system
 
 `SemanticTheme` is the product-neutral visual contract. Applications supply light and dark
 `SemanticColors`; `ThemePreferences::resolve` combines the stored appearance with platform and
 accessibility preferences, and `SemanticTheme::resolve` produces typed surface, border, text,
-accent, spacing, radius, sizing, typography, and motion roles. High contrast strengthens borders,
-reduced transparency resolves opaque structural surfaces, and reduced motion removes durations
-without changing hierarchy.
+accent, spacing, radius, sizing, typography, and motion roles. The ordinary accent communicates
+product selection; the contrasting `secondary_accent` communicates controller targeting. High
+contrast strengthens borders, reduced transparency resolves opaque structural surfaces, and reduced
+motion removes durations without changing hierarchy.
 
 Use `Surface`, `Button::semantic`, `RadioButton::semantic`, `SelectionIndicator`, and `Switch`
 instead of restating palette values. Their ordinary, hover, pressed, keyboard-focus, controller-focus,

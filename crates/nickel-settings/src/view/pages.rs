@@ -307,6 +307,7 @@ impl SettingsApp {
 
     pub(super) fn bar_components(&self) -> impl nickel_ui::Component<SettingsMessage> {
         let palette = self.palette();
+        let theme = self.ui_theme();
         let display_count = self.displays.len().max(1);
         let desktop_choices = (0..self.shell_settings.desktop_count).map(|index| {
             ui! {
@@ -356,7 +357,10 @@ impl SettingsApp {
                 </Text>
                 <Slider id={"bar-desktop-count"}
                     value={f32::from(self.shell_settings.desktop_count.saturating_sub(1)) / 7.0}
-                    on_change={desktop_count_message} width={520.0} />
+                    on_change={desktop_count_message} width={520.0}
+                    controller_step={1.0 / 7.0}
+                    focus_border={theme.borders.focus}
+                    controller_focus_border={theme.borders.controller_focus} />
                 <Row height={46.0} gap={8.0} children={desktop_choices} />
             </Column>
         }

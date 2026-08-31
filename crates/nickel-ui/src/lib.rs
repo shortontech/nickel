@@ -125,6 +125,60 @@ mod declarative_tests {
         Message::Query(value)
     }
 
+    #[test]
+    fn declarative_controller_panes_groups_and_adjustment_share_one_state_machine() {
+        let view = ui! {
+            <Row>
+                <Container id={"sidebar"} controller_pane={true}
+                    controller_pane_default={false} controller_pane_highlight={0x8b5cf6}>
+                    <Button on_press={Message::Save}>{"Save"}</Button>
+                </Container>
+                <Container id={"content"} controller_pane={true}
+                    controller_pane_default={true} controller_pane_highlight={0x8b5cf6}>
+                    <Container id={"audio"} controller_group={true}
+                        controller_focus_border={0x55d98b}>
+                        <Slider id={"volume"} value={0.5} on_change={volume}
+                            controller_step={0.1} controller_focus_border={0x55d98b} />
+                    </Container>
+                </Container>
+            </Row>
+        };
+        let mut state = UiStateStore::default();
+        let tree = UiTree::layout_with_state(view, Rect::new(0.0, 0.0, 480.0, 240.0), &mut state);
+
+        tree.handle_event(&mut state, UiEvent::ControllerNext);
+        assert!(
+            state
+                .controller_selected()
+                .is_some_and(|id| id.as_str().ends_with("/audio"))
+        );
+        tree.handle_event(&mut state, UiEvent::ControllerActivate);
+        assert!(state.controller_scope().is_some());
+        tree.handle_event(&mut state, UiEvent::ControllerActivate);
+        assert!(state.controller_editing());
+        let adjusted = tree.handle_event(&mut state, UiEvent::ControllerAdjust(1.0));
+        assert_eq!(adjusted.messages, vec![Message::Volume(0.6)]);
+        tree.handle_event(&mut state, UiEvent::ControllerBack);
+        assert!(!state.controller_editing());
+
+        tree.handle_event(&mut state, UiEvent::ControllerPreviousPane);
+        assert!(
+            state
+                .controller_selected()
+                .is_some_and(|id| id.as_str().contains("sidebar"))
+        );
+
+        tree.handle_event(&mut state, UiEvent::FocusLost);
+        assert!(!state.window_focused());
+        assert!(state.controller_selected().is_none());
+        tree.handle_event(&mut state, UiEvent::ControllerNext);
+        assert!(state.controller_selected().is_none());
+
+        tree.handle_event(&mut state, UiEvent::FocusGained);
+        tree.handle_event(&mut state, UiEvent::ControllerNext);
+        assert!(state.controller_selected().is_some());
+    }
+
     #[component]
     fn ItemCard(label: &str, message: Message, tone: Option<Color>) -> impl View<Message> {
         ui! {

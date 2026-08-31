@@ -108,6 +108,10 @@ pub struct UiStateStore {
     pressed: Option<UiId>,
     captured: Option<UiId>,
     controller_selected: Option<UiId>,
+    controller_pane: Option<UiId>,
+    controller_scope: Option<UiId>,
+    controller_editing: bool,
+    window_focused: bool,
     caret_visible: bool,
     selection_owner: Option<UiId>,
     document_selections: HashMap<UiId, DocumentSelection>,
@@ -131,6 +135,10 @@ impl UiStateStore {
             pressed: None,
             captured: None,
             controller_selected: None,
+            controller_pane: None,
+            controller_scope: None,
+            controller_editing: false,
+            window_focused: true,
             caret_visible: true,
             selection_owner: None,
             document_selections: HashMap::new(),
@@ -219,6 +227,56 @@ impl UiStateStore {
 
     pub fn controller_selected(&self) -> Option<&UiId> {
         self.controller_selected.as_ref()
+    }
+
+    pub fn controller_pane(&self) -> Option<&UiId> {
+        self.controller_pane.as_ref()
+    }
+
+    pub fn controller_scope(&self) -> Option<&UiId> {
+        self.controller_scope.as_ref()
+    }
+
+    pub fn controller_editing(&self) -> bool {
+        self.controller_editing
+    }
+
+    pub fn window_focused(&self) -> bool {
+        self.window_focused
+    }
+
+    pub fn set_window_focused(&mut self, focused: bool) -> Invalidation {
+        let changed = self.window_focused != focused;
+        self.window_focused = focused;
+        let controller_changed = if focused {
+            false
+        } else {
+            self.controller_selected.take().is_some()
+                | self.controller_scope.take().is_some()
+                | std::mem::take(&mut self.controller_editing)
+        };
+        if changed || controller_changed {
+            Invalidation::Paint
+        } else {
+            Invalidation::None
+        }
+    }
+
+    pub fn set_controller_pane(&mut self, id: Option<UiId>) -> Invalidation {
+        replace_if_changed(&mut self.controller_pane, id, Invalidation::Paint)
+    }
+
+    pub fn set_controller_scope(&mut self, id: Option<UiId>) -> Invalidation {
+        replace_if_changed(&mut self.controller_scope, id, Invalidation::Paint)
+    }
+
+    pub fn set_controller_editing(&mut self, editing: bool) -> Invalidation {
+        if self.controller_editing == editing {
+            Invalidation::None
+        } else {
+            self.controller_editing = editing;
+            Invalidation::Paint
+        }
     }
 
     pub fn selection_owner(&self) -> Option<&UiId> {
@@ -359,6 +417,9 @@ impl UiStateStore {
         self.pressed = None;
         self.captured = None;
         self.controller_selected = None;
+        self.controller_pane = None;
+        self.controller_scope = None;
+        self.controller_editing = false;
         self.caret_visible = true;
         self.selection_owner = None;
         self.document_selections.clear();
@@ -373,6 +434,8 @@ impl UiStateStore {
             &mut self.pressed,
             &mut self.captured,
             &mut self.controller_selected,
+            &mut self.controller_pane,
+            &mut self.controller_scope,
             &mut self.selection_owner,
         ] {
             if owner.as_ref().is_some_and(|id| !entries.contains_key(id)) {

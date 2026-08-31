@@ -24,6 +24,22 @@ const ERROR: Color = 0x542a2a;
 const TRANSCRIPT_GAP: f32 = 10.0;
 const TRANSCRIPT_VIEWPORT_ESTIMATE: f32 = 600.0;
 const TRANSCRIPT_OVERSCAN: f32 = 900.0;
+
+fn semantic_theme() -> SemanticTheme {
+    SemanticTheme::new(SemanticColors {
+        window: BACKGROUND,
+        sidebar: SIDEBAR,
+        card: PANEL,
+        raised: BORDER,
+        hover: BORDER,
+        primary_text: TEXT,
+        secondary_text: MUTED,
+        accent: ACCENT,
+        accent_soft: USER,
+        secondary_accent: 0x63d69a,
+        positive: 0x63d69a,
+    })
+}
 #[cfg(test)]
 static DEFAULT_CODEX_SETTINGS: std::sync::LazyLock<CodexSettings> =
     std::sync::LazyLock::new(CodexSettings::default);
@@ -1062,6 +1078,7 @@ fn connection_menu(settings: &CodexSettings) -> Menu<ChatMessage> {
 }
 
 fn project_menu_view(state: &ChatState, settings_error: Option<&str>) -> impl View<ChatMessage> {
+    let controller_focus = semantic_theme().borders.controller_focus;
     let status = match state.status {
         ConnectionStatus::Loading => "Loading projects…",
         ConnectionStatus::Ready if state.projects.is_empty() => "No projects available",
@@ -1074,7 +1091,8 @@ fn project_menu_view(state: &ChatState, settings_error: Option<&str>) -> impl Vi
             background={BACKGROUND} border={Border::new(BORDER, 1.0)}>
             <Row fill_width shrink={0.0} gap={8.0}>
                 <Text scale={1.25} color={TEXT} grow={1.0}>{"Codex projects"}</Text>
-                <Button on_press={ChatMessage::Refresh} background={PANEL} color={TEXT}>{"Retry"}</Button>
+                <Button on_press={ChatMessage::Refresh} background={PANEL} color={TEXT}
+                    controller_focus_border={controller_focus}>{"Retry"}</Button>
             </Row>
             <Text color={MUTED} shrink={0.0}>{status}</Text>
             {state.diagnostics.back().map(|diagnostic| ui! {
@@ -1095,6 +1113,7 @@ fn project_menu_view(state: &ChatState, settings_error: Option<&str>) -> impl Vi
                         <Button key={project.id.clone()} height={42.0}
                             on_press={ChatMessage::NewChatIn(root, project.id.clone())}
                             background={PANEL} color={TEXT} label_align={TextAlign::Start}
+                            controller_focus_border={controller_focus}
                             padding={Insets::symmetric(12.0, 8.0)} fill_width>{&project.name}</Button>
                     }
                 })}

@@ -129,8 +129,31 @@ fn same_session_user(pid: u32) -> bool {
     process_uid(pid).is_some_and(|uid| process_uid(std::process::id()).as_deref() == Some(&uid))
 }
 
-fn shell_registration_allowed(expected_pid: u32, claimed_pid: u32) -> bool {
-    expected_pid != 0 && expected_pid == claimed_pid && same_session_user(claimed_pid)
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ShellRegistrationRejection {
+    ClaimedPeerMismatch,
+    NoActiveGeneration,
+    OutsideActiveGeneration,
+    OutsideSessionUser,
+}
+
+fn shell_registration_rejection(
+    expected_pid: u32,
+    claimed_pid: u32,
+    peer_pid: u32,
+    same_user: bool,
+) -> Option<ShellRegistrationRejection> {
+    if claimed_pid != peer_pid {
+        Some(ShellRegistrationRejection::ClaimedPeerMismatch)
+    } else if expected_pid == 0 {
+        Some(ShellRegistrationRejection::NoActiveGeneration)
+    } else if expected_pid != claimed_pid {
+        Some(ShellRegistrationRejection::OutsideActiveGeneration)
+    } else if !same_user {
+        Some(ShellRegistrationRejection::OutsideSessionUser)
+    } else {
+        None
+    }
 }
 
 fn command_requires_shell_identity(command: &SessionCommand) -> bool {
@@ -152,6 +175,38 @@ fn test_control_may_invoke(command: &SessionCommand) -> bool {
                 action: nickel_session_protocol::SessionAction::Lock
             }
     )
+}
+
+const SHELL_OUTPUT_METADATA_MARKER: &str = "[output=";
+
+fn shell_surface_output_from_title(title: &str) -> Option<String> {
+    let output = title
+        .strip_suffix(']')?
+        .rsplit_once(SHELL_OUTPUT_METADATA_MARKER)?
+        .1;
+    (!output.is_empty()
+        && output
+            .chars()
+            .all(|character| !character.is_control() && character != ']'))
+    .then_some(output.to_owned())
+}
+
+fn output_index_for_shell_surface(output_name: &str, output_names: &[String]) -> Option<usize> {
+    if let Some(index) = output_names.iter().position(|name| name == output_name) {
+        return Some(index);
+    }
+
+    let mut matches = output_names
+        .iter()
+        .enumerate()
+        .filter(|(_, name)| {
+            output_name
+                .strip_suffix(name.as_str())
+                .is_some_and(|prefix| prefix.ends_with(" - "))
+        })
+        .map(|(index, _)| index);
+    let index = matches.next()?;
+    matches.next().is_none().then_some(index)
 }
 
 fn shell_role_accepts_ordinary_focus(role: ShellRole) -> bool {
@@ -252,7 +307,11 @@ pub struct NickelSession {
     launcher_subscribers: Vec<PathBuf>,
     protocol_token: String,
     authenticated_shell_pids: HashSet<u32>,
+    registered_shell_role_slots: Vec<(ShellRole, Option<String>)>,
+    last_logged_shell_readiness: Option<nickel_session_protocol::ShellReadinessSnapshot>,
     test_control_enabled: bool,
+    #[cfg(target_os = "linux")]
+    pub(crate) test_controller: Option<crate::test_input::TestController>,
     expected_shell_pid: Arc<AtomicU32>,
     pub launcher_show_requested_at: Option<std::time::Instant>,
     pub desktop_windows: Vec<Window>,
@@ -552,7 +611,11 @@ impl NickelSession {
             launcher_subscribers: Vec::new(),
             protocol_token,
             authenticated_shell_pids: HashSet::new(),
+            registered_shell_role_slots: Vec::new(),
+            last_logged_shell_readiness: None,
             test_control_enabled,
+            #[cfg(target_os = "linux")]
+            test_controller: None,
             expected_shell_pid: Arc::new(AtomicU32::new(0)),
             launcher_show_requested_at: None,
             desktop_windows: Vec::new(),
@@ -765,17 +828,28 @@ impl NickelSession {
         source: Option<&std::path::Path>,
         peer_pid: u32,
     ) -> ServerMessage {
+        let request_id = envelope.request_id;
         if envelope.token != self.protocol_token {
             return protocol_error(ErrorCode::Unauthorized, "invalid session capability");
         }
         match envelope.request {
             Request::RegisterShell { pid } => {
-                if pid != peer_pid
-                    || !shell_registration_allowed(
-                        self.expected_shell_pid.load(Ordering::Acquire),
-                        pid,
-                    )
-                {
+                let expected_pid = self.expected_shell_pid.load(Ordering::Acquire);
+                if let Some(rejection) = shell_registration_rejection(
+                    expected_pid,
+                    pid,
+                    peer_pid,
+                    same_session_user(pid),
+                ) {
+                    tracing::warn!(
+                        operation = "register-shell",
+                        correlation_id = request_id,
+                        claimed_pid = pid,
+                        peer_pid,
+                        expected_pid,
+                        rejection_category = ?rejection,
+                        "shell registration rejected"
+                    );
                     return protocol_error(
                         ErrorCode::Unauthorized,
                         "shell process is outside the active user session",
@@ -814,7 +888,7 @@ impl NickelSession {
                         "command requires the authenticated Nickel shell process",
                     );
                 }
-                self.handle_protocol_command(command, source, envelope.request_id)
+                self.handle_protocol_command(command, source, request_id)
             }
         }
     }
@@ -830,11 +904,16 @@ impl NickelSession {
             ),
             Query::Outputs => ServerMessage::Outputs(self.protocol_outputs()),
             Query::ShellSurfaces => ServerMessage::ShellSurfaces(self.protocol_shell_surfaces()),
+            Query::ShellReadiness => ServerMessage::ShellReadiness(self.protocol_shell_readiness()),
             Query::LauncherVisibility => ServerMessage::LauncherVisibility {
                 visible: self.launcher_visibility.is_visible(),
             },
             Query::SecureStorage => ServerMessage::SecureStorage {
                 state: self.protocol_secure_storage_state(),
+                reason: (self.secure_storage_state()
+                    == crate::login_services::SecureStorageState::Unavailable)
+                    .then(crate::login_services::secure_storage_unavailable_reason)
+                    .flatten(),
             },
             Query::IdleInhibition => ServerMessage::IdleInhibition {
                 surfaces: {
@@ -1420,6 +1499,8 @@ impl NickelSession {
 
     pub(crate) fn protocol_shell_surfaces(&self) -> Vec<ShellSurfaceSnapshot> {
         let registry = self.windows.snapshot();
+        let outputs = self.space.outputs().cloned().collect::<Vec<_>>();
+        let output_names = outputs.iter().map(Output::name).collect::<Vec<_>>();
         self.shell_windows()
             .filter_map(|window| {
                 let id = window
@@ -1437,25 +1518,31 @@ impl NickelSession {
                     width: bounds.size.w,
                     height: bounds.size.h,
                 });
-                let output = bounds.and_then(|bounds| {
-                    self.space
-                        .outputs()
-                        .filter_map(|output| {
-                            let output_bounds = self.space.output_geometry(output)?;
-                            let left = bounds.loc.x.max(output_bounds.loc.x);
-                            let top = bounds.loc.y.max(output_bounds.loc.y);
-                            let right = (bounds.loc.x + bounds.size.w)
-                                .min(output_bounds.loc.x + output_bounds.size.w);
-                            let bottom = (bounds.loc.y + bounds.size.h)
-                                .min(output_bounds.loc.y + output_bounds.size.h);
-                            let area =
-                                i64::from((right - left).max(0)) * i64::from((bottom - top).max(0));
-                            Some((area, output.name()))
+                let output = self
+                    .shell_surface_output_name(window)
+                    .and_then(|name| output_index_for_shell_surface(&name, &output_names))
+                    .map(|index| output_names[index].clone())
+                    .or_else(|| {
+                        bounds.and_then(|bounds| {
+                            outputs
+                                .iter()
+                                .filter_map(|output| {
+                                    let output_bounds = self.space.output_geometry(output)?;
+                                    let left = bounds.loc.x.max(output_bounds.loc.x);
+                                    let top = bounds.loc.y.max(output_bounds.loc.y);
+                                    let right = (bounds.loc.x + bounds.size.w)
+                                        .min(output_bounds.loc.x + output_bounds.size.w);
+                                    let bottom = (bounds.loc.y + bounds.size.h)
+                                        .min(output_bounds.loc.y + output_bounds.size.h);
+                                    let area = i64::from((right - left).max(0))
+                                        * i64::from((bottom - top).max(0));
+                                    Some((area, output.name()))
+                                })
+                                .max_by_key(|(area, _)| *area)
+                                .filter(|(area, _)| *area > 0)
+                                .map(|(_, name)| name)
                         })
-                        .max_by_key(|(area, _)| *area)
-                        .filter(|(area, _)| *area > 0)
-                        .map(|(_, name)| name)
-                });
+                    });
                 Some(ShellSurfaceSnapshot {
                     role,
                     geometry,
@@ -1464,6 +1551,133 @@ impl NickelSession {
             })
             .take(nickel_session_protocol::MAX_WINDOWS)
             .collect()
+    }
+
+    pub(crate) fn protocol_shell_readiness(
+        &self,
+    ) -> nickel_session_protocol::ShellReadinessSnapshot {
+        let expected_shell_pid = match self.expected_shell_pid.load(Ordering::Acquire) {
+            0 => None,
+            pid => Some(pid),
+        };
+        let authenticated_shell_pid = self.authenticated_shell_pids.iter().copied().next();
+        let outputs = u16::try_from(self.space.outputs().count()).unwrap_or(u16::MAX);
+        let surfaces = self.protocol_shell_surfaces();
+        let role_count = |role| {
+            u16::try_from(
+                surfaces
+                    .iter()
+                    .filter(|surface| surface.role == role)
+                    .count(),
+            )
+            .unwrap_or(u16::MAX)
+        };
+        let desktops = role_count(ShellRole::Desktop);
+        let panels = role_count(ShellRole::Panel);
+        let registered_role_count = |role| {
+            u16::try_from(
+                self.registered_shell_role_slots
+                    .iter()
+                    .filter(|(registered, _)| *registered == role)
+                    .count(),
+            )
+            .unwrap_or(u16::MAX)
+        };
+        let locks = registered_role_count(ShellRole::Lock);
+        let launchers = u16::from(
+            self.launcher_window
+                .as_ref()
+                .is_some_and(|window| window.alive()),
+        );
+        let reserved_ordinary_windows = u16::try_from(
+            self.windows
+                .snapshot()
+                .iter()
+                .filter(|window| {
+                    ShellRole::from_application_id(&window.app_id).is_some()
+                        && !self.shell_owned_windows.contains(&window.id)
+                })
+                .count(),
+        )
+        .unwrap_or(u16::MAX);
+        let required_singletons_ready = [
+            ShellRole::Launcher,
+            ShellRole::ControlCenter,
+            ShellRole::ContextMenu,
+            ShellRole::Preview,
+            ShellRole::Notification,
+            ShellRole::ProjectMenu,
+            ShellRole::Screenshot,
+        ]
+        .into_iter()
+        .all(|role| registered_role_count(role) == 1 && role_count(role) <= 1);
+        let output_names = self
+            .space
+            .outputs()
+            .map(|output| output.name())
+            .collect::<HashSet<_>>();
+        let registered_role_outputs = |role| {
+            self.registered_shell_role_slots
+                .iter()
+                .filter(|(registered, _)| *registered == role)
+                .filter_map(|(_, output)| output.clone())
+                .collect::<HashSet<_>>()
+        };
+        let live_role_outputs = |role| {
+            surfaces
+                .iter()
+                .filter(|surface| surface.role == role)
+                .filter_map(|surface| surface.output.clone())
+                .collect::<HashSet<_>>()
+        };
+        let output_roles_ready = live_role_outputs(ShellRole::Desktop) == output_names
+            && live_role_outputs(ShellRole::Panel) == output_names
+            && registered_role_outputs(ShellRole::Lock) == output_names;
+        let ready = expected_shell_pid.is_some()
+            && expected_shell_pid == authenticated_shell_pid
+            && desktops == outputs
+            && panels == outputs
+            && locks == outputs
+            && launchers == 1
+            && required_singletons_ready
+            && output_roles_ready
+            && reserved_ordinary_windows == 0;
+        nickel_session_protocol::ShellReadinessSnapshot {
+            expected_shell_pid,
+            authenticated_shell_pid,
+            outputs,
+            desktops,
+            panels,
+            locks,
+            launchers,
+            required_singletons_ready,
+            output_roles_ready,
+            reserved_ordinary_windows,
+            ready,
+        }
+    }
+
+    pub(crate) fn log_shell_readiness_if_changed(&mut self) {
+        let readiness = self.protocol_shell_readiness();
+        if self.last_logged_shell_readiness.as_ref() == Some(&readiness) {
+            return;
+        }
+        tracing::info!(
+            expected_shell_pid = ?readiness.expected_shell_pid,
+            authenticated_shell_pid = ?readiness.authenticated_shell_pid,
+            outputs = readiness.outputs,
+            desktops = readiness.desktops,
+            panels = readiness.panels,
+            locks = readiness.locks,
+            launchers = readiness.launchers,
+            required_singletons_ready = readiness.required_singletons_ready,
+            output_roles_ready = readiness.output_roles_ready,
+            reserved_ordinary_windows = readiness.reserved_ordinary_windows,
+            control_channel_health = "available",
+            ready = readiness.ready,
+            "shell readiness changed"
+        );
+        self.last_logged_shell_readiness = Some(readiness);
     }
 
     fn protocol_snapshot(&self) -> SessionSnapshot {
@@ -2225,6 +2439,17 @@ impl NickelSession {
     }
 
     fn retire_shell_surface_roles(&mut self) {
+        // A replacement shell generation must never expose the previous
+        // generation through the ordinary Space render/input paths. Keep the
+        // registry IDs shell-owned until destruction, but unmap and close all
+        // role surfaces atomically before dropping their role collections.
+        let retired = self.shell_windows().cloned().collect::<Vec<_>>();
+        for window in retired {
+            self.space.unmap_elem(&window);
+            if let Some(toplevel) = window.toplevel() {
+                toplevel.send_close();
+            }
+        }
         self.launcher_window = None;
         self.desktop_windows.clear();
         self.panel_windows.clear();
@@ -2232,6 +2457,32 @@ impl NickelSession {
         self.utility_windows.clear();
         self.context_menu_window = None;
         self.preview_window = None;
+        self.registered_shell_role_slots.clear();
+    }
+
+    pub(crate) fn record_shell_role_registration(&mut self, window: &Window, role: ShellRole) {
+        let output = matches!(
+            role,
+            ShellRole::Desktop | ShellRole::Panel | ShellRole::Lock
+        )
+        .then(|| self.shell_surface_output_name(window))
+        .flatten()
+        .and_then(|name| {
+            let output_names = self.space.outputs().map(Output::name).collect::<Vec<_>>();
+            output_index_for_shell_surface(&name, &output_names)
+                .map(|index| output_names[index].clone())
+        });
+        if matches!(
+            role,
+            ShellRole::Desktop | ShellRole::Panel | ShellRole::Lock
+        ) && output.is_none()
+        {
+            return;
+        }
+        let slot = (role, output);
+        if !self.registered_shell_role_slots.contains(&slot) {
+            self.registered_shell_role_slots.push(slot);
+        }
     }
 
     pub fn register_panel(&mut self, window: Window) {
@@ -2256,6 +2507,13 @@ impl NickelSession {
 
     pub fn is_panel_window(&self, window: &Window) -> bool {
         self.panel_windows.contains(window)
+    }
+
+    pub fn is_shell_owned_window(&self, window: &Window) -> bool {
+        window
+            .wl_surface()
+            .and_then(|surface| self.surface_windows.get(&surface.id()))
+            .is_some_and(|id| self.shell_owned_windows.contains(id))
     }
 
     pub fn is_fullscreen_window(&self, window: &Window) -> bool {
@@ -2405,8 +2663,7 @@ impl NickelSession {
 
     pub fn register_lock(&mut self, window: Window) {
         window.override_z_index(100);
-        self.lock_windows
-            .retain(|candidate| self.space.elements().any(|mapped| mapped == candidate));
+        self.lock_windows.retain(IsAlive::alive);
         if !self.lock_windows.contains(&window) {
             // SDL recreates native Wayland surfaces when a hidden window is
             // shown. The replacement may register before the old surface's
@@ -2447,8 +2704,17 @@ impl NickelSession {
 
     fn relayout_lock_surfaces(&mut self) {
         let outputs = self.space.outputs().cloned().collect::<Vec<_>>();
-        for (lock, output) in self.lock_windows.clone().into_iter().zip(outputs) {
-            let Some(geometry) = self.space.output_geometry(&output) else {
+        let output_names = outputs.iter().map(Output::name).collect::<Vec<_>>();
+        for lock in self.lock_windows.clone() {
+            let Some(output_name) = self.shell_surface_output_name(&lock) else {
+                continue;
+            };
+            let Some(output_index) = output_index_for_shell_surface(&output_name, &output_names)
+            else {
+                continue;
+            };
+            let output = &outputs[output_index];
+            let Some(geometry) = self.space.output_geometry(output) else {
                 continue;
             };
             Self::configure_window(
@@ -2939,15 +3205,35 @@ impl NickelSession {
         }
     }
 
+    fn shell_surface_output_name(&self, window: &Window) -> Option<String> {
+        let id = window
+            .wl_surface()
+            .and_then(|surface| self.surface_windows.get(&surface.id()))?;
+        let title = self
+            .windows
+            .snapshot()
+            .into_iter()
+            .find(|entry| entry.id == *id)?
+            .title
+            .clone();
+        shell_surface_output_from_title(&title)
+    }
+
     pub fn relayout_shell_surfaces(&mut self) {
         if self.output_geometry().is_none() {
             return;
         }
-        // SDL creates desktop and panel windows in the compositor-advertised
-        // display order. Space preserves that output insertion order, so the
-        // shell surfaces must use it rather than a separately sorted model.
         let outputs = self.space.outputs().cloned().collect::<Vec<_>>();
-        for (desktop, output) in self.desktop_windows.clone().into_iter().zip(&outputs) {
+        let output_names = outputs.iter().map(Output::name).collect::<Vec<_>>();
+        for desktop in self.desktop_windows.clone() {
+            let Some(output_name) = self.shell_surface_output_name(&desktop) else {
+                continue;
+            };
+            let Some(output_index) = output_index_for_shell_surface(&output_name, &output_names)
+            else {
+                continue;
+            };
+            let output = &outputs[output_index];
             let Some(geometry) = self.space.output_geometry(output) else {
                 continue;
             };
@@ -2961,8 +3247,16 @@ impl NickelSession {
             let location = Self::shell_surface_location(&desktop, geometry);
             self.space.map_element(desktop, location, false);
         }
-        for (panel, output) in self.panel_windows.clone().into_iter().zip(outputs) {
-            let Some(output) = self.space.output_geometry(&output) else {
+        for panel in self.panel_windows.clone() {
+            let Some(output_name) = self.shell_surface_output_name(&panel) else {
+                continue;
+            };
+            let Some(output_index) = output_index_for_shell_surface(&output_name, &output_names)
+            else {
+                continue;
+            };
+            let output = &outputs[output_index];
+            let Some(output) = self.space.output_geometry(output) else {
                 continue;
             };
             let output = Geometry {
@@ -3727,10 +4021,12 @@ impl ClientData for ClientState {
 #[cfg(test)]
 mod protocol_tests {
     use super::{
-        clamp_decorated_content_to_work_area, clamp_window_location,
+        ShellRegistrationRejection, clamp_decorated_content_to_work_area, clamp_window_location,
         command_requires_shell_identity, drag_icon_location, maximized_content_geometry,
-        restored_drag_content_geometry, retain_live_idle_inhibitors, shell_registration_allowed,
-        shell_role_accepts_ordinary_focus, test_control_may_invoke,
+        output_index_for_shell_surface, restored_drag_content_geometry,
+        retain_live_idle_inhibitors, shell_registration_rejection,
+        shell_role_accepts_ordinary_focus, shell_surface_output_from_title,
+        test_control_may_invoke,
     };
     use crate::shell_layout::Geometry;
     use nickel_session_protocol::{Command, SessionAction, ShellRole};
@@ -3740,13 +4036,26 @@ mod protocol_tests {
     #[test]
     fn only_the_exact_supervised_shell_pid_can_register() {
         let current = std::process::id();
-        assert!(shell_registration_allowed(current, current));
-        assert!(!shell_registration_allowed(0, current));
-        assert!(!shell_registration_allowed(
-            current.saturating_add(1),
-            current
-        ));
-        assert!(!shell_registration_allowed(current, u32::MAX));
+        assert_eq!(
+            shell_registration_rejection(current, current, current + 1, true),
+            Some(ShellRegistrationRejection::ClaimedPeerMismatch)
+        );
+        assert_eq!(
+            shell_registration_rejection(0, current, current, true),
+            Some(ShellRegistrationRejection::NoActiveGeneration)
+        );
+        assert_eq!(
+            shell_registration_rejection(current + 1, current, current, true),
+            Some(ShellRegistrationRejection::OutsideActiveGeneration)
+        );
+        assert_eq!(
+            shell_registration_rejection(current, current, current, false),
+            Some(ShellRegistrationRejection::OutsideSessionUser)
+        );
+        assert_eq!(
+            shell_registration_rejection(current, current, current, true),
+            None
+        );
     }
 
     #[test]
@@ -3808,6 +4117,75 @@ mod protocol_tests {
         let mut inhibitors = HashMap::from([("alive", 2), ("disconnected", 1)]);
         retain_live_idle_inhibitors(&mut inhibitors, |surface| *surface == "alive");
         assert_eq!(inhibitors, HashMap::from([("alive", 2)]));
+    }
+
+    #[test]
+    fn shell_surface_output_identity_survives_reversed_registration_order() {
+        let outputs = vec!["DP-2".into(), "DP-1".into()];
+        let registered_surfaces = [
+            "Nickel Panel [output=DP-1]",
+            "Nickel Desktop [output=DP-1]",
+            "Nickel Panel [output=DP-2]",
+            "Nickel Desktop [output=DP-2]",
+        ];
+        let names = registered_surfaces
+            .iter()
+            .map(|title| shell_surface_output_from_title(title).unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            names
+                .iter()
+                .map(|name| output_index_for_shell_surface(name, &outputs))
+                .collect::<Vec<_>>(),
+            [Some(1), Some(1), Some(0), Some(0)]
+        );
+    }
+
+    #[test]
+    fn descriptive_sdl_output_names_resolve_to_authoritative_connector_names() {
+        let outputs = vec!["DVI-I-1".into(), "DP-3".into()];
+
+        assert_eq!(
+            output_index_for_shell_surface("Unknown - Odyssey G40B - DP-3", &outputs),
+            Some(1)
+        );
+        assert_eq!(
+            output_index_for_shell_surface("Unknown - MB16A - DVI-I-1", &outputs),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn descriptive_output_matching_rejects_missing_or_ambiguous_connectors() {
+        assert_eq!(
+            output_index_for_shell_surface("Unknown - DisplayPort-1", &["DP-1".into()]),
+            None
+        );
+        assert_eq!(
+            output_index_for_shell_surface(
+                "Unknown - Display - DP-1",
+                &["DP-1".into(), "Display - DP-1".into()]
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn shell_surface_output_metadata_rejects_ambiguous_titles() {
+        assert_eq!(shell_surface_output_from_title("Nickel Panel"), None);
+        assert_eq!(
+            shell_surface_output_from_title("Nickel Panel [output=]"),
+            None
+        );
+        assert_eq!(
+            shell_surface_output_from_title("Nickel Panel [output=DP-1]extra"),
+            None
+        );
+        assert_eq!(
+            shell_surface_output_from_title("Nickel Panel [output=DP-1]"),
+            Some("DP-1".into())
+        );
     }
 
     #[test]

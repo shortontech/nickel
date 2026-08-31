@@ -102,10 +102,13 @@ use nickel_input::{
 use crate::{
     desktop::{Wallpaper, WallpaperPosition},
     launcher::Launcher,
-    model::{Application, ApplicationId, OpenWindow, TrayItem, WindowId, WindowPreview},
+    model::{
+        Application, ApplicationDiscovery, ApplicationId, OpenWindow, TrayItem, WindowId,
+        WindowPreview,
+    },
     platform::{
-        DesktopCapture, GlobalShortcut, LaunchError, NotificationSource, ScreenshotAction,
-        ShellCommand, TraySource, WindowAction,
+        DesktopCapture, FeedState, GlobalShortcut, LaunchError, NotificationSource,
+        ScreenshotAction, ShellCommand, TraySource, WindowAction,
     },
 };
 
@@ -551,6 +554,10 @@ mod start_menu;
 
 pub fn applications() -> Vec<Application> {
     start_menu::load_applications()
+}
+
+pub fn application_discovery() -> ApplicationDiscovery {
+    ApplicationDiscovery::ready(applications())
 }
 
 pub fn application_icon(reference: &str) -> Option<image::RgbaImage> {
@@ -2823,8 +2830,8 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
     }
 }
 
-pub fn register_session_shell() -> bool {
-    true
+pub fn register_session_shell() -> Result<(), super::SessionRequestError> {
+    Ok(())
 }
 
 fn should_restore_on_activation(iconic: bool, covers_monitor: bool) -> bool {
@@ -2969,7 +2976,7 @@ impl WindowFeed {
         Self
     }
 
-    pub fn snapshot(&self, _: &Launcher) -> Option<Vec<OpenWindow>> {
+    pub fn snapshot(&self, _: &Launcher) -> FeedState<Vec<OpenWindow>> {
         let mut windows = Vec::new();
         // SAFETY: The callback only reads top-level window metadata and the LPARAM points to this
         // live vector for the duration of the synchronous EnumWindows call.
@@ -2977,11 +2984,11 @@ impl WindowFeed {
             let state = LPARAM((&mut windows as *mut Vec<OpenWindow>) as isize);
             EnumWindows(Some(collect_window), state).ok()?;
         }
-        Some(windows)
+        FeedState::Ready(windows)
     }
 
-    pub fn workspaces(&self) -> Option<Vec<super::WorkspaceSummary>> {
-        None
+    pub fn workspaces(&self) -> FeedState<Vec<super::WorkspaceSummary>> {
+        FeedState::Ready(Vec::new())
     }
 
     pub fn preview(&self, window: WindowId) -> Option<WindowPreview> {

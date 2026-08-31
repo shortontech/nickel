@@ -13,6 +13,7 @@ struct MessageRegion<Message> {
     id: UiId,
     rect: Rect,
     message: Message,
+    message_mapper: Option<fn(f32) -> Message>,
 }
 
 #[derive(Clone, Debug)]
@@ -319,6 +320,11 @@ pub struct ResolvedNode {
     pub grid_tracks: Vec<f32>,
     pub hit_stack: Option<usize>,
     pub interaction: InteractionState,
+    pub controller_group: bool,
+    pub controller_pane: bool,
+    pub controller_pane_default: bool,
+    pub controller_step: f32,
+    pub controller_value: Option<f32>,
     pub accessibility_label: Option<String>,
     pub accessibility_description: Option<String>,
     pub accessibility_role: Option<String>,
@@ -535,6 +541,11 @@ impl<Message: Clone> UiTree<Message> {
         for region in &tree.selection_regions {
             state.touch(region.id.clone());
             state.reconcile_document_selection(region.id.clone(), region.document.clone());
+        }
+        for node in &tree.resolved.nodes {
+            if node.controller_group || node.controller_pane {
+                state.touch(node.id.clone());
+            }
         }
         tree.prepare_selection_paints(state);
         tree.reset_emission();
@@ -776,6 +787,11 @@ impl<Message: Clone> UiTree<Message> {
         for scroll in &self.scrolls {
             state.touch(scroll.id.clone());
         }
+        for node in &self.resolved.nodes {
+            if node.controller_group || node.controller_pane {
+                state.touch(node.id.clone());
+            }
+        }
         for id in retained {
             state.touch(id);
         }
@@ -892,6 +908,19 @@ impl<Message: Clone> UiTree<Message> {
 
     pub fn handle_event(&self, state: &mut UiStateStore, event: UiEvent) -> EventOutcome<Message> {
         let mut outcome = EventOutcome::default();
+        if matches!(
+            event,
+            UiEvent::ControllerNext
+                | UiEvent::ControllerPrevious
+                | UiEvent::ControllerPreviousPane
+                | UiEvent::ControllerNextPane
+                | UiEvent::ControllerAdjust(_)
+                | UiEvent::ControllerBack
+                | UiEvent::ControllerActivate
+        ) && !state.window_focused()
+        {
+            return outcome;
+        }
         outcome.invalidation = match event {
             UiEvent::PointerMoved(point) => {
                 if let Some(captured) = state.captured().cloned()
@@ -1150,6 +1179,52 @@ impl<Message: Clone> UiTree<Message> {
             UiEvent::FocusPrevious => self.move_focus(state, -1),
             UiEvent::ControllerNext => self.move_controller(state, 1),
             UiEvent::ControllerPrevious => self.move_controller(state, -1),
+            UiEvent::ControllerPreviousPane => self.switch_controller_pane(state, -1),
+            UiEvent::ControllerNextPane => self.switch_controller_pane(state, 1),
+            UiEvent::ControllerAdjust(direction) => {
+                if !state.controller_editing() {
+                    Invalidation::None
+                } else if let Some((value, step, map)) =
+                    state.controller_selected().and_then(|id| {
+                        let node = self.resolved.nodes.iter().find(|node| &node.id == id)?;
+                        let map = self
+                            .messages
+                            .iter()
+                            .find(|region| &region.id == id)?
+                            .message_mapper?;
+                        Some((node.controller_value?, node.controller_step, map))
+                    })
+                {
+                    outcome
+                        .messages
+                        .push(map((value + direction.signum() * step).clamp(0.0, 1.0)));
+                    Invalidation::Layout
+                } else {
+                    Invalidation::None
+                }
+            }
+            UiEvent::ControllerBack => {
+                if state.controller_editing() {
+                    state.set_controller_editing(false)
+                } else if let Some(scope) = state.controller_scope().cloned() {
+                    let parent_scope = self
+                        .resolved
+                        .nodes
+                        .iter()
+                        .filter(|node| {
+                            node.controller_group
+                                && node.id != scope
+                                && scope.as_str().starts_with(node.id.as_str())
+                        })
+                        .max_by_key(|node| node.id.as_str().len())
+                        .map(|node| node.id.clone());
+                    state
+                        .set_controller_scope(parent_scope)
+                        .merge(self.select_controller_id(state, scope))
+                } else {
+                    self.switch_controller_pane(state, -1)
+                }
+            }
             UiEvent::ActivateFocused | UiEvent::KeyboardActivate => {
                 if let Some(message) = state
                     .focused()
@@ -1161,9 +1236,34 @@ impl<Message: Clone> UiTree<Message> {
                 Invalidation::None
             }
             UiEvent::ControllerActivate => {
-                if let Some(message) = state
+                let selected = state
                     .controller_selected()
                     .or_else(|| state.focused())
+                    .cloned();
+                if let Some(node) = selected
+                    .as_ref()
+                    .and_then(|id| self.resolved.nodes.iter().find(|node| &node.id == id))
+                {
+                    if node.controller_group {
+                        let scope = node.id.clone();
+                        state.set_controller_scope(Some(scope));
+                        state.set_controller_selected(None);
+                        return EventOutcome {
+                            messages: outcome.messages,
+                            invalidation: self.move_controller(state, 1),
+                            clipboard_text: None,
+                        };
+                    }
+                    if node.controller_value.is_some() && node.controller_step > 0.0 {
+                        return EventOutcome {
+                            messages: outcome.messages,
+                            invalidation: state.set_controller_editing(true),
+                            clipboard_text: None,
+                        };
+                    }
+                }
+                if let Some(message) = selected
+                    .as_ref()
                     .and_then(|id| self.message_for_id(id))
                     .cloned()
                 {
@@ -1346,8 +1446,8 @@ impl<Message: Clone> UiTree<Message> {
                     invalidation.merge(state.set_dropdown_open(node.id.clone(), false))
                 }),
             UiEvent::CaretBlink => state.toggle_caret(),
-            UiEvent::FocusGained => Invalidation::None,
-            UiEvent::FocusLost => state.focus_lost(),
+            UiEvent::FocusGained => state.set_window_focused(true),
+            UiEvent::FocusLost => state.set_window_focused(false).merge(state.focus_lost()),
             UiEvent::Suspended => state.suspended(),
             UiEvent::DeviceRemoved => state.device_removed(),
         };
@@ -1472,7 +1572,159 @@ impl<Message: Clone> UiTree<Message> {
     }
 
     fn move_controller(&self, state: &mut UiStateStore, direction: isize) -> Invalidation {
-        let mut ids = self.hits.iter().map(|hit| &hit.id).collect::<Vec<_>>();
+        let ids = self.controller_targets(state);
+        self.select_controller_from(state, direction, ids)
+    }
+
+    fn node_has_controller_action(&self, index: usize) -> bool {
+        let node = &self.resolved.nodes[index];
+        self.messages.iter().any(|region| region.id == node.id)
+            || node
+                .children
+                .iter()
+                .any(|child| self.node_has_controller_action(*child))
+    }
+
+    fn collect_controller_targets(&self, index: usize, root: bool, targets: &mut Vec<UiId>) {
+        let node = &self.resolved.nodes[index];
+        if !root && node.controller_group && self.node_has_controller_action(index) {
+            targets.push(node.id.clone());
+            return;
+        }
+        if (!root || !node.controller_group && !node.controller_pane)
+            && self.messages.iter().any(|region| region.id == node.id)
+            && !self.scrolls.iter().any(|scroll| scroll.id == node.id)
+        {
+            targets.push(node.id.clone());
+            return;
+        }
+        for child in &node.children {
+            self.collect_controller_targets(*child, false, targets);
+        }
+    }
+
+    fn controller_targets(&self, state: &UiStateStore) -> Vec<UiId> {
+        let root = state
+            .controller_scope()
+            .or_else(|| state.controller_pane())
+            .and_then(|id| self.resolved.nodes.iter().position(|node| &node.id == id))
+            .unwrap_or(0);
+        let mut targets = Vec::new();
+        self.collect_controller_targets(root, true, &mut targets);
+        targets
+    }
+
+    fn select_controller_from(
+        &self,
+        state: &mut UiStateStore,
+        direction: isize,
+        ids: Vec<UiId>,
+    ) -> Invalidation {
+        if ids.is_empty() {
+            return state.set_controller_selected(None);
+        }
+        let current = state
+            .controller_selected()
+            .and_then(|selected| ids.iter().position(|id| id == selected));
+        let next = match (current, direction.is_negative()) {
+            (Some(index), false) => (index + 1) % ids.len(),
+            (Some(0), true) | (None, true) => ids.len() - 1,
+            (Some(index), true) => index - 1,
+            (None, false) => 0,
+        };
+        self.select_controller_id(state, ids[next].clone())
+    }
+
+    fn select_controller_id(&self, state: &mut UiStateStore, selected: UiId) -> Invalidation {
+        let mut invalidation = state.set_controller_selected(Some(selected.clone()));
+        invalidation = invalidation.merge(self.reveal_controller_target(state, &selected));
+        invalidation
+    }
+
+    fn reveal_controller_target(&self, state: &mut UiStateStore, selected: &UiId) -> Invalidation {
+        let Some(target) = self
+            .resolved
+            .nodes
+            .iter()
+            .find(|node| &node.id == selected)
+            .map(|node| node.allocated)
+        else {
+            return Invalidation::None;
+        };
+        for scroll in self.scrolls.iter().rev() {
+            let overlaps_horizontally = target.origin.x
+                < scroll.rect.origin.x + scroll.rect.size.width
+                && target.origin.x + target.size.width > scroll.rect.origin.x;
+            if !overlaps_horizontally {
+                continue;
+            }
+            let margin = 12.0;
+            let delta = if target.origin.y < scroll.rect.origin.y + margin {
+                target.origin.y - scroll.rect.origin.y - margin
+            } else if target.origin.y + target.size.height
+                > scroll.rect.origin.y + scroll.rect.size.height - margin
+            {
+                target.origin.y + target.size.height
+                    - (scroll.rect.origin.y + scroll.rect.size.height)
+                    + margin
+            } else {
+                0.0
+            };
+            if delta != 0.0 {
+                return state.scroll_by(
+                    scroll.id.clone(),
+                    delta,
+                    (scroll.extent.content.height - scroll.extent.viewport.height).max(0.0),
+                );
+            }
+        }
+        Invalidation::None
+    }
+
+    fn switch_controller_pane(&self, state: &mut UiStateStore, direction: isize) -> Invalidation {
+        let panes = self
+            .resolved
+            .nodes
+            .iter()
+            .filter(|node| node.controller_pane)
+            .map(|node| node.id.clone())
+            .collect::<Vec<_>>();
+        if panes.is_empty() {
+            return Invalidation::None;
+        }
+        let current = state
+            .controller_pane()
+            .and_then(|pane| panes.iter().position(|candidate| candidate == pane));
+        let next = match (current, direction.is_negative()) {
+            (Some(index), false) => (index + 1).min(panes.len() - 1),
+            (Some(index), true) => index.saturating_sub(1),
+            (None, false) => 0,
+            (None, true) => panes.len() - 1,
+        };
+        state
+            .set_controller_pane(Some(panes[next].clone()))
+            .merge(state.set_controller_scope(None))
+            .merge(state.set_controller_editing(false))
+            .merge(state.set_controller_selected(None))
+            .merge(self.move_controller(state, 1))
+    }
+
+    /// Moves controller selection among messages accepted by `include`.
+    pub fn move_controller_where(
+        &self,
+        state: &mut UiStateStore,
+        direction: isize,
+        include: impl Fn(&Message) -> bool,
+    ) -> Invalidation {
+        let mut ids = self
+            .messages
+            .iter()
+            .filter(|region| {
+                include(&region.message)
+                    && !self.scrolls.iter().any(|scroll| scroll.id == region.id)
+            })
+            .map(|region| &region.id)
+            .collect::<Vec<_>>();
         ids.dedup();
         if ids.is_empty() {
             return state.set_controller_selected(None);
@@ -1486,7 +1738,45 @@ impl<Message: Clone> UiTree<Message> {
             (Some(index), true) => index - 1,
             (None, false) => 0,
         };
-        state.set_controller_selected(Some(ids[next].clone()))
+        let selected = ids[next].clone();
+        let mut invalidation = state.set_controller_selected(Some(selected.clone()));
+        if let Some(target) = self
+            .messages
+            .iter()
+            .rev()
+            .find(|region| region.id == selected)
+            .map(|region| region.rect)
+        {
+            for scroll in self.scrolls.iter().rev() {
+                let overlaps_horizontally = target.origin.x
+                    < scroll.rect.origin.x + scroll.rect.size.width
+                    && target.origin.x + target.size.width > scroll.rect.origin.x;
+                if !overlaps_horizontally {
+                    continue;
+                }
+                let margin = 12.0;
+                let delta = if target.origin.y < scroll.rect.origin.y + margin {
+                    target.origin.y - scroll.rect.origin.y - margin
+                } else if target.origin.y + target.size.height
+                    > scroll.rect.origin.y + scroll.rect.size.height - margin
+                {
+                    target.origin.y + target.size.height
+                        - (scroll.rect.origin.y + scroll.rect.size.height)
+                        + margin
+                } else {
+                    0.0
+                };
+                if delta != 0.0 {
+                    invalidation = invalidation.merge(state.scroll_by(
+                        scroll.id.clone(),
+                        delta,
+                        (scroll.extent.content.height - scroll.extent.viewport.height).max(0.0),
+                    ));
+                    break;
+                }
+            }
+        }
+        invalidation
     }
 
     pub fn push_overlay_command(&mut self, command: PaintCommand) {
@@ -1498,6 +1788,7 @@ impl<Message: Clone> UiTree<Message> {
             id: UiId::from("overlay"),
             rect,
             message: message.clone(),
+            message_mapper: None,
         });
         self.hits.push(HitRegion {
             id: UiId::from("overlay"),
@@ -2245,6 +2536,16 @@ fn emit_element<Message: Clone>(
         .clip
         .is_some_and(|clip| intersection(rect, clip).is_none())
     {
+        // Pointer hit regions are clipped, but semantic controller traversal
+        // must retain off-screen actions so it can reveal them on selection.
+        if let Some(message) = &element.message {
+            tree.messages.push(MessageRegion {
+                id: node.id.clone(),
+                rect,
+                message: message.clone(),
+                message_mapper: element.message_mapper,
+            });
+        }
         let foreground = element.style.foreground.or(inherited_foreground);
         if matches!(element.kind, Kind::Flex(_) | Kind::Grid { .. }) {
             for (&child_index, child) in node.children.iter().zip(&element.children) {
@@ -2285,6 +2586,7 @@ fn emit_element<Message: Clone>(
             id: node.id.clone(),
             rect,
             message: message.clone(),
+            message_mapper: element.message_mapper,
         });
         if !is_scroll_container(element)
             && let Some(hit_rect) = node
@@ -2443,6 +2745,7 @@ fn emit_element<Message: Clone>(
                             id: link_id.clone(),
                             rect: glyph.rect,
                             message: message.clone(),
+                            message_mapper: None,
                         });
                         tree.hits.push(HitRegion {
                             id: link_id.clone(),
@@ -2510,11 +2813,12 @@ fn emit_element<Message: Clone>(
                 6.0,
             );
             let fill_width = track_rect.size.width * value.clamp(0.0, 1.0);
-            tree.commands.push(PaintCommand::Fill {
+            tree.commands.push(PaintCommand::RoundedFill {
                 rect: track_rect,
                 color: *track,
+                radius: 3.0,
             });
-            tree.commands.push(PaintCommand::Fill {
+            tree.commands.push(PaintCommand::RoundedFill {
                 rect: Rect::new(
                     track_rect.origin.x,
                     track_rect.origin.y,
@@ -2522,15 +2826,24 @@ fn emit_element<Message: Clone>(
                     track_rect.size.height,
                 ),
                 color: *fill,
+                radius: 3.0,
             });
-            tree.commands.push(PaintCommand::Fill {
-                rect: Rect::new(
-                    track_rect.origin.x + fill_width - 7.0,
-                    rect.origin.y + rect.size.height / 2.0 - 7.0,
-                    14.0,
-                    14.0,
-                ),
+            let thumb_rect = Rect::new(
+                (track_rect.origin.x + fill_width - 10.0)
+                    .clamp(rect.origin.x, rect.origin.x + rect.size.width - 20.0),
+                rect.origin.y + rect.size.height / 2.0 - 10.0,
+                20.0,
+                20.0,
+            );
+            tree.commands.push(PaintCommand::RoundedFill {
+                rect: thumb_rect,
                 color: *thumb,
+                radius: 10.0,
+            });
+            tree.commands.push(PaintCommand::Stroke {
+                rect: thumb_rect,
+                color: *fill,
+                width: 2.0,
             });
         }
         Kind::Dropdown {
@@ -2615,6 +2928,7 @@ fn emit_element<Message: Clone>(
                             id: option_id.clone(),
                             rect: option_rect,
                             message: message.clone(),
+                            message_mapper: None,
                         });
                     }
                     if let Some(hit_rect) = node
@@ -2692,6 +3006,14 @@ fn layout_element<Message: Clone>(
         grid_tracks: Vec::new(),
         hit_stack: None,
         interaction,
+        controller_group: element.controller_group,
+        controller_pane: element.controller_pane,
+        controller_pane_default: element.controller_pane_default,
+        controller_step: element.controller_step,
+        controller_value: match &element.kind {
+            Kind::Slider { value, .. } => Some(*value),
+            _ => None,
+        },
         accessibility_label: element.style.accessibility_label.clone(),
         accessibility_description: element.style.accessibility_description.clone(),
         accessibility_role: element.style.accessibility_role.clone(),
@@ -3205,6 +3527,8 @@ fn apply_transient_state<Message>(
     state: &mut UiStateStore,
 ) {
     let owns_state = element.message.is_some()
+        || element.controller_group
+        || element.controller_pane
         || element.text_mapper.is_some()
         || matches!(element.style.overflow_x, Overflow::Scroll | Overflow::Auto)
         || matches!(element.style.overflow_y, Overflow::Scroll | Overflow::Auto)
@@ -3213,6 +3537,12 @@ fn apply_transient_state<Message>(
             Kind::VerticalScroll { .. } | Kind::Dropdown { .. }
         );
     if owns_state {
+        if element.controller_pane
+            && state.controller_pane().is_none()
+            && element.controller_pane_default
+        {
+            state.set_controller_pane(Some(id.clone()));
+        }
         if state.pressed() == Some(id) {
             if let Some(background) = element.style.pressed_background {
                 element.style.background = Some(background);
@@ -3222,11 +3552,27 @@ fn apply_transient_state<Message>(
         {
             element.style.background = Some(background);
         }
-        if (state.focused() == Some(id) || state.controller_selected() == Some(id))
-            && let Some(border) = element.style.focus_border
-        {
+        let active_border = if state.window_focused() && state.controller_selected() == Some(id) {
+            element
+                .style
+                .controller_focus_border
+                .or(element.style.focus_border)
+        } else if state.focused() == Some(id) {
+            element.style.focus_border
+        } else {
+            None
+        };
+        if let Some(border) = active_border {
             element.style.border = Some(border);
             element.style.border_width = element.style.border_width.max(2.0);
+        }
+        if state.window_focused()
+            && element.controller_pane
+            && state.controller_pane() == Some(id)
+            && let Some(border) = element.style.controller_pane_border
+        {
+            element.style.border = Some(border);
+            element.style.border_width = element.style.border_width.max(3.0);
         }
         let (scroll_offset_x, scroll_offset, scroll_at_end, dropdown_open) = {
             let transient = state.touch(id.clone());

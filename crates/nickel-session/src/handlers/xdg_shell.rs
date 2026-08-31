@@ -38,7 +38,16 @@ fn is_codex_project_chat(app_id: Option<&str>) -> bool {
 }
 
 fn shell_owned_window_is_application(app_id: &str, shell_role: Option<ShellRole>) -> bool {
-    !app_id.is_empty() && shell_role.is_none()
+    !app_id.is_empty() && shell_role.is_none() && ShellRole::from_application_id(app_id).is_none()
+}
+
+fn unauthenticated_reserved_shell_role(
+    app_id: Option<&str>,
+    authenticated: bool,
+) -> Option<ShellRole> {
+    (!authenticated)
+        .then(|| app_id.and_then(ShellRole::from_application_id))
+        .flatten()
 }
 
 fn new_toplevel_may_focus(current_focus_is_shell: Option<bool>) -> bool {
@@ -231,13 +240,21 @@ impl XdgShellHandler for NickelSession {
         if let Some(start_data) = check_grab(&seat, wl_surface, serial) {
             let pointer = seat.get_pointer().unwrap();
 
-            let window = self
+            let Some(window) = self
                 .space
                 .elements()
                 .find(|window| window.wl_surface().as_deref() == Some(wl_surface))
-                .unwrap()
-                .clone();
-            let initial_window_location = self.space.element_location(&window).unwrap();
+                .cloned()
+            else {
+                return;
+            };
+            if self.is_shell_owned_window(&window) {
+                tracing::warn!("ignored move request from compositor-owned shell surface");
+                return;
+            }
+            let Some(initial_window_location) = self.space.element_location(&window) else {
+                return;
+            };
 
             let grab = MoveSurfaceGrab {
                 start_data,
@@ -264,13 +281,21 @@ impl XdgShellHandler for NickelSession {
         if let Some(start_data) = check_grab(&seat, wl_surface, serial) {
             let pointer = seat.get_pointer().unwrap();
 
-            let window = self
+            let Some(window) = self
                 .space
                 .elements()
                 .find(|window| window.wl_surface().as_deref() == Some(wl_surface))
-                .unwrap()
-                .clone();
-            let initial_window_location = self.space.element_location(&window).unwrap();
+                .cloned()
+            else {
+                return;
+            };
+            if self.is_shell_owned_window(&window) {
+                tracing::warn!("ignored resize request from compositor-owned shell surface");
+                return;
+            }
+            let Some(initial_window_location) = self.space.element_location(&window) else {
+                return;
+            };
             let initial_window_size = window.geometry().size;
 
             surface.with_pending_state(|state| {
@@ -451,8 +476,9 @@ impl NickelSession {
             .client()
             .and_then(|client| client.get_credentials(&self.display_handle).ok())
             .and_then(|credentials| u32::try_from(credentials.pid).ok());
+        let authenticated = client_pid.is_some_and(|pid| self.is_authenticated_shell_pid(pid));
         let shell_role = client_pid
-            .filter(|pid| self.is_authenticated_shell_pid(*pid))
+            .filter(|_| authenticated)
             .and_then(|_| app_id.as_deref().and_then(ShellRole::from_application_id));
         let is_launcher = shell_role == Some(ShellRole::Launcher);
         let is_desktop = shell_role == Some(ShellRole::Desktop);
@@ -478,6 +504,28 @@ impl NickelSession {
             .copied()
         {
             self.windows.update_metadata(id, title, app_id);
+            if let Some(role) =
+                unauthenticated_reserved_shell_role(self.windows.app_id(id), authenticated)
+            {
+                self.workspaces.remove_window(&id);
+                self.shell_owned_windows.remove(&id);
+                let window = self
+                    .space
+                    .elements()
+                    .find(|window| window.wl_surface().as_deref() == Some(surface.wl_surface()))
+                    .cloned();
+                if let Some(window) = window {
+                    self.space.unmap_elem(&window);
+                }
+                tracing::error!(
+                    ?client_pid,
+                    ?role,
+                    "rejected reserved Nickel shell role from unauthenticated client"
+                );
+                surface.send_close();
+                self.notify_protocol_snapshot();
+                return;
+            }
             if shell_role.is_some() {
                 self.workspaces.remove_window(&id);
                 // A hidden SDL role may recreate its wl_surface when shown.
@@ -509,6 +557,16 @@ impl NickelSession {
                 && self.shell_owned_windows.remove(&id)
             {
                 self.workspaces.add_window(id);
+            }
+        }
+        if let Some(role) = shell_role {
+            let window = self
+                .space
+                .elements()
+                .find(|window| window.wl_surface().as_deref() == Some(surface.wl_surface()))
+                .cloned();
+            if let Some(window) = window {
+                self.record_shell_role_registration(&window, role);
             }
         }
         self.notify_protocol_snapshot();
@@ -651,7 +709,10 @@ impl NickelSession {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_codex_project_chat, new_toplevel_may_focus, shell_owned_window_is_application};
+    use super::{
+        is_codex_project_chat, new_toplevel_may_focus, shell_owned_window_is_application,
+        unauthenticated_reserved_shell_role,
+    };
     use nickel_session_protocol::ShellRole;
 
     #[test]
@@ -685,5 +746,25 @@ mod tests {
             "io.nickel.codex.project.bd247278c96614ec",
             None
         ));
+        assert!(!shell_owned_window_is_application(
+            ShellRole::Panel.application_id(),
+            None
+        ));
+    }
+
+    #[test]
+    fn reserved_shell_identity_requires_authenticated_peer() {
+        assert_eq!(
+            unauthenticated_reserved_shell_role(Some(ShellRole::Panel.application_id()), false),
+            Some(ShellRole::Panel)
+        );
+        assert_eq!(
+            unauthenticated_reserved_shell_role(Some(ShellRole::Panel.application_id()), true),
+            None
+        );
+        assert_eq!(
+            unauthenticated_reserved_shell_role(Some("org.example.Application"), false),
+            None
+        );
     }
 }

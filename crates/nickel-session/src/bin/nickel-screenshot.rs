@@ -1,26 +1,34 @@
 use std::{ffi::OsString, path::PathBuf};
 
 const HELP: &str = "\
-Capture the primary output from a running Nickel compositor.
+Capture an output from a running Nickel compositor.
 
-Usage: nickel-screenshot [OUTPUT.png]
+Usage: nickel-screenshot [--output NAME] [OUTPUT.png]
 
 Arguments:
   [OUTPUT.png]  Destination path [default: ~/Pictures/Nickel Screenshot <timestamp>.png]
 
 Options:
+  --output NAME  Capture the named output instead of the primary output
+
   -h, --help    Print help
 ";
 
 enum Command {
-    Capture(Option<PathBuf>),
+    Capture {
+        path: Option<PathBuf>,
+        output: Option<String>,
+    },
     Help,
 }
 
 fn parse_command(args: impl IntoIterator<Item = OsString>) -> Result<Command, String> {
     let mut args = args.into_iter();
     let Some(argument) = args.next() else {
-        return Ok(Command::Capture(None));
+        return Ok(Command::Capture {
+            path: None,
+            output: None,
+        });
     };
     if argument == "-h" || argument == "--help" {
         if args.next().is_some() {
@@ -28,10 +36,30 @@ fn parse_command(args: impl IntoIterator<Item = OsString>) -> Result<Command, St
         }
         return Ok(Command::Help);
     }
+    if argument == "--output" {
+        let output = args
+            .next()
+            .ok_or_else(|| "--output requires an output name".to_owned())?;
+        let path = args.next().map(PathBuf::from);
+        if args.next().is_some() {
+            return Err("expected at most one output path".into());
+        }
+        return Ok(Command::Capture {
+            path,
+            output: Some(
+                output
+                    .into_string()
+                    .map_err(|_| "output name must be UTF-8".to_owned())?,
+            ),
+        });
+    }
     if args.next().is_some() {
         return Err("expected at most one output path".into());
     }
-    Ok(Command::Capture(Some(PathBuf::from(argument))))
+    Ok(Command::Capture {
+        path: Some(PathBuf::from(argument)),
+        output: None,
+    })
 }
 
 #[cfg(unix)]
@@ -47,12 +75,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
-    let output = match parse_command(env::args_os().skip(1))? {
+    let (output, output_name) = match parse_command(env::args_os().skip(1))? {
         Command::Help => {
             print!("{HELP}");
             return Ok(());
         }
-        Command::Capture(output) => output,
+        Command::Capture { path, output } => (path, output),
     };
     let control = env::var_os("NICKEL_SESSION_CONTROL")
         .map(PathBuf::from)
@@ -87,7 +115,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         request_id,
         request: Request::Command(SessionCommand::CaptureOutput {
             path: output.to_string_lossy().into_owned(),
-            output: None,
+            output: output_name,
         }),
     };
     socket.send_to(&encode(&request)?, control)?;
@@ -133,7 +161,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             print!("{HELP}");
             Ok(())
         }
-        Command::Capture(_) => {
+        Command::Capture { .. } => {
             Err("Nickel compositor screenshots are only available on Unix sessions".into())
         }
     }
@@ -155,9 +183,26 @@ mod tests {
 
     #[test]
     fn accepts_an_output_path() {
-        let Command::Capture(Some(path)) = parse_command(["capture.png".into()]).unwrap() else {
+        let Command::Capture {
+            path: Some(path),
+            output: None,
+        } = parse_command(["capture.png".into()]).unwrap()
+        else {
             panic!("expected a capture command");
         };
+        assert_eq!(path, std::path::Path::new("capture.png"));
+    }
+
+    #[test]
+    fn accepts_a_named_output_and_path() {
+        let Command::Capture {
+            path: Some(path),
+            output: Some(output),
+        } = parse_command(["--output".into(), "DP-3".into(), "capture.png".into()]).unwrap()
+        else {
+            panic!("expected a named capture command");
+        };
+        assert_eq!(output, "DP-3");
         assert_eq!(path, std::path::Path::new("capture.png"));
     }
 

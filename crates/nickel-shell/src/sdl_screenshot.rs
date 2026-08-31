@@ -425,6 +425,7 @@ fn screenshot_toolbar(
         secondary_text: palette.muted,
         accent: palette.accent,
         accent_soft: palette.accent_soft,
+        secondary_accent: palette.complement,
         positive: palette.complement,
     });
     let mut toolbar = Row::new()

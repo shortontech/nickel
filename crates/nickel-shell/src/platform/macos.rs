@@ -20,8 +20,10 @@ pub use super::unsupported::{
 };
 use crate::{
     launcher::Launcher,
-    model::{Application, ApplicationId, OpenWindow, WindowId, WindowPreview},
-    platform::{GlobalShortcut, ShellCommand, WindowAction},
+    model::{
+        Application, ApplicationDiscovery, ApplicationId, OpenWindow, WindowId, WindowPreview,
+    },
+    platform::{FeedState, GlobalShortcut, ShellCommand, WindowAction},
 };
 
 const OPTION_KEY: u32 = 1 << 11;
@@ -92,6 +94,10 @@ pub fn applications() -> Vec<Application> {
     }
     applications.sort_by(|left, right| left.name().cmp(right.name()));
     applications
+}
+
+pub fn application_discovery() -> ApplicationDiscovery {
+    ApplicationDiscovery::ready(applications())
 }
 
 pub fn launch_application(application: &Application) -> Result<Option<u32>, super::LaunchError> {
@@ -282,8 +288,8 @@ impl WindowFeed {
         None
     }
 
-    pub fn snapshot(&self, _: &Launcher) -> Option<Vec<OpenWindow>> {
-        Some(
+    pub fn snapshot(&self, _: &Launcher) -> FeedState<Vec<OpenWindow>> {
+        FeedState::Ready(
             visible_windows()
                 .into_iter()
                 .enumerate()
@@ -301,8 +307,8 @@ impl WindowFeed {
         )
     }
 
-    pub fn workspaces(&self) -> Option<Vec<super::WorkspaceSummary>> {
-        None
+    pub fn workspaces(&self) -> FeedState<Vec<super::WorkspaceSummary>> {
+        FeedState::Ready(Vec::new())
     }
 
     pub fn preview(&self, _: WindowId) -> Option<WindowPreview> {
@@ -340,8 +346,8 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
     }
 }
 
-pub fn register_session_shell() -> bool {
-    true
+pub fn register_session_shell() -> Result<(), super::SessionRequestError> {
+    Ok(())
 }
 
 pub fn launcher_hotkey_receiver() -> super::GlobalShortcutFeed {
