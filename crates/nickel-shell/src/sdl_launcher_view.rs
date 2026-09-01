@@ -17,11 +17,11 @@ use crate::{
 use image::RgbaImage;
 use nickel_core::theme::ThemePalette;
 use nickel_ui::{
-    AccountSummaryRow, ActionLegend, ActionLegendEntry, AnyView, Application as UiApplication,
-    Collection, CollectionPresentation, CollectionState, Column, ComponentBuilderExt, Container,
-    ControllerFamily, FallbackAvatar, FrameOverlay, Image, InputModality, Insets,
-    LauncherSearchField, OverlayAnchor, OverlayMenu, OverlayMenuItem, ProjectStatusRow,
-    ReadingDirection, Row, START_MENU_SINGLE_PANE_BREAKPOINT, SectionHeader,
+    AccountSummaryRow, ActionLegend, ActionLegendActions, ActionLegendEntry, AnyView,
+    Application as UiApplication, Collection, CollectionPresentation, CollectionState, Column,
+    ComponentBuilderExt, Container, ControllerFamily, FallbackAvatar, FrameOverlay, Image,
+    InputModality, Insets, LauncherSearchField, OverlayAnchor, OverlayMenu, OverlayMenuItem,
+    ProjectStatusRow, ReadingDirection, Row, START_MENU_SINGLE_PANE_BREAKPOINT, SectionHeader,
     SemanticControllerAction, SemanticTheme, ShortcutRow, ShortcutState, StartMenuNarrowPane,
     StartMenuShell, Text, TextAlign, UiId, ViewContext,
 };
@@ -139,6 +139,7 @@ impl UiApplication for LauncherApplication {
                 palette: self.palette,
                 modality: context.modality,
                 status: self.status.as_deref(),
+                legend_actions: ActionLegendActions::from_view_context(&context),
             },
         );
         let width = context.viewport.size.width;
@@ -463,12 +464,13 @@ pub struct LauncherIconCacheDiagnostics {
     pub evictions: u64,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct LauncherViewContext<'a> {
     viewport: (u32, u32),
     palette: ThemePalette,
     modality: InputModality,
     status: Option<&'a str>,
+    legend_actions: ActionLegendActions,
 }
 
 fn build_launcher_view(
@@ -662,6 +664,14 @@ fn build_launcher_view(
     let mut shell = StartMenuShell::new(theme, panel_width, sidebar, detail)
         .direction(direction)
         .header(search);
+    if context.modality == InputModality::Controller {
+        shell = shell.legend(launcher_action_legend(
+            theme,
+            state.controller_family,
+            &context.legend_actions,
+            direction,
+        ));
+    }
     if let Some(status) = context.status {
         shell = shell.detail_footer(launcher_status(theme, status));
     }
@@ -1053,17 +1063,10 @@ fn build_dashboard_view_directional(
             },
         );
     if context.modality == InputModality::Controller {
-        let entries = vec![
-            ActionLegendEntry::available(SemanticControllerAction::Confirm, "Open"),
-            ActionLegendEntry::available(SemanticControllerAction::ContextMenu, "Actions"),
-            ActionLegendEntry::available(SemanticControllerAction::PreviousSection, "Sidebar"),
-            ActionLegendEntry::available(SemanticControllerAction::NextSection, "Content"),
-            ActionLegendEntry::available(SemanticControllerAction::Cancel, "Close"),
-        ];
-        shell = shell.legend(ActionLegend::new_directional(
+        shell = shell.legend(launcher_action_legend(
             theme,
             state.controller_family,
-            entries,
+            &context.legend_actions,
             direction,
         ));
     }
@@ -1071,6 +1074,31 @@ fn build_dashboard_view_directional(
         shell = shell.detail_footer(launcher_status(theme, status));
     }
     AnyView::new(shell)
+}
+
+fn launcher_action_legend(
+    theme: SemanticTheme,
+    family: ControllerFamily,
+    actions: &ActionLegendActions,
+    direction: ReadingDirection,
+) -> ActionLegend<LauncherAction> {
+    let overlay_open = actions.is_overlay();
+    let entries = actions.iter().map(|action| {
+        let label = match action {
+            SemanticControllerAction::Confirm if overlay_open => "Select",
+            SemanticControllerAction::Confirm => "Open",
+            SemanticControllerAction::ContextMenu => "Actions",
+            SemanticControllerAction::PreviousSection => "Sidebar",
+            SemanticControllerAction::NextSection => "Content",
+            SemanticControllerAction::Cancel if overlay_open => "Back",
+            SemanticControllerAction::Cancel => "Close",
+            SemanticControllerAction::Pin => "Pin",
+            SemanticControllerAction::Unpin => "Unpin",
+            SemanticControllerAction::ToggleLauncher => "Launcher",
+        };
+        ActionLegendEntry::available(action, label)
+    });
+    ActionLegend::new_directional(theme, family, entries, direction)
 }
 
 fn launcher_status(theme: SemanticTheme, status: &str) -> Container<LauncherAction> {
@@ -1135,7 +1163,7 @@ fn has_visible_pixel(image: &RgbaImage) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nickel_ui::{ActionKind, SemanticAction, UiHost};
+    use nickel_ui::{ActionKind, ControllerAction, HostBatch, HostEvent, SemanticAction, UiHost};
 
     fn palette() -> ThemePalette {
         ThemePalette {
@@ -1162,6 +1190,13 @@ mod tests {
             920,
             680,
         )
+    }
+
+    fn accessibility_labels(host: &UiHost<LauncherApplication>) -> Vec<String> {
+        host.accessibility_nodes()
+            .iter()
+            .filter_map(|node| node.label.clone())
+            .collect()
     }
 
     #[test]
@@ -1215,6 +1250,68 @@ mod tests {
                 .filter_map(|node| node.label.as_deref())
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn controller_legend_tracks_search_selection_and_open_menu_semantics() {
+        let mut host = launcher_host();
+        host.application_mut()
+            .set_controller_family(ControllerFamily::PlayStation);
+        host.application_mut()
+            .update(LauncherAction::SetQuery("f".into()));
+        host.step(HostBatch {
+            events: vec![
+                HostEvent::Poll,
+                HostEvent::Controller(ControllerAction::Down),
+                HostEvent::Controller(ControllerAction::Down),
+            ],
+            ..HostBatch::default()
+        });
+        let search_labels = accessibility_labels(&host);
+        assert!(
+            search_labels.contains(&"Cross: Open".to_owned()),
+            "search labels: {search_labels:?}"
+        );
+        assert!(search_labels.contains(&"Options: Actions".to_owned()));
+        assert!(search_labels.contains(&"Circle: Close".to_owned()));
+
+        let target = host
+            .semantic_targets_for_message(&LauncherAction::ActivateResult(0))
+            .into_iter()
+            .next()
+            .expect("selected search result");
+        host.perform_semantic_action(target.id, SemanticAction::Invoke(ActionKind::ContextMenu));
+        let menu_labels = accessibility_labels(&host);
+        assert!(
+            menu_labels.contains(&"Cross: Select".to_owned()),
+            "menu labels: {menu_labels:?}; inspection: {:?}",
+            host.inspect()
+        );
+        assert!(menu_labels.contains(&"Circle: Back".to_owned()));
+        assert!(!menu_labels.iter().any(|label| label == "Options: Actions"));
+        assert!(!menu_labels.iter().any(|label| label.contains("Sidebar")));
+    }
+
+    #[test]
+    fn controller_legend_omits_context_menu_when_selected_target_lacks_it() {
+        let mut host = launcher_host();
+        host.step(HostBatch {
+            surface_size: Some((480, 680)),
+            events: vec![HostEvent::Controller(ControllerAction::Down)],
+            ..HostBatch::default()
+        });
+        let labels = host
+            .accessibility_nodes()
+            .iter()
+            .filter_map(|node| node.label.as_deref())
+            .collect::<Vec<_>>();
+        assert!(
+            !labels.iter().any(|label| label.contains("menu control")),
+            "labels: {labels:?}"
+        );
+        assert!(host.accessibility_nodes().iter().all(|node| {
+            node.rect.origin.x >= 0.0 && node.rect.origin.x + node.rect.size.width <= 480.0
+        }));
     }
 
     #[test]

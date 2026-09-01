@@ -4880,6 +4880,9 @@ mod tests {
                 modality: nickel_ui::InputModality::Pointer,
                 focused: None,
                 controller_target: None,
+                available_semantic_actions: Vec::new(),
+                navigation_depth: 0,
+                open_overlay: None,
             }),
             nickel_ui::Rect::new(0.0, 0.0, 120.0, 80.0),
         );

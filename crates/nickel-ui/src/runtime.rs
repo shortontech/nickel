@@ -101,6 +101,12 @@ pub struct ViewContext {
     pub focused: Option<UiId>,
     /// Host-owned controller selection retained across declarative rebuilds.
     pub controller_target: Option<UiId>,
+    /// Semantic actions accepted by the currently selected controller target.
+    pub available_semantic_actions: Vec<ActionKind>,
+    /// Depth of the active controller navigation scope.
+    pub navigation_depth: usize,
+    /// The topmost transient overlay, when controller navigation is trapped there.
+    pub open_overlay: Option<OverlayId>,
 }
 
 /// Declarative content rendered above an application's ordinary view.
@@ -271,15 +277,23 @@ impl ViewContext {
             modality,
             focused: None,
             controller_target: None,
+            available_semantic_actions: Vec::new(),
+            navigation_depth: 0,
+            open_overlay: None,
         }
     }
 
-    fn from_state(viewport: Rect, state: &UiStateStore) -> Self {
+    fn from_host(viewport: Rect, state: &UiStateStore, tree: Option<&UiFrame<impl Clone>>) -> Self {
         Self {
             viewport,
             modality: state.input_modality(),
             focused: state.focused().cloned(),
             controller_target: state.navigation().controller_selected().cloned(),
+            available_semantic_actions: tree
+                .map(|tree| tree.available_semantic_actions(state))
+                .unwrap_or_default(),
+            navigation_depth: tree.map(|tree| tree.navigation_depth(state)).unwrap_or(0),
+            open_overlay: state.open_overlay_id().cloned(),
         }
     }
 }
@@ -873,7 +887,7 @@ impl<A: Application> UiHost<A> {
     pub fn new_at(application: A, width: u32, height: u32, now: Instant) -> Self {
         let bounds = Rect::new(0.0, 0.0, width as f32, height as f32);
         let mut state = UiStateStore::default();
-        let context = ViewContext::from_state(bounds, &state);
+        let context = ViewContext::from_host(bounds, &state, None::<&UiFrame<A::Message>>);
         let mut tree = UiFrame::resolve(
             application.view(context.clone()),
             FrameRequest::new(bounds, &mut state),
@@ -1480,7 +1494,7 @@ impl<A: Application> UiHost<A> {
     }
 
     fn rebuild_timed(&mut self) -> (u64, u64) {
-        let context = ViewContext::from_state(self.bounds, &self.state);
+        let context = ViewContext::from_host(self.bounds, &self.state, Some(&self.tree));
         let overlay_interaction = OverlayInteractionSnapshot::capture(&self.state, &self.tree);
         let paint_started = Instant::now();
         let view = self.application.view(context.clone());

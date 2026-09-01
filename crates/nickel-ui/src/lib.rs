@@ -55,9 +55,9 @@ pub use theme::{
     TypographyScale,
 };
 pub use ui::{
-    AccessibilityNode, AccountSummaryRow, ActionKind, ActionLegend, ActionLegendEntry,
-    ActionLegendLabel, ActionLegendLocale, AnyView, Background, Border, Button, ButtonLabel,
-    ButtonPresentation, ChoiceCard, ChoiceCardGroup, Collection, CollectionError,
+    AccessibilityNode, AccountSummaryRow, ActionKind, ActionLegend, ActionLegendActions,
+    ActionLegendEntry, ActionLegendLabel, ActionLegendLocale, AnyView, Background, Border, Button,
+    ButtonLabel, ButtonPresentation, ChoiceCard, ChoiceCardGroup, Collection, CollectionError,
     CollectionPresentation, CollectionState, Color, ColorSwatch, Column, CompactIconTile,
     Component, ComponentBuilderExt, Container, ContentPane, ControllerControlPresentation,
     ControllerGlyphSource, CustomPaint, DiagnosticKind, DiagnosticMode, Dropdown,

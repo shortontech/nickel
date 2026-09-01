@@ -1,4 +1,4 @@
-use crate::{Align, ControllerFamily, Insets, Justify, SemanticTheme};
+use crate::{ActionKind, Align, ControllerFamily, Insets, Justify, SemanticTheme, ViewContext};
 
 use super::{
     AnyView, Button, ButtonPresentation, Column, Component, ComponentBuilderExt, Container,
@@ -24,6 +24,63 @@ pub enum SemanticControllerAction {
     PreviousSection,
     NextSection,
     ToggleLauncher,
+}
+
+/// Controller actions truthfully available in the host's active semantic scope.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ActionLegendActions {
+    actions: Vec<SemanticControllerAction>,
+    overlay: bool,
+}
+
+impl ActionLegendActions {
+    pub fn from_view_context(context: &ViewContext) -> Self {
+        let mut actions = Vec::new();
+        if context.open_overlay.is_some() {
+            actions.push(SemanticControllerAction::Confirm);
+            actions.push(SemanticControllerAction::Cancel);
+            return Self {
+                actions,
+                overlay: true,
+            };
+        }
+        if context
+            .available_semantic_actions
+            .iter()
+            .any(|action| matches!(action, ActionKind::Activate | ActionKind::Select))
+        {
+            actions.push(SemanticControllerAction::Confirm);
+        }
+        if context
+            .available_semantic_actions
+            .contains(&ActionKind::ContextMenu)
+        {
+            actions.push(SemanticControllerAction::ContextMenu);
+        }
+        if context.navigation_depth > 0 {
+            actions.extend([
+                SemanticControllerAction::PreviousSection,
+                SemanticControllerAction::NextSection,
+            ]);
+        }
+        actions.push(SemanticControllerAction::Cancel);
+        Self {
+            actions,
+            overlay: false,
+        }
+    }
+
+    pub fn contains(&self, action: SemanticControllerAction) -> bool {
+        self.actions.contains(&action)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = SemanticControllerAction> + '_ {
+        self.actions.iter().copied()
+    }
+
+    pub const fn is_overlay(&self) -> bool {
+        self.overlay
+    }
 }
 
 impl SemanticControllerAction {
@@ -1270,6 +1327,50 @@ mod tests {
             tree.commands()
                 .iter()
                 .any(|command| matches!(command, PaintCommand::Text { text, .. } if text == "×"))
+        );
+    }
+
+    #[test]
+    fn action_legend_actions_follow_selected_semantics_and_overlay_state() {
+        let base = ViewContext {
+            viewport: Rect::new(0.0, 0.0, 640.0, 480.0),
+            modality: crate::InputModality::Controller,
+            focused: None,
+            controller_target: Some(crate::UiId::from("result")),
+            available_semantic_actions: vec![ActionKind::Activate, ActionKind::ContextMenu],
+            navigation_depth: 2,
+            open_overlay: None,
+        };
+        let actions = ActionLegendActions::from_view_context(&base);
+        assert_eq!(
+            actions.iter().collect::<Vec<_>>(),
+            [
+                SemanticControllerAction::Confirm,
+                SemanticControllerAction::ContextMenu,
+                SemanticControllerAction::PreviousSection,
+                SemanticControllerAction::NextSection,
+                SemanticControllerAction::Cancel,
+            ]
+        );
+
+        let unavailable_menu = ActionLegendActions::from_view_context(&ViewContext {
+            available_semantic_actions: vec![ActionKind::Activate],
+            ..base.clone()
+        });
+        assert!(!unavailable_menu.contains(SemanticControllerAction::ContextMenu));
+
+        let overlay = ActionLegendActions::from_view_context(&ViewContext {
+            available_semantic_actions: vec![ActionKind::Activate],
+            open_overlay: Some(crate::OverlayId::new("menu")),
+            ..base
+        });
+        assert!(overlay.is_overlay());
+        assert_eq!(
+            overlay.iter().collect::<Vec<_>>(),
+            [
+                SemanticControllerAction::Confirm,
+                SemanticControllerAction::Cancel
+            ]
         );
     }
 
