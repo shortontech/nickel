@@ -55,6 +55,8 @@ pub struct ShellRuntimeDiagnostics {
     pub warm_present_us: Vec<u64>,
     /// Input receipt through the first synchronous present it caused, in microseconds.
     pub input_to_present_us: Vec<u64>,
+    /// Process-wide allocation operations observed during each warm present.
+    pub warm_present_allocations: Vec<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -166,6 +168,7 @@ pub struct SdlShell {
     input_adapter: nickel_input::sdl::Adapter,
     warm_present_us: VecDeque<u64>,
     input_to_present_us: VecDeque<u64>,
+    warm_present_allocations: VecDeque<u64>,
     pending_input_started: Option<Instant>,
     video: sdl3::VideoSubsystem,
     _sdl: sdl3::Sdl,
@@ -212,6 +215,7 @@ impl SdlShell {
             input_adapter: nickel_input::sdl::Adapter::default(),
             warm_present_us: VecDeque::with_capacity(RUNTIME_SAMPLE_CAPACITY),
             input_to_present_us: VecDeque::with_capacity(RUNTIME_SAMPLE_CAPACITY),
+            warm_present_allocations: VecDeque::with_capacity(RUNTIME_SAMPLE_CAPACITY),
             pending_input_started: None,
             video,
             _sdl: sdl,
@@ -465,6 +469,7 @@ impl SdlShell {
         ShellRuntimeDiagnostics {
             warm_present_us: self.warm_present_us.iter().copied().collect(),
             input_to_present_us: self.input_to_present_us.iter().copied().collect(),
+            warm_present_allocations: self.warm_present_allocations.iter().copied().collect(),
         }
     }
 
@@ -509,6 +514,7 @@ impl SdlShell {
             entry.presenter = Some(SdlGpuPresenter::new(&entry.window, graphics)?);
         }
         let started = Instant::now();
+        let allocations_before = crate::allocation_counter::allocation_operations();
         let damage = entry
             .presenter
             .as_mut()
@@ -517,6 +523,15 @@ impl SdlShell {
         let elapsed_us = started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
         if warm {
             push_bounded(&mut self.warm_present_us, elapsed_us);
+            if let (Some(before), Some(after)) = (
+                allocations_before,
+                crate::allocation_counter::allocation_operations(),
+            ) {
+                push_bounded(
+                    &mut self.warm_present_allocations,
+                    after.saturating_sub(before),
+                );
+            }
         }
         if let Some(input_started) = self.pending_input_started.take() {
             let input_us = input_started

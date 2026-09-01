@@ -562,6 +562,7 @@ struct NestedRuntimeEvidence {
     environment: NestedRuntimeEnvironment,
     samples: NestedRuntimeSamples,
     summary: NestedRuntimeSummary,
+    result: NestedRuntimeResult,
 }
 
 #[derive(Debug, Deserialize)]
@@ -585,14 +586,49 @@ struct NestedRuntimeSummary {
 
 #[derive(Debug, Deserialize)]
 struct NestedAllocationEvidence {
-    count: u64,
+    count: Option<u64>,
+    sample_count: usize,
     scope: String,
+    unavailable_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NestedRuntimeResult {
+    frame_allocations: bool,
+}
+
+fn validate_nested_allocation_evidence(
+    evidence: &NestedAllocationEvidence,
+) -> Result<(), Box<dyn Error>> {
+    match evidence.scope.as_str() {
+        "unavailable"
+            if evidence.count.is_none()
+                && evidence.sample_count == 0
+                && evidence
+                    .unavailable_reason
+                    .as_deref()
+                    .is_some_and(|reason| !reason.trim().is_empty()) =>
+        {
+            Ok(())
+        }
+        "process" | "thread" | "presenter"
+            if evidence.count.is_some()
+                && evidence.sample_count > 0
+                && evidence.unavailable_reason.is_none() =>
+        {
+            Ok(())
+        }
+        _ => Err(Box::new(UsageError(
+            "nested allocation evidence has an invalid scope or measurement shape".into(),
+        ))),
+    }
 }
 
 fn nested_runtime_evidence(
     budgets: &FeedbackBudgets,
 ) -> Result<NestedRuntimeEvidence, Box<dyn Error>> {
     let evidence: NestedRuntimeEvidence = serde_json::from_str(NESTED_RUNTIME_EVIDENCE)?;
+    validate_nested_allocation_evidence(&evidence.summary.frame_allocations)?;
     let mut warm = evidence.samples.warm_present_us.clone();
     let mut input = evidence.samples.input_to_visible_us.clone();
     if evidence.environment.hardware_claim
@@ -604,8 +640,14 @@ fn nested_runtime_evidence(
         || evidence.summary.input_to_visible_p95_us as f64
             > budgets.live.input_to_visible_p95_ms * 1_000.0
         || evidence.summary.retained_presenter_bytes > budgets.focused.retained_frame_bytes
-        || evidence.summary.frame_allocations.scope != "unavailable"
-        || evidence.summary.frame_allocations.count != 0
+        || evidence.summary.frame_allocations.scope == "unavailable"
+        || evidence.summary.frame_allocations.sample_count < budgets.live.samples
+        || evidence
+            .summary
+            .frame_allocations
+            .count
+            .is_none_or(|count| count > budgets.focused.frame_allocations as u64)
+        || !evidence.result.frame_allocations
     {
         return Err(Box::new(UsageError(
             "nested runtime evidence is inconsistent, insufficient, or exceeds its budget".into(),
@@ -3915,6 +3957,17 @@ mod tests {
         assert!(budgets.focused.semantic_scenario_p95_ms > 0.0);
         assert!(budgets.focused.software_render_p95_ms > 0.0);
         assert_eq!(budgets.lifecycle.idle_frames, 0);
+    }
+
+    #[test]
+    fn nested_allocation_unavailability_is_explicit_but_not_completion_evidence() {
+        let evidence: NestedRuntimeEvidence =
+            serde_json::from_str(NESTED_RUNTIME_EVIDENCE).expect("nested evidence schema");
+        validate_nested_allocation_evidence(&evidence.summary.frame_allocations)
+            .expect("honest unavailable evidence is structurally valid");
+        assert_eq!(evidence.summary.frame_allocations.scope, "unavailable");
+        assert!(!evidence.result.frame_allocations);
+        assert!(nested_runtime_evidence(&budgets().unwrap()).is_err());
     }
 
     #[test]

@@ -428,14 +428,67 @@ impl ShellRuntimeDiagnostics {
         {
             return Err(FrameError::TooLarge);
         }
-        Ok(())
+        self.frame_allocations.validate()
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AllocationMeasurement {
-    pub count: u64,
+    /// P95 allocation operations across the reported warm-frame samples.
+    pub count: Option<u64>,
+    pub sample_count: usize,
     pub scope: AllocationScope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
+}
+
+impl Default for AllocationMeasurement {
+    fn default() -> Self {
+        Self {
+            count: None,
+            sample_count: 0,
+            scope: AllocationScope::Unavailable,
+            unavailable_reason: Some("allocation instrumentation is not installed".into()),
+        }
+    }
+}
+
+impl AllocationMeasurement {
+    pub fn validate(&self) -> Result<(), FrameError> {
+        match self.scope {
+            AllocationScope::Unavailable
+                if self.count.is_some()
+                    || self.sample_count != 0
+                    || self
+                        .unavailable_reason
+                        .as_deref()
+                        .is_none_or(|reason| reason.trim().is_empty()) =>
+            {
+                Err(FrameError::InvalidPayload(
+                    "unavailable allocation evidence cannot contain measurements".into(),
+                ))
+            }
+            AllocationScope::Unavailable => Ok(()),
+            _ if self.count.is_some()
+                && self.sample_count > 0
+                && self.unavailable_reason.is_none() =>
+            {
+                Ok(())
+            }
+            _ if self.count.is_none()
+                && self.sample_count == 0
+                && self
+                    .unavailable_reason
+                    .as_deref()
+                    .is_some_and(|reason| !reason.trim().is_empty()) =>
+            {
+                Ok(())
+            }
+            _ => Err(FrameError::InvalidPayload(
+                "allocation evidence has inconsistent count, samples, or reason".into(),
+            )),
+        }
+    }
 }
 
 /// Scope covered by an allocator-visible measurement.
@@ -1003,8 +1056,10 @@ mod tests {
             host_phase_samples_available: true,
             retained_presenter_bytes: 1_048_576,
             frame_allocations: AllocationMeasurement {
-                count: 0,
+                count: Some(0),
+                sample_count: MAX_RUNTIME_PERFORMANCE_SAMPLES,
                 scope: AllocationScope::Process,
+                unavailable_reason: None,
             },
         };
         assert_eq!(diagnostics.validate(), Ok(()));
@@ -1024,6 +1079,25 @@ mod tests {
         let mut oversized = diagnostics;
         oversized.warm_present_us.push(950);
         assert_eq!(oversized.validate(), Err(FrameError::TooLarge));
+    }
+
+    #[test]
+    fn allocation_measurement_never_uses_a_zero_as_unavailable_evidence() {
+        let missing_reason = AllocationMeasurement {
+            count: None,
+            sample_count: 0,
+            scope: AllocationScope::Unavailable,
+            unavailable_reason: None,
+        };
+        assert!(missing_reason.validate().is_err());
+        let fake_zero = AllocationMeasurement {
+            count: Some(0),
+            sample_count: 0,
+            scope: AllocationScope::Process,
+            unavailable_reason: None,
+        };
+        assert!(fake_zero.validate().is_err());
+        assert_eq!(AllocationMeasurement::default().validate(), Ok(()));
     }
 
     #[test]

@@ -17,7 +17,12 @@
     "input_to_visible_samples": 64,
     "input_to_visible_p95_us": 6605,
     "retained_presenter_bytes": 6457628,
-    "frame_allocations": { "count": 0, "scope": "unavailable" }
+    "frame_allocations": {
+      "count": null,
+      "sample_count": 0,
+      "scope": "unavailable",
+      "unavailable_reason": "capture predates native shell allocation instrumentation"
+    }
   },
   "budgets": {
     "warm_present_p95_us": 16700,

@@ -1,6 +1,9 @@
 //! Reusable Nickel shell surfaces.
 
 #[cfg(feature = "workbench-fixtures")]
+mod allocation_counter;
+
+#[cfg(feature = "workbench-fixtures")]
 pub mod desktop {
     #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
     pub enum WallpaperPosition {

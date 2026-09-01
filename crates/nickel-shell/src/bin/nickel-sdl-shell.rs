@@ -11,6 +11,13 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "../allocation_counter.rs"]
+mod allocation_counter;
+
+#[global_allocator]
+static GLOBAL_ALLOCATOR: allocation_counter::CountingSystemAllocator =
+    allocation_counter::CountingSystemAllocator;
+
 #[allow(dead_code)]
 mod desktop {
     #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -72,6 +79,26 @@ mod sdl_window_preview;
 
 use sdl_live_shell::LiveShell;
 use sdl_shell::{SdlShell, ShellEvent, SurfaceId, SurfaceRole};
+
+fn p95_u64(samples: &[u64]) -> Option<u64> {
+    let mut samples = samples.to_vec();
+    if samples.is_empty() {
+        return None;
+    }
+    samples.sort_unstable();
+    let index = ((samples.len() * 95).div_ceil(100)).saturating_sub(1);
+    samples.get(index).copied()
+}
+
+#[cfg(test)]
+mod allocation_summary_tests {
+    #[test]
+    fn allocation_p95_requires_samples_and_uses_nearest_rank() {
+        assert_eq!(super::p95_u64(&[]), None);
+        assert_eq!(super::p95_u64(&[9, 0, 1, 2, 3]), Some(9));
+        assert_eq!(super::p95_u64(&[0; 64]), Some(0));
+    }
+}
 
 #[cfg(target_os = "linux")]
 const SHELL_STARTUP_BARRIER_ENV: &str = "NICKEL_SHELL_STARTUP_BARRIER";
@@ -1349,9 +1376,22 @@ fn main() -> Result<(), String> {
                             scheduled_wakeups,
                             host_phase_samples_available,
                             retained_presenter_bytes: memory.presenter_caches.live_bytes as u64,
-                            frame_allocations: nickel_session_protocol::AllocationMeasurement {
-                                count: 0,
-                                scope: nickel_session_protocol::AllocationScope::Unavailable,
+                            frame_allocations: if runtime.warm_present_allocations.is_empty() {
+                                nickel_session_protocol::AllocationMeasurement {
+                                    count: None,
+                                    sample_count: 0,
+                                    scope: nickel_session_protocol::AllocationScope::Process,
+                                    unavailable_reason: Some(
+                                        "no completed warm native presenter frames".into(),
+                                    ),
+                                }
+                            } else {
+                                nickel_session_protocol::AllocationMeasurement {
+                                    count: p95_u64(&runtime.warm_present_allocations),
+                                    sample_count: runtime.warm_present_allocations.len(),
+                                    scope: nickel_session_protocol::AllocationScope::Process,
+                                    unavailable_reason: None,
+                                }
                             },
                         },
                     );
