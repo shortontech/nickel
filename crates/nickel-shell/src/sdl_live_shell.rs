@@ -1086,14 +1086,10 @@ impl LiveShell {
             }
             _ => return false,
         };
-        let activates = matches!(&event, HostEvent::Controller(ControllerAction::Confirm));
-        let outcome = self.notification_host.step(HostBatch {
+        self.notification_host.step(HostBatch {
             events: vec![event],
             ..HostBatch::default()
         });
-        if activates && outcome.effects.is_empty() {
-            self.notification_host.application_mut().request_dismiss();
-        }
         self.apply_notification_effects();
         true
     }
@@ -1103,13 +1099,15 @@ impl LiveShell {
             return false;
         }
         self.sync_notification_host(420, 180);
+        let event = if action == ControllerAction::Cancel {
+            HostEvent::Shortcut(Shortcut::Escape)
+        } else {
+            HostEvent::Controller(action)
+        };
         let outcome = self.notification_host.step(HostBatch {
-            events: vec![HostEvent::Controller(action)],
+            events: vec![event],
             ..HostBatch::default()
         });
-        if action == ControllerAction::Confirm && outcome.effects.is_empty() {
-            self.notification_host.application_mut().request_dismiss();
-        }
         self.apply_notification_effects();
         outcome.changed
     }
@@ -3089,8 +3087,9 @@ mod tests {
         ShellSemanticTarget, WindowMenuTargetAction,
     };
     use nickel_ui::{
-        ActionKind, HostBatch, HostEvent, HostTelemetry, Point, Rect, SemanticAction, SemanticRole,
-        SemanticSelector, SemanticValueInput, SemanticValueSnapshot, UiEvent, UiHost,
+        ActionKind, ControllerAction, HostBatch, HostEvent, HostTelemetry, Point, Rect,
+        SemanticAction, SemanticRole, SemanticSelector, SemanticValueInput, SemanticValueSnapshot,
+        UiEvent, UiHost,
     };
     use nickel_ui_testkit::{Scenario, Selector};
 
@@ -3784,6 +3783,36 @@ mod tests {
         };
 
         assert!(shell.notification_click(point.x, point.y, 420, 180));
+        assert!(shell.notification.is_none());
+        assert!(
+            shell
+                .notification_host
+                .query(&nickel_ui::SemanticSelector::Role(
+                    nickel_ui::SemanticRole::Dialog
+                ))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn notification_controller_cancel_uses_the_typed_host_effect() {
+        let mut shell = LiveShell::new().unwrap();
+        let mut store = NotificationStore::default();
+        store.notify(
+            0,
+            NotificationRequest {
+                app_name: "Test".into(),
+                summary: "Ready".into(),
+                body: "Choose".into(),
+                actions: vec![],
+                expire_timeout_ms: 0,
+            },
+            Instant::now(),
+        );
+        shell.notification = store.newest();
+        let _ = shell.scene(SurfaceRole::Notification, 420, 180);
+
+        assert!(shell.notification_controller(ControllerAction::Cancel));
         assert!(shell.notification.is_none());
         assert!(
             shell

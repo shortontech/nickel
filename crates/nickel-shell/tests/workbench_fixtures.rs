@@ -78,12 +78,15 @@ fn registers_every_shell_surface_fixture() {
                     .semantic_nodes()
                     .iter()
                     .any(|node| node.actions.contains(&nickel_ui::ActionKind::Activate));
-                assert_eq!(
+                assert!(
                     has_activate,
-                    variant.id != "no-actions",
                     "notification action reachability drifted for {}",
                     variant.id
                 );
+                assert!(session.accessibility_nodes().iter().any(|node| {
+                    node.id.as_str().ends_with("notification-dismiss")
+                        && node.label.as_deref() == Some("Dismiss")
+                }));
             }
             if entry.metadata.id == "shell.screenshot" {
                 let has_activate = session

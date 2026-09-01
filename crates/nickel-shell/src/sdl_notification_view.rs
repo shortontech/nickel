@@ -9,6 +9,7 @@ use crate::notification::DesktopNotification;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NotificationMessage {
     Invoke(String),
+    Dismiss,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -97,6 +98,7 @@ impl Application for NotificationApp {
                     });
                 }
             }
+            NotificationMessage::Dismiss => self.request_dismiss(),
         }
     }
 
@@ -126,7 +128,7 @@ impl Application for NotificationApp {
         } else {
             &notification.summary
         };
-        let action_count = notification.actions.len();
+        let action_count = notification.actions.len() + 1;
         let gap = 8.0;
         let button_width = if action_count == 0 {
             0.0
@@ -152,7 +154,20 @@ impl Application for NotificationApp {
                 .radius(7.0)
                 .color(self.palette.text)
                 .label_align(TextAlign::Center)
-            }));
+            }))
+            .child(
+                Button::new(NotificationMessage::Dismiss, "Dismiss")
+                    .id("notification-dismiss")
+                    .width(button_width)
+                    .height(30.0)
+                    .padding(Insets::all(5.0))
+                    .background(self.palette.surface_hover)
+                    .focus_border(self.palette.accent)
+                    .controller_focus_border(self.palette.accent)
+                    .radius(7.0)
+                    .color(self.palette.text)
+                    .label_align(TextAlign::Center),
+            );
         AnyView::new(
             Container::new()
                 .id("notification")
@@ -252,7 +267,7 @@ mod tests {
         assert_eq!(
             host.query(&SemanticSelector::Role(SemanticRole::Button))
                 .len(),
-            2
+            3
         );
         assert!(host.accessibility_nodes().iter().any(|node| {
             node.role.as_deref() == Some("dialog") && node.label.as_deref() == Some("Ready")
@@ -261,6 +276,11 @@ mod tests {
             host.accessibility_nodes()
                 .iter()
                 .any(|node| node.label.as_deref() == Some("Open"))
+        );
+        assert!(
+            host.accessibility_nodes()
+                .iter()
+                .any(|node| node.label.as_deref() == Some("Dismiss"))
         );
     }
 
@@ -295,6 +315,47 @@ mod tests {
     }
 
     #[test]
+    fn keyboard_and_accessibility_activation_emit_typed_effects() {
+        let mut keyboard = host();
+        keyboard.step(HostBatch {
+            events: vec![
+                HostEvent::Ui(nickel_ui::UiEvent::FocusNext),
+                HostEvent::Ui(nickel_ui::UiEvent::KeyboardActivate),
+            ],
+            ..HostBatch::default()
+        });
+        assert_eq!(
+            keyboard.application_mut().take_effects(),
+            vec![NotificationEffect::Invoke {
+                notification_id: 1,
+                key: "open".into(),
+            }]
+        );
+
+        let mut accessibility = host();
+        let open = accessibility
+            .query_unique(&SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Open".into(),
+            })
+            .unwrap();
+        accessibility.step(HostBatch {
+            events: vec![HostEvent::Accessibility {
+                target: open.id,
+                action: SemanticAction::Invoke(ActionKind::Activate),
+            }],
+            ..HostBatch::default()
+        });
+        assert_eq!(
+            accessibility.application_mut().take_effects(),
+            vec![NotificationEffect::Invoke {
+                notification_id: 1,
+                key: "open".into(),
+            }]
+        );
+    }
+
+    #[test]
     fn dismissal_and_invalid_actions_are_typed() {
         let mut host = host();
         assert!(
@@ -317,6 +378,58 @@ mod tests {
                 notification_id: 1,
                 key: "missing".into(),
             }]
+        );
+    }
+
+    #[test]
+    fn keyboard_and_accessibility_dismissal_emit_typed_effects() {
+        let mut keyboard = host();
+        keyboard.step(HostBatch {
+            events: vec![
+                HostEvent::Ui(nickel_ui::UiEvent::FocusNext),
+                HostEvent::Ui(nickel_ui::UiEvent::FocusNext),
+                HostEvent::Ui(nickel_ui::UiEvent::FocusNext),
+                HostEvent::Ui(nickel_ui::UiEvent::KeyboardActivate),
+            ],
+            ..HostBatch::default()
+        });
+        assert_eq!(
+            keyboard.application_mut().take_effects(),
+            vec![NotificationEffect::Dismiss { notification_id: 1 }]
+        );
+
+        let mut accessibility = host();
+        let dismiss = accessibility
+            .query_unique(&SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Dismiss".into(),
+            })
+            .unwrap();
+        accessibility.step(HostBatch {
+            events: vec![HostEvent::Accessibility {
+                target: dismiss.id,
+                action: SemanticAction::Invoke(ActionKind::Activate),
+            }],
+            ..HostBatch::default()
+        });
+        assert_eq!(
+            accessibility.application_mut().take_effects(),
+            vec![NotificationEffect::Dismiss { notification_id: 1 }]
+        );
+
+        let mut controller = host();
+        controller.step(HostBatch {
+            events: vec![
+                HostEvent::Controller(ControllerAction::Right),
+                HostEvent::Controller(ControllerAction::Right),
+                HostEvent::Controller(ControllerAction::Right),
+                HostEvent::Controller(ControllerAction::Confirm),
+            ],
+            ..HostBatch::default()
+        });
+        assert_eq!(
+            controller.application_mut().take_effects(),
+            vec![NotificationEffect::Dismiss { notification_id: 1 }]
         );
     }
 }
