@@ -1545,6 +1545,7 @@ fn main() -> Result<(), String> {
                     .surface(surface)
                     .is_some_and(|entry| entry.role() == SurfaceRole::Launcher)
                 {
+                    state.focus_launcher_search();
                     shell.start_text_input(surface);
                 }
                 #[cfg(not(target_os = "linux"))]
@@ -1611,7 +1612,9 @@ fn main() -> Result<(), String> {
             Some(ShellEvent::Shown(surface)) => {
                 let role = shell.surface(surface).map(|entry| entry.role());
                 if let Some(
-                    role @ (SurfaceRole::WindowPreview
+                    role @ (SurfaceRole::Desktop
+                    | SurfaceRole::Panel
+                    | SurfaceRole::WindowPreview
                     | SurfaceRole::WindowContextMenu
                     | SurfaceRole::Lock),
                 ) = role

@@ -1076,7 +1076,7 @@ fn build_dashboard_view_directional(
     }
 
     let search = Container::new()
-        .id("launcher-dashboard-search-focus")
+        .id("launcher-search-focus")
         .accessibility_label("Focus application search")
         .child(LauncherSearchField::new_directional(
             theme,
@@ -1332,7 +1332,7 @@ mod tests {
         scenario.controller(ControllerAction::Down).unwrap();
         let first_target = controller_target(&scenario);
         assert!(
-            first_target.contains("launcher-dashboard-search-focus"),
+            first_target.contains("launcher-search-focus"),
             "selected {first_target}"
         );
         scenario.controller(ControllerAction::PreviousPane).unwrap();
@@ -1476,6 +1476,27 @@ mod tests {
         assert_eq!(
             host.application_mut().take_effects(),
             [LauncherAction::SetQuery("日本".into())]
+        );
+        let focused = host
+            .inspect()
+            .keyboard_focus
+            .clone()
+            .expect("search focus survives dashboard-to-search reconstruction");
+        assert!(focused.as_str().contains("launcher-search-focus"));
+
+        let second_commit = host.handle_input(
+            &InputEvent::Text(TextEvent::Commit {
+                device: DeviceId(7),
+                order: EventOrder(3),
+                text: "語".into(),
+            }),
+            None,
+        );
+        assert!(second_commit.changed);
+        assert_eq!(host.application().launcher.query(), "日本語");
+        assert_eq!(
+            host.application_mut().take_effects(),
+            [LauncherAction::SetQuery("日本語".into())]
         );
     }
 

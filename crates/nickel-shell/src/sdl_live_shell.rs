@@ -1960,9 +1960,26 @@ impl LiveShell {
         self.launcher_visible = visible;
         if visible {
             self.control_visible = false;
+            self.focus_launcher_search();
         } else {
             self.launcher.clear();
         }
+    }
+
+    pub fn focus_launcher_search(&mut self) -> bool {
+        let status = self.launcher_status_text();
+        self.launcher_host
+            .application_mut()
+            .sync(&self.launcher, self.palette, status);
+        self.launcher_host.step(HostBatch::default());
+        let Ok(search) = self
+            .launcher_host
+            .query_unique(&nickel_ui::SemanticSelector::Role(SemanticRole::TextField))
+        else {
+            return false;
+        };
+        let outcome = self.launcher_host.request_focus(search.id);
+        outcome.changed && outcome.failures.is_empty()
     }
 
     pub fn control_click(&mut self, x: f32, y: f32, width: u32, height: u32) -> bool {
@@ -3142,19 +3159,14 @@ mod tests {
     use std::time::Instant;
 
     #[test]
-    fn launcher_text_input_flows_through_the_production_host_once() {
+    fn launcher_open_focuses_search_and_sequential_input_survives_mode_change() {
         let mut shell = LiveShell::new().unwrap();
-        shell.launcher_visible = true;
+        shell.apply_session_launcher_visibility(true);
         shell.launcher_host.step(HostBatch {
             surface_size: Some((920, 680)),
             ..HostBatch::default()
         });
-        let search = shell
-            .launcher_host
-            .query_unique(&SemanticSelector::Role(SemanticRole::TextField))
-            .expect("launcher search text field");
-        let focus = shell.launcher_host.request_focus(search.id);
-        assert!(focus.failures.is_empty(), "{:#?}", focus.failures);
+        assert!(shell.launcher_host.inspect().keyboard_focus.is_some());
         shell.launcher_host.step(HostBatch {
             events: vec![HostEvent::Ui(UiEvent::TextInput("a".into()))],
             ..HostBatch::default()
@@ -3163,6 +3175,19 @@ mod tests {
             shell.apply_launcher_action(action);
         }
         assert_eq!(shell.launcher.query(), "a");
+        let status = shell.launcher_status_text();
+        shell
+            .launcher_host
+            .application_mut()
+            .sync(&shell.launcher, shell.palette, status);
+        shell.launcher_host.step(HostBatch {
+            events: vec![HostEvent::Ui(UiEvent::TextInput("b".into()))],
+            ..HostBatch::default()
+        });
+        for action in shell.launcher_host.application_mut().take_effects() {
+            shell.apply_launcher_action(action);
+        }
+        assert_eq!(shell.launcher.query(), "ab");
     }
 
     #[test]

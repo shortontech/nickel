@@ -61,7 +61,7 @@ fn registers_every_shell_surface_fixture() {
                         || node
                             .id
                             .as_str()
-                            .ends_with("launcher-dashboard-search-focus"))
+                            .ends_with("launcher-search-focus"))
                         && node.label.as_deref() == Some("Focus application search")
                 }));
             }
@@ -69,7 +69,7 @@ fn registers_every_shell_surface_fixture() {
                 assert!(session.accessibility_nodes().iter().any(|node| {
                     node.id
                         .as_str()
-                        .ends_with("launcher-dashboard-search-focus")
+                        .ends_with("launcher-search-focus")
                         && node.label.as_deref() == Some("Focus application search")
                 }));
             }

@@ -12505,7 +12505,7 @@
       "variant": "populated-wide-ltr-dark-1x-pointer",
       "report": {
         "schema": 1,
-        "semantic_digest": "fnv1a64:103d1102a6d96772",
+        "semantic_digest": "fnv1a64:21098ec914e30314",
         "paths": [
           {
             "target": "root/#0/#0/#0/start-menu-primary-pane/#0/#0/#1",
@@ -12710,11 +12710,11 @@
             "reached": true
           },
           {
-            "target": "root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1",
+            "target": "root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
             "action": "SetValue",
             "modality": "accessibility",
             "steps": [
-              "0:accessibility:SetValue:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1"
+              "0:accessibility:SetValue:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1"
             ],
             "reached": true
           },
@@ -12728,7 +12728,7 @@
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#3",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#5",
               "4:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#2/launcher-account",
-              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:keyboard:Activate:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox"
             ],
@@ -12739,7 +12739,7 @@
             "action": "Activate",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root",
               "2:controller:Confirm:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox"
             ],
@@ -12764,7 +12764,7 @@
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#3",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#5",
               "4:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#2/launcher-account",
-              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:keyboard:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox"
             ],
@@ -12775,7 +12775,7 @@
             "action": "ContextMenu",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root",
               "2:controller:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox"
             ],
@@ -12800,7 +12800,7 @@
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#3",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#5",
               "4:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#2/launcher-account",
-              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
               "8:keyboard:Activate:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files"
@@ -12812,7 +12812,7 @@
             "action": "Activate",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root",
               "2:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root",
               "3:controller:Confirm:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files"
@@ -12838,7 +12838,7 @@
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#3",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#5",
               "4:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#2/launcher-account",
-              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
               "8:keyboard:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files"
@@ -12850,7 +12850,7 @@
             "action": "ContextMenu",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root",
               "2:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root",
               "3:controller:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files"
@@ -12876,7 +12876,7 @@
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#3",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#5",
               "4:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#2/launcher-account",
-              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
               "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
@@ -12889,7 +12889,7 @@
             "action": "Activate",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root",
               "2:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root",
@@ -12916,7 +12916,7 @@
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#3",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#5",
               "4:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#2/launcher-account",
-              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
               "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
@@ -12929,7 +12929,7 @@
             "action": "ContextMenu",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root",
               "2:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root",
@@ -12956,7 +12956,7 @@
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#3",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#5",
               "4:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#2/launcher-account",
-              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
               "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
@@ -12970,7 +12970,7 @@
             "action": "Activate",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root",
               "2:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root",
@@ -12998,7 +12998,7 @@
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#3",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#5",
               "4:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#2/launcher-account",
-              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
               "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
@@ -13012,7 +13012,7 @@
             "action": "ContextMenu",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root",
               "2:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root",
@@ -13040,7 +13040,7 @@
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#3",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#5",
               "4:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#2/launcher-account",
-              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
               "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
@@ -13055,7 +13055,7 @@
             "action": "Activate",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root",
               "2:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root",
@@ -13084,7 +13084,7 @@
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#3",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#5",
               "4:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#2/launcher-account",
-              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
               "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
@@ -13099,7 +13099,7 @@
             "action": "ContextMenu",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root",
               "2:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root",
@@ -13128,7 +13128,7 @@
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#3",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#5",
               "4:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#2/launcher-account",
-              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
               "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
@@ -13144,7 +13144,7 @@
             "action": "Activate",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root",
               "2:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root",
@@ -13174,7 +13174,7 @@
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#3",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#5",
               "4:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#2/launcher-account",
-              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
               "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
@@ -13190,7 +13190,7 @@
             "action": "ContextMenu",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root",
               "2:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root",
@@ -13220,7 +13220,7 @@
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#3",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#5",
               "4:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#2/launcher-account",
-              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
               "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
@@ -13237,7 +13237,7 @@
             "action": "Activate",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root",
               "2:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root",
@@ -13268,7 +13268,7 @@
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#3",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#5",
               "4:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#2/launcher-account",
-              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
               "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
@@ -13285,7 +13285,7 @@
             "action": "ContextMenu",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root",
               "2:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root",
@@ -13316,7 +13316,7 @@
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#3",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#5",
               "4:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#2/launcher-account",
-              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
               "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
@@ -13334,7 +13334,7 @@
             "action": "Activate",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root",
               "2:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root",
@@ -13366,7 +13366,7 @@
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#3",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#5",
               "4:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#2/launcher-account",
-              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
               "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
@@ -13384,7 +13384,7 @@
             "action": "ContextMenu",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root",
               "2:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root",
@@ -13416,7 +13416,7 @@
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#3",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#5",
               "4:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#2/launcher-account",
-              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
               "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
@@ -13435,7 +13435,7 @@
             "action": "Activate",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root",
               "2:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root",
@@ -13468,7 +13468,7 @@
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#3",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#5",
               "4:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#2/launcher-account",
-              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
               "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
@@ -13488,7 +13488,7 @@
             "action": "Activate",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root",
               "2:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root",
@@ -13691,14 +13691,14 @@
       "variant": "empty-narrow-rtl-light-2x-keyboard",
       "report": {
         "schema": 1,
-        "semantic_digest": "fnv1a64:d3e7a9e6fb050dd6",
+        "semantic_digest": "fnv1a64:3c91d83517002aa4",
         "paths": [
           {
-            "target": "root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#0",
+            "target": "root/#0/#0/#0/launcher-search-focus/#0/#0/#0",
             "action": "SetValue",
             "modality": "accessibility",
             "steps": [
-              "0:accessibility:SetValue:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#0"
+              "0:accessibility:SetValue:root/#0/#0/#0/launcher-search-focus/#0/#0/#0"
             ],
             "reached": true
           },
@@ -13707,7 +13707,7 @@
             "action": "Activate",
             "modality": "keyboard",
             "steps": [
-              "0:focus_next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#0",
+              "0:focus_next:root/#0/#0/#0/launcher-search-focus/#0/#0/#0",
               "1:focus_next:root/#0/#0/#0/#1/#1",
               "2:keyboard:Activate:root/#0/#0/#0/#1/#1"
             ],
@@ -13718,7 +13718,7 @@
             "action": "Activate",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#0@root",
+              "0:controller_Next:root/#0/#0/#0/launcher-search-focus/#0/#0/#0@root",
               "1:controller_Next:root/#0/#0/#0/#1/#1@root",
               "2:controller:Confirm:root/#0/#0/#0/#1/#1"
             ],
@@ -13738,7 +13738,7 @@
             "action": "Activate",
             "modality": "keyboard",
             "steps": [
-              "0:focus_next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#0",
+              "0:focus_next:root/#0/#0/#0/launcher-search-focus/#0/#0/#0",
               "1:focus_next:root/#0/#0/#0/#1/#1",
               "2:focus_next:root/#0/#0/#0/#1/#2",
               "3:keyboard:Activate:root/#0/#0/#0/#1/#2"
@@ -13750,7 +13750,7 @@
             "action": "Activate",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#0@root",
+              "0:controller_Next:root/#0/#0/#0/launcher-search-focus/#0/#0/#0@root",
               "1:controller_Next:root/#0/#0/#0/#1/#1@root",
               "2:controller_Next:root/#0/#0/#0/#1/#2@root",
               "3:controller:Confirm:root/#0/#0/#0/#1/#2"
@@ -13771,7 +13771,7 @@
             "action": "Activate",
             "modality": "keyboard",
             "steps": [
-              "0:focus_next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#0",
+              "0:focus_next:root/#0/#0/#0/launcher-search-focus/#0/#0/#0",
               "1:focus_next:root/#0/#0/#0/#1/#1",
               "2:focus_next:root/#0/#0/#0/#1/#2",
               "3:focus_next:root/#0/#0/#0/#1/#3",
@@ -13784,7 +13784,7 @@
             "action": "Activate",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#0@root",
+              "0:controller_Next:root/#0/#0/#0/launcher-search-focus/#0/#0/#0@root",
               "1:controller_Next:root/#0/#0/#0/#1/#1@root",
               "2:controller_Next:root/#0/#0/#0/#1/#2@root",
               "3:controller_Next:root/#0/#0/#0/#1/#3@root",
@@ -13806,7 +13806,7 @@
             "action": "Activate",
             "modality": "keyboard",
             "steps": [
-              "0:focus_next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#0",
+              "0:focus_next:root/#0/#0/#0/launcher-search-focus/#0/#0/#0",
               "1:focus_next:root/#0/#0/#0/#1/#1",
               "2:focus_next:root/#0/#0/#0/#1/#2",
               "3:focus_next:root/#0/#0/#0/#1/#3",
@@ -13820,7 +13820,7 @@
             "action": "Activate",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#0@root",
+              "0:controller_Next:root/#0/#0/#0/launcher-search-focus/#0/#0/#0@root",
               "1:controller_Next:root/#0/#0/#0/#1/#1@root",
               "2:controller_Next:root/#0/#0/#0/#1/#2@root",
               "3:controller_Next:root/#0/#0/#0/#1/#3@root",
@@ -13843,7 +13843,7 @@
             "action": "Activate",
             "modality": "keyboard",
             "steps": [
-              "0:focus_next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#0",
+              "0:focus_next:root/#0/#0/#0/launcher-search-focus/#0/#0/#0",
               "1:focus_next:root/#0/#0/#0/#1/#1",
               "2:focus_next:root/#0/#0/#0/#1/#2",
               "3:focus_next:root/#0/#0/#0/#1/#3",
@@ -13858,7 +13858,7 @@
             "action": "Activate",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#0@root",
+              "0:controller_Next:root/#0/#0/#0/launcher-search-focus/#0/#0/#0@root",
               "1:controller_Next:root/#0/#0/#0/#1/#1@root",
               "2:controller_Next:root/#0/#0/#0/#1/#2@root",
               "3:controller_Next:root/#0/#0/#0/#1/#3@root",
@@ -13882,7 +13882,7 @@
             "action": "ContextMenu",
             "modality": "keyboard",
             "steps": [
-              "0:focus_next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#0",
+              "0:focus_next:root/#0/#0/#0/launcher-search-focus/#0/#0/#0",
               "1:focus_next:root/#0/#0/#0/#1/#1",
               "2:focus_next:root/#0/#0/#0/#1/#2",
               "3:focus_next:root/#0/#0/#0/#1/#3",
@@ -13897,7 +13897,7 @@
             "action": "ContextMenu",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#0@root",
+              "0:controller_Next:root/#0/#0/#0/launcher-search-focus/#0/#0/#0@root",
               "1:controller_Next:root/#0/#0/#0/#1/#1@root",
               "2:controller_Next:root/#0/#0/#0/#1/#2@root",
               "3:controller_Next:root/#0/#0/#0/#1/#3@root",
@@ -13935,7 +13935,7 @@
       "variant": "loading-wide-ltr-high-contrast-1x-controller-playstation",
       "report": {
         "schema": 1,
-        "semantic_digest": "fnv1a64:9068294b147ff50d",
+        "semantic_digest": "fnv1a64:893b271a0ee67f77",
         "paths": [
           {
             "target": "root/#0/#0/#0/start-menu-primary-pane/#0/#0/#1",
@@ -14140,11 +14140,11 @@
             "reached": true
           },
           {
-            "target": "root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1",
+            "target": "root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
             "action": "SetValue",
             "modality": "accessibility",
             "steps": [
-              "0:accessibility:SetValue:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1"
+              "0:accessibility:SetValue:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1"
             ],
             "reached": true
           },
@@ -14158,7 +14158,7 @@
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#3",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#5",
               "4:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#2/launcher-account",
-              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/#2/#0/#2",
               "7:keyboard:Activate:root/#0/#0/#0/start-menu-detail-pane/#0/#1/#2/#0/#2"
             ],
@@ -14169,7 +14169,7 @@
             "action": "Activate",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/#2/#0/#2@root",
               "2:controller:Confirm:root/#0/#0/#0/start-menu-detail-pane/#0/#1/#2/#0/#2"
             ],
@@ -14203,14 +14203,14 @@
       "variant": "partial-failure-narrow-rtl-dark-2x-a11y",
       "report": {
         "schema": 1,
-        "semantic_digest": "fnv1a64:6301cb67c51ecf87",
+        "semantic_digest": "fnv1a64:601ec8fd405a6cfd",
         "paths": [
           {
-            "target": "root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#0",
+            "target": "root/#0/#0/#0/launcher-search-focus/#0/#0/#0",
             "action": "SetValue",
             "modality": "accessibility",
             "steps": [
-              "0:accessibility:SetValue:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#0"
+              "0:accessibility:SetValue:root/#0/#0/#0/launcher-search-focus/#0/#0/#0"
             ],
             "reached": true
           },
@@ -14219,7 +14219,7 @@
             "action": "Activate",
             "modality": "keyboard",
             "steps": [
-              "0:focus_next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#0",
+              "0:focus_next:root/#0/#0/#0/launcher-search-focus/#0/#0/#0",
               "1:focus_next:root/#0/#0/#0/#1/#1",
               "2:keyboard:Activate:root/#0/#0/#0/#1/#1"
             ],
@@ -14230,7 +14230,7 @@
             "action": "Activate",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#0@root",
+              "0:controller_Next:root/#0/#0/#0/launcher-search-focus/#0/#0/#0@root",
               "1:controller_Next:root/#0/#0/#0/#1/#1@root",
               "2:controller:Confirm:root/#0/#0/#0/#1/#1"
             ],
@@ -14250,7 +14250,7 @@
             "action": "Activate",
             "modality": "keyboard",
             "steps": [
-              "0:focus_next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#0",
+              "0:focus_next:root/#0/#0/#0/launcher-search-focus/#0/#0/#0",
               "1:focus_next:root/#0/#0/#0/#1/#1",
               "2:focus_next:root/#0/#0/#0/#1/#2",
               "3:keyboard:Activate:root/#0/#0/#0/#1/#2"
@@ -14262,7 +14262,7 @@
             "action": "Activate",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#0@root",
+              "0:controller_Next:root/#0/#0/#0/launcher-search-focus/#0/#0/#0@root",
               "1:controller_Next:root/#0/#0/#0/#1/#1@root",
               "2:controller_Next:root/#0/#0/#0/#1/#2@root",
               "3:controller:Confirm:root/#0/#0/#0/#1/#2"
@@ -14283,7 +14283,7 @@
             "action": "Activate",
             "modality": "keyboard",
             "steps": [
-              "0:focus_next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#0",
+              "0:focus_next:root/#0/#0/#0/launcher-search-focus/#0/#0/#0",
               "1:focus_next:root/#0/#0/#0/#1/#1",
               "2:focus_next:root/#0/#0/#0/#1/#2",
               "3:focus_next:root/#0/#0/#0/#1/#3",
@@ -14296,7 +14296,7 @@
             "action": "Activate",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#0@root",
+              "0:controller_Next:root/#0/#0/#0/launcher-search-focus/#0/#0/#0@root",
               "1:controller_Next:root/#0/#0/#0/#1/#1@root",
               "2:controller_Next:root/#0/#0/#0/#1/#2@root",
               "3:controller_Next:root/#0/#0/#0/#1/#3@root",
@@ -14318,7 +14318,7 @@
             "action": "Activate",
             "modality": "keyboard",
             "steps": [
-              "0:focus_next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#0",
+              "0:focus_next:root/#0/#0/#0/launcher-search-focus/#0/#0/#0",
               "1:focus_next:root/#0/#0/#0/#1/#1",
               "2:focus_next:root/#0/#0/#0/#1/#2",
               "3:focus_next:root/#0/#0/#0/#1/#3",
@@ -14332,7 +14332,7 @@
             "action": "Activate",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#0@root",
+              "0:controller_Next:root/#0/#0/#0/launcher-search-focus/#0/#0/#0@root",
               "1:controller_Next:root/#0/#0/#0/#1/#1@root",
               "2:controller_Next:root/#0/#0/#0/#1/#2@root",
               "3:controller_Next:root/#0/#0/#0/#1/#3@root",
@@ -14355,7 +14355,7 @@
             "action": "Activate",
             "modality": "keyboard",
             "steps": [
-              "0:focus_next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#0",
+              "0:focus_next:root/#0/#0/#0/launcher-search-focus/#0/#0/#0",
               "1:focus_next:root/#0/#0/#0/#1/#1",
               "2:focus_next:root/#0/#0/#0/#1/#2",
               "3:focus_next:root/#0/#0/#0/#1/#3",
@@ -14370,7 +14370,7 @@
             "action": "Activate",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#0@root",
+              "0:controller_Next:root/#0/#0/#0/launcher-search-focus/#0/#0/#0@root",
               "1:controller_Next:root/#0/#0/#0/#1/#1@root",
               "2:controller_Next:root/#0/#0/#0/#1/#2@root",
               "3:controller_Next:root/#0/#0/#0/#1/#3@root",
@@ -14394,7 +14394,7 @@
             "action": "ContextMenu",
             "modality": "keyboard",
             "steps": [
-              "0:focus_next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#0",
+              "0:focus_next:root/#0/#0/#0/launcher-search-focus/#0/#0/#0",
               "1:focus_next:root/#0/#0/#0/#1/#1",
               "2:focus_next:root/#0/#0/#0/#1/#2",
               "3:focus_next:root/#0/#0/#0/#1/#3",
@@ -14409,7 +14409,7 @@
             "action": "ContextMenu",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#0@root",
+              "0:controller_Next:root/#0/#0/#0/launcher-search-focus/#0/#0/#0@root",
               "1:controller_Next:root/#0/#0/#0/#1/#1@root",
               "2:controller_Next:root/#0/#0/#0/#1/#2@root",
               "3:controller_Next:root/#0/#0/#0/#1/#3@root",
@@ -14447,14 +14447,14 @@
       "variant": "populated-narrow-ltr-light-1x-controller-xbox",
       "report": {
         "schema": 1,
-        "semantic_digest": "fnv1a64:e91e9889785fb633",
+        "semantic_digest": "fnv1a64:28d0b569eeb3fc49",
         "paths": [
           {
-            "target": "root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#1",
+            "target": "root/#0/#0/#0/launcher-search-focus/#0/#0/#1",
             "action": "SetValue",
             "modality": "accessibility",
             "steps": [
-              "0:accessibility:SetValue:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#1"
+              "0:accessibility:SetValue:root/#0/#0/#0/launcher-search-focus/#0/#0/#1"
             ],
             "reached": true
           },
@@ -14463,7 +14463,7 @@
             "action": "Activate",
             "modality": "keyboard",
             "steps": [
-              "0:focus_next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "0:focus_next:root/#0/#0/#0/launcher-search-focus/#0/#0/#1",
               "1:focus_next:root/#0/#0/#0/#1/#1",
               "2:keyboard:Activate:root/#0/#0/#0/#1/#1"
             ],
@@ -14474,7 +14474,7 @@
             "action": "Activate",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/#1/#1@root",
               "2:controller:Confirm:root/#0/#0/#0/#1/#1"
             ],
@@ -14494,7 +14494,7 @@
             "action": "Activate",
             "modality": "keyboard",
             "steps": [
-              "0:focus_next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "0:focus_next:root/#0/#0/#0/launcher-search-focus/#0/#0/#1",
               "1:focus_next:root/#0/#0/#0/#1/#1",
               "2:focus_next:root/#0/#0/#0/#1/#2",
               "3:keyboard:Activate:root/#0/#0/#0/#1/#2"
@@ -14506,7 +14506,7 @@
             "action": "Activate",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/#1/#1@root",
               "2:controller_Next:root/#0/#0/#0/#1/#2@root",
               "3:controller:Confirm:root/#0/#0/#0/#1/#2"
@@ -14527,7 +14527,7 @@
             "action": "Activate",
             "modality": "keyboard",
             "steps": [
-              "0:focus_next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "0:focus_next:root/#0/#0/#0/launcher-search-focus/#0/#0/#1",
               "1:focus_next:root/#0/#0/#0/#1/#1",
               "2:focus_next:root/#0/#0/#0/#1/#2",
               "3:focus_next:root/#0/#0/#0/#1/#3",
@@ -14540,7 +14540,7 @@
             "action": "Activate",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/#1/#1@root",
               "2:controller_Next:root/#0/#0/#0/#1/#2@root",
               "3:controller_Next:root/#0/#0/#0/#1/#3@root",
@@ -14562,7 +14562,7 @@
             "action": "Activate",
             "modality": "keyboard",
             "steps": [
-              "0:focus_next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "0:focus_next:root/#0/#0/#0/launcher-search-focus/#0/#0/#1",
               "1:focus_next:root/#0/#0/#0/#1/#1",
               "2:focus_next:root/#0/#0/#0/#1/#2",
               "3:focus_next:root/#0/#0/#0/#1/#3",
@@ -14576,7 +14576,7 @@
             "action": "Activate",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/#1/#1@root",
               "2:controller_Next:root/#0/#0/#0/#1/#2@root",
               "3:controller_Next:root/#0/#0/#0/#1/#3@root",
@@ -14599,7 +14599,7 @@
             "action": "Activate",
             "modality": "keyboard",
             "steps": [
-              "0:focus_next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "0:focus_next:root/#0/#0/#0/launcher-search-focus/#0/#0/#1",
               "1:focus_next:root/#0/#0/#0/#1/#1",
               "2:focus_next:root/#0/#0/#0/#1/#2",
               "3:focus_next:root/#0/#0/#0/#1/#3",
@@ -14614,7 +14614,7 @@
             "action": "Activate",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/#1/#1@root",
               "2:controller_Next:root/#0/#0/#0/#1/#2@root",
               "3:controller_Next:root/#0/#0/#0/#1/#3@root",
@@ -14638,7 +14638,7 @@
             "action": "ContextMenu",
             "modality": "keyboard",
             "steps": [
-              "0:focus_next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "0:focus_next:root/#0/#0/#0/launcher-search-focus/#0/#0/#1",
               "1:focus_next:root/#0/#0/#0/#1/#1",
               "2:focus_next:root/#0/#0/#0/#1/#2",
               "3:focus_next:root/#0/#0/#0/#1/#3",
@@ -14653,7 +14653,7 @@
             "action": "ContextMenu",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/#1/#1@root",
               "2:controller_Next:root/#0/#0/#0/#1/#2@root",
               "3:controller_Next:root/#0/#0/#0/#1/#3@root",
@@ -14691,14 +14691,14 @@
       "variant": "empty-wide-rtl-high-contrast-2x-controller-switch",
       "report": {
         "schema": 1,
-        "semantic_digest": "fnv1a64:a93180db8a5bcc2d",
+        "semantic_digest": "fnv1a64:0ac4be7d87ed810f",
         "paths": [
           {
-            "target": "root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#0",
+            "target": "root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#0",
             "action": "SetValue",
             "modality": "accessibility",
             "steps": [
-              "0:accessibility:SetValue:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#0"
+              "0:accessibility:SetValue:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#0"
             ],
             "reached": true
           },
@@ -14707,7 +14707,7 @@
             "action": "Activate",
             "modality": "keyboard",
             "steps": [
-              "0:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#0",
+              "0:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#0",
               "1:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/#2/#0/#0",
               "2:keyboard:Activate:root/#0/#0/#0/start-menu-detail-pane/#0/#1/#2/#0/#0"
             ],
@@ -14718,7 +14718,7 @@
             "action": "Activate",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#0@root",
+              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#0@root",
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/#2/#0/#0@root",
               "2:controller:Confirm:root/#0/#0/#0/start-menu-detail-pane/#0/#1/#2/#0/#0"
             ],
@@ -14738,7 +14738,7 @@
             "action": "Activate",
             "modality": "keyboard",
             "steps": [
-              "0:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#0",
+              "0:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#0",
               "1:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/#2/#0/#0",
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#1",
               "3:keyboard:Activate:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#1"
@@ -14769,7 +14769,7 @@
             "action": "Activate",
             "modality": "keyboard",
             "steps": [
-              "0:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#0",
+              "0:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#0",
               "1:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/#2/#0/#0",
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#1",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#2",
@@ -14802,7 +14802,7 @@
             "action": "Activate",
             "modality": "keyboard",
             "steps": [
-              "0:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#0",
+              "0:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#0",
               "1:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/#2/#0/#0",
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#1",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#2",
@@ -14837,7 +14837,7 @@
             "action": "Activate",
             "modality": "keyboard",
             "steps": [
-              "0:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#0",
+              "0:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#0",
               "1:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/#2/#0/#0",
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#1",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#2",
@@ -14874,7 +14874,7 @@
             "action": "Activate",
             "modality": "keyboard",
             "steps": [
-              "0:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#0",
+              "0:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#0",
               "1:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/#2/#0/#0",
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#1",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#2",
@@ -14913,7 +14913,7 @@
             "action": "ContextMenu",
             "modality": "keyboard",
             "steps": [
-              "0:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#0",
+              "0:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#0",
               "1:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/#2/#0/#0",
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#1",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#2",
@@ -14966,14 +14966,14 @@
       "variant": "loading-narrow-ltr-dark-2x-pointer",
       "report": {
         "schema": 1,
-        "semantic_digest": "fnv1a64:fda6b3d95a38f27d",
+        "semantic_digest": "fnv1a64:9b4e982182080453",
         "paths": [
           {
-            "target": "root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#1",
+            "target": "root/#0/#0/#0/launcher-search-focus/#0/#0/#1",
             "action": "SetValue",
             "modality": "accessibility",
             "steps": [
-              "0:accessibility:SetValue:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#1"
+              "0:accessibility:SetValue:root/#0/#0/#0/launcher-search-focus/#0/#0/#1"
             ],
             "reached": true
           },
@@ -14982,7 +14982,7 @@
             "action": "Activate",
             "modality": "keyboard",
             "steps": [
-              "0:focus_next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "0:focus_next:root/#0/#0/#0/launcher-search-focus/#0/#0/#1",
               "1:focus_next:root/#0/#0/#0/#1/#1",
               "2:keyboard:Activate:root/#0/#0/#0/#1/#1"
             ],
@@ -14993,7 +14993,7 @@
             "action": "Activate",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/#1/#1@root",
               "2:controller:Confirm:root/#0/#0/#0/#1/#1"
             ],
@@ -15013,7 +15013,7 @@
             "action": "Activate",
             "modality": "keyboard",
             "steps": [
-              "0:focus_next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "0:focus_next:root/#0/#0/#0/launcher-search-focus/#0/#0/#1",
               "1:focus_next:root/#0/#0/#0/#1/#1",
               "2:focus_next:root/#0/#0/#0/#1/#2",
               "3:keyboard:Activate:root/#0/#0/#0/#1/#2"
@@ -15025,7 +15025,7 @@
             "action": "Activate",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/#1/#1@root",
               "2:controller_Next:root/#0/#0/#0/#1/#2@root",
               "3:controller:Confirm:root/#0/#0/#0/#1/#2"
@@ -15046,7 +15046,7 @@
             "action": "Activate",
             "modality": "keyboard",
             "steps": [
-              "0:focus_next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "0:focus_next:root/#0/#0/#0/launcher-search-focus/#0/#0/#1",
               "1:focus_next:root/#0/#0/#0/#1/#1",
               "2:focus_next:root/#0/#0/#0/#1/#2",
               "3:focus_next:root/#0/#0/#0/#1/#3",
@@ -15059,7 +15059,7 @@
             "action": "Activate",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/#1/#1@root",
               "2:controller_Next:root/#0/#0/#0/#1/#2@root",
               "3:controller_Next:root/#0/#0/#0/#1/#3@root",
@@ -15081,7 +15081,7 @@
             "action": "Activate",
             "modality": "keyboard",
             "steps": [
-              "0:focus_next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "0:focus_next:root/#0/#0/#0/launcher-search-focus/#0/#0/#1",
               "1:focus_next:root/#0/#0/#0/#1/#1",
               "2:focus_next:root/#0/#0/#0/#1/#2",
               "3:focus_next:root/#0/#0/#0/#1/#3",
@@ -15095,7 +15095,7 @@
             "action": "Activate",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/#1/#1@root",
               "2:controller_Next:root/#0/#0/#0/#1/#2@root",
               "3:controller_Next:root/#0/#0/#0/#1/#3@root",
@@ -15118,7 +15118,7 @@
             "action": "Activate",
             "modality": "keyboard",
             "steps": [
-              "0:focus_next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "0:focus_next:root/#0/#0/#0/launcher-search-focus/#0/#0/#1",
               "1:focus_next:root/#0/#0/#0/#1/#1",
               "2:focus_next:root/#0/#0/#0/#1/#2",
               "3:focus_next:root/#0/#0/#0/#1/#3",
@@ -15133,7 +15133,7 @@
             "action": "Activate",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/#1/#1@root",
               "2:controller_Next:root/#0/#0/#0/#1/#2@root",
               "3:controller_Next:root/#0/#0/#0/#1/#3@root",
@@ -15157,7 +15157,7 @@
             "action": "ContextMenu",
             "modality": "keyboard",
             "steps": [
-              "0:focus_next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "0:focus_next:root/#0/#0/#0/launcher-search-focus/#0/#0/#1",
               "1:focus_next:root/#0/#0/#0/#1/#1",
               "2:focus_next:root/#0/#0/#0/#1/#2",
               "3:focus_next:root/#0/#0/#0/#1/#3",
@@ -15172,7 +15172,7 @@
             "action": "ContextMenu",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/#1/#1@root",
               "2:controller_Next:root/#0/#0/#0/#1/#2@root",
               "3:controller_Next:root/#0/#0/#0/#1/#3@root",
@@ -15210,14 +15210,14 @@
       "variant": "partial-failure-wide-rtl-light-1x-keyboard",
       "report": {
         "schema": 1,
-        "semantic_digest": "fnv1a64:908ca47d567d9c6a",
+        "semantic_digest": "fnv1a64:dae10601b485981c",
         "paths": [
           {
-            "target": "root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#0",
+            "target": "root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#0",
             "action": "SetValue",
             "modality": "accessibility",
             "steps": [
-              "0:accessibility:SetValue:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#0"
+              "0:accessibility:SetValue:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#0"
             ],
             "reached": true
           },
@@ -15226,7 +15226,7 @@
             "action": "Activate",
             "modality": "keyboard",
             "steps": [
-              "0:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#0",
+              "0:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#0",
               "1:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/#2/#0/#0",
               "2:keyboard:Activate:root/#0/#0/#0/start-menu-detail-pane/#0/#1/#2/#0/#0"
             ],
@@ -15237,7 +15237,7 @@
             "action": "Activate",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#0@root",
+              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#0@root",
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/#2/#0/#0@root",
               "2:controller:Confirm:root/#0/#0/#0/start-menu-detail-pane/#0/#1/#2/#0/#0"
             ],
@@ -15257,7 +15257,7 @@
             "action": "Activate",
             "modality": "keyboard",
             "steps": [
-              "0:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#0",
+              "0:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#0",
               "1:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/#2/#0/#0",
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#1",
               "3:keyboard:Activate:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#1"
@@ -15288,7 +15288,7 @@
             "action": "Activate",
             "modality": "keyboard",
             "steps": [
-              "0:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#0",
+              "0:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#0",
               "1:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/#2/#0/#0",
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#1",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#2",
@@ -15321,7 +15321,7 @@
             "action": "Activate",
             "modality": "keyboard",
             "steps": [
-              "0:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#0",
+              "0:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#0",
               "1:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/#2/#0/#0",
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#1",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#2",
@@ -15356,7 +15356,7 @@
             "action": "Activate",
             "modality": "keyboard",
             "steps": [
-              "0:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#0",
+              "0:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#0",
               "1:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/#2/#0/#0",
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#1",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#2",
@@ -15393,7 +15393,7 @@
             "action": "Activate",
             "modality": "keyboard",
             "steps": [
-              "0:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#0",
+              "0:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#0",
               "1:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/#2/#0/#0",
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#1",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#2",
@@ -15432,7 +15432,7 @@
             "action": "ContextMenu",
             "modality": "keyboard",
             "steps": [
-              "0:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#0",
+              "0:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#0",
               "1:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/#2/#0/#0",
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#1",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#2",
@@ -15485,7 +15485,7 @@
       "variant": "empty-query",
       "report": {
         "schema": 1,
-        "semantic_digest": "fnv1a64:5d7e1e95b781acd3",
+        "semantic_digest": "fnv1a64:c9a8de47a0ce25dd",
         "paths": [
           {
             "target": "root/#0/#0/#0/start-menu-primary-pane/#0/#0/#1",
@@ -15690,11 +15690,11 @@
             "reached": true
           },
           {
-            "target": "root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1",
+            "target": "root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
             "action": "SetValue",
             "modality": "accessibility",
             "steps": [
-              "0:accessibility:SetValue:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1"
+              "0:accessibility:SetValue:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1"
             ],
             "reached": true
           },
@@ -15708,7 +15708,7 @@
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#3",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#5",
               "4:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#2/launcher-account",
-              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:keyboard:Activate:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox"
             ],
@@ -15719,7 +15719,7 @@
             "action": "Activate",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root",
               "2:controller:Confirm:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox"
             ],
@@ -15744,7 +15744,7 @@
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#3",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#5",
               "4:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#2/launcher-account",
-              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:keyboard:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox"
             ],
@@ -15755,7 +15755,7 @@
             "action": "ContextMenu",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root",
               "2:controller:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox"
             ],
@@ -15780,7 +15780,7 @@
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#3",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#5",
               "4:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#2/launcher-account",
-              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
               "8:keyboard:Activate:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files"
@@ -15792,7 +15792,7 @@
             "action": "Activate",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root",
               "2:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root",
               "3:controller:Confirm:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files"
@@ -15818,7 +15818,7 @@
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#3",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#5",
               "4:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#2/launcher-account",
-              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
               "8:keyboard:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files"
@@ -15830,7 +15830,7 @@
             "action": "ContextMenu",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root",
               "2:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root",
               "3:controller:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files"
@@ -15856,7 +15856,7 @@
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#3",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#5",
               "4:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#2/launcher-account",
-              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
               "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
@@ -15869,7 +15869,7 @@
             "action": "Activate",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root",
               "2:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root",
@@ -15896,7 +15896,7 @@
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#3",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#5",
               "4:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#2/launcher-account",
-              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
               "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
@@ -15909,7 +15909,7 @@
             "action": "ContextMenu",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root",
               "2:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root",
@@ -15936,7 +15936,7 @@
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#3",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#5",
               "4:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#2/launcher-account",
-              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
               "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
@@ -15950,7 +15950,7 @@
             "action": "Activate",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root",
               "2:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root",
@@ -15978,7 +15978,7 @@
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#3",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#5",
               "4:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#2/launcher-account",
-              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
               "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
@@ -15992,7 +15992,7 @@
             "action": "ContextMenu",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root",
               "2:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root",
@@ -16020,7 +16020,7 @@
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#3",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#5",
               "4:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#2/launcher-account",
-              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
               "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
@@ -16035,7 +16035,7 @@
             "action": "Activate",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root",
               "2:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root",
@@ -16064,7 +16064,7 @@
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#3",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#5",
               "4:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#2/launcher-account",
-              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
               "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
@@ -16079,7 +16079,7 @@
             "action": "ContextMenu",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root",
               "2:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root",
@@ -16108,7 +16108,7 @@
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#3",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#5",
               "4:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#2/launcher-account",
-              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
               "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
@@ -16124,7 +16124,7 @@
             "action": "Activate",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root",
               "2:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root",
@@ -16154,7 +16154,7 @@
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#3",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#5",
               "4:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#2/launcher-account",
-              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
               "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
@@ -16170,7 +16170,7 @@
             "action": "ContextMenu",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root",
               "2:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root",
@@ -16200,7 +16200,7 @@
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#3",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#5",
               "4:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#2/launcher-account",
-              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
               "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
@@ -16217,7 +16217,7 @@
             "action": "Activate",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root",
               "2:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root",
@@ -16248,7 +16248,7 @@
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#3",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#5",
               "4:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#2/launcher-account",
-              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
               "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
@@ -16265,7 +16265,7 @@
             "action": "ContextMenu",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root",
               "2:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root",
@@ -16296,7 +16296,7 @@
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#3",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#5",
               "4:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#2/launcher-account",
-              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
               "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
@@ -16314,7 +16314,7 @@
             "action": "Activate",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root",
               "2:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root",
@@ -16346,7 +16346,7 @@
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#3",
               "3:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#5",
               "4:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#2/launcher-account",
-              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1",
+              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
               "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
@@ -16364,7 +16364,7 @@
             "action": "ContextMenu",
             "modality": "controller",
             "steps": [
-              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-dashboard-search-focus/#0/#0/#1@root",
+              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root",
               "2:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root",

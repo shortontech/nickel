@@ -20,6 +20,14 @@ use sdl3::video::{Window, WindowPos};
 
 pub const DESKTOP_TITLE: &str = "Nickel Desktop";
 pub const PANEL_TITLE: &str = "Nickel Panel";
+const DEFAULT_SDL_APP_ID: &str = "io.nickel.shell";
+
+fn restore_sdl_app_id(previous: Option<String>) {
+    sdl3::hint::set(
+        "SDL_APP_ID",
+        previous.as_deref().unwrap_or(DEFAULT_SDL_APP_ID),
+    );
+}
 pub const LAUNCHER_TITLE: &str = "Nickel Launcher";
 pub const CONTROL_CENTER_TITLE: &str = "Nickel Control Center";
 pub const NOTIFICATION_TITLE: &str = "Nickel Notification";
@@ -130,6 +138,7 @@ pub enum ShellEvent {
 pub struct ShellSurface {
     id: SurfaceId,
     role: SurfaceRole,
+    application_id: String,
     display_index: usize,
     output_name: String,
     display_connected: bool,
@@ -428,11 +437,7 @@ impl SdlShell {
                 .window(title, 1120.min(geometry.width), 760.min(geometry.height));
         builder.position_centered().resizable().high_pixel_density();
         let window = builder.build().map_err(|error| error.to_string());
-        if let Some(previous_app_id) = previous_app_id {
-            sdl3::hint::set("SDL_APP_ID", &previous_app_id);
-        } else {
-            sdl3::hint::set("SDL_APP_ID", "io.nickel.shell");
-        }
+        restore_sdl_app_id(previous_app_id);
         let window = window?;
         self.video.text_input().start(&window);
         let id = SurfaceId(window.id());
@@ -441,6 +446,7 @@ impl SdlShell {
         self.surfaces.push(ShellSurface {
             id,
             role: SurfaceRole::CodexChat,
+            application_id: application_id.to_owned(),
             display_index: 0,
             output_name: String::new(),
             display_connected: true,
@@ -529,7 +535,11 @@ impl SdlShell {
                 .window
                 .take()
                 .expect("unpresented surface owns a window");
-            entry.presenter = Some(SdlCanvasPresenter::new(window)?);
+            let previous_app_id = sdl3::hint::get("SDL_APP_ID");
+            sdl3::hint::set("SDL_APP_ID", &entry.application_id);
+            let presenter = SdlCanvasPresenter::new(window);
+            restore_sdl_app_id(previous_app_id);
+            entry.presenter = Some(presenter?);
         }
         let scale = entry.window().display_scale();
         let started = Instant::now();
@@ -754,9 +764,7 @@ impl SdlShell {
             builder.hidden();
         }
         let window = builder.build().map_err(|error| error.to_string());
-        if let Some(previous_app_id) = previous_app_id {
-            sdl3::hint::set("SDL_APP_ID", &previous_app_id);
-        }
+        restore_sdl_app_id(previous_app_id);
         let mut window = window?;
         if role == SurfaceRole::Screenshot {
             window
@@ -782,6 +790,7 @@ impl SdlShell {
         self.surfaces.push(ShellSurface {
             id,
             role,
+            application_id: application_id.to_owned(),
             display_index,
             output_name: output_name.to_owned(),
             display_connected: true,
