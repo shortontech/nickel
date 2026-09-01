@@ -624,6 +624,8 @@ impl<A: Application> HostAdapter<A> for DefaultHostAdapter {}
 pub struct HostBatch {
     /// Monotonic time supplied by an adapter or deterministic harness.
     pub now: Option<Instant>,
+    /// The embedding host mutated application-owned view data directly.
+    pub application_changed: bool,
     pub surface_size: Option<(u32, u32)>,
     pub scale_factor: Option<f32>,
     pub window_focused: Option<bool>,
@@ -1175,6 +1177,10 @@ impl<A: Application> UiHost<A> {
         };
         combined.telemetry.events_processed = batch.events.len();
         combined.telemetry.completions_processed = batch.completions.len();
+        if batch.application_changed {
+            combined.changed = true;
+            combined.invalidation = Invalidation::Layout;
+        }
         combined.telemetry.scheduled_wakeups = batch
             .events
             .iter()
@@ -2183,6 +2189,25 @@ mod tests {
         assert_eq!(host.application_mut().submits, 2);
         assert_eq!(host.inspect().frame_generation, 2);
         assert_eq!(host.inspect().resources.retained_build_scratch_bytes, 0);
+    }
+
+    #[test]
+    fn explicit_application_change_rebuilds_at_an_unchanged_surface_size() {
+        let mut host = UiHost::new(InputApplication::default(), 320, 48);
+        host.application_mut().text = "loaded after construction".into();
+
+        let outcome = host.step(HostBatch {
+            application_changed: true,
+            surface_size: Some((320, 48)),
+            ..HostBatch::default()
+        });
+
+        assert!(outcome.changed);
+        assert!(outcome.telemetry.rebuilt);
+        assert_eq!(host.inspect().frame_generation, 2);
+        assert!(host.commands().iter().any(|command| {
+            matches!(command, crate::PaintCommand::Text { text, .. } if text == "loaded after construction")
+        }));
     }
 
     #[test]

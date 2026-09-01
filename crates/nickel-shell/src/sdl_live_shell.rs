@@ -2156,9 +2156,16 @@ impl LiveShell {
     fn desktop_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
         self.load_wallpaper_for(width, height);
         let application = self.desktop_host.application_mut();
+        let wallpaper_changed = match (&application.wallpaper, &self.wallpaper) {
+            (Some(current), Some(next)) => !Arc::ptr_eq(current, next),
+            (None, None) => false,
+            _ => true,
+        };
+        let palette_changed = application.palette != self.palette;
         application.wallpaper.clone_from(&self.wallpaper);
         application.palette = self.palette;
         let outcome = self.desktop_host.step(HostBatch {
+            application_changed: wallpaper_changed || palette_changed,
             surface_size: Some((width, height)),
             ..HostBatch::default()
         });
@@ -3990,6 +3997,27 @@ mod tests {
             super::wallpaper_cache_target((3840, 2160), (1920, 1080)),
             Some((1920, 1080)),
             "4K to FHD releases three quarters of retained pixels"
+        );
+    }
+
+    #[test]
+    fn desktop_scene_rebuilds_when_wallpaper_arrives_at_the_initial_host_size() {
+        let mut shell = LiveShell::new().unwrap();
+        shell.wallpaper = Some(Arc::new(RgbaImage::from_pixel(
+            1920,
+            1080,
+            Rgba([10, 20, 30, 255]),
+        )));
+        shell.wallpaper_size = (1920, 1080);
+        let initial = shell.desktop_host.inspect();
+
+        shell.desktop_scene(1920, 1080);
+        let rebuilt = shell.desktop_host.inspect();
+
+        assert_eq!(rebuilt.frame_generation, initial.frame_generation + 1);
+        assert!(
+            rebuilt.resources.paint_primitive_count > initial.resources.paint_primitive_count,
+            "the declarative wallpaper image enters the rebuilt desktop frame"
         );
     }
 
