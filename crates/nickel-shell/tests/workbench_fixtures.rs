@@ -57,19 +57,13 @@ fn registers_every_shell_surface_fixture() {
             }
             if entry.metadata.id == "shell.launcher-search" {
                 assert!(session.accessibility_nodes().iter().any(|node| {
-                    (node.id.as_str().ends_with("launcher-search-focus")
-                        || node
-                            .id
-                            .as_str()
-                            .ends_with("launcher-search-focus"))
+                    node.id.as_str().ends_with("launcher-search-focus")
                         && node.label.as_deref() == Some("Focus application search")
                 }));
             }
             if entry.metadata.id == "shell.launcher-dashboard" {
                 assert!(session.accessibility_nodes().iter().any(|node| {
-                    node.id
-                        .as_str()
-                        .ends_with("launcher-search-focus")
+                    node.id.as_str().ends_with("launcher-search-focus")
                         && node.label.as_deref() == Some("Focus application search")
                 }));
             }

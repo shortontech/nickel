@@ -5088,7 +5088,7 @@ fn layout_element<Message: Clone>(
             }),
             Kind::Text {
                 input_value: Some(value),
-                input_protected: true,
+                input_mask: Some(_),
                 ..
             } => Some(SemanticValueSnapshot::ProtectedText {
                 character_count: value.chars().count(),
@@ -5709,6 +5709,7 @@ fn apply_transient_state<Message>(
                 selection_x,
                 caret_position,
                 input_value,
+                input_mask,
                 line_height,
                 ..
             } = &mut element.kind
@@ -5761,7 +5762,11 @@ fn apply_transient_state<Message>(
                     y: line_index as f32 * height,
                 }
             });
-            *value = editor.display_text_with_caret("");
+            *value = if let Some(mask) = input_mask {
+                std::iter::repeat_n(*mask, editor.text().chars().count()).collect()
+            } else {
+                editor.display_text_with_caret("")
+            };
         }
         if matches!(element.style.overflow_y, Overflow::Scroll | Overflow::Auto) {
             element.style.scroll_offset = if element.style.follow_scroll_end && scroll_at_end {

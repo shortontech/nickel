@@ -906,7 +906,7 @@ enum Kind {
         selection_x: Option<(f32, f32)>,
         caret_position: Option<Point>,
         input_value: Option<String>,
-        input_protected: bool,
+        input_mask: Option<char>,
     },
     StyledText {
         value: String,
@@ -1035,7 +1035,7 @@ impl<Message> Element<Message> {
                 selection_x: None,
                 caret_position: None,
                 input_value: None,
-                input_protected: false,
+                input_mask: None,
             },
             id: None,
             source: None,

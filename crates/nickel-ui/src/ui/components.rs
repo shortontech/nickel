@@ -1133,12 +1133,12 @@ impl<Message> TextField<Message> {
         };
         if let Kind::Text {
             input_value,
-            input_protected,
+            input_mask,
             ..
         } = &mut field.text.0.kind
         {
             *input_value = Some(value.to_owned());
-            *input_protected = true;
+            *input_mask = Some(mask);
         }
         field.text.0.text_mapper = Some(map);
         field
@@ -1161,12 +1161,12 @@ impl<Message> TextField<Message> {
         };
         if let Kind::Text {
             input_value,
-            input_protected,
+            input_mask,
             ..
         } = &mut field.text.0.kind
         {
             *input_value = Some(value.to_owned());
-            *input_protected = true;
+            *input_mask = Some(mask);
         }
         field.text.0.text_mapper = Some(map);
         field

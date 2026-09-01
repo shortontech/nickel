@@ -434,6 +434,28 @@ fn masked_text_field_semantics_never_publish_the_input_value() {
 }
 
 #[test]
+fn focused_masked_text_field_never_paints_the_input_value() {
+    let build = |state: &mut UiStateStore, value: &str| {
+        UiFrame::layout_with_state(
+            TextField::on_change_masked(value, '•', map_query).id("password"),
+            Rect::new(0.0, 0.0, 320.0, 40.0),
+            state,
+        )
+    };
+    let mut state = UiStateStore::default();
+    let first = build(&mut state, "secret");
+    first.handle_event(&mut state, UiEvent::FocusNext);
+
+    let focused = build(&mut state, "secret");
+    assert!(focused.commands().iter().any(|command| {
+        matches!(command, PaintCommand::Text { text, .. } if text == "••••••")
+    }));
+    assert!(focused.commands().iter().all(|command| {
+        !matches!(command, PaintCommand::Text { text, .. } if text.contains("secret"))
+    }));
+}
+
+#[test]
 fn image_presentations_resolve_deterministic_bounds_and_alignment() {
     let viewport = Rect::new(10.0, 20.0, 200.0, 100.0);
     let source = Size::new(100.0, 100.0);
