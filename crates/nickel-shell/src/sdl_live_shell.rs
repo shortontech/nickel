@@ -1293,12 +1293,16 @@ impl LiveShell {
             events: vec![HostEvent::Ui(UiEvent::PointerMoved(Point { x, y: 28.0 }))],
             ..HostBatch::default()
         });
-        let hovered = self
+        let hovered_action = self
             .panel_host
             .inspect()
             .pointer_hover
             .as_ref()
-            .and_then(|target| self.panel_hover_for_target(target.as_str()));
+            .and_then(|target| self.panel_host.message_for_semantic_target(target))
+            .cloned();
+        let hovered = hovered_action
+            .as_ref()
+            .and_then(|action| self.panel_hover_for_action(action));
         let changed = hovered != self.panel_hover;
         self.panel_hover = hovered;
         if let Some(PanelHover::Task(index)) = hovered {
@@ -1310,24 +1314,10 @@ impl LiveShell {
         changed
     }
 
-    fn panel_hover_for_target(&self, target: &str) -> Option<PanelHover> {
-        let leaf = target.rsplit('/').next().unwrap_or(target);
-        let action = match leaf {
-            "panel-launcher" => Some(PanelAction::Launcher),
-            "panel-codex" => Some(PanelAction::Codex),
-            "panel-control" => Some(PanelAction::Control),
-            _ => leaf
-                .strip_prefix("panel-task-")
-                .and_then(|index| index.parse().ok())
-                .map(PanelAction::Task)
-                .or_else(|| {
-                    leaf.strip_prefix("panel-tray-")
-                        .map(|id| PanelAction::Tray(id.to_owned()))
-                }),
-        }?;
+    fn panel_hover_for_action(&self, action: &PanelAction) -> Option<PanelHover> {
         Some(match action {
             PanelAction::Launcher => PanelHover::Launcher,
-            PanelAction::Task(index) => PanelHover::Task(index),
+            PanelAction::Task(index) => PanelHover::Task(*index),
             PanelAction::Codex => PanelHover::Codex,
             PanelAction::Tray(id) => self
                 .tray
@@ -1335,7 +1325,7 @@ impl LiveShell {
                 .rev()
                 .take(4)
                 .rev()
-                .position(|item| item.id == id)
+                .position(|item| item.id == id.as_str())
                 .map(PanelHover::Tray)
                 .unwrap_or(PanelHover::Tray(0)),
             PanelAction::Control => {
@@ -3862,6 +3852,33 @@ mod tests {
                 })
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn panel_hover_treats_semantic_ids_as_opaque() {
+        let mut shell = LiveShell::new().unwrap();
+        shell.tray = vec![TrayItem {
+            id: "opaque/panel-task-999".into(),
+            title: "Opaque tray target".into(),
+            icon: RgbaImage::new(18, 18),
+        }];
+        shell.tray_icons = panel_tray_icons(&shell.tray);
+        let _ = shell.scene(SurfaceRole::Panel, 1280, 56);
+
+        let tray = shell
+            .panel_host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Opaque tray target".into(),
+            })
+            .unwrap();
+        let center = Point {
+            x: tray.bounds.origin.x + tray.bounds.size.width / 2.0,
+            y: tray.bounds.origin.y + tray.bounds.size.height / 2.0,
+        };
+
+        assert!(shell.panel_pointer_moved(center.x, 1280));
+        assert_eq!(shell.panel_hover, Some(super::PanelHover::Tray(0)));
     }
 
     #[test]

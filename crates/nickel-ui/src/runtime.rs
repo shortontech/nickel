@@ -962,6 +962,15 @@ impl<A: Application> UiHost<A> {
         self.tree.semantic_targets_for_message(message)
     }
 
+    /// Returns the typed application message bound to a semantic target.
+    ///
+    /// Semantic IDs are opaque identity tokens. Adapters that need to route
+    /// hover or other non-activating interactions can use this lookup instead
+    /// of recovering application meaning by parsing an ID's text.
+    pub fn message_for_semantic_target(&self, target: &UiId) -> Option<&A::Message> {
+        self.tree.message_for_id(target)
+    }
+
     pub fn unique_semantic_target_for_message(
         &self,
         message: &A::Message,
