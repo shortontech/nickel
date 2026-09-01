@@ -464,6 +464,7 @@ fn deterministic() -> bool { true }
 "#;
 const FEEDBACK_BUDGETS: &str = include_str!("../../../assets/ui-feedback-budgets.toml");
 const CACHE_INVENTORY: &str = include_str!("../../../assets/ui-caches.tsv");
+const CACHE_LIFECYCLE_MATRIX: &str = include_str!("../../../assets/ui-cache-lifecycle.tsv");
 const CONSUMER_INVENTORY: &str = include_str!("../../../assets/ui-consumers.tsv");
 const VISUAL_FIXTURES: &str = include_str!("../../../assets/visual-fixtures.toml");
 const UI_EVIDENCE: &str = include_str!("../../../assets/evidence/ui-evidence.json");
@@ -811,6 +812,71 @@ fn validate_cache_inventory() -> Result<usize, Box<dyn Error>> {
 
 fn validate_cache_inventory_for_final_completion() -> Result<usize, Box<dyn Error>> {
     validate_cache_inventory_with(CACHE_INVENTORY, CacheInventoryValidation::FinalCompletion)
+}
+
+fn validate_cache_lifecycle_matrix(inventory: &str, matrix: &str) -> Result<usize, Box<dyn Error>> {
+    const HEADER: &str = "id\thide\tsuspend\tclose\toutput_reconnect\ttopology_shrink\ttheme\tlocale\tfont\tapplication_replace\tfixture_teardown";
+    const ACTIONS: &[&str] = &[
+        "na",
+        "retain",
+        "clear",
+        "drop_owner",
+        "replace",
+        "rebuild",
+        "reconcile",
+    ];
+
+    let inventory_ids = inventory
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.split('\t').next())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut lines = matrix.lines();
+    if lines.next() != Some(HEADER) {
+        return Err(Box::new(UsageError(
+            "invalid cache lifecycle matrix header".into(),
+        )));
+    }
+    let mut matrix_ids = std::collections::BTreeSet::new();
+    for (line_number, line) in lines.enumerate() {
+        let columns = line.split('\t').collect::<Vec<_>>();
+        if columns.len() != 11 || columns.iter().any(|column| column.trim().is_empty()) {
+            return Err(Box::new(UsageError(format!(
+                "invalid cache lifecycle row {}",
+                line_number + 2
+            ))));
+        }
+        if !matrix_ids.insert(columns[0]) {
+            return Err(Box::new(UsageError(format!(
+                "duplicate cache lifecycle id `{}`",
+                columns[0]
+            ))));
+        }
+        for (boundary, action) in HEADER.split('\t').skip(1).zip(columns.iter().skip(1)) {
+            if !ACTIONS.contains(action) {
+                return Err(Box::new(UsageError(format!(
+                    "cache `{}` has invalid `{}` lifecycle action `{}`",
+                    columns[0], boundary, action
+                ))));
+            }
+        }
+    }
+    let missing = inventory_ids
+        .difference(&matrix_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    let unknown = matrix_ids
+        .difference(&inventory_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    if !missing.is_empty() || !unknown.is_empty() {
+        return Err(Box::new(UsageError(format!(
+            "cache lifecycle matrix differs from inventory: missing [{}], unknown [{}]",
+            missing.join(", "),
+            unknown.join(", ")
+        ))));
+    }
+    Ok(matrix_ids.len())
 }
 
 fn validate_consumer_inventory() -> Result<usize, Box<dyn Error>> {
@@ -3272,6 +3338,7 @@ fn validate() -> Result<(), Box<dyn Error>> {
     let budgets = budgets()?;
     validate_durable_evidence()?;
     let cache_count = validate_cache_inventory()?;
+    let lifecycle_count = validate_cache_lifecycle_matrix(CACHE_INVENTORY, CACHE_LIFECYCLE_MATRIX)?;
     let consumer_count = validate_consumer_inventory()?;
     let inspection = counter.host().inspect();
     if inspection.resources.retained_build_scratch_bytes
@@ -3282,9 +3349,10 @@ fn validate() -> Result<(), Box<dyn Error>> {
         )));
     }
     println!(
-        "validated {} fixture(s), {} cache record(s), and {} consumer record(s)",
+        "validated {} fixture(s), {} cache record(s), {} lifecycle record(s), and {} consumer record(s)",
         fixtures.len(),
         cache_count,
+        lifecycle_count,
         consumer_count
     );
     Ok(())
@@ -3973,6 +4041,51 @@ mod tests {
     #[test]
     fn cache_inventory_is_machine_readable_unique_and_statused() {
         assert!(validate_cache_inventory().expect("valid cache inventory") >= 10);
+    }
+
+    #[test]
+    fn every_inventoried_resource_declares_each_lifecycle_boundary() {
+        assert_eq!(
+            validate_cache_lifecycle_matrix(CACHE_INVENTORY, CACHE_LIFECYCLE_MATRIX)
+                .expect("valid cache lifecycle matrix"),
+            CACHE_INVENTORY.lines().skip(1).count()
+        );
+    }
+
+    #[test]
+    fn lifecycle_matrix_covers_required_replacement_and_surface_transitions() {
+        let rows = CACHE_LIFECYCLE_MATRIX
+            .lines()
+            .skip(1)
+            .map(|line| {
+                let columns = line.split('\t').collect::<Vec<_>>();
+                (columns[0], columns)
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let action = |id: &str, boundary: usize| rows[id][boundary];
+
+        assert_eq!(action("native_text_layout", 1), "clear"); // hide
+        assert_eq!(action("software_glyph_raster", 2), "clear"); // suspend
+        assert_eq!(action("native_image_textures", 3), "drop_owner"); // close
+        assert_eq!(action("shell_presenter_pixels", 4), "rebuild"); // output reconnect
+        assert_eq!(action("wallpaper_pixels", 5), "clear"); // topology shrink
+        assert_eq!(action("launcher_icons", 6), "clear"); // theme
+        assert_eq!(action("plain_text_measure", 7), "clear"); // locale
+        assert_eq!(action("native_glyph_atlas", 8), "clear"); // font
+        assert_eq!(action("shared_decoded_images", 9), "replace"); // application
+        assert_eq!(action("markdown_load_workers", 10), "drop_owner"); // fixture
+    }
+
+    #[test]
+    fn lifecycle_matrix_fails_closed_for_missing_or_unknown_resources() {
+        let incomplete = CACHE_LIFECYCLE_MATRIX
+            .lines()
+            .filter(|line| !line.starts_with("native_image_textures\t"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let error = validate_cache_lifecycle_matrix(CACHE_INVENTORY, &incomplete)
+            .expect_err("missing lifecycle owner must fail validation");
+        assert!(error.to_string().contains("native_image_textures"));
     }
 
     #[test]

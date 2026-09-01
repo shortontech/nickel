@@ -4,6 +4,7 @@
 //! [`SurfaceId`] values and can attach either a software surface or an
 //! accelerated backend without owning the application event pump.
 
+use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 use std::time::Instant;
@@ -35,6 +36,13 @@ fn push_bounded(samples: &mut VecDeque<u64>, sample: u64) {
         samples.pop_front();
     }
     samples.push_back(sample);
+}
+
+fn durable_presenter_peak(
+    previous_peak_bytes: usize,
+    current: &AggregatePresenterCacheDiagnostics,
+) -> usize {
+    previous_peak_bytes.max(current.peak_cache_bytes)
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -169,6 +177,7 @@ pub struct SdlShell {
     warm_present_us: VecDeque<u64>,
     input_to_present_us: VecDeque<u64>,
     warm_present_allocations: VecDeque<u64>,
+    presenter_cache_peak_bytes: Cell<usize>,
     pending_input_started: Option<Instant>,
     video: sdl3::VideoSubsystem,
     _sdl: sdl3::Sdl,
@@ -216,6 +225,7 @@ impl SdlShell {
             warm_present_us: VecDeque::with_capacity(RUNTIME_SAMPLE_CAPACITY),
             input_to_present_us: VecDeque::with_capacity(RUNTIME_SAMPLE_CAPACITY),
             warm_present_allocations: VecDeque::with_capacity(RUNTIME_SAMPLE_CAPACITY),
+            presenter_cache_peak_bytes: Cell::new(0),
             pending_input_started: None,
             video,
             _sdl: sdl,
@@ -442,6 +452,10 @@ impl SdlShell {
         let Some(index) = self.surface_indices.remove(&id.0) else {
             return;
         };
+        // Observe the process peak before dropping the presenter's last
+        // diagnostics. A closed surface must release live bytes without
+        // erasing the process-wide high-water mark.
+        let _ = self.memory_diagnostics();
         self.surfaces.remove(index);
         self.rebuild_surface_indices();
         let diagnostics = self.memory_diagnostics();
@@ -454,13 +468,18 @@ impl SdlShell {
     }
 
     pub fn memory_diagnostics(&self) -> ShellMemoryDiagnostics {
+        let mut presenter_caches = AggregatePresenterCacheDiagnostics::from_presenters(
+            self.surfaces
+                .iter()
+                .filter_map(|surface| surface.presenter.as_ref())
+                .map(SdlGpuPresenter::cache_diagnostics),
+        );
+        let process_peak =
+            durable_presenter_peak(self.presenter_cache_peak_bytes.get(), &presenter_caches);
+        self.presenter_cache_peak_bytes.set(process_peak);
+        presenter_caches.peak_cache_bytes = process_peak;
         ShellMemoryDiagnostics {
-            presenter_caches: AggregatePresenterCacheDiagnostics::from_presenters(
-                self.surfaces
-                    .iter()
-                    .filter_map(|surface| surface.presenter.as_ref())
-                    .map(SdlGpuPresenter::cache_diagnostics),
-            ),
+            presenter_caches,
             process_rss_bytes: process_rss_bytes(),
         }
     }
@@ -1022,9 +1041,34 @@ pub(crate) fn parse_proc_status_rss(status: &str) -> Option<usize> {
 mod tests {
     use super::{
         DESKTOP_TITLE, DisplayGeometry, LAUNCHER_TITLE, PANEL_TITLE, SurfaceRole,
-        parse_proc_status_rss, require_displays, shell_surface_title, surface_geometry,
-        surface_is_borderless,
+        durable_presenter_peak, parse_proc_status_rss, require_displays, shell_surface_title,
+        surface_geometry, surface_is_borderless,
     };
+
+    use nickel_ui::AggregatePresenterCacheDiagnostics;
+
+    #[test]
+    fn process_presenter_peak_survives_destroyed_presenters() {
+        let live = AggregatePresenterCacheDiagnostics {
+            presenters: 2,
+            live_bytes: 220,
+            peak_cache_bytes: 320,
+            ..AggregatePresenterCacheDiagnostics::default()
+        };
+        let peak = durable_presenter_peak(0, &live);
+        assert_eq!(
+            durable_presenter_peak(peak, &AggregatePresenterCacheDiagnostics::default()),
+            320
+        );
+
+        let reopened = AggregatePresenterCacheDiagnostics {
+            presenters: 1,
+            live_bytes: 80,
+            peak_cache_bytes: 140,
+            ..AggregatePresenterCacheDiagnostics::default()
+        };
+        assert_eq!(durable_presenter_peak(peak, &reopened), 320);
+    }
 
     #[test]
     fn linux_screenshot_shell_surface_has_no_client_decoration_extents() {
