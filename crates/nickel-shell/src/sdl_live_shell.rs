@@ -49,6 +49,14 @@ use crate::{
 use nickel_input::KeyCode;
 use zeroize::{Zeroize, Zeroizing};
 
+fn launcher_controller_host_event(action: ControllerAction, overlay_open: bool) -> HostEvent {
+    if action == ControllerAction::Cancel && !overlay_open {
+        HostEvent::Shortcut(Shortcut::Escape)
+    } else {
+        HostEvent::Controller(action)
+    }
+}
+
 const PANEL_ITEM_WIDTH: f32 = 52.0;
 const PANEL_CLOCK_WIDTH: f32 = 96.0;
 #[cfg(test)]
@@ -1025,8 +1033,12 @@ impl LiveShell {
         self.launcher_host
             .application_mut()
             .set_controller_family(family);
+        let event = launcher_controller_host_event(
+            action,
+            self.launcher_host.inspect().open_overlay.is_some(),
+        );
         let outcome = self.launcher_host.step(HostBatch {
-            events: vec![HostEvent::Controller(action)],
+            events: vec![event],
             ..HostBatch::default()
         });
         let actions = self.launcher_host.application_mut().take_effects();
@@ -2771,6 +2783,7 @@ impl LiveShell {
                     });
                 }
             }
+            LauncherShellEffect::Dismiss => self.set_launcher_visible(false),
         }
     }
 
@@ -3089,7 +3102,7 @@ mod tests {
     use nickel_ui::{
         ActionKind, ControllerAction, HostBatch, HostEvent, HostTelemetry, Point, Rect,
         SemanticAction, SemanticRole, SemanticSelector, SemanticValueInput, SemanticValueSnapshot,
-        UiEvent, UiHost,
+        Shortcut, UiEvent, UiHost,
     };
     use nickel_ui_testkit::{Scenario, Selector};
 
@@ -3150,6 +3163,22 @@ mod tests {
             shell.apply_launcher_action(action);
         }
         assert_eq!(shell.launcher.query(), "a");
+    }
+
+    #[test]
+    fn controller_cancel_closes_nested_overlay_before_requesting_launcher_dismissal() {
+        assert!(matches!(
+            super::launcher_controller_host_event(ControllerAction::Cancel, true),
+            HostEvent::Controller(ControllerAction::Cancel)
+        ));
+        assert!(matches!(
+            super::launcher_controller_host_event(ControllerAction::Cancel, false),
+            HostEvent::Shortcut(Shortcut::Escape)
+        ));
+        assert!(matches!(
+            super::launcher_controller_host_event(ControllerAction::Down, false),
+            HostEvent::Controller(ControllerAction::Down)
+        ));
     }
 
     #[test]

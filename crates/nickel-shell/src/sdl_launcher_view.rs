@@ -23,14 +23,12 @@ use nickel_ui::{
     ComponentBuilderExt, Container, ControllerFamily, FallbackAvatar, FrameOverlay, Image,
     InputModality, Insets, LauncherSearchField, OverlayAnchor, OverlayMenu, OverlayMenuItem,
     OverlayStyle, ProjectStatusRow, ReadingDirection, Row, START_MENU_SINGLE_PANE_BREAKPOINT,
-    SectionHeader, SemanticControllerAction, SemanticTheme, ShortcutRow, ShortcutState,
-    StartMenuNarrowPane, StartMenuShell, Text, TextAlign, UiId, ViewContext,
+    SectionHeader, SemanticControllerAction, SemanticTheme, Shortcut, ShortcutRow, ShortcutState,
+    StartMenuNarrowPane, StartMenuShell, Text, TextAlign, UiId, VerticalScroll, ViewContext,
 };
 
 const PANEL_MAX_WIDTH: f32 = 920.0;
-const PANEL_MAX_HEIGHT: f32 = 680.0;
 const SIDEBAR_WIDTH: f32 = 148.0;
-const HEADER_HEIGHT: f32 = 72.0;
 const GRID_GAP: f32 = 10.0;
 const TILE_MIN_WIDTH: f32 = 142.0;
 const TILE_HEIGHT: f32 = 108.0;
@@ -58,6 +56,8 @@ pub enum LauncherAction {
     RequestLogout,
     ShowNarrowPrimary,
     SetQuery(String),
+    SearchScroll,
+    Dismiss,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -71,6 +71,7 @@ pub enum LauncherShellEffect {
     OpenSettings(SettingsDestination),
     OpenAccount,
     RequestLogout,
+    Dismiss,
 }
 
 pub struct LauncherApplication {
@@ -231,6 +232,18 @@ impl UiApplication for LauncherApplication {
     fn poll(&mut self) -> bool {
         std::mem::take(&mut self.dirty)
     }
+
+    fn shortcut(&mut self, shortcut: Shortcut) -> bool {
+        if shortcut != Shortcut::Escape {
+            return false;
+        }
+        if self.launcher.query().is_empty() {
+            self.effects.push(LauncherAction::Dismiss);
+        } else {
+            self.update(LauncherAction::SetQuery(String::new()));
+        }
+        true
+    }
 }
 
 fn launcher_semantic_theme(palette: ThemePalette) -> SemanticTheme {
@@ -258,9 +271,6 @@ pub enum DashboardNarrowPage {
 
 #[derive(Clone, Debug, Default)]
 pub struct LauncherViewState {
-    pub scroll_row: usize,
-    dashboard_scroll_row: usize,
-    search_scroll_row: usize,
     pub dashboard_selected: usize,
     pub dashboard_narrow_page: DashboardNarrowPage,
     controller_family: ControllerFamily,
@@ -269,28 +279,6 @@ pub struct LauncherViewState {
 impl LauncherViewState {
     pub fn set_controller_family(&mut self, family: ControllerFamily) {
         self.controller_family = family;
-    }
-
-    pub fn transition_mode(&mut self, previous: LauncherMode, next: LauncherMode) {
-        if previous == next {
-            return;
-        }
-        match previous {
-            LauncherMode::Dashboard => self.dashboard_scroll_row = self.scroll_row,
-            LauncherMode::Search => self.search_scroll_row = self.scroll_row,
-        }
-        self.scroll_row = match next {
-            LauncherMode::Dashboard => self.dashboard_scroll_row,
-            LauncherMode::Search => self.search_scroll_row,
-        };
-    }
-
-    pub fn reset_active_scroll(&mut self, mode: LauncherMode) {
-        self.scroll_row = 0;
-        match mode {
-            LauncherMode::Dashboard => self.dashboard_scroll_row = 0,
-            LauncherMode::Search => self.search_scroll_row = 0,
-        }
     }
 }
 
@@ -302,7 +290,6 @@ pub fn reduce_launcher_action(
     match action {
         LauncherAction::SetView(next) => {
             launcher.set_view(next);
-            view.scroll_row = 0;
             view.dashboard_narrow_page = DashboardNarrowPage::Projects;
             None
         }
@@ -325,12 +312,11 @@ pub fn reduce_launcher_action(
             None
         }
         LauncherAction::SetQuery(query) => {
-            let previous = launcher.mode();
             launcher.set_query(&query);
-            view.transition_mode(previous, launcher.mode());
-            view.reset_active_scroll(launcher.mode());
             None
         }
+        LauncherAction::SearchScroll => None,
+        LauncherAction::Dismiss => Some(LauncherShellEffect::Dismiss),
     }
 }
 
@@ -531,34 +517,15 @@ fn build_launcher_view_directional(
     context: LauncherViewContext<'_>,
     direction: ReadingDirection,
 ) -> AnyView<LauncherAction> {
-    let (viewport_width, viewport_height) = context.viewport;
+    let (viewport_width, _viewport_height) = context.viewport;
     if launcher.mode() == LauncherMode::Dashboard {
         return build_dashboard_view_directional(launcher, state, icons, context, direction);
     }
     let panel_width = PANEL_MAX_WIDTH.min(viewport_width.max(1) as f32).max(320.0);
-    let panel_height = PANEL_MAX_HEIGHT
-        .min(viewport_height.max(1) as f32)
-        .max(280.0);
     let content_width = (panel_width - SIDEBAR_WIDTH - 34.0).max(TILE_MIN_WIDTH);
     let columns = ((content_width + GRID_GAP) / (TILE_MIN_WIDTH + GRID_GAP))
         .floor()
         .max(1.0) as usize;
-    let grid_height = (panel_height - HEADER_HEIGHT - 26.0).max(TILE_HEIGHT);
-    let visible_rows = ((grid_height + GRID_GAP) / (TILE_HEIGHT + GRID_GAP))
-        .floor()
-        .max(1.0) as usize;
-    let selected_row = launcher.selected_index() / columns.max(1);
-    let mut scroll_row = state.scroll_row;
-    if selected_row < scroll_row {
-        scroll_row = selected_row;
-    } else if selected_row >= scroll_row + visible_rows.max(1) {
-        scroll_row = selected_row + 1 - visible_rows.max(1);
-    }
-    let maximum_row = launcher
-        .result_count()
-        .div_ceil(columns)
-        .saturating_sub(visible_rows);
-    scroll_row = scroll_row.min(maximum_row);
 
     let theme = SemanticTheme::from_tokens(nickel_ui::SemanticTokenSet::standard(
         context.palette.background,
@@ -612,9 +579,7 @@ fn build_launcher_view_directional(
             },
             direction,
         ));
-    let first = scroll_row * columns;
-    let end = (first + visible_rows * columns).min(launcher.result_count());
-    let cards = (first..end)
+    let cards = (0..launcher.result_count())
         .filter_map(|index| {
             launcher.result_at(index).map(|app| {
                 let icon = icons.resolve(app).unwrap_or_else(|| {
@@ -674,6 +639,16 @@ fn build_launcher_view_directional(
                 .expect("collection key must retain its result index"),
         )
     });
+    let result_content = if launcher.result_count() == 0 {
+        AnyView::new(Text::new("No matching applications").color(theme.text.secondary))
+    } else {
+        AnyView::new(
+            VerticalScroll::new(LauncherAction::SearchScroll, 0.0)
+                .id("launcher-search-scroll")
+                .grow(1.0)
+                .child(collection),
+        )
+    };
     let detail = Column::new()
         .fill_width()
         .fill_height()
@@ -690,11 +665,7 @@ fn build_launcher_view_directional(
             )
             .direction(direction),
         )
-        .child(if launcher.result_count() == 0 {
-            AnyView::new(Text::new("No matching applications").color(theme.text.secondary))
-        } else {
-            AnyView::new(collection)
-        });
+        .child(result_content);
     let search = Container::new()
         .id("launcher-search-focus")
         .accessibility_label("Focus application search")
@@ -1216,9 +1187,10 @@ fn has_visible_pixel(image: &RgbaImage) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nickel_input::{DeviceId, EventOrder, InputEvent, TextEvent};
     use nickel_ui::{
         ActionKind, ControllerAction, HostBatch, HostEvent, Point, SemanticAction,
-        SemanticValueInput, UiEvent, UiHost,
+        SemanticValueInput, Shortcut, UiEvent, UiHost,
     };
     use nickel_ui_testkit::{
         ReachabilityModality, ReachabilityPolicy, Scenario, Selector, audit_reachability,
@@ -1286,6 +1258,33 @@ mod tests {
                 .collect(),
         );
         launcher.set_view(LauncherView::Applications);
+        Scenario::new(
+            LauncherApplication::new(
+                launcher,
+                LauncherViewState::default(),
+                LauncherIconCache::new(),
+                palette(),
+            ),
+            920,
+            680,
+        )
+    }
+
+    fn populated_search_scenario() -> Scenario<LauncherApplication> {
+        let mut launcher = Launcher::new(
+            (0..30)
+                .map(|index| {
+                    Application::new(
+                        format!("application-{index:02}"),
+                        format!("Application {index:02}"),
+                        None,
+                        None,
+                        None,
+                    )
+                })
+                .collect(),
+        );
+        launcher.open_search();
         Scenario::new(
             LauncherApplication::new(
                 launcher,
@@ -1389,6 +1388,138 @@ mod tests {
             .to_json()
             .expect("reachability report is serializable");
         assert!(json.contains("launcher-applications/application-00"));
+    }
+
+    #[test]
+    fn controller_reaches_and_reveals_the_last_search_result() {
+        let mut scenario = populated_search_scenario();
+        scenario.controller(ControllerAction::Down).unwrap();
+        for _ in 0..40 {
+            if controller_target(&scenario).contains("application-29") {
+                break;
+            }
+            scenario.controller(ControllerAction::Down).unwrap();
+        }
+        assert!(
+            controller_target(&scenario).contains("application-29"),
+            "controller did not traverse the complete search collection"
+        );
+        let selected = scenario
+            .semantic_nodes()
+            .into_iter()
+            .find(|node| node.id.as_str().contains("application-29"))
+            .expect("last result remains semantic after scrolling");
+        assert!(selected.bounds.origin.y >= 0.0);
+        assert!(selected.bounds.origin.y + selected.bounds.size.height <= 680.0);
+        scenario.controller(ControllerAction::Confirm).unwrap();
+        assert_eq!(
+            scenario.host_mut().application_mut().take_effects(),
+            [LauncherAction::ActivateResult(29)]
+        );
+    }
+
+    #[test]
+    fn production_launcher_host_keeps_preedit_transient_and_commits_once() {
+        let mut host = launcher_host();
+        let search = host
+            .query_unique(&nickel_ui::SemanticSelector::Role(
+                nickel_ui::SemanticRole::TextField,
+            ))
+            .expect("launcher search text field");
+        assert!(host.request_focus(search.id).changed);
+        host.application_mut().take_effects();
+        let committed_before = host.application().launcher.query().to_owned();
+        let commands_before = host.commands().to_vec();
+
+        let preedit = host.handle_input(
+            &InputEvent::Text(TextEvent::Preedit {
+                device: DeviceId(7),
+                order: EventOrder(1),
+                text: "にほ".into(),
+                selection: Some((6, 6)),
+            }),
+            None,
+        );
+        assert!(preedit.changed);
+        assert_eq!(host.application().launcher.query(), committed_before);
+        assert!(host.application_mut().take_effects().is_empty());
+        assert_ne!(host.commands(), commands_before);
+
+        let commit = host.handle_input(
+            &InputEvent::Text(TextEvent::Commit {
+                device: DeviceId(7),
+                order: EventOrder(2),
+                text: "日本".into(),
+            }),
+            None,
+        );
+        assert!(commit.changed);
+        assert_eq!(host.application().launcher.query(), "日本");
+        assert_eq!(
+            host.application_mut().take_effects(),
+            [LauncherAction::SetQuery("日本".into())]
+        );
+    }
+
+    #[test]
+    fn logical_launcher_search_semantics_survive_supported_scale_variants() {
+        let mut baseline = None;
+        for scale in [1.0, 1.25, 2.0] {
+            let mut launcher = Launcher::default();
+            launcher.set_query("fire");
+            let mut host = UiHost::new(
+                LauncherApplication::new(
+                    launcher,
+                    LauncherViewState::default(),
+                    LauncherIconCache::new(),
+                    palette(),
+                ),
+                920,
+                680,
+            );
+            host.step(HostBatch {
+                surface_size: Some((920, 680)),
+                scale_factor: Some(scale),
+                events: vec![HostEvent::Poll],
+                ..HostBatch::default()
+            });
+            assert_eq!(host.inspect().scale_factor, scale);
+            let ids = host
+                .semantic_nodes()
+                .iter()
+                .map(|node| node.id.clone())
+                .collect::<Vec<_>>();
+            if let Some(expected) = &baseline {
+                assert_eq!(&ids, expected, "semantic drift at scale {scale}");
+            } else {
+                baseline = Some(ids);
+            }
+            assert!(
+                !host
+                    .semantic_targets_for_message(&LauncherAction::ActivateResult(0))
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn launcher_escape_clears_search_then_requests_boundary_dismissal() {
+        let mut host = launcher_host();
+        host.application_mut()
+            .update(LauncherAction::SetQuery("fire".into()));
+        host.application_mut().take_effects();
+
+        assert!(host.shortcut(Shortcut::Escape));
+        assert_eq!(host.application().launcher.query(), "");
+        assert_eq!(
+            host.application_mut().take_effects(),
+            [LauncherAction::SetQuery(String::new())]
+        );
+        assert!(host.shortcut(Shortcut::Escape));
+        assert_eq!(
+            host.application_mut().take_effects(),
+            [LauncherAction::Dismiss]
+        );
     }
 
     #[test]
