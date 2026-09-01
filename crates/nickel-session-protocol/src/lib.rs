@@ -54,9 +54,10 @@ pub enum Query {
     Preview {
         window: WindowId,
     },
-    /// Resolve a semantic shell target through the live renderer records. This
-    /// query is served by the shell's capability-gated nested test endpoint,
-    /// not by the compositor control socket.
+    /// Resolve a semantic shell target through the live renderer records, or
+    /// dispatch a screenshot action through its application host. This query
+    /// is served by the shell's capability-gated nested test endpoint, not by
+    /// the compositor control socket.
     ShellSemanticTarget {
         target: ShellSemanticTarget,
     },
@@ -968,6 +969,14 @@ mod tests {
         assert_eq!(
             decode::<ClientEnvelope>(&encode(&screenshot).unwrap()).unwrap(),
             screenshot
+        );
+        let screenshot_response = ServerEnvelope {
+            request_id: 13,
+            message: ServerMessage::Ack,
+        };
+        assert_eq!(
+            decode::<ServerEnvelope>(&encode(&screenshot_response).unwrap()).unwrap(),
+            screenshot_response
         );
     }
 

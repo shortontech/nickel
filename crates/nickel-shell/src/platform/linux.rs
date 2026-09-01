@@ -1550,6 +1550,18 @@ pub fn respond_semantic_target(
     send_semantic_target_response(reply_path, request_id, message);
 }
 
+pub fn respond_semantic_action(request_id: u64, reply_path: &Path, performed: bool) {
+    let message = if performed {
+        ServerMessage::Ack
+    } else {
+        ServerMessage::Error {
+            code: nickel_session_protocol::ErrorCode::InvalidRequest,
+            message: "semantic action is not available in the live shell frame".into(),
+        }
+    };
+    send_semantic_target_response(reply_path, request_id, message);
+}
+
 pub fn respond_runtime_diagnostics(
     request_id: u64,
     reply_path: &Path,

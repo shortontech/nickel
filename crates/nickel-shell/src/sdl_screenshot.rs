@@ -43,6 +43,9 @@ enum ScreenshotCompletion {
         y: f32,
     },
     PointerReleased,
+    Semantic {
+        action: nickel_session_protocol::ScreenshotTargetAction,
+    },
     Platform {
         effect: ScreenshotEffect,
         result: Result<String, String>,
@@ -200,6 +203,60 @@ impl ScreenshotApp {
             label: Some(format!("{effect:?}")),
         });
     }
+
+    fn perform_semantic_action(
+        &mut self,
+        action: nickel_session_protocol::ScreenshotTargetAction,
+    ) -> bool {
+        use nickel_session_protocol::ScreenshotTargetAction;
+
+        let Some(_) = self.image else {
+            return false;
+        };
+        let preview = self.image_rect();
+        match action {
+            ScreenshotTargetAction::SelectionStart => {
+                let start = (
+                    preview.origin.x + preview.size.width * 0.25,
+                    preview.origin.y + preview.size.height * 0.25,
+                );
+                self.cursor = start;
+                self.drag_start = Some(start);
+                self.selection = Some(normalized(start, start));
+                self.confirmed = false;
+                self.last_click = None;
+                true
+            }
+            ScreenshotTargetAction::SelectionEnd => {
+                let Some(start) = self.drag_start.take() else {
+                    return false;
+                };
+                let end = (
+                    preview.origin.x + preview.size.width * 0.75,
+                    preview.origin.y + preview.size.height * 0.75,
+                );
+                self.cursor = end;
+                self.selection = Some(normalized(start, end));
+                self.last_click = None;
+                true
+            }
+            ScreenshotTargetAction::Confirm if self.selection.is_some() => {
+                self.confirmed = true;
+                self.drag_start = None;
+                self.last_click = None;
+                self.status = "SELECTION CONFIRMED".into();
+                if self.save_after_confirmation {
+                    self.push_effect(ScreenshotEffect::Save);
+                }
+                true
+            }
+            ScreenshotTargetAction::Confirm
+            | ScreenshotTargetAction::CopyImage
+            | ScreenshotTargetAction::SaveImage
+            | ScreenshotTargetAction::CopyTemporaryPath
+            | ScreenshotTargetAction::Cancel => false,
+        }
+    }
 }
 
 impl Application for ScreenshotApp {
@@ -230,6 +287,7 @@ impl Application for ScreenshotApp {
             ScreenshotCompletion::PointerMoved { x, y } => self.pointer_moved(x, y),
             ScreenshotCompletion::PointerPressed { x, y } => self.pointer_pressed(x, y),
             ScreenshotCompletion::PointerReleased => self.pointer_released(),
+            ScreenshotCompletion::Semantic { action } => self.perform_semantic_action(action),
             ScreenshotCompletion::Platform { effect, result } => {
                 match (effect, result) {
                     (ScreenshotEffect::Copy, Ok(status)) => {
@@ -353,6 +411,11 @@ impl ScreenshotTool {
         self.host.application().image.is_some() || self.host.application().error_visible
     }
 
+    #[cfg(test)]
+    pub fn confirmed(&self) -> bool {
+        self.host.application().confirmed
+    }
+
     pub fn hide(&mut self) {
         let app = self.host.application_mut();
         app.image = None;
@@ -428,64 +491,46 @@ impl ScreenshotTool {
         outcome.changed
     }
 
-    pub fn semantic_target(
-        &self,
+    pub fn perform_semantic_action(
+        &mut self,
         action: nickel_session_protocol::ScreenshotTargetAction,
-    ) -> Option<(i32, i32, nickel_session_protocol::PointerInteraction)> {
-        use nickel_session_protocol::{PointerInteraction, ScreenshotTargetAction};
+    ) -> bool {
+        use nickel_session_protocol::ScreenshotTargetAction;
 
-        let app = self.host.application();
-        let point = match action {
-            ScreenshotTargetAction::SelectionStart => {
-                let preview = app.image_rect();
-                (
-                    preview.origin.x + preview.size.width * 0.25,
-                    preview.origin.y + preview.size.height * 0.25,
-                    PointerInteraction::LeftPress,
-                )
-            }
-            ScreenshotTargetAction::SelectionEnd => {
-                let preview = app.image_rect();
-                (
-                    preview.origin.x + preview.size.width * 0.75,
-                    preview.origin.y + preview.size.height * 0.75,
-                    PointerInteraction::LeftRelease,
-                )
-            }
-            ScreenshotTargetAction::Confirm => {
-                let selection = app.selection?;
-                (
-                    selection.origin.x + selection.size.width / 2.0,
-                    selection.origin.y + selection.size.height / 2.0,
-                    PointerInteraction::LeftDoubleClick,
-                )
-            }
-            ScreenshotTargetAction::CopyImage if app.confirmed => message_center(
-                &self.host,
-                ToolbarAction::Copy,
-                PointerInteraction::LeftClick,
-            )?,
-            ScreenshotTargetAction::SaveImage if app.confirmed => message_center(
-                &self.host,
-                ToolbarAction::Save,
-                PointerInteraction::LeftClick,
-            )?,
-            ScreenshotTargetAction::CopyTemporaryPath if app.confirmed => message_center(
-                &self.host,
-                ToolbarAction::TemporaryPath,
-                PointerInteraction::LeftClick,
-            )?,
-            ScreenshotTargetAction::Cancel if app.confirmed => message_center(
-                &self.host,
-                ToolbarAction::Cancel,
-                PointerInteraction::LeftClick,
-            )?,
-            ScreenshotTargetAction::CopyImage
-            | ScreenshotTargetAction::SaveImage
-            | ScreenshotTargetAction::CopyTemporaryPath
-            | ScreenshotTargetAction::Cancel => return None,
+        let toolbar = match action {
+            ScreenshotTargetAction::CopyImage => Some(ToolbarAction::Copy),
+            ScreenshotTargetAction::SaveImage => Some(ToolbarAction::Save),
+            ScreenshotTargetAction::CopyTemporaryPath => Some(ToolbarAction::TemporaryPath),
+            ScreenshotTargetAction::Cancel => Some(ToolbarAction::Cancel),
+            ScreenshotTargetAction::SelectionStart
+            | ScreenshotTargetAction::SelectionEnd
+            | ScreenshotTargetAction::Confirm => None,
         };
-        Some((point.0.round() as i32, point.1.round() as i32, point.2))
+        let outcome = if let Some(toolbar) = toolbar {
+            if !self.host.application().confirmed {
+                return false;
+            }
+            let Ok(target) = self
+                .host
+                .unique_semantic_target_for_message(&ScreenshotMessage::Toolbar(toolbar))
+            else {
+                return false;
+            };
+            self.host.perform_semantic_action(
+                target.id,
+                nickel_ui::SemanticAction::Invoke(ActionKind::Activate),
+            )
+        } else {
+            self.host.step(HostBatch {
+                completions: vec![Completion::new(
+                    "screenshot-semantic-action",
+                    ScreenshotCompletion::Semantic { action },
+                )],
+                ..HostBatch::default()
+            })
+        };
+        self.apply_effects();
+        outcome.changed
     }
 
     pub fn scene(
@@ -729,20 +774,6 @@ fn instructions() -> String {
     "DRAG CORNER TO CORNER · DOUBLE-CLICK TO CONFIRM · ESC TO CANCEL".into()
 }
 
-fn message_center(
-    host: &UiHost<ScreenshotApp>,
-    action: ToolbarAction,
-    interaction: nickel_session_protocol::PointerInteraction,
-) -> Option<(f32, f32, nickel_session_protocol::PointerInteraction)> {
-    let target = host
-        .unique_semantic_target_for_message(&ScreenshotMessage::Toolbar(action))
-        .ok()?;
-    let route = host
-        .resolve_effective_target(&target.id, ActionKind::Activate)
-        .ok()?;
-    Some((route.point.x, route.point.y, interaction))
-}
-
 fn image_rect(image: Option<&RgbaImage>, width: u32, height: u32) -> Rect {
     let Some(image) = image else {
         return Rect::new(0.0, TOOLBAR_HEIGHT, 1.0, 1.0);
@@ -968,8 +999,8 @@ mod tests {
     }
 
     #[test]
-    fn semantic_selection_targets_drive_production_hit_testing() {
-        use nickel_session_protocol::{PointerInteraction, ScreenshotTargetAction};
+    fn semantic_selection_actions_drive_application_state_without_coordinates() {
+        use nickel_session_protocol::ScreenshotTargetAction;
 
         let mut tool = ScreenshotTool::default();
         tool.show(RgbaImage::new(400, 200));
@@ -978,32 +1009,27 @@ mod tests {
             600,
             nickel_core::theme::ThemePalette::from_appearance(Default::default()),
         );
-        let (start_x, start_y, start_edge) = tool
-            .semantic_target(ScreenshotTargetAction::SelectionStart)
-            .unwrap();
-        assert_eq!(start_edge, PointerInteraction::LeftPress);
-        assert!(tool.pointer_pressed(start_x as f32, start_y as f32, 800, 600));
-        let (end_x, end_y, end_edge) = tool
-            .semantic_target(ScreenshotTargetAction::SelectionEnd)
-            .unwrap();
-        assert_eq!(end_edge, PointerInteraction::LeftRelease);
-        assert!(tool.pointer_moved(end_x as f32, end_y as f32, 800, 600));
-        assert!(tool.pointer_released());
-        let (confirm_x, confirm_y, confirm_edge) = tool
-            .semantic_target(ScreenshotTargetAction::Confirm)
-            .unwrap();
-        assert_eq!(confirm_edge, PointerInteraction::LeftDoubleClick);
-        assert!(tool.pointer_pressed(confirm_x as f32, confirm_y as f32, 800, 600));
-        assert!(tool.pointer_pressed(confirm_x as f32, confirm_y as f32, 800, 600));
+        assert!(tool.perform_semantic_action(ScreenshotTargetAction::SelectionStart));
+        assert!(tool.perform_semantic_action(ScreenshotTargetAction::SelectionEnd));
+        assert!(tool.perform_semantic_action(ScreenshotTargetAction::Confirm));
         assert!(tool.host.application().confirmed);
         let _ = tool.scene(
             800,
             600,
             nickel_core::theme::ThemePalette::from_appearance(Default::default()),
         );
-        assert!(
-            tool.semantic_target(ScreenshotTargetAction::CopyImage)
-                .is_some()
-        );
+        assert!(tool.perform_semantic_action(ScreenshotTargetAction::Cancel));
+        assert!(!tool.visible());
+    }
+
+    #[test]
+    fn semantic_actions_reject_unavailable_state_without_synthesizing_input() {
+        use nickel_session_protocol::ScreenshotTargetAction;
+
+        let mut tool = ScreenshotTool::default();
+        assert!(!tool.perform_semantic_action(ScreenshotTargetAction::SelectionStart));
+        tool.show(RgbaImage::new(400, 200));
+        assert!(!tool.perform_semantic_action(ScreenshotTargetAction::Confirm));
+        assert!(!tool.perform_semantic_action(ScreenshotTargetAction::CopyImage));
     }
 }

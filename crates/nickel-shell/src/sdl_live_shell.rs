@@ -1275,17 +1275,15 @@ impl LiveShell {
                     interaction: PointerInteraction::LeftClick,
                 })
             }
-            ShellSemanticTarget::Screenshot { action } => {
-                let (x, y, interaction) = self.screenshot.semantic_target(*action)?;
-                Some(ResolvedShellTarget {
-                    role: ShellRole::Screenshot,
-                    output: None,
-                    x,
-                    y,
-                    interaction,
-                })
-            }
+            ShellSemanticTarget::Screenshot { .. } => None,
         }
+    }
+
+    pub fn perform_screenshot_semantic_action(
+        &mut self,
+        action: nickel_session_protocol::ScreenshotTargetAction,
+    ) -> bool {
+        self.screenshot.perform_semantic_action(action)
     }
 
     pub fn panel_pointer_moved(&mut self, x: f32, width: u32) -> bool {
@@ -3611,41 +3609,10 @@ mod tests {
 
         shell.screenshot.show(image::RgbaImage::new(400, 200));
         let _ = shell.scene(SurfaceRole::Screenshot, 800, 600);
-        let selection_start = shell
-            .resolve_semantic_target(&ShellSemanticTarget::Screenshot {
-                action: ScreenshotTargetAction::SelectionStart,
-            })
-            .expect("live screenshot selection start resolves");
-        assert_eq!(selection_start.role, ShellRole::Screenshot);
-        assert_eq!(selection_start.interaction, PointerInteraction::LeftPress);
-        assert!(shell.screenshot_pointer_pressed(
-            selection_start.x as f32,
-            selection_start.y as f32,
-            800,
-            600,
-        ));
-
-        let selection_end = shell
-            .resolve_semantic_target(&ShellSemanticTarget::Screenshot {
-                action: ScreenshotTargetAction::SelectionEnd,
-            })
-            .expect("live screenshot selection end resolves");
-        assert_eq!(selection_end.role, ShellRole::Screenshot);
-        assert_eq!(selection_end.interaction, PointerInteraction::LeftRelease);
-        assert!(shell.screenshot_pointer_moved(
-            selection_end.x as f32,
-            selection_end.y as f32,
-            800,
-            600,
-        ));
-        assert!(shell.screenshot_pointer_released());
-        assert!(
-            shell
-                .resolve_semantic_target(&ShellSemanticTarget::Screenshot {
-                    action: ScreenshotTargetAction::Confirm,
-                })
-                .is_some()
-        );
+        assert!(shell.perform_screenshot_semantic_action(ScreenshotTargetAction::SelectionStart));
+        assert!(shell.perform_screenshot_semantic_action(ScreenshotTargetAction::SelectionEnd));
+        assert!(shell.perform_screenshot_semantic_action(ScreenshotTargetAction::Confirm));
+        assert!(shell.screenshot.confirmed());
     }
 
     #[test]

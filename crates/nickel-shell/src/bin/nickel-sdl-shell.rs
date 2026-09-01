@@ -1312,6 +1312,13 @@ fn main() -> Result<(), String> {
                     target,
                     reply_path,
                 } => {
+                    if let nickel_session_protocol::ShellSemanticTarget::Screenshot { action } =
+                        target
+                    {
+                        let performed = state.perform_screenshot_semantic_action(action);
+                        platform::respond_semantic_action(request_id, &reply_path, performed);
+                        continue;
+                    }
                     let target = state.resolve_semantic_target(&target);
                     platform::respond_semantic_target(request_id, &reply_path, target);
                 }
