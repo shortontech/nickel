@@ -19,6 +19,59 @@ pub const RESTORE_GLYPH: char = '\u{f2d2}';
 pub const CLOSE_GLYPH: char = '\u{f2d3}';
 const RECOVERY_PANEL_WIDTH: i32 = 560;
 const RECOVERY_PANEL_HEIGHT: i32 = 144;
+const TITLEBAR_CACHE_MAX_ENTRIES: usize = 128;
+const TITLEBAR_CACHE_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+type TitlebarCacheKey = (i32, String, u32, u32);
+
+#[derive(Clone)]
+struct TitlebarCacheEntry {
+    buffer: MemoryRenderBuffer,
+}
+
+#[derive(Default)]
+struct TitlebarCache {
+    entries: HashMap<TitlebarCacheKey, TitlebarCacheEntry>,
+    live_bytes: usize,
+    peak_bytes: usize,
+    hits: u64,
+    misses: u64,
+    insertions: u64,
+    evictions: u64,
+    invalidations: u64,
+}
+
+static TITLEBAR_CACHE: OnceLock<Mutex<TitlebarCache>> = OnceLock::new();
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TitlebarCacheDiagnostics {
+    pub entries: usize,
+    pub live_bytes: usize,
+    pub peak_bytes: usize,
+    pub hits: u64,
+    pub misses: u64,
+    pub insertions: u64,
+    pub evictions: u64,
+    pub invalidations: u64,
+}
+
+pub fn titlebar_cache_diagnostics() -> TitlebarCacheDiagnostics {
+    TITLEBAR_CACHE
+        .get()
+        .and_then(|cache| cache.lock().ok())
+        .map_or_else(TitlebarCacheDiagnostics::default, |cache| {
+            TitlebarCacheDiagnostics {
+                entries: cache.entries.len(),
+                live_bytes: cache.live_bytes,
+                peak_bytes: cache.peak_bytes,
+                hits: cache.hits,
+                misses: cache.misses,
+                insertions: cache.insertions,
+                evictions: cache.evictions,
+                invalidations: cache.invalidations,
+            }
+        })
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RecoveryAction {
@@ -193,19 +246,56 @@ pub fn render_titlebar(
     // raster width keeps the expensive SVG/text asset stable while the render
     // element scales it by only a few pixels.
     let width = ((width.max(1) + 31) / 32) * 32;
-    type CacheKey = (i32, String, u32, u32);
-    static CACHE: OnceLock<Mutex<HashMap<CacheKey, MemoryRenderBuffer>>> = OnceLock::new();
     let key = (width, title.to_owned(), background, foreground);
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(buffer) = cache.lock().ok()?.get(&key).cloned() {
-        return Some(buffer);
+    let cache = TITLEBAR_CACHE.get_or_init(|| Mutex::new(TitlebarCache::default()));
+    {
+        let mut cache = cache.lock().ok()?;
+        if let Some(buffer) = cache.entries.get(&key).map(|entry| entry.buffer.clone()) {
+            cache.hits = cache.hits.saturating_add(1);
+            return Some(buffer);
+        }
+        cache.misses = cache.misses.saturating_add(1);
     }
     let buffer = render_titlebar_uncached(width, title, background, foreground)?;
+    let retained_bytes = usize::try_from(width)
+        .unwrap_or(usize::MAX)
+        .saturating_mul(TITLEBAR_HEIGHT as usize)
+        .saturating_mul(4)
+        .saturating_add(key.1.len());
     let mut cache = cache.lock().ok()?;
-    if cache.len() >= 128 {
-        cache.clear();
+    if retained_bytes > TITLEBAR_CACHE_MAX_BYTES {
+        return Some(buffer);
     }
-    cache.insert(key, buffer.clone());
+    if cache.entries.len() >= TITLEBAR_CACHE_MAX_ENTRIES
+        || cache.live_bytes.saturating_add(retained_bytes) > TITLEBAR_CACHE_MAX_BYTES
+    {
+        cache.evictions = cache.evictions.saturating_add(cache.entries.len() as u64);
+        cache.invalidations = cache.invalidations.saturating_add(1);
+        cache.entries.clear();
+        cache.live_bytes = 0;
+    }
+    cache.entries.insert(
+        key,
+        TitlebarCacheEntry {
+            buffer: buffer.clone(),
+        },
+    );
+    cache.live_bytes = cache.live_bytes.saturating_add(retained_bytes);
+    cache.peak_bytes = cache.peak_bytes.max(cache.live_bytes);
+    cache.insertions = cache.insertions.saturating_add(1);
+    drop(cache);
+    let diagnostics = titlebar_cache_diagnostics();
+    tracing::trace!(
+        entries = diagnostics.entries,
+        live_bytes = diagnostics.live_bytes,
+        peak_bytes = diagnostics.peak_bytes,
+        hits = diagnostics.hits,
+        misses = diagnostics.misses,
+        insertions = diagnostics.insertions,
+        evictions = diagnostics.evictions,
+        invalidations = diagnostics.invalidations,
+        "server-decoration titlebar cache updated"
+    );
     Some(buffer)
 }
 
@@ -377,9 +467,10 @@ pub fn hit_test(content: Geometry, x: i32, y: i32) -> Option<FramePart> {
 #[cfg(test)]
 mod tests {
     use super::{
-        FramePart, RESIZE_BORDER, RecoveryAction, TITLEBAR_HEIGHT, hit_test, outer_geometry,
-        recovery_action_at, recovery_layout, render_recovery_panel, render_titlebar_pixels,
-        titlebar_geometry, topmost_frame_target,
+        FramePart, RESIZE_BORDER, RecoveryAction, TITLEBAR_CACHE, TITLEBAR_CACHE_MAX_BYTES,
+        TITLEBAR_CACHE_MAX_ENTRIES, TITLEBAR_HEIGHT, hit_test, outer_geometry, recovery_action_at,
+        recovery_layout, render_recovery_panel, render_titlebar, render_titlebar_pixels,
+        titlebar_cache_diagnostics, titlebar_geometry, topmost_frame_target,
     };
     use crate::shell_layout::Geometry;
 
@@ -432,6 +523,28 @@ mod tests {
             "outer top border must have no transparent gap"
         );
         assert!(alpha(0, 10) > 0 && alpha(width - 1, 10) > 0);
+    }
+
+    #[test]
+    fn titlebar_cache_is_byte_bounded_and_reports_churn() {
+        if let Some(cache) = TITLEBAR_CACHE.get() {
+            *cache.lock().unwrap() = super::TitlebarCache::default();
+        }
+        for index in 0..(TITLEBAR_CACHE_MAX_ENTRIES + 16) {
+            render_titlebar(4096, &format!("Window {index}"), 0x20242c, 0xe8edf4)
+                .expect("titlebar raster");
+        }
+        render_titlebar(4096, "Window 143", 0x20242c, 0xe8edf4).expect("cached titlebar raster");
+
+        let diagnostics = titlebar_cache_diagnostics();
+        assert!(diagnostics.entries <= TITLEBAR_CACHE_MAX_ENTRIES);
+        assert!(diagnostics.live_bytes <= TITLEBAR_CACHE_MAX_BYTES);
+        assert!(diagnostics.peak_bytes <= TITLEBAR_CACHE_MAX_BYTES);
+        assert_eq!(diagnostics.misses, (TITLEBAR_CACHE_MAX_ENTRIES + 16) as u64);
+        assert_eq!(diagnostics.hits, 1);
+        assert_eq!(diagnostics.insertions, diagnostics.misses);
+        assert!(diagnostics.evictions > 0);
+        assert!(diagnostics.invalidations > 0);
     }
 
     #[test]
