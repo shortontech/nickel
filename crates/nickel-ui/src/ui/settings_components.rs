@@ -1183,8 +1183,14 @@ impl<Message> TabList<Message> {
                 .gap(theme.spacing.section)
                 .shrink(0.0)
                 .children(tabs)
-                .semantic_role(SemanticRole::TabList),
+                .semantic_role(SemanticRole::TabList)
+                .navigation_scope(NavigationScope::group()),
         )
+    }
+
+    pub fn id(mut self, id: impl Into<UiId>) -> Self {
+        self.0 = self.0.id(id);
+        self
     }
 
     pub fn direction(mut self, direction: ReadingDirection) -> Self {
@@ -2235,6 +2241,55 @@ mod tests {
         assert!(
             tabs.iter()
                 .all(|node| node.controls.as_ref() == Some(&panel))
+        );
+    }
+
+    #[test]
+    fn tab_list_owns_controller_enter_operate_and_exit_depth() {
+        let mut state = UiStateStore::default();
+        let tree = UiFrame::layout_with_state(
+            TabList::new(
+                theme(),
+                [
+                    ("General", Message::Tab(0), true),
+                    ("Theme", Message::Tab(1), false),
+                ],
+            )
+            .id("appearance-tabs"),
+            Rect::new(0.0, 0.0, 400.0, 80.0),
+            &mut state,
+        );
+        let tab_ids = tree
+            .accessibility_nodes()
+            .iter()
+            .filter(|node| node.role.as_deref() == Some("tab"))
+            .map(|node| node.id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(tab_ids.len(), 2);
+
+        tree.handle_event(&mut state, UiEvent::ControllerDown);
+        assert_eq!(
+            state.navigation().controller_selected().map(UiId::as_str),
+            Some("root/appearance-tabs")
+        );
+
+        tree.handle_event(&mut state, UiEvent::ControllerActivate);
+        assert_eq!(
+            state.navigation().controller_scope().map(UiId::as_str),
+            Some("root/appearance-tabs")
+        );
+        assert_eq!(state.navigation().controller_selected(), Some(&tab_ids[0]));
+
+        tree.handle_event(&mut state, UiEvent::ControllerRight);
+        assert_eq!(state.navigation().controller_selected(), Some(&tab_ids[1]));
+        let activation = tree.handle_event(&mut state, UiEvent::ControllerActivate);
+        assert_eq!(activation.messages, vec![Message::Tab(1)]);
+
+        tree.handle_event(&mut state, UiEvent::ControllerBack);
+        assert_eq!(state.navigation().controller_scope(), None);
+        assert_eq!(
+            state.navigation().controller_selected().map(UiId::as_str),
+            Some("root/appearance-tabs")
         );
     }
 

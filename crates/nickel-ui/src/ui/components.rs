@@ -2152,6 +2152,7 @@ impl<Message> RadioGroup<Message> {
             Container::new()
                 .fill_width()
                 .semantic_role(SemanticRole::RadioGroup)
+                .navigation_scope(crate::NavigationScope::group())
                 .child(Column::new().fill_width().gap(10.0).children(options)),
         )
     }
@@ -2634,7 +2635,7 @@ impl<Message> Component<Message> for MenuBar<Message> {
 #[cfg(test)]
 mod semantic_control_tests {
     use super::*;
-    use crate::{UiFrame, UiStateStore};
+    use crate::{UiEvent, UiFrame, UiStateStore};
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     enum Message {
@@ -3063,6 +3064,56 @@ mod semantic_control_tests {
             !tree
                 .semantic_targets_for_message(&Message::SelectOther)
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn radio_group_owns_controller_enter_operate_and_exit_depth() {
+        let theme = theme();
+        let mut state = UiStateStore::default();
+        let tree = UiFrame::layout_with_state(
+            RadioGroup::new([
+                RadioOption::new(theme, Message::Select, "Headphones", true).id("headphones"),
+                RadioOption::new(theme, Message::SelectOther, "Speakers", false).id("speakers"),
+            ])
+            .id("outputs"),
+            Rect::new(0.0, 0.0, 360.0, 180.0),
+            &mut state,
+        );
+
+        tree.handle_event(&mut state, UiEvent::ControllerDown);
+        assert_eq!(
+            state.navigation().controller_selected().map(UiId::as_str),
+            Some("root/outputs")
+        );
+
+        tree.handle_event(&mut state, UiEvent::ControllerActivate);
+        assert_eq!(
+            state.navigation().controller_scope().map(UiId::as_str),
+            Some("root/outputs")
+        );
+        assert!(
+            state
+                .navigation()
+                .controller_selected()
+                .is_some_and(|id| id.as_str().ends_with("/headphones"))
+        );
+
+        tree.handle_event(&mut state, UiEvent::ControllerDown);
+        assert!(
+            state
+                .navigation()
+                .controller_selected()
+                .is_some_and(|id| id.as_str().ends_with("/speakers"))
+        );
+        let activation = tree.handle_event(&mut state, UiEvent::ControllerActivate);
+        assert_eq!(activation.messages, vec![Message::SelectOther]);
+
+        tree.handle_event(&mut state, UiEvent::ControllerBack);
+        assert_eq!(state.navigation().controller_scope(), None);
+        assert_eq!(
+            state.navigation().controller_selected().map(UiId::as_str),
+            Some("root/outputs")
         );
     }
 }
