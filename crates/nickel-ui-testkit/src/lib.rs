@@ -3734,15 +3734,17 @@ fn explore_controller_routes<A: Application>(
 }
 
 fn controller_node_reveals_topology(node: &SemanticNodeSnapshot) -> bool {
-    node.actions.iter().any(|action| {
-        matches!(
-            action,
-            ActionKind::Expand | ActionKind::EnterNavigation | ActionKind::ContextMenu
+    node.navigation_scope
+        || node.actions.iter().any(|action| {
+            matches!(
+                action,
+                ActionKind::Expand | ActionKind::EnterNavigation | ActionKind::ContextMenu
+            )
+        })
+        || matches!(
+            node.role,
+            Some(SemanticRole::Grid | SemanticRole::Menu | SemanticRole::Dialog)
         )
-    }) || matches!(
-        node.role,
-        Some(SemanticRole::Grid | SemanticRole::Menu | SemanticRole::Dialog)
-    )
 }
 
 fn replay_controller_route<A: Application>(
@@ -4091,7 +4093,7 @@ pub fn open<F: Fixture>() -> Scenario<F::App> {
 mod tests {
     use nickel_ui::{
         Button, Collection, CollectionState, ComponentBuilderExt, Container, DiagnosticKind,
-        Spacer, Text, TextField,
+        RadioGroup, RadioOption, SemanticTheme, SemanticTokenSet, Spacer, TabList, Text, TextField,
     };
 
     use super::*;
@@ -4534,6 +4536,79 @@ mod tests {
             scenario.host().inspect().controller_target,
             Some(UiId::from("root/increment"))
         );
+    }
+
+    #[test]
+    fn controller_reachability_enters_semantic_radio_and_tab_scopes() {
+        struct NestedDepthApp;
+
+        impl Application for NestedDepthApp {
+            type Message = Message;
+
+            fn update(&mut self, _message: Self::Message) {}
+
+            fn view(
+                &self,
+                _context: nickel_ui::ViewContext,
+            ) -> impl nickel_ui::View<Self::Message> {
+                let theme = SemanticTheme::from_tokens(SemanticTokenSet::standard(
+                    0x101010, 0x181818, 0x202020, 0x242424, 0x303030, 0xf0f0f0, 0xa0a0a0, 0x9050e0,
+                    0x402060, 0x50c080, 0x50c080,
+                ));
+                nickel_ui::Column::new()
+                    .child(
+                        RadioGroup::new([
+                            RadioOption::new(theme, Message::Increment, "Headphones", true)
+                                .id("headphones"),
+                            RadioOption::new(theme, Message::Increment, "Speakers", false)
+                                .id("speakers"),
+                        ])
+                        .id("outputs"),
+                    )
+                    .child(
+                        TabList::new(
+                            theme,
+                            [
+                                ("General", Message::Increment, true),
+                                ("Theme", Message::Increment, false),
+                            ],
+                        )
+                        .id("tabs"),
+                    )
+            }
+        }
+
+        let factory = || Scenario::new(NestedDepthApp, 480, 240);
+        let initial = factory();
+        let scope_ids = initial
+            .semantic_nodes()
+            .into_iter()
+            .filter(|node| node.navigation_scope)
+            .map(|node| node.id)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            scope_ids,
+            BTreeSet::from([UiId::from("root/outputs"), UiId::from("root/tabs")])
+        );
+
+        let report = audit_reachability(
+            factory,
+            &ReachabilityPolicy {
+                modalities: BTreeSet::from([ReachabilityModality::Controller]),
+                ..ReachabilityPolicy::default()
+            },
+        );
+        assert!(report.is_complete(), "{:#?}", report.issues);
+        assert_eq!(
+            report
+                .paths
+                .iter()
+                .map(|path| &path.target)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            4
+        );
+        assert!(report.paths.iter().all(|path| path.reached));
     }
 
     #[test]
