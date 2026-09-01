@@ -141,6 +141,9 @@ pub struct PresenterCacheDiagnostics {
     pub text_layout_bytes: usize,
     pub image_textures: usize,
     pub glyphs: usize,
+    pub glyph_atlas_width: u32,
+    pub glyph_atlas_height: u32,
+    pub glyph_atlas_bytes: usize,
     pub live_bytes: usize,
     pub peak_bytes: usize,
     pub hits: u64,
@@ -242,12 +245,27 @@ impl CachedImageSource {
     }
 }
 
-const GLYPH_ATLAS_SIZE: u32 = 1024;
+const GLYPH_ATLAS_INITIAL_SIZE: u32 = 256;
+const GLYPH_ATLAS_MAX_SIZE: u32 = 1024;
 const TEXT_LAYOUT_CACHE_CAPACITY: usize = 2048;
 const TEXT_LAYOUT_CACHE_BYTE_BUDGET: usize = 16 * 1024 * 1024;
 
+fn next_glyph_atlas_size(current: u32, width: u32, height: u32) -> Option<u32> {
+    let required = width.checked_add(2)?.max(height.checked_add(2)?);
+    if required > GLYPH_ATLAS_MAX_SIZE {
+        return None;
+    }
+    let required = required.next_power_of_two().max(GLYPH_ATLAS_INITIAL_SIZE);
+    Some(
+        current
+            .saturating_mul(2)
+            .max(required)
+            .min(GLYPH_ATLAS_MAX_SIZE),
+    )
+}
+
 struct GlyphAtlas {
-    texture: Texture,
+    texture: Option<Texture>,
     allocator: ShelfAllocator,
     entries: HashMap<CacheKey, GlyphAtlasEntry>,
 }
@@ -311,65 +329,114 @@ impl ShelfAllocator {
 }
 
 impl GlyphAtlas {
-    fn new(canvas: &WindowCanvas) -> Result<Self, String> {
+    fn new() -> Self {
+        Self {
+            texture: None,
+            allocator: ShelfAllocator::new(0, 0),
+            entries: HashMap::new(),
+        }
+    }
+
+    fn texture(&self) -> &Texture {
+        self.texture
+            .as_ref()
+            .expect("glyph entry requires an allocated atlas")
+    }
+
+    fn texture_mut(&mut self) -> &mut Texture {
+        self.texture
+            .as_mut()
+            .expect("glyph entry requires an allocated atlas")
+    }
+
+    fn dimensions(&self) -> (u32, u32) {
+        (self.allocator.width, self.allocator.height)
+    }
+
+    fn retained_bytes(&self) -> usize {
+        if self.texture.is_some() {
+            self.allocator
+                .width
+                .saturating_mul(self.allocator.height)
+                .saturating_mul(4) as usize
+        } else {
+            0
+        }
+    }
+
+    fn allocate_texture(&mut self, canvas: &WindowCanvas, size: u32) -> Result<(), String> {
         let creator = canvas.texture_creator();
         let mut texture = creator
-            .create_texture_streaming(PixelFormat::ABGR8888, GLYPH_ATLAS_SIZE, GLYPH_ATLAS_SIZE)
+            .create_texture_streaming(PixelFormat::ABGR8888, size, size)
             .map_err(|error| error.to_string())?;
         texture.set_blend_mode(BlendMode::Blend);
         texture.set_scale_mode(ScaleMode::Nearest);
-        texture
-            .update(
-                None,
-                &vec![0; (GLYPH_ATLAS_SIZE * GLYPH_ATLAS_SIZE * 4) as usize],
-                (GLYPH_ATLAS_SIZE * 4) as usize,
-            )
-            .map_err(|error| error.to_string())?;
-        Ok(Self {
-            texture,
-            allocator: ShelfAllocator::new(GLYPH_ATLAS_SIZE, GLYPH_ATLAS_SIZE),
-            entries: HashMap::new(),
-        })
+        self.release();
+        self.texture = Some(texture);
+        self.allocator = ShelfAllocator::new(size, size);
+        Ok(())
     }
 
-    fn clear(&mut self) -> Result<(), String> {
+    fn clear(&mut self) {
         self.entries.clear();
         self.allocator.reset();
-        self.texture
-            .update(
-                None,
-                &vec![0; (GLYPH_ATLAS_SIZE * GLYPH_ATLAS_SIZE * 4) as usize],
-                (GLYPH_ATLAS_SIZE * 4) as usize,
-            )
-            .map_err(|error| error.to_string())
+    }
+
+    fn release(&mut self) {
+        self.entries.clear();
+        self.allocator = ShelfAllocator::new(0, 0);
+        if let Some(texture) = self.texture.take() {
+            // SAFETY: the atlas exclusively owns this SDL texture and removes
+            // it before destruction, so no subsequent copy can reference it.
+            unsafe { texture.destroy() };
+        }
     }
 
     fn entry(
         &mut self,
+        canvas: &WindowCanvas,
         font_system: &mut FontSystem,
         swash_cache: &mut SwashCache,
         key: CacheKey,
-    ) -> Result<(Option<GlyphAtlasEntry>, bool), String> {
+    ) -> Result<(Option<GlyphAtlasEntry>, bool, usize), String> {
         if let Some(entry) = self.entries.get(&key) {
-            return Ok((Some(*entry), true));
+            return Ok((Some(*entry), true, 0));
         }
         let Some(image) = swash_cache.get_image(font_system, key).clone() else {
-            return Ok((None, false));
+            return Ok((None, false, 0));
         };
         let width = image.placement.width;
         let height = image.placement.height;
         if width == 0 || height == 0 {
-            return Ok((None, false));
+            return Ok((None, false, 0));
         }
-        let position = match self.allocator.allocate(width, height) {
-            Some(position) => position,
+        if width.saturating_add(2) > GLYPH_ATLAS_MAX_SIZE
+            || height.saturating_add(2) > GLYPH_ATLAS_MAX_SIZE
+        {
+            return Ok((None, false, 0));
+        }
+        if self.texture.is_none() {
+            let required = next_glyph_atlas_size(0, width, height)
+                .expect("oversized glyphs returned before atlas allocation");
+            self.allocate_texture(canvas, required)?;
+        }
+        let (position, evicted) = match self.allocator.allocate(width, height) {
+            Some(position) => (position, 0),
             None => {
-                self.clear()?;
+                let evicted = self.entries.len();
+                let current = self.allocator.width;
+                if current < GLYPH_ATLAS_MAX_SIZE {
+                    let next = next_glyph_atlas_size(current, width, height)
+                        .expect("oversized glyphs returned before atlas growth");
+                    self.allocate_texture(canvas, next)?;
+                } else {
+                    self.clear();
+                }
                 *swash_cache = SwashCache::new();
                 let Some(position) = self.allocator.allocate(width, height) else {
-                    return Ok((None, false));
+                    return Ok((None, false, evicted));
                 };
-                position
+                (position, evicted)
             }
         };
         let colored = image.content == SwashContent::Color;
@@ -391,6 +458,8 @@ impl GlyphAtlas {
         };
         let source = SdlRect::new(position.0 as i32, position.1 as i32, width, height);
         self.texture
+            .as_mut()
+            .expect("atlas allocated before glyph upload")
             .update(Some(source), &pixels, (width * 4) as usize)
             .map_err(|error| error.to_string())?;
         let entry = GlyphAtlasEntry {
@@ -400,7 +469,7 @@ impl GlyphAtlas {
             colored,
         };
         self.entries.insert(key, entry);
-        Ok((Some(entry), false))
+        Ok((Some(entry), false, evicted))
     }
 }
 
@@ -421,12 +490,11 @@ impl SdlCanvasPresenter {
             renderer = %canvas.renderer_name,
             "SDL accelerated presenter initialized"
         );
-        let glyph_atlas = GlyphAtlas::new(&canvas)?;
         Ok(Self {
             canvas,
             font_system: ProcessFontSystem::new(),
             swash_cache: SwashCache::new(),
-            glyph_atlas,
+            glyph_atlas: GlyphAtlas::new(),
             image_textures: HashMap::new(),
             text_layouts: HashMap::new(),
             text_layout_bytes: 0,
@@ -446,14 +514,17 @@ impl SdlCanvasPresenter {
     }
 
     pub fn cache_diagnostics(&self) -> PresenterCacheDiagnostics {
-        let live_bytes = self.text_layout_bytes
-            + self.image_texture_bytes
-            + (GLYPH_ATLAS_SIZE * GLYPH_ATLAS_SIZE * 4) as usize;
+        let glyph_atlas_bytes = self.glyph_atlas.retained_bytes();
+        let live_bytes = self.text_layout_bytes + self.image_texture_bytes + glyph_atlas_bytes;
+        let (glyph_atlas_width, glyph_atlas_height) = self.glyph_atlas.dimensions();
         PresenterCacheDiagnostics {
             text_layouts: self.text_layouts.len(),
             text_layout_bytes: self.text_layout_bytes,
             image_textures: self.image_textures.len(),
             glyphs: self.glyph_atlas.entries.len(),
+            glyph_atlas_width,
+            glyph_atlas_height,
+            glyph_atlas_bytes,
             live_bytes,
             peak_bytes: self.cache_activity.peak_bytes.max(live_bytes),
             hits: self.cache_activity.hits,
@@ -477,8 +548,8 @@ impl SdlCanvasPresenter {
     }
 
     /// Releases derived accelerated resources when the owning surface is
-    /// hidden. The fixed-size atlas texture remains allocated but is emptied;
-    /// subsequent presentation repopulates every resource on demand.
+    /// hidden. The glyph atlas texture is destroyed; subsequent presentation
+    /// recreates and repopulates every resource on demand.
     pub fn suspend(&mut self) -> Result<(), String> {
         self.cache_activity.invalidations = self.cache_activity.invalidations.saturating_add(1);
         self.cache_activity.evictions = self.cache_activity.evictions.saturating_add(
@@ -494,7 +565,8 @@ impl SdlCanvasPresenter {
             unsafe { cached.texture.destroy() };
         }
         self.swash_cache = SwashCache::new();
-        self.glyph_atlas.clear()
+        self.glyph_atlas.release();
+        Ok(())
     }
 
     pub fn present_accelerated(
@@ -792,15 +864,25 @@ impl SdlCanvasPresenter {
             self.cache_activity.peak_bytes = self.cache_activity.peak_bytes.max(
                 self.text_layout_bytes
                     + self.image_texture_bytes
-                    + (GLYPH_ATLAS_SIZE * GLYPH_ATLAS_SIZE * 4) as usize,
+                    + self.glyph_atlas.retained_bytes(),
             );
             layout
         };
         self.canvas.set_clip_rect(Some(sdl_rect(parent_clip)));
         for (glyph, glyph_color) in &layout.glyphs {
-            let (entry, atlas_hit) =
-                self.glyph_atlas
-                    .entry(&mut font_system, &mut self.swash_cache, glyph.cache_key)?;
+            let (entry, atlas_hit, evicted) = self.glyph_atlas.entry(
+                &self.canvas,
+                &mut font_system,
+                &mut self.swash_cache,
+                glyph.cache_key,
+            )?;
+            self.cache_activity.evictions =
+                self.cache_activity.evictions.saturating_add(evicted as u64);
+            self.cache_activity.peak_bytes = self.cache_activity.peak_bytes.max(
+                self.text_layout_bytes
+                    + self.image_texture_bytes
+                    + self.glyph_atlas.retained_bytes(),
+            );
             if atlas_hit {
                 self.cache_activity.hits = self.cache_activity.hits.saturating_add(1);
             } else {
@@ -823,18 +905,18 @@ impl SdlCanvasPresenter {
                 continue;
             }
             if entry.colored {
-                self.glyph_atlas.texture.set_color_mod(255, 255, 255);
+                self.glyph_atlas.texture_mut().set_color_mod(255, 255, 255);
             } else {
-                self.glyph_atlas.texture.set_color_mod(
+                self.glyph_atlas.texture_mut().set_color_mod(
                     glyph_color.r(),
                     glyph_color.g(),
                     glyph_color.b(),
                 );
             }
-            self.glyph_atlas.texture.set_alpha_mod(pixel(color).a);
+            self.glyph_atlas.texture_mut().set_alpha_mod(pixel(color).a);
             self.canvas
                 .copy(
-                    &self.glyph_atlas.texture,
+                    self.glyph_atlas.texture(),
                     entry.source,
                     FRect::new(
                         destination.origin.x,
@@ -902,7 +984,7 @@ impl SdlCanvasPresenter {
             self.cache_activity.peak_bytes = self.cache_activity.peak_bytes.max(
                 self.text_layout_bytes
                     + self.image_texture_bytes
-                    + (GLYPH_ATLAS_SIZE * GLYPH_ATLAS_SIZE * 4) as usize,
+                    + self.glyph_atlas.retained_bytes(),
             );
             layout
         };
@@ -919,9 +1001,19 @@ impl SdlCanvasPresenter {
             )?;
         }
         for (glyph, glyph_color) in &layout.glyphs {
-            let (entry, atlas_hit) =
-                self.glyph_atlas
-                    .entry(&mut font_system, &mut self.swash_cache, glyph.cache_key)?;
+            let (entry, atlas_hit, evicted) = self.glyph_atlas.entry(
+                &self.canvas,
+                &mut font_system,
+                &mut self.swash_cache,
+                glyph.cache_key,
+            )?;
+            self.cache_activity.evictions =
+                self.cache_activity.evictions.saturating_add(evicted as u64);
+            self.cache_activity.peak_bytes = self.cache_activity.peak_bytes.max(
+                self.text_layout_bytes
+                    + self.image_texture_bytes
+                    + self.glyph_atlas.retained_bytes(),
+            );
             if atlas_hit {
                 self.cache_activity.hits = self.cache_activity.hits.saturating_add(1);
             } else {
@@ -944,18 +1036,20 @@ impl SdlCanvasPresenter {
                 continue;
             }
             if entry.colored {
-                self.glyph_atlas.texture.set_color_mod(255, 255, 255);
+                self.glyph_atlas.texture_mut().set_color_mod(255, 255, 255);
             } else {
-                self.glyph_atlas.texture.set_color_mod(
+                self.glyph_atlas.texture_mut().set_color_mod(
                     glyph_color.r(),
                     glyph_color.g(),
                     glyph_color.b(),
                 );
             }
-            self.glyph_atlas.texture.set_alpha_mod(glyph_color.a());
+            self.glyph_atlas
+                .texture_mut()
+                .set_alpha_mod(glyph_color.a());
             self.canvas
                 .copy(
-                    &self.glyph_atlas.texture,
+                    self.glyph_atlas.texture(),
                     entry.source,
                     FRect::new(
                         destination.origin.x,
@@ -1049,7 +1143,7 @@ impl SdlCanvasPresenter {
             self.cache_activity.peak_bytes = self.cache_activity.peak_bytes.max(
                 self.text_layout_bytes
                     + self.image_texture_bytes
-                    + (GLYPH_ATLAS_SIZE * GLYPH_ATLAS_SIZE * 4) as usize,
+                    + self.glyph_atlas.retained_bytes(),
             );
         } else {
             self.cache_activity.hits = self.cache_activity.hits.saturating_add(1);
@@ -2052,6 +2146,9 @@ mod tests {
                 text_layout_bytes: 80,
                 image_textures: 1,
                 glyphs: 4,
+                glyph_atlas_width: 8,
+                glyph_atlas_height: 8,
+                glyph_atlas_bytes: 256,
                 live_bytes: 120,
                 peak_bytes: 180,
                 hits: 8,
@@ -2066,6 +2163,9 @@ mod tests {
                 text_layout_bytes: 40,
                 image_textures: 2,
                 glyphs: 3,
+                glyph_atlas_width: 8,
+                glyph_atlas_height: 8,
+                glyph_atlas_bytes: 256,
                 live_bytes: 100,
                 peak_bytes: 140,
                 hits: 5,
@@ -2447,6 +2547,86 @@ mod tests {
         allocator.reset();
         assert_eq!(allocator.allocate(8, 8), Some((2, 2)));
         assert_eq!(allocator.resets, 1);
+    }
+
+    #[test]
+    fn glyph_atlas_is_lazy_and_growth_is_bounded() {
+        let atlas = super::GlyphAtlas::new();
+        assert_eq!(atlas.dimensions(), (0, 0));
+        assert_eq!(atlas.retained_bytes(), 0);
+        assert!(atlas.entries.is_empty());
+
+        assert_eq!(super::next_glyph_atlas_size(0, 18, 24), Some(256));
+        assert_eq!(super::next_glyph_atlas_size(256, 18, 24), Some(512));
+        assert_eq!(super::next_glyph_atlas_size(256, 700, 24), Some(1024));
+        assert_eq!(super::next_glyph_atlas_size(1024, 18, 24), Some(1024));
+        assert_eq!(super::next_glyph_atlas_size(0, 1023, 24), None);
+    }
+
+    #[test]
+    fn dummy_presenter_releases_and_lazily_reopens_glyph_atlas() {
+        sdl3::hint::set("SDL_VIDEO_DRIVER", "dummy");
+        let sdl = sdl3::init().expect("SDL initialization");
+        let video = sdl.video().expect("dummy video subsystem");
+        let window = video
+            .window("Nickel lazy glyph atlas", 320, 96)
+            .hidden()
+            .build()
+            .expect("dummy SDL window");
+        let mut presenter = super::SdlCanvasPresenter::new(window).expect("dummy presenter");
+        assert_eq!(presenter.cache_diagnostics().glyph_atlas_bytes, 0);
+
+        let text = PaintCommand::Text {
+            bounds: Rect::new(8.0, 8.0, 304.0, 48.0),
+            text: "Nickel launcher".into(),
+            scale: 18.0,
+            color: 0xf4f7ffff,
+            align: TextAlign::Start,
+            bold: false,
+            wrap: false,
+        };
+        presenter
+            .present_accelerated(std::slice::from_ref(&text), 1.0)
+            .expect("cold text presentation");
+        let opened = presenter.cache_diagnostics();
+        assert!(opened.glyphs > 0);
+        assert_eq!(opened.glyph_atlas_width, 256);
+        assert_eq!(opened.glyph_atlas_bytes, 256 * 256 * 4);
+        assert!(opened.live_bytes <= 8 * 1024 * 1024);
+
+        presenter.suspend().expect("presenter suspension");
+        let suspended = presenter.cache_diagnostics();
+        assert_eq!(suspended.glyphs, 0);
+        assert_eq!(suspended.glyph_atlas_bytes, 0);
+        assert_eq!(suspended.glyph_atlas_width, 0);
+
+        presenter
+            .present_accelerated(std::slice::from_ref(&text), 1.0)
+            .expect("presentation after suspension");
+        let reopened = presenter.cache_diagnostics();
+        assert!(reopened.glyphs > 0);
+        assert_eq!(reopened.glyph_atlas_bytes, 256 * 256 * 4);
+        assert!(reopened.peak_bytes >= reopened.live_bytes);
+
+        let mut presenters = vec![presenter];
+        for index in 1..12 {
+            let window = video
+                .window(&format!("Nickel nested surface {index}"), 320, 96)
+                .hidden()
+                .build()
+                .expect("dummy nested window");
+            let mut nested =
+                super::SdlCanvasPresenter::new(window).expect("dummy nested presenter");
+            nested
+                .present_accelerated(std::slice::from_ref(&text), 1.0)
+                .expect("ordinary nested launcher presentation");
+            presenters.push(nested);
+        }
+        let aggregate = super::AggregatePresenterCacheDiagnostics::from_presenters(
+            presenters.iter().map(|item| item.cache_diagnostics()),
+        );
+        assert_eq!(aggregate.presenters, 12);
+        assert!(aggregate.live_bytes <= 8 * 1024 * 1024);
     }
 
     #[test]
