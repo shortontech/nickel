@@ -5,6 +5,7 @@ pub mod launcher;
 pub mod launcher_preferences;
 pub mod output_layout;
 pub mod quick_settings;
+pub mod resource_owner;
 pub mod run;
 pub mod scenario;
 pub mod shell_settings;

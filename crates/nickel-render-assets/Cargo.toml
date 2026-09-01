@@ -6,5 +6,6 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+nickel-core = { path = "../nickel-core" }
 cosmic-text.workspace = true
 image.workspace = true

@@ -29,6 +29,9 @@ pub use layout::{
     Align, Axis, Constraints, FlexItem, Insets, Justify, Length, Overflow, Point, Rect, Size,
     Track, layout_flex,
 };
+pub use nickel_core::resource_owner::{
+    DependencyOwnerDiagnostics, DependencyOwnerKind, dependency_owner_diagnostics,
+};
 pub use overlay::{
     CollisionPolicy, DismissPolicy, DismissReason, FocusReturn, OverlayAnchor, OverlayFocusPolicy,
     OverlayId, OverlayMenu, OverlayMenuItem, OverlayPlacement, OverlayStyle, TransientKind,

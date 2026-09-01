@@ -15,6 +15,10 @@ use cosmic_text::{
     Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, SwashCache, Weight, Wrap,
 };
 use image::{Rgba, RgbaImage, imageops::FilterType};
+use nickel_core::resource_owner::DependencyOwnerToken;
+pub use nickel_core::resource_owner::{
+    DependencyOwnerDiagnostics, DependencyOwnerKind, dependency_owner_diagnostics,
+};
 
 /// Immutable, tightly packed, straight-alpha RGBA pixels.
 #[derive(Clone, Debug)]
@@ -113,6 +117,7 @@ impl From<TextRequest<'_>> for TextKey {
 
 /// Shapes with cosmic-text and caches the final CPU raster, independent of glyphon/wgpu.
 pub struct TextAssetCache {
+    _font_system_owner: DependencyOwnerToken,
     font_system: FontSystem,
     swash_cache: SwashCache,
     assets: HashMap<TextKey, Arc<RgbaAsset>>,
@@ -166,6 +171,9 @@ impl Default for TextAssetCache {
 impl TextAssetCache {
     pub fn new() -> Self {
         Self {
+            _font_system_owner: DependencyOwnerToken::new(
+                DependencyOwnerKind::CosmicTextFontSystem,
+            ),
             font_system: FontSystem::new(),
             swash_cache: SwashCache::new(),
             assets: HashMap::new(),
@@ -650,6 +658,23 @@ fn source_over(destination: [u8; 4], source: [u8; 4]) -> [u8; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn font_system_owner_churn_releases_active_instances_and_preserves_peak() {
+        let before = dependency_owner_diagnostics(DependencyOwnerKind::CosmicTextFontSystem);
+        for _ in 0..8 {
+            let caches = (0..4).map(|_| TextAssetCache::new()).collect::<Vec<_>>();
+            assert_eq!(
+                dependency_owner_diagnostics(DependencyOwnerKind::CosmicTextFontSystem)
+                    .active_owners,
+                before.active_owners + caches.len()
+            );
+            drop(caches);
+        }
+        let after = dependency_owner_diagnostics(DependencyOwnerKind::CosmicTextFontSystem);
+        assert_eq!(after.active_owners, before.active_owners);
+        assert!(after.peak_owners >= before.active_owners + 4);
+    }
 
     #[test]
     fn rasterized_text_contains_visible_pixels_and_is_cached() {

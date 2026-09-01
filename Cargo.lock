@@ -2759,6 +2759,7 @@ version = "0.1.0"
 dependencies = [
  "cosmic-text",
  "image",
+ "nickel-core",
 ]
 
 [[package]]
@@ -2880,6 +2881,7 @@ dependencies = [
  "cosmic-text",
  "gilrs",
  "image",
+ "nickel-core",
  "nickel-i18n",
  "nickel-input",
  "proptest",

@@ -8,6 +8,7 @@ description = "Declarative native Rust UI with intrinsic layout and SDL presenta
 readme = "README.md"
 
 [dependencies]
+nickel-core = { path = "../nickel-core" }
 cosmic-text.workspace = true
 gilrs.workspace = true
 image.workspace = true

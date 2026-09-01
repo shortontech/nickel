@@ -57,6 +57,7 @@ use smithay::{
 use thiserror::Error;
 
 use nickel_core::{
+    resource_owner::{DependencyOwnerKind, DependencyOwnerToken},
     shell_settings::ShellSettings,
     theme::{Appearance, ThemePalette},
 };
@@ -159,6 +160,7 @@ struct DeviceData {
 }
 
 pub struct UdevData {
+    _renderer_owner: DependencyOwnerToken,
     session: LibSeatSession,
     activity: SessionActivity,
     gpus: GpuManager<RendererBackend>,
@@ -212,6 +214,7 @@ pub fn init_udev(
     let gpus = GpuManager::new(GbmGlesBackend::with_context_priority(ContextPriority::High))?;
 
     data.native = Some(UdevData {
+        _renderer_owner: DependencyOwnerToken::new(DependencyOwnerKind::SmithayRenderer),
         session: session.clone(),
         activity: SessionActivity::default(),
         gpus,

@@ -805,6 +805,18 @@ fn validate_cache_inventory_with(
                 columns[0]
             ))));
         }
+        if matches!(
+            columns[0],
+            "smithay_renderer_internal_caches" | "cosmic_text_font_systems"
+        ) && (!columns[14].contains("active and peak safe Rust owner-instance diagnostics")
+            || !columns[14].contains("ordinary owner drop")
+            || !columns[14].contains("remain opaque"))
+        {
+            return Err(Box::new(UsageError(format!(
+                "dependency owner `{}` lacks executable owner lifecycle evidence or explicit opacity",
+                columns[0]
+            ))));
+        }
         if columns[13] == "admitted_opaque" {
             if columns[8] != "opaque_dependency" {
                 return Err(Box::new(UsageError(format!(
@@ -4206,6 +4218,24 @@ mod tests {
         )
         .expect_err("performance-derived retention needs measured admission");
         assert!(error.to_string().contains("performance-derived category"));
+    }
+
+    #[test]
+    fn dependency_owner_rows_require_safe_lifecycle_diagnostics_and_honest_opacity() {
+        for evidence in [
+            "active and peak safe Rust owner-instance diagnostics",
+            "ordinary owner drop",
+            "remain opaque",
+        ] {
+            let row = CACHE_INVENTORY
+                .lines()
+                .find(|line| line.starts_with("cosmic_text_font_systems\t"))
+                .expect("cosmic-text dependency owner row");
+            let dishonest_row = row.replacen(evidence, "unverified", 1);
+            let dishonest = CACHE_INVENTORY.replace(row, &dishonest_row);
+            validate_cache_inventory_with(&dishonest, CacheInventoryValidation::Routine)
+                .expect_err("dependency owner evidence must fail closed");
+        }
     }
 
     #[test]

@@ -2,6 +2,7 @@ use cosmic_text::{
     Align, Attrs, Buffer, CacheKey, Color as TextColor, Family, FontSystem, Metrics, PhysicalGlyph,
     Shaping, Style as FontStyle, SwashCache, SwashContent, Weight, Wrap,
 };
+use nickel_core::resource_owner::{DependencyOwnerKind, DependencyOwnerToken};
 use sdl3::{
     pixels::{Color as SdlColor, PixelFormat},
     rect::Rect as SdlRect,
@@ -46,6 +47,7 @@ impl DamageRegion {
 /// its paint list. The retained pixel buffer makes an eventual SDL GPU upload or
 /// Wayland damage submission independent of component semantics.
 pub struct SdlComponentRenderer {
+    _font_system_owner: DependencyOwnerToken,
     width: u32,
     height: u32,
     scale: f32,
@@ -62,6 +64,7 @@ type StrikeLines = Vec<(Rect, Color)>;
 type SpanBackgrounds = Vec<(Rect, Color)>;
 
 pub struct SdlCanvasPresenter {
+    _font_system_owner: DependencyOwnerToken,
     canvas: WindowCanvas,
     font_system: FontSystem,
     swash_cache: SwashCache,
@@ -382,6 +385,9 @@ impl SdlCanvasPresenter {
         );
         let glyph_atlas = GlyphAtlas::new(&canvas)?;
         Ok(Self {
+            _font_system_owner: DependencyOwnerToken::new(
+                DependencyOwnerKind::CosmicTextFontSystem,
+            ),
             canvas,
             font_system: FontSystem::new(),
             swash_cache: SwashCache::new(),
@@ -1046,6 +1052,9 @@ impl SdlComponentRenderer {
         let height = height.max(1);
         let upload = upload.then(|| Self::create_upload_surface(width, height));
         Self {
+            _font_system_owner: DependencyOwnerToken::new(
+                DependencyOwnerKind::CosmicTextFontSystem,
+            ),
             width,
             height,
             scale: scale.max(0.25),
@@ -1940,11 +1949,31 @@ mod tests {
     };
 
     use cosmic_text::FontSystem;
+    use nickel_core::resource_owner::{DependencyOwnerKind, dependency_owner_diagnostics};
 
     use super::{
         CachedImageSource, PaintCommand, Rect, SdlComponentRenderer, ShelfAllocator, TextAlign,
         command_intersects_clip, physical_text_key, shape_physical_glyphs,
     };
+
+    #[test]
+    fn software_renderer_churn_releases_font_system_owners_and_preserves_peak() {
+        let before = dependency_owner_diagnostics(DependencyOwnerKind::CosmicTextFontSystem);
+        for _ in 0..8 {
+            let renderers = (0..4)
+                .map(|_| SdlComponentRenderer::new_pixel_buffer(2, 2, 1.0))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                dependency_owner_diagnostics(DependencyOwnerKind::CosmicTextFontSystem)
+                    .active_owners,
+                before.active_owners + renderers.len()
+            );
+            drop(renderers);
+        }
+        let after = dependency_owner_diagnostics(DependencyOwnerKind::CosmicTextFontSystem);
+        assert_eq!(after.active_owners, before.active_owners);
+        assert!(after.peak_owners >= before.active_owners + 4);
+    }
 
     #[test]
     fn aggregate_presenter_diagnostics_saturate_across_surfaces() {

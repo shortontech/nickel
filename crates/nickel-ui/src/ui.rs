@@ -10,6 +10,7 @@ use cosmic_text::{
     Attrs, Buffer, Family, FontSystem, Metrics, Shaping, Style as FontStyle, Weight, Wrap,
 };
 use image::RgbaImage;
+use nickel_core::resource_owner::{DependencyOwnerKind, DependencyOwnerToken};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
@@ -1363,6 +1364,7 @@ struct StyledTextMeasureKey {
 }
 
 struct TextMeasurer {
+    _font_system_owner: DependencyOwnerToken,
     font_system: FontSystem,
     cache_enabled: bool,
     plain: HashMap<TextMeasureKey, Size>,
@@ -1417,6 +1419,9 @@ pub fn with_text_measure_cache_mode<R>(
 impl Default for TextMeasurer {
     fn default() -> Self {
         Self {
+            _font_system_owner: DependencyOwnerToken::new(
+                DependencyOwnerKind::CosmicTextFontSystem,
+            ),
             font_system: FontSystem::new(),
             cache_enabled: true,
             plain: HashMap::new(),

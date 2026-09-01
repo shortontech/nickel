@@ -29,6 +29,7 @@ use smithay::{
 };
 
 use nickel_core::{
+    resource_owner::{DependencyOwnerKind, DependencyOwnerToken},
     shell_settings::ShellSettings,
     theme::{Appearance, ThemePalette},
 };
@@ -64,6 +65,7 @@ pub fn init_winit(
     let state = data;
 
     let (mut backend, winit) = winit::init()?;
+    let renderer_owner = DependencyOwnerToken::new(DependencyOwnerKind::SmithayRenderer);
     state.set_winit_redraw_window(backend.window());
     let startup_frame_pump_until = Instant::now() + Duration::from_secs(3);
 
@@ -107,6 +109,9 @@ pub fn init_winit(
     event_loop
         .handle()
         .insert_source(winit, move |event, _, data| {
+            // Keep lifecycle accounting adjacent to the backend captured by
+            // this source; both are released when the event source drops.
+            let _ = &renderer_owner;
             let mut display = data.display_handle.clone();
             let state = data;
 

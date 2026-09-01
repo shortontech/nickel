@@ -12,6 +12,12 @@ an explicit owner-drop lifecycle, and `opaque_dependency` bytes. It does not con
 bytes into dependency storage estimates. Resources whose dependency-owned cardinality is itself
 unbounded or unobservable remain provisional.
 
+Nickel's dependency-owner diagnostics use non-cloneable safe Rust tokens held beside the resource
+owner. Construction increments process-wide active and durable peak owner counts; ordinary `Drop`
+decrements only the active count. These are owner-instance lifecycle signals, not dependency entry,
+byte, or eviction estimates. A row remains provisional when a dependency creates an unknown number
+of internal owners or a public Nickel owner constructor has no process cardinality bound.
+
 `assets/ui-cache-lifecycle.tsv` is the executable owner-by-boundary companion matrix. It has exactly
 one row for every inventory ID and an explicit action for hide, suspend, close, output reconnect,
 topology shrink, theme, locale, font, application replacement, and fixture teardown. `na` is an
