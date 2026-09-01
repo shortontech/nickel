@@ -4,6 +4,7 @@
 //! not infer dependency-internal entry counts, retained bytes, or activity.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::{error::Error, fmt};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DependencyOwnerKind {
@@ -33,6 +34,7 @@ impl OwnerCounters {
 
 static COSMIC_TEXT_FONT_SYSTEMS: OwnerCounters = OwnerCounters::new();
 static SMITHAY_RENDERERS: OwnerCounters = OwnerCounters::new();
+const MAX_SMITHAY_RENDERER_OWNERS: usize = 1;
 
 fn counters(kind: DependencyOwnerKind) -> &'static OwnerCounters {
     match kind {
@@ -49,12 +51,49 @@ pub struct DependencyOwnerToken {
 
 impl DependencyOwnerToken {
     #[must_use]
-    pub fn new(kind: DependencyOwnerKind) -> Self {
+    pub fn new_cosmic_text_font_system() -> Self {
+        let kind = DependencyOwnerKind::CosmicTextFontSystem;
         let counters = counters(kind);
         let active = counters.active.fetch_add(1, Ordering::Relaxed) + 1;
         counters.peak.fetch_max(active, Ordering::Relaxed);
         Self { kind }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SmithayRendererAdmissionError;
+
+impl fmt::Display for SmithayRendererAdmissionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a Smithay renderer backend is already active")
+    }
+}
+
+impl Error for SmithayRendererAdmissionError {}
+
+/// Acquires Nickel's single process-wide Smithay renderer-backend owner.
+///
+/// Smithay may create dependency-internal renderers below a native `GpuManager`,
+/// but Nickel admits only one top-level backend (`GpuManager` or winit renderer)
+/// at a time. Dropping the returned token releases that admission.
+pub fn try_acquire_smithay_renderer_owner()
+-> Result<DependencyOwnerToken, SmithayRendererAdmissionError> {
+    let counters = counters(DependencyOwnerKind::SmithayRenderer);
+    counters
+        .active
+        .compare_exchange(
+            0,
+            MAX_SMITHAY_RENDERER_OWNERS,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .map_err(|_| SmithayRendererAdmissionError)?;
+    counters
+        .peak
+        .fetch_max(MAX_SMITHAY_RENDERER_OWNERS, Ordering::Relaxed);
+    Ok(DependencyOwnerToken {
+        kind: DependencyOwnerKind::SmithayRenderer,
+    })
 }
 
 impl Drop for DependencyOwnerToken {
@@ -78,20 +117,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn churn_releases_active_owners_and_retains_peak() {
+    fn smithay_admission_is_singleton_and_released_on_drop() {
         let before = dependency_owner_diagnostics(DependencyOwnerKind::SmithayRenderer);
         for _ in 0..8 {
-            let owners = (0..4)
-                .map(|_| DependencyOwnerToken::new(DependencyOwnerKind::SmithayRenderer))
-                .collect::<Vec<_>>();
+            let owner = try_acquire_smithay_renderer_owner().expect("first owner is admitted");
             assert_eq!(
                 dependency_owner_diagnostics(DependencyOwnerKind::SmithayRenderer).active_owners,
-                before.active_owners + owners.len()
+                1
             );
-            drop(owners);
+            assert!(matches!(
+                try_acquire_smithay_renderer_owner(),
+                Err(SmithayRendererAdmissionError)
+            ));
+            drop(owner);
         }
         let after = dependency_owner_diagnostics(DependencyOwnerKind::SmithayRenderer);
         assert_eq!(after.active_owners, before.active_owners);
-        assert!(after.peak_owners >= before.active_owners + 4);
+        assert_eq!(after.peak_owners, 1);
     }
 }

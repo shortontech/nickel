@@ -171,9 +171,7 @@ impl Default for TextAssetCache {
 impl TextAssetCache {
     pub fn new() -> Self {
         Self {
-            _font_system_owner: DependencyOwnerToken::new(
-                DependencyOwnerKind::CosmicTextFontSystem,
-            ),
+            _font_system_owner: DependencyOwnerToken::new_cosmic_text_font_system(),
             font_system: FontSystem::new(),
             swash_cache: SwashCache::new(),
             assets: HashMap::new(),

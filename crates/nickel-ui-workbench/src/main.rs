@@ -817,6 +817,16 @@ fn validate_cache_inventory_with(
                 columns[0]
             ))));
         }
+        if columns[0] == "smithay_renderer_internal_caches"
+            && columns[13] == "admitted_opaque"
+            && (!columns[14].contains("hard admission=1")
+                || !columns[14].contains("active DRM render nodes"))
+        {
+            return Err(Box::new(UsageError(
+                "Smithay opaque admission lacks its enforced top-level bound or native child resource bound"
+                    .into(),
+            )));
+        }
         if columns[13] == "admitted_opaque" {
             if columns[8] != "opaque_dependency" {
                 return Err(Box::new(UsageError(format!(
@@ -4235,6 +4245,23 @@ mod tests {
             let dishonest = CACHE_INVENTORY.replace(row, &dishonest_row);
             validate_cache_inventory_with(&dishonest, CacheInventoryValidation::Routine)
                 .expect_err("dependency owner evidence must fail closed");
+        }
+    }
+
+    #[test]
+    fn smithay_opaque_admission_requires_enforced_and_resource_bounds() {
+        let row = CACHE_INVENTORY
+            .lines()
+            .find(|line| line.starts_with("smithay_renderer_internal_caches\t"))
+            .expect("Smithay dependency owner row");
+        for evidence in [
+            "hard admission=1",
+            "resource-bounded by active DRM render nodes",
+        ] {
+            let dishonest_row = row.replacen(evidence, "unverified", 1);
+            let dishonest = CACHE_INVENTORY.replace(row, &dishonest_row);
+            validate_cache_inventory_with(&dishonest, CacheInventoryValidation::Routine)
+                .expect_err("Smithay admission bounds must fail closed");
         }
     }
 

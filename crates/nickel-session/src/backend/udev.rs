@@ -57,7 +57,7 @@ use smithay::{
 use thiserror::Error;
 
 use nickel_core::{
-    resource_owner::{DependencyOwnerKind, DependencyOwnerToken},
+    resource_owner::DependencyOwnerToken,
     shell_settings::ShellSettings,
     theme::{Appearance, ThemePalette},
 };
@@ -207,6 +207,7 @@ pub fn init_udev(
     event_loop: &mut EventLoop<'static, NickelSession>,
     data: &mut NickelSession,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let renderer_owner = nickel_core::resource_owner::try_acquire_smithay_renderer_owner()?;
     let (session, notifier) = LibSeatSession::new()?;
     let seat_name = session.seat();
     let udev = UdevBackend::new(&seat_name)?;
@@ -214,7 +215,7 @@ pub fn init_udev(
     let gpus = GpuManager::new(GbmGlesBackend::with_context_priority(ContextPriority::High))?;
 
     data.native = Some(UdevData {
-        _renderer_owner: DependencyOwnerToken::new(DependencyOwnerKind::SmithayRenderer),
+        _renderer_owner: renderer_owner,
         session: session.clone(),
         activity: SessionActivity::default(),
         gpus,

@@ -29,7 +29,6 @@ use smithay::{
 };
 
 use nickel_core::{
-    resource_owner::{DependencyOwnerKind, DependencyOwnerToken},
     shell_settings::ShellSettings,
     theme::{Appearance, ThemePalette},
 };
@@ -64,8 +63,8 @@ pub fn init_winit(
     let display_handle = data.display_handle.clone();
     let state = data;
 
+    let renderer_owner = nickel_core::resource_owner::try_acquire_smithay_renderer_owner()?;
     let (mut backend, winit) = winit::init()?;
-    let renderer_owner = DependencyOwnerToken::new(DependencyOwnerKind::SmithayRenderer);
     state.set_winit_redraw_window(backend.window());
     let startup_frame_pump_until = Instant::now() + Duration::from_secs(3);
 

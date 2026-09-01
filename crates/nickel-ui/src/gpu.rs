@@ -2,7 +2,7 @@ use cosmic_text::{
     Align, Attrs, Buffer, CacheKey, Color as TextColor, Family, FontSystem, Metrics, PhysicalGlyph,
     Shaping, Style as FontStyle, SwashCache, SwashContent, Weight, Wrap,
 };
-use nickel_core::resource_owner::{DependencyOwnerKind, DependencyOwnerToken};
+use nickel_core::resource_owner::DependencyOwnerToken;
 use sdl3::{
     pixels::{Color as SdlColor, PixelFormat},
     rect::Rect as SdlRect,
@@ -425,9 +425,7 @@ impl SdlCanvasPresenter {
         );
         let glyph_atlas = GlyphAtlas::new(&canvas)?;
         Ok(Self {
-            _font_system_owner: DependencyOwnerToken::new(
-                DependencyOwnerKind::CosmicTextFontSystem,
-            ),
+            _font_system_owner: DependencyOwnerToken::new_cosmic_text_font_system(),
             canvas,
             font_system: FontSystem::new(),
             swash_cache: SwashCache::new(),
@@ -1097,9 +1095,7 @@ impl SdlComponentRenderer {
         let height = height.max(1);
         let upload = upload.then(|| Self::create_upload_surface(width, height));
         Self {
-            _font_system_owner: DependencyOwnerToken::new(
-                DependencyOwnerKind::CosmicTextFontSystem,
-            ),
+            _font_system_owner: DependencyOwnerToken::new_cosmic_text_font_system(),
             width,
             height,
             scale: scale.max(0.25),
