@@ -2525,6 +2525,11 @@ impl<Message> Dropdown<Message> {
         self.colors(colors.0, colors.1, colors.2)
     }
 
+    pub fn focus_border(mut self, color: Color) -> Self {
+        self.0.style.focus_border = Some(color);
+        self
+    }
+
     pub fn controller_focus_border(mut self, color: Color) -> Self {
         self.0.style.controller_focus_border = Some(color);
         self

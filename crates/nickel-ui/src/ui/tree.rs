@@ -4953,6 +4953,19 @@ fn emit_element<Message: Clone>(
             }
         }
     }
+    // Sliders and dropdowns paint their native surface after the generic
+    // style layer. Repeat an active/focused border in the foreground so their
+    // own track or header cannot cover the selection indicator.
+    if matches!(element.kind, Kind::Slider { .. } | Kind::Dropdown { .. })
+        && let Some(color) = element.style.border
+        && element.style.border_width > 0.0
+    {
+        tree.commands.push(PaintCommand::Stroke {
+            rect,
+            color,
+            width: element.style.border_width,
+        });
+    }
     if clips_descendants {
         tree.commands.push(PaintCommand::PopClip);
     }

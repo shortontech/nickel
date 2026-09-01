@@ -1025,6 +1025,7 @@ impl<Message> SelectField<Message> {
                 theme.surfaces.hover,
                 theme.text.primary,
             )
+            .focus_border(theme.borders.focus)
             .controller_focus_border(theme.borders.controller_focus)
             .accessibility_label(label.clone());
         Self(

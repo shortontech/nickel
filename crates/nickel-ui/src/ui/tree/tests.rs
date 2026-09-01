@@ -2630,6 +2630,69 @@ fn literal_semantic_roles_have_stable_accessibility_mappings() {
 }
 
 #[test]
+fn controller_selected_value_controls_paint_focus_above_their_native_surface() {
+    const CONTROLLER_FOCUS: Color = 0xff4fb3;
+
+    let mut slider_state = UiStateStore::default();
+    let slider = || {
+        Slider::on_change(map_volume, 0.5)
+            .id("volume")
+            .controller_focus_border(CONTROLLER_FOCUS)
+    };
+    let initial_slider = UiFrame::layout_with_state(
+        slider(),
+        Rect::new(0.0, 0.0, 200.0, 24.0),
+        &mut slider_state,
+    );
+    initial_slider.handle_event(&mut slider_state, UiEvent::ControllerDown);
+    let selected_slider = UiFrame::layout_with_state(
+        slider(),
+        Rect::new(0.0, 0.0, 200.0, 24.0),
+        &mut slider_state,
+    );
+    assert_eq!(
+        slider_state.navigation().controller_selected(),
+        Some(&UiId::from("root/volume"))
+    );
+    assert!(matches!(
+        selected_slider.commands().last(),
+        Some(PaintCommand::Stroke { color, width, .. })
+            if *color == CONTROLLER_FOCUS && *width == 2.0
+    ));
+
+    let mut dropdown_state = UiStateStore::default();
+    let dropdown = || {
+        Dropdown::new(
+            TestMessage::Named("toggle"),
+            "Off",
+            [("On", TestMessage::Option(1))],
+        )
+        .id("animations")
+        .controller_focus_border(CONTROLLER_FOCUS)
+    };
+    let initial_dropdown = UiFrame::layout_with_state(
+        dropdown(),
+        Rect::new(0.0, 0.0, 180.0, 42.0),
+        &mut dropdown_state,
+    );
+    initial_dropdown.handle_event(&mut dropdown_state, UiEvent::ControllerDown);
+    let selected_dropdown = UiFrame::layout_with_state(
+        dropdown(),
+        Rect::new(0.0, 0.0, 180.0, 42.0),
+        &mut dropdown_state,
+    );
+    assert_eq!(
+        dropdown_state.navigation().controller_selected(),
+        Some(&UiId::from("root/animations"))
+    );
+    assert!(matches!(
+        selected_dropdown.commands().last(),
+        Some(PaintCommand::Stroke { color, width, .. })
+            if *color == CONTROLLER_FOCUS && *width == 2.0
+    ));
+}
+
+#[test]
 fn stateful_layout_rehydrates_dropdown_scroll_focus_and_pointer_capture() {
     let mut state = UiStateStore::default();
     let dropdown = || {
