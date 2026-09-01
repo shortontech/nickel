@@ -276,15 +276,26 @@ impl UiApplication for LauncherApplication {
     }
 
     fn shortcut(&mut self, shortcut: Shortcut) -> bool {
-        if shortcut != Shortcut::Escape {
-            return false;
+        match shortcut {
+            Shortcut::Submit if self.launcher.mode() == LauncherMode::Search => {
+                if self.launcher.result_count() == 0 {
+                    return false;
+                }
+                self.effects.push(LauncherAction::ActivateResult(
+                    self.launcher.selected_index(),
+                ));
+                true
+            }
+            Shortcut::Escape => {
+                if self.launcher.query().is_empty() {
+                    self.effects.push(LauncherAction::Dismiss);
+                } else {
+                    self.update(LauncherAction::SetQuery(String::new()));
+                }
+                true
+            }
+            _ => false,
         }
-        if self.launcher.query().is_empty() {
-            self.effects.push(LauncherAction::Dismiss);
-        } else {
-            self.update(LauncherAction::SetQuery(String::new()));
-        }
-        true
     }
 }
 
@@ -1374,6 +1385,39 @@ mod tests {
             assert_eq!(operation.outcome.global_actions, ["ToggleLauncher"]);
             assert!(!operation.outcome.rebuilt);
         }
+    }
+
+    #[test]
+    fn submit_shortcut_activates_the_selected_search_result() {
+        let mut launcher = Launcher::new(vec![Application::new(
+            "org.kde.konsole".into(),
+            "Konsole".into(),
+            None,
+            None,
+            None,
+        )]);
+        launcher.set_query("konsole");
+        let mut host = UiHost::new(
+            LauncherApplication::new(
+                launcher,
+                LauncherViewState::default(),
+                LauncherIconCache::new(),
+                palette(),
+            ),
+            920,
+            680,
+        );
+
+        let outcome = host.step(HostBatch {
+            events: vec![HostEvent::Shortcut(Shortcut::Submit)],
+            ..HostBatch::default()
+        });
+
+        assert!(outcome.changed);
+        assert_eq!(
+            host.application_mut().take_effects(),
+            [LauncherAction::ActivateResult(0)]
+        );
     }
 
     #[test]

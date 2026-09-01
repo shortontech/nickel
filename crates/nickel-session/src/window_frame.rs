@@ -171,10 +171,9 @@ pub fn render_titlebar_with_mode(
     foreground: u32,
     mode: TitlebarCacheMode,
 ) -> Option<MemoryRenderBuffer> {
-    // Resizing can produce a new width for every pointer event. Quantizing the
-    // raster width keeps the expensive SVG/text asset stable while the render
-    // element scales it by only a few pixels.
-    let width = ((width.max(1) + 31) / 32) * 32;
+    // The compositor uses this buffer as a viewport rather than scaling it.
+    // Retain the exact width so the right rounded corner is never cropped.
+    let width = width.max(1);
     if mode == TitlebarCacheMode::Bypass {
         return render_titlebar_uncached(width, title, background, foreground);
     }
@@ -268,10 +267,9 @@ fn render_titlebar_pixels(
     let svg = format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{TITLEBAR_HEIGHT}">
 <defs><clipPath id="title"><rect x="16" y="0" width="{title_width}" height="{TITLEBAR_HEIGHT}"/></clipPath></defs>
-<path d="M 10 .5 H {right} Q {width_minus_half} .5 {width_minus_half} 10 V {TITLEBAR_HEIGHT} H .5 V 10 Q .5 .5 10 .5 Z" fill="#{background:06x}" stroke="#{foreground:06x}" stroke-opacity=".38"/>
+<path d="M 10 0 H {right} Q {width} 0 {width} 10 V {TITLEBAR_HEIGHT} H 0 V 10 Q 0 0 10 0 Z" fill="#{background:06x}"/>
 <text x="16" y="26" clip-path="url(#title)" font-family="sans-serif" font-size="14" font-weight="500" fill="#{foreground:06x}">{escaped_title}</text>
 </svg>"##,
-        width_minus_half = width as f32 - 0.5
     );
     let tree = resvg::usvg::Tree::from_data(svg.as_bytes(), &options).ok()?;
     let mut pixmap = resvg::tiny_skia::Pixmap::new(width, TITLEBAR_HEIGHT as u32)?;
@@ -440,7 +438,7 @@ mod tests {
     }
 
     #[test]
-    fn titlebar_raster_has_rounded_alpha_corners_and_continuous_top_border() {
+    fn titlebar_raster_has_symmetric_rounded_alpha_corners_without_an_outline() {
         let (pixels, width) = render_titlebar_pixels(320, "Nickel File", 0x20242c, 0xe8edf4)
             .expect("titlebar raster");
         let alpha = |x: u32, y: u32| pixels[((y * width + x) * 4 + 3) as usize];
@@ -455,6 +453,11 @@ mod tests {
             "outer top border must have no transparent gap"
         );
         assert!(alpha(0, 10) > 0 && alpha(width - 1, 10) > 0);
+        let rgba = |x: u32, y: u32| {
+            let offset = ((y * width + x) * 4) as usize;
+            &pixels[offset..offset + 4]
+        };
+        assert_eq!(rgba(width / 2, 1), rgba(width / 2, 2));
     }
 
     #[test]
