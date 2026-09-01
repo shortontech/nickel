@@ -208,6 +208,43 @@ mod tests {
     }
 
     #[test]
+    fn damaged_warm_renderer_frame_is_allocation_free_and_raster_equivalent() {
+        let mut renderer = SdlComponentRenderer::new_pixel_buffer(320, 200, 1.0);
+        for generation in 0..33 {
+            let frame = UiFrame::<()>::layout(
+                Container::new()
+                    .width(320.0)
+                    .height(200.0)
+                    .background(if generation % 2 == 0 {
+                        0x111827
+                    } else {
+                        0x111828
+                    })
+                    .child(Text::new("Nickel steady frame")),
+                Rect::new(0.0, 0.0, 320.0, 200.0),
+            );
+
+            let mut reference = SdlComponentRenderer::new_pixel_buffer(320, 200, 1.0);
+            reference.render(frame.commands());
+            let expected = reference.pixels();
+
+            let Some(before) = crate::allocation_counter::thread_allocation_operations() else {
+                // The reusable library test target does not install the native
+                // shell binary's allocator. The same test runs with counting
+                // enabled in the `nickel` binary test target.
+                return;
+            };
+            let damage = renderer.render(frame.commands());
+            let after = crate::allocation_counter::thread_allocation_operations().unwrap();
+            assert!(!damage.is_empty());
+            assert_eq!(renderer.pixels(), expected);
+            if generation > 0 {
+                assert_eq!(after - before, 0, "warm damaged frame {generation}");
+            }
+        }
+    }
+
+    #[test]
     fn surface_presenter_close_reopen_has_steady_cache_bounds_and_separate_rss() {
         const SURFACES: usize = 2;
         const WIDTH: u32 = 320;

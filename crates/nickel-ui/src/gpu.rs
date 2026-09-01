@@ -10,6 +10,7 @@ use sdl3::{
     surface::{Surface, SurfaceRef},
     video::Window,
 };
+use smallvec::{SmallVec, smallvec};
 
 use crate::{Color, GradientAxis, PaintCommand, Rect, StyledTextSpan, TextAlign};
 
@@ -32,7 +33,7 @@ impl Pixel {
 /// Physical pixels changed by the latest component frame.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DamageRegion {
-    pub rects: Vec<Rect>,
+    pub rects: SmallVec<[Rect; 1]>,
 }
 
 impl DamageRegion {
@@ -54,9 +55,47 @@ pub struct SdlComponentRenderer {
     pixels: Vec<Pixel>,
     upload: Option<Surface<'static>>,
     previous_commands: Vec<PaintCommand>,
+    clips: Vec<Rect>,
+    text_rasters: Vec<Option<CachedSoftwareText>>,
     font_system: FontSystem,
     swash_cache: SwashCache,
     swash_source_bytes: usize,
+}
+type SoftwareGlyphPixels = Vec<(i32, i32, u32, u32, TextColor)>;
+const SOFTWARE_TEXT_RASTER_BUDGET: usize = 2 * 1024 * 1024;
+
+struct CachedSoftwareText {
+    command: PaintCommand,
+    pixels: SoftwareGlyphPixels,
+    strikes: StrikeLines,
+}
+
+impl CachedSoftwareText {
+    fn retained_bytes(&self) -> usize {
+        let command_bytes = match &self.command {
+            PaintCommand::Text { text, .. } => text.capacity(),
+            PaintCommand::StyledText { text, spans, .. } => text.capacity().saturating_add(
+                spans
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<StyledTextSpan>()),
+            ),
+            _ => 0,
+        };
+        std::mem::size_of::<PaintCommand>()
+            .saturating_add(command_bytes)
+            .saturating_add(self.pixels.capacity().saturating_mul(std::mem::size_of::<(
+                i32,
+                i32,
+                u32,
+                u32,
+                TextColor,
+            )>()))
+            .saturating_add(
+                self.strikes
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<(Rect, Color)>()),
+            )
+    }
 }
 type PhysicalGlyphs = Vec<(PhysicalGlyph, TextColor)>;
 const SOFTWARE_SWASH_SOURCE_BUDGET: usize = 2 * 1024 * 1024;
@@ -478,7 +517,7 @@ impl SdlCanvasPresenter {
         self.canvas.set_clip_rect(None);
         self.canvas.present();
         Ok(DamageRegion {
-            rects: vec![Rect::new(0.0, 0.0, width as f32, height as f32)],
+            rects: smallvec![Rect::new(0.0, 0.0, width as f32, height as f32)],
         })
     }
 
@@ -1061,6 +1100,8 @@ impl SdlComponentRenderer {
             pixels: vec![Pixel::TRANSPARENT; (width * height) as usize],
             upload,
             previous_commands: Vec::new(),
+            clips: Vec::new(),
+            text_rasters: Vec::new(),
             font_system: FontSystem::new(),
             swash_cache: SwashCache::new(),
             swash_source_bytes: 0,
@@ -1079,7 +1120,11 @@ impl SdlComponentRenderer {
     pub fn resize(&mut self, width: u32, height: u32, scale: f32) {
         let width = width.max(1);
         let height = height.max(1);
-        self.scale = scale.max(0.25);
+        let scale = scale.max(0.25);
+        if scale != self.scale {
+            self.text_rasters.clear();
+        }
+        self.scale = scale;
         if (width, height) != (self.width, self.height) {
             self.width = width;
             self.height = height;
@@ -1115,6 +1160,8 @@ impl SdlComponentRenderer {
             self.upload = Some(Self::create_upload_surface(1, 1));
         }
         self.previous_commands = Vec::new();
+        self.clips = Vec::new();
+        self.text_rasters = Vec::new();
         self.swash_cache = SwashCache::new();
         self.swash_source_bytes = 0;
     }
@@ -1138,12 +1185,27 @@ impl SdlComponentRenderer {
             .and_then(|rect| intersection(full, rect))
             .unwrap_or(full);
         self.clear(repaint);
-        let mut clips = vec![repaint];
-        for command in commands {
-            self.draw_command(command, &mut clips);
+        let mut clips = std::mem::take(&mut self.clips);
+        clips.clear();
+        clips.push(repaint);
+        if self.text_rasters.len() < commands.len() {
+            self.text_rasters.resize_with(commands.len(), || None);
         }
-        self.previous_commands.clear();
-        self.previous_commands.extend_from_slice(commands);
+        self.text_rasters.truncate(commands.len());
+        for (index, command) in commands.iter().enumerate() {
+            self.draw_command(index, command, &mut clips);
+        }
+        self.clips = clips;
+        if self.previous_commands.len() == commands.len() {
+            for (previous, command) in self.previous_commands.iter_mut().zip(commands) {
+                if previous != command {
+                    previous.clone_from(command);
+                }
+            }
+        } else {
+            self.previous_commands.clear();
+            self.previous_commands.extend_from_slice(commands);
+        }
         damage
     }
 
@@ -1190,7 +1252,7 @@ impl SdlComponentRenderer {
     fn damage(&self, commands: &[PaintCommand]) -> DamageRegion {
         if self.previous_commands.is_empty() {
             return DamageRegion {
-                rects: vec![Rect::new(0.0, 0.0, self.width as f32, self.height as f32)],
+                rects: smallvec![Rect::new(0.0, 0.0, self.width as f32, self.height as f32)],
             };
         }
         let mut union = None;
@@ -1218,7 +1280,7 @@ impl SdlComponentRenderer {
         }
     }
 
-    fn draw_command(&mut self, command: &PaintCommand, clips: &mut Vec<Rect>) {
+    fn draw_command(&mut self, index: usize, command: &PaintCommand, clips: &mut Vec<Rect>) {
         let clip = *clips.last().expect("clip stack always has the surface");
         match command {
             PaintCommand::Fill { rect, color } | PaintCommand::OverlayFill { rect, color } => {
@@ -1258,8 +1320,8 @@ impl SdlComponentRenderer {
                     clip,
                 );
             }
-            PaintCommand::Text { .. } => self.text(command, clip),
-            PaintCommand::StyledText { .. } => self.styled_text(command, clip),
+            PaintCommand::Text { .. } => self.text(index, command, clip),
+            PaintCommand::StyledText { .. } => self.styled_text(index, command, clip),
             PaintCommand::Image {
                 bounds,
                 image,
@@ -1353,7 +1415,7 @@ impl SdlComponentRenderer {
         }
     }
 
-    fn text(&mut self, command: &PaintCommand, clip: Rect) {
+    fn text(&mut self, index: usize, command: &PaintCommand, clip: Rect) {
         let PaintCommand::Text {
             bounds,
             text,
@@ -1366,6 +1428,12 @@ impl SdlComponentRenderer {
         else {
             return;
         };
+        let cached = self.text_rasters[index].take();
+        if let Some(cached) = cached.filter(|cached| cached.command == *command) {
+            self.draw_cached_text(&cached, physical_rect(*bounds, self.scale), clip);
+            self.text_rasters[index] = Some(cached);
+            return;
+        }
         let font_size = text_size(*scale) * self.scale;
         if self.swash_source_bytes.saturating_add(text.len()) > SOFTWARE_SWASH_SOURCE_BUDGET {
             self.swash_cache = SwashCache::new();
@@ -1408,11 +1476,21 @@ impl SdlComponentRenderer {
         // Cosmic Text emits already-rasterized 1x1 physical pixels. Keep their
         // origin on the physical pixel grid; a fractional origin would make
         // `for_pixels` expand each sample across adjacent pixels.
+        let cached = CachedSoftwareText {
+            command: command.clone(),
+            pixels: glyph_pixels,
+            strikes: Vec::new(),
+        };
+        self.draw_cached_text(&cached, physical, clip);
+        self.retain_text_raster(index, cached);
+    }
+
+    fn draw_cached_text(&mut self, cached: &CachedSoftwareText, physical: Rect, clip: Rect) {
         let origin = crate::Point {
             x: physical.origin.x.round(),
             y: physical.origin.y.round(),
         };
-        for &(x, y, width, height, glyph_color) in glyph_pixels.iter() {
+        for &(x, y, width, height, glyph_color) in &cached.pixels {
             let glyph = Rect::new(
                 origin.x + x as f32,
                 origin.y + y as f32,
@@ -1435,9 +1513,27 @@ impl SdlComponentRenderer {
                 );
             });
         }
+        for &(rect, strike_color) in &cached.strikes {
+            self.fill_round(rect, 0.0, 0, strike_color, clip);
+        }
     }
 
-    fn styled_text(&mut self, command: &PaintCommand, clip: Rect) {
+    fn retain_text_raster(&mut self, index: usize, cached: CachedSoftwareText) {
+        let other_bytes = self
+            .text_rasters
+            .iter()
+            .enumerate()
+            .filter(|(other_index, _)| *other_index != index)
+            .filter_map(|(_, cached)| cached.as_ref())
+            .fold(0usize, |total, cached| {
+                total.saturating_add(cached.retained_bytes())
+            });
+        if other_bytes.saturating_add(cached.retained_bytes()) <= SOFTWARE_TEXT_RASTER_BUDGET {
+            self.text_rasters[index] = Some(cached);
+        }
+    }
+
+    fn styled_text(&mut self, index: usize, command: &PaintCommand, clip: Rect) {
         let PaintCommand::StyledText {
             bounds,
             text,
@@ -1449,6 +1545,12 @@ impl SdlComponentRenderer {
         else {
             return;
         };
+        let cached = self.text_rasters[index].take();
+        if let Some(cached) = cached.filter(|cached| cached.command == *command) {
+            self.draw_cached_text(&cached, physical_rect(*bounds, self.scale), clip);
+            self.text_rasters[index] = Some(cached);
+            return;
+        }
         let font_size = text_size(*scale) * self.scale;
         let physical = physical_rect(*bounds, self.scale);
         let mut buffer = Buffer::new(
@@ -1478,36 +1580,13 @@ impl SdlComponentRenderer {
             },
         );
         let strikes = styled_strikes(&buffer, spans, physical, *color, font_size);
-        let origin = crate::Point {
-            x: physical.origin.x.round(),
-            y: physical.origin.y.round(),
+        let cached = CachedSoftwareText {
+            command: command.clone(),
+            pixels,
+            strikes,
         };
-        for (x, y, width, height, glyph_color) in pixels {
-            let glyph = Rect::new(
-                origin.x + x as f32,
-                origin.y + y as f32,
-                width as f32,
-                height as f32,
-            );
-            let Some(glyph) = intersection(glyph, clip) else {
-                continue;
-            };
-            self.for_pixels(glyph, |renderer, px, py| {
-                renderer.blend(
-                    px,
-                    py,
-                    Pixel::rgba(
-                        glyph_color.r(),
-                        glyph_color.g(),
-                        glyph_color.b(),
-                        glyph_color.a(),
-                    ),
-                );
-            });
-        }
-        for (rect, strike_color) in strikes {
-            self.fill_round(rect, 0.0, 0, strike_color, clip);
-        }
+        self.draw_cached_text(&cached, physical, clip);
+        self.retain_text_raster(index, cached);
     }
 
     fn image(&mut self, rect: Rect, image: &image::RgbaImage, clip: Rect) {

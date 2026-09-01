@@ -1,10 +1,21 @@
 use std::{
     alloc::{GlobalAlloc, Layout, System},
+    cell::Cell,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 static ALLOCATION_OPERATIONS: AtomicU64 = AtomicU64::new(0);
 static TRACKING_INSTALLED: AtomicBool = AtomicBool::new(false);
+thread_local! {
+    static THREAD_ALLOCATION_OPERATIONS: Cell<u64> = const { Cell::new(0) };
+}
+
+#[allow(dead_code)] // The library fixture exposes the allocator without installing it.
+fn record_allocation() {
+    TRACKING_INSTALLED.store(true, Ordering::Relaxed);
+    ALLOCATION_OPERATIONS.fetch_add(1, Ordering::Relaxed);
+    THREAD_ALLOCATION_OPERATIONS.with(|operations| operations.set(operations.get() + 1));
+}
 
 /// System allocator wrapper used by the native shell's process-wide telemetry.
 ///
@@ -19,15 +30,13 @@ pub(crate) struct CountingSystemAllocator;
 // pointers or layouts.
 unsafe impl GlobalAlloc for CountingSystemAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        TRACKING_INSTALLED.store(true, Ordering::Relaxed);
-        ALLOCATION_OPERATIONS.fetch_add(1, Ordering::Relaxed);
+        record_allocation();
         // SAFETY: Forwarding the caller-provided layout unchanged.
         unsafe { System.alloc(layout) }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        TRACKING_INSTALLED.store(true, Ordering::Relaxed);
-        ALLOCATION_OPERATIONS.fetch_add(1, Ordering::Relaxed);
+        record_allocation();
         // SAFETY: Forwarding the caller-provided layout unchanged.
         unsafe { System.alloc_zeroed(layout) }
     }
@@ -38,8 +47,7 @@ unsafe impl GlobalAlloc for CountingSystemAllocator {
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        TRACKING_INSTALLED.store(true, Ordering::Relaxed);
-        ALLOCATION_OPERATIONS.fetch_add(1, Ordering::Relaxed);
+        record_allocation();
         // SAFETY: Forwarding the original pointer/layout and requested size.
         unsafe { System.realloc(ptr, layout, new_size) }
     }
@@ -49,4 +57,11 @@ pub(crate) fn allocation_operations() -> Option<u64> {
     TRACKING_INSTALLED
         .load(Ordering::Relaxed)
         .then(|| ALLOCATION_OPERATIONS.load(Ordering::Relaxed))
+}
+
+#[cfg(test)]
+pub(crate) fn thread_allocation_operations() -> Option<u64> {
+    TRACKING_INSTALLED
+        .load(Ordering::Relaxed)
+        .then(|| THREAD_ALLOCATION_OPERATIONS.with(Cell::get))
 }
