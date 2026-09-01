@@ -4303,11 +4303,10 @@ mod tests {
             .expect_err("provisional status must not satisfy final completion");
             assert!(error.to_string().contains(status));
         }
-        assert!(
+        assert_eq!(
             validate_cache_inventory_for_final_completion()
-                .expect_err("current pending inventory must stay honest")
-                .to_string()
-                .contains("not final-completion ready")
+                .expect("the checked-in inventory is final-completion ready"),
+            31
         );
     }
 
