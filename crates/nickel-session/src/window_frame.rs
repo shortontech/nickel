@@ -53,6 +53,14 @@ pub struct TitlebarCacheDiagnostics {
     pub invalidations: u64,
 }
 
+/// Selects whether server-decoration rasters may be retained and reused.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TitlebarCacheMode {
+    #[default]
+    Enabled,
+    Bypass,
+}
+
 pub fn titlebar_cache_diagnostics() -> TitlebarCacheDiagnostics {
     TITLEBAR_CACHE
         .get()
@@ -147,10 +155,29 @@ pub fn render_titlebar(
     background: u32,
     foreground: u32,
 ) -> Option<MemoryRenderBuffer> {
+    render_titlebar_with_mode(
+        width,
+        title,
+        background,
+        foreground,
+        TitlebarCacheMode::Enabled,
+    )
+}
+
+pub fn render_titlebar_with_mode(
+    width: i32,
+    title: &str,
+    background: u32,
+    foreground: u32,
+    mode: TitlebarCacheMode,
+) -> Option<MemoryRenderBuffer> {
     // Resizing can produce a new width for every pointer event. Quantizing the
     // raster width keeps the expensive SVG/text asset stable while the render
     // element scales it by only a few pixels.
     let width = ((width.max(1) + 31) / 32) * 32;
+    if mode == TitlebarCacheMode::Bypass {
+        return render_titlebar_uncached(width, title, background, foreground);
+    }
     let key = (width, title.to_owned(), background, foreground);
     let cache = TITLEBAR_CACHE.get_or_init(|| Mutex::new(TitlebarCache::default()));
     {
@@ -373,9 +400,9 @@ pub fn hit_test(content: Geometry, x: i32, y: i32) -> Option<FramePart> {
 mod tests {
     use super::{
         FramePart, RESIZE_BORDER, TITLEBAR_CACHE, TITLEBAR_CACHE_MAX_BYTES,
-        TITLEBAR_CACHE_MAX_ENTRIES, TITLEBAR_HEIGHT, hit_test, outer_geometry, render_titlebar,
-        render_titlebar_pixels, titlebar_cache_diagnostics, titlebar_geometry,
-        topmost_frame_target,
+        TITLEBAR_CACHE_MAX_ENTRIES, TITLEBAR_HEIGHT, TitlebarCacheMode, hit_test, outer_geometry,
+        render_titlebar, render_titlebar_pixels, render_titlebar_with_mode,
+        titlebar_cache_diagnostics, titlebar_geometry, topmost_frame_target,
     };
     use crate::shell_layout::Geometry;
 
@@ -450,6 +477,92 @@ mod tests {
         assert_eq!(diagnostics.insertions, diagnostics.misses);
         assert!(diagnostics.evictions > 0);
         assert!(diagnostics.invalidations > 0);
+    }
+
+    #[derive(Clone, Copy)]
+    struct AdmissionStats {
+        median_us: f64,
+        p95_us: f64,
+    }
+
+    fn admission_stats(mut samples: Vec<f64>) -> AdmissionStats {
+        samples.sort_by(f64::total_cmp);
+        let nearest_rank =
+            |percent: usize| samples[(samples.len() * percent).div_ceil(100).saturating_sub(1)];
+        AdmissionStats {
+            median_us: nearest_rank(50),
+            p95_us: nearest_rank(95),
+        }
+    }
+
+    #[test]
+    #[ignore = "release-mode cache admission benchmark"]
+    fn window_titlebar_rasters_admission_workloads() {
+        const SAMPLES: usize = 31;
+        const WARM_P95_BENEFIT_US: f64 = 100.0;
+        if let Some(cache) = TITLEBAR_CACHE.get() {
+            *cache.lock().unwrap() = super::TitlebarCache::default();
+        }
+        render_titlebar(1280, "Nickel File", 0x20242c, 0xe8edf4).expect("warm titlebar");
+
+        for workload in ["cold", "warm", "churn", "low_reuse"] {
+            let mut cached_samples = Vec::with_capacity(SAMPLES);
+            let mut bypass_samples = Vec::with_capacity(SAMPLES);
+            for sample in 0..SAMPLES {
+                if workload == "cold"
+                    && let Some(cache) = TITLEBAR_CACHE.get()
+                {
+                    *cache.lock().unwrap() = super::TitlebarCache::default();
+                }
+                let title = match workload {
+                    "churn" => format!("Nickel workspace {}", sample % 4),
+                    "low_reuse" => format!("Nickel document {sample}"),
+                    _ => "Nickel File".to_owned(),
+                };
+                let started = std::time::Instant::now();
+                let cached = render_titlebar_with_mode(
+                    1280,
+                    &title,
+                    0x20242c,
+                    0xe8edf4,
+                    TitlebarCacheMode::Enabled,
+                )
+                .expect("cached titlebar");
+                std::hint::black_box(cached);
+                cached_samples.push(started.elapsed().as_secs_f64() * 1_000_000.0);
+
+                let started = std::time::Instant::now();
+                let bypass = render_titlebar_with_mode(
+                    1280,
+                    &title,
+                    0x20242c,
+                    0xe8edf4,
+                    TitlebarCacheMode::Bypass,
+                )
+                .expect("bypassed titlebar");
+                std::hint::black_box(bypass);
+                bypass_samples.push(started.elapsed().as_secs_f64() * 1_000_000.0);
+
+                let cached_pixels = render_titlebar_pixels(1280, &title, 0x20242c, 0xe8edf4)
+                    .expect("cached-path authoritative pixels");
+                let bypass_pixels = render_titlebar_pixels(1280, &title, 0x20242c, 0xe8edf4)
+                    .expect("bypass authoritative pixels");
+                assert_eq!(cached_pixels, bypass_pixels);
+            }
+            let cached = admission_stats(cached_samples);
+            let bypass = admission_stats(bypass_samples);
+            let retained_bytes = titlebar_cache_diagnostics().live_bytes;
+            println!(
+                "{{\"schema\":\"nickel-cache-admission-v1\",\"cache\":\"window_titlebar_rasters\",\"workload\":\"{workload}\",\"fixture\":\"deterministic_headless\",\"profile\":\"release\",\"samples\":{SAMPLES},\"cached_median_us\":{:.3},\"cached_p95_us\":{:.3},\"bypass_median_us\":{:.3},\"bypass_p95_us\":{:.3},\"retained_bytes\":{retained_bytes},\"complexity\":{{\"key_fields\":4,\"invalidation_triggers\":3,\"storage_collections\":1}},\"output_equivalence\":\"exact_rgba\"}}",
+                cached.median_us, cached.p95_us, bypass.median_us, bypass.p95_us
+            );
+            if workload == "warm" {
+                assert!(
+                    bypass.p95_us - cached.p95_us > WARM_P95_BENEFIT_US,
+                    "predeclared warm p95 benefit was not met"
+                );
+            }
+        }
     }
 
     #[test]

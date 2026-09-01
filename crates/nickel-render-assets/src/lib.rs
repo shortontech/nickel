@@ -57,6 +57,14 @@ pub enum TextWeight {
     Bold,
 }
 
+/// Selects whether derived raster assets may be retained and reused.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum AssetCacheMode {
+    #[default]
+    Enabled,
+    Bypass,
+}
+
 #[derive(Clone, Debug)]
 pub struct TextRequest<'a> {
     pub text: &'a str,
@@ -167,7 +175,25 @@ impl TextAssetCache {
     }
 
     pub fn get(&mut self, request: TextRequest<'_>) -> Arc<RgbaAsset> {
+        self.get_with_mode(request, AssetCacheMode::Enabled)
+    }
+
+    pub fn get_with_mode(
+        &mut self,
+        request: TextRequest<'_>,
+        mode: AssetCacheMode,
+    ) -> Arc<RgbaAsset> {
         let key = TextKey::from(request);
+        if mode == AssetCacheMode::Bypass {
+            let recompute_started = Instant::now();
+            let asset = Arc::new(self.rasterize(&key));
+            self.diagnostics.recomputation_nanos = self
+                .diagnostics
+                .recomputation_nanos
+                .saturating_add(recompute_started.elapsed().as_nanos());
+            self.diagnostics.recomputations = self.diagnostics.recomputations.saturating_add(1);
+            return asset;
+        }
         if let Some(asset) = self.assets.get(&key) {
             self.diagnostics.hits = self.diagnostics.hits.saturating_add(1);
             return Arc::clone(asset);
@@ -373,11 +399,38 @@ impl ImageAssetCache {
     }
 
     pub fn scaled(&mut self, id: ImageAssetId, width: u32, height: u32) -> Option<Arc<RgbaAsset>> {
+        self.scaled_with_mode(id, width, height, AssetCacheMode::Enabled)
+    }
+
+    pub fn scaled_with_mode(
+        &mut self,
+        id: ImageAssetId,
+        width: u32,
+        height: u32,
+        mode: AssetCacheMode,
+    ) -> Option<Arc<RgbaAsset>> {
         let key = ImageKey {
             id,
             width: width.max(1),
             height: height.max(1),
         };
+        if mode == AssetCacheMode::Bypass {
+            let original = self.originals.get(&id)?;
+            let recompute_started = Instant::now();
+            let pixels = image::imageops::resize(
+                original.image(),
+                key.width,
+                key.height,
+                FilterType::Triangle,
+            );
+            self.scaled_diagnostics.recomputation_nanos = self
+                .scaled_diagnostics
+                .recomputation_nanos
+                .saturating_add(recompute_started.elapsed().as_nanos());
+            self.scaled_diagnostics.recomputations =
+                self.scaled_diagnostics.recomputations.saturating_add(1);
+            return Some(Arc::new(RgbaAsset::new(pixels)));
+        }
         if let Some(asset) = self.scaled.get(&key) {
             self.scaled_diagnostics.hits = self.scaled_diagnostics.hits.saturating_add(1);
             return Some(Arc::clone(asset));
@@ -768,5 +821,156 @@ mod tests {
 
         cache.clear();
         assert_eq!(cache.diagnostics().estimated_retained_bytes, 0);
+    }
+
+    #[derive(Clone, Copy)]
+    struct AdmissionStats {
+        median_us: f64,
+        p95_us: f64,
+    }
+
+    fn admission_stats(mut samples: Vec<f64>) -> AdmissionStats {
+        samples.sort_by(f64::total_cmp);
+        let nearest_rank =
+            |percent: usize| samples[(samples.len() * percent).div_ceil(100).saturating_sub(1)];
+        AdmissionStats {
+            median_us: nearest_rank(50),
+            p95_us: nearest_rank(95),
+        }
+    }
+
+    fn print_admission(
+        cache: &str,
+        workload: &str,
+        cached: AdmissionStats,
+        bypass: AdmissionStats,
+        retained_bytes: usize,
+        key_fields: usize,
+        invalidation_triggers: usize,
+    ) {
+        println!(
+            "{{\"schema\":\"nickel-cache-admission-v1\",\"cache\":\"{cache}\",\"workload\":\"{workload}\",\"fixture\":\"deterministic_headless\",\"profile\":\"release\",\"samples\":31,\"cached_median_us\":{:.3},\"cached_p95_us\":{:.3},\"bypass_median_us\":{:.3},\"bypass_p95_us\":{:.3},\"retained_bytes\":{retained_bytes},\"complexity\":{{\"key_fields\":{key_fields},\"invalidation_triggers\":{invalidation_triggers},\"storage_collections\":2}},\"output_equivalence\":\"exact_rgba\"}}",
+            cached.median_us, cached.p95_us, bypass.median_us, bypass.p95_us
+        );
+    }
+
+    fn admission_text_request(text: &str) -> TextRequest<'_> {
+        TextRequest {
+            text,
+            size: 22.0,
+            line_height: 30.0,
+            max_width: Some(640),
+            color: [232, 237, 244, 255],
+            weight: TextWeight::Normal,
+        }
+    }
+
+    #[test]
+    #[ignore = "release-mode cache admission benchmark"]
+    fn shared_cpu_text_rasters_admission_workloads() {
+        const SAMPLES: usize = 31;
+        const WARM_P95_BENEFIT_US: f64 = 100.0;
+        let mut cache = TextAssetCache::new();
+        cache.get(admission_text_request(
+            "Nickel shared CPU text raster admission workload",
+        ));
+
+        for workload in ["cold", "warm", "churn", "low_reuse"] {
+            let mut cached_samples = Vec::with_capacity(SAMPLES);
+            let mut bypass_samples = Vec::with_capacity(SAMPLES);
+            for sample in 0..SAMPLES {
+                if workload == "cold" {
+                    cache.clear();
+                }
+                let text = match workload {
+                    "churn" => format!("Nickel palette generation {}", sample % 4),
+                    "low_reuse" => format!("Nickel unique search result {sample}"),
+                    _ => "Nickel shared CPU text raster admission workload".to_owned(),
+                };
+                let started = Instant::now();
+                let cached =
+                    cache.get_with_mode(admission_text_request(&text), AssetCacheMode::Enabled);
+                cached_samples.push(started.elapsed().as_secs_f64() * 1_000_000.0);
+                let started = Instant::now();
+                let bypass =
+                    cache.get_with_mode(admission_text_request(&text), AssetCacheMode::Bypass);
+                bypass_samples.push(started.elapsed().as_secs_f64() * 1_000_000.0);
+                assert_eq!(cached.image(), bypass.image());
+            }
+            let cached = admission_stats(cached_samples);
+            let bypass = admission_stats(bypass_samples);
+            print_admission(
+                "shared_cpu_text_rasters",
+                workload,
+                cached,
+                bypass,
+                cache.diagnostics().estimated_retained_bytes,
+                6,
+                3,
+            );
+            if workload == "warm" {
+                assert!(
+                    bypass.p95_us - cached.p95_us > WARM_P95_BENEFIT_US,
+                    "predeclared warm p95 benefit was not met"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "release-mode cache admission benchmark"]
+    fn shared_scaled_images_admission_workloads() {
+        const SAMPLES: usize = 31;
+        const WARM_P95_BENEFIT_US: f64 = 100.0;
+        let source = RgbaImage::from_fn(512, 512, |x, y| {
+            Rgba([(x % 251) as u8, (y % 241) as u8, ((x + y) % 239) as u8, 255])
+        });
+        let mut cache = ImageAssetCache::default();
+        let id = ImageAssetId::from_rgba(&source);
+        cache.insert(id, source);
+        cache.scaled(id, 256, 256).expect("warm scaled image");
+
+        for workload in ["cold", "warm", "churn", "low_reuse"] {
+            let mut cached_samples = Vec::with_capacity(SAMPLES);
+            let mut bypass_samples = Vec::with_capacity(SAMPLES);
+            for sample in 0..SAMPLES {
+                if workload == "cold" {
+                    cache.invalidate_scaled_for_original(id);
+                }
+                let (width, height) = match workload {
+                    "churn" => (224 + (sample % 4) as u32 * 8, 224 + (sample % 4) as u32 * 8),
+                    "low_reuse" => (180 + sample as u32, 220 + sample as u32),
+                    _ => (256, 256),
+                };
+                let started = Instant::now();
+                let cached = cache
+                    .scaled_with_mode(id, width, height, AssetCacheMode::Enabled)
+                    .expect("cached scale");
+                cached_samples.push(started.elapsed().as_secs_f64() * 1_000_000.0);
+                let started = Instant::now();
+                let bypass = cache
+                    .scaled_with_mode(id, width, height, AssetCacheMode::Bypass)
+                    .expect("bypassed scale");
+                bypass_samples.push(started.elapsed().as_secs_f64() * 1_000_000.0);
+                assert_eq!(cached.image(), bypass.image());
+            }
+            let cached = admission_stats(cached_samples);
+            let bypass = admission_stats(bypass_samples);
+            print_admission(
+                "shared_scaled_images",
+                workload,
+                cached,
+                bypass,
+                cache.diagnostics().1.estimated_retained_bytes,
+                3,
+                3,
+            );
+            if workload == "warm" {
+                assert!(
+                    bypass.p95_us - cached.p95_us > WARM_P95_BENEFIT_US,
+                    "predeclared warm p95 benefit was not met"
+                );
+            }
+        }
     }
 }
