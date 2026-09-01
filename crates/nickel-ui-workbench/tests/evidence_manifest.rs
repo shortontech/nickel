@@ -58,8 +58,12 @@ fn durable_ui_evidence_is_complete_content_addressed_and_within_budget() {
     assert_eq!(sha256(&report_bytes), reachability["sha256"]);
     let report: Value = serde_json::from_slice(&report_bytes).expect("path report is valid JSON");
     assert_eq!(report["schema"], reachability["report_schema"]);
-    assert_eq!(report["variants"].as_array().unwrap().len(), 66);
-    assert_eq!(report["path_count"], 1125);
+    assert_eq!(
+        report["variants"].as_array().unwrap().len() as u64,
+        reachability["fixture_variants"].as_u64().unwrap()
+    );
+    assert_eq!(report["path_count"], reachability["path_count"]);
+    assert_eq!(report["reached_count"], reachability["reached_count"]);
     assert_eq!(report["reached_count"], report["path_count"]);
     assert_eq!(report["issue_count"], 0);
     assert!(
