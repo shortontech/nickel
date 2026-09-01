@@ -195,6 +195,7 @@ pub(crate) enum ShellSupervisorCommand {
 const USER_SESSION_ENVIRONMENT: &[&str] = &[
     "DBUS_SESSION_BUS_ADDRESS",
     "DISPLAY",
+    "KDE_SESSION_VERSION",
     "WAYLAND_DISPLAY",
     "XDG_CACHE_HOME",
     "XDG_CONFIG_HOME",
@@ -702,6 +703,7 @@ mod tests {
     fn runtime_import_covers_display_bus_and_xdg_service_authority() {
         for variable in [
             "DBUS_SESSION_BUS_ADDRESS",
+            "KDE_SESSION_VERSION",
             "WAYLAND_DISPLAY",
             "XDG_CURRENT_DESKTOP",
             "XDG_RUNTIME_DIR",

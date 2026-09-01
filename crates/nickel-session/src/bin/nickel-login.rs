@@ -5,7 +5,8 @@ use std::{
     process::Command,
 };
 
-const CURRENT_DESKTOP: &str = "Nickel";
+const CURRENT_DESKTOP: &str = "Nickel:KDE";
+const KDE_SESSION_VERSION: &str = "6";
 const XDG_HOME_DEFAULTS: [(&str, &str); 4] = [
     ("XDG_CONFIG_HOME", ".config"),
     ("XDG_DATA_HOME", ".local/share"),
@@ -39,6 +40,7 @@ fn prepare_login_environment() -> Result<(), Box<dyn std::error::Error>> {
         env::set_var("XDG_SESSION_TYPE", "wayland");
         env::set_var("XDG_CURRENT_DESKTOP", CURRENT_DESKTOP);
         env::set_var("XDG_SESSION_DESKTOP", "Nickel");
+        env::set_var("KDE_SESSION_VERSION", KDE_SESSION_VERSION);
         for (variable, relative) in XDG_HOME_DEFAULTS {
             if env::var_os(variable).is_none() {
                 let directory = home
@@ -64,11 +66,12 @@ fn sibling_binary(directory: &Path, name: &str) -> Result<PathBuf, Box<dyn std::
 
 #[cfg(test)]
 mod tests {
-    use super::{CURRENT_DESKTOP, XDG_HOME_DEFAULTS, sibling_binary};
+    use super::{CURRENT_DESKTOP, KDE_SESSION_VERSION, XDG_HOME_DEFAULTS, sibling_binary};
 
     #[test]
-    fn advertises_provider_neutral_desktop_identity() {
-        assert_eq!(CURRENT_DESKTOP, "Nickel");
+    fn advertises_nickel_with_kde6_compatibility() {
+        assert_eq!(CURRENT_DESKTOP, "Nickel:KDE");
+        assert_eq!(KDE_SESSION_VERSION, "6");
     }
 
     #[test]
