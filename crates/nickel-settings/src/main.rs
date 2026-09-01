@@ -40,14 +40,13 @@ use nickel_i18n::Localizer;
 use nickel_input::{InputEvent, KeyEdge, LogicalKey, NamedKey};
 use nickel_ui::{
     ActionLegend, ActionLegendEntry, AdapterOutcome, AnyView, Application, Button,
-    ButtonPresentation, ChoiceCard, ChoiceCardGroup, ColorSwatch, ComponentBuilderExt, Container,
-    DragGesture, DragPhase, GlobalAction, HostAdapter, HostServices, Image, ImageFit,
-    InputModality, Insets, NavigationItem, PageHeader, PreviewTile, ReadingDirection,
-    ResponsiveNavigation, ResponsiveNavigationDestination, SelectField, SemanticControllerAction,
-    SemanticRole, SemanticSelector, SemanticTheme, SettingsCard, SettingsNavigation, SettingsRow,
+    ButtonPresentation, ChoiceCard, ChoiceCardGroup, ColorSwatch, DragGesture, DragPhase,
+    GlobalAction, HostAdapter, HostServices, Image, ImageFit, InputModality, Insets,
+    NavigationItem, PageHeader, PreviewTile, ReadingDirection, ResponsiveNavigation,
+    ResponsiveNavigationDestination, SelectField, SemanticControllerAction, SemanticRole,
+    SemanticSelector, SemanticTheme, SettingsCard, SettingsNavigation, SettingsRow,
     SettingsSearchEntry, SettingsSearchField, SettingsStatus, SettingsStatusKind, SliderField,
-    Surface, SurfaceRole, Switch, TabList, TextAlign, UiHost, UiId, ViewContext, search_settings,
-    ui,
+    Surface, SurfaceRole, Switch, TextAlign, UiHost, UiId, ViewContext, search_settings, ui,
 };
 use sdl3::event::Event;
 
@@ -260,16 +259,6 @@ impl std::fmt::Display for SettingsPage {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-enum AppearanceTab {
-    #[default]
-    General,
-    Theme,
-    Fonts,
-    Icons,
-    Cursors,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum AppearanceNotice {
     Confirmation(String),
@@ -310,7 +299,6 @@ enum SettingsMessage {
     AppearanceLight,
     AppearanceDark,
     AppearanceSystem,
-    AppearanceTab(AppearanceTab),
     AppearanceReset,
     SetAccentHue(u16),
     SetAppearanceHue(u16),
@@ -411,9 +399,6 @@ impl SettingsApp {
                 self.sidebar_query.clear();
                 self.pending_effects
                     .push(SettingsEffect::FocusControl(target));
-                if page == SettingsPage::Appearance {
-                    self.appearance_tab = AppearanceTab::General;
-                }
                 match page {
                     SettingsPage::Network => self.load_linux_network(),
                     SettingsPage::Bluetooth => self.load_bluetooth(),
@@ -457,7 +442,6 @@ impl SettingsApp {
                 self.shell_settings.theme = ThemePreference::System;
                 self.persist_appearance();
             }
-            SettingsMessage::AppearanceTab(tab) => self.appearance_tab = tab,
             SettingsMessage::SetAccentHue(hue) => {
                 self.shell_settings.accent_hue = Some(hue.min(359));
                 self.persist_appearance();
@@ -1276,6 +1260,19 @@ mod tests {
         })
     }
 
+    fn navigation_key(order: u64, physical: KeyCode, logical: NamedKey) -> InputEvent {
+        InputEvent::Key(KeyEvent {
+            device: DeviceId(1),
+            order: EventOrder(order),
+            physical: PhysicalKey::Code(physical),
+            logical: LogicalKey::Named(logical),
+            location: KeyLocation::Standard,
+            edge: KeyEdge::Pressed,
+            repeat: false,
+            modifiers: ModifierState::default(),
+        })
+    }
+
     fn primary_event(order: u64, edge: KeyEdge, x: f64, y: f64) -> InputEvent {
         InputEvent::Pointer(PointerEvent::Button {
             device: DeviceId(2),
@@ -1472,20 +1469,6 @@ mod tests {
                 "missing Appearance control for {message:?}"
             );
         }
-    }
-
-    #[test]
-    fn unavailable_appearance_tabs_explain_platform_authority_and_restart_scope() {
-        let mut app = SettingsApp::with_initial_page(SettingsPage::Appearance);
-        app.appearance_tab = super::AppearanceTab::Theme;
-        let tree = app.build_ui_with_diagnostics(1000.0, 760.0);
-        assert!(tree.accessibility_nodes().iter().any(|node| {
-            node.role.as_deref() == Some("status") && node.state.as_deref() == Some("unavailable")
-        }));
-        assert!(tree.accessibility_nodes().iter().any(|node| {
-            node.role.as_deref() == Some("status")
-                && node.state.as_deref() == Some("restart required")
-        }));
     }
 
     #[test]
@@ -1692,17 +1675,6 @@ mod tests {
                     .reduce_transparency,
                 "{via:?}"
             );
-
-            let mut scenario = activate(
-                SettingsApp::with_initial_page(SettingsPage::Appearance),
-                SettingsMessage::AppearanceTab(super::AppearanceTab::Theme),
-                via,
-            );
-            assert_eq!(
-                scenario.host_mut().application_mut().appearance_tab,
-                super::AppearanceTab::Theme,
-                "{via:?}"
-            );
         }
     }
 
@@ -1784,21 +1756,14 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_search_renders_unavailable_destinations_without_activation() {
+    fn sidebar_search_omits_unimplemented_appearance_destinations() {
         let mut app = SettingsApp::with_initial_page(SettingsPage::Appearance);
         app.sidebar_query = "fonts".into();
         let tree = app.build_ui(850.0, 580.0);
-        let unavailable = SettingsMessage::NavigateTarget(
-            SettingsPage::Appearance,
-            "appearance-tab-fonts".into(),
-        );
-        assert!(tree.semantic_targets_for_message(&unavailable).is_empty());
-        assert!(tree.accessibility_nodes().iter().any(|node| {
-            node.state.as_deref() == Some("unavailable")
-                && node
-                    .label
-                    .as_deref()
-                    .is_some_and(|label| label.contains("Fonts"))
+        assert!(!tree.accessibility_nodes().iter().any(|node| {
+            node.label
+                .as_deref()
+                .is_some_and(|label| label.contains("Fonts"))
         }));
     }
 
@@ -1855,20 +1820,20 @@ mod tests {
         host.handle_controller_action(ControllerAction::NextPane);
 
         let selected = host.inspect().controller_target.unwrap();
-        let selected_node = host
-            .semantic_nodes()
-            .into_iter()
-            .find(|node| node.id == selected)
-            .unwrap();
-        assert_ne!(
-            selected_node.role,
-            Some(nickel_ui::SemanticRole::NavigationItem)
+        assert!(
+            selected.as_str().contains("appearance-mode-card"),
+            "{selected:?}"
         );
         assert_eq!(
             host.inspect().modality,
             nickel_ui::InputModality::Controller
         );
-        assert!(selected_node.controller_selected);
+        let selected_background = host.application().ui_theme().surfaces.hover;
+        assert!(host.commands().iter().any(|command| matches!(
+            command,
+            nickel_ui::backend::PaintCommand::RoundedFill { color, .. }
+                if *color == selected_background
+        )));
     }
 
     #[test]
@@ -1918,11 +1883,24 @@ mod tests {
         let mut app = SettingsApp::with_initial_page(SettingsPage::Appearance);
         app.shell_settings.accent_intensity = Some(50);
         let mut host = UiHost::new(app, 850, 580);
+        host.handle_controller_action(ControllerAction::PreviousPane);
+        host.handle_controller_action(ControllerAction::Down);
         host.handle_controller_action(ControllerAction::NextPane);
+        for _ in 0..3 {
+            host.handle_controller_action(ControllerAction::Down);
+        }
+        let target = host.inspect().controller_target;
+        assert!(
+            target
+                .as_ref()
+                .is_some_and(|id| id.as_str().ends_with("/appearance-interface-card")),
+            "{target:?}"
+        );
+        host.handle_controller_action(ControllerAction::Right);
 
         let mut reached_slider = false;
         let mut reached_dropdown = false;
-        for _ in 0..40 {
+        for _ in 0..8 {
             if let Some(selected) = host.inspect().controller_target
                 && let Some(node) = host
                     .semantic_nodes()
@@ -1958,6 +1936,49 @@ mod tests {
     }
 
     #[test]
+    fn normalized_keyboard_proxies_the_settings_navigation_tree() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Appearance);
+        app.shell_settings.accent_intensity = Some(50);
+        let mut host = UiHost::new(app, 850, 580);
+        let mut order = 10;
+        let mut press = |host: &mut UiHost<SettingsApp>, physical, logical| {
+            order += 1;
+            host.handle_input(&navigation_key(order, physical, logical), None)
+        };
+
+        for _ in 0..4 {
+            press(&mut host, KeyCode::ArrowDown, NamedKey::ArrowDown);
+        }
+        assert!(
+            host.inspect()
+                .controller_target
+                .as_ref()
+                .is_some_and(|id| id.as_str().ends_with("/appearance-interface-card"))
+        );
+        press(&mut host, KeyCode::ArrowRight, NamedKey::ArrowRight);
+        press(&mut host, KeyCode::ArrowDown, NamedKey::ArrowDown);
+        assert!(
+            host.inspect()
+                .controller_target
+                .as_ref()
+                .is_some_and(|id| id.as_str().contains("/appearance-intensity/"))
+        );
+        press(&mut host, KeyCode::Enter, NamedKey::Enter);
+        press(&mut host, KeyCode::ArrowRight, NamedKey::ArrowRight);
+        assert_eq!(host.application().shell_settings.accent_intensity, Some(55));
+        press(&mut host, KeyCode::Backspace, NamedKey::Backspace);
+        assert!(!host.inspect().controller_editing);
+        press(&mut host, KeyCode::Backspace, NamedKey::Backspace);
+        assert!(
+            host.inspect()
+                .controller_target
+                .as_ref()
+                .is_some_and(|id| { id.as_str().ends_with("/appearance-interface-card") })
+        );
+        assert_eq!(host.inspect().modality, nickel_ui::InputModality::Keyboard);
+    }
+
+    #[test]
     fn settings_legend_uses_the_active_playstation_controller_family() {
         let mut host = UiHost::new(
             SettingsApp::with_initial_page(SettingsPage::Appearance),
@@ -1977,6 +1998,23 @@ mod tests {
         assert!(labels.contains(&"R1: Content"));
         assert!(labels.contains(&"Circle: Back"));
         assert!(!labels.contains(&"L: Navigation"));
+        for label in [
+            "Cross: Select",
+            "L1: Navigation",
+            "R1: Content",
+            "Circle: Back",
+        ] {
+            let node = host
+                .accessibility_nodes()
+                .iter()
+                .find(|node| node.label.as_deref() == Some(label))
+                .expect("controller legend entry has accessibility geometry");
+            assert!(
+                node.rect.origin.y + node.rect.size.height <= 580.0,
+                "{label} is outside the Settings viewport: {:?}",
+                node.rect
+            );
+        }
     }
 
     #[test]

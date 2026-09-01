@@ -182,6 +182,12 @@ pub enum UiEvent {
     },
     FocusNext,
     FocusPrevious,
+    KeyboardNavigateUp,
+    KeyboardNavigateDown,
+    KeyboardNavigateLeft,
+    KeyboardNavigateRight,
+    KeyboardNavigateBack,
+    KeyboardNavigateActivate,
     ControllerUp,
     ControllerDown,
     ControllerLeft,
@@ -446,6 +452,8 @@ pub enum ActionKind {
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum NavigationTraversal {
     Linear,
+    /// Form-style traversal where only Up and Down move between children.
+    Vertical,
     #[default]
     Spatial,
     Grid,
@@ -648,6 +656,12 @@ impl UiEvent {
             | Self::AccessibilityContextMenu(_) => InputSource::Accessibility,
             Self::FocusNext
             | Self::FocusPrevious
+            | Self::KeyboardNavigateUp
+            | Self::KeyboardNavigateDown
+            | Self::KeyboardNavigateLeft
+            | Self::KeyboardNavigateRight
+            | Self::KeyboardNavigateBack
+            | Self::KeyboardNavigateActivate
             | Self::ActivateFocused
             | Self::KeyboardActivate
             | Self::KeyboardContextMenu
@@ -782,6 +796,8 @@ pub struct Style {
     /// Semantic border applied to the current controller target.
     pub controller_focus_border: Option<Color>,
     pub controller_pane_border: Option<Color>,
+    /// Semantic background applied to a selected or entered controller scope.
+    pub controller_scope_background: Option<Background>,
     pub text_align: TextAlign,
     pub padding: Insets,
     pub gap: f32,
@@ -843,6 +859,7 @@ impl Default for Style {
             focus_border: None,
             controller_focus_border: None,
             controller_pane_border: None,
+            controller_scope_background: None,
             text_align: TextAlign::Start,
             padding: Insets::default(),
             gap: 0.0,
@@ -1133,6 +1150,11 @@ impl<Message> Element<Message> {
 
     pub fn navigation_scope_highlight(mut self, highlight: Color) -> Self {
         self.style.controller_pane_border = Some(highlight);
+        self
+    }
+
+    pub fn controller_scope_background(mut self, background: impl Into<Background>) -> Self {
+        self.style.controller_scope_background = Some(background.into());
         self
     }
 

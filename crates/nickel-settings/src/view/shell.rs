@@ -18,7 +18,7 @@ impl SettingsApp {
     pub(crate) fn settings_view(
         &self,
         width: f32,
-        _height: f32,
+        height: f32,
         modality: InputModality,
     ) -> AnyView<SettingsMessage> {
         let theme = self.ui_theme();
@@ -197,50 +197,6 @@ impl SettingsApp {
                         "appearance-animations".into(),
                     ),
                 ),
-                SettingsSearchEntry::new(
-                    &appearance_label,
-                    self.localizer.text("settings-appearance-mode"),
-                    self.localizer.text("settings-tab-theme"),
-                    "appearance-tab-theme",
-                    SettingsMessage::NavigateTarget(
-                        SettingsPage::Appearance,
-                        "appearance-tab-theme".into(),
-                    ),
-                )
-                .unavailable(),
-                SettingsSearchEntry::new(
-                    &appearance_label,
-                    self.localizer.text("settings-appearance-mode"),
-                    self.localizer.text("settings-tab-fonts"),
-                    "appearance-tab-fonts",
-                    SettingsMessage::NavigateTarget(
-                        SettingsPage::Appearance,
-                        "appearance-tab-fonts".into(),
-                    ),
-                )
-                .unavailable(),
-                SettingsSearchEntry::new(
-                    &appearance_label,
-                    self.localizer.text("settings-appearance-mode"),
-                    self.localizer.text("settings-tab-icons"),
-                    "appearance-tab-icons",
-                    SettingsMessage::NavigateTarget(
-                        SettingsPage::Appearance,
-                        "appearance-tab-icons".into(),
-                    ),
-                )
-                .unavailable(),
-                SettingsSearchEntry::new(
-                    &appearance_label,
-                    self.localizer.text("settings-appearance-mode"),
-                    self.localizer.text("settings-tab-cursors"),
-                    "appearance-tab-cursors",
-                    SettingsMessage::NavigateTarget(
-                        SettingsPage::Appearance,
-                        "appearance-tab-cursors".into(),
-                    ),
-                )
-                .unavailable(),
             ];
             let results = search_settings(&query, &entries);
             if !results.is_empty() {
@@ -416,11 +372,20 @@ impl SettingsApp {
         .id("settings-navigation");
         let show_controller_legend = modality == InputModality::Controller;
         if show_controller_legend {
+            let legend_height = theme.sizing.control_height + theme.spacing.control * 2.0;
             AnyView::new(
                 nickel_ui::Column::new()
                     .fill_width()
                     .fill_height()
-                    .child(root)
+                    // ResponsiveNavigation requests all available height. Bound
+                    // it to the space above the fixed legend so the legend cannot
+                    // be laid out below (and clipped by) the client viewport.
+                    .child(
+                        nickel_ui::Container::new()
+                            .fill_width()
+                            .height((height - legend_height).max(0.0))
+                            .child(root),
+                    )
                     .child(ActionLegend::new_directional(
                         theme,
                         self.controller_family,

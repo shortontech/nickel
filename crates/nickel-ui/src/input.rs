@@ -10,6 +10,9 @@ use crate::{Point, Shortcut, UiEvent};
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct InputContext {
     pub text_focused: bool,
+    /// A retained controller/tree target takes precedence over a stale text
+    /// focus when keyboard keys are serving as the controller proxy.
+    pub navigation_active: bool,
     pub selection_owned: bool,
 }
 
@@ -154,6 +157,7 @@ impl FocusedInputDispatcher {
             InputEvent::Key(event) if event.edge == KeyEdge::Pressed => {
                 let shift = event.modifiers.aggregate(AggregateModifier::Shift);
                 let control = event.modifiers.aggregate(AggregateModifier::Control);
+                let text_editing = context.text_focused && !context.navigation_active;
                 let command = if cfg!(target_os = "macos") {
                     event.modifiers.aggregate(AggregateModifier::Super)
                 } else {
@@ -193,7 +197,7 @@ impl FocusedInputDispatcher {
                             fallback: None,
                         }
                     }
-                    (LogicalKey::Named(NamedKey::Enter), _) if shift && context.text_focused => {
+                    (LogicalKey::Named(NamedKey::Enter), _) if shift && text_editing => {
                         InputCommand::Ui(UiEvent::TextInput("\n".into()))
                     }
                     (LogicalKey::Named(NamedKey::Enter), _) if shift && !event.repeat => {
@@ -205,7 +209,11 @@ impl FocusedInputDispatcher {
                     (LogicalKey::Named(NamedKey::Enter), _) if !event.repeat => {
                         InputCommand::Application {
                             shortcut: Shortcut::Submit,
-                            fallback: Some(UiEvent::KeyboardActivate),
+                            fallback: Some(if text_editing {
+                                UiEvent::KeyboardActivate
+                            } else {
+                                UiEvent::KeyboardNavigateActivate
+                            }),
                         }
                     }
                     (LogicalKey::Named(NamedKey::Space), _) if !event.repeat => {
@@ -252,7 +260,11 @@ impl FocusedInputDispatcher {
                         InputCommand::Ui(UiEvent::TextBackspaceWord)
                     }
                     (LogicalKey::Named(NamedKey::Backspace), _) => {
-                        InputCommand::Ui(UiEvent::TextBackspace)
+                        InputCommand::Ui(if text_editing {
+                            UiEvent::TextBackspace
+                        } else {
+                            UiEvent::KeyboardNavigateBack
+                        })
                     }
                     (LogicalKey::Named(NamedKey::Delete), _) => {
                         InputCommand::Ui(UiEvent::TextDelete)
@@ -263,8 +275,12 @@ impl FocusedInputDispatcher {
                         })
                     }
                     (LogicalKey::Named(NamedKey::ArrowLeft), _) => {
-                        InputCommand::Ui(UiEvent::TextMoveLeft {
-                            extend_selection: shift,
+                        InputCommand::Ui(if text_editing {
+                            UiEvent::TextMoveLeft {
+                                extend_selection: shift,
+                            }
+                        } else {
+                            UiEvent::KeyboardNavigateLeft
                         })
                     }
                     (LogicalKey::Named(NamedKey::ArrowRight), _) if control => {
@@ -273,9 +289,19 @@ impl FocusedInputDispatcher {
                         })
                     }
                     (LogicalKey::Named(NamedKey::ArrowRight), _) => {
-                        InputCommand::Ui(UiEvent::TextMoveRight {
-                            extend_selection: shift,
+                        InputCommand::Ui(if text_editing {
+                            UiEvent::TextMoveRight {
+                                extend_selection: shift,
+                            }
+                        } else {
+                            UiEvent::KeyboardNavigateRight
                         })
+                    }
+                    (LogicalKey::Named(NamedKey::ArrowUp), _) => {
+                        InputCommand::Ui(UiEvent::KeyboardNavigateUp)
+                    }
+                    (LogicalKey::Named(NamedKey::ArrowDown), _) => {
+                        InputCommand::Ui(UiEvent::KeyboardNavigateDown)
                     }
                     (LogicalKey::Character(value), _)
                         if command && value.eq_ignore_ascii_case("a") =>
@@ -408,6 +434,49 @@ mod tests {
                 &[Modifier::ShiftLeft]
             )),
             [InputCommand::Ui(UiEvent::KeyboardContextMenu)]
+        );
+    }
+
+    #[test]
+    fn retained_navigation_target_wins_over_stale_text_focus() {
+        let context = InputContext {
+            text_focused: true,
+            navigation_active: true,
+            selection_owned: false,
+        };
+        let mut dispatch = FocusedInputDispatcher::default();
+
+        assert_eq!(
+            dispatch.dispatch_with_context(
+                &key(
+                    LogicalKey::Named(NamedKey::ArrowRight),
+                    KeyCode::ArrowRight,
+                    &[]
+                ),
+                context,
+            ),
+            [InputCommand::Ui(UiEvent::KeyboardNavigateRight)]
+        );
+        assert_eq!(
+            dispatch.dispatch_with_context(
+                &key(
+                    LogicalKey::Named(NamedKey::Backspace),
+                    KeyCode::Backspace,
+                    &[]
+                ),
+                context,
+            ),
+            [InputCommand::Ui(UiEvent::KeyboardNavigateBack)]
+        );
+        assert_eq!(
+            dispatch.dispatch_with_context(
+                &key(LogicalKey::Named(NamedKey::Enter), KeyCode::Enter, &[]),
+                context,
+            ),
+            [InputCommand::Application {
+                shortcut: Shortcut::Submit,
+                fallback: Some(UiEvent::KeyboardNavigateActivate),
+            }]
         );
     }
 

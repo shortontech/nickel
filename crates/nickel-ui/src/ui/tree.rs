@@ -1970,8 +1970,21 @@ impl<Message: Clone> UiFrame<Message> {
             .expect("ordinary UI events cannot fail semantic resolution")
     }
 
+    pub(crate) fn is_text_input(&self, id: &UiId) -> bool {
+        self.text_inputs.iter().any(|input| &input.id == id)
+    }
+
     fn reduce_event(&self, state: &mut UiStateStore, event: UiEvent) -> EventOutcome<Message> {
         let mut outcome = EventOutcome::default();
+        let keyboard_tree_navigation = matches!(
+            event,
+            UiEvent::KeyboardNavigateUp
+                | UiEvent::KeyboardNavigateDown
+                | UiEvent::KeyboardNavigateLeft
+                | UiEvent::KeyboardNavigateRight
+                | UiEvent::KeyboardNavigateBack
+                | UiEvent::KeyboardNavigateActivate
+        );
         if matches!(
             event,
             UiEvent::ControllerUp
@@ -2331,24 +2344,59 @@ impl<Message: Clone> UiFrame<Message> {
                 .unwrap_or(Invalidation::None),
             UiEvent::FocusNext => self.move_focus(state, 1),
             UiEvent::FocusPrevious => self.move_focus(state, -1),
-            UiEvent::ControllerUp => {
+            UiEvent::ControllerUp | UiEvent::KeyboardNavigateUp => {
                 self.move_controller_spatial(state, ControllerDirection::Up, &mut outcome.messages)
             }
-            UiEvent::ControllerDown => self.move_controller_spatial(
-                state,
-                ControllerDirection::Down,
-                &mut outcome.messages,
-            ),
-            UiEvent::ControllerLeft => self.move_controller_spatial(
-                state,
-                ControllerDirection::Left,
-                &mut outcome.messages,
-            ),
-            UiEvent::ControllerRight => self.move_controller_spatial(
-                state,
-                ControllerDirection::Right,
-                &mut outcome.messages,
-            ),
+            UiEvent::ControllerDown | UiEvent::KeyboardNavigateDown => self
+                .move_controller_spatial(state, ControllerDirection::Down, &mut outcome.messages),
+            UiEvent::ControllerLeft | UiEvent::KeyboardNavigateLeft => {
+                let vertical_scope = state
+                    .navigation()
+                    .controller_scope()
+                    .and_then(|id| self.scope_policy(id))
+                    .is_some_and(|scope| scope.traversal == crate::NavigationTraversal::Vertical);
+                if state.navigation().controller_editing() {
+                    self.move_controller_spatial(
+                        state,
+                        ControllerDirection::Left,
+                        &mut outcome.messages,
+                    )
+                } else if vertical_scope {
+                    let scope = state
+                        .navigation()
+                        .controller_scope()
+                        .cloned()
+                        .expect("vertical scope is active");
+                    self.leave_controller_scope(state, &scope)
+                } else if state.navigation().controller_scope().is_none()
+                    && state.navigation().controller_pane().is_some()
+                {
+                    self.switch_controller_pane(state, -1)
+                } else {
+                    self.move_controller_spatial(
+                        state,
+                        ControllerDirection::Left,
+                        &mut outcome.messages,
+                    )
+                }
+            }
+            UiEvent::ControllerRight | UiEvent::KeyboardNavigateRight => {
+                if let Some(invalidation) =
+                    self.enter_selected_controller_scope(state, &mut outcome.messages)
+                {
+                    invalidation
+                } else if state.navigation().controller_scope().is_none()
+                    && state.navigation().controller_pane().is_some()
+                {
+                    self.switch_controller_pane(state, 1)
+                } else {
+                    self.move_controller_spatial(
+                        state,
+                        ControllerDirection::Right,
+                        &mut outcome.messages,
+                    )
+                }
+            }
             UiEvent::ControllerNext => self.move_controller(state, 1, true),
             UiEvent::ControllerPrevious => self.move_controller(state, -1, true),
             UiEvent::ControllerPreviousPane => self.switch_controller_pane(state, -1),
@@ -2375,7 +2423,7 @@ impl<Message: Clone> UiFrame<Message> {
                     Invalidation::None
                 }
             }
-            UiEvent::ControllerBack => {
+            UiEvent::ControllerBack | UiEvent::KeyboardNavigateBack => {
                 if state.open_overlay_id().is_some()
                     && self
                         .active_overlay_dismiss
@@ -2416,7 +2464,7 @@ impl<Message: Clone> UiFrame<Message> {
                 }
                 Invalidation::None
             }
-            UiEvent::ControllerActivate => {
+            UiEvent::ControllerActivate | UiEvent::KeyboardNavigateActivate => {
                 let selected = state
                     .navigation()
                     .controller_selected()
@@ -2787,6 +2835,9 @@ impl<Message: Clone> UiFrame<Message> {
                 state.device_removed()
             }
         };
+        if keyboard_tree_navigation {
+            outcome.invalidation = outcome.invalidation.merge(state.set_focus(None));
+        }
         outcome
     }
 
@@ -2984,6 +3035,48 @@ impl<Message: Clone> UiFrame<Message> {
             .is_some_and(|node| node.component == "Dropdown")
     }
 
+    fn enter_selected_controller_scope(
+        &self,
+        state: &mut UiStateStore,
+        messages: &mut Vec<Message>,
+    ) -> Option<Invalidation> {
+        let selected = state
+            .navigation()
+            .controller_selected()
+            .or_else(|| state.focused())
+            .cloned()?;
+        let node = self
+            .resolved
+            .nodes
+            .iter()
+            .find(|node| node.id == selected)?;
+        if node.component == "Dropdown" {
+            if let Some(message) = self.message_for_id(&selected).cloned() {
+                messages.push(message);
+            }
+            let first_option = self
+                .messages
+                .iter()
+                .find(|region| region.navigation_owner.as_ref() == Some(&selected))
+                .map(|region| region.id.clone());
+            let invalidation = state
+                .navigation_mut()
+                .set_controller_scope(Some(selected.clone()))
+                .merge(state.navigation_mut().set_controller_selected(None))
+                .merge(state.set_dropdown_open(selected, true))
+                .merge(first_option.map_or(Invalidation::None, |option| {
+                    self.select_controller_id(state, option)
+                }));
+            return Some(invalidation);
+        }
+        node.navigation_scope.as_ref()?;
+        state
+            .navigation_mut()
+            .set_controller_scope(Some(selected.clone()));
+        state.navigation_mut().set_controller_selected(None);
+        Some(self.select_scope_entry(state, &selected))
+    }
+
     fn move_controller_spatial(
         &self,
         state: &mut UiStateStore,
@@ -3002,21 +3095,25 @@ impl<Message: Clone> UiFrame<Message> {
             .controller_scope()
             .or_else(|| state.navigation().controller_pane())
             .and_then(|id| self.scope_policy(id))
-            && scope.traversal == crate::NavigationTraversal::Linear
+            && matches!(
+                scope.traversal,
+                crate::NavigationTraversal::Linear | crate::NavigationTraversal::Vertical
+            )
         {
-            let direction = match (direction, scope.direction) {
-                (ControllerDirection::Up, _) => Some(-1),
-                (ControllerDirection::Down, _) => Some(1),
-                (ControllerDirection::Left, crate::ReadingDirection::LeftToRight)
-                | (ControllerDirection::Right, crate::ReadingDirection::RightToLeft) => Some(-1),
-                (ControllerDirection::Right, crate::ReadingDirection::LeftToRight)
-                | (ControllerDirection::Left, crate::ReadingDirection::RightToLeft) => Some(1),
+            let direction = match (scope.traversal, direction, scope.direction) {
+                (crate::NavigationTraversal::Vertical, ControllerDirection::Up, _) => Some(-1),
+                (crate::NavigationTraversal::Vertical, ControllerDirection::Down, _) => Some(1),
+                (crate::NavigationTraversal::Vertical, _, _) => None,
+                (_, ControllerDirection::Up, _) => Some(-1),
+                (_, ControllerDirection::Down, _) => Some(1),
+                (_, ControllerDirection::Left, crate::ReadingDirection::LeftToRight)
+                | (_, ControllerDirection::Right, crate::ReadingDirection::RightToLeft) => Some(-1),
+                (_, ControllerDirection::Right, crate::ReadingDirection::LeftToRight)
+                | (_, ControllerDirection::Left, crate::ReadingDirection::RightToLeft) => Some(1),
             };
-            return self.move_controller(
-                state,
-                direction.expect("every direction is mapped"),
-                false,
-            );
+            return direction.map_or(Invalidation::None, |direction| {
+                self.move_controller(state, direction, false)
+            });
         }
         let ids = self.controller_targets(state);
         if ids.is_empty() {
@@ -3212,7 +3309,7 @@ impl<Message: Clone> UiFrame<Message> {
         // A nested scope is itself a controller waypoint even when its
         // container has no activation message. Confirm enters the scope; its
         // descendants remain hidden from the parent traversal until then.
-        if !root && node.navigation_scope.is_some() {
+        if !root && node.navigation_scope.is_some() && self.node_has_controller_action(index) {
             targets.push(node.id.clone());
             return;
         }
@@ -5660,6 +5757,13 @@ fn apply_transient_state<Message>(
             Kind::VerticalScroll { .. } | Kind::Dropdown { .. }
         );
     if owns_state {
+        if element.navigation_scope.is_some()
+            && (state.navigation().controller_selected() == Some(id)
+                || state.navigation().controller_scope() == Some(id))
+            && let Some(background) = element.style.controller_scope_background
+        {
+            element.style.background = Some(background);
+        }
         if element
             .navigation_scope
             .as_ref()

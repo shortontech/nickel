@@ -549,6 +549,7 @@ impl SettingsApp {
             self.localizer.text("settings-appearance-mode"),
             self.localizer.text("settings-appearance-mode-description"),
         )
+        .id("appearance-mode-card")
         .child(mode_group);
         let accent_card = SettingsCard::titled(
             theme,
@@ -556,12 +557,14 @@ impl SettingsApp {
             self.localizer
                 .text("settings-appearance-accent-description"),
         )
+        .id("appearance-accent-card")
         .child(swatch_row);
         let wallpaper_card = SettingsCard::titled(
             theme,
             self.localizer.text("settings-wallpaper-image"),
             self.localizer.text("settings-wallpaper-description"),
         )
+        .id("appearance-wallpaper-card")
         .child({
             let choose = Button::semantic(
                 theme,
@@ -647,6 +650,7 @@ impl SettingsApp {
             self.localizer.text("settings-interface-settings"),
             "",
         )
+        .id("appearance-interface-card")
         .child(
             SliderField::new(
                 theme,
@@ -711,70 +715,12 @@ impl SettingsApp {
         if let Some(notice) = appearance_notice {
             general = general.child(notice);
         }
-        let unavailable = SettingsCard::titled(
-            theme,
-            self.localizer.text("settings-appearance-tab-unavailable"),
-            self.localizer
-                .text("settings-appearance-tab-unavailable-description"),
-        )
-        .child(SettingsStatus::new(
-            theme,
-            SettingsStatusKind::Unavailable,
-            self.localizer.text("settings-appearance-platform-managed"),
-        ))
-        .child(SettingsStatus::new(
-            theme,
-            SettingsStatusKind::RestartRequired,
-            self.localizer.text("settings-appearance-external-restart"),
-        ));
-        let content = if self.appearance_tab == AppearanceTab::General {
-            AnyView::new(general)
-        } else {
-            AnyView::new(unavailable)
-        };
-        let panel_id = UiId::from("appearance-tab-panel");
-        let content = Container::new()
-            .id(panel_id.clone())
-            .child(content)
-            .accessibility_role("tab-panel");
-        let tabs = TabList::with_panel(
-            theme,
-            [
-                (
-                    self.localizer.text("settings-tab-general"),
-                    SettingsMessage::AppearanceTab(AppearanceTab::General),
-                    self.appearance_tab == AppearanceTab::General,
-                ),
-                (
-                    self.localizer.text("settings-tab-theme"),
-                    SettingsMessage::AppearanceTab(AppearanceTab::Theme),
-                    self.appearance_tab == AppearanceTab::Theme,
-                ),
-                (
-                    self.localizer.text("settings-tab-fonts"),
-                    SettingsMessage::AppearanceTab(AppearanceTab::Fonts),
-                    self.appearance_tab == AppearanceTab::Fonts,
-                ),
-                (
-                    self.localizer.text("settings-tab-icons"),
-                    SettingsMessage::AppearanceTab(AppearanceTab::Icons),
-                    self.appearance_tab == AppearanceTab::Icons,
-                ),
-                (
-                    self.localizer.text("settings-tab-cursors"),
-                    SettingsMessage::AppearanceTab(AppearanceTab::Cursors),
-                    self.appearance_tab == AppearanceTab::Cursors,
-                ),
-            ],
-            panel_id,
-        );
         ui! {
             <Column grow={1.0} padding={Insets {
                 top: 16.0, right: 24.0, bottom: 20.0, left: 20.0,
             }} gap={10.0}>
-                {tabs}
                 <VerticalScroll id={"appearance-list"} on_scroll={SettingsMessage::AppearanceScroll}
-                    offset={0.0}>{content}</VerticalScroll>
+                    offset={0.0}>{general}</VerticalScroll>
             </Column>
         }
     }

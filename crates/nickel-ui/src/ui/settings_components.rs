@@ -757,7 +757,14 @@ impl<Message> SettingsCard<Message> {
                 .padding(Insets::all(theme.spacing.content))
                 .background(theme.surfaces.card)
                 .border(theme.surfaces.raised, 1.0)
-                .radius(theme.radii.card),
+                .radius(theme.radii.card)
+                .navigation_scope(
+                    NavigationScope::group().traversal(crate::NavigationTraversal::Vertical),
+                )
+                // A card is a navigation waypoint, not an activated choice. Keep
+                // its scope cue to a quiet hue shift; leaf controls retain the
+                // high-contrast controller focus outline.
+                .controller_scope_background(theme.surfaces.hover),
         )
     }
 
@@ -2036,6 +2043,82 @@ mod tests {
             !tree
                 .semantic_targets_for_message(&Message::Slide(0.85))
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn settings_cards_are_vertical_enterable_controller_scopes() {
+        let theme = theme();
+        let view = || {
+            Column::new()
+                .child(
+                    SettingsCard::titled(theme, "Interface settings", "")
+                        .id("interface")
+                        .child(
+                            SliderField::new(theme, "Starting hue", "Hue", "167°", 0.46, slide)
+                                .id("hue"),
+                        )
+                        .child(
+                            SelectField::new(
+                                theme,
+                                "Animations",
+                                "Animation level",
+                                Message::ToggleSelect,
+                                "Off",
+                                [("Off", Message::Select(0))],
+                                false,
+                            )
+                            .id("animations"),
+                        ),
+                )
+                .child(
+                    SettingsCard::titled(theme, "Other settings", "")
+                        .id("other")
+                        .child(Switch::new(false, toggle, theme).id("other-switch")),
+                )
+        };
+        let bounds = Rect::new(0.0, 0.0, 760.0, 420.0);
+        let mut state = UiStateStore::default();
+        let frame = UiFrame::layout_with_state(view(), bounds, &mut state);
+
+        frame.handle_event(&mut state, UiEvent::ControllerDown);
+        assert_eq!(
+            state.navigation().controller_selected(),
+            Some(&UiId::from("root/interface"))
+        );
+        let selected = UiFrame::layout_with_state(view(), bounds, &mut state);
+        assert!(selected.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::RoundedFill { color, .. } if *color == theme.surfaces.hover
+        )));
+
+        selected.handle_event(&mut state, UiEvent::ControllerRight);
+        assert_eq!(
+            state.navigation().controller_scope(),
+            Some(&UiId::from("root/interface"))
+        );
+        let first_control = state.navigation().controller_selected().cloned();
+        assert!(
+            first_control
+                .as_ref()
+                .is_some_and(|id| id.as_str().contains("/hue")),
+            "{first_control:?}"
+        );
+
+        let entered = UiFrame::layout_with_state(view(), bounds, &mut state);
+        entered.handle_event(&mut state, UiEvent::ControllerDown);
+        let dropdown = state
+            .navigation()
+            .controller_selected()
+            .cloned()
+            .expect("Down follows vertical form order");
+        assert!(dropdown.as_str().contains("animations"), "{dropdown:?}");
+        let moved = UiFrame::layout_with_state(view(), bounds, &mut state);
+        moved.handle_event(&mut state, UiEvent::ControllerLeft);
+        assert_eq!(state.navigation().controller_scope(), None);
+        assert_eq!(
+            state.navigation().controller_selected(),
+            Some(&UiId::from("root/interface"))
         );
     }
 

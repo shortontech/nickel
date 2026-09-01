@@ -33,6 +33,21 @@ pub enum ControllerFamily {
 }
 
 impl ControllerFamily {
+    const MICROSOFT_VENDOR_ID: u16 = 0x045e;
+    const SONY_VENDOR_ID: u16 = 0x054c;
+    const NINTENDO_VENDOR_ID: u16 = 0x057e;
+
+    /// Resolves the strongest identity exposed by the controller backend,
+    /// falling back to its reported display name when hardware IDs are absent.
+    pub fn from_reported_identity(name: &str, vendor_id: Option<u16>) -> Self {
+        match vendor_id {
+            Some(Self::SONY_VENDOR_ID) => Self::PlayStation,
+            Some(Self::MICROSOFT_VENDOR_ID) => Self::Xbox,
+            Some(Self::NINTENDO_VENDOR_ID) => Self::Switch,
+            _ => Self::from_reported_name(name),
+        }
+    }
+
     /// Resolves only backend-reported identity. Button layout is deliberately
     /// not used as a branding guess.
     pub fn from_reported_name(name: &str) -> Self {
@@ -83,7 +98,10 @@ impl ControllerInput {
                 .filter(|(_, gamepad)| gamepad.is_connected())
             {
                 let id = ControllerId(usize::from(id) as u64);
-                families.insert(id, ControllerFamily::from_reported_name(gamepad.name()));
+                families.insert(
+                    id,
+                    ControllerFamily::from_reported_identity(gamepad.name(), gamepad.vendor_id()),
+                );
                 normalizer.handle(
                     ControllerEvent::Connected {
                         id,
@@ -136,7 +154,7 @@ impl ControllerInput {
                 let gamepad = gilrs.gamepad(event.id);
                 self.families.insert(
                     ControllerId(usize::from(event.id) as u64),
-                    ControllerFamily::from_reported_name(gamepad.name()),
+                    ControllerFamily::from_reported_identity(gamepad.name(), gamepad.vendor_id()),
                 );
                 ControllerIdentity {
                     backend: "gilrs".into(),
@@ -402,6 +420,34 @@ mod tests {
         assert_eq!(
             ControllerFamily::from_reported_name("USB game controller"),
             ControllerFamily::Generic
+        );
+    }
+
+    #[test]
+    fn hardware_vendor_resolves_a_generically_named_dualsense() {
+        assert_eq!(
+            ControllerFamily::from_reported_identity("Wireless Controller", Some(0x054c)),
+            ControllerFamily::PlayStation
+        );
+    }
+
+    #[test]
+    fn hardware_vendor_takes_precedence_over_a_misleading_name() {
+        assert_eq!(
+            ControllerFamily::from_reported_identity("Xbox-compatible controller", Some(0x054c)),
+            ControllerFamily::PlayStation
+        );
+    }
+
+    #[test]
+    fn identity_resolution_retains_name_fallbacks() {
+        assert_eq!(
+            ControllerFamily::from_reported_identity("Sony DualSense", None),
+            ControllerFamily::PlayStation
+        );
+        assert_eq!(
+            ControllerFamily::from_reported_identity("Nintendo Switch Pro Controller", Some(0)),
+            ControllerFamily::Switch
         );
     }
 

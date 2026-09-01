@@ -1287,6 +1287,11 @@ impl<Message> Container<Message> {
         self
     }
 
+    pub fn controller_scope_background(mut self, background: impl Into<Background>) -> Self {
+        self.0 = self.0.controller_scope_background(background);
+        self
+    }
+
     pub fn border(mut self, color: Color, width: f32) -> Self {
         self.0 = self.0.border(color, width);
         self

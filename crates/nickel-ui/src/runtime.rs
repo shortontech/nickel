@@ -949,7 +949,11 @@ impl<A: Application> UiHost<A> {
 
     pub fn input_context(&self) -> crate::InputContext {
         crate::InputContext {
-            text_focused: self.state.focused().is_some(),
+            text_focused: self
+                .state
+                .focused()
+                .is_some_and(|id| self.tree.is_text_input(id)),
+            navigation_active: self.state.navigation().controller_selected().is_some(),
             selection_owned: self.state.selection_owner().is_some(),
         }
     }
@@ -2494,6 +2498,15 @@ mod tests {
             host.handle_controller_action(ControllerAction::Down)
                 .changed
         );
+    }
+
+    #[test]
+    fn focused_button_is_not_reported_as_a_text_editor() {
+        let mut host = UiHost::new(ControllerApplication, 320, 48);
+        let button = host.semantic_nodes()[0].id.clone();
+
+        assert!(host.request_focus(button).changed);
+        assert!(!host.input_context().text_focused);
     }
 
     #[test]

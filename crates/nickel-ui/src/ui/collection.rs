@@ -1,8 +1,9 @@
 use std::{collections::HashMap, fmt};
 
 use super::{
-    AnyView, Column, Component, ComponentBuilderExt, Container, Element, Grid, ReadingDirection,
-    SemanticRole, Text, Track, UiId, VirtualColumn, VirtualWindow,
+    AnyView, Background, Color, Column, Component, ComponentBuilderExt, Container, Element, Grid,
+    NavigationScope, ReadingDirection, SemanticRole, Text, Track, UiId, VirtualColumn,
+    VirtualWindow,
 };
 use crate::{InputModality, ViewContext};
 
@@ -109,6 +110,10 @@ pub struct Collection<T, K, Message, Render, View> {
     presentation: CollectionPresentation,
     id: UiId,
     gap: f32,
+    item_focus_border: Option<Color>,
+    item_controller_focus_border: Option<Color>,
+    navigation_scope: Option<NavigationScope>,
+    controller_scope_background: Option<Background>,
     interactions: CollectionInteractions<K, Message>,
     item_label: Option<CollectionItemLabel<T>>,
     reveal: Option<K>,
@@ -170,6 +175,10 @@ where
             presentation: CollectionPresentation::List,
             id: UiId::from("collection"),
             gap: 0.0,
+            item_focus_border: None,
+            item_controller_focus_border: None,
+            navigation_scope: None,
+            controller_scope_background: None,
             interactions: CollectionInteractions::default(),
             item_label: None,
             reveal: None,
@@ -187,6 +196,28 @@ where
 
     pub fn id(mut self, id: impl Into<UiId>) -> Self {
         self.id = id.into();
+        self
+    }
+
+    /// Paints keyboard focus on the keyed item which owns its semantic actions.
+    pub fn item_focus_border(mut self, color: Color) -> Self {
+        self.item_focus_border = Some(color);
+        self
+    }
+
+    /// Paints controller selection on the keyed item which owns its semantic actions.
+    pub fn item_controller_focus_border(mut self, color: Color) -> Self {
+        self.item_controller_focus_border = Some(color);
+        self
+    }
+
+    pub fn navigation_scope(mut self, scope: NavigationScope) -> Self {
+        self.navigation_scope = Some(scope);
+        self
+    }
+
+    pub fn controller_scope_background(mut self, background: impl Into<Background>) -> Self {
+        self.controller_scope_background = Some(background.into());
         self
     }
 
@@ -396,7 +427,7 @@ where
                     .map_or_else(|| key.to_string(), |label| label(&item));
                 let is_selected = selected.as_ref().is_some_and(|predicate| predicate(&key));
                 let is_disabled = disabled.as_ref().is_some_and(|predicate| predicate(&key));
-                let mut element = Container::new()
+                let mut item_container = Container::new()
                     .id(key.to_string())
                     .semantic_role(item_role)
                     .accessibility_label(accessible_name)
@@ -417,8 +448,14 @@ where
                         (false, true) => "disabled",
                         (false, false) => "unselected",
                     })
-                    .child(AnyView::new((self.render)(item)))
-                    .into_element();
+                    .child(AnyView::new((self.render)(item)));
+                if let Some(color) = self.item_focus_border {
+                    item_container = item_container.focus_border(color);
+                }
+                if let Some(color) = self.item_controller_focus_border {
+                    item_container = item_container.controller_focus_border(color);
+                }
+                let mut element = item_container.into_element();
                 if !is_disabled && let Some(action) = &self.interactions.activate {
                     element = element.message(action(&key));
                 }
@@ -428,7 +465,7 @@ where
                 element
             });
 
-        match self.presentation {
+        let mut element = match self.presentation {
             CollectionPresentation::List => Column::new()
                 .id(self.id)
                 .semantic_role(SemanticRole::List)
@@ -456,7 +493,10 @@ where
                 .into_element()
                 .id(self.id)
                 .semantic_role(SemanticRole::List),
-        }
+        };
+        element.navigation_scope = self.navigation_scope;
+        element.style.controller_scope_background = self.controller_scope_background;
+        element
     }
 }
 

@@ -21,10 +21,11 @@ use nickel_ui::{
     AccountSummaryRow, ActionLegend, ActionLegendActions, ActionLegendEntry, AnyView,
     Application as UiApplication, Collection, CollectionPresentation, CollectionState, Column,
     ComponentBuilderExt, Container, ControllerFamily, FallbackAvatar, FrameOverlay, Image,
-    InputModality, Insets, LauncherSearchField, OverlayAnchor, OverlayMenu, OverlayMenuItem,
-    OverlayStyle, ProjectStatusRow, ReadingDirection, Row, START_MENU_SINGLE_PANE_BREAKPOINT,
-    SectionHeader, SemanticControllerAction, SemanticTheme, Shortcut, ShortcutRow, ShortcutState,
-    StartMenuNarrowPane, StartMenuShell, Text, TextAlign, UiId, VerticalScroll, ViewContext,
+    InputModality, Insets, LauncherSearchField, NavigationScope, NavigationTraversal,
+    OverlayAnchor, OverlayMenu, OverlayMenuItem, OverlayStyle, ProjectStatusRow, ReadingDirection,
+    Row, START_MENU_SINGLE_PANE_BREAKPOINT, SectionHeader, SemanticControllerAction, SemanticTheme,
+    Shortcut, ShortcutRow, ShortcutState, StartMenuNarrowPane, StartMenuShell, Text, TextAlign,
+    UiId, VerticalScroll, ViewContext,
 };
 
 const PANEL_MAX_WIDTH: f32 = 920.0;
@@ -665,7 +666,6 @@ fn build_launcher_view_directional(
                 .radius(theme.radii.card)
                 .background(theme.surfaces.raised)
                 .border(theme.borders.ordinary, theme.sizing.border)
-                .controller_focus_border(theme.borders.controller_focus)
                 .align_items(nickel_ui::Align::Center)
                 .child(
                     Image::new(icon.0, icon.1)
@@ -685,6 +685,10 @@ fn build_launcher_view_directional(
     .id("launcher-search-results")
     .presentation(CollectionPresentation::UniformGrid { columns })
     .gap(GRID_GAP)
+    .item_focus_border(theme.borders.focus)
+    .item_controller_focus_border(theme.borders.controller_focus)
+    .navigation_scope(NavigationScope::group().traversal(NavigationTraversal::Grid))
+    .controller_scope_background(theme.surfaces.selected)
     .on_activate(move |id| {
         LauncherAction::ActivateResult(
             *activation_indices
@@ -938,7 +942,6 @@ fn build_dashboard_view_directional(
                 .radius(theme.radii.card)
                 .background(theme.surfaces.raised)
                 .border(theme.borders.ordinary, theme.sizing.border)
-                .controller_focus_border(theme.borders.controller_focus)
                 .align_items(nickel_ui::Align::Center)
                 .child(Image::new(icon.0, icon.1).width(48.0).height(48.0))
                 .child(
@@ -956,6 +959,10 @@ fn build_dashboard_view_directional(
         columns: if width >= 820.0 { 4 } else { 3 },
     })
     .gap(theme.spacing.control)
+    .item_focus_border(theme.borders.focus)
+    .item_controller_focus_border(theme.borders.controller_focus)
+    .navigation_scope(NavigationScope::group().traversal(NavigationTraversal::Grid))
+    .controller_scope_background(theme.surfaces.selected)
     .on_activate(|id| LauncherAction::LaunchApplication(id.clone()));
 
     let title = match launcher.view() {
@@ -1216,7 +1223,10 @@ fn has_visible_pixel(image: &RgbaImage) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nickel_input::{DeviceId, EventOrder, InputEvent, TextEvent};
+    use nickel_input::{
+        DeviceId, EventOrder, InputEvent, KeyCode, KeyEdge, KeyEvent, KeyLocation, LogicalKey,
+        ModifierState, NamedKey, PhysicalKey, TextEvent,
+    };
     use nickel_ui::{
         ActionKind, ControllerAction, HostBatch, HostEvent, Point, SemanticAction,
         SemanticValueInput, Shortcut, UiEvent, UiHost,
@@ -1270,6 +1280,19 @@ mod tests {
             920,
             680,
         )
+    }
+
+    fn navigation_key(order: u64, physical: KeyCode, logical: NamedKey) -> InputEvent {
+        InputEvent::Key(KeyEvent {
+            device: DeviceId(1),
+            order: EventOrder(order),
+            physical: PhysicalKey::Code(physical),
+            logical: LogicalKey::Named(logical),
+            location: KeyLocation::Standard,
+            edge: KeyEdge::Pressed,
+            repeat: false,
+            modifiers: ModifierState::default(),
+        })
     }
 
     fn populated_launcher_scenario() -> Scenario<LauncherApplication> {
@@ -1371,6 +1394,135 @@ mod tests {
         assert_eq!(controller_target(&scenario), sidebar_home);
         scenario.controller(ControllerAction::NextPane).unwrap();
         assert_eq!(controller_target(&scenario), content_moved);
+    }
+
+    #[test]
+    fn controller_moves_from_recent_project_toward_home_tiles() {
+        let mut launcher = Launcher::default();
+        launcher.set_codex_available(true);
+        launcher.set_dashboard_projects(crate::launcher::DashboardSection::Ready(vec![
+            crate::launcher::DashboardProject {
+                id: "project".into(),
+                name: "Project".into(),
+                roots: Vec::new(),
+                chat_count: Some(1),
+                activity: crate::launcher::ProjectActivity::Idle,
+                last_used_at: None,
+            },
+        ]));
+        let mut host = UiHost::new(
+            LauncherApplication::new(
+                launcher.clone(),
+                LauncherViewState::default(),
+                LauncherIconCache::new(),
+                palette(),
+            ),
+            920,
+            680,
+        );
+        for _ in 0..4 {
+            host.application_mut().sync(&launcher, palette(), None);
+            host.step(HostBatch {
+                events: vec![HostEvent::Controller(ControllerAction::Down)],
+                ..HostBatch::default()
+            });
+        }
+        host.application_mut().sync(&launcher, palette(), None);
+        host.step(HostBatch {
+            events: vec![HostEvent::Controller(ControllerAction::Up)],
+            ..HostBatch::default()
+        });
+
+        let target = host
+            .inspect()
+            .controller_target
+            .expect("Up from Recent projects selects the application grid");
+        assert!(
+            target.as_str().ends_with("/launcher-applications"),
+            "{target:?}"
+        );
+        let scope_background = launcher_semantic_theme(palette()).surfaces.selected;
+        assert!(host.commands().iter().any(|command| matches!(
+            command,
+            nickel_ui::backend::PaintCommand::RoundedFill { color, .. }
+                if *color == scope_background
+        )));
+
+        host.application_mut().sync(&launcher, palette(), None);
+        host.step(HostBatch {
+            events: vec![HostEvent::Controller(ControllerAction::Right)],
+            ..HostBatch::default()
+        });
+        let target = host
+            .inspect()
+            .controller_target
+            .expect("Right enters the selected application grid");
+        assert!(
+            target.as_str().contains("launcher-applications/"),
+            "{target:?}"
+        );
+        let bounds = host
+            .accessibility_nodes()
+            .iter()
+            .find(|node| node.id == target)
+            .expect("selected tile remains in accessibility tree")
+            .rect;
+        let focus = launcher_semantic_theme(palette()).borders.controller_focus;
+        assert!(host.commands().iter().any(|command| {
+            matches!(
+                command,
+                nickel_ui::backend::PaintCommand::Stroke { rect, color, width }
+                    if *rect == bounds && *color == focus && *width >= 2.0
+            )
+        }));
+        let labels = accessibility_labels(&host);
+        assert!(labels.contains(&"confirm control: Open".to_owned()));
+        assert!(labels.contains(&"menu control: Actions".to_owned()));
+    }
+
+    #[test]
+    fn normalized_keyboard_enters_the_home_application_grid() {
+        let launcher = Launcher::default();
+        let mut host = UiHost::new(
+            LauncherApplication::new(
+                launcher,
+                LauncherViewState::default(),
+                LauncherIconCache::new(),
+                palette(),
+            ),
+            920,
+            680,
+        );
+        host.handle_input(
+            &navigation_key(1, KeyCode::ArrowDown, NamedKey::ArrowDown),
+            None,
+        );
+        host.handle_input(
+            &navigation_key(2, KeyCode::ArrowDown, NamedKey::ArrowDown),
+            None,
+        );
+        assert!(
+            host.inspect()
+                .controller_target
+                .as_ref()
+                .is_some_and(|id| id.as_str().ends_with("/launcher-applications"))
+        );
+        host.handle_input(
+            &navigation_key(3, KeyCode::ArrowRight, NamedKey::ArrowRight),
+            None,
+        );
+        assert!(
+            host.inspect()
+                .controller_target
+                .as_ref()
+                .is_some_and(|id| { id.as_str().contains("/launcher-applications/") })
+        );
+        assert_eq!(host.inspect().modality, InputModality::Keyboard);
+        assert!(
+            !accessibility_labels(&host)
+                .iter()
+                .any(|label| label.contains("confirm control"))
+        );
     }
 
     #[test]
@@ -1810,6 +1962,7 @@ mod tests {
                 HostEvent::Poll,
                 HostEvent::Controller(ControllerAction::Down),
                 HostEvent::Controller(ControllerAction::Down),
+                HostEvent::Controller(ControllerAction::Right),
             ],
             ..HostBatch::default()
         });
