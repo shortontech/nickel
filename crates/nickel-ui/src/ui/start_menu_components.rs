@@ -1,4 +1,5 @@
 use crate::{ActionKind, Align, ControllerFamily, Insets, Justify, SemanticTheme, ViewContext};
+use nickel_i18n::{ActionLabel, Localizer};
 
 use super::{
     AnyView, Button, ButtonPresentation, Column, Component, ComponentBuilderExt, Container,
@@ -98,67 +99,15 @@ impl SemanticControllerAction {
     }
 }
 
+pub use nickel_i18n::ActionLabel as ActionLegendLabel;
+
+pub const ACTION_LEGEND_COMPACT_BREAKPOINT: f32 = 520.0;
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum ActionLegendLocale {
+pub enum ActionLegendDensity {
     #[default]
-    English,
-    German,
-    Arabic,
-}
-
-impl ActionLegendLocale {
-    pub const fn reading_direction(self) -> ReadingDirection {
-        match self {
-            Self::English | Self::German => ReadingDirection::LeftToRight,
-            Self::Arabic => ReadingDirection::RightToLeft,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ActionLegendLabel {
-    Open,
-    Close,
-    Actions,
-    Pin,
-    Unpin,
-    PreviousSection,
-    NextSection,
-    Launcher,
-}
-
-impl ActionLegendLabel {
-    pub const fn localized(self, locale: ActionLegendLocale) -> &'static str {
-        use ActionLegendLabel::{
-            Actions, Close, Launcher, NextSection, Open, Pin, PreviousSection, Unpin,
-        };
-        match (locale, self) {
-            (ActionLegendLocale::English, Open) => "Open",
-            (ActionLegendLocale::English, Close) => "Close",
-            (ActionLegendLocale::English, Actions) => "Actions",
-            (ActionLegendLocale::English, Pin) => "Pin",
-            (ActionLegendLocale::English, Unpin) => "Unpin",
-            (ActionLegendLocale::English, PreviousSection) => "Previous section",
-            (ActionLegendLocale::English, NextSection) => "Next section",
-            (ActionLegendLocale::English, Launcher) => "Launcher",
-            (ActionLegendLocale::German, Open) => "Öffnen",
-            (ActionLegendLocale::German, Close) => "Schließen",
-            (ActionLegendLocale::German, Actions) => "Aktionen",
-            (ActionLegendLocale::German, Pin) => "Anheften",
-            (ActionLegendLocale::German, Unpin) => "Lösen",
-            (ActionLegendLocale::German, PreviousSection) => "Vorheriger Bereich",
-            (ActionLegendLocale::German, NextSection) => "Nächster Bereich",
-            (ActionLegendLocale::German, Launcher) => "Starter",
-            (ActionLegendLocale::Arabic, Open) => "فتح",
-            (ActionLegendLocale::Arabic, Close) => "إغلاق",
-            (ActionLegendLocale::Arabic, Actions) => "الإجراءات",
-            (ActionLegendLocale::Arabic, Pin) => "تثبيت",
-            (ActionLegendLocale::Arabic, Unpin) => "إلغاء التثبيت",
-            (ActionLegendLocale::Arabic, PreviousSection) => "القسم السابق",
-            (ActionLegendLocale::Arabic, NextSection) => "القسم التالي",
-            (ActionLegendLocale::Arabic, Launcher) => "المشغّل",
-        }
-    }
+    Full,
+    Compact,
 }
 
 /// Provenance for a controller control's visual mark. Nickel currently ships
@@ -250,18 +199,18 @@ impl ActionLegendEntry {
 
     pub fn localized(
         action: SemanticControllerAction,
-        label: ActionLegendLabel,
-        locale: ActionLegendLocale,
+        label: ActionLabel,
+        localizer: &Localizer,
     ) -> Self {
-        Self::available(action, label.localized(locale))
+        Self::available(action, localizer.action_label(label))
     }
 
     pub fn localized_unavailable(
         action: SemanticControllerAction,
-        label: ActionLegendLabel,
-        locale: ActionLegendLocale,
+        label: ActionLabel,
+        localizer: &Localizer,
     ) -> Self {
-        Self::unavailable(action, label.localized(locale))
+        Self::unavailable(action, localizer.action_label(label))
     }
 }
 
@@ -284,25 +233,80 @@ impl<Message> ActionLegend<Message> {
         entries: impl IntoIterator<Item = ActionLegendEntry>,
         direction: ReadingDirection,
     ) -> Self {
-        let items = entries
+        Self::new_responsive(theme, family, entries, direction, f32::INFINITY, true)
+    }
+
+    pub fn new_localized(
+        theme: SemanticTheme,
+        family: ControllerFamily,
+        entries: impl IntoIterator<Item = ActionLegendEntry>,
+        localizer: &Localizer,
+        available_width: f32,
+        glyphs_available: bool,
+    ) -> Self {
+        let direction = if localizer.is_right_to_left() {
+            ReadingDirection::RightToLeft
+        } else {
+            ReadingDirection::LeftToRight
+        };
+        Self::new_responsive(
+            theme,
+            family,
+            entries,
+            direction,
+            available_width,
+            glyphs_available,
+        )
+    }
+
+    pub fn new_responsive(
+        theme: SemanticTheme,
+        family: ControllerFamily,
+        entries: impl IntoIterator<Item = ActionLegendEntry>,
+        direction: ReadingDirection,
+        available_width: f32,
+        glyphs_available: bool,
+    ) -> Self {
+        let density = if available_width < ACTION_LEGEND_COMPACT_BREAKPOINT {
+            ActionLegendDensity::Compact
+        } else {
+            ActionLegendDensity::Full
+        };
+        let entries = entries
             .into_iter()
             .filter(|entry| entry.available)
+            .collect::<Vec<_>>();
+        let items = entries
+            .into_iter()
             .map(|entry| {
                 let presentation = family.presentation(entry.action);
                 let accessible = format!("{}: {}", presentation.spoken_name, entry.label);
-                Row::new()
+                let visual_control = if glyphs_available {
+                    presentation.glyph
+                } else {
+                    presentation.spoken_name
+                };
+                let control_width = if glyphs_available { 38.0 } else { 112.0 };
+                let label = Text::new(entry.label).color(theme.text.secondary);
+                let mut item = Row::new()
                     .id(format!("action-{}", entry.action.stable_key()))
+                    .shrink(0.0)
                     .min_height(theme.sizing.control_height)
-                    .padding(Insets::symmetric(
-                        theme.spacing.control,
-                        theme.spacing.compact,
-                    ))
-                    .gap(theme.spacing.compact)
+                    .padding(if density == ActionLegendDensity::Compact {
+                        Insets::all(0.0)
+                    } else {
+                        Insets::symmetric(theme.spacing.control, theme.spacing.compact)
+                    })
+                    .gap(if density == ActionLegendDensity::Compact {
+                        0.0
+                    } else {
+                        theme.spacing.compact
+                    })
                     .align_items(Align::Center)
                     .accessibility_label(accessible)
                     .child(
                         Container::new()
-                            .min_width(38.0)
+                            .min_width(control_width)
                             .min_height(26.0)
                             .shrink(0.0)
                             .radius(theme.radii.control)
@@ -310,30 +314,41 @@ impl<Message> ActionLegend<Message> {
                             .align_items(Align::Center)
                             .justify_content(Justify::Center)
                             .child(
-                                Text::new(presentation.glyph)
+                                Text::new(visual_control)
                                     .color(theme.borders.controller_focus)
                                     .scale(0.82),
                             ),
-                    )
-                    .child(Text::new(entry.label).color(theme.text.secondary))
+                    );
+                if density == ActionLegendDensity::Full || !glyphs_available {
+                    item = item.child(label);
+                }
+                item
             })
             .collect::<Vec<Element<Message>>>();
         let mut row = Row::new()
+            .id("action-legend-items")
             .fill_width()
             .min_height(theme.sizing.control_height + theme.spacing.control * 2.0)
-            .gap(theme.spacing.content)
+            .gap(if density == ActionLegendDensity::Compact {
+                theme.spacing.compact
+            } else {
+                theme.spacing.content
+            })
             .align_items(Align::Center)
             .children(items);
         if direction == ReadingDirection::RightToLeft {
             row = row.reverse();
         }
-        Self(
-            Container::new()
-                .fill_width()
-                .background(theme.surfaces.raised)
-                .border(theme.borders.subtle, 1.0)
-                .child(row),
-        )
+        let mut container = Container::new()
+            .id("action-legend-scroll")
+            .fill_width()
+            .background(theme.surfaces.raised)
+            .border(theme.borders.subtle, 1.0)
+            .child(row);
+        if available_width.is_finite() {
+            container = container.max_width(available_width);
+        }
+        Self(container)
     }
 }
 
@@ -1376,31 +1391,34 @@ mod tests {
 
     #[test]
     fn action_legend_localizes_expanded_and_rtl_labels_with_stable_action_identity() {
-        let build = |locale| {
+        let build = |locale: &str| {
+            let localizer = Localizer::for_locale(Some(locale));
             UiFrame::<Message>::layout(
-                ActionLegend::new_directional(
+                ActionLegend::new_localized(
                     theme(),
                     ControllerFamily::Generic,
                     [
                         ActionLegendEntry::localized(
                             SemanticControllerAction::Confirm,
                             ActionLegendLabel::Open,
-                            locale,
+                            &localizer,
                         ),
                         ActionLegendEntry::localized(
                             SemanticControllerAction::Cancel,
                             ActionLegendLabel::Close,
-                            locale,
+                            &localizer,
                         ),
                     ],
-                    locale.reading_direction(),
+                    &localizer,
+                    640.0,
+                    true,
                 ),
                 Rect::new(0.0, 0.0, 640.0, 72.0),
             )
         };
 
-        let german = build(ActionLegendLocale::German);
-        let arabic = build(ActionLegendLocale::Arabic);
+        let german = build("de-DE");
+        let arabic = build("ar");
         let mut german_ids = german
             .accessibility_nodes()
             .iter()
@@ -1472,6 +1490,173 @@ mod tests {
                 .source,
             ControllerGlyphSource::TextFallback
         );
+    }
+
+    #[test]
+    fn narrow_legends_compact_without_dropping_or_clipping_standard_actions() {
+        let localizer = Localizer::for_locale(Some("en-US"));
+        let entries = [
+            (SemanticControllerAction::Confirm, ActionLegendLabel::Open),
+            (
+                SemanticControllerAction::ContextMenu,
+                ActionLegendLabel::Actions,
+            ),
+            (
+                SemanticControllerAction::PreviousSection,
+                ActionLegendLabel::PreviousSection,
+            ),
+            (
+                SemanticControllerAction::NextSection,
+                ActionLegendLabel::NextSection,
+            ),
+            (SemanticControllerAction::Cancel, ActionLegendLabel::Close),
+        ]
+        .map(|(action, label)| ActionLegendEntry::localized(action, label, &localizer));
+        let tree = UiFrame::<Message>::layout(
+            ActionLegend::new_localized(
+                theme(),
+                ControllerFamily::Xbox,
+                entries,
+                &localizer,
+                220.0,
+                true,
+            ),
+            Rect::new(0.0, 0.0, 220.0, 72.0),
+        );
+
+        for action in [
+            "confirm",
+            "context-menu",
+            "previous-section",
+            "next-section",
+            "cancel",
+        ] {
+            assert!(
+                tree.accessibility_nodes()
+                    .iter()
+                    .any(|node| node.id.as_str().ends_with(&format!("action-{action}"))),
+                "compact mode preserves host action {action}"
+            );
+        }
+        for node in tree.resolved_layout().nodes().iter().filter(|node| {
+            [
+                "action-confirm",
+                "action-context-menu",
+                "action-previous-section",
+                "action-next-section",
+                "action-cancel",
+            ]
+            .iter()
+            .any(|suffix| node.id.as_str().ends_with(suffix))
+        }) {
+            assert!(
+                node.allocated.origin.x + node.allocated.size.width <= 220.0,
+                "{} remains visible in compact mode",
+                node.id.as_str()
+            );
+        }
+        assert!(
+            !tree.commands().iter().any(
+                |command| matches!(command, PaintCommand::Text { text, .. } if text == "Open")
+            )
+        );
+    }
+
+    #[test]
+    fn unavailable_glyphs_show_control_names_and_keep_accessible_meaning() {
+        let localizer = Localizer::for_locale(Some("en-US"));
+        let tree = UiFrame::<Message>::layout(
+            ActionLegend::new_localized(
+                theme(),
+                ControllerFamily::PlayStation,
+                [ActionLegendEntry::localized(
+                    SemanticControllerAction::Confirm,
+                    ActionLegendLabel::Open,
+                    &localizer,
+                )],
+                &localizer,
+                320.0,
+                false,
+            ),
+            Rect::new(0.0, 0.0, 320.0, 72.0),
+        );
+        assert!(
+            tree.commands().iter().any(
+                |command| matches!(command, PaintCommand::Text { text, .. } if text == "Cross")
+            )
+        );
+        assert!(
+            !tree
+                .commands()
+                .iter()
+                .any(|command| matches!(command, PaintCommand::Text { text, .. } if text == "×"))
+        );
+        assert!(
+            tree.accessibility_nodes()
+                .iter()
+                .any(|node| { node.label.as_deref() == Some("Cross: Open") })
+        );
+    }
+
+    #[test]
+    fn legend_family_theme_scale_direction_matrix_renders_deterministically() {
+        let dark = theme();
+        let high_contrast = SemanticTheme::resolve(
+            light_theme().tokens(),
+            dark.tokens(),
+            crate::ResolvedThemePreferences {
+                appearance: crate::ResolvedAppearance::Dark,
+                high_contrast: true,
+                reduced_transparency: false,
+                reduced_motion: false,
+            },
+        );
+        for family in [
+            ControllerFamily::PlayStation,
+            ControllerFamily::Xbox,
+            ControllerFamily::Switch,
+            ControllerFamily::Generic,
+        ] {
+            for (theme, locale) in [
+                (dark, "en-US"),
+                (light_theme(), "de"),
+                (high_contrast, "ar"),
+            ] {
+                let localizer = Localizer::for_locale(Some(locale));
+                for width in [280.0, 760.0] {
+                    let entries = [
+                        (SemanticControllerAction::Confirm, ActionLegendLabel::Open),
+                        (
+                            SemanticControllerAction::ContextMenu,
+                            ActionLegendLabel::Actions,
+                        ),
+                        (SemanticControllerAction::Cancel, ActionLegendLabel::Close),
+                    ]
+                    .map(|(action, label)| ActionLegendEntry::localized(action, label, &localizer));
+                    let tree = UiFrame::<Message>::layout_with_diagnostics(
+                        ActionLegend::new_localized(
+                            theme, family, entries, &localizer, width, true,
+                        ),
+                        Rect::new(0.0, 0.0, width, 72.0),
+                    );
+                    assert!(tree.diagnostics().is_empty());
+                    for action in ["confirm", "context-menu", "cancel"] {
+                        assert!(tree.accessibility_nodes().iter().any(|node| {
+                            node.id.as_str().ends_with(&format!("action-{action}"))
+                        }));
+                    }
+                    for scale in [1.0, 2.0] {
+                        let mut renderer = crate::SdlComponentRenderer::new_pixel_buffer(
+                            (width * scale) as u32,
+                            (72.0 * scale) as u32,
+                            scale,
+                        );
+                        assert!(!renderer.render(tree.commands()).is_empty());
+                        assert!(renderer.pixels().iter().any(|pixel| pixel.a > 0));
+                    }
+                }
+            }
+        }
     }
 
     #[test]

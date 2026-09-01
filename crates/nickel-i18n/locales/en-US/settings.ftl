@@ -187,3 +187,16 @@ run-error-path-not-found = Could not find the path for “{ $target }”.
 run-error-access-denied = Access was denied while opening “{ $target }”.
 run-error-no-association = No application is associated with “{ $target }”.
 run-error-platform = Could not open “{ $target }”.
+
+action-open = Open
+action-select = Select
+action-close = Close
+action-back = Back
+action-actions = Actions
+action-pin = Pin
+action-unpin = Unpin
+action-previous-section = Previous section
+action-next-section = Next section
+action-launcher = Launcher
+action-sidebar = Sidebar
+action-content = Content

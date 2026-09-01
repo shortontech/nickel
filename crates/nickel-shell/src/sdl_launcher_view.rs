@@ -16,6 +16,7 @@ use crate::{
 };
 use image::RgbaImage;
 use nickel_core::theme::ThemePalette;
+use nickel_i18n::{ActionLabel, Localizer};
 use nickel_ui::{
     AccountSummaryRow, ActionLegend, ActionLegendActions, ActionLegendEntry, AnyView,
     Application as UiApplication, Collection, CollectionPresentation, CollectionState, Column,
@@ -669,7 +670,7 @@ fn build_launcher_view(
             theme,
             state.controller_family,
             &context.legend_actions,
-            direction,
+            panel_width,
         ));
     }
     if let Some(status) = context.status {
@@ -1067,7 +1068,7 @@ fn build_dashboard_view_directional(
             theme,
             state.controller_family,
             &context.legend_actions,
-            direction,
+            width,
         ));
     }
     if let Some(status) = context.status {
@@ -1080,25 +1081,26 @@ fn launcher_action_legend(
     theme: SemanticTheme,
     family: ControllerFamily,
     actions: &ActionLegendActions,
-    direction: ReadingDirection,
+    available_width: f32,
 ) -> ActionLegend<LauncherAction> {
+    let localizer = Localizer::system();
     let overlay_open = actions.is_overlay();
     let entries = actions.iter().map(|action| {
         let label = match action {
-            SemanticControllerAction::Confirm if overlay_open => "Select",
-            SemanticControllerAction::Confirm => "Open",
-            SemanticControllerAction::ContextMenu => "Actions",
-            SemanticControllerAction::PreviousSection => "Sidebar",
-            SemanticControllerAction::NextSection => "Content",
-            SemanticControllerAction::Cancel if overlay_open => "Back",
-            SemanticControllerAction::Cancel => "Close",
-            SemanticControllerAction::Pin => "Pin",
-            SemanticControllerAction::Unpin => "Unpin",
-            SemanticControllerAction::ToggleLauncher => "Launcher",
+            SemanticControllerAction::Confirm if overlay_open => ActionLabel::Select,
+            SemanticControllerAction::Confirm => ActionLabel::Open,
+            SemanticControllerAction::ContextMenu => ActionLabel::Actions,
+            SemanticControllerAction::PreviousSection => ActionLabel::Sidebar,
+            SemanticControllerAction::NextSection => ActionLabel::Content,
+            SemanticControllerAction::Cancel if overlay_open => ActionLabel::Back,
+            SemanticControllerAction::Cancel => ActionLabel::Close,
+            SemanticControllerAction::Pin => ActionLabel::Pin,
+            SemanticControllerAction::Unpin => ActionLabel::Unpin,
+            SemanticControllerAction::ToggleLauncher => ActionLabel::Launcher,
         };
-        ActionLegendEntry::available(action, label)
+        ActionLegendEntry::localized(action, label, &localizer)
     });
-    ActionLegend::new_directional(theme, family, entries, direction)
+    ActionLegend::new_localized(theme, family, entries, &localizer, available_width, true)
 }
 
 fn launcher_status(theme: SemanticTheme, status: &str) -> Container<LauncherAction> {

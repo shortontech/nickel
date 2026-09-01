@@ -2880,6 +2880,7 @@ dependencies = [
  "cosmic-text",
  "gilrs",
  "image",
+ "nickel-i18n",
  "nickel-input",
  "proptest",
  "sdl3",

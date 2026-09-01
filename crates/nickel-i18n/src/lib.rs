@@ -8,6 +8,45 @@ const DE: &str = include_str!("../locales/de/settings.ftl");
 const ZH: &str = include_str!("../locales/zh/settings.ftl");
 const AR: &str = include_str!("../locales/ar/settings.ftl");
 
+/// Typed, shared labels for semantic controller actions.
+///
+/// Keeping these keys here makes the Fluent catalogs the single translation
+/// authority while UI components remain responsible only for presentation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ActionLabel {
+    Open,
+    Select,
+    Close,
+    Back,
+    Actions,
+    Pin,
+    Unpin,
+    PreviousSection,
+    NextSection,
+    Launcher,
+    Sidebar,
+    Content,
+}
+
+impl ActionLabel {
+    const fn message_id(self) -> &'static str {
+        match self {
+            Self::Open => "action-open",
+            Self::Select => "action-select",
+            Self::Close => "action-close",
+            Self::Back => "action-back",
+            Self::Actions => "action-actions",
+            Self::Pin => "action-pin",
+            Self::Unpin => "action-unpin",
+            Self::PreviousSection => "action-previous-section",
+            Self::NextSection => "action-next-section",
+            Self::Launcher => "action-launcher",
+            Self::Sidebar => "action-sidebar",
+            Self::Content => "action-content",
+        }
+    }
+}
+
 pub struct Localizer {
     selected: FluentBundle<FluentResource>,
     fallback: Option<FluentBundle<FluentResource>>,
@@ -54,6 +93,10 @@ impl Localizer {
 
     pub fn text(&self, id: &str) -> String {
         self.format(id, None)
+    }
+
+    pub fn action_label(&self, label: ActionLabel) -> String {
+        self.text(label.message_id())
     }
 
     pub fn number(&self, id: &str, name: &str, value: i64) -> String {
