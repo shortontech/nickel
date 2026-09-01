@@ -7,7 +7,7 @@
 use std::{
     collections::{HashMap, VecDeque},
     hash::{Hash, Hasher},
-    sync::Arc,
+    sync::{Arc, Mutex, MutexGuard, OnceLock},
     time::Instant,
 };
 
@@ -19,6 +19,39 @@ use nickel_core::resource_owner::DependencyOwnerToken;
 pub use nickel_core::resource_owner::{
     DependencyOwnerDiagnostics, DependencyOwnerKind, dependency_owner_diagnostics,
 };
+
+struct ProcessFontSystemOwner {
+    _owner: DependencyOwnerToken,
+    font_system: Mutex<FontSystem>,
+}
+
+static PROCESS_FONT_SYSTEM: OnceLock<ProcessFontSystemOwner> = OnceLock::new();
+
+/// A handle to Nickel's single process-wide cosmic-text font system.
+///
+/// Handles are freely constructible and carry no additional dependency-owned
+/// state. The underlying font database and cosmic-text caches are serialized so
+/// every public UI consumer shares a hard cardinality bound of one.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ProcessFontSystem;
+
+impl ProcessFontSystem {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+
+    pub fn lock(self) -> MutexGuard<'static, FontSystem> {
+        PROCESS_FONT_SYSTEM
+            .get_or_init(|| ProcessFontSystemOwner {
+                _owner: DependencyOwnerToken::new_cosmic_text_font_system(),
+                font_system: Mutex::new(FontSystem::new()),
+            })
+            .font_system
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
 
 /// Immutable, tightly packed, straight-alpha RGBA pixels.
 #[derive(Clone, Debug)]
@@ -117,8 +150,7 @@ impl From<TextRequest<'_>> for TextKey {
 
 /// Shapes with cosmic-text and caches the final CPU raster, independent of glyphon/wgpu.
 pub struct TextAssetCache {
-    _font_system_owner: DependencyOwnerToken,
-    font_system: FontSystem,
+    font_system: ProcessFontSystem,
     swash_cache: SwashCache,
     assets: HashMap<TextKey, Arc<RgbaAsset>>,
     insertion_order: VecDeque<TextKey>,
@@ -171,8 +203,7 @@ impl Default for TextAssetCache {
 impl TextAssetCache {
     pub fn new() -> Self {
         Self {
-            _font_system_owner: DependencyOwnerToken::new_cosmic_text_font_system(),
-            font_system: FontSystem::new(),
+            font_system: ProcessFontSystem::new(),
             swash_cache: SwashCache::new(),
             assets: HashMap::new(),
             insertion_order: VecDeque::new(),
@@ -265,9 +296,10 @@ impl TextAssetCache {
     }
 
     fn rasterize(&mut self, key: &TextKey) -> RgbaAsset {
+        let mut font_system = self.font_system.lock();
         let size = f32::from_bits(key.size_bits).max(1.0);
         let line_height = f32::from_bits(key.line_height_bits).max(size);
-        let mut buffer = Buffer::new(&mut self.font_system, Metrics::new(size, line_height));
+        let mut buffer = Buffer::new(&mut font_system, Metrics::new(size, line_height));
         buffer.set_wrap(if key.max_width.is_some() {
             Wrap::WordOrGlyph
         } else {
@@ -284,7 +316,7 @@ impl TextAssetCache {
             Shaping::Advanced,
             None,
         );
-        buffer.shape_until_scroll(&mut self.font_system, false);
+        buffer.shape_until_scroll(&mut font_system, false);
 
         let (layout_width, layout_height) =
             buffer
@@ -303,7 +335,7 @@ impl TextAssetCache {
         let mut pixels = RgbaImage::new(width, height);
         let color = Color::rgba(key.color[0], key.color[1], key.color[2], key.color[3]);
         buffer.draw(
-            &mut self.font_system,
+            &mut font_system,
             &mut self.swash_cache,
             color,
             |x, y, glyph_width, glyph_height, glyph_color| {
@@ -658,18 +690,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn font_system_owner_churn_is_visible_in_aggregate_diagnostics() {
+    fn public_cache_churn_cannot_increase_process_font_system_cardinality() {
+        drop(ProcessFontSystem::new().lock());
         for _ in 0..8 {
             let caches = (0..4).map(|_| TextAssetCache::new()).collect::<Vec<_>>();
             let during = dependency_owner_diagnostics(DependencyOwnerKind::CosmicTextFontSystem);
-            // Diagnostics are process-global and other tests may concurrently release owners.
-            // Our four live caches nevertheless establish an unconditional lower bound.
-            assert!(during.active_owners >= caches.len());
-            assert!(during.peak_owners >= during.active_owners);
+            assert_eq!(during.active_owners, 1);
+            assert_eq!(during.peak_owners, 1);
             drop(caches);
         }
         let after = dependency_owner_diagnostics(DependencyOwnerKind::CosmicTextFontSystem);
-        assert!(after.peak_owners >= 4);
+        assert_eq!(after.active_owners, 1);
+        assert_eq!(after.peak_owners, 1);
     }
 
     #[test]

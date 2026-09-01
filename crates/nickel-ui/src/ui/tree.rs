@@ -4194,9 +4194,9 @@ fn shape_selection_glyphs(
         line_bases.push(0);
     }
     TEXT_MEASURER.with(|measurer| {
-        let mut measurer = measurer.borrow_mut();
-        let font_system = &mut measurer.font_system;
-        let mut buffer = Buffer::new(font_system, Metrics::new(font_size, line_height));
+        let measurer = measurer.borrow_mut();
+        let mut font_system = measurer.font_system.lock();
+        let mut buffer = Buffer::new(&mut font_system, Metrics::new(font_size, line_height));
         buffer.set_wrap(if wrap { Wrap::WordOrGlyph } else { Wrap::None });
         buffer.set_size(wrap.then_some(rect.size.width.max(1.0)), None);
         let mut attrs = Attrs::new().family(Family::SansSerif);
@@ -4204,7 +4204,7 @@ fn shape_selection_glyphs(
             attrs = attrs.weight(Weight::BOLD);
         }
         buffer.set_text(text, &attrs, Shaping::Advanced, None);
-        buffer.shape_until_scroll(font_system, false);
+        buffer.shape_until_scroll(&mut font_system, false);
         let mut glyphs = Vec::new();
         for run in buffer.layout_runs().take(max_lines.unwrap_or(usize::MAX)) {
             let align_offset = match align {

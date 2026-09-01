@@ -2882,6 +2882,7 @@ dependencies = [
  "nickel-core",
  "nickel-i18n",
  "nickel-input",
+ "nickel-render-assets",
  "proptest",
  "sdl3",
  "sha2",

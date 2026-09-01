@@ -19,7 +19,7 @@ compositor_cursor_buffers	retain	clear	drop_owner	retain	retain	clear	na	clear	d
 compositor_frame_action_icons	retain	clear	drop_owner	retain	retain	clear	na	clear	drop_owner	drop_owner
 compositor_identify_badges	clear	clear	drop_owner	rebuild	drop_owner	retain	na	na	drop_owner	drop_owner
 smithay_renderer_internal_caches	retain	clear	drop_owner	reconcile	reconcile	reconcile	na	reconcile	drop_owner	drop_owner
-cosmic_text_font_systems	retain	clear	drop_owner	retain	retain	retain	clear	clear	drop_owner	drop_owner
+cosmic_text_font_systems	retain	retain	retain	retain	retain	retain	retain	retain	retain	retain
 launcher_icons	retain	clear	drop_owner	retain	retain	clear	retain	retain	replace	drop_owner
 wallpaper_pixels	retain	clear	drop_owner	rebuild	clear	retain	na	na	replace	drop_owner
 tray_pixmaps	retain	clear	drop_owner	reconcile	reconcile	retain	na	na	replace	drop_owner

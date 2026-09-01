@@ -14,6 +14,7 @@ gilrs.workspace = true
 image.workspace = true
 nickel-input = { path = "../nickel-input", features = ["gilrs", "sdl"] }
 nickel-i18n = { path = "../nickel-i18n" }
+nickel-render-assets = { path = "../nickel-render-assets" }
 ui-declarative-macros = "0.1.0"
 sdl3.workspace = true
 smallvec.workspace = true

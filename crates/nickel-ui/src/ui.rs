@@ -6,11 +6,9 @@ use std::{
     sync::Arc,
 };
 
-use cosmic_text::{
-    Attrs, Buffer, Family, FontSystem, Metrics, Shaping, Style as FontStyle, Weight, Wrap,
-};
+use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Style as FontStyle, Weight, Wrap};
 use image::RgbaImage;
-use nickel_core::resource_owner::DependencyOwnerToken;
+use nickel_render_assets::ProcessFontSystem;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
@@ -1364,8 +1362,7 @@ struct StyledTextMeasureKey {
 }
 
 struct TextMeasurer {
-    _font_system_owner: DependencyOwnerToken,
-    font_system: FontSystem,
+    font_system: ProcessFontSystem,
     cache_enabled: bool,
     plain: HashMap<TextMeasureKey, Size>,
     styled: HashMap<StyledTextMeasureKey, Size>,
@@ -1419,8 +1416,7 @@ pub fn with_text_measure_cache_mode<R>(
 impl Default for TextMeasurer {
     fn default() -> Self {
         Self {
-            _font_system_owner: DependencyOwnerToken::new_cosmic_text_font_system(),
-            font_system: FontSystem::new(),
+            font_system: ProcessFontSystem::new(),
             cache_enabled: true,
             plain: HashMap::new(),
             styled: HashMap::new(),
@@ -1468,7 +1464,7 @@ fn measure_text(
         let mut measurer = measurer.borrow_mut();
         let key = TextMeasureKey {
             text: text.to_owned(),
-            locale: measurer.font_system.locale().to_owned(),
+            locale: measurer.font_system.lock().locale().to_owned(),
             scale: scale.to_bits(),
             width: width.to_bits(),
             bold,
@@ -1481,8 +1477,8 @@ fn measure_text(
         {
             return size;
         }
-        let font_system = &mut measurer.font_system;
-        let mut buffer = Buffer::new(font_system, Metrics::new(font_size, line_height));
+        let mut font_system = measurer.font_system.lock();
+        let mut buffer = Buffer::new(&mut font_system, Metrics::new(font_size, line_height));
         buffer.set_wrap(if wrap { Wrap::WordOrGlyph } else { Wrap::None });
         buffer.set_size(width.is_finite().then_some(width), None);
         let mut attrs = Attrs::new().family(Family::SansSerif);
@@ -1490,7 +1486,7 @@ fn measure_text(
             attrs = attrs.weight(Weight::BOLD);
         }
         buffer.set_text(text, &attrs, Shaping::Advanced, None);
-        buffer.shape_until_scroll(font_system, false);
+        buffer.shape_until_scroll(&mut font_system, false);
         let mut measured = Size::new(0.0, 0.0);
         for run in buffer.layout_runs().take(max_lines.unwrap_or(usize::MAX)) {
             measured.width = measured.width.max(run.line_w);
@@ -1572,7 +1568,7 @@ fn measure_styled_text(
         let key = StyledTextMeasureKey {
             text: text.to_owned(),
             spans: spans.to_vec(),
-            locale: measurer.font_system.locale().to_owned(),
+            locale: measurer.font_system.lock().locale().to_owned(),
             scale: scale.to_bits(),
             width: width.to_bits(),
             wrap,
@@ -1583,8 +1579,8 @@ fn measure_styled_text(
         {
             return size;
         }
-        let font_system = &mut measurer.font_system;
-        let mut buffer = Buffer::new(font_system, Metrics::new(font_size, line_height));
+        let mut font_system = measurer.font_system.lock();
+        let mut buffer = Buffer::new(&mut font_system, Metrics::new(font_size, line_height));
         buffer.set_wrap(if wrap { Wrap::WordOrGlyph } else { Wrap::None });
         buffer.set_size(width.is_finite().then_some(width), None);
         let defaults = styled_attrs(None);
@@ -1594,7 +1590,7 @@ fn measure_styled_text(
             Shaping::Advanced,
             None,
         );
-        buffer.shape_until_scroll(font_system, false);
+        buffer.shape_until_scroll(&mut font_system, false);
         let mut measured = Size::new(0.0, 0.0);
         for run in buffer.layout_runs() {
             measured.width = measured.width.max(run.line_w);

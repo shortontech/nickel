@@ -805,12 +805,10 @@ fn validate_cache_inventory_with(
                 columns[0]
             ))));
         }
-        if matches!(
-            columns[0],
-            "smithay_renderer_internal_caches" | "cosmic_text_font_systems"
-        ) && (!columns[14].contains("active and peak safe Rust owner-instance diagnostics")
-            || !columns[14].contains("ordinary owner drop")
-            || !columns[14].contains("remain opaque"))
+        if columns[0] == "smithay_renderer_internal_caches"
+            && (!columns[14].contains("active and peak safe Rust owner-instance diagnostics")
+                || !columns[14].contains("ordinary owner drop")
+                || !columns[14].contains("remain opaque"))
         {
             return Err(Box::new(UsageError(format!(
                 "dependency owner `{}` lacks executable owner lifecycle evidence or explicit opacity",
@@ -827,6 +825,19 @@ fn validate_cache_inventory_with(
                     .into(),
             )));
         }
+        if columns[0] == "cosmic_text_font_systems"
+            && (columns[7] != "1"
+                || columns[13] != "admitted_opaque"
+                || !columns[14].contains("hard process-wide owner cardinality of 1")
+                || !columns[14].contains("zero-state handle")
+                || !columns[14].contains("process teardown")
+                || !columns[14].contains("remain opaque"))
+        {
+            return Err(Box::new(UsageError(
+                "cosmic-text owner lacks a hard process-wide singleton bound or honest opacity"
+                    .into(),
+            )));
+        }
         if columns[13] == "admitted_opaque" {
             if columns[8] != "opaque_dependency" {
                 return Err(Box::new(UsageError(format!(
@@ -840,9 +851,9 @@ fn validate_cache_inventory_with(
                     columns[0]
                 ))));
             }
-            if !columns[14].contains("drop") {
+            if !columns[14].contains("drop") && !columns[14].contains("process teardown") {
                 return Err(Box::new(UsageError(format!(
-                    "opaque admission `{}` must state its owner drop lifecycle",
+                    "opaque admission `{}` must state its owner release lifecycle",
                     columns[0]
                 ))));
             }
@@ -4231,10 +4242,11 @@ mod tests {
     }
 
     #[test]
-    fn dependency_owner_rows_require_safe_lifecycle_diagnostics_and_honest_opacity() {
+    fn cosmic_text_row_requires_process_wide_singleton_evidence() {
         for evidence in [
-            "active and peak safe Rust owner-instance diagnostics",
-            "ordinary owner drop",
+            "hard process-wide owner cardinality of 1",
+            "zero-state handle",
+            "process teardown",
             "remain opaque",
         ] {
             let row = CACHE_INVENTORY

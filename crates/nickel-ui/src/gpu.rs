@@ -2,7 +2,7 @@ use cosmic_text::{
     Align, Attrs, Buffer, CacheKey, Color as TextColor, Family, FontSystem, Metrics, PhysicalGlyph,
     Shaping, Style as FontStyle, SwashCache, SwashContent, Weight, Wrap,
 };
-use nickel_core::resource_owner::DependencyOwnerToken;
+use nickel_render_assets::ProcessFontSystem;
 use sdl3::{
     pixels::{Color as SdlColor, PixelFormat},
     rect::Rect as SdlRect,
@@ -48,7 +48,6 @@ impl DamageRegion {
 /// its paint list. The retained pixel buffer makes an eventual SDL GPU upload or
 /// Wayland damage submission independent of component semantics.
 pub struct SdlComponentRenderer {
-    _font_system_owner: DependencyOwnerToken,
     width: u32,
     height: u32,
     scale: f32,
@@ -57,7 +56,7 @@ pub struct SdlComponentRenderer {
     previous_commands: Vec<PaintCommand>,
     clips: Vec<Rect>,
     text_rasters: Vec<Option<CachedSoftwareText>>,
-    font_system: FontSystem,
+    font_system: ProcessFontSystem,
     swash_cache: SwashCache,
     swash_source_bytes: usize,
 }
@@ -103,9 +102,8 @@ type StrikeLines = Vec<(Rect, Color)>;
 type SpanBackgrounds = Vec<(Rect, Color)>;
 
 pub struct SdlCanvasPresenter {
-    _font_system_owner: DependencyOwnerToken,
     canvas: WindowCanvas,
-    font_system: FontSystem,
+    font_system: ProcessFontSystem,
     swash_cache: SwashCache,
     glyph_atlas: GlyphAtlas,
     image_textures: HashMap<u16, CachedImageTexture>,
@@ -425,9 +423,8 @@ impl SdlCanvasPresenter {
         );
         let glyph_atlas = GlyphAtlas::new(&canvas)?;
         Ok(Self {
-            _font_system_owner: DependencyOwnerToken::new_cosmic_text_font_system(),
             canvas,
-            font_system: FontSystem::new(),
+            font_system: ProcessFontSystem::new(),
             swash_cache: SwashCache::new(),
             glyph_atlas,
             image_textures: HashMap::new(),
@@ -753,6 +750,7 @@ impl SdlCanvasPresenter {
         wrap: bool,
         parent_clip: Rect,
     ) -> Result<(), String> {
+        let mut font_system = self.font_system.lock();
         let key = physical_text_key(text, &[], bounds, size, color, align, bold, wrap);
         let cached = (self.cache_mode == PresenterCacheMode::Enabled)
             .then(|| self.text_layouts.get(&key))
@@ -766,7 +764,7 @@ impl SdlCanvasPresenter {
             let relative_bounds = Rect::new(0.0, 0.0, bounds.size.width, bounds.size.height);
             let layout = Arc::new(CachedPhysicalText {
                 glyphs: shape_physical_glyphs(
-                    &mut self.font_system,
+                    &mut font_system,
                     text,
                     relative_bounds,
                     size,
@@ -800,11 +798,9 @@ impl SdlCanvasPresenter {
         };
         self.canvas.set_clip_rect(Some(sdl_rect(parent_clip)));
         for (glyph, glyph_color) in &layout.glyphs {
-            let (entry, atlas_hit) = self.glyph_atlas.entry(
-                &mut self.font_system,
-                &mut self.swash_cache,
-                glyph.cache_key,
-            )?;
+            let (entry, atlas_hit) =
+                self.glyph_atlas
+                    .entry(&mut font_system, &mut self.swash_cache, glyph.cache_key)?;
             if atlas_hit {
                 self.cache_activity.hits = self.cache_activity.hits.saturating_add(1);
             } else {
@@ -864,6 +860,7 @@ impl SdlCanvasPresenter {
         align: TextAlign,
         parent_clip: Rect,
     ) -> Result<(), String> {
+        let mut font_system = self.font_system.lock();
         let key = physical_text_key(text, spans, bounds, size, color, align, false, true);
         let cached = (self.cache_mode == PresenterCacheMode::Enabled)
             .then(|| self.text_layouts.get(&key))
@@ -876,7 +873,7 @@ impl SdlCanvasPresenter {
             let started = std::time::Instant::now();
             let relative_bounds = Rect::new(0.0, 0.0, bounds.size.width, bounds.size.height);
             let (glyphs, strikes, backgrounds) = shape_styled_physical_glyphs(
-                &mut self.font_system,
+                &mut font_system,
                 text,
                 spans,
                 relative_bounds,
@@ -922,11 +919,9 @@ impl SdlCanvasPresenter {
             )?;
         }
         for (glyph, glyph_color) in &layout.glyphs {
-            let (entry, atlas_hit) = self.glyph_atlas.entry(
-                &mut self.font_system,
-                &mut self.swash_cache,
-                glyph.cache_key,
-            )?;
+            let (entry, atlas_hit) =
+                self.glyph_atlas
+                    .entry(&mut font_system, &mut self.swash_cache, glyph.cache_key)?;
             if atlas_hit {
                 self.cache_activity.hits = self.cache_activity.hits.saturating_add(1);
             } else {
@@ -1095,7 +1090,6 @@ impl SdlComponentRenderer {
         let height = height.max(1);
         let upload = upload.then(|| Self::create_upload_surface(width, height));
         Self {
-            _font_system_owner: DependencyOwnerToken::new_cosmic_text_font_system(),
             width,
             height,
             scale: scale.max(0.25),
@@ -1104,7 +1098,7 @@ impl SdlComponentRenderer {
             previous_commands: Vec::new(),
             clips: Vec::new(),
             text_rasters: Vec::new(),
-            font_system: FontSystem::new(),
+            font_system: ProcessFontSystem::new(),
             swash_cache: SwashCache::new(),
             swash_source_bytes: 0,
         }
@@ -1418,6 +1412,7 @@ impl SdlComponentRenderer {
     }
 
     fn text(&mut self, index: usize, command: &PaintCommand, clip: Rect) {
+        let mut font_system = self.font_system.lock();
         let PaintCommand::Text {
             bounds,
             text,
@@ -1445,10 +1440,7 @@ impl SdlComponentRenderer {
         let physical = physical_rect(*bounds, self.scale);
         let buffer_width = physical.size.width.max(1.0);
         let buffer_height = physical.size.height.max(font_size * 1.4);
-        let mut buffer = Buffer::new(
-            &mut self.font_system,
-            Metrics::new(font_size, font_size * 1.3),
-        );
+        let mut buffer = Buffer::new(&mut font_system, Metrics::new(font_size, font_size * 1.3));
         buffer.set_size(Some(buffer_width), Some(buffer_height));
         let mut attrs = Attrs::new().family(Family::SansSerif);
         if *bold {
@@ -1463,12 +1455,12 @@ impl SdlComponentRenderer {
                 TextAlign::End => Align::Right,
             }));
         }
-        buffer.shape_until_scroll(&mut self.font_system, false);
+        buffer.shape_until_scroll(&mut font_system, false);
         let pixel = pixel(*color);
         let text_color = TextColor::rgba(pixel.r, pixel.g, pixel.b, pixel.a);
         let mut glyph_pixels = Vec::new();
         buffer.draw(
-            &mut self.font_system,
+            &mut font_system,
             &mut self.swash_cache,
             text_color,
             |x, y, width, height, glyph_color| {
@@ -1536,6 +1528,7 @@ impl SdlComponentRenderer {
     }
 
     fn styled_text(&mut self, index: usize, command: &PaintCommand, clip: Rect) {
+        let mut font_system = self.font_system.lock();
         let PaintCommand::StyledText {
             bounds,
             text,
@@ -1555,10 +1548,7 @@ impl SdlComponentRenderer {
         }
         let font_size = text_size(*scale) * self.scale;
         let physical = physical_rect(*bounds, self.scale);
-        let mut buffer = Buffer::new(
-            &mut self.font_system,
-            Metrics::new(font_size, font_size * 1.3),
-        );
+        let mut buffer = Buffer::new(&mut font_system, Metrics::new(font_size, font_size * 1.3));
         buffer.set_wrap(Wrap::WordOrGlyph);
         buffer.set_size(
             Some(physical.size.width.max(1.0)),
@@ -1571,10 +1561,10 @@ impl SdlComponentRenderer {
             Shaping::Advanced,
             Some(cosmic_align(*align)),
         );
-        buffer.shape_until_scroll(&mut self.font_system, false);
+        buffer.shape_until_scroll(&mut font_system, false);
         let mut pixels = Vec::new();
         buffer.draw(
-            &mut self.font_system,
+            &mut font_system,
             &mut self.swash_cache,
             text_color(*color),
             |x, y, width, height, glyph_color| {
@@ -2038,20 +2028,20 @@ mod tests {
     };
 
     #[test]
-    fn software_renderer_churn_is_visible_in_aggregate_owner_diagnostics() {
+    fn software_renderer_churn_respects_process_font_system_bound() {
+        drop(nickel_render_assets::ProcessFontSystem::new().lock());
         for _ in 0..8 {
             let renderers = (0..4)
                 .map(|_| SdlComponentRenderer::new_pixel_buffer(2, 2, 1.0))
                 .collect::<Vec<_>>();
             let during = dependency_owner_diagnostics(DependencyOwnerKind::CosmicTextFontSystem);
-            // Diagnostics are process-global and other tests may concurrently release owners.
-            // Our four live renderers nevertheless establish an unconditional lower bound.
-            assert!(during.active_owners >= renderers.len());
-            assert!(during.peak_owners >= during.active_owners);
+            assert_eq!(during.active_owners, 1);
+            assert_eq!(during.peak_owners, 1);
             drop(renderers);
         }
         let after = dependency_owner_diagnostics(DependencyOwnerKind::CosmicTextFontSystem);
-        assert!(after.peak_owners >= 4);
+        assert_eq!(after.active_owners, 1);
+        assert_eq!(after.peak_owners, 1);
     }
 
     #[test]

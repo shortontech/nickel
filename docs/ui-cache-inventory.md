@@ -52,7 +52,8 @@ name `admission=resource_ownership`, `bounded=`, `release=`, and `authority=`. I
 a lookup microbenchmark justifies ownership of an already-authoritative resource.
 
 `admitted_opaque` is limited to dependency-backed resources whose Nickel-owned cardinality and
-owner-drop lifecycle are bounded while dependency-retained bytes remain explicitly opaque.
+release lifecycle are bounded while dependency-retained bytes remain explicitly opaque. A
+process-lifetime singleton may name process teardown instead of claiming an ordinary Rust drop.
 
 In particular,
 `pending_measure` and `lifecycle_fixed` remain honest provisional states and cannot satisfy final
