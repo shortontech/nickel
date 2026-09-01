@@ -341,6 +341,8 @@ impl Application for ScreenshotApp {
 pub struct ScreenshotTool {
     host: UiHost<ScreenshotApp>,
     capture_deadline: Option<Instant>,
+    pending_pointer: Option<(f32, f32, u32, u32)>,
+    pointer_deadline: Option<Instant>,
 }
 
 impl Default for ScreenshotTool {
@@ -348,6 +350,8 @@ impl Default for ScreenshotTool {
         Self {
             host: UiHost::new(ScreenshotApp::new(1, 1), 1, 1),
             capture_deadline: None,
+            pending_pointer: None,
+            pointer_deadline: None,
         }
     }
 }
@@ -386,7 +390,10 @@ impl ScreenshotTool {
     }
 
     pub fn next_deadline(&self) -> Option<Instant> {
-        self.capture_deadline
+        [self.capture_deadline, self.pointer_deadline]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     pub fn show(&mut self, image: RgbaImage) {
@@ -417,6 +424,8 @@ impl ScreenshotTool {
     }
 
     pub fn hide(&mut self) {
+        self.pending_pointer = None;
+        self.pointer_deadline = None;
         let app = self.host.application_mut();
         app.image = None;
         app.drag_start = None;
@@ -442,7 +451,33 @@ impl ScreenshotTool {
         outcome.changed
     }
 
+    pub fn queue_pointer_moved(&mut self, x: f32, y: f32, width: u32, height: u32) {
+        self.pending_pointer = Some((x, y, width, height));
+        self.pointer_deadline
+            .get_or_insert_with(|| Instant::now() + Duration::from_millis(10));
+    }
+
+    pub fn poll_pointer_deadline(&mut self, now: Instant) -> bool {
+        if self.pointer_deadline.is_none_or(|deadline| now < deadline) {
+            return false;
+        }
+        self.pointer_deadline = None;
+        let Some((x, y, width, height)) = self.pending_pointer.take() else {
+            return false;
+        };
+        self.pointer_moved(x, y, width, height)
+    }
+
+    fn flush_pointer(&mut self) -> bool {
+        self.pointer_deadline = None;
+        let Some((x, y, width, height)) = self.pending_pointer.take() else {
+            return false;
+        };
+        self.pointer_moved(x, y, width, height)
+    }
+
     pub fn pointer_pressed(&mut self, x: f32, y: f32, width: u32, height: u32) -> bool {
+        self.flush_pointer();
         self.resize(width, height, None);
         let outcome = self.host.step(HostBatch {
             completions: vec![Completion::new(
@@ -457,6 +492,7 @@ impl ScreenshotTool {
     }
 
     pub fn pointer_released(&mut self) -> bool {
+        self.flush_pointer();
         let cursor = self.host.application().cursor;
         let outcome = self.host.step(HostBatch {
             completions: vec![Completion::new(
@@ -1031,5 +1067,23 @@ mod tests {
         tool.show(RgbaImage::new(400, 200));
         assert!(!tool.perform_semantic_action(ScreenshotTargetAction::Confirm));
         assert!(!tool.perform_semantic_action(ScreenshotTargetAction::CopyImage));
+    }
+
+    #[test]
+    fn pointer_motion_is_coalesced_to_the_latest_sample_before_one_frame() {
+        let mut tool = ScreenshotTool::default();
+        tool.show(RgbaImage::new(800, 600));
+        let before = tool.change_token();
+        for x in 0..100 {
+            tool.queue_pointer_moved(x as f32, 240.0, 800, 600);
+        }
+        let deadline = tool.pointer_deadline.expect("motion schedules one frame");
+
+        assert_eq!(tool.change_token(), before);
+        assert_eq!(tool.pending_pointer.map(|sample| sample.0), Some(99.0));
+        assert!(tool.poll_pointer_deadline(deadline));
+        assert_eq!(tool.host.application().cursor, (99.0, 240.0));
+        assert!(tool.pending_pointer.is_none());
+        assert!(tool.pointer_deadline.is_none());
     }
 }
