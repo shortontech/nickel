@@ -1,6 +1,7 @@
 #![cfg(feature = "workbench-fixtures")]
 
 use nickel_shell::ShellFixtureProvider;
+use nickel_ui::{SemanticRole, Size};
 use nickel_ui_testkit::{FixtureProvider, FixtureRegistry};
 
 #[test]
@@ -102,6 +103,52 @@ fn registers_every_shell_surface_fixture() {
                 }));
             }
         }
+    }
+}
+
+#[test]
+fn desktop_variants_expose_only_the_named_presentation_to_accessibility() {
+    let mut registry = FixtureRegistry::new();
+    ShellFixtureProvider.register(&mut registry).unwrap();
+    let entry = registry
+        .finish()
+        .into_iter()
+        .find(|entry| entry.metadata.id == "shell.desktop")
+        .expect("desktop fixture");
+
+    assert_eq!(
+        entry
+            .metadata
+            .variants
+            .iter()
+            .map(|variant| variant.id)
+            .collect::<Vec<_>>(),
+        ["solid", "wallpaper"]
+    );
+
+    for variant in entry.metadata.variants {
+        let session = entry.open_configuration(*variant);
+        let semantic = session.semantic_nodes();
+        assert_eq!(semantic.len(), 1, "{} semantic nodes", variant.id);
+        assert_eq!(
+            semantic[0].role,
+            Some(SemanticRole::ApplicationPresentation)
+        );
+        assert_eq!(semantic[0].name.as_deref(), Some("Desktop"));
+        assert_eq!(semantic[0].bounds.size, Size::new(960.0, 540.0));
+        assert!(semantic[0].actions.is_empty());
+
+        let accessibility = session.accessibility_nodes();
+        assert_eq!(accessibility.len(), 1, "{} accessibility nodes", variant.id);
+        assert_eq!(
+            accessibility[0].semantic_role,
+            Some(SemanticRole::ApplicationPresentation)
+        );
+        assert_eq!(accessibility[0].role.as_deref(), Some("application"));
+        assert_eq!(accessibility[0].label.as_deref(), Some("Desktop"));
+        assert_eq!(accessibility[0].rect.size, Size::new(960.0, 540.0));
+        assert!(!accessibility[0].interactive);
+        assert!(accessibility[0].actions.is_empty());
     }
 }
 

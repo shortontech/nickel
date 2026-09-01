@@ -137,6 +137,7 @@ impl nickel_ui::Application for DesktopApplication {
         let height = context.viewport.size.height;
         let root = Container::new()
             .id("desktop")
+            .semantic_role(SemanticRole::ApplicationPresentation)
             .accessibility_label("Desktop")
             .background(self.palette.background)
             .width(width)
@@ -146,7 +147,8 @@ impl nickel_ui::Application for DesktopApplication {
                 Image::new(1, Arc::clone(wallpaper))
                     .width(width)
                     .height(height)
-                    .fit(ImageFit::Stretch),
+                    .fit(ImageFit::Stretch)
+                    .decorative(),
             )
         } else {
             root

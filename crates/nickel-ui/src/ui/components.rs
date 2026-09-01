@@ -985,6 +985,13 @@ impl<Message> Image<Message> {
         }
         self
     }
+
+    /// Marks an image as purely visual so it is omitted from semantic and
+    /// accessibility output while remaining in the paint list.
+    pub fn decorative(mut self) -> Self {
+        self.0 = self.0.decorative();
+        self
+    }
 }
 
 impl<Message> Component<Message> for Image<Message> {
@@ -3005,6 +3012,23 @@ mod semantic_control_tests {
             Rect::new(0.0, 0.0, 24.0, 24.0),
         );
         assert!(decorative.accessibility_nodes().is_empty());
+
+        let decorative_image = UiFrame::layout(
+            Image::<Message>::new(
+                9,
+                Arc::new(RgbaImage::from_pixel(2, 2, image::Rgba([1, 2, 3, 255]))),
+            )
+            .decorative(),
+            Rect::new(0.0, 0.0, 24.0, 24.0),
+        );
+        assert!(decorative_image.semantic_nodes().is_empty());
+        assert!(decorative_image.accessibility_nodes().is_empty());
+        assert!(
+            decorative_image
+                .commands()
+                .iter()
+                .any(|command| matches!(command, PaintCommand::Image { .. }))
+        );
     }
 
     #[test]
