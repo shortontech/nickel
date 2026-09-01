@@ -210,6 +210,12 @@ fn button_action(button: &ControllerButton) -> Option<ControllerAction> {
 fn signal_action(signal: ControllerSignal) -> Option<ControllerAction> {
     match signal {
         ControllerSignal::Button {
+            button: ControllerButton::Start,
+            edge: nickel_input::KeyEdge::Pressed,
+            repeat: true,
+            ..
+        } => None,
+        ControllerSignal::Button {
             button,
             edge: nickel_input::KeyEdge::Pressed,
             ..
@@ -243,6 +249,60 @@ mod tests {
         AxisDirection, ControllerAxis, ControllerButton, ControllerEvent, ControllerId,
         ControllerIdentity, ControllerNormalizer, ControllerSignal,
     };
+
+    fn identity(name: &str, fingerprint: Option<&str>) -> ControllerIdentity {
+        ControllerIdentity {
+            backend: name.into(),
+            native: NativeCode::Text(name.into()),
+            fingerprint: fingerprint.map(str::to_owned),
+        }
+    }
+
+    fn context_trace(
+        normalizer: &mut ControllerNormalizer,
+        id: ControllerId,
+        identity: ControllerIdentity,
+    ) -> Vec<Option<ControllerAction>> {
+        let mut actions = Vec::new();
+        for (time, event) in [
+            (0, ControllerEvent::Connected { id, identity }),
+            (
+                1,
+                ControllerEvent::Button {
+                    id,
+                    button: ControllerButton::Start,
+                    edge: nickel_input::KeyEdge::Pressed,
+                    repeat: false,
+                },
+            ),
+            (
+                2,
+                ControllerEvent::Button {
+                    id,
+                    button: ControllerButton::Start,
+                    edge: nickel_input::KeyEdge::Pressed,
+                    repeat: true,
+                },
+            ),
+            (
+                3,
+                ControllerEvent::Button {
+                    id,
+                    button: ControllerButton::Start,
+                    edge: nickel_input::KeyEdge::Released,
+                    repeat: false,
+                },
+            ),
+        ] {
+            actions.extend(
+                normalizer
+                    .handle(event, time)
+                    .into_iter()
+                    .map(signal_action),
+            );
+        }
+        actions
+    }
 
     #[test]
     fn normalized_directions_remain_consumer_owned_actions() {
@@ -300,6 +360,75 @@ mod tests {
         assert_eq!(
             ControllerFamily::from_reported_name("USB game controller"),
             ControllerFamily::Generic
+        );
+    }
+
+    #[test]
+    fn family_context_traces_normalize_press_only_and_survive_hotplug() {
+        for (index, (name, family)) in [
+            ("Sony DualSense", ControllerFamily::PlayStation),
+            ("Microsoft Xbox Wireless Controller", ControllerFamily::Xbox),
+            ("Nintendo Switch Pro Controller", ControllerFamily::Switch),
+            ("Unknown USB HID", ControllerFamily::Generic),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(ControllerFamily::from_reported_name(name), family);
+            let mut normalizer = ControllerNormalizer::default();
+            let id = ControllerId(index as u64 + 1);
+            assert_eq!(
+                context_trace(&mut normalizer, id, identity(name, None)),
+                [None, Some(ControllerAction::ContextMenu), None, None]
+            );
+            assert_eq!(
+                normalizer.handle(ControllerEvent::Disconnected { id }, 4),
+                [ControllerSignal::Disconnected(id)]
+            );
+            let replacement = ControllerId(id.0 + 100);
+            assert_eq!(
+                context_trace(&mut normalizer, replacement, identity(name, None)),
+                [None, Some(ControllerAction::ContextMenu), None, None]
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_backend_context_delivery_is_suppressed_by_hardware_identity() {
+        let mut normalizer = ControllerNormalizer::default();
+        let primary = ControllerId(1);
+        let duplicate = ControllerId(2);
+        normalizer.handle(
+            ControllerEvent::Connected {
+                id: primary,
+                identity: identity("gilrs", Some("physical-pad")),
+            },
+            0,
+        );
+        assert_eq!(
+            normalizer.handle(
+                ControllerEvent::Connected {
+                    id: duplicate,
+                    identity: identity("sdl", Some("physical-pad")),
+                },
+                1,
+            ),
+            [ControllerSignal::DuplicateSuppressed(duplicate)]
+        );
+        let press = |id| ControllerEvent::Button {
+            id,
+            button: ControllerButton::Start,
+            edge: nickel_input::KeyEdge::Pressed,
+            repeat: false,
+        };
+        assert!(normalizer.handle(press(duplicate), 2).is_empty());
+        assert_eq!(
+            normalizer
+                .handle(press(primary), 3)
+                .into_iter()
+                .filter_map(signal_action)
+                .collect::<Vec<_>>(),
+            [ControllerAction::ContextMenu]
         );
     }
 

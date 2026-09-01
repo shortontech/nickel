@@ -365,6 +365,7 @@ pub struct OverlayMenu<Message> {
     pub item_selected: Option<Color>,
     pub item_radius: f32,
     pub initial_controller_item: Option<UiId>,
+    pub direction: ReadingDirection,
 }
 
 impl<Message> OverlayMenu<Message> {
@@ -391,6 +392,7 @@ impl<Message> OverlayMenu<Message> {
             item_selected: None,
             item_radius: 0.0,
             initial_controller_item: None,
+            direction: ReadingDirection::LeftToRight,
         }
     }
 
@@ -414,6 +416,12 @@ impl<Message> OverlayMenu<Message> {
         self.foreground = style.foreground;
         self.item_selected = Some(style.selected);
         self.radius = f32::from(style.radius);
+        self
+    }
+
+    /// Resolves logical before/after placement using the menu's reading direction.
+    pub fn direction(mut self, direction: ReadingDirection) -> Self {
+        self.direction = direction;
         self
     }
 }
@@ -451,6 +459,14 @@ pub(crate) fn place(
     placement: OverlayPlacement,
     collision: CollisionPolicy,
 ) -> Rect {
+    let desired = if collision == CollisionPolicy::None {
+        desired
+    } else {
+        Size::new(
+            desired.width.min(viewport.size.width.max(0.0)),
+            desired.height.min(viewport.size.height.max(0.0)),
+        )
+    };
     let candidate = |side| match side {
         OverlayPlacement::Below => Rect::new(
             anchor.origin.x,
@@ -758,6 +774,108 @@ mod tests {
         assert_eq!(rtl.origin.x, 40.0, "after must flip before overflowing");
         assert!(rtl.origin.x >= area.origin.x && rtl.origin.y >= area.origin.y);
         assert!(rtl.origin.x + rtl.size.width <= area.origin.x + area.size.width);
+    }
+
+    #[test]
+    fn menu_reconstruction_preserves_item_focus_and_removed_origin_closes_recoverably() {
+        let mut state = UiStateStore::default();
+        let mut closed = frame(&mut state);
+        let anchor = anchor_id(&closed);
+        state
+            .navigation_mut()
+            .set_controller_selected(Some(anchor.clone()));
+        closed
+            .present_menu(&mut state, menu(anchor.clone()))
+            .unwrap();
+        closed.handle_event(&mut state, UiEvent::ControllerContextMenu);
+
+        let mut rebuilt = frame(&mut state);
+        rebuilt
+            .present_menu(&mut state, menu(anchor.clone()))
+            .unwrap();
+        let selected = OverlayId::new("context").item_id(&UiId::from("choose"));
+        assert_eq!(state.navigation().controller_selected(), Some(&selected));
+
+        let mut without_origin = UiFrame::layout_with_state(
+            crate::Text::<Message>::new("Origin removed"),
+            Rect::new(0.0, 0.0, 240.0, 120.0),
+            &mut state,
+        );
+        assert_eq!(
+            without_origin.present_menu(&mut state, menu(anchor)),
+            Err(crate::SemanticActionError::MissingTarget)
+        );
+        assert!(state.open_overlay_id().is_none());
+        let returned = state.take_focus_return().expect("recoverable focus return");
+        assert_eq!(returned.reason, DismissReason::Cancel);
+    }
+
+    #[test]
+    fn menu_render_matrix_is_bounded_directional_themed_and_deterministic() {
+        let palettes = [
+            crate::SemanticTokenSet::standard(
+                0x090b10, 0x121722, 0x1b2230, 0x263149, 0x31405e, 0xf7f9ff, 0xa8b0c0, 0x7c5cff,
+                0x352968, 0x52d6a4, 0xe05252,
+            ),
+            crate::SemanticTokenSet::standard(
+                0xf8f8fa, 0xffffff, 0xf0f1f4, 0xe1e4ea, 0xd1d6df, 0x111318, 0x555b66, 0x006ad4,
+                0xcce5ff, 0x006b4f, 0xb00020,
+            ),
+            crate::SemanticTokenSet::standard(
+                0x000000, 0x000000, 0x000000, 0xffffff, 0xffffff, 0xffffff, 0xffffff, 0x00ffff,
+                0x003333, 0xffff00, 0xff00ff,
+            ),
+        ];
+        for (width, direction) in [
+            (176.0, ReadingDirection::LeftToRight),
+            (320.0, ReadingDirection::RightToLeft),
+        ] {
+            for tokens in palettes {
+                for scale in [1.0, 2.0] {
+                    let render = || {
+                        let mut state = UiStateStore::default();
+                        let mut frame = UiFrame::layout_with_state(
+                            Button::new(Message::Anchor, "Anchor at output edge")
+                                .id("anchor")
+                                .width(width),
+                            Rect::new(0.0, 0.0, width, 112.0),
+                            &mut state,
+                        );
+                        let anchor = anchor_id(&frame);
+                        state.open_overlay(OverlayId::new("matrix-menu"), anchor.clone());
+                        let theme = SemanticTheme::from_tokens(tokens);
+                        let mut menu = OverlayMenu::new(
+                            "matrix-menu",
+                            OverlayAnchor::InvocationTarget(anchor),
+                        )
+                        .direction(direction)
+                        .semantic_style(OverlayStyle::from_theme(&theme))
+                        .item(OverlayMenuItem::action(
+                            "localized",
+                            "Eine sehr lange lokalisierte Anwendungsaktion",
+                            Message::Choose,
+                        ));
+                        menu.row_height *= scale;
+                        menu.text_scale *= scale;
+                        frame.present_menu(&mut state, menu).unwrap();
+                        (
+                            frame.commands().to_vec(),
+                            frame.accessibility_nodes().to_vec(),
+                        )
+                    };
+                    let first = render();
+                    let second = render();
+                    assert_eq!(first.0, second.0);
+                    assert_eq!(first.1, second.1);
+                    for node in &first.1 {
+                        assert!(node.rect.origin.x >= 0.0);
+                        assert!(node.rect.origin.y >= 0.0);
+                        assert!(node.rect.origin.x + node.rect.size.width <= width);
+                        assert!(node.rect.origin.y + node.rect.size.height <= 112.0);
+                    }
+                }
+            }
+        }
     }
 
     #[test]

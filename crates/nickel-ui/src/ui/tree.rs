@@ -793,8 +793,16 @@ impl<Message: Clone> UiFrame<Message> {
             .iter()
             .filter(|node| node.id == requested || node.id.as_str().ends_with(&suffix))
             .map(|node| node.id.clone());
-        let target = matches.next().ok_or(SemanticActionError::MissingTarget)?;
+        let Some(target) = matches.next() else {
+            if state.open_overlay_id() == Some(&menu.id) {
+                state.dismiss_overlay(crate::DismissReason::Cancel);
+            }
+            return Err(SemanticActionError::MissingTarget);
+        };
         if matches.next().is_some() {
+            if state.open_overlay_id() == Some(&menu.id) {
+                state.dismiss_overlay(crate::DismissReason::Cancel);
+            }
             return Err(SemanticActionError::AmbiguousTarget);
         }
         menu.anchor = menu.anchor.with_resolved_target(target);
@@ -824,7 +832,7 @@ impl<Message: Clone> UiFrame<Message> {
         let item_count = menu.items.len();
         let content_height = menu.row_height * item_count as f32
             + menu.row_gap * item_count.saturating_sub(1) as f32;
-        let rect = crate::overlay::place(
+        let rect = crate::place_transient(
             anchor,
             Size {
                 width: menu.width,
@@ -833,6 +841,8 @@ impl<Message: Clone> UiFrame<Message> {
             self.viewport,
             menu.placement,
             menu.collision,
+            menu.direction,
+            1.0,
         );
         self.commands.push(PaintCommand::RoundedFill {
             rect,

@@ -22,9 +22,9 @@ use nickel_ui::{
     Application as UiApplication, Collection, CollectionPresentation, CollectionState, Column,
     ComponentBuilderExt, Container, ControllerFamily, FallbackAvatar, FrameOverlay, Image,
     InputModality, Insets, LauncherSearchField, OverlayAnchor, OverlayMenu, OverlayMenuItem,
-    ProjectStatusRow, ReadingDirection, Row, START_MENU_SINGLE_PANE_BREAKPOINT, SectionHeader,
-    SemanticControllerAction, SemanticTheme, ShortcutRow, ShortcutState, StartMenuNarrowPane,
-    StartMenuShell, Text, TextAlign, UiId, ViewContext,
+    OverlayStyle, ProjectStatusRow, ReadingDirection, Row, START_MENU_SINGLE_PANE_BREAKPOINT,
+    SectionHeader, SemanticControllerAction, SemanticTheme, ShortcutRow, ShortcutState,
+    StartMenuNarrowPane, StartMenuShell, Text, TextAlign, UiId, ViewContext,
 };
 
 const PANEL_MAX_WIDTH: f32 = 920.0;
@@ -160,6 +160,9 @@ impl UiApplication for LauncherApplication {
     }
 
     fn frame_overlays(&self, _context: ViewContext) -> Vec<FrameOverlay<Self::Message>> {
+        let theme = launcher_semantic_theme(self.palette);
+        let style = OverlayStyle::from_theme(&theme);
+        let direction = launcher_reading_direction();
         let mut overlays = (0..self.launcher.result_count())
             .filter_map(|index| {
                 self.launcher
@@ -183,6 +186,8 @@ impl UiApplication for LauncherApplication {
                     format!("application-menu-{id}"),
                     OverlayAnchor::InvocationTarget(anchor),
                 )
+                .semantic_style(style)
+                .direction(direction)
                 .item(OverlayMenuItem::action("launch", "Launch", launch))
                 .item(OverlayMenuItem::action(
                     "toggle-pin",
@@ -211,6 +216,8 @@ impl UiApplication for LauncherApplication {
                     "session-actions-menu",
                     OverlayAnchor::InvocationTarget(UiId::new("launcher-account")),
                 )
+                .semantic_style(style)
+                .direction(direction)
                 .item(OverlayMenuItem::action(
                     "logout",
                     "Log out",
@@ -224,6 +231,22 @@ impl UiApplication for LauncherApplication {
     fn poll(&mut self) -> bool {
         std::mem::take(&mut self.dirty)
     }
+}
+
+fn launcher_semantic_theme(palette: ThemePalette) -> SemanticTheme {
+    SemanticTheme::from_tokens(nickel_ui::SemanticTokenSet::standard(
+        palette.background,
+        palette.panel,
+        palette.surface,
+        palette.surface_hover,
+        palette.surface_hover,
+        palette.text,
+        palette.muted,
+        palette.accent,
+        palette.accent_soft,
+        palette.complement,
+        palette.complement,
+    ))
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1194,8 +1217,8 @@ fn has_visible_pixel(image: &RgbaImage) -> bool {
 mod tests {
     use super::*;
     use nickel_ui::{
-        ActionKind, ControllerAction, HostBatch, HostEvent, SemanticAction, SemanticValueInput,
-        UiHost,
+        ActionKind, ControllerAction, HostBatch, HostEvent, Point, SemanticAction,
+        SemanticValueInput, UiEvent, UiHost,
     };
     use nickel_ui_testkit::{
         ReachabilityModality, ReachabilityPolicy, Scenario, Selector, audit_reachability,
@@ -1485,6 +1508,80 @@ mod tests {
                 .filter_map(|node| node.label.as_deref())
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn launcher_context_entry_routes_dispatch_the_identical_typed_launch_action() {
+        for route in ["pointer", "keyboard", "controller", "accessibility"] {
+            let mut host = launcher_host();
+            let target = host
+                .unique_semantic_target_for_message(&LauncherAction::LaunchApplication(
+                    "firefox".into(),
+                ))
+                .expect("unique Firefox launcher presentation");
+            let target_id = target.id.clone();
+            let center = Point {
+                x: target.bounds.origin.x + target.bounds.size.width / 2.0,
+                y: target.bounds.origin.y + target.bounds.size.height / 2.0,
+            };
+            match route {
+                "pointer" => {
+                    host.step(HostBatch {
+                        events: vec![HostEvent::Ui(UiEvent::PointerContext(center))],
+                        ..HostBatch::default()
+                    });
+                }
+                "keyboard" => {
+                    host.step(HostBatch {
+                        events: vec![
+                            HostEvent::Ui(UiEvent::AccessibilityFocus(target_id.clone())),
+                            HostEvent::Ui(UiEvent::KeyboardContextMenu),
+                        ],
+                        ..HostBatch::default()
+                    });
+                }
+                "controller" => {
+                    host.step(HostBatch {
+                        events: vec![HostEvent::ControllerSemantic {
+                            target: target_id,
+                            action: SemanticAction::Invoke(ActionKind::ContextMenu),
+                        }],
+                        ..HostBatch::default()
+                    });
+                }
+                "accessibility" => {
+                    host.step(HostBatch {
+                        events: vec![HostEvent::Accessibility {
+                            target: target_id,
+                            action: SemanticAction::Invoke(ActionKind::ContextMenu),
+                        }],
+                        ..HostBatch::default()
+                    });
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                host.inspect().open_overlay.is_some(),
+                "{route} did not open the shared launcher menu: {:?}",
+                host.inspect().overlay_failures
+            );
+            let launch = host
+                .accessibility_nodes()
+                .iter()
+                .find(|node| {
+                    node.semantic_role == Some(nickel_ui::SemanticRole::MenuItem)
+                        && node.label.as_deref() == Some("Launch")
+                })
+                .expect("open menu exposes its typed Launch item")
+                .id
+                .clone();
+            host.perform_semantic_action(launch, SemanticAction::Invoke(ActionKind::Activate));
+            assert_eq!(
+                host.application_mut().take_effects(),
+                [LauncherAction::LaunchApplication("firefox".into())],
+                "{route} must converge on the same typed action"
+            );
+        }
     }
 
     #[test]
