@@ -4094,6 +4094,141 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "release-only cache timing evidence; debug resampling is intentionally slow"]
+    fn preview_image_cache_cold_warm_churn_and_low_reuse_are_measured() {
+        use std::{hint::black_box, time::Duration};
+
+        const SAMPLES: usize = 51;
+        const CHURN_REUSES: usize = 8;
+        const LOW_REUSE_P95_ADDITION: Duration = Duration::from_micros(500);
+
+        fn percentile(samples: &[Duration], percentile: usize) -> Duration {
+            assert!(
+                samples.len() >= 20,
+                "tail latency needs a useful sample set"
+            );
+            let mut sorted = samples.to_vec();
+            sorted.sort_unstable();
+            let rank = (sorted.len() * percentile).div_ceil(100);
+            sorted[rank.saturating_sub(1)]
+        }
+
+        fn cached_preview(
+            cache: &mut HashMap<WindowId, Arc<RgbaImage>>,
+            id: WindowId,
+            source: &RgbaImage,
+        ) -> Arc<RgbaImage> {
+            if let Some(image) = cache.get(&id) {
+                return Arc::clone(image);
+            }
+            let image = Arc::new(super::normalize_preview_image(source));
+            cache.insert(id, Arc::clone(&image));
+            image
+        }
+
+        let sources = (0..SAMPLES)
+            .map(|index| {
+                RgbaImage::from_pixel(
+                    640 + (index % 3) as u32,
+                    360 + (index % 5) as u32,
+                    Rgba([index as u8, 20, 30, 255]),
+                )
+            })
+            .collect::<Vec<_>>();
+        let expected = sources
+            .iter()
+            .map(super::normalize_preview_image)
+            .collect::<Vec<_>>();
+
+        let mut cold_cached = Vec::with_capacity(SAMPLES);
+        let mut cold_bypass = Vec::with_capacity(SAMPLES);
+        let mut warm_cached = Vec::with_capacity(SAMPLES);
+        let mut warm_bypass = Vec::with_capacity(SAMPLES);
+        let mut churn_cached = Vec::with_capacity(SAMPLES);
+        let mut churn_bypass = Vec::with_capacity(SAMPLES);
+        let mut low_reuse_cached = Vec::with_capacity(SAMPLES);
+        let mut low_reuse_bypass = Vec::with_capacity(SAMPLES);
+
+        for (index, source) in sources.iter().enumerate() {
+            let id = WindowId(index as u64);
+            let mut cache = HashMap::new();
+            let started = Instant::now();
+            let cached = cached_preview(&mut cache, id, black_box(source));
+            cold_cached.push(started.elapsed());
+            let started = Instant::now();
+            let bypass = super::normalize_preview_image(black_box(source));
+            cold_bypass.push(started.elapsed());
+            assert_eq!(&*cached, &bypass, "cold cache changed preview pixels");
+
+            let started = Instant::now();
+            let cached = cached_preview(&mut cache, id, black_box(source));
+            warm_cached.push(started.elapsed());
+            let started = Instant::now();
+            let bypass = super::normalize_preview_image(black_box(source));
+            warm_bypass.push(started.elapsed());
+            assert_eq!(&*cached, &bypass, "warm cache changed preview pixels");
+
+            let churn_id = WindowId(10_000 + index as u64);
+            cache.clear();
+            let started = Instant::now();
+            let mut cached = cached_preview(&mut cache, churn_id, black_box(source));
+            for _ in 1..CHURN_REUSES {
+                cached = cached_preview(&mut cache, churn_id, black_box(source));
+            }
+            churn_cached.push(started.elapsed());
+            let started = Instant::now();
+            let mut bypass = super::normalize_preview_image(black_box(source));
+            for _ in 1..CHURN_REUSES {
+                bypass = super::normalize_preview_image(black_box(source));
+            }
+            churn_bypass.push(started.elapsed());
+            assert_eq!(&*cached, &bypass, "generation churn changed preview pixels");
+
+            let unique_id = WindowId(20_000 + index as u64);
+            let started = Instant::now();
+            let cached = cached_preview(&mut cache, unique_id, black_box(source));
+            low_reuse_cached.push(started.elapsed());
+            let started = Instant::now();
+            let bypass = super::normalize_preview_image(black_box(source));
+            low_reuse_bypass.push(started.elapsed());
+            assert_eq!(&*cached, &bypass, "low-reuse cache changed preview pixels");
+            assert_eq!(&*cached, &expected[index]);
+        }
+
+        let cold_cached_p95 = percentile(&cold_cached, 95);
+        let cold_bypass_p95 = percentile(&cold_bypass, 95);
+        let warm_cached_p95 = percentile(&warm_cached, 95);
+        let warm_bypass_p95 = percentile(&warm_bypass, 95);
+        let churn_cached_p95 = percentile(&churn_cached, 95);
+        let churn_bypass_p95 = percentile(&churn_bypass, 95);
+        let low_reuse_cached_p95 = percentile(&low_reuse_cached, 95);
+        let low_reuse_bypass_p95 = percentile(&low_reuse_bypass, 95);
+
+        println!(
+            "preview image cache samples={SAMPLES} cold-median={:?}/{:?} cold-p95={cold_cached_p95:?}/{cold_bypass_p95:?} warm-median={:?}/{:?} warm-p95={warm_cached_p95:?}/{warm_bypass_p95:?} churn-reuses={CHURN_REUSES} churn-median={:?}/{:?} churn-p95={churn_cached_p95:?}/{churn_bypass_p95:?} low-reuse-median={:?}/{:?} low-reuse-p95={low_reuse_cached_p95:?}/{low_reuse_bypass_p95:?}",
+            percentile(&cold_cached, 50),
+            percentile(&cold_bypass, 50),
+            percentile(&warm_cached, 50),
+            percentile(&warm_bypass, 50),
+            percentile(&churn_cached, 50),
+            percentile(&churn_bypass, 50),
+            percentile(&low_reuse_cached, 50),
+            percentile(&low_reuse_bypass, 50),
+        );
+
+        assert!(warm_cached_p95 < warm_bypass_p95);
+        assert!(churn_cached_p95 < churn_bypass_p95);
+        assert!(
+            cold_cached_p95 <= cold_bypass_p95 + LOW_REUSE_P95_ADDITION,
+            "cold insertion exceeds the predeclared 0.5 ms frame-work allowance"
+        );
+        assert!(
+            low_reuse_cached_p95 <= low_reuse_bypass_p95 + LOW_REUSE_P95_ADDITION,
+            "low-reuse insertion exceeds the predeclared 0.5 ms frame-work allowance"
+        );
+    }
+
+    #[test]
     fn visible_tray_indices_address_the_last_four_items() {
         let items = (0..5)
             .map(|index| TrayItem {
