@@ -22,6 +22,7 @@ enum TestMessage {
     Option(usize),
     Volume(u8),
     Query(String),
+    Drag(DragPhase, i32, i32),
 }
 
 fn map_volume(value: f32) -> TestMessage {
@@ -30,6 +31,64 @@ fn map_volume(value: f32) -> TestMessage {
 
 fn map_query(value: String) -> TestMessage {
     TestMessage::Query(value)
+}
+
+fn map_drag(_seed: TestMessage, gesture: DragGesture) -> TestMessage {
+    TestMessage::Drag(
+        gesture.phase,
+        gesture.position.x.round() as i32,
+        gesture.position.y.round() as i32,
+    )
+}
+
+#[test]
+fn declarative_drag_target_captures_motion_beyond_its_bounds() {
+    let tree = UiFrame::layout(
+        Container::new()
+            .id("draggable")
+            .width(80.0)
+            .height(40.0)
+            .accessibility_label("Draggable item")
+            .on_drag((TestMessage::Named("drag seed"), map_drag)),
+        Rect::new(10.0, 20.0, 80.0, 40.0),
+    );
+    let mut state = UiStateStore::default();
+
+    assert_eq!(
+        tree.handle_event(
+            &mut state,
+            UiEvent::PointerPressed(Point { x: 20.0, y: 30.0 }),
+        )
+        .messages,
+        vec![TestMessage::Drag(DragPhase::Started, 20, 30)]
+    );
+    assert_eq!(
+        tree.handle_event(
+            &mut state,
+            UiEvent::PointerMoved(Point { x: 180.0, y: 130.0 }),
+        )
+        .messages,
+        vec![TestMessage::Drag(DragPhase::Moved, 180, 130)]
+    );
+    assert_eq!(
+        tree.handle_event(
+            &mut state,
+            UiEvent::PointerReleased(Point { x: 180.0, y: 130.0 }),
+        )
+        .messages,
+        vec![TestMessage::Drag(DragPhase::Ended, 180, 130)]
+    );
+    assert!(state.captured().is_none());
+
+    tree.handle_event(
+        &mut state,
+        UiEvent::PointerPressed(Point { x: 20.0, y: 30.0 }),
+    );
+    assert_eq!(
+        tree.handle_event(&mut state, UiEvent::FocusLost).messages,
+        vec![TestMessage::Drag(DragPhase::Cancelled, 10, 20)]
+    );
+    assert!(state.captured().is_none());
 }
 
 #[test]

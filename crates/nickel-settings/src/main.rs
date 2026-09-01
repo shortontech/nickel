@@ -37,14 +37,14 @@ use nickel_core::{
     wallpaper_settings::{WallpaperPosition, WallpaperSettings},
 };
 use nickel_i18n::Localizer;
-use nickel_input::{InputEvent, KeyEdge, LogicalKey, NamedKey, PointerButton, PointerEvent};
+use nickel_input::{InputEvent, KeyEdge, LogicalKey, NamedKey};
 use nickel_ui::{
     ActionLegend, ActionLegendEntry, AdapterOutcome, AnyView, Application, Button,
     ButtonPresentation, ChoiceCard, ChoiceCardGroup, ColorSwatch, ComponentBuilderExt, Container,
-    GlobalAction, HostAdapter, HostServices, Image, ImageFit, InputModality, Insets,
-    NavigationItem, PageHeader, PreviewTile, ReadingDirection, ResponsiveNavigation,
-    ResponsiveNavigationDestination, SelectField, SemanticControllerAction, SemanticRole,
-    SemanticSelector, SemanticTheme, SettingsCard, SettingsNavigation, SettingsRow,
+    DragGesture, DragPhase, GlobalAction, HostAdapter, HostServices, Image, ImageFit,
+    InputModality, Insets, NavigationItem, PageHeader, PreviewTile, ReadingDirection,
+    ResponsiveNavigation, ResponsiveNavigationDestination, SelectField, SemanticControllerAction,
+    SemanticRole, SemanticSelector, SemanticTheme, SettingsCard, SettingsNavigation, SettingsRow,
     SettingsSearchEntry, SettingsSearchField, SettingsStatus, SettingsStatusKind, SliderField,
     Surface, SurfaceRole, Switch, TabList, TextAlign, UiHost, UiId, ViewContext, search_settings,
     ui,
@@ -330,9 +330,27 @@ enum SettingsMessage {
     SetDesktopCount(u8),
     DisplayIdentify,
     SelectDisplay(usize),
+    DisplayDrag {
+        index: usize,
+        phase: DragPhase,
+        x: i32,
+        y: i32,
+    },
     DisplayPrimary,
     DisplayEnabled(bool),
     DisplayApply,
+}
+
+fn display_drag_message(seed: SettingsMessage, gesture: DragGesture) -> SettingsMessage {
+    let SettingsMessage::SelectDisplay(index) = seed else {
+        unreachable!("display drag targets use SelectDisplay as their typed seed")
+    };
+    SettingsMessage::DisplayDrag {
+        index,
+        phase: gesture.phase,
+        x: gesture.position.x.round() as i32,
+        y: gesture.position.y.round() as i32,
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -521,6 +539,15 @@ impl SettingsApp {
                     self.selected = index;
                 }
             }
+            SettingsMessage::DisplayDrag { index, phase, x, y } => match phase {
+                DragPhase::Started => self.begin_display_drag(index, x, y),
+                DragPhase::Moved => self.move_display_drag(x, y),
+                DragPhase::Ended => {
+                    self.move_display_drag(x, y);
+                    self.finish_drag();
+                }
+                DragPhase::Cancelled => self.cancel_drag(),
+            },
             SettingsMessage::DisplayPrimary => {
                 self.displays[self.selected].enabled = true;
                 for (index, display) in self.displays.iter_mut().enumerate() {
@@ -627,6 +654,15 @@ impl SettingsApp {
             self.applied = false;
             self.status = self.localizer.text("settings-status-changes-not-applied");
         }
+        self.request_redraw();
+    }
+
+    fn cancel_drag(&mut self) {
+        self.drag_offset = None;
+        let Some(origin) = self.drag_origin.take() else {
+            return;
+        };
+        self.displays[self.selected].rect = origin;
         self.request_redraw();
     }
 
@@ -1130,45 +1166,6 @@ impl HostAdapter<SettingsApp> for SettingsHostAdapter {
             {
                 return Ok(AdapterOutcome::exit());
             }
-            InputEvent::Pointer(PointerEvent::Button {
-                button: PointerButton::Primary,
-                edge: KeyEdge::Pressed,
-                position: Some(position),
-                ..
-            }) => {
-                let count = host.application_mut().displays.len();
-                for index in 0..count {
-                    let Ok(target) = host
-                        .unique_semantic_target_for_message(&SettingsMessage::SelectDisplay(index))
-                    else {
-                        continue;
-                    };
-                    let bounds = target.bounds;
-                    let x = position.x as f32;
-                    let y = position.y as f32;
-                    if x >= bounds.origin.x
-                        && y >= bounds.origin.y
-                        && x < bounds.origin.x + bounds.size.width
-                        && y < bounds.origin.y + bounds.size.height
-                    {
-                        host.application_mut().begin_display_drag(
-                            index,
-                            position.x.round() as i32,
-                            position.y.round() as i32,
-                        );
-                        break;
-                    }
-                }
-            }
-            InputEvent::Pointer(PointerEvent::Motion { position, .. }) => {
-                host.application_mut()
-                    .move_display_drag(position.x.round() as i32, position.y.round() as i32);
-            }
-            InputEvent::Pointer(PointerEvent::Button {
-                button: PointerButton::Primary,
-                edge: KeyEdge::Released,
-                ..
-            }) => host.application_mut().finish_drag(),
             _ => {}
         }
         Ok(AdapterOutcome::default())
@@ -2004,5 +2001,52 @@ mod tests {
         );
 
         assert_eq!(host.application().selected, 1);
+    }
+
+    #[test]
+    fn display_drag_flows_through_declarative_capture_and_application_update() {
+        let mut host = UiHost::new(
+            SettingsApp::with_initial_page(SettingsPage::Display),
+            1200,
+            760,
+        );
+        SettingsHostAdapter::sync_display_plane(&mut host);
+        let target = host
+            .unique_semantic_target_for_message(&SettingsMessage::SelectDisplay(0))
+            .expect("first display is a semantic drag target");
+        let start = nickel_ui::Point {
+            x: target.bounds.origin.x + 12.0,
+            y: target.bounds.origin.y + 12.0,
+        };
+        let moved = nickel_ui::Point {
+            x: start.x + 80.0,
+            y: start.y + 55.0,
+        };
+        host.application_mut().applied = true;
+        let origin = host.application().displays[0].rect;
+
+        host.handle_event(nickel_ui::UiEvent::PointerPressed(start));
+        assert_eq!(host.application().selected, 0);
+        assert!(host.application().drag_offset.is_some());
+
+        host.handle_event(nickel_ui::UiEvent::PointerMoved(moved));
+        assert_ne!(host.application().displays[0].rect, origin);
+
+        host.handle_event(nickel_ui::UiEvent::PointerReleased(moved));
+        assert!(host.application().drag_offset.is_none());
+        assert!(host.application().drag_origin.is_none());
+        assert!(!host.application().applied);
+
+        let settled = host.application().displays[0].rect;
+        host.handle_event(nickel_ui::UiEvent::PointerPressed(start));
+        host.handle_event(nickel_ui::UiEvent::PointerMoved(nickel_ui::Point {
+            x: start.x - 45.0,
+            y: start.y - 35.0,
+        }));
+        assert_ne!(host.application().displays[0].rect, settled);
+        host.handle_event(nickel_ui::UiEvent::FocusLost);
+        assert_eq!(host.application().displays[0].rect, settled);
+        assert!(host.application().drag_offset.is_none());
+        assert!(host.application().drag_origin.is_none());
     }
 }

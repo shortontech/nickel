@@ -245,6 +245,27 @@ pub enum UiEvent {
     DeviceRemoved,
 }
 
+/// The lifecycle phase of a pointer drag owned by a declarative UI target.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DragPhase {
+    Started,
+    Moved,
+    Ended,
+    Cancelled,
+}
+
+/// A typed pointer drag delivered through the normal application message path.
+///
+/// `bounds` is the resolved target rectangle that won pointer capture. Motion
+/// and release continue to target that same semantic identity even when the
+/// pointer leaves the rectangle.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DragGesture {
+    pub phase: DragPhase,
+    pub position: Point,
+    pub bounds: Rect,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum PointerIcon {
     #[default]
@@ -972,6 +993,7 @@ pub struct Element<Message = String> {
     message: Option<Message>,
     context_message: Option<Message>,
     message_mapper: Option<fn(f32) -> Message>,
+    drag_mapper: Option<fn(Message, DragGesture) -> Message>,
     text_mapper: Option<fn(String) -> Message>,
     option_messages: Vec<Option<Message>>,
     inline_messages: Vec<(Range<usize>, Message)>,
@@ -990,6 +1012,7 @@ impl<Message> Element<Message> {
             message: None,
             context_message: None,
             message_mapper: None,
+            drag_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
@@ -1020,6 +1043,7 @@ impl<Message> Element<Message> {
             message: None,
             context_message: None,
             message_mapper: None,
+            drag_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
@@ -1209,6 +1233,16 @@ impl<Message> Element<Message> {
         self
     }
 
+    /// Turns this element into a declarative pointer-drag target.
+    ///
+    /// The seed message supplies target-specific typed data. Nickel UI owns
+    /// hit testing and pointer capture, then calls `map` for every drag phase.
+    pub fn on_drag(mut self, seed: Message, map: fn(Message, DragGesture) -> Message) -> Self {
+        self.message = Some(seed);
+        self.drag_mapper = Some(map);
+        self
+    }
+
     pub fn min_width(mut self, width: f32) -> Self {
         self.style.min_width = width.max(0.0);
         self
@@ -1305,7 +1339,9 @@ impl<Message> Element<Message> {
         Map: FnMut(Message) -> ParentMessage,
     {
         assert!(
-            self.message_mapper.is_none() && self.text_mapper.is_none(),
+            self.message_mapper.is_none()
+                && self.drag_mapper.is_none()
+                && self.text_mapper.is_none(),
             "map value-producing messages at the control constructor"
         );
         Element {
@@ -1316,6 +1352,7 @@ impl<Message> Element<Message> {
             message: self.message.map(&mut *map),
             context_message: self.context_message.map(&mut *map),
             message_mapper: None,
+            drag_mapper: None,
             text_mapper: None,
             option_messages: self
                 .option_messages

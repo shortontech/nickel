@@ -5,8 +5,10 @@ use std::collections::BTreeSet;
 struct HitRegion<Message> {
     id: UiId,
     rect: Rect,
+    target_bounds: Rect,
     message: Option<Message>,
     message_mapper: Option<fn(f32) -> Message>,
+    drag_mapper: Option<fn(Message, DragGesture) -> Message>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -584,6 +586,29 @@ impl<Message> Default for UiFrame<Message> {
 }
 
 impl<Message: Clone> UiFrame<Message> {
+    fn drag_message(&self, id: &UiId, phase: DragPhase, position: Point) -> Option<Message> {
+        let hit = self.hits.iter().rev().find(|hit| &hit.id == id)?;
+        Some((hit.drag_mapper?)(
+            hit.message.clone()?,
+            DragGesture {
+                phase,
+                position,
+                bounds: hit.target_bounds,
+            },
+        ))
+    }
+
+    fn cancelled_drag_message(&self, state: &UiStateStore) -> Option<Message> {
+        let captured = state.captured()?;
+        let bounds = self
+            .hits
+            .iter()
+            .rev()
+            .find(|hit| &hit.id == captured)?
+            .target_bounds;
+        self.drag_message(captured, DragPhase::Cancelled, bounds.origin)
+    }
+
     pub(crate) fn resolve_stable_target(&self, requested: &UiId) -> Option<UiId> {
         let suffix = format!("/{}", requested.as_str());
         let mut matches = self
@@ -1018,8 +1043,10 @@ impl<Message: Clone> UiFrame<Message> {
             self.hits.push(HitRegion {
                 id: id.clone(),
                 rect: item_rect,
+                target_bounds: item_rect,
                 message: item.action.clone(),
                 message_mapper: None,
+                drag_mapper: None,
             });
             if let Some(message) = item.action {
                 self.messages.push(MessageRegion {
@@ -1965,6 +1992,12 @@ impl<Message: Clone> UiFrame<Message> {
                 }
                 let mut invalidation = state.set_hovered(self.id_at(point).cloned());
                 if let Some(captured) = state.captured()
+                    && let Some(message) = self.drag_message(captured, DragPhase::Moved, point)
+                {
+                    outcome.messages.push(message);
+                    invalidation = invalidation.merge(Invalidation::Paint);
+                }
+                if let Some(captured) = state.captured()
                     && let Some(hit) = self.hits.iter().rev().find(|hit| &hit.id == captured)
                     && let Some(map) = hit.message_mapper
                 {
@@ -2130,6 +2163,12 @@ impl<Message: Clone> UiFrame<Message> {
                     .merge(state.set_focus(id.clone()))
                     .merge(state.set_pressed(id.clone()))
                     .merge(state.set_capture(id.clone()));
+                if let Some(id) = id.as_ref()
+                    && let Some(message) = self.drag_message(id, DragPhase::Started, point)
+                {
+                    outcome.messages.push(message);
+                    invalidation = invalidation.merge(Invalidation::Paint);
+                }
                 if let Some(id) = id
                     && let Some(input) = self.text_inputs.iter().find(|input| input.id == id)
                 {
@@ -2151,6 +2190,11 @@ impl<Message: Clone> UiFrame<Message> {
                             .merge(Invalidation::Paint),
                         ..outcome
                     };
+                }
+                if let Some(captured) = state.captured()
+                    && let Some(message) = self.drag_message(captured, DragPhase::Ended, point)
+                {
+                    outcome.messages.push(message);
                 }
                 let released = self.id_at(point);
                 let activates = state
@@ -2199,10 +2243,15 @@ impl<Message: Clone> UiFrame<Message> {
                     invalidation
                 }
             }
-            UiEvent::PointerCancelled => state
-                .set_pressed(None)
-                .merge(state.set_capture(None))
-                .merge(Invalidation::Paint),
+            UiEvent::PointerCancelled => {
+                if let Some(message) = self.cancelled_drag_message(state) {
+                    outcome.messages.push(message);
+                }
+                state
+                    .set_pressed(None)
+                    .merge(state.set_capture(None))
+                    .merge(Invalidation::Paint)
+            }
             UiEvent::Scroll { point, delta_y } => {
                 let Some(scroll) = self.scrolls.iter().rev().find(|scroll| {
                     if !contains(scroll.rect, point) {
@@ -2664,9 +2713,24 @@ impl<Message: Clone> UiFrame<Message> {
             }
             UiEvent::CaretBlink => state.toggle_caret(),
             UiEvent::FocusGained => state.set_window_focused(true),
-            UiEvent::FocusLost => state.set_window_focused(false).merge(state.focus_lost()),
-            UiEvent::Suspended => state.suspended(),
-            UiEvent::DeviceRemoved => state.device_removed(),
+            UiEvent::FocusLost => {
+                if let Some(message) = self.cancelled_drag_message(state) {
+                    outcome.messages.push(message);
+                }
+                state.set_window_focused(false).merge(state.focus_lost())
+            }
+            UiEvent::Suspended => {
+                if let Some(message) = self.cancelled_drag_message(state) {
+                    outcome.messages.push(message);
+                }
+                state.suspended()
+            }
+            UiEvent::DeviceRemoved => {
+                if let Some(message) = self.cancelled_drag_message(state) {
+                    outcome.messages.push(message);
+                }
+                state.device_removed()
+            }
         };
         outcome
     }
@@ -4372,8 +4436,10 @@ fn emit_element<Message: Clone>(
             tree.hits.push(HitRegion {
                 id: node.id.clone(),
                 rect: hit_rect,
+                target_bounds: rect,
                 message: Some(message.clone()),
                 message_mapper: element.message_mapper,
+                drag_mapper: element.drag_mapper,
             });
         }
     }
@@ -4423,8 +4489,10 @@ fn emit_element<Message: Clone>(
             tree.hits.push(HitRegion {
                 id: node.id.clone(),
                 rect: hit_rect,
+                target_bounds: rect,
                 message: None,
                 message_mapper: None,
+                drag_mapper: None,
             });
         }
     }
@@ -4542,8 +4610,10 @@ fn emit_element<Message: Clone>(
                         tree.hits.push(HitRegion {
                             id: link_id.clone(),
                             rect: glyph.rect,
+                            target_bounds: glyph.rect,
                             message: Some(message.clone()),
                             message_mapper: None,
+                            drag_mapper: None,
                         });
                     }
                 }
@@ -4800,8 +4870,10 @@ fn emit_element<Message: Clone>(
                         hits.push(HitRegion {
                             id: option_id,
                             rect: hit_rect,
+                            target_bounds: option_rect,
                             message,
                             message_mapper: None,
+                            drag_mapper: None,
                         });
                     }
                 }

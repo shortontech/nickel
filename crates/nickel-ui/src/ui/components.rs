@@ -167,6 +167,7 @@ impl<Message> VerticalScroll<Message> {
             message: Some(message),
             context_message: None,
             message_mapper: None,
+            drag_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
@@ -243,6 +244,7 @@ impl<Message> Grid<Message> {
             message: None,
             context_message: None,
             message_mapper: None,
+            drag_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
@@ -278,6 +280,7 @@ impl<Message> Grid<Message> {
             message: None,
             context_message: None,
             message_mapper: None,
+            drag_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
@@ -298,6 +301,7 @@ impl<Message> Grid<Message> {
             message: None,
             context_message: None,
             message_mapper: None,
+            drag_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
@@ -583,6 +587,7 @@ impl<Message> StyledText<Message> {
             message: None,
             context_message: None,
             message_mapper: None,
+            drag_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
@@ -826,6 +831,7 @@ impl<Message> CustomPaint<Message> {
             message: None,
             context_message: None,
             message_mapper: None,
+            drag_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
@@ -852,6 +858,11 @@ impl<Message> CustomPaint<Message> {
 
     pub fn message(mut self, message: Message) -> Self {
         self.0 = self.0.message(message);
+        self
+    }
+
+    pub fn on_drag(mut self, (seed, map): (Message, fn(Message, DragGesture) -> Message)) -> Self {
+        self.0 = self.0.on_drag(seed, map);
         self
     }
 
@@ -913,6 +924,7 @@ impl<Message> Image<Message> {
             message: None,
             context_message: None,
             message_mapper: None,
+            drag_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
@@ -1395,6 +1407,11 @@ impl<Message> Container<Message> {
 
     pub fn message(mut self, message: Message) -> Self {
         self.0 = self.0.message(message);
+        self
+    }
+
+    pub fn on_drag(mut self, (seed, map): (Message, fn(Message, DragGesture) -> Message)) -> Self {
+        self.0 = self.0.on_drag(seed, map);
         self
     }
 
@@ -2343,6 +2360,7 @@ impl<Message> Slider<Message> {
             message: Some(message),
             context_message: None,
             message_mapper: None,
+            drag_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
@@ -2440,6 +2458,7 @@ impl<Message> Dropdown<Message> {
             message: Some(toggle_message),
             context_message: None,
             message_mapper: None,
+            drag_mapper: None,
             text_mapper: None,
             option_messages,
             inline_messages: Vec::new(),
@@ -2552,6 +2571,7 @@ impl<Message> Menu<Message> {
             message: Some(toggle_message),
             context_message: None,
             message_mapper: None,
+            drag_mapper: None,
             text_mapper: None,
             option_messages: items.into_iter().map(|item| item.message).collect(),
             inline_messages: Vec::new(),

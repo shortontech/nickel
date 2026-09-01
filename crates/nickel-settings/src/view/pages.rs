@@ -64,6 +64,7 @@ impl SettingsApp {
                         else if selected { palette.accent_soft } else { palette.surface }}
                     border={(border_color, border_width)} radius={theme.radii.card}
                     padding={Insets::all(18.0)}
+                    on_drag={(SettingsMessage::SelectDisplay(index), display_drag_message)}
                     on_press={SettingsMessage::SelectDisplay(index)}>
                     <Column gap={8.0}>
                         <Text scale={1.5} color={palette.text}>{&display.name}</Text>
