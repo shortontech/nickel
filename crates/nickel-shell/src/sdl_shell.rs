@@ -1073,7 +1073,7 @@ mod tests {
         presenter
             .present_accelerated(frame.commands(), 1.0)
             .expect("cold dummy present");
-        for sample in 0..16 {
+        for sample in 0..64 {
             let before = crate::allocation_counter::thread_allocation_operations().unwrap();
             presenter
                 .present_accelerated(frame.commands(), 1.0)

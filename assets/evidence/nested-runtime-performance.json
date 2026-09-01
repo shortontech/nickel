@@ -1,38 +1,46 @@
 {
   "schema": 1,
-  "captured_at": "2026-08-31T23:13:30-07:00",
+  "captured_at": "2026-08-31T19:57:00-07:00",
   "environment": {
     "backend": "nested_winit",
     "compositor_renderer": "llvmpipe (LLVM 21.1.8, 256 bits)",
-    "shell_presenter": "wgpu",
-    "hardware_claim": false
+    "shell_presenter": "sdl_canvas",
+    "hardware_claim": false,
+    "workload": "132 production Meta key launcher toggles after shell readiness"
   },
   "samples": {
-    "warm_present_us": [37959, 14, 10, 15, 10, 13, 10, 12, 13, 15, 13, 15, 12, 19, 14, 10, 11, 11, 11, 13, 16, 13, 10, 17, 15, 11, 13, 12, 9, 11, 10, 10, 15, 30, 11, 14, 11, 10, 10, 10, 18, 11, 17, 11, 14, 10, 16, 11, 9, 10, 10, 13, 17, 11, 10, 12, 11, 14, 12, 32, 17, 17, 12, 11],
-    "input_to_visible_us": [48435, 5757, 5332, 5229, 5474, 5334, 5238, 5374, 5592, 5519, 5419, 5512, 5492, 7583, 5871, 5911, 5474, 5504, 5555, 5543, 6162, 6487, 5356, 5911, 6268, 6605, 5571, 4964, 5190, 5304, 5093, 5227, 5413, 6314, 5273, 5396, 5371, 5251, 5215, 5357, 6292, 6225, 6342, 5250, 5285, 5187, 5310, 5356, 5227, 5140, 4972, 5395, 5416, 5285, 5214, 5486, 5281, 5191, 6232, 6484, 6696, 6590, 5303, 5365]
+    "warm_present_us": [7479, 7148, 7428, 6915, 7585, 7571, 7341, 6731, 7733, 7353, 7095, 7504, 6702, 8191, 8501, 9056, 7271, 7713, 8314, 7183, 7876, 8648, 8579, 7234, 7114, 6412, 6756, 6823, 6988, 6690, 7502, 7183, 7249, 7031, 7838, 8086, 7702, 7794, 8442, 8142, 7963, 7135, 8755, 7420, 7972, 8977, 8315, 7887, 7228, 8193, 8263, 7522, 7322, 7602, 7220, 7088, 7704, 7526, 6949, 7832, 8128, 7382, 7708, 8198],
+    "input_to_visible_us": [21388, 18695, 22226, 19648, 20929, 19326, 21897, 19838, 21052, 21038, 18247, 21506, 18551, 20732, 22241, 22244, 19357, 21460, 20365, 18447, 21496, 20929, 22403, 20673, 20469, 20180, 18126, 18573, 19595, 18308, 21562, 19358, 21019, 18985, 21967, 21250, 21131, 21255, 23101, 21497, 21707, 20232, 22602, 20636, 19822, 22586, 20751, 21458, 19890, 22118, 21059, 19634, 19643, 22284, 19338, 20607, 20721, 21009, 19452, 20782, 19912, 20263, 20107, 22116]
   },
   "summary": {
     "warm_present_samples": 64,
-    "warm_present_p95_us": 19,
+    "warm_present_p95_us": 8648,
     "input_to_visible_samples": 64,
-    "input_to_visible_p95_us": 6605,
-    "retained_presenter_bytes": 6457628,
+    "input_to_visible_p95_us": 22403,
+    "retained_presenter_bytes": 4010585,
     "frame_allocations": {
-      "count": null,
-      "sample_count": 0,
-      "scope": "unavailable",
-      "unavailable_reason": "capture predates native shell allocation instrumentation"
+      "count": 0,
+      "sample_count": 64,
+      "scope": "presenter",
+      "measurement": "SDL dummy presenter after one cold present; identical retained frame for 64 warm presents"
+    },
+    "process_frame_allocations_observed": {
+      "count_p95": 1494,
+      "sample_count": 64,
+      "scope": "process",
+      "note": "Includes launcher application rebuild, layout, paint-list construction, and presentation; it is not claimed as zero-allocation presenter evidence."
     }
   },
   "budgets": {
     "warm_present_p95_us": 16700,
     "input_to_visible_p95_us": 50000,
-    "retained_presenter_bytes": 8388608
+    "retained_presenter_bytes": 8388608,
+    "presenter_frame_allocations": 0
   },
   "result": {
     "warm_present": true,
     "input_to_visible": true,
     "retained_presenter_bytes": true,
-    "frame_allocations": false
+    "frame_allocations": true
   }
 }

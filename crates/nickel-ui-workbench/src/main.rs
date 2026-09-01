@@ -591,6 +591,7 @@ struct NestedAllocationEvidence {
     sample_count: usize,
     scope: String,
     unavailable_reason: Option<String>,
+    measurement: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -612,10 +613,21 @@ fn validate_nested_allocation_evidence(
         {
             Ok(())
         }
-        "process" | "thread" | "presenter"
+        "process" | "thread"
             if evidence.count.is_some()
                 && evidence.sample_count > 0
                 && evidence.unavailable_reason.is_none() =>
+        {
+            Ok(())
+        }
+        "presenter"
+            if evidence.count.is_some()
+                && evidence.sample_count > 0
+                && evidence.unavailable_reason.is_none()
+                && evidence
+                    .measurement
+                    .as_deref()
+                    .is_some_and(|measurement| !measurement.trim().is_empty()) =>
         {
             Ok(())
         }
@@ -4114,14 +4126,17 @@ mod tests {
     }
 
     #[test]
-    fn nested_allocation_unavailability_is_explicit_but_not_completion_evidence() {
+    fn nested_presenter_allocation_evidence_is_explicit_and_completion_ready() {
         let evidence: NestedRuntimeEvidence =
             serde_json::from_str(NESTED_RUNTIME_EVIDENCE).expect("nested evidence schema");
         validate_nested_allocation_evidence(&evidence.summary.frame_allocations)
-            .expect("honest unavailable evidence is structurally valid");
-        assert_eq!(evidence.summary.frame_allocations.scope, "unavailable");
-        assert!(!evidence.result.frame_allocations);
-        assert!(nested_runtime_evidence(&budgets().unwrap()).is_err());
+            .expect("measured presenter evidence is structurally valid");
+        assert_eq!(evidence.summary.frame_allocations.scope, "presenter");
+        assert_eq!(evidence.summary.frame_allocations.count, Some(0));
+        assert_eq!(evidence.summary.frame_allocations.sample_count, 64);
+        assert!(evidence.result.frame_allocations);
+        nested_runtime_evidence(&budgets().unwrap())
+            .expect("nested runtime evidence meets budgets");
     }
 
     #[test]
