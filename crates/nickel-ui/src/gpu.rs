@@ -2466,6 +2466,42 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires an SDL video driver for accelerated readback"]
+    fn accelerated_image_upload_reaches_the_presented_frame() {
+        use crate::{FrameRequest, Image, UiFrame, UiStateStore};
+
+        let sdl = sdl3::init().expect("SDL initialization");
+        let video = sdl.video().expect("SDL video subsystem");
+        let window = video
+            .window("Nickel image delivery", 64, 48)
+            .hidden()
+            .build()
+            .expect("hidden native test window");
+        let mut presenter = super::SdlCanvasPresenter::new(window).expect("accelerated presenter");
+        let source = Arc::new(image::RgbaImage::from_pixel(
+            8,
+            8,
+            image::Rgba([17, 131, 239, 255]),
+        ));
+        let mut state = UiStateStore::default();
+        let frame = UiFrame::resolve(
+            Image::<()>::new(7, source).width(64.0).height(48.0),
+            FrameRequest::new(Rect::new(0.0, 0.0, 64.0, 48.0), &mut state),
+        );
+
+        presenter
+            .present_accelerated(frame.commands(), 1.0)
+            .expect("image presentation");
+        let readback = presenter.canvas.read_pixels(None).expect("image readback");
+        // SAFETY: SDL owns the readback surface and it is only read while this
+        // immutable byte slice is alive.
+        let pixels = unsafe { readback.without_lock() }.expect("readback pixels");
+        assert!(pixels.chunks_exact(4).any(|pixel| {
+            pixel[0] == 17 && pixel[1] == 131 && pixel[2] == 239 && pixel[3] == 255
+        }));
+    }
+
+    #[test]
     fn suspended_pixel_renderer_releases_frame_storage_and_can_render_again() {
         let mut renderer = SdlComponentRenderer::new_pixel_buffer(1920, 1080, 1.0);
         assert_eq!(renderer.pixels().len(), 1920 * 1080);
