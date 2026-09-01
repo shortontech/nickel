@@ -408,13 +408,11 @@ pub struct LiveShell {
     preview_pointer_inside: bool,
     preview_leave_deadline: Option<Instant>,
     preview_hovered: Option<crate::model::WindowId>,
-    preview_selected: usize,
     preview_images: HashMap<crate::model::WindowId, Arc<image::RgbaImage>>,
     preview_refresh_deadline: Option<Instant>,
     preview_frame: Option<WindowPreviewFrame>,
     window_menu: Option<crate::model::WindowId>,
     window_menu_host: Option<nickel_ui::UiHost<WindowMenuApp>>,
-    window_menu_selected: usize,
     notification_host: NotificationHost,
     panel_origin_x: i32,
     control_host: ControlCenterHost,
@@ -686,13 +684,11 @@ impl LiveShell {
             preview_pointer_inside: false,
             preview_leave_deadline: None,
             preview_hovered: None,
-            preview_selected: 0,
             preview_images: HashMap::new(),
             preview_refresh_deadline: None,
             preview_frame: None,
             window_menu: None,
             window_menu_host: None,
-            window_menu_selected: 0,
             notification_host,
             panel_origin_x: 0,
             control_host,
@@ -1363,6 +1359,7 @@ impl LiveShell {
         let Some(frame) = self.preview_frame.as_mut() else {
             return false;
         };
+        let primed = action != ControllerAction::Cancel && frame.ensure_controller_selection();
         let outcome = frame.step(HostBatch {
             events: vec![HostEvent::Controller(action)],
             ..HostBatch::default()
@@ -1371,7 +1368,7 @@ impl LiveShell {
         for action in actions {
             self.apply_preview_action(action);
         }
-        outcome.changed
+        outcome.changed || primed
     }
 
     pub fn panel_pointer_entered(&mut self) -> bool {
@@ -1400,8 +1397,8 @@ impl LiveShell {
     pub fn preview_pointer_moved(&mut self, x: f32, y: f32) -> bool {
         let hovered = self
             .preview_frame
-            .as_ref()
-            .and_then(|frame| frame.window_at(Point { x, y }));
+            .as_mut()
+            .and_then(|frame| frame.transition_pointer_hover(Point { x, y }));
         if hovered == self.preview_hovered {
             return false;
         }
@@ -1458,7 +1455,6 @@ impl LiveShell {
             }
             PreviewAction::OpenMenu(window) => {
                 self.window_menu = Some(window);
-                self.window_menu_selected = 0;
                 self.window_menu_host = None;
                 let x = self.panel_origin_x
                     + self.preview_group.map_or(0, |index| {
@@ -1486,11 +1482,9 @@ impl LiveShell {
         let Some(frame) = self.preview_frame.as_mut() else {
             return false;
         };
-        let count = frame.window_count();
-        if count == 0 {
-            return false;
+        if !matches!(key, Some(KeyCode::Escape) | None) {
+            let _ = frame.ensure_controller_selection();
         }
-        self.preview_selected = self.preview_selected.min(count - 1);
         match key {
             Some(KeyCode::Escape) => {
                 frame.step(HostBatch {
@@ -1512,8 +1506,7 @@ impl LiveShell {
                     events: vec![HostEvent::Controller(ControllerAction::Left)],
                     ..HostBatch::default()
                 });
-                self.preview_selected = (self.preview_selected + count - 1) % count;
-                self.preview_hovered = frame.window(self.preview_selected);
+                self.preview_hovered = frame.controller_selected_window();
                 if let Some(window) = self.preview_hovered {
                     let _ = send_session_command(
                         "highlight-preview-window",
@@ -1526,8 +1519,7 @@ impl LiveShell {
                     events: vec![HostEvent::Controller(ControllerAction::Right)],
                     ..HostBatch::default()
                 });
-                self.preview_selected = (self.preview_selected + 1) % count;
-                self.preview_hovered = frame.window(self.preview_selected);
+                self.preview_hovered = frame.controller_selected_window();
                 if let Some(window) = self.preview_hovered {
                     let _ = send_session_command(
                         "highlight-preview-window",
@@ -1536,10 +1528,12 @@ impl LiveShell {
                 }
             }
             Some(KeyCode::Delete) => {
-                let Some(window) = frame.window(self.preview_selected) else {
+                if !frame.close_controller_selected() {
                     return false;
-                };
-                self.send_window_action(window, WindowAction::Close);
+                }
+                for action in frame.take_actions() {
+                    self.apply_preview_action(action);
+                }
             }
             Some(KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space) => {
                 frame.step(HostBatch {
@@ -1736,7 +1730,6 @@ impl LiveShell {
         self.preview_images.clear();
         self.preview_refresh_deadline = None;
         self.preview_hovered = None;
-        self.preview_selected = 0;
         self.window_menu = None;
         self.window_menu_host = None;
     }
@@ -1747,7 +1740,6 @@ impl LiveShell {
         self.preview_pointer_inside = false;
         self.preview_leave_deadline = None;
         self.preview_hovered = None;
-        self.preview_selected = 0;
         self.preview_images.clear();
         self.preview_refresh_deadline = None;
         self.preview_frame = None;
@@ -2356,22 +2348,13 @@ impl LiveShell {
         let height = menu_height(&self.workspaces).ceil().max(1.0) as u32;
         let host = self.window_menu_host.get_or_insert_with(|| {
             nickel_ui::UiHost::new(
-                WindowMenuApp::new(
-                    window,
-                    self.workspaces.clone(),
-                    Some(self.window_menu_selected),
-                    self.palette,
-                ),
+                WindowMenuApp::new(window, self.workspaces.clone(), self.palette),
                 MENU_WIDTH.ceil() as u32,
                 height,
             )
         });
-        host.application_mut().sync(
-            window,
-            &self.workspaces,
-            Some(self.window_menu_selected),
-            self.palette,
-        );
+        host.application_mut()
+            .sync(window, &self.workspaces, self.palette);
         host.step(HostBatch {
             surface_size: Some((MENU_WIDTH.ceil() as u32, height)),
             events: vec![HostEvent::Poll],
@@ -3721,10 +3704,9 @@ mod tests {
         shell.preview_frame = Some(build_preview_frame(&group, &HashMap::new(), None, palette));
 
         assert!(shell.preview_key(Some(KeyCode::ArrowRight)));
-        assert_eq!(shell.preview_selected, 1);
         assert_eq!(shell.preview_hovered, Some(WindowId(9)));
         assert!(shell.preview_key(Some(KeyCode::ArrowLeft)));
-        assert_eq!(shell.preview_selected, 0);
+        assert_eq!(shell.preview_hovered, Some(WindowId(4)));
 
         shell.window_menu = Some(WindowId(4));
         let _ = shell.window_menu_scene();
