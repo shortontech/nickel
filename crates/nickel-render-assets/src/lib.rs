@@ -8,6 +8,7 @@ use std::{
     collections::{HashMap, VecDeque},
     hash::{Hash, Hasher},
     sync::Arc,
+    time::Instant,
 };
 
 use cosmic_text::{
@@ -108,18 +109,44 @@ pub struct TextAssetCache {
     swash_cache: SwashCache,
     assets: HashMap<TextKey, Arc<RgbaAsset>>,
     insertion_order: VecDeque<TextKey>,
-    evictions: u64,
+    diagnostics: CacheActivity,
 }
 
 const TEXT_ASSET_CAPACITY: usize = 512;
+const TEXT_ASSET_BYTE_CAPACITY: usize = 32 * 1024 * 1024;
 const IMAGE_ORIGINAL_CAPACITY: usize = 256;
+const IMAGE_ORIGINAL_BYTE_CAPACITY: usize = 128 * 1024 * 1024;
 const IMAGE_SCALED_CAPACITY: usize = 512;
+const IMAGE_SCALED_BYTE_CAPACITY: usize = 64 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct CacheActivity {
+    estimated_retained_bytes: usize,
+    peak_estimated_retained_bytes: usize,
+    hits: u64,
+    misses: u64,
+    insertions: u64,
+    evictions: u64,
+    invalidations: u64,
+    recomputations: u64,
+    recomputation_nanos: u128,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CacheDiagnostics {
     pub entries: usize,
     pub capacity: usize,
+    /// Sum of retained RGBA pixel payloads. This excludes map, key, queue, and allocator overhead.
+    pub estimated_retained_bytes: usize,
+    pub byte_capacity: usize,
+    pub peak_estimated_retained_bytes: usize,
+    pub hits: u64,
+    pub misses: u64,
+    pub insertions: u64,
     pub evictions: u64,
+    pub invalidations: u64,
+    pub recomputations: u64,
+    pub recomputation_nanos: u128,
 }
 
 impl Default for TextAssetCache {
@@ -135,32 +162,57 @@ impl TextAssetCache {
             swash_cache: SwashCache::new(),
             assets: HashMap::new(),
             insertion_order: VecDeque::new(),
-            evictions: 0,
+            diagnostics: CacheActivity::default(),
         }
     }
 
     pub fn get(&mut self, request: TextRequest<'_>) -> Arc<RgbaAsset> {
         let key = TextKey::from(request);
         if let Some(asset) = self.assets.get(&key) {
+            self.diagnostics.hits = self.diagnostics.hits.saturating_add(1);
             return Arc::clone(asset);
         }
+        self.diagnostics.misses = self.diagnostics.misses.saturating_add(1);
+        let recompute_started = Instant::now();
         let asset = Arc::new(self.rasterize(&key));
-        while self.assets.len() >= TEXT_ASSET_CAPACITY {
-            let Some(oldest) = self.insertion_order.pop_front() else {
+        self.diagnostics.recomputation_nanos = self
+            .diagnostics
+            .recomputation_nanos
+            .saturating_add(recompute_started.elapsed().as_nanos());
+        self.diagnostics.recomputations = self.diagnostics.recomputations.saturating_add(1);
+        let bytes = asset_pixel_bytes(&asset);
+        if bytes > TEXT_ASSET_BYTE_CAPACITY {
+            return asset;
+        }
+        while self.assets.len() >= TEXT_ASSET_CAPACITY
+            || self
+                .diagnostics
+                .estimated_retained_bytes
+                .saturating_add(bytes)
+                > TEXT_ASSET_BYTE_CAPACITY
+        {
+            if !evict_text_oldest(
+                &mut self.assets,
+                &mut self.insertion_order,
+                &mut self.diagnostics,
+            ) {
                 break;
-            };
-            if self.assets.remove(&oldest).is_some() {
-                self.evictions = self.evictions.saturating_add(1);
             }
         }
         self.insertion_order.push_back(key.clone());
         self.assets.insert(key, Arc::clone(&asset));
+        record_insertion(&mut self.diagnostics, bytes);
         asset
     }
 
     pub fn clear(&mut self) {
+        self.diagnostics.invalidations = self
+            .diagnostics
+            .invalidations
+            .saturating_add(self.assets.len() as u64);
         self.assets.clear();
         self.insertion_order.clear();
+        self.diagnostics.estimated_retained_bytes = 0;
     }
 
     pub fn len(&self) -> usize {
@@ -172,11 +224,12 @@ impl TextAssetCache {
     }
 
     pub fn diagnostics(&self) -> CacheDiagnostics {
-        CacheDiagnostics {
-            entries: self.assets.len(),
-            capacity: TEXT_ASSET_CAPACITY,
-            evictions: self.evictions,
-        }
+        cache_diagnostics(
+            self.assets.len(),
+            TEXT_ASSET_CAPACITY,
+            TEXT_ASSET_BYTE_CAPACITY,
+            self.diagnostics,
+        )
     }
 
     fn rasterize(&mut self, key: &TextKey) -> RgbaAsset {
@@ -268,26 +321,38 @@ pub struct ImageAssetCache {
     scaled: HashMap<ImageKey, Arc<RgbaAsset>>,
     original_order: VecDeque<ImageAssetId>,
     scaled_order: VecDeque<ImageKey>,
-    original_evictions: u64,
-    scaled_evictions: u64,
+    original_diagnostics: CacheActivity,
+    scaled_diagnostics: CacheActivity,
 }
 
 impl ImageAssetCache {
     pub fn insert(&mut self, id: ImageAssetId, image: RgbaImage) -> Arc<RgbaAsset> {
         self.remove(id);
-        while self.originals.len() >= IMAGE_ORIGINAL_CAPACITY {
+        let asset = Arc::new(RgbaAsset::new(image));
+        let bytes = asset_pixel_bytes(&asset);
+        if bytes > IMAGE_ORIGINAL_BYTE_CAPACITY {
+            return asset;
+        }
+        while self.originals.len() >= IMAGE_ORIGINAL_CAPACITY
+            || self
+                .original_diagnostics
+                .estimated_retained_bytes
+                .saturating_add(bytes)
+                > IMAGE_ORIGINAL_BYTE_CAPACITY
+        {
             let Some(oldest) = self.original_order.pop_front() else {
                 break;
             };
-            if self.originals.remove(&oldest).is_some() {
-                self.scaled.retain(|key, _| key.id != oldest);
-                self.scaled_order.retain(|key| key.id != oldest);
-                self.original_evictions = self.original_evictions.saturating_add(1);
+            if let Some(removed) = self.originals.remove(&oldest) {
+                subtract_retained(&mut self.original_diagnostics, asset_pixel_bytes(&removed));
+                self.original_diagnostics.evictions =
+                    self.original_diagnostics.evictions.saturating_add(1);
+                self.evict_scaled_for_original(oldest);
             }
         }
-        let asset = Arc::new(RgbaAsset::new(image));
         self.original_order.push_back(id);
         self.originals.insert(id, Arc::clone(&asset));
+        record_insertion(&mut self.original_diagnostics, bytes);
         asset
     }
 
@@ -297,8 +362,14 @@ impl ImageAssetCache {
         (id, asset)
     }
 
-    pub fn get(&self, id: ImageAssetId) -> Option<Arc<RgbaAsset>> {
-        self.originals.get(&id).cloned()
+    pub fn get(&mut self, id: ImageAssetId) -> Option<Arc<RgbaAsset>> {
+        let asset = self.originals.get(&id).cloned();
+        if asset.is_some() {
+            self.original_diagnostics.hits = self.original_diagnostics.hits.saturating_add(1);
+        } else {
+            self.original_diagnostics.misses = self.original_diagnostics.misses.saturating_add(1);
+        }
+        asset
     }
 
     pub fn scaled(&mut self, id: ImageAssetId, width: u32, height: u32) -> Option<Arc<RgbaAsset>> {
@@ -308,57 +379,181 @@ impl ImageAssetCache {
             height: height.max(1),
         };
         if let Some(asset) = self.scaled.get(&key) {
+            self.scaled_diagnostics.hits = self.scaled_diagnostics.hits.saturating_add(1);
             return Some(Arc::clone(asset));
         }
+        self.scaled_diagnostics.misses = self.scaled_diagnostics.misses.saturating_add(1);
         let original = self.originals.get(&id)?;
+        let recompute_started = Instant::now();
         let pixels = image::imageops::resize(
             original.image(),
             key.width,
             key.height,
             FilterType::Triangle,
         );
+        self.scaled_diagnostics.recomputation_nanos = self
+            .scaled_diagnostics
+            .recomputation_nanos
+            .saturating_add(recompute_started.elapsed().as_nanos());
         let asset = Arc::new(RgbaAsset::new(pixels));
-        while self.scaled.len() >= IMAGE_SCALED_CAPACITY {
+        self.scaled_diagnostics.recomputations =
+            self.scaled_diagnostics.recomputations.saturating_add(1);
+        let bytes = asset_pixel_bytes(&asset);
+        if bytes > IMAGE_SCALED_BYTE_CAPACITY {
+            return Some(asset);
+        }
+        while self.scaled.len() >= IMAGE_SCALED_CAPACITY
+            || self
+                .scaled_diagnostics
+                .estimated_retained_bytes
+                .saturating_add(bytes)
+                > IMAGE_SCALED_BYTE_CAPACITY
+        {
             let Some(oldest) = self.scaled_order.pop_front() else {
                 break;
             };
-            if self.scaled.remove(&oldest).is_some() {
-                self.scaled_evictions = self.scaled_evictions.saturating_add(1);
+            if let Some(removed) = self.scaled.remove(&oldest) {
+                subtract_retained(&mut self.scaled_diagnostics, asset_pixel_bytes(&removed));
+                self.scaled_diagnostics.evictions =
+                    self.scaled_diagnostics.evictions.saturating_add(1);
             }
         }
         self.scaled_order.push_back(key);
         self.scaled.insert(key, Arc::clone(&asset));
+        record_insertion(&mut self.scaled_diagnostics, bytes);
         Some(asset)
     }
 
     pub fn remove(&mut self, id: ImageAssetId) {
-        self.originals.remove(&id);
-        self.scaled.retain(|key, _| key.id != id);
+        if let Some(removed) = self.originals.remove(&id) {
+            subtract_retained(&mut self.original_diagnostics, asset_pixel_bytes(&removed));
+            self.original_diagnostics.invalidations =
+                self.original_diagnostics.invalidations.saturating_add(1);
+        }
+        self.invalidate_scaled_for_original(id);
         self.original_order.retain(|candidate| *candidate != id);
-        self.scaled_order.retain(|key| key.id != id);
     }
 
     pub fn clear(&mut self) {
+        self.original_diagnostics.invalidations = self
+            .original_diagnostics
+            .invalidations
+            .saturating_add(self.originals.len() as u64);
+        self.scaled_diagnostics.invalidations = self
+            .scaled_diagnostics
+            .invalidations
+            .saturating_add(self.scaled.len() as u64);
         self.originals.clear();
         self.scaled.clear();
         self.original_order.clear();
         self.scaled_order.clear();
+        self.original_diagnostics.estimated_retained_bytes = 0;
+        self.scaled_diagnostics.estimated_retained_bytes = 0;
     }
 
     pub fn diagnostics(&self) -> (CacheDiagnostics, CacheDiagnostics) {
         (
-            CacheDiagnostics {
-                entries: self.originals.len(),
-                capacity: IMAGE_ORIGINAL_CAPACITY,
-                evictions: self.original_evictions,
-            },
-            CacheDiagnostics {
-                entries: self.scaled.len(),
-                capacity: IMAGE_SCALED_CAPACITY,
-                evictions: self.scaled_evictions,
-            },
+            cache_diagnostics(
+                self.originals.len(),
+                IMAGE_ORIGINAL_CAPACITY,
+                IMAGE_ORIGINAL_BYTE_CAPACITY,
+                self.original_diagnostics,
+            ),
+            cache_diagnostics(
+                self.scaled.len(),
+                IMAGE_SCALED_CAPACITY,
+                IMAGE_SCALED_BYTE_CAPACITY,
+                self.scaled_diagnostics,
+            ),
         )
     }
+
+    fn evict_scaled_for_original(&mut self, id: ImageAssetId) {
+        let keys = self
+            .scaled
+            .keys()
+            .filter(|key| key.id == id)
+            .copied()
+            .collect::<Vec<_>>();
+        for key in keys {
+            if let Some(removed) = self.scaled.remove(&key) {
+                subtract_retained(&mut self.scaled_diagnostics, asset_pixel_bytes(&removed));
+                self.scaled_diagnostics.evictions =
+                    self.scaled_diagnostics.evictions.saturating_add(1);
+            }
+        }
+        self.scaled_order.retain(|key| key.id != id);
+    }
+
+    fn invalidate_scaled_for_original(&mut self, id: ImageAssetId) {
+        let keys = self
+            .scaled
+            .keys()
+            .filter(|key| key.id == id)
+            .copied()
+            .collect::<Vec<_>>();
+        for key in keys {
+            if let Some(removed) = self.scaled.remove(&key) {
+                subtract_retained(&mut self.scaled_diagnostics, asset_pixel_bytes(&removed));
+                self.scaled_diagnostics.invalidations =
+                    self.scaled_diagnostics.invalidations.saturating_add(1);
+            }
+        }
+        self.scaled_order.retain(|key| key.id != id);
+    }
+}
+
+fn asset_pixel_bytes(asset: &RgbaAsset) -> usize {
+    asset.pixels().len()
+}
+
+fn subtract_retained(activity: &mut CacheActivity, bytes: usize) {
+    activity.estimated_retained_bytes = activity.estimated_retained_bytes.saturating_sub(bytes);
+}
+
+fn record_insertion(activity: &mut CacheActivity, bytes: usize) {
+    activity.insertions = activity.insertions.saturating_add(1);
+    activity.estimated_retained_bytes = activity.estimated_retained_bytes.saturating_add(bytes);
+    activity.peak_estimated_retained_bytes = activity
+        .peak_estimated_retained_bytes
+        .max(activity.estimated_retained_bytes);
+}
+
+fn cache_diagnostics(
+    entries: usize,
+    capacity: usize,
+    byte_capacity: usize,
+    activity: CacheActivity,
+) -> CacheDiagnostics {
+    CacheDiagnostics {
+        entries,
+        capacity,
+        estimated_retained_bytes: activity.estimated_retained_bytes,
+        byte_capacity,
+        peak_estimated_retained_bytes: activity.peak_estimated_retained_bytes,
+        hits: activity.hits,
+        misses: activity.misses,
+        insertions: activity.insertions,
+        evictions: activity.evictions,
+        invalidations: activity.invalidations,
+        recomputations: activity.recomputations,
+        recomputation_nanos: activity.recomputation_nanos,
+    }
+}
+
+fn evict_text_oldest(
+    assets: &mut HashMap<TextKey, Arc<RgbaAsset>>,
+    insertion_order: &mut VecDeque<TextKey>,
+    diagnostics: &mut CacheActivity,
+) -> bool {
+    while let Some(oldest) = insertion_order.pop_front() {
+        if let Some(removed) = assets.remove(&oldest) {
+            subtract_retained(diagnostics, asset_pixel_bytes(&removed));
+            diagnostics.evictions = diagnostics.evictions.saturating_add(1);
+            return true;
+        }
+    }
+    false
 }
 
 fn fill_blended(target: &mut RgbaImage, x: i32, y: i32, width: u32, height: u32, source: [u8; 4]) {
@@ -416,8 +611,23 @@ mod tests {
         assert!(Arc::ptr_eq(&first, &second));
         assert_eq!(cache.len(), 1);
 
+        let before_clear = cache.diagnostics();
+        assert_eq!(before_clear.hits, 1);
+        assert_eq!(before_clear.misses, 1);
+        assert_eq!(before_clear.insertions, 1);
+        assert_eq!(before_clear.recomputations, 1);
+        assert!(before_clear.recomputation_nanos > 0);
+        assert_eq!(before_clear.estimated_retained_bytes, first.pixels().len());
+
         cache.clear();
         assert!(cache.is_empty());
+        let after_clear = cache.diagnostics();
+        assert_eq!(after_clear.estimated_retained_bytes, 0);
+        assert_eq!(after_clear.invalidations, 1);
+        assert_eq!(
+            after_clear.peak_estimated_retained_bytes,
+            before_clear.estimated_retained_bytes
+        );
     }
 
     #[test]
@@ -430,6 +640,13 @@ mod tests {
 
         assert_eq!((first.width(), first.height()), (16, 16));
         assert!(Arc::ptr_eq(&first, &second));
+        let (originals, scaled) = cache.diagnostics();
+        assert_eq!(originals.insertions, 1);
+        assert_eq!(scaled.hits, 1);
+        assert_eq!(scaled.misses, 1);
+        assert_eq!(scaled.insertions, 1);
+        assert_eq!(scaled.recomputations, 1);
+        assert!(scaled.recomputation_nanos > 0);
     }
 
     #[test]
@@ -443,14 +660,14 @@ mod tests {
             ));
         }
 
-        assert_eq!(
-            cache.diagnostics(),
-            CacheDiagnostics {
-                entries: TEXT_ASSET_CAPACITY,
-                capacity: TEXT_ASSET_CAPACITY,
-                evictions: 1,
-            }
-        );
+        let diagnostics = cache.diagnostics();
+        assert_eq!(diagnostics.entries, TEXT_ASSET_CAPACITY);
+        assert_eq!(diagnostics.capacity, TEXT_ASSET_CAPACITY);
+        assert_eq!(diagnostics.misses, (TEXT_ASSET_CAPACITY + 1) as u64);
+        assert_eq!(diagnostics.insertions, diagnostics.misses);
+        assert_eq!(diagnostics.evictions, 1);
+        assert!(diagnostics.estimated_retained_bytes <= diagnostics.byte_capacity);
+        assert!(diagnostics.peak_estimated_retained_bytes <= diagnostics.byte_capacity);
     }
 
     #[test]
@@ -470,21 +687,86 @@ mod tests {
         }
 
         let (originals, scaled) = cache.diagnostics();
-        assert_eq!(
-            originals,
-            CacheDiagnostics {
-                entries: IMAGE_ORIGINAL_CAPACITY,
-                capacity: IMAGE_ORIGINAL_CAPACITY,
-                evictions: 1,
-            }
-        );
-        assert_eq!(
-            scaled,
-            CacheDiagnostics {
-                entries: IMAGE_SCALED_CAPACITY,
-                capacity: IMAGE_SCALED_CAPACITY,
-                evictions: 1,
-            }
-        );
+        assert_eq!(originals.entries, IMAGE_ORIGINAL_CAPACITY);
+        assert_eq!(originals.capacity, IMAGE_ORIGINAL_CAPACITY);
+        assert_eq!(originals.insertions, (IMAGE_ORIGINAL_CAPACITY + 1) as u64);
+        assert_eq!(originals.evictions, 1);
+        assert!(originals.estimated_retained_bytes <= originals.byte_capacity);
+        assert_eq!(scaled.entries, IMAGE_SCALED_CAPACITY);
+        assert_eq!(scaled.capacity, IMAGE_SCALED_CAPACITY);
+        assert_eq!(scaled.misses, (IMAGE_SCALED_CAPACITY + 1) as u64);
+        assert_eq!(scaled.recomputations, scaled.misses);
+        assert_eq!(scaled.evictions, 1);
+        assert!(scaled.estimated_retained_bytes <= scaled.byte_capacity);
+    }
+
+    #[test]
+    fn image_cache_byte_bounds_and_lifecycle_account_for_cascaded_variants() {
+        let mut cache = ImageAssetCache::default();
+        for index in 0..5 {
+            cache.insert(
+                ImageAssetId(index),
+                RgbaImage::from_pixel(4096, 2048, Rgba([index as u8, 0, 0, 255])),
+            );
+        }
+        let retained = ImageAssetId(4);
+        cache
+            .scaled(retained, 2048, 2048)
+            .expect("retained original");
+        cache
+            .scaled(retained, 2048, 2047)
+            .expect("retained original");
+        cache
+            .scaled(retained, 2048, 2046)
+            .expect("retained original");
+        cache
+            .scaled(retained, 2048, 2045)
+            .expect("retained original");
+        cache
+            .scaled(retained, 2048, 2044)
+            .expect("retained original");
+
+        let (originals, scaled) = cache.diagnostics();
+        assert!(originals.estimated_retained_bytes <= originals.byte_capacity);
+        assert!(originals.peak_estimated_retained_bytes <= originals.byte_capacity);
+        assert!(originals.evictions > 0);
+        assert!(scaled.estimated_retained_bytes <= scaled.byte_capacity);
+        assert!(scaled.peak_estimated_retained_bytes <= scaled.byte_capacity);
+        assert!(scaled.evictions > 0);
+
+        cache.remove(retained);
+        let (after_remove, after_scaled_remove) = cache.diagnostics();
+        assert_eq!(after_remove.invalidations, 1);
+        assert_eq!(after_scaled_remove.entries, 0);
+        assert!(after_scaled_remove.invalidations > 0);
+
+        cache.clear();
+        let (after_clear, after_scaled_clear) = cache.diagnostics();
+        assert_eq!(after_clear.entries, 0);
+        assert_eq!(after_clear.estimated_retained_bytes, 0);
+        assert_eq!(after_scaled_clear.estimated_retained_bytes, 0);
+    }
+
+    #[test]
+    fn text_cache_byte_churn_returns_to_steady_state() {
+        let mut cache = TextAssetCache::new();
+        for index in 0..4 {
+            cache.get(TextRequest {
+                text: &format!("wide-{index}"),
+                size: 8.0,
+                line_height: 1024.0,
+                max_width: Some(4096),
+                color: [255, 255, 255, 255],
+                weight: TextWeight::Normal,
+            });
+        }
+        let diagnostics = cache.diagnostics();
+        assert!(diagnostics.entries < TEXT_ASSET_CAPACITY);
+        assert!(diagnostics.evictions > 0);
+        assert!(diagnostics.estimated_retained_bytes <= diagnostics.byte_capacity);
+        assert!(diagnostics.peak_estimated_retained_bytes <= diagnostics.byte_capacity);
+
+        cache.clear();
+        assert_eq!(cache.diagnostics().estimated_retained_bytes, 0);
     }
 }

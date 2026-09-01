@@ -7,9 +7,9 @@ window titles, icons, scales, and preview targets cannot grow a desktop session 
 | Cache | Limit | Eviction and diagnostics |
 | --- | ---: | --- |
 | Launcher icons, including negative lookups | 512 | Oldest inserted entry; `LauncherIconCache::diagnostics` |
-| Shared CPU text rasters | 512 | Oldest inserted entry; `TextAssetCache::diagnostics` |
-| Shared decoded images | 256 | Oldest inserted image and all of its scaled variants; `ImageAssetCache::diagnostics` |
-| Shared scaled image variants | 512 | Oldest inserted variant; `ImageAssetCache::diagnostics` |
+| Shared CPU text rasters | 512 entries and 32 MiB estimated RGBA payload | Oldest inserted entry at either bound; `TextAssetCache::diagnostics` |
+| Shared decoded images | 256 entries and 128 MiB estimated RGBA payload | Oldest inserted image at either bound, together with all of its scaled variants; `ImageAssetCache::diagnostics` |
+| Shared scaled image variants | 512 entries and 64 MiB estimated RGBA payload | Oldest inserted variant at either bound; `ImageAssetCache::diagnostics` |
 | SDL text layouts and rasters | 2,048 each | Whole-cache reset at the limit |
 | SDL uploaded image textures | 512 | Whole-cache reset with explicit texture destruction |
 | Compositor window previews | 1,024 | Removed when no longer requested or when the window closes |
@@ -21,8 +21,11 @@ geometry. They are intentionally not cached or retained between frames.
 
 `nickel-test-input caches` reports the compositor preview entry count, hard limit, and current RGBA
 byte total for an explicitly test-controlled nested session. The shared asset and launcher cache APIs
-expose entry, capacity, and cumulative eviction counters to application diagnostics without exposing
-native handles or retaining duplicate semantic state.
+expose hard entry and byte capacities, live and peak estimated RGBA payload bytes, and cumulative
+hit, miss, insertion, eviction, invalidation, recomputation-count, and recomputation-time diagnostics
+without exposing native handles or retaining duplicate semantic state. These byte totals deliberately
+exclude allocator, hash-map, key, queue, `Arc`, font-system, and dependency-owned cache overhead, so
+they are cache-owned payload estimates rather than exact process-memory claims.
 
 Visible grouped-window previews refresh at most twice per second. Preview frames are fetched by
 correlated request ID over the session socket; stale timed-out replies are discarded instead of
