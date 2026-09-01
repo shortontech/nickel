@@ -1730,6 +1730,253 @@ fn missing_declared_neighbor_uses_deterministic_spatial_fallback() {
     );
 }
 
+fn selected_suffix(state: &UiStateStore, suffix: &str) -> bool {
+    state
+        .navigation()
+        .controller_selected()
+        .is_some_and(|id| id.as_str().ends_with(suffix))
+}
+
+#[test]
+fn navigation_scope_entry_first_last_and_target_use_production_targets() {
+    for (entry, expected) in [
+        (crate::NavigationEntry::First, "/first"),
+        (crate::NavigationEntry::Last, "/third"),
+        (
+            crate::NavigationEntry::Target(UiId::from("root/scope/second")),
+            "/second",
+        ),
+    ] {
+        let view = Container::new()
+            .id("scope")
+            .navigation_scope(crate::NavigationScope::group().entry(entry))
+            .children([
+                Button::new(TestMessage::Option(1), "First").id("first"),
+                Button::new(TestMessage::Option(2), "Second").id("second"),
+                Button::new(TestMessage::Option(3), "Third").id("third"),
+            ]);
+        let mut state = UiStateStore::default();
+        let tree = UiFrame::layout_with_state(view, Rect::new(0.0, 0.0, 240.0, 160.0), &mut state);
+        tree.handle_event(&mut state, UiEvent::ControllerDown);
+        tree.handle_event(&mut state, UiEvent::ControllerActivate);
+        assert!(selected_suffix(&state, expected), "entry {expected:?}");
+    }
+}
+
+#[test]
+fn navigation_scope_exit_parent_contain_and_dismiss_are_distinct() {
+    for (exit, expected_scope, expected_selected) in [
+        (crate::NavigationExit::Parent, None, Some("/scope")),
+        (
+            crate::NavigationExit::Contain,
+            Some("root/scope"),
+            Some("/item"),
+        ),
+        (crate::NavigationExit::Dismiss, None, None),
+    ] {
+        let view = Container::new()
+            .id("scope")
+            .navigation_scope(crate::NavigationScope::group().exit(exit))
+            .child(Button::new(TestMessage::Option(1), "Item").id("item"));
+        let mut state = UiStateStore::default();
+        let tree = UiFrame::layout_with_state(view, Rect::new(0.0, 0.0, 160.0, 80.0), &mut state);
+        tree.handle_event(&mut state, UiEvent::ControllerDown);
+        tree.handle_event(&mut state, UiEvent::ControllerActivate);
+        tree.handle_event(&mut state, UiEvent::ControllerBack);
+        assert_eq!(
+            state.navigation().controller_scope().map(UiId::as_str),
+            expected_scope
+        );
+        assert_eq!(
+            state
+                .navigation()
+                .controller_selected()
+                .map(|id| expected_selected.is_some_and(|suffix| id.as_str().ends_with(suffix))),
+            expected_selected.map(|_| true)
+        );
+    }
+}
+
+#[test]
+fn linear_navigation_honors_rtl_and_containment_at_edges() {
+    let view = Container::new()
+        .id("scope")
+        .navigation_scope(
+            crate::NavigationScope::group()
+                .traversal(crate::NavigationTraversal::Linear)
+                .direction(crate::ReadingDirection::RightToLeft)
+                .exit(crate::NavigationExit::Contain),
+        )
+        .children([
+            Button::new(TestMessage::Option(1), "First").id("first"),
+            Button::new(TestMessage::Option(2), "Second").id("second"),
+        ]);
+    let mut state = UiStateStore::default();
+    let tree = UiFrame::layout_with_state(view, Rect::new(0.0, 0.0, 240.0, 80.0), &mut state);
+    tree.handle_event(&mut state, UiEvent::ControllerDown);
+    tree.handle_event(&mut state, UiEvent::ControllerActivate);
+    tree.handle_event(&mut state, UiEvent::ControllerLeft);
+    assert!(selected_suffix(&state, "/second"));
+    tree.handle_event(&mut state, UiEvent::ControllerLeft);
+    assert!(selected_suffix(&state, "/second"));
+    tree.handle_event(&mut state, UiEvent::ControllerRight);
+    assert!(selected_suffix(&state, "/first"));
+}
+
+#[test]
+fn pane_peers_are_scoped_to_their_navigation_parent() {
+    let pane = |id, item, default| {
+        Container::new()
+            .id(id)
+            .navigation_scope(crate::NavigationScope::pane(default))
+            .child(Button::new(TestMessage::Named(item), item).id(item))
+    };
+    let view = Row::new().children([
+        Container::new()
+            .id("outer")
+            .navigation_scope(crate::NavigationScope::group())
+            .children([
+                pane("left", "left-item", true),
+                pane("right", "right-item", false),
+            ]),
+        Container::new()
+            .id("other")
+            .navigation_scope(crate::NavigationScope::group())
+            .children([
+                pane("alpha", "alpha-item", false),
+                pane("beta", "beta-item", false),
+            ]),
+    ]);
+    let mut state = UiStateStore::default();
+    let tree = UiFrame::layout_with_state(view, Rect::new(0.0, 0.0, 600.0, 100.0), &mut state);
+    assert!(
+        state
+            .navigation()
+            .controller_pane()
+            .is_some_and(|id| id.as_str().ends_with("/outer/left"))
+    );
+    tree.handle_event(&mut state, UiEvent::ControllerNextPane);
+    assert!(
+        state
+            .navigation()
+            .controller_pane()
+            .is_some_and(|id| id.as_str().ends_with("/outer/right"))
+    );
+    tree.handle_event(&mut state, UiEvent::ControllerNextPane);
+    assert!(
+        state
+            .navigation()
+            .controller_pane()
+            .is_some_and(|id| id.as_str().ends_with("/outer/right"))
+    );
+}
+
+#[test]
+fn retain_focus_false_and_removed_retained_target_use_declared_entry() {
+    fn scope(retain: bool, include_second: bool) -> Container<TestMessage> {
+        let mut scope = Container::new().id("scope").navigation_scope(
+            crate::NavigationScope::group()
+                .entry(crate::NavigationEntry::First)
+                .retain_focus(retain),
+        );
+        scope = scope.child(Button::new(TestMessage::Option(1), "First").id("first"));
+        if include_second {
+            scope = scope.child(Button::new(TestMessage::Option(2), "Second").id("second"));
+        }
+        scope
+    }
+    for retain in [false, true] {
+        let mut state = UiStateStore::default();
+        let tree = UiFrame::layout_with_state(
+            scope(retain, true),
+            Rect::new(0.0, 0.0, 200.0, 100.0),
+            &mut state,
+        );
+        tree.handle_event(&mut state, UiEvent::ControllerDown);
+        tree.handle_event(&mut state, UiEvent::ControllerActivate);
+        tree.handle_event(&mut state, UiEvent::ControllerDown);
+        assert!(selected_suffix(&state, "/second"));
+        tree.handle_event(&mut state, UiEvent::ControllerBack);
+        let rebuilt = UiFrame::layout_with_state(
+            scope(retain, false),
+            Rect::new(0.0, 0.0, 200.0, 100.0),
+            &mut state,
+        );
+        rebuilt.handle_event(&mut state, UiEvent::ControllerActivate);
+        assert!(selected_suffix(&state, "/first"));
+    }
+}
+
+#[test]
+fn disabled_retained_target_falls_back_to_declared_entry() {
+    let build = |second_enabled| {
+        let mut second = Container::new()
+            .id("second")
+            .semantic_role(SemanticRole::Button)
+            .accessibility_label("Second");
+        if second_enabled {
+            second = second.message(TestMessage::Option(2));
+        }
+        Container::new()
+            .id("scope")
+            .navigation_scope(crate::NavigationScope::group())
+            .children([
+                Container::new()
+                    .id("first")
+                    .semantic_role(SemanticRole::Button)
+                    .accessibility_label("First")
+                    .message(TestMessage::Option(1)),
+                second,
+            ])
+    };
+    let mut state = UiStateStore::default();
+    let tree =
+        UiFrame::layout_with_state(build(true), Rect::new(0.0, 0.0, 200.0, 100.0), &mut state);
+    tree.handle_event(&mut state, UiEvent::ControllerDown);
+    tree.handle_event(&mut state, UiEvent::ControllerActivate);
+    tree.handle_event(&mut state, UiEvent::ControllerDown);
+    tree.handle_event(&mut state, UiEvent::ControllerBack);
+    let rebuilt =
+        UiFrame::layout_with_state(build(false), Rect::new(0.0, 0.0, 200.0, 100.0), &mut state);
+    rebuilt.handle_event(&mut state, UiEvent::ControllerActivate);
+    assert!(selected_suffix(&state, "/first"));
+}
+
+#[test]
+fn declared_scroll_owner_is_the_only_surface_revealed_for_scope_focus() {
+    let view = VerticalScroll::new(TestMessage::Named("scroll"), 0.0)
+        .id("owner")
+        .height(60.0)
+        .child(
+            Container::new()
+                .id("scope")
+                .navigation_scope(
+                    crate::NavigationScope::group().scroll_owner(UiId::from("root/owner")),
+                )
+                .child(
+                    Column::new().children([
+                        Button::new(TestMessage::Option(1), "First")
+                            .id("first")
+                            .height(50.0),
+                        Button::new(TestMessage::Option(2), "Second")
+                            .id("second")
+                            .height(50.0),
+                    ]),
+                ),
+        );
+    let mut state = UiStateStore::default();
+    let tree = UiFrame::layout_with_state(view, Rect::new(0.0, 0.0, 200.0, 60.0), &mut state);
+    tree.handle_event(&mut state, UiEvent::ControllerDown);
+    tree.handle_event(&mut state, UiEvent::ControllerActivate);
+    tree.handle_event(&mut state, UiEvent::ControllerDown);
+    assert!(selected_suffix(&state, "/second"));
+    assert!(
+        state
+            .state(&UiId::from("root/owner"))
+            .is_some_and(|entry| entry.scroll_offset > 0.0)
+    );
+}
+
 #[test]
 fn pointer_drag_selects_visible_text_and_caret_blink_only_changes_paint() {
     fn query(value: String) -> TestMessage {

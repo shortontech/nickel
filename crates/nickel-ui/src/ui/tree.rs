@@ -2293,14 +2293,6 @@ impl<Message: Clone> UiFrame<Message> {
                 } else if state.navigation().controller_editing() {
                     state.navigation_mut().set_controller_editing(false)
                 } else if let Some(scope) = state.navigation().controller_scope().cloned() {
-                    if let Some(selected) = state.navigation().controller_selected().cloned() {
-                        state
-                            .navigation_mut()
-                            .retain_controller_focus(scope.clone(), selected);
-                    }
-                    let parent_scope = self
-                        .nearest_ancestor_where(&scope, |node| node.navigation_scope.is_some())
-                        .map(|node| node.id.clone());
                     let close_menu = if self
                         .resolved
                         .nodes
@@ -2312,14 +2304,12 @@ impl<Message: Clone> UiFrame<Message> {
                     } else {
                         Invalidation::None
                     };
-                    close_menu.merge(
-                        state
-                            .navigation_mut()
-                            .set_controller_scope(parent_scope)
-                            .merge(self.select_controller_id(state, scope)),
-                    )
+                    close_menu.merge(self.leave_controller_scope(state, &scope))
                 } else {
-                    self.switch_controller_pane(state, -1)
+                    state
+                        .navigation_mut()
+                        .set_controller_selected(None)
+                        .merge(state.navigation_mut().set_controller_pane(None))
                 }
             }
             UiEvent::ActivateFocused | UiEvent::KeyboardActivate => {
@@ -2344,10 +2334,6 @@ impl<Message: Clone> UiFrame<Message> {
                 {
                     if node.navigation_scope.is_some() {
                         let scope = node.id.clone();
-                        let retained = state
-                            .navigation()
-                            .retained_controller_focus(&scope)
-                            .cloned();
                         state.navigation_mut().set_controller_scope(Some(scope));
                         state.navigation_mut().set_controller_selected(None);
                         let dropdown_invalidation = if node.component == "Dropdown" {
@@ -2355,13 +2341,7 @@ impl<Message: Clone> UiFrame<Message> {
                         } else {
                             Invalidation::None
                         };
-                        let targets = self.controller_targets(state);
-                        let invalidation =
-                            if let Some(retained) = retained.filter(|id| targets.contains(id)) {
-                                self.select_controller_id(state, retained)
-                            } else {
-                                self.move_controller(state, 1)
-                            };
+                        let invalidation = self.select_scope_entry(state, &node.id);
                         return EventOutcome {
                             messages: outcome.messages,
                             invalidation: invalidation.merge(dropdown_invalidation),
@@ -2820,23 +2800,11 @@ impl<Message: Clone> UiFrame<Message> {
                 }
             });
         if at_scope_edge && let Some(scope) = state.navigation().controller_scope().cloned() {
-            if let Some(selected) = state.navigation().controller_selected().cloned() {
-                state
-                    .navigation_mut()
-                    .retain_controller_focus(scope.clone(), selected);
-            }
-            let parent_scope = self
-                .nearest_ancestor_where(&scope, |node| node.navigation_scope.is_some())
-                .map(|node| node.id.clone());
-            let mut invalidation = state
-                .navigation_mut()
-                .set_controller_scope(parent_scope)
-                .merge(state.navigation_mut().set_controller_editing(false))
-                .merge(self.select_controller_id(state, scope));
-            let parent_targets = self.controller_targets(state);
-            invalidation =
-                invalidation.merge(self.select_controller_from(state, direction, parent_targets));
-            return invalidation;
+            return match self.scope_policy(&scope).map(|policy| policy.exit) {
+                Some(crate::NavigationExit::Parent) => self.leave_controller_scope(state, &scope),
+                Some(crate::NavigationExit::Dismiss) => self.leave_controller_scope(state, &scope),
+                Some(crate::NavigationExit::Contain) | None => Invalidation::None,
+            };
         }
         self.select_controller_from(state, direction, ids)
     }
@@ -2861,6 +2829,23 @@ impl<Message: Clone> UiFrame<Message> {
                 ControllerDirection::Right => self.adjust_controller_value(state, 1.0, messages),
                 ControllerDirection::Up | ControllerDirection::Down => Invalidation::None,
             };
+        }
+        if let Some(scope) = state
+            .navigation()
+            .controller_scope()
+            .or_else(|| state.navigation().controller_pane())
+            .and_then(|id| self.scope_policy(id))
+            && scope.traversal == crate::NavigationTraversal::Linear
+        {
+            let direction = match (direction, scope.direction) {
+                (ControllerDirection::Up, _) => Some(-1),
+                (ControllerDirection::Down, _) => Some(1),
+                (ControllerDirection::Left, crate::ReadingDirection::LeftToRight)
+                | (ControllerDirection::Right, crate::ReadingDirection::RightToLeft) => Some(-1),
+                (ControllerDirection::Right, crate::ReadingDirection::LeftToRight)
+                | (ControllerDirection::Left, crate::ReadingDirection::RightToLeft) => Some(1),
+            };
+            return self.move_controller(state, direction.expect("every direction is mapped"));
         }
         let ids = self.controller_targets(state);
         if ids.is_empty() {
@@ -3125,6 +3110,79 @@ impl<Message: Clone> UiFrame<Message> {
         targets
     }
 
+    fn scope_policy(&self, id: &UiId) -> Option<&crate::NavigationScope> {
+        self.resolved.find(id)?.navigation_scope.as_ref()
+    }
+
+    fn remember_scope_selection(&self, state: &mut UiStateStore, scope: &UiId) {
+        if self
+            .scope_policy(scope)
+            .is_some_and(|policy| policy.retain_focus)
+        {
+            if let Some(selected) = state.navigation().controller_selected().cloned() {
+                state
+                    .navigation_mut()
+                    .retain_controller_focus(scope.clone(), selected);
+            }
+        } else {
+            state.navigation_mut().forget_controller_focus(scope);
+        }
+    }
+
+    fn select_scope_entry(&self, state: &mut UiStateStore, scope: &UiId) -> Invalidation {
+        let targets = self.controller_targets(state);
+        if targets.is_empty() {
+            return state.navigation_mut().set_controller_selected(None);
+        }
+        let policy = self.scope_policy(scope);
+        let retained = policy
+            .filter(|policy| policy.retain_focus)
+            .and_then(|_| state.navigation().retained_controller_focus(scope))
+            .filter(|id| targets.contains(id))
+            .cloned();
+        let declared = policy.and_then(|policy| match &policy.entry {
+            crate::NavigationEntry::First => targets.first().cloned(),
+            crate::NavigationEntry::Last => targets.last().cloned(),
+            crate::NavigationEntry::Target(id) => targets
+                .contains(id)
+                .then(|| id.clone())
+                .or_else(|| targets.first().cloned()),
+        });
+        retained
+            .or(declared)
+            .or_else(|| targets.first().cloned())
+            .map(|id| self.select_controller_id(state, id))
+            .unwrap_or(Invalidation::None)
+    }
+
+    fn leave_controller_scope(&self, state: &mut UiStateStore, scope: &UiId) -> Invalidation {
+        let exit = self
+            .scope_policy(scope)
+            .map_or(crate::NavigationExit::Parent, |policy| policy.exit);
+        match exit {
+            crate::NavigationExit::Contain => Invalidation::None,
+            crate::NavigationExit::Dismiss => {
+                self.remember_scope_selection(state, scope);
+                state
+                    .navigation_mut()
+                    .set_controller_scope(None)
+                    .merge(state.navigation_mut().set_controller_pane(None))
+                    .merge(state.navigation_mut().set_controller_selected(None))
+            }
+            crate::NavigationExit::Parent => {
+                self.remember_scope_selection(state, scope);
+                let parent_scope = self
+                    .nearest_ancestor_where(scope, |node| node.navigation_scope.is_some())
+                    .map(|node| node.id.clone());
+                state
+                    .navigation_mut()
+                    .set_controller_scope(parent_scope)
+                    .merge(state.navigation_mut().set_controller_editing(false))
+                    .merge(self.select_controller_id(state, scope.clone()))
+            }
+        }
+    }
+
     fn controller_rect(&self, id: &UiId) -> Option<Rect> {
         self.resolved
             .nodes
@@ -3181,7 +3239,18 @@ impl<Message: Clone> UiFrame<Message> {
         let Some(target) = self.controller_rect(selected) else {
             return Invalidation::None;
         };
-        for scroll in self.scrolls.iter().rev() {
+        let declared_owner = state
+            .navigation()
+            .controller_scope()
+            .or_else(|| state.navigation().controller_pane())
+            .and_then(|scope| self.scope_policy(scope))
+            .and_then(|scope| scope.scroll_owner.as_ref());
+        for scroll in self
+            .scrolls
+            .iter()
+            .rev()
+            .filter(|scroll| declared_owner.is_none_or(|owner| &scroll.id == owner))
+        {
             let overlaps_horizontally = target.origin.x
                 < scroll.rect.origin.x + scroll.rect.size.width
                 && target.origin.x + target.size.width > scroll.rect.origin.x;
@@ -3212,6 +3281,13 @@ impl<Message: Clone> UiFrame<Message> {
     }
 
     fn switch_controller_pane(&self, state: &mut UiStateStore, direction: isize) -> Invalidation {
+        let current_parent = state
+            .navigation()
+            .controller_pane()
+            .and_then(|pane| {
+                self.nearest_ancestor_where(pane, |node| node.navigation_scope.is_some())
+            })
+            .map(|node| node.id.clone());
         let panes = self
             .resolved
             .nodes
@@ -3220,6 +3296,12 @@ impl<Message: Clone> UiFrame<Message> {
                 node.navigation_scope
                     .as_ref()
                     .is_some_and(|scope| scope.pane)
+                    && self
+                        .nearest_ancestor_where(&node.id, |candidate| {
+                            candidate.navigation_scope.is_some()
+                        })
+                        .map(|parent| parent.id.clone())
+                        == current_parent
             })
             .map(|node| node.id.clone())
             .collect::<Vec<_>>();
@@ -3240,29 +3322,17 @@ impl<Message: Clone> UiFrame<Message> {
             state.navigation().controller_pane().cloned(),
             state.navigation().controller_selected().cloned(),
         ) {
-            state
-                .navigation_mut()
-                .retain_controller_focus(pane, selected);
+            let _ = selected;
+            self.remember_scope_selection(state, &pane);
         }
         let destination = panes[next].clone();
-        let retained = state
-            .navigation()
-            .retained_controller_focus(&destination)
-            .cloned();
         let mut invalidation = state
             .navigation_mut()
             .set_controller_pane(Some(destination))
             .merge(state.navigation_mut().set_controller_scope(None))
             .merge(state.navigation_mut().set_controller_editing(false))
             .merge(state.navigation_mut().set_controller_selected(None));
-        let targets = self.controller_targets(state);
-        invalidation = invalidation.merge(
-            if let Some(retained) = retained.filter(|id| targets.contains(id)) {
-                self.select_controller_id(state, retained)
-            } else {
-                self.move_controller(state, 1)
-            },
-        );
+        invalidation = invalidation.merge(self.select_scope_entry(state, &panes[next]));
         invalidation
     }
 

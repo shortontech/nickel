@@ -1831,9 +1831,9 @@ mod tests {
         wait_duration,
     };
     use crate::{
-        ActionKind, Button, ControllerAction, InputModality, Invalidation, OverlayId,
-        SemanticAction, SemanticActionError, SemanticRole, SemanticValueInput, TextField, UiEvent,
-        UiId, UiStateStore,
+        ActionKind, Button, Container, ControllerAction, InputModality, Invalidation,
+        NavigationEntry, NavigationScope, OverlayId, SemanticAction, SemanticActionError,
+        SemanticRole, SemanticValueInput, TextField, UiEvent, UiId, UiStateStore,
     };
 
     #[derive(Clone)]
@@ -1857,6 +1857,24 @@ mod tests {
 
         fn view(&self, _context: ViewContext) -> impl crate::View<Self::Message> {
             Button::new((), "Activate")
+        }
+    }
+
+    struct NavigationApplication;
+
+    impl Application for NavigationApplication {
+        type Message = ();
+
+        fn update(&mut self, (): Self::Message) {}
+
+        fn view(&self, _context: ViewContext) -> impl crate::View<Self::Message> {
+            Container::new()
+                .id("scope")
+                .navigation_scope(NavigationScope::group().entry(NavigationEntry::Last))
+                .children([
+                    Button::new((), "First").id("first"),
+                    Button::new((), "Last").id("last"),
+                ])
         }
     }
 
@@ -2010,6 +2028,20 @@ mod tests {
         assert!(outcome.telemetry.input_to_frame_us >= outcome.telemetry.input_to_message_us);
         assert!(outcome.telemetry.retained_frame_bytes > 0);
         assert_eq!(outcome.telemetry.allocation_count, None);
+    }
+
+    #[test]
+    fn ui_host_dispatches_declared_scope_entry_through_the_production_frame() {
+        let mut host = UiHost::new(NavigationApplication, 320, 200);
+        host.handle_event(UiEvent::ControllerDown);
+        host.handle_event(UiEvent::ControllerActivate);
+        let selected = host
+            .semantic_nodes()
+            .into_iter()
+            .find(|node| node.controller_selected)
+            .expect("declared entry selects a semantic target");
+        assert!(selected.id.as_str().ends_with("/last"));
+        assert_eq!(selected.navigation_depth, 1);
     }
 
     #[test]

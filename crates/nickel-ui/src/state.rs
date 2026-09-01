@@ -156,6 +156,9 @@ impl NavigationState {
     pub(crate) fn retain_controller_focus(&mut self, scope: UiId, selected: UiId) {
         self.controller_retained_focus.insert(scope, selected);
     }
+    pub(crate) fn forget_controller_focus(&mut self, scope: &UiId) {
+        self.controller_retained_focus.remove(scope);
+    }
     pub(crate) fn set_controller_selected(&mut self, id: Option<UiId>) -> Invalidation {
         replace_if_changed(&mut self.controller_selected, id, Invalidation::Paint)
     }

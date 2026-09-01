@@ -492,7 +492,6 @@ pub struct NavigationScope {
     pub traversal: NavigationTraversal,
     pub entry: NavigationEntry,
     pub exit: NavigationExit,
-    pub peer: Option<UiId>,
     pub direction: ReadingDirection,
     pub retain_focus: bool,
     pub scroll_owner: Option<UiId>,
@@ -507,7 +506,6 @@ impl Default for NavigationScope {
             traversal: NavigationTraversal::Spatial,
             entry: NavigationEntry::First,
             exit: NavigationExit::Parent,
-            peer: None,
             direction: ReadingDirection::LeftToRight,
             retain_focus: true,
             scroll_owner: None,
@@ -533,6 +531,36 @@ impl NavigationScope {
 
     pub fn neighbor(mut self, direction: NavigationDirection, target: impl Into<UiId>) -> Self {
         self.neighbors = self.neighbors.with(direction, target);
+        self
+    }
+
+    pub fn traversal(mut self, traversal: NavigationTraversal) -> Self {
+        self.traversal = traversal;
+        self
+    }
+
+    pub fn entry(mut self, entry: NavigationEntry) -> Self {
+        self.entry = entry;
+        self
+    }
+
+    pub fn exit(mut self, exit: NavigationExit) -> Self {
+        self.exit = exit;
+        self
+    }
+
+    pub fn direction(mut self, direction: ReadingDirection) -> Self {
+        self.direction = direction;
+        self
+    }
+
+    pub fn retain_focus(mut self, retain_focus: bool) -> Self {
+        self.retain_focus = retain_focus;
+        self
+    }
+
+    pub fn scroll_owner(mut self, scroll_owner: impl Into<UiId>) -> Self {
+        self.scroll_owner = Some(scroll_owner.into());
         self
     }
 }

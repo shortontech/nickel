@@ -46,8 +46,8 @@ application owns only domain state, typed messages, `update`, and `view`. See
 
 Controller structure is declarative and renderer-owned. Mark shoulder-switchable regions with
 `NavigationScope::pane`, and mark nested levels with `NavigationScope::group`. Each scope declares
-its traversal, entry, exit, peer, direction, retained-focus, and scroll-owner policy. Stable tree
-parentage supplies scope topology; identifier prefixes never do. `ControllerActivate` enters a group or begins editing a slider;
+its traversal, entry, exit, direction, retained-focus, and scroll-owner policy. Stable tree
+parentage supplies peer topology; identifier prefixes never do. `ControllerActivate` enters a group or begins editing a slider;
 `ControllerBack` exits one level; `ControllerAdjust` changes an active slider by its
 `controller_step`. Navigation automatically reveals off-screen semantic targets.
 
