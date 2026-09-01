@@ -1163,7 +1163,13 @@ fn has_visible_pixel(image: &RgbaImage) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nickel_ui::{ActionKind, ControllerAction, HostBatch, HostEvent, SemanticAction, UiHost};
+    use nickel_ui::{
+        ActionKind, ControllerAction, HostBatch, HostEvent, SemanticAction, SemanticValueInput,
+        UiHost,
+    };
+    use nickel_ui_testkit::{
+        ReachabilityModality, ReachabilityPolicy, Scenario, Selector, audit_reachability,
+    };
 
     fn palette() -> ThemePalette {
         ThemePalette {
@@ -1197,6 +1203,205 @@ mod tests {
             .iter()
             .filter_map(|node| node.label.clone())
             .collect()
+    }
+
+    fn launcher_scenario() -> Scenario<LauncherApplication> {
+        Scenario::new(
+            LauncherApplication::new(
+                Launcher::default(),
+                LauncherViewState::default(),
+                LauncherIconCache::new(),
+                palette(),
+            ),
+            920,
+            680,
+        )
+    }
+
+    fn populated_launcher_scenario() -> Scenario<LauncherApplication> {
+        let mut launcher = Launcher::new(
+            (0..30)
+                .map(|index| {
+                    Application::new(
+                        format!("application-{index:02}"),
+                        format!("Application {index:02}"),
+                        None,
+                        None,
+                        None,
+                    )
+                })
+                .collect(),
+        );
+        launcher.set_view(LauncherView::Applications);
+        Scenario::new(
+            LauncherApplication::new(
+                launcher,
+                LauncherViewState::default(),
+                LauncherIconCache::new(),
+                palette(),
+            ),
+            920,
+            680,
+        )
+    }
+
+    fn controller_target(scenario: &Scenario<LauncherApplication>) -> String {
+        scenario
+            .host()
+            .inspect()
+            .controller_target
+            .expect("controller input establishes a useful launcher target")
+            .as_str()
+            .to_owned()
+    }
+
+    #[test]
+    fn controller_scenario_switches_peer_panes_and_contains_dpad() {
+        let mut scenario = populated_launcher_scenario();
+
+        scenario.controller(ControllerAction::Down).unwrap();
+        let first_target = controller_target(&scenario);
+        assert!(
+            first_target.contains("launcher-dashboard-search-focus"),
+            "selected {first_target}"
+        );
+        scenario.controller(ControllerAction::PreviousPane).unwrap();
+        let sidebar_home = controller_target(&scenario);
+        assert!(sidebar_home.contains("start-menu-primary-pane"));
+
+        scenario.controller(ControllerAction::NextPane).unwrap();
+        assert_eq!(controller_target(&scenario), first_target);
+        scenario.controller(ControllerAction::Down).unwrap();
+        let content_home = controller_target(&scenario);
+        assert!(
+            content_home.contains("launcher-applications"),
+            "selected {content_home}"
+        );
+        for _ in 0..5 {
+            scenario.controller(ControllerAction::Down).unwrap();
+        }
+        let content_moved = controller_target(&scenario);
+        assert!(
+            content_moved.contains("launcher-applications"),
+            "D-pad escaped content pane: {content_moved}"
+        );
+
+        scenario.controller(ControllerAction::PreviousPane).unwrap();
+        assert_eq!(controller_target(&scenario), sidebar_home);
+        scenario.controller(ControllerAction::NextPane).unwrap();
+        assert_eq!(controller_target(&scenario), content_moved);
+    }
+
+    #[test]
+    fn controller_scenario_home_requests_open_and_close_without_local_polling() {
+        let mut scenario = launcher_scenario();
+        scenario.controller(ControllerAction::Launcher).unwrap();
+        scenario.controller(ControllerAction::Launcher).unwrap();
+
+        let operations = scenario.operation_trace();
+        assert_eq!(operations.len(), 2);
+        for operation in operations {
+            assert_eq!(operation.outcome.global_actions, ["ToggleLauncher"]);
+            assert!(!operation.outcome.rebuilt);
+        }
+    }
+
+    #[test]
+    fn populated_launcher_emits_machine_readable_controller_reachability() {
+        let report = audit_reachability(
+            populated_launcher_scenario,
+            &ReachabilityPolicy {
+                modalities: [ReachabilityModality::Controller].into_iter().collect(),
+                maximum_path_length: 32,
+                maximum_state_count: 64,
+                wall_time_ms: 1_000,
+                require_semantic_change: false,
+            },
+        );
+        let launch = report
+            .paths
+            .iter()
+            .find(|path| {
+                path.target.contains("launcher-applications/application-00")
+                    && path.action == "Activate"
+                    && path.modality == ReachabilityModality::Controller
+            })
+            .expect("representative populated application has a controller path");
+        assert!(
+            launch.reached,
+            "path: {launch:?}; issues: {:?}",
+            report.issues
+        );
+        let json = report
+            .to_json()
+            .expect("reachability report is serializable");
+        assert!(json.contains("launcher-applications/application-00"));
+    }
+
+    #[test]
+    fn controller_scenario_restores_dashboard_after_search_and_launches_selected_app() {
+        let mut scenario = launcher_scenario();
+        scenario.controller(ControllerAction::Down).unwrap();
+        scenario.controller(ControllerAction::Down).unwrap();
+        let dashboard_target = controller_target(&scenario);
+
+        let search = Selector::Role(nickel_ui::SemanticRole::TextField);
+        scenario
+            .semantic_operation(
+                &search,
+                SemanticAction::SetValue(SemanticValueInput::Text("fire".into())),
+            )
+            .unwrap();
+        assert!(
+            scenario
+                .semantic_nodes()
+                .iter()
+                .any(|node| node.id.as_str().contains("launcher-search-results/firefox"))
+        );
+        scenario
+            .semantic_operation(
+                &search,
+                SemanticAction::SetValue(SemanticValueInput::Text("".into())),
+            )
+            .unwrap();
+        assert!(
+            scenario
+                .semantic_nodes()
+                .iter()
+                .any(|node| node.id.as_str() == dashboard_target)
+        );
+
+        scenario
+            .controller_semantic_action(
+                &Selector::keyed_item("launcher-applications", "firefox"),
+                ActionKind::Activate,
+            )
+            .unwrap();
+        assert_eq!(
+            scenario.host_mut().application_mut().take_effects(),
+            [
+                LauncherAction::SetQuery("fire".into()),
+                LauncherAction::SetQuery("".into()),
+                LauncherAction::LaunchApplication("firefox".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn controller_scenario_cancel_closes_nested_menu_before_launcher_boundary() {
+        let mut scenario = launcher_scenario();
+        scenario
+            .controller_semantic_action(
+                &Selector::keyed_item("launcher-applications", "firefox"),
+                ActionKind::ContextMenu,
+            )
+            .unwrap();
+        assert!(scenario.host().inspect().open_overlay.is_some());
+
+        scenario.controller(ControllerAction::Cancel).unwrap();
+        assert!(scenario.host().inspect().open_overlay.is_none());
+        scenario.controller(ControllerAction::Cancel).unwrap();
+        assert!(scenario.host().inspect().open_overlay.is_none());
     }
 
     #[test]
