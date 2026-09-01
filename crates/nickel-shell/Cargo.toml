@@ -23,10 +23,8 @@ nickel-input = { path = "../nickel-input", features = ["sdl"] }
 nickel-logging = { path = "../nickel-logging" }
 nickel-session-protocol = { path = "../nickel-session-protocol" }
 nucleo-matcher.workspace = true
-raw-window-handle.workspace = true
 resvg.workspace = true
 sdl3.workspace = true
-softbuffer.workspace = true
 tracing.workspace = true
 zeroize.workspace = true
 nickel-ui-testkit = { path = "../nickel-ui-testkit", optional = true }

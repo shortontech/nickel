@@ -61,8 +61,6 @@ mod places;
 mod platform;
 #[path = "../sdl_control_view.rs"]
 mod sdl_control_view;
-#[path = "../sdl_gpu.rs"]
-mod sdl_gpu;
 #[path = "../sdl_launcher_view.rs"]
 mod sdl_launcher_view;
 #[path = "../sdl_live_shell.rs"]

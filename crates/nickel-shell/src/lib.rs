@@ -49,9 +49,6 @@ mod platform;
 mod sdl_control_view;
 #[cfg(feature = "workbench-fixtures")]
 #[allow(dead_code)]
-mod sdl_gpu;
-#[cfg(feature = "workbench-fixtures")]
-#[allow(dead_code)]
 mod sdl_launcher_view;
 #[cfg(feature = "workbench-fixtures")]
 #[allow(dead_code)]

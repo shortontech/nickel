@@ -114,6 +114,7 @@ pub struct SdlCanvasPresenter {
     image_texture_bytes: usize,
     cache_activity: CacheActivity,
     cache_mode: PresenterCacheMode,
+    clips: Vec<Rect>,
 }
 
 /// Diagnostic policy for comparing accelerated presentation with and without
@@ -437,6 +438,7 @@ impl SdlCanvasPresenter {
             image_texture_bytes: 0,
             cache_activity: CacheActivity::default(),
             cache_mode: PresenterCacheMode::Enabled,
+            clips: Vec::new(),
         })
     }
 
@@ -510,10 +512,14 @@ impl SdlCanvasPresenter {
         self.canvas.set_clip_rect(None);
         self.canvas.set_draw_color(SdlColor::RGBA(0, 0, 0, 0));
         self.canvas.clear();
-        let mut clips = vec![Rect::new(0.0, 0.0, width as f32, height as f32)];
-        for command in commands {
-            self.draw_accelerated(command, scale, &mut clips)?;
-        }
+        let mut clips = std::mem::take(&mut self.clips);
+        clips.clear();
+        clips.push(Rect::new(0.0, 0.0, width as f32, height as f32));
+        let result = commands
+            .iter()
+            .try_for_each(|command| self.draw_accelerated(command, scale, &mut clips));
+        self.clips = clips;
+        result?;
         self.canvas.set_clip_rect(None);
         self.canvas.present();
         Ok(DamageRegion {
