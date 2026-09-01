@@ -4,6 +4,7 @@ use nickel_codex::{
     BackendChoice, CodexSettings, CommandDecision, FileChangeDecision, RemoteHost, ServerRequestId,
 };
 use nickel_markdown::{MarkdownPalette, markdown_content_view};
+use nickel_ui::SemanticRole;
 use nickel_ui::prelude::*;
 
 use crate::model::{item_label, item_markdown_document};
@@ -1350,7 +1351,9 @@ fn configured_chat_view(
                             <Button on_press={ChatMessage::Refresh}>{"Retry"}</Button>
                         </Row>
                     })}
-                    <Container fill_width min_height={52.0} max_height={140.0} shrink={0.0}
+                    <Container id={id!(composer_viewport)} accessibility_label={"Message composer"}
+                        semantic_role={SemanticRole::Group}
+                        fill_width min_height={52.0} max_height={140.0} shrink={0.0}
                         padding={Insets::all(12.0)} background={PANEL}
                         border={Border::new(BORDER, 1.0)} radius={10.0}
                         overflow_y={Overflow::Auto} follow_scroll_end={true}>

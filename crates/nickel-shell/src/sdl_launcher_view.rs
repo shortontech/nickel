@@ -48,6 +48,7 @@ pub enum LauncherAction {
     SetView(LauncherView),
     ActivateResult(usize),
     TogglePin(String),
+    RetryPreferencePersistence,
     LaunchApplication(String),
     OpenProject(String),
     SeeAllProjects,
@@ -62,6 +63,7 @@ pub enum LauncherAction {
 pub enum LauncherShellEffect {
     ActivateResult(usize),
     TogglePin(String),
+    RetryPreferencePersistence,
     LaunchApplication(String),
     OpenProject(String),
     SeeAllProjects,
@@ -180,22 +182,30 @@ impl UiApplication for LauncherApplication {
                         LauncherAction::LaunchApplication(id.clone()),
                     )
                 };
-                FrameOverlay::Menu(
-                    OverlayMenu::new(
-                        format!("application-menu-{id}"),
-                        OverlayAnchor::InvocationTarget(anchor),
-                    )
-                    .item(OverlayMenuItem::action("launch", "Launch", launch))
-                    .item(OverlayMenuItem::action(
-                        "toggle-pin",
-                        if self.launcher.is_pinned(&id) {
-                            "Unpin"
-                        } else {
-                            "Pin"
-                        },
-                        LauncherAction::TogglePin(id.clone()),
-                    )),
+                let mut menu = OverlayMenu::new(
+                    format!("application-menu-{id}"),
+                    OverlayAnchor::InvocationTarget(anchor),
                 )
+                .item(OverlayMenuItem::action("launch", "Launch", launch))
+                .item(OverlayMenuItem::action(
+                    "toggle-pin",
+                    if self.launcher.is_pinned(&id) {
+                        "Unpin"
+                    } else {
+                        "Pin"
+                    },
+                    LauncherAction::TogglePin(id.clone()),
+                ));
+                if self.status.as_deref().is_some_and(|status| {
+                    status.starts_with("Launcher preferences could not be saved:")
+                }) {
+                    menu = menu.item(OverlayMenuItem::action(
+                        "retry-preferences",
+                        "Retry saving favorites",
+                        LauncherAction::RetryPreferencePersistence,
+                    ));
+                }
+                FrameOverlay::Menu(menu)
             })
             .collect::<Vec<_>>();
         if self.launcher.mode() == LauncherMode::Dashboard && self.launcher.logout_available() {
@@ -278,6 +288,9 @@ pub fn reduce_launcher_action(
         }
         LauncherAction::ActivateResult(index) => Some(LauncherShellEffect::ActivateResult(index)),
         LauncherAction::TogglePin(id) => Some(LauncherShellEffect::TogglePin(id)),
+        LauncherAction::RetryPreferencePersistence => {
+            Some(LauncherShellEffect::RetryPreferencePersistence)
+        }
         LauncherAction::LaunchApplication(id) => Some(LauncherShellEffect::LaunchApplication(id)),
         LauncherAction::OpenProject(id) => Some(LauncherShellEffect::OpenProject(id)),
         LauncherAction::SeeAllProjects => Some(LauncherShellEffect::SeeAllProjects),

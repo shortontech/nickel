@@ -26,10 +26,97 @@ pub enum SemanticControllerAction {
     ToggleLauncher,
 }
 
+impl SemanticControllerAction {
+    const fn stable_key(self) -> &'static str {
+        match self {
+            Self::Confirm => "confirm",
+            Self::Cancel => "cancel",
+            Self::ContextMenu => "context-menu",
+            Self::Pin => "pin",
+            Self::Unpin => "unpin",
+            Self::PreviousSection => "previous-section",
+            Self::NextSection => "next-section",
+            Self::ToggleLauncher => "toggle-launcher",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ActionLegendLocale {
+    #[default]
+    English,
+    German,
+    Arabic,
+}
+
+impl ActionLegendLocale {
+    pub const fn reading_direction(self) -> ReadingDirection {
+        match self {
+            Self::English | Self::German => ReadingDirection::LeftToRight,
+            Self::Arabic => ReadingDirection::RightToLeft,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ActionLegendLabel {
+    Open,
+    Close,
+    Actions,
+    Pin,
+    Unpin,
+    PreviousSection,
+    NextSection,
+    Launcher,
+}
+
+impl ActionLegendLabel {
+    pub const fn localized(self, locale: ActionLegendLocale) -> &'static str {
+        use ActionLegendLabel::{
+            Actions, Close, Launcher, NextSection, Open, Pin, PreviousSection, Unpin,
+        };
+        match (locale, self) {
+            (ActionLegendLocale::English, Open) => "Open",
+            (ActionLegendLocale::English, Close) => "Close",
+            (ActionLegendLocale::English, Actions) => "Actions",
+            (ActionLegendLocale::English, Pin) => "Pin",
+            (ActionLegendLocale::English, Unpin) => "Unpin",
+            (ActionLegendLocale::English, PreviousSection) => "Previous section",
+            (ActionLegendLocale::English, NextSection) => "Next section",
+            (ActionLegendLocale::English, Launcher) => "Launcher",
+            (ActionLegendLocale::German, Open) => "Öffnen",
+            (ActionLegendLocale::German, Close) => "Schließen",
+            (ActionLegendLocale::German, Actions) => "Aktionen",
+            (ActionLegendLocale::German, Pin) => "Anheften",
+            (ActionLegendLocale::German, Unpin) => "Lösen",
+            (ActionLegendLocale::German, PreviousSection) => "Vorheriger Bereich",
+            (ActionLegendLocale::German, NextSection) => "Nächster Bereich",
+            (ActionLegendLocale::German, Launcher) => "Starter",
+            (ActionLegendLocale::Arabic, Open) => "فتح",
+            (ActionLegendLocale::Arabic, Close) => "إغلاق",
+            (ActionLegendLocale::Arabic, Actions) => "الإجراءات",
+            (ActionLegendLocale::Arabic, Pin) => "تثبيت",
+            (ActionLegendLocale::Arabic, Unpin) => "إلغاء التثبيت",
+            (ActionLegendLocale::Arabic, PreviousSection) => "القسم السابق",
+            (ActionLegendLocale::Arabic, NextSection) => "القسم التالي",
+            (ActionLegendLocale::Arabic, Launcher) => "المشغّل",
+        }
+    }
+}
+
+/// Provenance for a controller control's visual mark. Nickel currently ships
+/// no third-party branded controller artwork, so every family uses a truthful,
+/// font-rendered fallback with an independent spoken name.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ControllerGlyphSource {
+    TextFallback,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ControllerControlPresentation {
     pub glyph: &'static str,
     pub spoken_name: &'static str,
+    pub source: ControllerGlyphSource,
 }
 
 impl ControllerFamily {
@@ -73,7 +160,11 @@ impl ControllerFamily {
 }
 
 const fn control(glyph: &'static str, spoken_name: &'static str) -> ControllerControlPresentation {
-    ControllerControlPresentation { glyph, spoken_name }
+    ControllerControlPresentation {
+        glyph,
+        spoken_name,
+        source: ControllerGlyphSource::TextFallback,
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -98,6 +189,22 @@ impl ActionLegendEntry {
             label: label.into(),
             available: false,
         }
+    }
+
+    pub fn localized(
+        action: SemanticControllerAction,
+        label: ActionLegendLabel,
+        locale: ActionLegendLocale,
+    ) -> Self {
+        Self::available(action, label.localized(locale))
+    }
+
+    pub fn localized_unavailable(
+        action: SemanticControllerAction,
+        label: ActionLegendLabel,
+        locale: ActionLegendLocale,
+    ) -> Self {
+        Self::unavailable(action, label.localized(locale))
     }
 }
 
@@ -127,6 +234,7 @@ impl<Message> ActionLegend<Message> {
                 let presentation = family.presentation(entry.action);
                 let accessible = format!("{}: {}", presentation.spoken_name, entry.label);
                 Row::new()
+                    .id(format!("action-{}", entry.action.stable_key()))
                     .min_height(theme.sizing.control_height)
                     .padding(Insets::symmetric(
                         theme.spacing.control,
@@ -1047,8 +1155,7 @@ mod tests {
         let tree = UiFrame::layout(view, Rect::new(0.0, 0.0, 480.0, 160.0));
         let open = tree
             .semantic_targets_for_message(&Message::Open)
-            .into_iter()
-            .next()
+            .first()
             .expect("row action")
             .bounds;
         let see_all = tree
@@ -1184,6 +1291,78 @@ mod tests {
     }
 
     #[test]
+    fn action_legend_localizes_expanded_and_rtl_labels_with_stable_action_identity() {
+        let build = |locale| {
+            UiFrame::<Message>::layout(
+                ActionLegend::new_directional(
+                    theme(),
+                    ControllerFamily::Generic,
+                    [
+                        ActionLegendEntry::localized(
+                            SemanticControllerAction::Confirm,
+                            ActionLegendLabel::Open,
+                            locale,
+                        ),
+                        ActionLegendEntry::localized(
+                            SemanticControllerAction::Cancel,
+                            ActionLegendLabel::Close,
+                            locale,
+                        ),
+                    ],
+                    locale.reading_direction(),
+                ),
+                Rect::new(0.0, 0.0, 640.0, 72.0),
+            )
+        };
+
+        let german = build(ActionLegendLocale::German);
+        let arabic = build(ActionLegendLocale::Arabic);
+        let mut german_ids = german
+            .accessibility_nodes()
+            .iter()
+            .filter(|node| node.id.as_str().contains("action-"))
+            .map(|node| node.id.clone())
+            .collect::<Vec<_>>();
+        let arabic_nodes = arabic
+            .accessibility_nodes()
+            .iter()
+            .filter(|node| node.id.as_str().contains("action-"))
+            .collect::<Vec<_>>();
+        let mut arabic_ids = arabic_nodes
+            .iter()
+            .map(|node| node.id.clone())
+            .collect::<Vec<_>>();
+
+        german_ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        arabic_ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        assert_eq!(german_ids, arabic_ids, "locale changes preserve action IDs");
+        assert!(
+            german
+                .accessibility_nodes()
+                .iter()
+                .any(|node| { node.label.as_deref() == Some("confirm control: Öffnen") })
+        );
+        assert!(
+            arabic
+                .accessibility_nodes()
+                .iter()
+                .any(|node| { node.label.as_deref() == Some("confirm control: فتح") })
+        );
+        let confirm = arabic_nodes
+            .iter()
+            .find(|node| node.id.as_str().ends_with("action-confirm"))
+            .expect("confirm entry");
+        let cancel = arabic_nodes
+            .iter()
+            .find(|node| node.id.as_str().ends_with("action-cancel"))
+            .expect("cancel entry");
+        assert!(
+            confirm.rect.origin.x > cancel.rect.origin.x,
+            "RTL reverses placement"
+        );
+    }
+
+    #[test]
     fn controller_family_presentations_are_semantic_and_have_truthful_fallbacks() {
         assert_eq!(
             ControllerFamily::Xbox
@@ -1202,6 +1381,12 @@ mod tests {
                 .presentation(SemanticControllerAction::Confirm)
                 .spoken_name,
             "confirm control"
+        );
+        assert_eq!(
+            ControllerFamily::PlayStation
+                .presentation(SemanticControllerAction::Confirm)
+                .source,
+            ControllerGlyphSource::TextFallback
         );
     }
 

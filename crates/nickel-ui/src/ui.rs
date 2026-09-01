@@ -447,6 +447,45 @@ pub enum NavigationEntry {
     Target(UiId),
 }
 
+/// A physical direction used by explicit controller-navigation topology.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum NavigationDirection {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+/// Optional deterministic destinations declared by a navigation scope.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct NavigationNeighbors {
+    pub up: Option<UiId>,
+    pub down: Option<UiId>,
+    pub left: Option<UiId>,
+    pub right: Option<UiId>,
+}
+
+impl NavigationNeighbors {
+    pub fn target(&self, direction: NavigationDirection) -> Option<&UiId> {
+        match direction {
+            NavigationDirection::Up => self.up.as_ref(),
+            NavigationDirection::Down => self.down.as_ref(),
+            NavigationDirection::Left => self.left.as_ref(),
+            NavigationDirection::Right => self.right.as_ref(),
+        }
+    }
+
+    pub fn with(mut self, direction: NavigationDirection, target: impl Into<UiId>) -> Self {
+        *match direction {
+            NavigationDirection::Up => &mut self.up,
+            NavigationDirection::Down => &mut self.down,
+            NavigationDirection::Left => &mut self.left,
+            NavigationDirection::Right => &mut self.right,
+        } = Some(target.into());
+        self
+    }
+}
+
 /// Explicit modality-neutral navigation topology declared by a component.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NavigationScope {
@@ -459,6 +498,7 @@ pub struct NavigationScope {
     pub scroll_owner: Option<UiId>,
     pub pane: bool,
     pub default_pane: bool,
+    pub neighbors: NavigationNeighbors,
 }
 
 impl Default for NavigationScope {
@@ -473,6 +513,7 @@ impl Default for NavigationScope {
             scroll_owner: None,
             pane: false,
             default_pane: false,
+            neighbors: NavigationNeighbors::default(),
         }
     }
 }
@@ -488,6 +529,11 @@ impl NavigationScope {
             default_pane,
             ..Self::default()
         }
+    }
+
+    pub fn neighbor(mut self, direction: NavigationDirection, target: impl Into<UiId>) -> Self {
+        self.neighbors = self.neighbors.with(direction, target);
+        self
     }
 }
 

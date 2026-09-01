@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -367,6 +367,7 @@ pub struct ShellImageCacheDiagnostics {
 }
 
 pub struct LiveShell {
+    host_runtime_samples: HostRuntimeSamples,
     launcher: Launcher,
     window_feed: WindowFeed,
     tray_feed: TrayFeed,
@@ -433,11 +434,64 @@ pub struct LiveShell {
     screenshot: ScreenshotTool,
 }
 
+#[derive(Default)]
+struct HostRuntimeSamples {
+    input_to_message_us: VecDeque<u64>,
+    input_to_frame_us: VecDeque<u64>,
+    layout_us: VecDeque<u64>,
+    paint_list_us: VecDeque<u64>,
+    scheduled_wakeups: u64,
+}
+
+impl HostRuntimeSamples {
+    fn record(&mut self, telemetry: nickel_ui::HostTelemetry) {
+        for (samples, value) in [
+            (&mut self.input_to_message_us, telemetry.input_to_message_us),
+            (&mut self.input_to_frame_us, telemetry.input_to_frame_us),
+            (&mut self.layout_us, telemetry.layout_us),
+            (&mut self.paint_list_us, telemetry.paint_list_us),
+        ] {
+            if samples.len() == nickel_session_protocol::MAX_RUNTIME_PERFORMANCE_SAMPLES {
+                samples.pop_front();
+            }
+            samples.push_back(value);
+        }
+        self.scheduled_wakeups = self
+            .scheduled_wakeups
+            .saturating_add(telemetry.scheduled_wakeups as u64);
+    }
+}
+
 fn preview_refresh_due(deadline: Option<Instant>, now: Instant) -> bool {
     deadline.is_none_or(|deadline| now >= deadline)
 }
 
 impl LiveShell {
+    pub fn host_runtime_samples(&self) -> (Vec<u64>, Vec<u64>, Vec<u64>, Vec<u64>, u64) {
+        (
+            self.host_runtime_samples
+                .input_to_message_us
+                .iter()
+                .copied()
+                .collect(),
+            self.host_runtime_samples
+                .input_to_frame_us
+                .iter()
+                .copied()
+                .collect(),
+            self.host_runtime_samples
+                .layout_us
+                .iter()
+                .copied()
+                .collect(),
+            self.host_runtime_samples
+                .paint_list_us
+                .iter()
+                .copied()
+                .collect(),
+            self.host_runtime_samples.scheduled_wakeups,
+        )
+    }
     pub fn set_dashboard_projects(
         &mut self,
         projects: DashboardSection<Vec<DashboardProject>>,
@@ -591,6 +645,7 @@ impl LiveShell {
             56,
         );
         Ok(Self {
+            host_runtime_samples: HostRuntimeSamples::default(),
             launcher,
             window_feed,
             tray_feed,
@@ -955,6 +1010,7 @@ impl LiveShell {
         for action in actions {
             self.apply_launcher_action(action);
         }
+        self.host_runtime_samples.record(outcome.telemetry);
         outcome
     }
 
@@ -978,6 +1034,7 @@ impl LiveShell {
         for action in actions {
             self.apply_launcher_action(action);
         }
+        self.host_runtime_samples.record(outcome.telemetry);
         outcome.changed
     }
 
@@ -1238,31 +1295,11 @@ impl LiveShell {
             ..HostBatch::default()
         });
         let hovered = self
-            .panel_action_at(Point { x, y: 28.0 })
-            .map(|action| match action {
-                PanelAction::Launcher => PanelHover::Launcher,
-                PanelAction::Task(index) => PanelHover::Task(index),
-                PanelAction::Codex => PanelHover::Codex,
-                PanelAction::Tray(id) => self
-                    .tray
-                    .iter()
-                    .rev()
-                    .take(4)
-                    .rev()
-                    .position(|item| item.id == id)
-                    .map(PanelHover::Tray)
-                    .unwrap_or(PanelHover::Tray(0)),
-                PanelAction::Control => {
-                    #[cfg(not(target_os = "macos"))]
-                    {
-                        PanelHover::Control
-                    }
-                    #[cfg(target_os = "macos")]
-                    {
-                        PanelHover::Launcher
-                    }
-                }
-            });
+            .panel_host
+            .inspect()
+            .pointer_hover
+            .as_ref()
+            .and_then(|target| self.panel_hover_for_target(target.as_str()));
         let changed = hovered != self.panel_hover;
         self.panel_hover = hovered;
         if let Some(PanelHover::Task(index)) = hovered {
@@ -1274,33 +1311,44 @@ impl LiveShell {
         changed
     }
 
-    fn panel_action_at(&self, point: Point) -> Option<PanelAction> {
-        let groups = self.launcher.group_windows(&self.windows);
-        let mut actions = Vec::with_capacity(groups.len().min(12) + self.tray.len().min(4) + 3);
-        actions.push(PanelAction::Launcher);
-        actions.extend((0..groups.len().min(12)).map(PanelAction::Task));
-        if self.launcher.codex_available() {
-            actions.push(PanelAction::Codex);
-        }
-        actions.extend(
-            self.tray
+    fn panel_hover_for_target(&self, target: &str) -> Option<PanelHover> {
+        let leaf = target.rsplit('/').next().unwrap_or(target);
+        let action = match leaf {
+            "panel-launcher" => Some(PanelAction::Launcher),
+            "panel-codex" => Some(PanelAction::Codex),
+            "panel-control" => Some(PanelAction::Control),
+            _ => leaf
+                .strip_prefix("panel-task-")
+                .and_then(|index| index.parse().ok())
+                .map(PanelAction::Task)
+                .or_else(|| {
+                    leaf.strip_prefix("panel-tray-")
+                        .map(|id| PanelAction::Tray(id.to_owned()))
+                }),
+        }?;
+        Some(match action {
+            PanelAction::Launcher => PanelHover::Launcher,
+            PanelAction::Task(index) => PanelHover::Task(index),
+            PanelAction::Codex => PanelHover::Codex,
+            PanelAction::Tray(id) => self
+                .tray
                 .iter()
                 .rev()
                 .take(4)
                 .rev()
-                .map(|item| PanelAction::Tray(item.id.clone())),
-        );
-        actions.push(PanelAction::Control);
-        actions.into_iter().find(|action| {
-            self.panel_host
-                .semantic_targets_for_message(action)
-                .iter()
-                .any(|target| {
-                    point.x >= target.bounds.origin.x
-                        && point.y >= target.bounds.origin.y
-                        && point.x < target.bounds.origin.x + target.bounds.size.width
-                        && point.y < target.bounds.origin.y + target.bounds.size.height
-                })
+                .position(|item| item.id == id)
+                .map(PanelHover::Tray)
+                .unwrap_or(PanelHover::Tray(0)),
+            PanelAction::Control => {
+                #[cfg(not(target_os = "macos"))]
+                {
+                    PanelHover::Control
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    PanelHover::Launcher
+                }
+            }
         })
     }
 
@@ -2647,6 +2695,7 @@ impl LiveShell {
 
     fn step_control_host(&mut self, batch: HostBatch) -> bool {
         let outcome = self.control_host.step(batch);
+        self.host_runtime_samples.record(outcome.telemetry);
         let changed = outcome.change_token != self.control_change_token;
         self.control_change_token = outcome.change_token;
         self.control_deadline = outcome.next_deadline;
@@ -2674,6 +2723,9 @@ impl LiveShell {
             LauncherShellEffect::ActivateResult(index) => self.launch_result(index),
             LauncherShellEffect::TogglePin(id) => {
                 self.launcher.toggle_pin(&id);
+                self.persist_launcher_preferences();
+            }
+            LauncherShellEffect::RetryPreferencePersistence => {
                 self.persist_launcher_preferences();
             }
             LauncherShellEffect::LaunchApplication(id) => self.launch_application_by_id(&id),
@@ -3063,16 +3115,35 @@ mod tests {
         ShellSemanticTarget, WindowMenuTargetAction,
     };
     use nickel_ui::{
-        ActionKind, HostBatch, HostEvent, Point, Rect, SemanticAction, SemanticRole,
+        ActionKind, HostBatch, HostEvent, HostTelemetry, Point, Rect, SemanticAction, SemanticRole,
         SemanticSelector, UiEvent, UiHost,
     };
+    use nickel_ui_testkit::{Scenario, Selector};
 
     use super::{
-        LiveShell, panel_status_layout, panel_tray_icons,
+        HostRuntimeSamples, LiveShell, panel_status_layout, panel_tray_icons,
         platform::{FeedState, FeedStatus, SecureStorageState},
         preview_refresh_due, secure_storage_status_label, session_feed_status_label,
         visible_tray_item,
     };
+
+    #[test]
+    fn host_runtime_phase_samples_are_bounded() {
+        let mut samples = HostRuntimeSamples::default();
+        for value in 0..70 {
+            samples.record(HostTelemetry {
+                input_to_message_us: value,
+                input_to_frame_us: value,
+                layout_us: value,
+                paint_list_us: value,
+                scheduled_wakeups: 1,
+                ..HostTelemetry::default()
+            });
+        }
+        assert_eq!(samples.input_to_frame_us.len(), 64);
+        assert_eq!(samples.input_to_frame_us.front(), Some(&6));
+        assert_eq!(samples.scheduled_wakeups, 70);
+    }
     use crate::{
         model::{ApplicationId, OpenWindow, TrayItem, WindowGroup, WindowId},
         notification::{NotificationAction, NotificationRequest, NotificationStore},
@@ -3221,6 +3292,175 @@ mod tests {
         assert_eq!(
             LauncherPreferences::load(preferences_path)
                 .expect("recovered preferences")
+                .favorites(),
+            [application_id]
+        );
+    }
+
+    fn launcher_scenario(
+        launcher: &crate::launcher::Launcher,
+        palette: nickel_core::theme::ThemePalette,
+        status: Option<String>,
+    ) -> Scenario<LauncherApplication> {
+        let mut application = LauncherApplication::new(
+            launcher.clone(),
+            crate::sdl_launcher_view::LauncherViewState::default(),
+            crate::sdl_launcher_view::LauncherIconCache::new(),
+            palette,
+        );
+        application.sync(launcher, palette, status);
+        Scenario::new(application, 920, 680)
+    }
+
+    fn application_context_target(
+        scenario: &Scenario<LauncherApplication>,
+        application_id: &str,
+    ) -> Selector {
+        let target = scenario
+            .host()
+            .unique_semantic_target_for_message(&LauncherAction::LaunchApplication(
+                application_id.to_owned(),
+            ))
+            .expect("launcher application semantic target");
+        Selector::id(target.id.as_str())
+    }
+
+    #[test]
+    fn controller_scenario_pins_reopens_unpins_and_persists_each_action_once() {
+        let directory = tempfile::tempdir().expect("temporary preferences directory");
+        let preferences_path = directory.path().join("launcher-preferences");
+        let mut shell = LiveShell::new().unwrap();
+        shell.launcher = crate::launcher::Launcher::default();
+        shell.launcher_preferences_path = Some(preferences_path.clone());
+        let application_id = "firefox";
+
+        let mut pin = launcher_scenario(&shell.launcher, shell.palette, None);
+        let origin = application_context_target(&pin, application_id);
+        pin.controller_semantic_action(&origin, ActionKind::ContextMenu)
+            .expect("production controller context action opens application menu");
+        pin.controller_activate(&Selector::role_name(SemanticRole::MenuItem, "Pin"))
+            .expect("controller reaches and confirms Pin");
+        assert!(pin.host().inspect().open_overlay.is_none());
+        assert_eq!(
+            pin.host().inspect().controller_target.as_ref(),
+            Some(
+                &pin.host()
+                    .query_unique(&SemanticSelector::Id(match &origin {
+                        Selector::Id(id) => id.clone(),
+                        _ => unreachable!(),
+                    }))
+                    .expect("origin remains present")
+                    .id
+            )
+        );
+        let effects = pin.host_mut().application_mut().take_effects();
+        assert_eq!(effects, [LauncherAction::TogglePin(application_id.into())]);
+        for effect in effects {
+            shell.apply_launcher_action(effect);
+        }
+        assert_eq!(shell.launcher_persistence_attempts, 1);
+        assert!(shell.launcher.is_pinned(application_id));
+        assert_eq!(
+            LauncherPreferences::load(&preferences_path)
+                .expect("pin persisted")
+                .favorites(),
+            [application_id]
+        );
+
+        let mut unpin = launcher_scenario(&shell.launcher, shell.palette, None);
+        let origin = application_context_target(&unpin, application_id);
+        unpin
+            .controller_semantic_action(&origin, ActionKind::ContextMenu)
+            .expect("reopened menu uses authoritative favorite state");
+        unpin
+            .controller_activate(&Selector::role_name(SemanticRole::MenuItem, "Unpin"))
+            .expect("controller reaches and confirms Unpin");
+        let effects = unpin.host_mut().application_mut().take_effects();
+        assert_eq!(effects, [LauncherAction::TogglePin(application_id.into())]);
+        for effect in effects {
+            shell.apply_launcher_action(effect);
+        }
+        assert_eq!(shell.launcher_persistence_attempts, 2);
+        assert!(!shell.launcher.is_pinned(application_id));
+        assert!(
+            LauncherPreferences::load(preferences_path)
+                .expect("unpin persisted")
+                .favorites()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn controller_scenario_logout_emits_only_the_typed_request() {
+        let shell = LiveShell::new().unwrap();
+        let mut scenario = launcher_scenario(&shell.launcher, shell.palette, None);
+        let account = scenario
+            .host()
+            .unique_semantic_target_for_message(&LauncherAction::OpenAccount)
+            .expect("account presentation semantic target");
+        scenario
+            .controller_semantic_action(&Selector::id(account.id.as_str()), ActionKind::ContextMenu)
+            .expect("controller opens the shared account menu");
+        scenario
+            .controller_activate(&Selector::role_name(SemanticRole::MenuItem, "Log out"))
+            .expect("controller reaches Logout");
+        assert_eq!(
+            scenario.host_mut().application_mut().take_effects(),
+            [LauncherAction::RequestLogout]
+        );
+        assert!(scenario.host().inspect().open_overlay.is_none());
+    }
+
+    #[test]
+    fn failed_pin_retry_is_idempotent_and_restores_origin_focus() {
+        let directory = tempfile::tempdir().expect("temporary preferences directory");
+        let valid_path = directory.path().join("launcher-preferences");
+        let mut shell = LiveShell::new().unwrap();
+        shell.launcher = crate::launcher::Launcher::default();
+        let application_id = "firefox";
+        shell.launcher_preferences_path = Some(directory.path().to_path_buf());
+
+        shell.apply_launcher_action(LauncherAction::TogglePin(application_id.into()));
+        assert_eq!(shell.launcher_persistence_attempts, 1);
+        assert!(shell.launcher.is_pinned(application_id));
+        let failure = shell
+            .launcher_status
+            .clone()
+            .expect("truthful save failure");
+
+        shell.launcher_preferences_path = Some(valid_path.clone());
+        let mut retry = launcher_scenario(&shell.launcher, shell.palette, Some(failure));
+        let origin = application_context_target(&retry, application_id);
+        let origin_id = match &origin {
+            Selector::Id(id) => id.clone(),
+            _ => unreachable!(),
+        };
+        retry
+            .controller_semantic_action(&origin, ActionKind::ContextMenu)
+            .expect("failed menu remains controller-usable");
+        retry
+            .controller_activate(&Selector::role_name(
+                SemanticRole::MenuItem,
+                "Retry saving favorites",
+            ))
+            .expect("controller retries persistence without toggling state");
+        assert!(retry.host().inspect().open_overlay.is_none());
+        assert_eq!(
+            retry.host().inspect().controller_target.as_ref(),
+            Some(&origin_id),
+            "closing the retry menu restores the originating application"
+        );
+        let effects = retry.host_mut().application_mut().take_effects();
+        assert_eq!(effects, [LauncherAction::RetryPreferencePersistence]);
+        for effect in effects {
+            shell.apply_launcher_action(effect);
+        }
+        assert_eq!(shell.launcher_persistence_attempts, 2);
+        assert!(shell.launcher.is_pinned(application_id));
+        assert!(shell.launcher_status.is_none());
+        assert_eq!(
+            LauncherPreferences::load(valid_path)
+                .expect("retry persisted unchanged authoritative state")
                 .favorites(),
             [application_id]
         );
@@ -3606,10 +3846,8 @@ mod tests {
             x: launcher.bounds.origin.x + launcher.bounds.size.width / 2.0,
             y: launcher.bounds.origin.y + launcher.bounds.size.height / 2.0,
         };
-        assert_eq!(
-            shell.panel_action_at(center),
-            Some(super::PanelAction::Launcher)
-        );
+        assert!(shell.panel_pointer_moved(center.x, 1280));
+        assert_eq!(shell.panel_hover, Some(super::PanelHover::Launcher));
         #[cfg(not(target_os = "macos"))]
         assert!(
             shell

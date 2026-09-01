@@ -16,6 +16,17 @@ enum ControllerDirection {
     Right,
 }
 
+impl From<ControllerDirection> for NavigationDirection {
+    fn from(direction: ControllerDirection) -> Self {
+        match direction {
+            ControllerDirection::Up => Self::Up,
+            ControllerDirection::Down => Self::Down,
+            ControllerDirection::Left => Self::Left,
+            ControllerDirection::Right => Self::Right,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct MessageRegion<Message> {
     id: UiId,
@@ -282,6 +293,7 @@ pub struct AccessibilityNode {
     pub enabled: bool,
     pub focused: bool,
     pub controller_selected: bool,
+    pub navigation_depth: usize,
     pub value: Option<SemanticValueSnapshot>,
 }
 
@@ -363,6 +375,7 @@ pub struct SemanticNodeSnapshot {
     pub enabled: bool,
     pub focused: bool,
     pub controller_selected: bool,
+    pub navigation_depth: usize,
     pub controls: Option<UiId>,
     pub actions: Vec<ActionKind>,
     pub value: Option<SemanticValueSnapshot>,
@@ -570,6 +583,18 @@ impl<Message> Default for UiFrame<Message> {
 }
 
 impl<Message: Clone> UiFrame<Message> {
+    pub(crate) fn resolve_stable_target(&self, requested: &UiId) -> Option<UiId> {
+        let suffix = format!("/{}", requested.as_str());
+        let mut matches = self
+            .resolved
+            .nodes
+            .iter()
+            .filter(|node| &node.id == requested || node.id.as_str().ends_with(&suffix))
+            .map(|node| node.id.clone());
+        let target = matches.next()?;
+        matches.next().is_none().then_some(target)
+    }
+
     pub(crate) fn contains_target(&self, id: &UiId) -> bool {
         self.resolved.find(id).is_some()
             || self.hits.iter().any(|region| &region.id == id)
@@ -863,6 +888,7 @@ impl<Message: Clone> UiFrame<Message> {
             enabled: true,
             focused: false,
             controller_selected: false,
+            navigation_depth: 1,
             value: None,
         });
         if menu.focus == crate::OverlayFocusPolicy::FirstItem
@@ -1012,6 +1038,7 @@ impl<Message: Clone> UiFrame<Message> {
                 enabled,
                 focused: interaction.focused,
                 controller_selected: interaction.controller_selected,
+                navigation_depth: 1,
                 value: None,
             });
         }
@@ -1233,6 +1260,28 @@ impl<Message: Clone> UiFrame<Message> {
         &self.accessibility
     }
 
+    pub(crate) fn navigation_depth(&self, state: &UiStateStore) -> usize {
+        let mut depth = 0;
+        let mut scope = state.navigation().controller_scope().cloned();
+        while let Some(current) = scope {
+            depth += 1;
+            scope = self
+                .nearest_ancestor_where(&current, |node| node.navigation_scope.is_some())
+                .map(|node| node.id.clone());
+        }
+        depth
+    }
+
+    pub(crate) fn available_semantic_actions(&self, state: &UiStateStore) -> Vec<ActionKind> {
+        state
+            .navigation()
+            .controller_selected()
+            .or_else(|| state.focused())
+            .and_then(|id| self.resolved.find(id))
+            .map(|node| node.semantic_actions.clone())
+            .unwrap_or_default()
+    }
+
     pub fn semantic_nodes(&self) -> Vec<SemanticNodeSnapshot> {
         let mut parents = vec![None; self.resolved.nodes.len()];
         for node in &self.resolved.nodes {
@@ -1255,6 +1304,7 @@ impl<Message: Clone> UiFrame<Message> {
                 enabled: !node.semantic_actions.is_empty(),
                 focused: node.interaction.focused,
                 controller_selected: node.interaction.controller_selected,
+                navigation_depth: self.navigation_depth_for_index(index),
                 controls: node.accessibility_controls.clone(),
                 actions: node.semantic_actions.clone(),
                 value: node.semantic_value.clone(),
@@ -1280,6 +1330,7 @@ impl<Message: Clone> UiFrame<Message> {
             enabled: !node.semantic_actions.is_empty(),
             focused: node.interaction.focused,
             controller_selected: node.interaction.controller_selected,
+            navigation_depth: self.navigation_depth_for_index(index),
             controls: node.accessibility_controls.clone(),
             actions: node.semantic_actions.clone(),
             value: node.semantic_value.clone(),
@@ -2826,6 +2877,20 @@ impl<Message: Clone> UiFrame<Message> {
         let Some(current_rect) = self.controller_rect(&current) else {
             return self.select_controller_id(state, ids[0].clone());
         };
+        let declared_neighbor = self
+            .resolved
+            .find(&current)
+            .filter(|node| node.navigation_scope.is_some())
+            .or_else(|| {
+                self.nearest_ancestor_where(&current, |node| node.navigation_scope.is_some())
+            })
+            .and_then(|scope| scope.navigation_scope.as_ref())
+            .and_then(|scope| scope.neighbors.target(direction.into()))
+            .filter(|target| ids.contains(target))
+            .cloned();
+        if let Some(target) = declared_neighbor {
+            return self.select_controller_id(state, target);
+        }
         let current_center = Point {
             x: current_rect.origin.x + current_rect.size.width / 2.0,
             y: current_rect.origin.y + current_rect.size.height / 2.0,
@@ -3488,6 +3553,7 @@ impl<Message: Clone> UiFrame<Message> {
                     enabled: !node.semantic_actions.is_empty(),
                     focused: node.interaction.focused,
                     controller_selected: node.interaction.controller_selected,
+                    navigation_depth: self.navigation_depth_for_index(index),
                     value: node.semantic_value.clone(),
                 })
             })
@@ -3504,6 +3570,22 @@ impl<Message: Clone> UiFrame<Message> {
                     .or_default()
                     .push(index);
             }
+        }
+    }
+
+    fn navigation_depth_for_index(&self, mut index: usize) -> usize {
+        let mut depth = usize::from(self.resolved.nodes[index].navigation_scope.is_some());
+        loop {
+            let parent = self
+                .resolved
+                .nodes
+                .iter()
+                .position(|node| node.children.contains(&index));
+            let Some(parent) = parent else {
+                return depth;
+            };
+            index = parent;
+            depth += usize::from(self.resolved.nodes[index].navigation_scope.is_some());
         }
     }
 

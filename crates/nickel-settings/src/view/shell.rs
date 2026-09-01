@@ -3,17 +3,7 @@ use super::*;
 impl SettingsApp {
     #[cfg(test)]
     pub(crate) fn build_ui(&self, width: f32, height: f32) -> UiFrame<SettingsMessage> {
-        self.build_ui_internal(width, height, false, None)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn build_ui_with_state(
-        &self,
-        width: f32,
-        height: f32,
-        state: &mut UiStateStore,
-    ) -> UiFrame<SettingsMessage> {
-        self.build_ui_internal(width, height, false, Some(state))
+        self.build_ui_internal(width, height, false)
     }
 
     #[cfg(test)]
@@ -22,7 +12,7 @@ impl SettingsApp {
         width: f32,
         height: f32,
     ) -> UiFrame<SettingsMessage> {
-        self.build_ui_internal(width, height, true, None)
+        self.build_ui_internal(width, height, true)
     }
 
     pub(crate) fn settings_view(
@@ -434,7 +424,7 @@ impl SettingsApp {
                     .child(root)
                     .child(ActionLegend::new_directional(
                         theme,
-                        self.controller.active_family().unwrap_or_default(),
+                        Default::default(),
                         [
                             ActionLegendEntry::available(
                                 SemanticControllerAction::Confirm,
@@ -468,20 +458,13 @@ impl SettingsApp {
         width: f32,
         height: f32,
         diagnostics: bool,
-        state: Option<&mut UiStateStore>,
     ) -> UiFrame<SettingsMessage> {
-        let modality = state
-            .as_ref()
-            .map(|state| state.input_modality())
-            .unwrap_or_else(|| self.ui_state.input_modality());
-        let root = self.settings_view(width, height, modality);
+        let root = self.settings_view(width, height, InputModality::Pointer);
         let bounds = UiRect::new(0.0, 0.0, width, height);
-        match (state, diagnostics) {
-            (Some(state), diagnostics) => {
-                UiFrame::layout_with_state_and_diagnostics(root, bounds, state, diagnostics)
-            }
-            (None, true) => UiFrame::layout_with_diagnostics(root, bounds),
-            (None, false) => UiFrame::layout(root, bounds),
+        if diagnostics {
+            UiFrame::layout_with_diagnostics(root, bounds)
+        } else {
+            UiFrame::layout(root, bounds)
         }
     }
 }

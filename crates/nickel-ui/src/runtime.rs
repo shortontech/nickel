@@ -302,6 +302,16 @@ pub trait Application: Sized {
         Vec::new()
     }
 
+    /// Drains a semantic focus request produced by a domain update.
+    ///
+    /// The host resolves the stable application id against the rebuilt tree,
+    /// including component-generated ancestor prefixes, and performs focus as
+    /// an ordinary UI transition. Applications therefore never need to retain
+    /// a frame or mutate [`UiStateStore`] to reconcile focus after rebuilding.
+    fn take_focus_request(&mut self) -> Option<UiId> {
+        None
+    }
+
     /// Applies an application/domain completion injected by a host adapter or
     /// deterministic scenario. Implementations downcast the typed payload and
     /// return whether the completion changed declarative state.
@@ -658,9 +668,13 @@ pub struct HostInspection {
     pub scale_factor: f32,
     pub pointer_icon: PointerIcon,
     pub keyboard_focus: Option<UiId>,
+    /// The semantic target currently owned by production pointer hit testing.
+    pub pointer_hover: Option<UiId>,
     pub pointer_capture: Option<UiId>,
     pub controller_target: Option<UiId>,
     pub controller_scope: Option<UiId>,
+    pub navigation_depth: usize,
+    pub available_semantic_actions: Vec<ActionKind>,
     pub controller_editing: bool,
     pub open_overlay: Option<OverlayId>,
     pub modality: InputModality,
@@ -729,6 +743,21 @@ pub struct HostTelemetry {
     pub events_processed: usize,
     pub completions_processed: usize,
     pub rebuilt: bool,
+    /// Time from beginning the host step through application message dispatch.
+    pub input_to_message_us: u64,
+    /// Time from beginning the host step through the resolved frame.
+    pub input_to_frame_us: u64,
+    /// Time spent resolving declarative layout during this step.
+    pub layout_us: u64,
+    /// Time spent constructing the application's declarative view/paint list.
+    pub paint_list_us: u64,
+    /// Explicit host/application deadline wakeups processed by this step.
+    pub scheduled_wakeups: usize,
+    /// Retained bytes owned by the resolved frame after this step.
+    pub retained_frame_bytes: usize,
+    /// Allocation counting is not available in the shared runtime unless a
+    /// concrete adapter installs an allocator-visible counter.
+    pub allocation_count: Option<u64>,
 }
 
 impl Default for HostEventOutcome {
@@ -794,6 +823,37 @@ impl HostEventOutcome {
             .completions_processed
             .saturating_add(other.telemetry.completions_processed);
         self.telemetry.rebuilt |= other.telemetry.rebuilt;
+        self.telemetry.input_to_message_us = self
+            .telemetry
+            .input_to_message_us
+            .saturating_add(other.telemetry.input_to_message_us);
+        self.telemetry.input_to_frame_us = self
+            .telemetry
+            .input_to_frame_us
+            .saturating_add(other.telemetry.input_to_frame_us);
+        self.telemetry.layout_us = self
+            .telemetry
+            .layout_us
+            .saturating_add(other.telemetry.layout_us);
+        self.telemetry.paint_list_us = self
+            .telemetry
+            .paint_list_us
+            .saturating_add(other.telemetry.paint_list_us);
+        self.telemetry.scheduled_wakeups = self
+            .telemetry
+            .scheduled_wakeups
+            .saturating_add(other.telemetry.scheduled_wakeups);
+        self.telemetry.retained_frame_bytes = self
+            .telemetry
+            .retained_frame_bytes
+            .max(other.telemetry.retained_frame_bytes);
+        self.telemetry.allocation_count = match (
+            self.telemetry.allocation_count,
+            other.telemetry.allocation_count,
+        ) {
+            (Some(left), Some(right)) => Some(left.saturating_add(right)),
+            _ => None,
+        };
     }
 }
 
@@ -1068,9 +1128,12 @@ impl<A: Application> UiHost<A> {
             scale_factor: self.scale_factor,
             pointer_icon: self.pointer_icon,
             keyboard_focus: self.state.focused().cloned(),
+            pointer_hover: self.state.hovered().cloned(),
             pointer_capture: self.state.captured().cloned(),
             controller_target: self.state.navigation().controller_selected().cloned(),
             controller_scope: self.state.navigation().controller_scope().cloned(),
+            navigation_depth: self.tree.navigation_depth(&self.state),
+            available_semantic_actions: self.tree.available_semantic_actions(&self.state),
             controller_editing: self.state.navigation().controller_editing(),
             open_overlay: self.state.open_overlay_id().cloned(),
             modality: self.state.input_modality(),
@@ -1081,6 +1144,7 @@ impl<A: Application> UiHost<A> {
     }
 
     pub fn step(&mut self, batch: HostBatch) -> HostEventOutcome {
+        let step_started = Instant::now();
         let now = batch.now.unwrap_or_else(Instant::now);
         let mut combined = HostEventOutcome {
             failures: batch.failures,
@@ -1088,6 +1152,11 @@ impl<A: Application> UiHost<A> {
         };
         combined.telemetry.events_processed = batch.events.len();
         combined.telemetry.completions_processed = batch.completions.len();
+        combined.telemetry.scheduled_wakeups = batch
+            .events
+            .iter()
+            .filter(|event| matches!(event, HostEvent::Poll))
+            .count();
         if let Some((width, height)) = batch.surface_size {
             let next = Rect::new(0.0, 0.0, width as f32, height as f32);
             if next != self.bounds {
@@ -1173,9 +1242,39 @@ impl<A: Application> UiHost<A> {
             };
             combined.merge(outcome);
         }
+        combined.telemetry.input_to_message_us = elapsed_us(step_started);
         if combined.changed {
-            self.rebuild();
+            let (paint_list_us, layout_us) = self.rebuild_timed();
+            combined.telemetry.paint_list_us = paint_list_us;
+            combined.telemetry.layout_us = layout_us;
             combined.telemetry.rebuilt = true;
+        }
+        if let Some(requested) = self.application.take_focus_request()
+            && let Some(target) = self.tree.resolve_stable_target(&requested)
+        {
+            let focus = self
+                .tree
+                .transition(
+                    &mut self.state,
+                    InputSource::System,
+                    InteractionIntent::Event(UiEvent::AccessibilityFocus(target)),
+                )
+                .expect("host focus requests are ordinary frame events");
+            if focus.invalidation != Invalidation::None || !focus.messages.is_empty() {
+                combined.changed = true;
+                combined.invalidation = combined.invalidation.merge(focus.invalidation);
+                for message in focus.messages {
+                    self.application.update(message);
+                }
+                let (paint_list_us, layout_us) = self.rebuild_timed();
+                combined.telemetry.paint_list_us = combined
+                    .telemetry
+                    .paint_list_us
+                    .saturating_add(paint_list_us);
+                combined.telemetry.layout_us =
+                    combined.telemetry.layout_us.saturating_add(layout_us);
+                combined.telemetry.rebuilt = true;
+            }
         }
         combined.effects = self.application.take_effect_evidence();
         combined.pointer_icon = self.pointer_icon;
@@ -1186,6 +1285,9 @@ impl<A: Application> UiHost<A> {
             semantic_generation: self.frame_generation,
         };
         combined.next_deadline = self.next_application_deadline;
+        combined.telemetry.retained_frame_bytes =
+            self.tree.resource_diagnostics().estimated_retained_bytes;
+        combined.telemetry.input_to_frame_us = elapsed_us(step_started);
         combined
     }
 
@@ -1374,30 +1476,37 @@ impl<A: Application> UiHost<A> {
     }
 
     fn rebuild(&mut self) {
+        let _ = self.rebuild_timed();
+    }
+
+    fn rebuild_timed(&mut self) -> (u64, u64) {
         let context = ViewContext::from_state(self.bounds, &self.state);
         let overlay_interaction = OverlayInteractionSnapshot::capture(&self.state, &self.tree);
-        self.tree = UiFrame::resolve(
-            self.application.view(context.clone()),
-            FrameRequest::new(self.bounds, &mut self.state),
-        );
+        let paint_started = Instant::now();
+        let view = self.application.view(context.clone());
+        let overlays = self.application.frame_overlays(context);
+        let paint_list_us = elapsed_us(paint_started);
+        let layout_started = Instant::now();
+        self.tree = UiFrame::resolve(view, FrameRequest::new(self.bounds, &mut self.state));
         // Base resolution cannot retain transient descendants because their
         // topology is declared next. Restore interaction ownership before
         // overlay emission so paint and semantics observe the same state.
         overlay_interaction.restore_before_overlay(&mut self.state);
-        self.overlay_failures = apply_frame_overlays(
-            &mut self.tree,
-            &mut self.state,
-            self.application.frame_overlays(context),
-        );
+        self.overlay_failures = apply_frame_overlays(&mut self.tree, &mut self.state, overlays);
         overlay_interaction.restore(&mut self.state, &self.tree);
         self.tree.reconcile_transient_focus(&mut self.state);
         self.tree.finalize_transient_layers(&self.state);
         self.frame_generation = self.frame_generation.wrapping_add(1);
+        (paint_list_us, elapsed_us(layout_started))
     }
 
     pub fn shutdown(&mut self) {
         self.state.destroy();
     }
+}
+
+fn elapsed_us(started: Instant) -> u64 {
+    started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
 }
 
 fn apply_frame_overlays<Message: Clone>(
@@ -1888,6 +1997,19 @@ mod tests {
         scheduler.invalidate();
         assert!(scheduler.take_present());
         assert!(!scheduler.take_present());
+    }
+
+    #[test]
+    fn host_telemetry_reports_phases_and_explicit_allocation_unavailability() {
+        let mut host = UiHost::new(ControllerApplication, 320, 200);
+        let outcome = host.step(HostBatch {
+            events: vec![HostEvent::Poll],
+            ..HostBatch::default()
+        });
+        assert_eq!(outcome.telemetry.scheduled_wakeups, 1);
+        assert!(outcome.telemetry.input_to_frame_us >= outcome.telemetry.input_to_message_us);
+        assert!(outcome.telemetry.retained_frame_bytes > 0);
+        assert_eq!(outcome.telemetry.allocation_count, None);
     }
 
     #[test]
@@ -2847,6 +2969,74 @@ mod tests {
         assert_eq!(
             host.inspect().overlay_failures[0].error,
             crate::SemanticActionError::MissingTarget
+        );
+    }
+
+    #[test]
+    fn inspection_and_accessibility_retain_navigation_depth_and_actions_across_rebuild() {
+        struct NestedApplication {
+            activated: bool,
+        }
+
+        impl Application for NestedApplication {
+            type Message = ();
+
+            fn update(&mut self, (): Self::Message) {
+                self.activated = true;
+            }
+
+            fn view(&self, _context: ViewContext) -> impl crate::View<Self::Message> {
+                crate::Container::new()
+                    .id("outer")
+                    .navigation_scope(crate::NavigationScope::group())
+                    .child(
+                        crate::Container::new()
+                            .id("inner")
+                            .navigation_scope(crate::NavigationScope::group())
+                            .child(
+                                crate::Button::new(
+                                    (),
+                                    if self.activated {
+                                        "Activated"
+                                    } else {
+                                        "Activate"
+                                    },
+                                )
+                                .id("action"),
+                            ),
+                    )
+            }
+        }
+
+        let mut host = UiHost::new(NestedApplication { activated: false }, 320, 200);
+        host.handle_event(UiEvent::ControllerDown);
+        host.handle_event(UiEvent::ControllerActivate);
+        assert_eq!(host.inspect().navigation_depth, 1);
+        host.handle_event(UiEvent::ControllerActivate);
+        assert_eq!(host.inspect().navigation_depth, 2);
+        assert_eq!(
+            host.inspect().available_semantic_actions,
+            [crate::ActionKind::Activate]
+        );
+        let selected = host
+            .inspect()
+            .controller_target
+            .expect("nested action selected");
+        let accessible = host
+            .accessibility_nodes()
+            .iter()
+            .find(|node| node.id == selected)
+            .expect("selected action remains accessibility-visible");
+        assert_eq!(accessible.navigation_depth, 2);
+        assert_eq!(accessible.actions, [crate::ActionKind::Activate]);
+
+        host.handle_event(UiEvent::ControllerActivate);
+        assert!(host.application().activated);
+        assert_eq!(host.inspect().navigation_depth, 2);
+        assert_eq!(host.inspect().controller_target.as_ref(), Some(&selected));
+        assert_eq!(
+            host.inspect().available_semantic_actions,
+            [crate::ActionKind::Activate]
         );
     }
 }

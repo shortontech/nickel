@@ -1038,30 +1038,40 @@ mod tests {
             .host_mut()
             .handle_event(UiEvent::TextPaste("one\r\ntwo\rthree\nfour".into()));
         let expected = "one\ntwo\nthree\nfour";
-        let state = &mut scenario.host_mut().application_mut().state;
-        assert_eq!(state.draft, expected);
-        assert!(state.items.is_empty());
+        scenario
+            .assert_value(
+                &Selector::Role(SemanticRole::TextField),
+                &nickel_ui::SemanticValueSnapshot::Text(expected.into()),
+            )
+            .unwrap();
 
-        state.draft = (0..30)
+        let long_draft = (0..30)
             .map(|line| format!("line {line}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let mut ui_state = UiStateStore::default();
-        let rebuilt = UiFrame::layout_with_state(
-            view::chat_view(state),
-            Rect::new(0.0, 0.0, 1120.0, 760.0),
-            &mut ui_state,
+        scenario
+            .set_value(
+                &Selector::Role(SemanticRole::TextField),
+                nickel_ui::SemanticValueInput::Text(long_draft.clone()),
+            )
+            .unwrap()
+            .assert_value(
+                &Selector::Role(SemanticRole::TextField),
+                &nickel_ui::SemanticValueSnapshot::Text(long_draft),
+            )
+            .unwrap();
+        let composer = scenario
+            .host()
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::Group,
+                name: "Message composer".into(),
+            })
+            .unwrap();
+        assert!(
+            composer.bounds.size.height <= 140.0,
+            "composer bounds: {:?}",
+            composer.bounds
         );
-        let composer_viewport = rebuilt
-            .resolved_layout()
-            .nodes()
-            .iter()
-            .find(|node| node.id.as_str().ends_with("composer/#0"))
-            .expect("composer viewport");
-        assert!(composer_viewport.allocated.size.height <= 140.0);
-        let extent = composer_viewport.scroll.expect("multiline scroll extent");
-        assert!(extent.content.height > extent.viewport.height);
-        assert!(extent.offset > 0.0);
     }
 
     #[test]

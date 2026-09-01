@@ -15,7 +15,7 @@ pub(super) struct SettingsApp {
     pub(super) status: String,
     pub(super) page: SettingsPage,
     pub(super) sidebar_query: String,
-    pub(super) pending_focus: Option<nickel_ui::UiId>,
+    pub(super) pending_effects: Vec<SettingsEffect>,
     pub(super) active_destination: Option<SettingsPage>,
     pub(super) appearance_tab: AppearanceTab,
     pub(super) appearance_notice: Option<AppearanceNotice>,
@@ -42,11 +42,6 @@ pub(super) struct SettingsApp {
     pub(super) bluetooth: BluetoothSnapshot,
     pub(super) next_bluetooth_refresh: Instant,
     pub(super) next_network_refresh: Instant,
-    #[cfg(test)]
-    pub(super) ui: UiFrame<SettingsMessage>,
-    #[cfg(test)]
-    pub(super) ui_state: UiStateStore,
-    pub(super) controller: ControllerInput,
 }
 
 impl Default for SettingsApp {
@@ -109,7 +104,7 @@ impl Default for SettingsApp {
             status,
             page: SettingsPage::Display,
             sidebar_query: String::new(),
-            pending_focus: None,
+            pending_effects: Vec::new(),
             active_destination: Some(SettingsPage::Display),
             appearance_tab: AppearanceTab::General,
             appearance_notice: None,
@@ -135,11 +130,6 @@ impl Default for SettingsApp {
             bluetooth: BluetoothSnapshot::default(),
             next_bluetooth_refresh: Instant::now(),
             next_network_refresh: Instant::now(),
-            #[cfg(test)]
-            ui: UiFrame::default(),
-            #[cfg(test)]
-            ui_state: UiStateStore::default(),
-            controller: ControllerInput::new(),
         }
     }
 }

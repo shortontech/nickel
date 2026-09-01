@@ -142,16 +142,18 @@ fn consumer_inventory_is_explicit_evidence_bearing_and_honest() {
             assert_eq!(row[9], "frame");
         } else {
             assert_eq!(row[9], "mixed");
-            assert!(
-                admitted_exceptions.contains(row[11]),
-                "{} names unadmitted exception {}",
-                row[1],
-                row[11]
-            );
-            assert!(
-                named_exceptions.insert(row[11].to_owned()),
-                "exception authority must have one owning consumer"
-            );
+            for exception in row[11].split(',') {
+                assert!(
+                    admitted_exceptions.contains(exception),
+                    "{} names unadmitted exception {}",
+                    row[1],
+                    exception
+                );
+                assert!(
+                    named_exceptions.insert(exception.to_owned()),
+                    "exception authority must have one owning consumer"
+                );
+            }
         }
         assert!(matches!(
             row[6],

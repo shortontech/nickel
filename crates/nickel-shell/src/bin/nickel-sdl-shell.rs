@@ -1321,12 +1321,26 @@ fn main() -> Result<(), String> {
                 } => {
                     let runtime = shell.runtime_diagnostics();
                     let memory = shell.memory_diagnostics();
+                    let (
+                        input_to_message_us,
+                        input_to_frame_us,
+                        layout_us,
+                        paint_list_us,
+                        scheduled_wakeups,
+                    ) = state.host_runtime_samples();
+                    let host_phase_samples_available = !input_to_frame_us.is_empty();
                     platform::respond_runtime_diagnostics(
                         request_id,
                         &reply_path,
                         nickel_session_protocol::ShellRuntimeDiagnostics {
+                            input_to_message_us,
+                            input_to_frame_us,
+                            layout_us,
+                            paint_list_us,
                             warm_present_us: runtime.warm_present_us,
                             input_to_visible_us: runtime.input_to_present_us,
+                            scheduled_wakeups,
+                            host_phase_samples_available,
                             retained_presenter_bytes: memory.presenter_caches.live_bytes as u64,
                             frame_allocations: nickel_session_protocol::AllocationMeasurement {
                                 count: 0,

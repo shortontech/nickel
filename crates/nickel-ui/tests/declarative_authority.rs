@@ -92,6 +92,35 @@ fn hit_authority_references(source: &str) -> usize {
             .into_iter()
             .map(|needle| code_references(source, needle))
             .sum::<usize>()
+        + source
+            .lines()
+            .filter(|line| {
+                let mut quoted = false;
+                let mut escaped = false;
+                let code = line
+                    .split("//")
+                    .next()
+                    .unwrap_or_default()
+                    .chars()
+                    .filter(|character| {
+                        if escaped {
+                            escaped = false;
+                            return !quoted;
+                        }
+                        if *character == '\\' {
+                            escaped = true;
+                            return !quoted;
+                        }
+                        if *character == '"' {
+                            quoted = !quoted;
+                            return false;
+                        }
+                        !quoted
+                    })
+                    .collect::<String>();
+                code.contains("fn ") && code.contains("action_at")
+            })
+            .count()
 }
 
 /// Removes comments and literal contents before counting authority-bearing
@@ -266,7 +295,7 @@ fn display_list_reference_counter_detects_seeded_regressions() {
     );
     assert_eq!(
         hit_authority_references("struct HitTarget; fn action_at(&self) {} hits: Vec<()>"),
-        2
+        3
     );
     assert_eq!(
         hit_authority_references(

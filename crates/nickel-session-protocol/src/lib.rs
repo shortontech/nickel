@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-pub const PROTOCOL_VERSION: u16 = 15;
+pub const PROTOCOL_VERSION: u16 = 16;
 pub const MAX_FRAME_BYTES: usize = 196_608;
 pub const MAX_PREVIEW_WIDTH: u16 = 256;
 pub const MAX_PREVIEW_HEIGHT: u16 = 144;
@@ -394,16 +394,36 @@ pub struct CacheDiagnostics {
 /// sample vector is capped by [`MAX_RUNTIME_PERFORMANCE_SAMPLES`].
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShellRuntimeDiagnostics {
+    #[serde(default)]
+    pub input_to_message_us: Vec<u64>,
+    #[serde(default)]
+    pub input_to_frame_us: Vec<u64>,
+    #[serde(default)]
+    pub layout_us: Vec<u64>,
+    #[serde(default)]
+    pub paint_list_us: Vec<u64>,
     pub warm_present_us: Vec<u64>,
     pub input_to_visible_us: Vec<u64>,
+    #[serde(default)]
+    pub scheduled_wakeups: u64,
+    #[serde(default)]
+    pub host_phase_samples_available: bool,
     pub retained_presenter_bytes: u64,
     pub frame_allocations: AllocationMeasurement,
 }
 
 impl ShellRuntimeDiagnostics {
     pub fn validate(&self) -> Result<(), FrameError> {
-        if self.warm_present_us.len() > MAX_RUNTIME_PERFORMANCE_SAMPLES
-            || self.input_to_visible_us.len() > MAX_RUNTIME_PERFORMANCE_SAMPLES
+        if [
+            &self.input_to_message_us,
+            &self.input_to_frame_us,
+            &self.layout_us,
+            &self.paint_list_us,
+            &self.warm_present_us,
+            &self.input_to_visible_us,
+        ]
+        .into_iter()
+        .any(|samples| samples.len() > MAX_RUNTIME_PERFORMANCE_SAMPLES)
         {
             return Err(FrameError::TooLarge);
         }
@@ -964,8 +984,14 @@ mod tests {
         );
 
         let diagnostics = ShellRuntimeDiagnostics {
+            input_to_message_us: vec![120; MAX_RUNTIME_PERFORMANCE_SAMPLES],
+            input_to_frame_us: vec![480; MAX_RUNTIME_PERFORMANCE_SAMPLES],
+            layout_us: vec![210; MAX_RUNTIME_PERFORMANCE_SAMPLES],
+            paint_list_us: vec![90; MAX_RUNTIME_PERFORMANCE_SAMPLES],
             warm_present_us: vec![950; MAX_RUNTIME_PERFORMANCE_SAMPLES],
             input_to_visible_us: vec![2_400; MAX_RUNTIME_PERFORMANCE_SAMPLES],
+            scheduled_wakeups: 3,
+            host_phase_samples_available: true,
             retained_presenter_bytes: 1_048_576,
             frame_allocations: AllocationMeasurement {
                 count: 0,
@@ -975,6 +1001,7 @@ mod tests {
         assert_eq!(diagnostics.validate(), Ok(()));
         let json = serde_json::to_value(&diagnostics).unwrap();
         assert_eq!(json["warm_present_us"][0], 950);
+        assert_eq!(json["input_to_frame_us"][0], 480);
         assert_eq!(json["frame_allocations"]["scope"], "process");
         let response = ServerEnvelope {
             request_id: 14,

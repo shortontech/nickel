@@ -238,8 +238,10 @@ fn signal_id(signal: &ControllerSignal) -> Option<ControllerId> {
 #[cfg(test)]
 mod tests {
     use super::{ControllerAction, ControllerFamily, signal_action};
+    use nickel_input::NativeCode;
     use nickel_input::controller::{
-        AxisDirection, ControllerButton, ControllerId, ControllerSignal,
+        AxisDirection, ControllerAxis, ControllerButton, ControllerEvent, ControllerId,
+        ControllerIdentity, ControllerNormalizer, ControllerSignal,
     };
 
     #[test]
@@ -298,6 +300,40 @@ mod tests {
         assert_eq!(
             ControllerFamily::from_reported_name("USB game controller"),
             ControllerFamily::Generic
+        );
+    }
+
+    #[test]
+    fn connection_and_stick_drift_do_not_produce_modality_changing_actions() {
+        let id = ControllerId(7);
+        let mut normalizer = ControllerNormalizer::default();
+        let mut signals = normalizer.handle(
+            ControllerEvent::Connected {
+                id,
+                identity: ControllerIdentity {
+                    backend: "fixture".into(),
+                    native: NativeCode::Numeric(7),
+                    fingerprint: None,
+                },
+            },
+            0,
+        );
+        for (time, value) in [(1, 0.01), (2, -0.08), (3, 0.22), (4, -0.31)] {
+            signals.extend(normalizer.handle(
+                ControllerEvent::Axis {
+                    id,
+                    axis: ControllerAxis::LeftX,
+                    value,
+                },
+                time,
+            ));
+        }
+
+        assert!(
+            signals
+                .into_iter()
+                .all(|signal| signal_action(signal).is_none()),
+            "only a meaningful normalized controller action may select controller modality"
         );
     }
 }

@@ -72,6 +72,7 @@ windows = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
+nickel-ui-testkit = { path = "../nickel-ui-testkit" }
 sha2.workspace = true
 tempfile = "3.25.0"
 toml.workspace = true

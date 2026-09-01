@@ -1653,6 +1653,65 @@ fn controller_panes_restore_their_own_last_selected_descendant() {
 }
 
 #[test]
+fn declared_directional_neighbor_precedes_spatial_candidate() {
+    let view = Container::new()
+        .id("scope")
+        .navigation_scope(crate::NavigationScope::group().neighbor(
+            crate::NavigationDirection::Down,
+            UiId::from("root/scope/third"),
+        ))
+        .children([
+            Button::new(TestMessage::Option(1), "First").id("first"),
+            Button::new(TestMessage::Option(2), "Second").id("second"),
+            Button::new(TestMessage::Option(3), "Third").id("third"),
+        ]);
+    let mut state = UiStateStore::default();
+    let tree = UiFrame::layout_with_state(view, Rect::new(0.0, 0.0, 200.0, 160.0), &mut state);
+
+    tree.handle_event(&mut state, UiEvent::ControllerDown);
+    tree.handle_event(&mut state, UiEvent::ControllerActivate);
+    assert!(
+        state
+            .navigation()
+            .controller_selected()
+            .is_some_and(|id| id.as_str().ends_with("/first"))
+    );
+    tree.handle_event(&mut state, UiEvent::ControllerDown);
+    assert!(
+        state
+            .navigation()
+            .controller_selected()
+            .is_some_and(|id| id.as_str().ends_with("/third"))
+    );
+}
+
+#[test]
+fn missing_declared_neighbor_uses_deterministic_spatial_fallback() {
+    let view = Container::new()
+        .id("scope")
+        .navigation_scope(crate::NavigationScope::group().neighbor(
+            crate::NavigationDirection::Down,
+            UiId::from("root/scope/missing"),
+        ))
+        .children([
+            Button::new(TestMessage::Option(1), "First").id("first"),
+            Button::new(TestMessage::Option(2), "Second").id("second"),
+        ]);
+    let mut state = UiStateStore::default();
+    let tree = UiFrame::layout_with_state(view, Rect::new(0.0, 0.0, 200.0, 120.0), &mut state);
+
+    tree.handle_event(&mut state, UiEvent::ControllerDown);
+    tree.handle_event(&mut state, UiEvent::ControllerActivate);
+    tree.handle_event(&mut state, UiEvent::ControllerDown);
+    assert!(
+        state
+            .navigation()
+            .controller_selected()
+            .is_some_and(|id| id.as_str().ends_with("/second"))
+    );
+}
+
+#[test]
 fn pointer_drag_selects_visible_text_and_caret_blink_only_changes_paint() {
     fn query(value: String) -> TestMessage {
         TestMessage::Query(value)

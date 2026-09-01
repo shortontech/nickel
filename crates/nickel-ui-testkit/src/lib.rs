@@ -3328,6 +3328,37 @@ fn merge_outcome(into: &mut HostEventOutcome, next: HostEventOutcome) {
     into.telemetry.events_processed += next.telemetry.events_processed;
     into.telemetry.completions_processed += next.telemetry.completions_processed;
     into.telemetry.rebuilt |= next.telemetry.rebuilt;
+    into.telemetry.input_to_message_us = into
+        .telemetry
+        .input_to_message_us
+        .saturating_add(next.telemetry.input_to_message_us);
+    into.telemetry.input_to_frame_us = into
+        .telemetry
+        .input_to_frame_us
+        .saturating_add(next.telemetry.input_to_frame_us);
+    into.telemetry.layout_us = into
+        .telemetry
+        .layout_us
+        .saturating_add(next.telemetry.layout_us);
+    into.telemetry.paint_list_us = into
+        .telemetry
+        .paint_list_us
+        .saturating_add(next.telemetry.paint_list_us);
+    into.telemetry.scheduled_wakeups = into
+        .telemetry
+        .scheduled_wakeups
+        .saturating_add(next.telemetry.scheduled_wakeups);
+    into.telemetry.retained_frame_bytes = into
+        .telemetry
+        .retained_frame_bytes
+        .max(next.telemetry.retained_frame_bytes);
+    into.telemetry.allocation_count = match (
+        into.telemetry.allocation_count,
+        next.telemetry.allocation_count,
+    ) {
+        (Some(left), Some(right)) => Some(left.saturating_add(right)),
+        _ => None,
+    };
     if next.clipboard_text.is_some() {
         into.clipboard_text = next.clipboard_text;
     }

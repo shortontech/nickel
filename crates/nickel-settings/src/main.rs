@@ -41,8 +41,8 @@ use nickel_input::{InputEvent, KeyEdge, LogicalKey, NamedKey, PointerButton, Poi
 use nickel_ui::{
     ActionLegend, ActionLegendEntry, AdapterOutcome, AnyView, Application, Button,
     ButtonPresentation, ChoiceCard, ChoiceCardGroup, ColorSwatch, ComponentBuilderExt, Container,
-    ControllerInput, GlobalAction, HostAdapter, HostServices, Image, ImageFit, InputModality,
-    Insets, NavigationItem, PageHeader, PreviewTile, ReadingDirection, ResponsiveNavigation,
+    GlobalAction, HostAdapter, HostServices, Image, ImageFit, InputModality, Insets,
+    NavigationItem, PageHeader, PreviewTile, ReadingDirection, ResponsiveNavigation,
     ResponsiveNavigationDestination, SelectField, SemanticColors, SemanticControllerAction,
     SemanticRole, SemanticSelector, SemanticTheme, SettingsCard, SettingsNavigation, SettingsRow,
     SettingsSearchEntry, SettingsSearchField, SettingsStatus, SettingsStatusKind, SliderField,
@@ -52,10 +52,7 @@ use nickel_ui::{
 use sdl3::event::Event;
 
 #[cfg(test)]
-use nickel_ui::{
-    ControllerAction, InputSource, InteractionIntent, Rect as UiRect, UiEvent, UiFrame,
-    UiStateStore,
-};
+use nickel_ui::{ControllerAction, Rect as UiRect, UiFrame};
 
 const SIDEBAR_WIDTH: i32 = 280;
 const DISPLAY_PLANE: Rect = Rect {
@@ -338,6 +335,11 @@ enum SettingsMessage {
     DisplayApply,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SettingsEffect {
+    FocusControl(String),
+}
+
 fn desktop_count_message(fraction: f32) -> SettingsMessage {
     SettingsMessage::SetDesktopCount(1 + (fraction.clamp(0.0, 1.0) * 7.0).round() as u8)
 }
@@ -359,54 +361,6 @@ fn sidebar_search_message(value: String) -> SettingsMessage {
 }
 
 impl SettingsApp {
-    #[cfg(test)]
-    fn dispatch_ui_event(&mut self, event: UiEvent) {
-        let source = event.input_source();
-        let outcome = self
-            .ui
-            .transition(&mut self.ui_state, source, InteractionIntent::Event(event))
-            .expect("event transitions do not perform fallible semantic lookup");
-        for message in outcome.messages {
-            self.handle_settings_message(message);
-        }
-        if outcome.invalidation != nickel_ui::Invalidation::None {
-            self.request_redraw();
-        }
-    }
-
-    #[cfg(test)]
-    fn dispatch_semantic_action(
-        &mut self,
-        target: UiId,
-        source: InputSource,
-        action: nickel_ui::SemanticAction,
-    ) {
-        let outcome = self
-            .ui
-            .transition(
-                &mut self.ui_state,
-                source,
-                InteractionIntent::Invoke { target, action },
-            )
-            .expect("semantic action target must advertise the requested action");
-        for message in outcome.messages {
-            self.handle_settings_message(message);
-        }
-        if outcome.invalidation != nickel_ui::Invalidation::None {
-            self.request_redraw();
-        }
-    }
-
-    #[cfg(test)]
-    fn transient_scroll(&self, message: &SettingsMessage) -> f32 {
-        self.ui
-            .unique_semantic_target_for_message(message)
-            .ok()
-            .and_then(|target| self.ui_state.state(&target.id))
-            .map(|state| state.scroll_offset)
-            .unwrap_or(0.0)
-    }
-
     fn request_redraw(&self) {
         self.redraw_requested.set(true);
     }
@@ -420,27 +374,6 @@ impl SettingsApp {
 
     fn ui_theme(&self) -> SemanticTheme {
         semantic_theme(self.palette())
-    }
-
-    #[cfg(test)]
-    fn apply_pending_focus(&mut self, ui: &UiFrame<SettingsMessage>) {
-        let Some(target) = self.pending_focus.take() else {
-            return;
-        };
-        let suffix = format!("/{}", target.as_str());
-        if let Some(id) = ui
-            .resolved_layout()
-            .nodes()
-            .iter()
-            .find(|node| node.id == target || node.id.as_str().ends_with(&suffix))
-            .map(|node| node.id.clone())
-        {
-            let _ = ui.transition(
-                &mut self.ui_state,
-                InputSource::Programmatic,
-                InteractionIntent::Event(UiEvent::AccessibilityFocus(id)),
-            );
-        }
     }
 
     fn handle_settings_message(&mut self, message: SettingsMessage) {
@@ -458,7 +391,8 @@ impl SettingsApp {
                 self.page = page;
                 self.active_destination = Some(page);
                 self.sidebar_query.clear();
-                self.pending_focus = Some(target.into());
+                self.pending_effects
+                    .push(SettingsEffect::FocusControl(target));
                 if page == SettingsPage::Appearance {
                     self.appearance_tab = AppearanceTab::General;
                 }
@@ -696,38 +630,6 @@ impl SettingsApp {
         self.request_redraw();
     }
 
-    #[cfg(test)]
-    fn scroll_settings(&mut self, wheel_y: f32) {
-        let delta = -wheel_y * 42.0;
-        match self.page {
-            SettingsPage::Appearance => {
-                self.scroll_page(SettingsMessage::AppearanceScroll, delta);
-            }
-            SettingsPage::Network => {
-                self.scroll_page(SettingsMessage::NetworkScroll, delta);
-            }
-            SettingsPage::Bluetooth => {
-                self.scroll_page(SettingsMessage::BluetoothScroll, delta);
-            }
-            _ => {}
-        }
-    }
-
-    #[cfg(test)]
-    fn scroll_page(&mut self, message: SettingsMessage, delta: f32) {
-        let Ok(target) = self.ui.unique_semantic_target_for_message(&message) else {
-            return;
-        };
-        let maximum = self
-            .ui
-            .scroll_extent(&message)
-            .map(|extent| (extent.content.height - extent.viewport.height).max(0.0))
-            .unwrap_or(0.0);
-        if self.ui_state.scroll_by(target.id, delta, maximum) != nickel_ui::Invalidation::None {
-            self.request_redraw();
-        }
-    }
-
     fn set_desktop_count(&mut self, count: u8) {
         if count == self.shell_settings.desktop_count {
             return;
@@ -812,33 +714,6 @@ impl SettingsApp {
         self.wallpaper_preview = None;
         self.wallpaper_dimensions = None;
         self.wallpaper_status = None;
-    }
-
-    #[cfg(test)]
-    fn sync_display_plane(&mut self) {
-        if self.page != SettingsPage::Display {
-            return;
-        }
-        let Some(node) = self
-            .ui
-            .resolved_layout()
-            .nodes()
-            .iter()
-            .find(|node| node.id.as_str().ends_with("/display-plane"))
-        else {
-            return;
-        };
-        let resolved = Rect {
-            x: node.allocated.origin.x.round() as i32,
-            y: node.allocated.origin.y.round() as i32,
-            w: node.allocated.size.width.round() as i32,
-            h: node.allocated.size.height.round() as i32,
-        };
-        if resolved.w <= 0 || resolved.h <= 0 || resolved == self.display_plane {
-            return;
-        }
-        self.display_plane = resolved;
-        center_display_rects(&mut self.displays, resolved);
     }
 }
 
@@ -1131,6 +1006,12 @@ impl Application for SettingsApp {
         self.handle_settings_message(message);
     }
 
+    fn take_focus_request(&mut self) -> Option<UiId> {
+        self.pending_effects.pop().map(|effect| match effect {
+            SettingsEffect::FocusControl(target) => UiId::from(target),
+        })
+    }
+
     fn view(&self, context: ViewContext) -> impl nickel_ui::View<Self::Message> {
         self.settings_view(
             context.viewport.size.width,
@@ -1203,20 +1084,6 @@ impl SettingsHostAdapter {
         if resolved.w > 0 && resolved.h > 0 && resolved != app.display_plane {
             app.display_plane = resolved;
             center_display_rects(&mut app.displays, resolved);
-        }
-    }
-
-    fn apply_pending_focus(host: &mut UiHost<SettingsApp>) {
-        let pending = host.application_mut().pending_focus.take();
-        let Some(target) = pending else { return };
-        let suffix = format!("/{}", target.as_str());
-        if let Some(id) = host
-            .semantic_nodes()
-            .into_iter()
-            .find(|node| node.id == target || node.id.as_str().ends_with(&suffix))
-            .map(|node| node.id)
-        {
-            host.request_focus(id);
         }
     }
 }
@@ -1314,7 +1181,6 @@ impl HostAdapter<SettingsApp> for SettingsHostAdapter {
     ) -> Result<AdapterOutcome, Box<dyn std::error::Error>> {
         self.sync_requested = false;
         Self::sync_display_plane(host);
-        Self::apply_pending_focus(host);
         Ok(AdapterOutcome::default())
     }
 
@@ -1363,8 +1229,8 @@ mod tests {
 
     use super::{
         BluetoothDevice, ControllerAction, NetworkAdapter, Rect, SIDEBAR_WIDTH, SettingsApp,
-        SettingsMessage, SettingsPage, ThemePreference, UiEvent, UiHost, WallpaperSettings,
-        attach_rect_centered, constrain_center, snap_rect,
+        SettingsHostAdapter, SettingsMessage, SettingsPage, ThemePreference, UiHost,
+        WallpaperSettings, attach_rect_centered, constrain_center, snap_rect,
     };
 
     #[test]
@@ -1575,16 +1441,13 @@ mod tests {
 
     #[test]
     fn appearance_composition_exposes_shared_controls_and_scrolls() {
-        let mut app = SettingsApp::with_initial_page(SettingsPage::Appearance);
+        let app = SettingsApp::with_initial_page(SettingsPage::Appearance);
         let tree = app.build_ui(850.0, 580.0);
 
         assert!(
             tree.scroll_extent(&SettingsMessage::AppearanceScroll)
                 .is_some_and(|extent| extent.can_scroll())
         );
-        app.ui = tree;
-        app.scroll_settings(-1.0);
-        assert!(app.transient_scroll(&SettingsMessage::AppearanceScroll) > 0.0);
         let expanded = app.build_ui(850.0, 1600.0);
         for message in [
             SettingsMessage::AppearanceLight,
@@ -1888,16 +1751,27 @@ mod tests {
                 .is_some_and(|label| label.contains("Automatic") && label.contains("Appearance"))
         }));
 
-        app.handle_settings_message(message);
-        let destination = app.build_ui(850.0, 900.0);
-        destination.reconcile_state(&mut app.ui_state);
-        app.apply_pending_focus(&destination);
+        let mut scenario = nickel_ui_testkit::Scenario::new(app, 850, 580);
+        let search_result = scenario
+            .host()
+            .unique_semantic_target_for_message(&message)
+            .expect("search result has a production semantic target")
+            .id;
+        scenario
+            .accessibility_action(
+                &nickel_ui_testkit::Selector::id(search_result),
+                nickel_ui::ActionKind::Activate,
+            )
+            .expect("search result follows production accessibility routing");
         assert!(
-            app.ui_state
-                .focused()
+            scenario
+                .host()
+                .inspect()
+                .keyboard_focus
+                .as_ref()
                 .is_some_and(|id| id.as_str().ends_with("/appearance-mode-system"))
         );
-        assert!(app.sidebar_query.is_empty());
+        assert!(scenario.host().application().sidebar_query.is_empty());
     }
 
     #[test]
@@ -1922,11 +1796,12 @@ mod tests {
     #[test]
     fn navigation_activation_converges_across_keyboard_controller_and_accessibility() {
         for modality in ["keyboard", "controller", "accessibility"] {
-            let mut app = SettingsApp::with_initial_page(SettingsPage::Display);
-            app.ui = app.build_ui(850.0, 580.0);
-            app.ui.reconcile_state(&mut app.ui_state);
-            let id = app
-                .ui
+            let mut host = UiHost::new(
+                SettingsApp::with_initial_page(SettingsPage::Display),
+                850,
+                580,
+            );
+            let id = host
                 .unique_semantic_target_for_message(&SettingsMessage::Navigate(
                     SettingsPage::Appearance,
                 ))
@@ -1934,25 +1809,28 @@ mod tests {
                 .id;
             match modality {
                 "keyboard" => {
-                    app.dispatch_semantic_action(
-                        id,
-                        nickel_ui::InputSource::Keyboard,
-                        nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
-                    );
+                    host.request_focus(id);
+                    host.handle_input(&enter_event(), None);
                 }
                 "controller" => {
-                    app.dispatch_semantic_action(
+                    host.perform_controller_semantic_action(
                         id,
-                        nickel_ui::InputSource::Controller,
                         nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
                     );
                 }
                 "accessibility" => {
-                    app.dispatch_ui_event(UiEvent::AccessibilityActivate(id));
+                    host.perform_accessibility_action(
+                        id,
+                        nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+                    );
                 }
                 _ => unreachable!(),
             }
-            assert_eq!(app.page, SettingsPage::Appearance, "{modality}");
+            assert_eq!(
+                host.application().page,
+                SettingsPage::Appearance,
+                "{modality}"
+            );
         }
     }
 
@@ -1986,46 +1864,42 @@ mod tests {
 
     #[test]
     fn sidebar_semantic_activation_selects_destination() {
-        let mut app = SettingsApp::with_initial_page(SettingsPage::Appearance);
-        let mut state = std::mem::take(&mut app.ui_state);
-        app.ui = app.build_ui_with_state(850.0, 580.0, &mut state);
-        app.ui_state = state;
-        let destination = app
-            .ui
+        let mut host = UiHost::new(
+            SettingsApp::with_initial_page(SettingsPage::Appearance),
+            850,
+            580,
+        );
+        let destination = host
             .unique_semantic_target_for_message(&SettingsMessage::Navigate(SettingsPage::Display))
             .expect("display destination semantics")
             .id;
-        app.dispatch_ui_event(UiEvent::AccessibilityActivate(destination));
-        assert_eq!(app.page, SettingsPage::Display);
+        host.perform_accessibility_action(
+            destination,
+            nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+        );
+        assert_eq!(host.application().page, SettingsPage::Display);
     }
 
     #[test]
     fn controller_reaches_offscreen_appearance_sliders_and_adjusts_them() {
         let mut app = SettingsApp::with_initial_page(SettingsPage::Appearance);
         app.shell_settings.accent_intensity = Some(50);
-        let mut state = std::mem::take(&mut app.ui_state);
-        app.ui = app.build_ui_with_state(850.0, 580.0, &mut state);
-        app.ui_state = state;
-        let slider = app
-            .ui
-            .resolved_layout()
-            .nodes()
-            .iter()
+        let mut host = UiHost::new(app, 850, 580);
+        let slider = host
+            .semantic_nodes()
+            .into_iter()
             .find(|node| {
-                node.id.as_str().contains("/appearance-intensity/")
-                    && node.controller_value.is_some()
+                node.id.as_str().contains("/appearance-intensity/") && node.value.is_some()
             })
             .unwrap()
-            .id
-            .clone();
-        app.dispatch_semantic_action(
+            .id;
+        host.perform_controller_semantic_action(
             slider,
-            nickel_ui::InputSource::Controller,
             nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Increment),
         );
-        assert_eq!(app.shell_settings.accent_intensity, Some(55));
+        assert_eq!(host.application().shell_settings.accent_intensity, Some(55));
         assert_eq!(
-            app.ui_state.input_modality(),
+            host.inspect().modality,
             nickel_ui::InputModality::Controller
         );
     }
@@ -2094,10 +1968,14 @@ mod tests {
 
     #[test]
     fn display_cards_follow_the_resolved_canvas_instead_of_legacy_coordinates() {
-        let mut app = SettingsApp::with_initial_page(SettingsPage::Display);
-        app.ui = app.build_ui(1200.0, 760.0);
-        app.sync_display_plane();
+        let mut host = UiHost::new(
+            SettingsApp::with_initial_page(SettingsPage::Display),
+            1200,
+            760,
+        );
+        SettingsHostAdapter::sync_display_plane(&mut host);
 
+        let app = host.application();
         let plane = app.display_plane;
         assert!(plane.x > SIDEBAR_WIDTH);
         for display in &app.displays {
@@ -2110,17 +1988,21 @@ mod tests {
 
     #[test]
     fn display_card_selection_uses_the_declarative_semantic_route() {
-        let mut app = SettingsApp::with_initial_page(SettingsPage::Display);
-        app.ui = app.build_ui(1200.0, 760.0);
-        app.ui.reconcile_state(&mut app.ui_state);
-        let second = app
-            .ui
+        let mut host = UiHost::new(
+            SettingsApp::with_initial_page(SettingsPage::Display),
+            1200,
+            760,
+        );
+        let second = host
             .unique_semantic_target_for_message(&SettingsMessage::SelectDisplay(1))
             .expect("second display card exposes an activation action")
             .id;
 
-        app.dispatch_ui_event(UiEvent::AccessibilityActivate(second));
+        host.perform_accessibility_action(
+            second,
+            nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+        );
 
-        assert_eq!(app.selected, 1);
+        assert_eq!(host.application().selected, 1);
     }
 }
