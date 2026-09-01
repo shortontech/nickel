@@ -790,6 +790,7 @@ mod tests {
                 "shell.codex-project-menu",
                 "shell.control-center",
                 "shell.desktop",
+                "shell.launcher-dashboard",
                 "shell.launcher-search",
                 "shell.lock",
                 "shell.notification",
