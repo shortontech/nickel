@@ -288,8 +288,22 @@ impl SdlShell {
     }
 
     pub fn sync_display_geometry(&mut self) -> Result<(), String> {
-        let displays = require_displays(self.display_geometries()?)?;
+        let displays = self.display_geometries()?;
         let output_names = self.display_names()?;
+        if displays.is_empty() {
+            for surface in &mut self.surfaces {
+                surface.display_connected = false;
+                let _ = surface.window_mut().hide();
+                if let Some(presenter) = surface.presenter.as_mut()
+                    && let Err(error) = presenter.suspend()
+                {
+                    tracing::warn!(%error, "failed to suspend headless presenter");
+                }
+            }
+            self.rebuild_surface_indices();
+            tracing::info!("SDL shell is dormant while no displays are available");
+            return Ok(());
+        }
         let panels_match_outputs = output_names.iter().all(|output_name| {
             self.surfaces.iter().any(|surface| {
                 surface.display_connected
@@ -355,6 +369,31 @@ impl SdlShell {
             }
             self.rebuild_surface_indices();
         }
+
+        let primary = displays[0];
+        let primary_name = &output_names[0];
+        for surface in &mut self.surfaces {
+            if surface.display_connected
+                || matches!(
+                    surface.role,
+                    SurfaceRole::Desktop | SurfaceRole::Panel | SurfaceRole::Lock
+                )
+            {
+                continue;
+            }
+            surface.display_index = 0;
+            surface.output_name.clone_from(primary_name);
+            surface.display_connected = true;
+            let (_, x, y, width, height, _) = surface_geometry(surface.role, primary);
+            surface
+                .window_mut()
+                .set_position(WindowPos::Positioned(x), WindowPos::Positioned(y));
+            surface
+                .window_mut()
+                .set_size(width, height)
+                .map_err(|error| error.to_string())?;
+        }
+        self.rebuild_surface_indices();
 
         for surface in &mut self.surfaces {
             if !surface.display_connected {

@@ -380,16 +380,15 @@ impl NickelSession {
             .and_then(|credentials| u32::try_from(credentials.pid).ok())
             .is_some_and(|pid| self.is_authenticated_shell_pid(pid));
         let mode = if shell_client { Mode::ClientSide } else { mode };
-        match mode {
-            Mode::ServerSide => {
-                self.server_decorated.insert(toplevel.wl_surface().id());
-            }
-            Mode::ClientSide => {
-                self.server_decorated.remove(&toplevel.wl_surface().id());
-            }
+        let decoration_changed = match mode {
+            Mode::ServerSide => self.server_decorated.insert(toplevel.wl_surface().id()),
+            Mode::ClientSide => self.server_decorated.remove(&toplevel.wl_surface().id()),
             _ => return,
-        }
+        };
         toplevel.with_pending_state(|state| state.decoration_mode = Some(mode));
+        if decoration_changed {
+            self.reconcile_maximized_toplevel_geometry(&toplevel);
+        }
         toplevel.send_pending_configure();
     }
 }
