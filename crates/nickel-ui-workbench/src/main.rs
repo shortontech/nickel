@@ -466,6 +466,7 @@ const FEEDBACK_BUDGETS: &str = include_str!("../../../assets/ui-feedback-budgets
 const CACHE_INVENTORY: &str = include_str!("../../../assets/ui-caches.tsv");
 const CACHE_LIFECYCLE_MATRIX: &str = include_str!("../../../assets/ui-cache-lifecycle.tsv");
 const CONSUMER_INVENTORY: &str = include_str!("../../../assets/ui-consumers.tsv");
+const LIVE_ACCEPTANCE: &str = include_str!("../../../assets/ui-live-acceptance.tsv");
 const VISUAL_FIXTURES: &str = include_str!("../../../assets/visual-fixtures.toml");
 const UI_EVIDENCE: &str = include_str!("../../../assets/evidence/ui-evidence.json");
 const NESTED_RUNTIME_EVIDENCE: &str =
@@ -1050,6 +1051,116 @@ fn validate_consumer_inventory() -> Result<usize, Box<dyn Error>> {
         expected_order += 1;
     }
     Ok(expected_order - 1)
+}
+
+fn validate_live_acceptance_with(
+    consumer_inventory: &str,
+    live_acceptance: &str,
+) -> Result<usize, Box<dyn Error>> {
+    const HEADER: &str = "surface\tplatform\tmodalities\tbehaviors\tcontroller\tstatus\tartifact\tsha256\tcaptured_at";
+    let migration_by_surface = consumer_inventory
+        .lines()
+        .skip(1)
+        .map(|line| {
+            let columns = line.split('\t').collect::<Vec<_>>();
+            (columns[1], columns[4])
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut lines = live_acceptance.lines();
+    if lines.next() != Some(HEADER) {
+        return Err(Box::new(UsageError(
+            "invalid live acceptance header".into(),
+        )));
+    }
+    let mut accepted_surfaces = std::collections::BTreeSet::new();
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for (line_number, line) in lines.enumerate() {
+        let columns = line.split('\t').collect::<Vec<_>>();
+        if columns.len() != 9 || columns.iter().any(|column| column.trim().is_empty()) {
+            return Err(Box::new(UsageError(format!(
+                "invalid live acceptance row {}",
+                line_number + 2
+            ))));
+        }
+        let surface = columns[0];
+        if !accepted_surfaces.insert(surface) {
+            return Err(Box::new(UsageError(format!(
+                "duplicate live acceptance surface `{surface}`"
+            ))));
+        }
+        let migration = migration_by_surface.get(surface).ok_or_else(|| {
+            UsageError(format!(
+                "live acceptance names unknown consumer surface `{surface}`"
+            ))
+        })?;
+        let expected_status = match *migration {
+            "architecture_and_live_verified" => "verified",
+            "headless_verified_live_not_applicable" => "not_applicable",
+            _ => "pending",
+        };
+        if columns[5] != expected_status {
+            return Err(Box::new(UsageError(format!(
+                "consumer `{surface}` migration `{migration}` requires live status `{expected_status}`, got `{}`",
+                columns[5]
+            ))));
+        }
+        match columns[5] {
+            "verified" => {
+                if columns[6] == "none" || columns[7].len() != 64 || columns[8] == "not_captured" {
+                    return Err(Box::new(UsageError(format!(
+                        "verified consumer `{surface}` lacks durable live evidence"
+                    ))));
+                }
+                let bytes = fs::read(repository.join(columns[6]))?;
+                let digest = format!("{:x}", Sha256::digest(bytes));
+                if digest != columns[7] {
+                    return Err(Box::new(UsageError(format!(
+                        "live evidence checksum drifted for `{surface}`"
+                    ))));
+                }
+            }
+            "pending" => {
+                if columns[6] != "none" || columns[7] != "none" || columns[8] != "not_captured" {
+                    return Err(Box::new(UsageError(format!(
+                        "pending consumer `{surface}` claims unverified live evidence"
+                    ))));
+                }
+            }
+            "not_applicable" => {
+                if columns[1] != "not_applicable"
+                    || columns[4] != "not_applicable"
+                    || columns[6] != "none"
+                    || columns[7] != "none"
+                    || columns[8] != "not_applicable"
+                {
+                    return Err(Box::new(UsageError(format!(
+                        "non-live consumer `{surface}` has inconsistent acceptance metadata"
+                    ))));
+                }
+            }
+            status => {
+                return Err(Box::new(UsageError(format!(
+                    "consumer `{surface}` has invalid live status `{status}`"
+                ))));
+            }
+        }
+    }
+    let missing = migration_by_surface
+        .keys()
+        .filter(|surface| !accepted_surfaces.contains(**surface))
+        .copied()
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(Box::new(UsageError(format!(
+            "live acceptance is missing consumer surfaces [{}]",
+            missing.join(", ")
+        ))));
+    }
+    Ok(accepted_surfaces.len())
+}
+
+fn validate_live_acceptance() -> Result<usize, Box<dyn Error>> {
+    validate_live_acceptance_with(CONSUMER_INVENTORY, LIVE_ACCEPTANCE)
 }
 
 fn validate_fixture_asset(asset: &FixtureAsset) -> Result<(), Box<dyn Error>> {
@@ -3456,6 +3567,7 @@ fn validate() -> Result<(), Box<dyn Error>> {
     let cache_count = validate_cache_inventory()?;
     let lifecycle_count = validate_cache_lifecycle_matrix(CACHE_INVENTORY, CACHE_LIFECYCLE_MATRIX)?;
     let consumer_count = validate_consumer_inventory()?;
+    let live_acceptance_count = validate_live_acceptance()?;
     let inspection = counter.host().inspect();
     if inspection.resources.retained_build_scratch_bytes
         != budgets.lifecycle.retained_build_scratch_bytes
@@ -3465,11 +3577,12 @@ fn validate() -> Result<(), Box<dyn Error>> {
         )));
     }
     println!(
-        "validated {} fixture(s), {} cache record(s), {} lifecycle record(s), and {} consumer record(s)",
+        "validated {} fixture(s), {} cache record(s), {} lifecycle record(s), {} consumer record(s), and {} live acceptance record(s)",
         fixtures.len(),
         cache_count,
         lifecycle_count,
-        consumer_count
+        consumer_count,
+        live_acceptance_count
     );
     Ok(())
 }
@@ -4334,6 +4447,48 @@ mod tests {
         assert_eq!(
             validate_consumer_inventory().expect("valid consumer inventory"),
             21
+        );
+        assert_eq!(
+            validate_live_acceptance().expect("valid joined live acceptance ledger"),
+            21
+        );
+    }
+
+    #[test]
+    fn live_acceptance_join_fails_closed_for_false_completion_and_orphans() {
+        let falsely_completed = CONSUMER_INVENTORY.replacen(
+            "architecture_verified_acceptance_pending",
+            "architecture_and_live_verified",
+            1,
+        );
+        let error = validate_live_acceptance_with(&falsely_completed, LIVE_ACCEPTANCE)
+            .expect_err("a pending live record cannot support completed migration");
+        assert!(
+            error
+                .to_string()
+                .contains("requires live status `verified`")
+        );
+
+        let missing_surface = LIVE_ACCEPTANCE
+            .lines()
+            .filter(|line| !line.starts_with("ui-examples\t"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let error = validate_live_acceptance_with(CONSUMER_INVENTORY, &missing_surface)
+            .expect_err("every consumer must have a live acceptance record");
+        assert!(error.to_string().contains("ui-examples"));
+
+        let false_pending_artifact = LIVE_ACCEPTANCE.replacen(
+            "pending\tnone\tnone\tnot_captured",
+            "pending\tassets/evidence/ui-evidence.json\tnone\tnot_captured",
+            1,
+        );
+        let error = validate_live_acceptance_with(CONSUMER_INVENTORY, &false_pending_artifact)
+            .expect_err("pending rows cannot imply durable verified evidence");
+        assert!(
+            error
+                .to_string()
+                .contains("claims unverified live evidence")
         );
     }
 

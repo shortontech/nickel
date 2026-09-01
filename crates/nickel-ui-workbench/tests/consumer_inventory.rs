@@ -47,10 +47,10 @@ const REQUIRED_SURFACES: [&str; 21] = [
     "workbench-custom-paint",
 ];
 
-const FIXTURES: [&str; 23] = [
+const FIXTURES: [&str; 24] = [
     "codex.chat",
     "core.counter",
-    "file.representative",
+    "file.browser",
     "gaze.grid",
     "launcher.dashboard",
     "markdown.core",
@@ -61,6 +61,7 @@ const FIXTURES: [&str; 23] = [
     "shell.control-center",
     "shell.desktop",
     "shell.launcher-search",
+    "shell.launcher-dashboard",
     "shell.lock",
     "shell.notification",
     "shell.panel",

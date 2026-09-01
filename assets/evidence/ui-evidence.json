@@ -12,7 +12,7 @@
   },
   "reachability": {
     "path": "assets/evidence/ui-reachability-report.json",
-    "sha256": "af235e141753e0467d5732cf750c4e58c47864cf6ab7d582470bc4410a8b2204",
+    "sha256": "cea02ca0065ba6523394b7f2fc4e1826f71c2d9ec2e58fbec75a9eaa58ac2353",
     "report_schema": 2,
     "fixture_variants": 74,
     "path_count": 1364,
