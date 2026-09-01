@@ -149,10 +149,11 @@ impl ControllerInput {
             if let Some(event) = nickel_input::gilrs::event(&event, identity) {
                 let now_ms = now.saturating_duration_since(self.epoch).as_millis() as u64;
                 for signal in self.normalizer.handle(event, now_ms) {
-                    if let Some(action) = signal_action(signal.clone()) {
-                        self.active_family = signal_id(&signal)
-                            .and_then(|id| self.families.get(&id).copied())
-                            .or(Some(ControllerFamily::Generic));
+                    let family = signal_id(&signal)
+                        .and_then(|id| self.families.get(&id).copied())
+                        .unwrap_or(ControllerFamily::Generic);
+                    if let Some(action) = signal_action_for_family(signal, family) {
+                        self.active_family = Some(family);
                         actions.push(action);
                     }
                 }
@@ -164,10 +165,11 @@ impl ControllerInput {
         self.connected = gilrs.gamepads().any(|(_, gamepad)| gamepad.is_connected());
         let now_ms = now.saturating_duration_since(self.epoch).as_millis() as u64;
         for signal in self.normalizer.tick(now_ms) {
-            if let Some(action) = signal_action(signal.clone()) {
-                self.active_family = signal_id(&signal)
-                    .and_then(|id| self.families.get(&id).copied())
-                    .or(Some(ControllerFamily::Generic));
+            let family = signal_id(&signal)
+                .and_then(|id| self.families.get(&id).copied())
+                .unwrap_or(ControllerFamily::Generic);
+            if let Some(action) = signal_action_for_family(signal, family) {
+                self.active_family = Some(family);
                 actions.push(action);
             }
         }
@@ -191,12 +193,18 @@ impl Default for ControllerInput {
     }
 }
 
-fn button_action(button: &ControllerButton) -> Option<ControllerAction> {
+fn button_action(button: &ControllerButton, family: ControllerFamily) -> Option<ControllerAction> {
     match button {
         ControllerButton::DPadUp => Some(ControllerAction::Up),
         ControllerButton::DPadDown => Some(ControllerAction::Down),
         ControllerButton::DPadLeft => Some(ControllerAction::Left),
         ControllerButton::DPadRight => Some(ControllerAction::Right),
+        ControllerButton::East if family == ControllerFamily::Switch => {
+            Some(ControllerAction::Confirm)
+        }
+        ControllerButton::South if family == ControllerFamily::Switch => {
+            Some(ControllerAction::Cancel)
+        }
         ControllerButton::South => Some(ControllerAction::Confirm),
         ControllerButton::East | ControllerButton::Select => Some(ControllerAction::Cancel),
         ControllerButton::Start => Some(ControllerAction::ContextMenu),
@@ -207,7 +215,15 @@ fn button_action(button: &ControllerButton) -> Option<ControllerAction> {
     }
 }
 
+#[cfg(test)]
 fn signal_action(signal: ControllerSignal) -> Option<ControllerAction> {
+    signal_action_for_family(signal, ControllerFamily::Generic)
+}
+
+fn signal_action_for_family(
+    signal: ControllerSignal,
+    family: ControllerFamily,
+) -> Option<ControllerAction> {
     match signal {
         ControllerSignal::Button {
             button: ControllerButton::Start,
@@ -219,7 +235,7 @@ fn signal_action(signal: ControllerSignal) -> Option<ControllerAction> {
             button,
             edge: nickel_input::KeyEdge::Pressed,
             ..
-        } => button_action(&button),
+        } => button_action(&button, family),
         ControllerSignal::Direction {
             direction,
             edge: nickel_input::KeyEdge::Pressed,
@@ -243,7 +259,7 @@ fn signal_id(signal: &ControllerSignal) -> Option<ControllerId> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ControllerAction, ControllerFamily, signal_action};
+    use super::{ControllerAction, ControllerFamily, signal_action, signal_action_for_family};
     use nickel_input::NativeCode;
     use nickel_input::controller::{
         AxisDirection, ControllerAxis, ControllerButton, ControllerEvent, ControllerId,
@@ -340,6 +356,32 @@ mod tests {
                 repeat: false,
             }),
             Some(ControllerAction::ContextMenu)
+        );
+    }
+
+    #[test]
+    fn switch_face_buttons_follow_reported_nintendo_labels() {
+        let pressed = |button| ControllerSignal::Button {
+            id: ControllerId(1),
+            button,
+            edge: nickel_input::KeyEdge::Pressed,
+            repeat: false,
+        };
+
+        assert_eq!(
+            signal_action_for_family(pressed(ControllerButton::East), ControllerFamily::Switch),
+            Some(ControllerAction::Confirm),
+            "the Switch A button is the east face button"
+        );
+        assert_eq!(
+            signal_action_for_family(pressed(ControllerButton::South), ControllerFamily::Switch),
+            Some(ControllerAction::Cancel),
+            "the Switch B button is the south face button"
+        );
+        assert_eq!(
+            signal_action_for_family(pressed(ControllerButton::South), ControllerFamily::Generic),
+            Some(ControllerAction::Confirm),
+            "unknown layouts retain the conventional south-button fallback"
         );
     }
 
