@@ -653,8 +653,31 @@ fn budgets() -> Result<FeedbackBudgets, Box<dyn Error>> {
     Ok(budgets)
 }
 
-fn validate_cache_inventory() -> Result<usize, Box<dyn Error>> {
-    let mut lines = CACHE_INVENTORY.lines();
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CacheInventoryValidation {
+    Routine,
+    FinalCompletion,
+}
+
+const REQUIRED_UI_CACHE_IDS: &[&str] = &[
+    "compositor_cursor_buffers",
+    "compositor_frame_action_icons",
+    "compositor_identify_badges",
+    "compositor_output_backgrounds",
+    "cosmic_text_font_systems",
+    "native_glyph_atlas",
+    "native_image_textures",
+    "shell_presenter_pixels",
+    "smithay_renderer_internal_caches",
+    "software_glyph_raster",
+    "window_titlebar_rasters",
+];
+
+fn validate_cache_inventory_with(
+    inventory: &str,
+    validation: CacheInventoryValidation,
+) -> Result<usize, Box<dyn Error>> {
+    let mut lines = inventory.lines();
     if lines.next()
         != Some(
             "id\towner\tcategory\tkey_type\tvalue_type\tsource_truth\tgeneration\tmax_entries\tmax_bytes\teviction\tinvalidation\tlifetime\tfallback\tstatus\tevidence",
@@ -704,12 +727,48 @@ fn validate_cache_inventory() -> Result<usize, Box<dyn Error>> {
                 columns[0]
             ))));
         }
+        if columns[8] == "opaque_dependency" && !columns[14].contains("opaque") {
+            return Err(Box::new(UsageError(format!(
+                "dependency-owned cache `{}` must describe its opaque accounting",
+                columns[0]
+            ))));
+        }
+        if validation == CacheInventoryValidation::FinalCompletion
+            && !matches!(
+                columns[13],
+                "removed" | "admitted_measured" | "measured_admitted"
+            )
+        {
+            return Err(Box::new(UsageError(format!(
+                "cache `{}` is not final-completion ready: status `{}`",
+                columns[0], columns[13]
+            ))));
+        }
         count += 1;
     }
     if count == 0 {
         return Err(Box::new(UsageError("cache inventory is empty".into())));
     }
+    let missing = REQUIRED_UI_CACHE_IDS
+        .iter()
+        .filter(|id| !ids.contains(**id))
+        .copied()
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(Box::new(UsageError(format!(
+            "cache inventory omits required UI retained resources: {}",
+            missing.join(", ")
+        ))));
+    }
     Ok(count)
+}
+
+fn validate_cache_inventory() -> Result<usize, Box<dyn Error>> {
+    validate_cache_inventory_with(CACHE_INVENTORY, CacheInventoryValidation::Routine)
+}
+
+fn validate_cache_inventory_for_final_completion() -> Result<usize, Box<dyn Error>> {
+    validate_cache_inventory_with(CACHE_INVENTORY, CacheInventoryValidation::FinalCompletion)
 }
 
 fn validate_consumer_inventory() -> Result<usize, Box<dyn Error>> {
@@ -3189,6 +3248,13 @@ fn validate() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn validate_final_completion() -> Result<(), Box<dyn Error>> {
+    validate()?;
+    let cache_count = validate_cache_inventory_for_final_completion()?;
+    println!("validated {cache_count} final-completion cache record(s)");
+    Ok(())
+}
+
 fn benchmark(id: &str) -> Result<(), Box<dyn Error>> {
     let command_started = Instant::now();
     let entry = fixture_entry(id)?;
@@ -3612,6 +3678,9 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
         [command] if command == "list" => list(),
         [command] if command == "validate" => validate(),
+        [command, flag] if command == "validate" && flag == "--final-completion" => {
+            validate_final_completion()
+        }
         [command, flag] if command == "validate" && flag == "--full-providers" => validate(),
         [command] if command == "feedback-evidence" => feedback_evidence(),
         [command, flag] if command == "feedback-evidence" && flag == "--full-comparison" => {
@@ -3851,6 +3920,49 @@ mod tests {
     #[test]
     fn cache_inventory_is_machine_readable_unique_and_statused() {
         assert!(validate_cache_inventory().expect("valid cache inventory") >= 10);
+    }
+
+    #[test]
+    fn cache_inventory_completeness_is_fail_closed() {
+        let incomplete = CACHE_INVENTORY
+            .lines()
+            .filter(|line| !line.starts_with("compositor_cursor_buffers\t"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let error = validate_cache_inventory_with(&incomplete, CacheInventoryValidation::Routine)
+            .expect_err("omitted retained resource must fail validation");
+        assert!(error.to_string().contains("compositor_cursor_buffers"));
+    }
+
+    #[test]
+    fn opaque_dependency_accounting_must_remain_explicit() {
+        let dishonest = CACHE_INVENTORY.replacen(
+            "dependency-owned renderer allocation and retained bytes are opaque",
+            "dependency-owned retained bytes are zero",
+            1,
+        );
+        let error = validate_cache_inventory_with(&dishonest, CacheInventoryValidation::Routine)
+            .expect_err("opaque dependency accounting must be stated");
+        assert!(error.to_string().contains("opaque accounting"));
+    }
+
+    #[test]
+    fn final_completion_rejects_pending_performance_and_lifecycle_statuses() {
+        for status in ["pending_measure", "lifecycle_fixed"] {
+            let inventory = CACHE_INVENTORY.replacen("measured_admitted", status, 1);
+            let error = validate_cache_inventory_with(
+                &inventory,
+                CacheInventoryValidation::FinalCompletion,
+            )
+            .expect_err("provisional status must not satisfy final completion");
+            assert!(error.to_string().contains(status));
+        }
+        assert!(
+            validate_cache_inventory_for_final_completion()
+                .expect_err("current pending inventory must stay honest")
+                .to_string()
+                .contains("not final-completion ready")
+        );
     }
 
     #[test]
