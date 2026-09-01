@@ -981,7 +981,7 @@ fn validate_consumer_inventory() -> Result<usize, Box<dyn Error>> {
     let mut lines = CONSUMER_INVENTORY.lines();
     if lines.next()
         != Some(
-            "order\tsurface\tcrate\tarchitecture_state\tmigration_status\towner\tplatform_scope\tsemantic_roles\tsemantic_actions\tpaint_authority\thost_authority\tcustom_paint_exception\tworkbench_fixtures\tscenario_evidence\tvisual_variants\taccessibility_evidence\tcontroller_evidence\tlive_acceptance\tresource_evidence\tdepends_on",
+            "order\tsurface\tcrate\tarchitecture_state\tmigration_status\towner\tplatform_scope\tsemantic_roles\tsemantic_actions\tpaint_authority\thost_authority\tcustom_paint_exception\tworkbench_fixtures\tscenario_evidence\tvisual_variants\taccessibility_evidence\tcontroller_evidence\tlive_acceptance\tresource_evidence\tgoverning_specs",
         )
     {
         return Err(Box::new(UsageError(
@@ -1008,6 +1008,7 @@ fn validate_consumer_inventory() -> Result<usize, Box<dyn Error>> {
         if !matches!(
             columns[4],
             "architecture_verified_acceptance_pending"
+                | "architecture_and_live_verified"
                 | "headless_verified_live_not_applicable"
                 | "headless_verified_live_pending"
                 | "external_migration_pending"
@@ -1021,6 +1022,23 @@ fn validate_consumer_inventory() -> Result<usize, Box<dyn Error>> {
             return Err(Box::new(UsageError(format!(
                 "invalid consumer paint authority `{}`",
                 columns[9]
+            ))));
+        }
+        if columns[4] == "architecture_and_live_verified"
+            && (columns[17].contains("pending") || !columns[17].starts_with("verified_"))
+        {
+            return Err(Box::new(UsageError(format!(
+                "completed consumer `{}` lacks verified live acceptance",
+                columns[1]
+            ))));
+        }
+        if !columns[19]
+            .split(',')
+            .all(|spec| spec.len() == 4 && spec.bytes().all(|byte| byte.is_ascii_digit()))
+        {
+            return Err(Box::new(UsageError(format!(
+                "consumer `{}` has invalid governing specification ids",
+                columns[1]
             ))));
         }
         if !surfaces.insert(columns[1]) {

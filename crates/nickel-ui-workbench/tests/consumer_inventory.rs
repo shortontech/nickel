@@ -20,7 +20,7 @@ const HEADER: [&str; 20] = [
     "controller_evidence",
     "live_acceptance",
     "resource_evidence",
-    "depends_on",
+    "governing_specs",
 ];
 
 const REQUIRED_SURFACES: [&str; 21] = [
@@ -135,8 +135,19 @@ fn consumer_inventory_is_explicit_evidence_bearing_and_honest() {
         ));
         assert!(matches!(
             row[4],
-            "architecture_verified_acceptance_pending" | "headless_verified_live_not_applicable"
+            "architecture_verified_acceptance_pending"
+                | "architecture_and_live_verified"
+                | "headless_verified_live_not_applicable"
         ));
+        if row[4] == "architecture_and_live_verified" {
+            assert!(row[17].starts_with("verified_"));
+            assert!(!row[17].contains("pending"));
+        }
+        assert!(
+            row[19]
+                .split(',')
+                .all(|spec| spec.len() == 4 && spec.bytes().all(|byte| byte.is_ascii_digit()))
+        );
         assert!(matches!(row[9], "frame" | "mixed"));
         if row[11] == "none" {
             assert_eq!(row[9], "frame");
