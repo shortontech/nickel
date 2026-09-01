@@ -753,6 +753,7 @@ fn validate_cache_inventory_with(
                 | "pending_measure"
                 | "admitted_measured"
                 | "measured_admitted"
+                | "admitted_opaque"
                 | "lifecycle_fixed"
                 | "lifecycle_fix_required"
         ) {
@@ -776,10 +777,30 @@ fn validate_cache_inventory_with(
                 columns[0]
             ))));
         }
+        if columns[13] == "admitted_opaque" {
+            if columns[8] != "opaque_dependency" {
+                return Err(Box::new(UsageError(format!(
+                    "opaque admission `{}` must retain explicit opaque dependency byte accounting",
+                    columns[0]
+                ))));
+            }
+            if matches!(columns[7], "0" | "dependency-owned") {
+                return Err(Box::new(UsageError(format!(
+                    "opaque admission `{}` has no bounded Nickel owner cardinality",
+                    columns[0]
+                ))));
+            }
+            if !columns[14].contains("drop") {
+                return Err(Box::new(UsageError(format!(
+                    "opaque admission `{}` must state its owner drop lifecycle",
+                    columns[0]
+                ))));
+            }
+        }
         if validation == CacheInventoryValidation::FinalCompletion
             && !matches!(
                 columns[13],
-                "removed" | "admitted_measured" | "measured_admitted"
+                "removed" | "admitted_measured" | "measured_admitted" | "admitted_opaque"
             )
         {
             return Err(Box::new(UsageError(format!(
@@ -4102,14 +4123,35 @@ mod tests {
 
     #[test]
     fn opaque_dependency_accounting_must_remain_explicit() {
-        let dishonest = CACHE_INVENTORY.replacen(
-            "dependency-owned renderer allocation and retained bytes are opaque",
-            "dependency-owned retained bytes are zero",
-            1,
-        );
+        let dishonest = CACHE_INVENTORY.replacen("opaque_dependency", "0", 1);
         let error = validate_cache_inventory_with(&dishonest, CacheInventoryValidation::Routine)
             .expect_err("opaque dependency accounting must be stated");
-        assert!(error.to_string().contains("opaque accounting"));
+        assert!(error.to_string().contains("explicit opaque dependency"));
+    }
+
+    #[test]
+    fn opaque_admission_fails_closed_without_cardinality_bytes_or_drop_semantics() {
+        let admitted = CACHE_INVENTORY
+            .lines()
+            .find(|line| line.starts_with("software_glyph_raster\t"))
+            .expect("opaque admitted row");
+
+        for dishonest in [
+            admitted.replacen(
+                "one SwashCache per SdlComponentRenderer owner",
+                "dependency-owned",
+                1,
+            ),
+            admitted.replacen("opaque_dependency", "0", 1),
+            admitted.replace("drop", "release"),
+        ] {
+            let inventory = CACHE_INVENTORY.replace(admitted, &dishonest);
+            assert!(
+                validate_cache_inventory_with(&inventory, CacheInventoryValidation::Routine)
+                    .is_err(),
+                "dishonest opaque admission must fail validation"
+            );
+        }
     }
 
     #[test]
