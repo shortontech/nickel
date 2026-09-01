@@ -1200,7 +1200,7 @@ impl<Message: Clone> UiFrame<Message> {
         if state.navigation().controller_scope().is_some()
             && state.navigation().controller_selected().is_none()
         {
-            tree.move_controller(state, 1);
+            tree.move_controller(state, 1, true);
         }
         tree.emit_accessibility_geometry();
         tree.validate_clip_commands();
@@ -2255,8 +2255,8 @@ impl<Message: Clone> UiFrame<Message> {
                 ControllerDirection::Right,
                 &mut outcome.messages,
             ),
-            UiEvent::ControllerNext => self.move_controller(state, 1),
-            UiEvent::ControllerPrevious => self.move_controller(state, -1),
+            UiEvent::ControllerNext => self.move_controller(state, 1, true),
+            UiEvent::ControllerPrevious => self.move_controller(state, -1, true),
             UiEvent::ControllerPreviousPane => self.switch_controller_pane(state, -1),
             UiEvent::ControllerNextPane => self.switch_controller_pane(state, 1),
             UiEvent::ControllerAdjust(direction) => {
@@ -2786,7 +2786,12 @@ impl<Message: Clone> UiFrame<Message> {
             .merge(self.reveal_controller_target(state, &target))
     }
 
-    fn move_controller(&self, state: &mut UiStateStore, direction: isize) -> Invalidation {
+    fn move_controller(
+        &self,
+        state: &mut UiStateStore,
+        direction: isize,
+        continue_in_parent: bool,
+    ) -> Invalidation {
         let ids = self.controller_targets(state);
         let at_scope_edge = state
             .navigation()
@@ -2801,7 +2806,18 @@ impl<Message: Clone> UiFrame<Message> {
             });
         if at_scope_edge && let Some(scope) = state.navigation().controller_scope().cloned() {
             return match self.scope_policy(&scope).map(|policy| policy.exit) {
-                Some(crate::NavigationExit::Parent) => self.leave_controller_scope(state, &scope),
+                Some(crate::NavigationExit::Parent) => {
+                    let mut invalidation = self.leave_controller_scope(state, &scope);
+                    if continue_in_parent {
+                        let parent_targets = self.controller_targets(state);
+                        invalidation = invalidation.merge(self.select_controller_from(
+                            state,
+                            direction,
+                            parent_targets,
+                        ));
+                    }
+                    invalidation
+                }
                 Some(crate::NavigationExit::Dismiss) => self.leave_controller_scope(state, &scope),
                 Some(crate::NavigationExit::Contain) | None => Invalidation::None,
             };
@@ -2845,7 +2861,11 @@ impl<Message: Clone> UiFrame<Message> {
                 (ControllerDirection::Right, crate::ReadingDirection::LeftToRight)
                 | (ControllerDirection::Left, crate::ReadingDirection::RightToLeft) => Some(1),
             };
-            return self.move_controller(state, direction.expect("every direction is mapped"));
+            return self.move_controller(
+                state,
+                direction.expect("every direction is mapped"),
+                false,
+            );
         }
         let ids = self.controller_targets(state);
         if ids.is_empty() {

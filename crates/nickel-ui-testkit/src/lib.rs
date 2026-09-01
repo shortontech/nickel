@@ -3512,69 +3512,84 @@ fn explore_controller_routes<A: Application>(
     let started = Instant::now();
     let ceiling = Duration::from_millis(policy.wall_time_ms);
     let mut routes = std::collections::BTreeMap::new();
-    // Seed the graph with the production structural traversal. This cheaply
-    // records its predecessor tree once; BFS below explores every branch the
-    // structural walk cannot cover.
-    let mut seed = factory();
-    let mut seed_prefix = Vec::new();
-    let mut seed_states = BTreeSet::new();
-    for _ in 0..policy.maximum_path_length {
-        if started.elapsed() >= ceiling {
-            return ControllerGraphResult {
-                routes,
-                failure: Some(format!(
-                    "controller graph exploration exceeded the {}ms wall ceiling during structural seeding",
-                    ceiling.as_millis()
-                )),
+    // Seed structural traversal from the default pane and nearby shoulder
+    // peers. Ordinary pane spines are recorded once before spatial BFS.
+    let mut initial_prefixes = vec![Vec::new()];
+    for action in [ControllerAction::PreviousPane, ControllerAction::NextPane] {
+        for count in 1..=3 {
+            initial_prefixes.push(vec![ControllerGraphStep::Action(action); count]);
+        }
+    }
+    for initial_prefix in initial_prefixes {
+        let mut seed = factory();
+        for step in &initial_prefix {
+            apply_controller_graph_step(&mut seed, *step);
+        }
+        let mut seed_prefix = initial_prefix;
+        let mut seed_states = BTreeSet::new();
+        let mut repeat_recoveries = 0;
+        for _ in seed_prefix.len()..policy.maximum_path_length {
+            if started.elapsed() >= ceiling {
+                return ControllerGraphResult {
+                    routes,
+                    failure: Some(format!(
+                        "controller graph exploration exceeded the {}ms wall ceiling during structural seeding",
+                        ceiling.as_millis()
+                    )),
+                };
+            }
+            let inspection = seed.host.inspect();
+            if let Some(current) = inspection.controller_target.as_ref()
+                && targets.contains(current.as_str())
+            {
+                routes
+                    .entry(current.as_str().to_owned())
+                    .or_insert(seed_prefix.clone());
+            }
+            if routes.len() == targets.len() {
+                return ControllerGraphResult {
+                    routes,
+                    failure: None,
+                };
+            }
+            let state = (
+                inspection.controller_target.clone(),
+                inspection.controller_scope.clone(),
+            );
+            let repeated = !seed_states.insert(state);
+            if repeated && repeat_recoveries > 0 {
+                break;
+            }
+            if seed_states.len() > policy.maximum_state_count {
+                return ControllerGraphResult {
+                    routes,
+                    failure: Some(format!(
+                        "controller graph exploration exceeded the {} state ceiling during structural seeding",
+                        policy.maximum_state_count
+                    )),
+                };
+            }
+            let current_node = inspection.controller_target.as_ref().and_then(|target| {
+                seed.host
+                    .semantic_nodes()
+                    .into_iter()
+                    .find(|node| &node.id == target)
+            });
+            let step = if repeated {
+                repeat_recoveries += 1;
+                ControllerGraphStep::Action(ControllerAction::Cancel)
+            } else if inspection.controller_target.is_some()
+                && current_node
+                    .as_ref()
+                    .is_none_or(controller_node_reveals_topology)
+            {
+                ControllerGraphStep::Action(ControllerAction::Confirm)
+            } else {
+                ControllerGraphStep::Next
             };
+            apply_controller_graph_step(&mut seed, step);
+            seed_prefix.push(step);
         }
-        let inspection = seed.host.inspect();
-        if let Some(current) = inspection.controller_target.as_ref()
-            && targets.contains(current.as_str())
-        {
-            routes
-                .entry(current.as_str().to_owned())
-                .or_insert(seed_prefix.clone());
-        }
-        if routes.len() == targets.len() {
-            return ControllerGraphResult {
-                routes,
-                failure: None,
-            };
-        }
-        let state = (
-            inspection.controller_target.clone(),
-            inspection.controller_scope.clone(),
-        );
-        let repeated = !seed_states.insert(state);
-        if seed_states.len() > policy.maximum_state_count {
-            return ControllerGraphResult {
-                routes,
-                failure: Some(format!(
-                    "controller graph exploration exceeded the {} state ceiling during structural seeding",
-                    policy.maximum_state_count
-                )),
-            };
-        }
-        let current_node = inspection.controller_target.as_ref().and_then(|target| {
-            seed.host
-                .semantic_nodes()
-                .into_iter()
-                .find(|node| &node.id == target)
-        });
-        let step = if repeated {
-            ControllerGraphStep::Action(ControllerAction::Cancel)
-        } else if inspection.controller_target.is_some()
-            && current_node
-                .as_ref()
-                .is_none_or(controller_node_reveals_topology)
-        {
-            ControllerGraphStep::Action(ControllerAction::Confirm)
-        } else {
-            ControllerGraphStep::Next
-        };
-        apply_controller_graph_step(&mut seed, step);
-        seed_prefix.push(step);
     }
 
     let mut queue = VecDeque::from([Vec::<ControllerGraphStep>::new()]);
@@ -3670,28 +3685,36 @@ fn explore_controller_routes<A: Application>(
             .as_ref()
             .and_then(|target| semantic_nodes.iter().find(|node| &node.id == target));
         let mut branches = vec![
-            ControllerAction::Up,
-            ControllerAction::Down,
-            ControllerAction::Left,
-            ControllerAction::Right,
-            ControllerAction::PreviousPane,
-            ControllerAction::NextPane,
+            ControllerGraphStep::Next,
+            ControllerGraphStep::Action(ControllerAction::Up),
+            ControllerGraphStep::Action(ControllerAction::Down),
+            ControllerGraphStep::Action(ControllerAction::Left),
+            ControllerGraphStep::Action(ControllerAction::Right),
+            ControllerGraphStep::Action(ControllerAction::PreviousPane),
+            ControllerGraphStep::Action(ControllerAction::NextPane),
         ];
         let is_scope_waypoint = inspection.controller_target.is_some() && current_node.is_none();
         let reveals_topology = current_node.is_some_and(controller_node_reveals_topology);
         if is_scope_waypoint || reveals_topology {
-            branches.push(ControllerAction::Confirm);
+            branches.push(ControllerGraphStep::Action(ControllerAction::Confirm));
         }
         if inspection.controller_scope.is_some()
             || inspection.controller_editing
             || inspection.open_overlay.is_some()
         {
-            branches.push(ControllerAction::Cancel);
+            branches.push(ControllerGraphStep::Action(ControllerAction::Cancel));
         }
         for controller in branches {
             let mut next = prefix.clone();
-            next.push(ControllerGraphStep::Action(controller));
-            queue.push_back(next);
+            next.push(controller);
+            if matches!(controller, ControllerGraphStep::Next) {
+                // Structural traversal is deterministic and usually advances
+                // to a new production target. Explore that cheap spine before
+                // replaying every spatial branch from the same prefix.
+                queue.push_front(next);
+            } else {
+                queue.push_back(next);
+            }
         }
     }
 

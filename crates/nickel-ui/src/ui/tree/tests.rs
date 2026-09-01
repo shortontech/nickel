@@ -1824,6 +1824,37 @@ fn linear_navigation_honors_rtl_and_containment_at_edges() {
 }
 
 #[test]
+fn structural_next_continues_after_a_nested_scope_without_changing_dpad_containment() {
+    let view = Container::new()
+        .id("outer")
+        .navigation_scope(crate::NavigationScope::group())
+        .children([
+            Container::new()
+                .id("nested")
+                .navigation_scope(crate::NavigationScope::group())
+                .child(Button::new(TestMessage::Option(1), "Nested").id("nested-item")),
+            Container::new()
+                .id("after")
+                .semantic_role(SemanticRole::Button)
+                .accessibility_label("After")
+                .message(TestMessage::Option(2)),
+        ]);
+    let mut state = UiStateStore::default();
+    let tree = UiFrame::layout_with_state(view, Rect::new(0.0, 0.0, 240.0, 120.0), &mut state);
+    tree.handle_event(&mut state, UiEvent::ControllerNext);
+    tree.handle_event(&mut state, UiEvent::ControllerActivate);
+    tree.handle_event(&mut state, UiEvent::ControllerActivate);
+    assert!(selected_suffix(&state, "/nested-item"));
+
+    tree.handle_event(&mut state, UiEvent::ControllerNext);
+    assert!(selected_suffix(&state, "/after"));
+    assert_eq!(
+        state.navigation().controller_scope().map(UiId::as_str),
+        Some("root/outer")
+    );
+}
+
+#[test]
 fn pane_peers_are_scoped_to_their_navigation_parent() {
     let pane = |id, item, default| {
         Container::new()
