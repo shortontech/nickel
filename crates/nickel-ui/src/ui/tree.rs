@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::BTreeSet;
 
 #[derive(Clone, Debug)]
 struct HitRegion<Message> {
@@ -1054,6 +1055,16 @@ impl<Message: Clone> UiFrame<Message> {
         }
         self.active_overlay = Some((menu.id.clone(), rect));
         self.active_overlay_dismiss = Some(crate::DismissPolicy::default());
+        let overlay_root = menu.id.as_ui_id();
+        let overlay_accessibility = self
+            .resolved
+            .nodes
+            .iter()
+            .filter(|node| self.is_descendant_or_self(overlay_root, &node.id))
+            .map(|node| node.id.clone())
+            .collect::<BTreeSet<_>>();
+        self.accessibility
+            .retain(|node| overlay_accessibility.contains(&node.id));
         Ok(())
     }
 
@@ -1303,6 +1314,11 @@ impl<Message: Clone> UiFrame<Message> {
             .nodes
             .iter()
             .enumerate()
+            .filter(|(_, node)| {
+                self.active_overlay.as_ref().is_none_or(|(overlay, _)| {
+                    self.is_descendant_or_self(overlay.as_ui_id(), &node.id)
+                })
+            })
             .filter(|(_, node)| node.semantic_role.is_some() || !node.semantic_actions.is_empty())
             .map(|(index, node)| SemanticNodeSnapshot {
                 id: node.id.clone(),

@@ -1419,11 +1419,11 @@ pub fn audit_reachability<A: Application>(
             }
         }
     }
-    let mut queued = VecDeque::from([Vec::<(String, ActionKind)>::new()]);
+    let mut queued = VecDeque::from([(Vec::<(String, ActionKind)>::new(), factory())]);
     let mut expanded_states = BTreeSet::new();
     let mut enqueued_states = BTreeSet::new();
     let dynamic_started = Instant::now();
-    while let Some(prefix) = queued.pop_front() {
+    while let Some((prefix, state)) = queued.pop_front() {
         if dynamic_started.elapsed() >= wall_ceiling {
             if !issues
                 .iter()
@@ -1446,11 +1446,6 @@ pub fn audit_reachability<A: Application>(
             });
             break;
         }
-        let Some(state) =
-            replay_accessibility_prefix(&factory, &prefix, dynamic_started, wall_ceiling)
-        else {
-            continue;
-        };
         let state_nodes = state.semantic_nodes();
         let state_digest = action_topology_digest(&state_nodes);
         if !expanded_states.insert(state_digest) {
@@ -1525,14 +1520,14 @@ pub fn audit_reachability<A: Application>(
                 }
                 if reveals_topology
                     && prefix.len() < policy.maximum_path_length
-                    && let Some(next) = next.as_ref()
+                    && let Some(next) = next
                 {
                     let next_digest = action_topology_digest(&next.semantic_nodes());
                     if next_digest != action_topology_digest(&state_nodes)
                         && !expanded_states.contains(&next_digest)
                         && enqueued_states.insert(next_digest)
                     {
-                        queued.push_back(next_prefix);
+                        queued.push_back((next_prefix, next));
                     }
                 }
             }
@@ -1586,7 +1581,8 @@ fn replay_accessibility_prefix<A: Application>(
             node.id.clone(),
             semantic_action_for_target(&node, *action),
         );
-        if !outcome.changed || !outcome.semantic_failures.is_empty() {
+        if (!outcome.changed && outcome.effects.is_empty()) || !outcome.semantic_failures.is_empty()
+        {
             return None;
         }
     }

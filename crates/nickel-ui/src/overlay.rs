@@ -668,7 +668,7 @@ mod tests {
         state.open_overlay(OverlayId::new("context"), anchor.clone());
 
         let mut open = frame(&mut state);
-        open.present_menu(&mut state, menu(anchor)).unwrap();
+        open.present_menu(&mut state, menu(anchor.clone())).unwrap();
         let menu_id = OverlayId::new("context").as_ui_id().clone();
         let item_id = OverlayId::new("context").item_id(&UiId::from("choose"));
         let menus = open.query(&SemanticSelector::Role(SemanticRole::Menu));
@@ -676,6 +676,16 @@ mod tests {
         let item = open
             .query_unique(&SemanticSelector::Id(item_id.clone()))
             .expect("open menu item must be semantically queryable");
+        assert!(
+            open.semantic_nodes().iter().all(|node| node.id != anchor),
+            "an open menu makes background semantics inert"
+        );
+        assert!(
+            open.accessibility_nodes()
+                .iter()
+                .all(|node| node.id != anchor),
+            "an open menu makes the background accessibility tree inert"
+        );
         assert_eq!(item.parent, Some(menu_id));
         assert_eq!(item.role, Some(SemanticRole::MenuItem));
         assert_eq!(item.actions, vec![ActionKind::Activate]);

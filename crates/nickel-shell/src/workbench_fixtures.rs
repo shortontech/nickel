@@ -771,6 +771,9 @@ impl FixtureProvider for ShellFixtureProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nickel_ui_testkit::{
+        ReachabilityModality, ReachabilityPolicy, Scenario, audit_reachability,
+    };
 
     #[test]
     fn provider_registers_every_shell_surface() {
@@ -796,5 +799,38 @@ mod tests {
                 "shell.window-preview",
             ]
         );
+    }
+
+    #[test]
+    fn populated_dashboard_replays_discover_accessibility_menu_actions() {
+        let report = audit_reachability(
+            || {
+                Scenario::new(
+                    LauncherDashboardFixture::create_variant(&LAUNCHER_DASHBOARD_VARIANTS[0]),
+                    920,
+                    680,
+                )
+            },
+            &ReachabilityPolicy {
+                modalities: [ReachabilityModality::Accessibility].into_iter().collect(),
+                ..ReachabilityPolicy::default()
+            },
+        );
+
+        for target in [
+            "application-menu-discover/launch",
+            "application-menu-discover/toggle-pin",
+        ] {
+            assert!(
+                report.paths.iter().any(|path| {
+                    path.target == target
+                        && path.modality == ReachabilityModality::Accessibility
+                        && path.reached
+                }),
+                "{target} was not replayed: {:?}",
+                report.issues
+            );
+        }
+        assert!(report.issues.is_empty(), "issues: {:?}", report.issues);
     }
 }
