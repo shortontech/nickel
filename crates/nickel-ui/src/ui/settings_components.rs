@@ -24,19 +24,19 @@ impl<Message> PageHeader<Message> {
                     theme.spacing.section,
                     theme.spacing.content,
                 ))
-                .background(theme.colors.window)
+                .background(theme.surfaces.window)
                 .child(
                     Column::new()
                         .gap(theme.spacing.compact)
                         .child(
                             Text::new(title)
                                 .scale(1.75)
-                                .color(theme.colors.primary_text)
+                                .color(theme.text.primary)
                                 .wrap(true),
                         )
                         .child(
                             Text::new(description)
-                                .color(theme.colors.secondary_text)
+                                .color(theme.text.secondary)
                                 .wrap(true),
                         ),
                 ),
@@ -74,7 +74,7 @@ impl<Message> NavigationItem<Message> {
                     theme.spacing.content,
                 ))
                 .radius(theme.radii.control)
-                .background(theme.colors.sidebar)
+                .background(theme.surfaces.sidebar)
                 .semantic_role(SemanticRole::NavigationItem)
                 .accessibility_label(&label)
                 .accessibility_state("unavailable")
@@ -136,7 +136,7 @@ impl<Message> NavigationItem<Message> {
             .child(leading)
             .child(
                 Text::new(&label)
-                    .color(theme.colors.primary_text)
+                    .color(theme.text.primary)
                     .wrap(true)
                     .align(if direction == ReadingDirection::RightToLeft {
                         TextAlign::End
@@ -152,9 +152,9 @@ impl<Message> NavigationItem<Message> {
             .width(3.0)
             .height(40.0)
             .background(if selected {
-                theme.colors.accent
+                theme.accent.ordinary
             } else {
-                theme.colors.sidebar
+                theme.surfaces.sidebar
             });
         let action = Container::new()
             .grow(1.0)
@@ -196,9 +196,9 @@ impl<Message> NavigationItem<Message> {
                 .shrink(0.0)
                 .radius(theme.radii.control)
                 .background(if selected {
-                    theme.colors.accent_soft
+                    theme.accent.soft
                 } else {
-                    theme.colors.sidebar
+                    theme.surfaces.sidebar
                 })
                 .message(message)
                 .child(row)
@@ -334,7 +334,7 @@ impl<Message> SettingsSearchField<Message> {
                 .width(15.0)
                 .scale(1.1)
                 .align(TextAlign::Center)
-                .color(theme.colors.secondary_text),
+                .color(theme.text.secondary),
         )
     }
 
@@ -347,9 +347,9 @@ impl<Message> SettingsSearchField<Message> {
         leading: impl Component<Message>,
     ) -> Self {
         let text_color = if value.is_empty() {
-            theme.colors.secondary_text
+            theme.text.secondary
         } else {
-            theme.colors.primary_text
+            theme.text.primary
         };
         Self(
             Container::new()
@@ -358,7 +358,7 @@ impl<Message> SettingsSearchField<Message> {
                 .shrink(0.0)
                 .padding(Insets::symmetric(9.0, 10.0))
                 .radius(theme.radii.control)
-                .background(theme.colors.raised)
+                .background(theme.surfaces.raised)
                 .border(theme.borders.subtle, theme.sizing.border)
                 .child(
                     Row::new()
@@ -393,7 +393,7 @@ impl<Message> NavigationSectionLabel<Message> {
         Self(
             Text::new(label)
                 .scale(0.85)
-                .color(theme.colors.secondary_text)
+                .color(theme.text.secondary)
                 .wrap(true),
         )
     }
@@ -418,11 +418,11 @@ impl<Message> SettingsNavigation<Message> {
                 .fill_height()
                 .border(theme.borders.subtle, 1.0)
                 .navigation_scope(NavigationScope::pane(false))
-                .navigation_scope_highlight(theme.colors.secondary_accent)
+                .navigation_scope_highlight(theme.borders.controller_focus)
                 .padding(Insets::all(theme.spacing.content))
                 .gap(theme.spacing.compact)
                 .overflow_y(Overflow::Auto)
-                .background(theme.colors.sidebar),
+                .background(theme.surfaces.sidebar),
         )
     }
 
@@ -498,7 +498,7 @@ impl<Message> SettingsShell<Message> {
             .fill_height()
             .border(theme.borders.subtle, 1.0)
             .navigation_scope(NavigationScope::pane(true))
-            .navigation_scope_highlight(theme.colors.secondary_accent)
+            .navigation_scope_highlight(theme.borders.controller_focus)
             .child(content);
         let root = if viewport_width < SETTINGS_SHELL_NARROW_BREAKPOINT {
             Container::new().child(
@@ -534,7 +534,7 @@ impl<Message> SettingsShell<Message> {
         Self(
             root.fill_width()
                 .fill_height()
-                .background(theme.colors.window),
+                .background(theme.surfaces.window),
         )
     }
 
@@ -566,11 +566,11 @@ pub struct Surface<Message = String>(Container<Message>);
 impl<Message> Surface<Message> {
     pub fn new(theme: SemanticTheme, role: SurfaceRole) -> Self {
         let color = match role {
-            SurfaceRole::Window => theme.colors.window,
-            SurfaceRole::Sidebar => theme.colors.sidebar,
-            SurfaceRole::Card => theme.colors.card,
-            SurfaceRole::Raised => theme.colors.raised,
-            SurfaceRole::Hover => theme.colors.hover,
+            SurfaceRole::Window => theme.surfaces.window,
+            SurfaceRole::Sidebar => theme.surfaces.sidebar,
+            SurfaceRole::Card => theme.surfaces.card,
+            SurfaceRole::Raised => theme.surfaces.raised,
+            SurfaceRole::Hover => theme.surfaces.hover,
         };
         Self(Container::new().background(color))
     }
@@ -744,8 +744,8 @@ impl<Message> SettingsCard<Message> {
                 .fill_width()
                 .gap(theme.spacing.content)
                 .padding(Insets::all(theme.spacing.content))
-                .background(theme.colors.card)
-                .border(theme.colors.raised, 1.0)
+                .background(theme.surfaces.card)
+                .border(theme.surfaces.raised, 1.0)
                 .radius(theme.radii.card)
                 .navigation_scope(NavigationScope::group())
                 .controller_focus_border(theme.borders.controller_focus),
@@ -759,11 +759,11 @@ impl<Message> SettingsCard<Message> {
     ) -> Self {
         let description = description.into();
         let mut card =
-            Self::new(theme).child(Text::new(title).color(theme.colors.primary_text).scale(1.2));
+            Self::new(theme).child(Text::new(title).color(theme.text.primary).scale(1.2));
         if !description.is_empty() {
             card = card.child(
                 Text::new(description)
-                    .color(theme.colors.secondary_text)
+                    .color(theme.text.secondary)
                     .wrap(true),
             );
         }
@@ -892,15 +892,14 @@ impl<Message> SettingsRow<Message> {
     ) -> Self {
         let label = label.into();
         let supporting_text = supporting_text.into();
-        let mut labels = Column::new().grow(1.0).gap(theme.spacing.compact).child(
-            Text::new(&label)
-                .color(theme.colors.primary_text)
-                .wrap(true),
-        );
+        let mut labels = Column::new()
+            .grow(1.0)
+            .gap(theme.spacing.compact)
+            .child(Text::new(&label).color(theme.text.primary).wrap(true));
         if !supporting_text.is_empty() {
             labels = labels.child(
                 Text::new(supporting_text)
-                    .color(theme.colors.secondary_text)
+                    .color(theme.text.secondary)
                     .wrap(true),
             );
         }
@@ -966,9 +965,9 @@ impl<Message> SliderField<Message> {
             .child(
                 Slider::on_change(on_change, value)
                     .colors(
-                        theme.colors.raised,
-                        theme.colors.accent,
-                        theme.colors.primary_text,
+                        theme.surfaces.raised,
+                        theme.accent.ordinary,
+                        theme.text.primary,
                     )
                     .focus_border(theme.borders.focus)
                     .controller_focus_border(theme.borders.controller_focus)
@@ -979,7 +978,7 @@ impl<Message> SliderField<Message> {
                 Text::new(value_label)
                     .width(72.0)
                     .align(TextAlign::End)
-                    .color(theme.colors.primary_text),
+                    .color(theme.text.primary),
             );
         Self(SettingsRow::new(theme, label, supporting_text).trailing(control))
     }
@@ -1013,9 +1012,9 @@ impl<Message> SelectField<Message> {
         let dropdown = Dropdown::new(toggle_message, selected, options)
             .expanded(expanded)
             .colors(
-                theme.colors.raised,
-                theme.colors.hover,
-                theme.colors.primary_text,
+                theme.surfaces.raised,
+                theme.surfaces.hover,
+                theme.text.primary,
             )
             .accessibility_label(label.clone());
         Self(
@@ -1166,15 +1165,15 @@ impl<Message> TabList<Message> {
                         Column::new()
                             .gap(6.0)
                             .child(Text::new(label).color(if selected {
-                                theme.colors.accent
+                                theme.accent.ordinary
                             } else {
-                                theme.colors.secondary_text
+                                theme.text.secondary
                             }))
                             .child(Container::new().height(2.0).fill_width().background(
                                 if selected {
-                                    theme.colors.accent
+                                    theme.accent.ordinary
                                 } else {
-                                    theme.colors.window
+                                    theme.surfaces.window
                                 },
                             )),
                     )
@@ -1243,9 +1242,9 @@ impl<Message> ChoiceCard<Message> {
             .radius(8.0)
             .border(
                 if selected {
-                    theme.colors.accent
+                    theme.accent.ordinary
                 } else {
-                    theme.colors.secondary_text
+                    theme.text.secondary
                 },
                 2.0,
             )
@@ -1256,15 +1255,15 @@ impl<Message> ChoiceCard<Message> {
                     .fill_height()
                     .radius(4.0)
                     .background(if selected {
-                        theme.colors.accent
+                        theme.accent.ordinary
                     } else {
-                        theme.colors.card
+                        theme.surfaces.card
                     }),
             );
         let mut text = Column::new().gap(theme.spacing.compact).child(
             Text::new(label.clone())
                 .color(if enabled {
-                    theme.colors.primary_text
+                    theme.text.primary
                 } else {
                     theme.text.disabled
                 })
@@ -1288,15 +1287,15 @@ impl<Message> ChoiceCard<Message> {
                 .min_height(minimum_height)
                 .gap(theme.spacing.content)
                 .padding(Insets::all(theme.spacing.content))
-                .background(theme.colors.card)
+                .background(theme.surfaces.card)
                 .interaction_backgrounds(theme.surfaces.hover, theme.surfaces.pressed)
                 .focus_border(theme.borders.focus)
                 .controller_focus_border(theme.borders.controller_focus)
                 .border(
                     if selected {
-                        theme.colors.accent
+                        theme.accent.ordinary
                     } else {
-                        theme.colors.raised
+                        theme.surfaces.raised
                     },
                     if selected { 2.0 } else { 1.0 },
                 )
@@ -1487,9 +1486,9 @@ impl<Message> ColorSwatch<Message> {
             .radius(19.0)
             .border(
                 if selected {
-                    theme.colors.accent
+                    theme.accent.ordinary
                 } else {
-                    theme.colors.raised
+                    theme.surfaces.raised
                 },
                 if selected { 3.0 } else { 1.0 },
             )
@@ -1522,7 +1521,7 @@ impl<Message> ColorSwatch<Message> {
                 .width(42.0)
                 .height(42.0)
                 .radius(21.0)
-                .border(theme.colors.raised, 1.0)
+                .border(theme.surfaces.raised, 1.0)
                 .message(message)
                 .interaction_backgrounds(theme.surfaces.hover, theme.surfaces.pressed)
                 .focus_border(theme.borders.focus)
@@ -1534,7 +1533,7 @@ impl<Message> ColorSwatch<Message> {
                         Text::new("+")
                             .align(TextAlign::Center)
                             .scale(1.45)
-                            .color(theme.colors.secondary_text),
+                            .color(theme.text.secondary),
                     ),
                 ),
         )
@@ -1556,8 +1555,8 @@ impl<Message> Component<Message> for ColorSwatch<Message> {
 mod tests {
     use super::*;
     use crate::{
-        DiagnosticKind, PaintCommand, Point, Rect, ResolvedNode, SdlComponentRenderer,
-        SemanticColors, UiEvent, UiFrame, UiStateStore,
+        DiagnosticKind, PaintCommand, Point, Rect, ResolvedNode, SdlComponentRenderer, UiEvent,
+        UiFrame, UiStateStore,
     };
 
     #[derive(Clone, Debug, PartialEq)]
@@ -1586,19 +1585,10 @@ mod tests {
     }
 
     fn theme() -> SemanticTheme {
-        SemanticTheme::new(SemanticColors {
-            window: 0x101114,
-            sidebar: 0x15171b,
-            card: 0x1b1e23,
-            raised: 0x32363e,
-            hover: 0x3c414b,
-            primary_text: 0xf2f3f5,
-            secondary_text: 0xa8abb2,
-            accent: 0x9b62e8,
-            accent_soft: 0x45305f,
-            secondary_accent: 0x55b982,
-            positive: 0x55b982,
-        })
+        SemanticTheme::from_tokens(crate::SemanticTokenSet::standard(
+            0x101114, 0x15171b, 0x1b1e23, 0x32363e, 0x3c414b, 0xf2f3f5, 0xa8abb2, 0x9b62e8,
+            0x45305f, 0x55b982, 0x55b982,
+        ))
     }
 
     #[test]
@@ -1898,19 +1888,10 @@ mod tests {
     #[test]
     fn visual_choice_matrix_renders_narrow_wide_scaled_themed_and_directional() {
         let dark = theme();
-        let light = SemanticTheme::new(SemanticColors {
-            window: 0xf4f5f7,
-            sidebar: 0xe8eaf0,
-            card: 0xffffff,
-            raised: 0xd7dae2,
-            hover: 0xe1e5ef,
-            primary_text: 0x17191f,
-            secondary_text: 0x555b68,
-            accent: 0x7040bb,
-            accent_soft: 0xe5d8fa,
-            secondary_accent: 0x247a50,
-            positive: 0x247a50,
-        });
+        let light = SemanticTheme::from_tokens(crate::SemanticTokenSet::standard(
+            0xf4f5f7, 0xe8eaf0, 0xffffff, 0xd7dae2, 0xe1e5ef, 0x17191f, 0x555b68, 0x7040bb,
+            0xe5d8fa, 0x247a50, 0x247a50,
+        ));
         for (width, scale, palette, direction) in [
             (220.0, 1.0, dark, ReadingDirection::LeftToRight),
             (640.0, 1.25, dark, ReadingDirection::RightToLeft),
@@ -1955,7 +1936,7 @@ mod tests {
                     image::Rgba([pixel.r, pixel.g, pixel.b, pixel.a])
                 },
             );
-            let mode = if palette.colors.window == dark.colors.window {
+            let mode = if palette.surfaces.window == dark.surfaces.window {
                 "dark"
             } else {
                 "light"
@@ -2564,7 +2545,7 @@ mod tests {
         assert!(selected.commands().iter().any(|command| matches!(
             command,
             PaintCommand::Stroke { color, width, .. }
-                if *color == theme.colors.secondary_accent && *width == 3.0
+                if *color == theme.borders.controller_focus && *width == 3.0
         )));
     }
 

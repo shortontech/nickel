@@ -27,19 +27,9 @@ const TRANSCRIPT_VIEWPORT_ESTIMATE: f32 = 600.0;
 const TRANSCRIPT_OVERSCAN: f32 = 900.0;
 
 fn semantic_theme() -> SemanticTheme {
-    SemanticTheme::new(SemanticColors {
-        window: BACKGROUND,
-        sidebar: SIDEBAR,
-        card: PANEL,
-        raised: BORDER,
-        hover: BORDER,
-        primary_text: TEXT,
-        secondary_text: MUTED,
-        accent: ACCENT,
-        accent_soft: USER,
-        secondary_accent: 0x63d69a,
-        positive: 0x63d69a,
-    })
+    SemanticTheme::from_tokens(nickel_ui::SemanticTokenSet::standard(
+        BACKGROUND, SIDEBAR, PANEL, BORDER, BORDER, TEXT, MUTED, ACCENT, USER, 0x63d69a, 0x63d69a,
+    ))
 }
 #[cfg(test)]
 static DEFAULT_CODEX_SETTINGS: std::sync::LazyLock<CodexSettings> =

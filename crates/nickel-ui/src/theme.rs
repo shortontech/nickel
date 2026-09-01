@@ -1,22 +1,5 @@
 use crate::Color;
 
-/// Compact compatibility palette accepted by [`SemanticTheme::new`].
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct SemanticColors {
-    pub window: Color,
-    pub sidebar: Color,
-    pub card: Color,
-    pub raised: Color,
-    pub hover: Color,
-    pub primary_text: Color,
-    pub secondary_text: Color,
-    pub accent: Color,
-    pub accent_soft: Color,
-    /// A contrasting, high-visibility accent for alternate interaction modalities.
-    pub secondary_accent: Color,
-    pub positive: Color,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SurfaceColors {
     pub window: Color,
@@ -320,10 +303,67 @@ pub struct SemanticTokenSet {
     pub motion: MotionScale,
 }
 
+impl SemanticTokenSet {
+    #[allow(clippy::too_many_arguments)]
+    pub fn standard(
+        window: Color,
+        sidebar: Color,
+        card: Color,
+        raised: Color,
+        hover: Color,
+        primary_text: Color,
+        secondary_text: Color,
+        accent: Color,
+        accent_soft: Color,
+        controller_focus: Color,
+        positive: Color,
+    ) -> Self {
+        Self {
+            surfaces: SurfaceColors {
+                window,
+                sidebar,
+                card,
+                raised,
+                hover,
+                pressed: mix(hover, primary_text, 18),
+                selected: accent_soft,
+            },
+            borders: BorderColors {
+                subtle: mix(card, primary_text, 12),
+                ordinary: mix(card, primary_text, 22),
+                strong: mix(card, primary_text, 38),
+                focus: accent,
+                controller_focus,
+                selected: accent,
+            },
+            text: TextColors {
+                primary: primary_text,
+                secondary: secondary_text,
+                disabled: mix(secondary_text, window, 48),
+                inverse: contrasting_text(primary_text),
+                accent,
+                success: positive,
+                warning: 0xe6a23c,
+                danger: 0xdc5a66,
+            },
+            accent: AccentColors {
+                ordinary: accent,
+                hover: mix(accent, primary_text, 12),
+                pressed: mix(accent, window, 18),
+                soft: accent_soft,
+                on_accent: contrasting_text(accent),
+            },
+            spacing: SpacingScale::default(),
+            radii: RadiusScale::default(),
+            sizing: SizingScale::default(),
+            typography: TypographyScale::default(),
+            motion: MotionScale::default(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SemanticTheme {
-    /// Compact compatibility palette. Prefer typed role groups in new code.
-    pub colors: SemanticColors,
     pub surfaces: SurfaceColors,
     pub borders: BorderColors,
     pub text: TextColors,
@@ -336,13 +376,8 @@ pub struct SemanticTheme {
 }
 
 impl SemanticTheme {
-    pub fn new(colors: SemanticColors) -> Self {
-        Self::from_tokens(colors, SemanticTokenSet::from(colors))
-    }
-
-    pub const fn from_tokens(colors: SemanticColors, tokens: SemanticTokenSet) -> Self {
+    pub const fn from_tokens(tokens: SemanticTokenSet) -> Self {
         Self {
-            colors,
             surfaces: tokens.surfaces,
             borders: tokens.borders,
             text: tokens.text,
@@ -377,15 +412,15 @@ impl SemanticTheme {
     /// Resolves light/dark palettes and accessibility preferences into the
     /// semantic roles consumed by components.
     pub fn resolve(
-        light: SemanticColors,
-        dark: SemanticColors,
+        light: SemanticTokenSet,
+        dark: SemanticTokenSet,
         preferences: ResolvedThemePreferences,
     ) -> Self {
-        let colors = match preferences.appearance {
+        let tokens = match preferences.appearance {
             ResolvedAppearance::Light => light,
             ResolvedAppearance::Dark => dark,
         };
-        let mut theme = Self::new(colors);
+        let mut theme = Self::from_tokens(tokens);
         if preferences.high_contrast {
             theme.borders.subtle = mix(theme.surfaces.card, theme.text.primary, 60);
             theme.borders.ordinary = theme.text.primary;
@@ -402,52 +437,6 @@ impl SemanticTheme {
             theme.motion = theme.motion.reduced();
         }
         theme
-    }
-}
-
-impl From<SemanticColors> for SemanticTokenSet {
-    fn from(colors: SemanticColors) -> Self {
-        Self {
-            surfaces: SurfaceColors {
-                window: colors.window,
-                sidebar: colors.sidebar,
-                card: colors.card,
-                raised: colors.raised,
-                hover: colors.hover,
-                pressed: mix(colors.hover, colors.primary_text, 18),
-                selected: colors.accent_soft,
-            },
-            borders: BorderColors {
-                subtle: mix(colors.card, colors.primary_text, 12),
-                ordinary: mix(colors.card, colors.primary_text, 22),
-                strong: mix(colors.card, colors.primary_text, 38),
-                focus: colors.accent,
-                controller_focus: colors.secondary_accent,
-                selected: colors.accent,
-            },
-            text: TextColors {
-                primary: colors.primary_text,
-                secondary: colors.secondary_text,
-                disabled: mix(colors.secondary_text, colors.window, 48),
-                inverse: contrasting_text(colors.primary_text),
-                accent: colors.accent,
-                success: colors.positive,
-                warning: 0xe6a23c,
-                danger: 0xdc5a66,
-            },
-            accent: AccentColors {
-                ordinary: colors.accent,
-                hover: mix(colors.accent, colors.primary_text, 12),
-                pressed: mix(colors.accent, colors.window, 18),
-                soft: colors.accent_soft,
-                on_accent: contrasting_text(colors.accent),
-            },
-            spacing: SpacingScale::default(),
-            radii: RadiusScale::default(),
-            sizing: SizingScale::default(),
-            typography: TypographyScale::default(),
-            motion: MotionScale::default(),
-        }
     }
 }
 
@@ -499,32 +488,21 @@ fn opaque(color: Color) -> Color {
 mod tests {
     use super::*;
 
-    fn colors() -> SemanticColors {
-        SemanticColors {
-            window: 0x101010,
-            sidebar: 0x181818,
-            card: 0x202020,
-            raised: 0x242424,
-            hover: 0x303030,
-            primary_text: 0xf0f0f0,
-            secondary_text: 0xa0a0a0,
-            accent: 0x9050e0,
-            accent_soft: 0x402060,
-            secondary_accent: 0x50c080,
-            positive: 0x50c080,
-        }
+    fn tokens() -> SemanticTokenSet {
+        SemanticTokenSet::standard(
+            0x101010, 0x181818, 0x202020, 0x242424, 0x303030, 0xf0f0f0, 0xa0a0a0, 0x9050e0,
+            0x402060, 0x50c080, 0x50c080,
+        )
     }
 
     #[test]
-    fn compatibility_palette_expands_into_distinct_roles() {
-        let colors = colors();
-        let theme = SemanticTheme::new(colors);
-        assert_eq!(theme.colors, colors);
-        assert_eq!(theme.surfaces.selected, colors.accent_soft);
-        assert_eq!(theme.borders.focus, colors.accent);
-        assert_eq!(theme.borders.controller_focus, colors.secondary_accent);
+    fn standard_tokens_expand_into_distinct_roles() {
+        let theme = SemanticTheme::from_tokens(tokens());
+        assert_eq!(theme.surfaces.selected, 0x402060);
+        assert_eq!(theme.borders.focus, 0x9050e0);
+        assert_eq!(theme.borders.controller_focus, 0x50c080);
         assert_ne!(theme.borders.controller_focus, theme.borders.focus);
-        assert_eq!(theme.text.success, colors.positive);
+        assert_eq!(theme.text.success, 0x50c080);
         assert_eq!(theme.accent.on_accent, 0xffffff);
         assert_ne!(theme.surfaces.hover, theme.surfaces.pressed);
         assert_ne!(theme.accent.ordinary, theme.accent.hover);
@@ -535,13 +513,10 @@ mod tests {
 
     #[test]
     fn explicit_tokens_round_trip_without_policy() {
-        let mut tokens = SemanticTokenSet::from(colors());
+        let mut tokens = tokens();
         tokens.text.warning = 0xabcdef;
         tokens.motion.ordinary_ms = 240;
-        assert_eq!(
-            SemanticTheme::from_tokens(colors(), tokens).tokens(),
-            tokens
-        );
+        assert_eq!(SemanticTheme::from_tokens(tokens).tokens(), tokens);
     }
 
     #[test]
@@ -592,7 +567,7 @@ mod tests {
 
     #[test]
     fn reduced_motion_preserves_roles_and_removes_duration() {
-        let theme = SemanticTheme::new(colors());
+        let theme = SemanticTheme::from_tokens(tokens());
         let reduced = theme.with_reduced_motion();
         assert_eq!(
             (reduced.motion.short_ms, reduced.motion.ordinary_ms),
@@ -604,14 +579,13 @@ mod tests {
 
     #[test]
     fn resolved_theme_applies_appearance_contrast_transparency_and_motion() {
-        let light = SemanticColors {
-            window: 0x80f0f0f0,
-            primary_text: 0x111111,
-            ..colors()
-        };
+        let light = SemanticTokenSet::standard(
+            0x80f0f0f0, 0x181818, 0x202020, 0x242424, 0x303030, 0x111111, 0xa0a0a0, 0x9050e0,
+            0x402060, 0x50c080, 0x50c080,
+        );
         let resolved = SemanticTheme::resolve(
             light,
-            colors(),
+            tokens(),
             ResolvedThemePreferences {
                 appearance: ResolvedAppearance::Light,
                 high_contrast: true,
@@ -634,12 +608,20 @@ mod tests {
     #[test]
     fn representative_accent_families_keep_readable_and_distinct_states() {
         for accent in [0xd94b4b, 0x4b8bd8, 0x45a56b] {
-            let colors = SemanticColors {
+            let tokens = SemanticTokenSet::standard(
+                0x101010,
+                0x181818,
+                0x202020,
+                0x242424,
+                0x303030,
+                0xf0f0f0,
+                0xa0a0a0,
                 accent,
-                accent_soft: mix(accent, 0x111111, 68),
-                ..colors()
-            };
-            let theme = SemanticTheme::new(colors);
+                mix(accent, 0x111111, 68),
+                0x50c080,
+                0x50c080,
+            );
+            let theme = SemanticTheme::from_tokens(tokens);
             assert!(contrast_ratio(theme.accent.ordinary, theme.accent.on_accent) >= 4.5);
             assert_ne!(theme.accent.ordinary, theme.accent.hover);
             assert_ne!(theme.accent.hover, theme.accent.pressed);

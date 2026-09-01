@@ -241,10 +241,10 @@ where
             .gap(self.theme.spacing.compact)
             .padding(Insets::all(self.theme.spacing.content))
             .overflow_y(Overflow::Auto)
-            .background(self.theme.colors.sidebar)
+            .background(self.theme.surfaces.sidebar)
             .semantic_role(SemanticRole::List)
             .navigation_scope(NavigationScope::pane(active.is_none()))
-            .navigation_scope_highlight(self.theme.colors.secondary_accent);
+            .navigation_scope_highlight(self.theme.borders.controller_focus);
         if let Some(header) = self.navigation_header {
             navigation = navigation.child(header);
         }
@@ -254,10 +254,11 @@ where
             let destination_id = format!("{root_id}/destination/{}", destination.key);
             if destination.visible {
                 if let Some(section) = destination.section {
-                    navigation =
-                        navigation.child(Container::new().min_height(21.0).child(
-                            crate::Text::new(section).color(self.theme.colors.secondary_text),
-                        ));
+                    navigation = navigation.child(
+                        Container::new()
+                            .min_height(21.0)
+                            .child(crate::Text::new(section).color(self.theme.text.secondary)),
+                    );
                 }
                 let item = if let Some(leading) = destination.leading {
                     NavigationItem::with_leading(
@@ -292,10 +293,10 @@ where
                 .id(format!("{root_id}/detail/{key}"))
                 .fill_width()
                 .fill_height()
-                .background(self.theme.colors.window)
+                .background(self.theme.surfaces.window)
                 .semantic_role(SemanticRole::TabPanel)
                 .navigation_scope(NavigationScope::pane(true))
-                .navigation_scope_highlight(self.theme.colors.secondary_accent);
+                .navigation_scope_highlight(self.theme.borders.controller_focus);
             if let Some(header) = header {
                 content = content.child(header);
             }
@@ -351,7 +352,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Point, Rect, SemanticColors, Text, UiEvent, UiFrame, UiStateStore};
+    use crate::{Point, Rect, Text, UiEvent, UiFrame, UiStateStore};
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     enum Message {
@@ -359,19 +360,10 @@ mod tests {
     }
 
     fn theme() -> SemanticTheme {
-        SemanticTheme::new(SemanticColors {
-            window: 0x101114,
-            sidebar: 0x15171b,
-            card: 0x1b1e23,
-            raised: 0x32363e,
-            hover: 0x3c414b,
-            primary_text: 0xf2f3f5,
-            secondary_text: 0xa8abb2,
-            accent: 0x9b62e8,
-            accent_soft: 0x45305f,
-            secondary_accent: 0x55b982,
-            positive: 0x55b982,
-        })
+        SemanticTheme::from_tokens(crate::SemanticTokenSet::standard(
+            0x101114, 0x15171b, 0x1b1e23, 0x32363e, 0x3c414b, 0xf2f3f5, 0xa8abb2, 0x9b62e8,
+            0x45305f, 0x55b982, 0x55b982,
+        ))
     }
 
     fn destinations() -> Vec<ResponsiveNavigationDestination<&'static str, Message>> {

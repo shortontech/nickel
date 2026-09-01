@@ -43,8 +43,8 @@ use nickel_ui::{
     ButtonPresentation, ChoiceCard, ChoiceCardGroup, ColorSwatch, ComponentBuilderExt, Container,
     GlobalAction, HostAdapter, HostServices, Image, ImageFit, InputModality, Insets,
     NavigationItem, PageHeader, PreviewTile, ReadingDirection, ResponsiveNavigation,
-    ResponsiveNavigationDestination, SelectField, SemanticColors, SemanticControllerAction,
-    SemanticRole, SemanticSelector, SemanticTheme, SettingsCard, SettingsNavigation, SettingsRow,
+    ResponsiveNavigationDestination, SelectField, SemanticControllerAction, SemanticRole,
+    SemanticSelector, SemanticTheme, SettingsCard, SettingsNavigation, SettingsRow,
     SettingsSearchEntry, SettingsSearchField, SettingsStatus, SettingsStatusKind, SliderField,
     Surface, SurfaceRole, Switch, TabList, TextAlign, UiHost, UiId, ViewContext, search_settings,
     ui,
@@ -71,19 +71,19 @@ struct Rect {
 }
 
 fn semantic_theme(palette: ThemePalette) -> SemanticTheme {
-    SemanticTheme::new(SemanticColors {
-        window: palette.background,
-        sidebar: palette.panel,
-        card: palette.surface,
-        raised: palette.surface_hover,
-        hover: palette.surface_hover,
-        primary_text: palette.text,
-        secondary_text: palette.muted,
-        accent: palette.accent,
-        accent_soft: palette.accent_soft,
-        secondary_accent: palette.complement,
-        positive: palette.complement,
-    })
+    SemanticTheme::from_tokens(nickel_ui::SemanticTokenSet::standard(
+        palette.background,
+        palette.panel,
+        palette.surface,
+        palette.surface_hover,
+        palette.surface_hover,
+        palette.text,
+        palette.muted,
+        palette.accent,
+        palette.accent_soft,
+        palette.complement,
+        palette.complement,
+    ))
 }
 
 fn load_wallpaper_preview(

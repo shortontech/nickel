@@ -15,9 +15,8 @@ use nickel_ui::{
     ActionKind, AnyView, Application, Button, ButtonLabel, Collection, CollectionPresentation,
     CollectionState, Column, ComponentBuilderExt, Container, Dropdown, Grid, Image, ImageFit,
     Insets, Menu, MenuBar, MenuItem, RadioButton, ReadingDirection, ResponsiveNavigation,
-    ResponsiveNavigationDestination, Row, SdlComponentRenderer, SemanticColors, SemanticRole,
-    SemanticTheme, Slider, Surface, SurfaceRole, Switch, Text, TextField, UiHost, VerticalScroll,
-    ViewContext,
+    ResponsiveNavigationDestination, Row, SdlComponentRenderer, SemanticRole, SemanticTheme,
+    Slider, Surface, SurfaceRole, Switch, Text, TextField, UiHost, VerticalScroll, ViewContext,
 };
 use nickel_ui_testkit::{
     AccessibilityPreset, ActivationVia, ErasedFixtureSession, Fixture, FixtureAsset,
@@ -1123,32 +1122,18 @@ impl GalleryApp {
 
     fn theme(&self) -> SemanticTheme {
         match self.fixture_theme {
-            FixtureTheme::Light => SemanticTheme::new(SemanticColors {
-                window: 0xf5f7fb,
-                sidebar: 0xe8edf5,
-                card: 0xffffff,
-                raised: 0xdce5f1,
-                hover: 0xcbd7e6,
-                primary_text: 0x17202e,
-                secondary_text: 0x52647a,
-                accent: 0x5641d8,
-                accent_soft: 0xded9ff,
-                secondary_accent: 0x156db8,
-                positive: 0x217a50,
-            }),
-            FixtureTheme::HighContrast => SemanticTheme::new(SemanticColors {
-                window: 0x000000,
-                sidebar: 0x090909,
-                card: 0x111111,
-                raised: 0x1c1c1c,
-                hover: 0x292929,
-                primary_text: 0xffffff,
-                secondary_text: 0xe8e8e8,
-                accent: 0xffd400,
-                accent_soft: 0x4a3d00,
-                secondary_accent: 0x00e5ff,
-                positive: 0x7dff8a,
-            }),
+            FixtureTheme::Light => {
+                SemanticTheme::from_tokens(nickel_ui::SemanticTokenSet::standard(
+                    0xf5f7fb, 0xe8edf5, 0xffffff, 0xdce5f1, 0xcbd7e6, 0x17202e, 0x52647a, 0x5641d8,
+                    0xded9ff, 0x156db8, 0x217a50,
+                ))
+            }
+            FixtureTheme::HighContrast => {
+                SemanticTheme::from_tokens(nickel_ui::SemanticTokenSet::standard(
+                    0x000000, 0x090909, 0x111111, 0x1c1c1c, 0x292929, 0xffffff, 0xe8e8e8, 0xffd400,
+                    0x4a3d00, 0x00e5ff, 0x7dff8a,
+                ))
+            }
             FixtureTheme::Dark => workbench_theme(),
         }
     }
@@ -1468,19 +1453,10 @@ impl Application for GalleryApp {
 }
 
 fn workbench_theme() -> SemanticTheme {
-    SemanticTheme::new(SemanticColors {
-        window: 0x101722,
-        sidebar: 0x151f2d,
-        card: 0x1c2838,
-        raised: 0x243247,
-        hover: 0x2d405a,
-        primary_text: 0xf2f6fb,
-        secondary_text: 0x9cacc0,
-        accent: 0x7b61ff,
-        accent_soft: 0x332c61,
-        secondary_accent: 0x67b7ff,
-        positive: 0x61c993,
-    })
+    SemanticTheme::from_tokens(nickel_ui::SemanticTokenSet::standard(
+        0x101722, 0x151f2d, 0x1c2838, 0x243247, 0x2d405a, 0xf2f6fb, 0x9cacc0, 0x7b61ff, 0x332c61,
+        0x67b7ff, 0x61c993,
+    ))
 }
 
 macro_rules! gallery_fixture {

@@ -2634,7 +2634,7 @@ impl<Message> Component<Message> for MenuBar<Message> {
 #[cfg(test)]
 mod semantic_control_tests {
     use super::*;
-    use crate::{SemanticColors, UiFrame, UiStateStore};
+    use crate::{UiFrame, UiStateStore};
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     enum Message {
@@ -2644,41 +2644,23 @@ mod semantic_control_tests {
     }
 
     fn theme() -> SemanticTheme {
-        SemanticTheme::new(SemanticColors {
-            window: 0x101010,
-            sidebar: 0x181818,
-            card: 0x202020,
-            raised: 0x242424,
-            hover: 0x303030,
-            primary_text: 0xf0f0f0,
-            secondary_text: 0xa0a0a0,
-            accent: 0x9050e0,
-            accent_soft: 0x402060,
-            secondary_accent: 0x50c080,
-            positive: 0x50c080,
-        })
+        SemanticTheme::from_tokens(crate::SemanticTokenSet::standard(
+            0x101010, 0x181818, 0x202020, 0x242424, 0x303030, 0xf0f0f0, 0xa0a0a0, 0x9050e0,
+            0x402060, 0x50c080, 0x50c080,
+        ))
     }
 
     fn light_theme() -> SemanticTheme {
-        SemanticTheme::new(SemanticColors {
-            window: 0xf4f5f7,
-            sidebar: 0xe7e9ed,
-            card: 0xffffff,
-            raised: 0xdfe3e8,
-            hover: 0xd4d9e0,
-            primary_text: 0x17191d,
-            secondary_text: 0x555b66,
-            accent: 0x7440bd,
-            accent_soft: 0xe5d8f7,
-            secondary_accent: 0x207a4b,
-            positive: 0x207a4b,
-        })
+        SemanticTheme::from_tokens(crate::SemanticTokenSet::standard(
+            0xf4f5f7, 0xe7e9ed, 0xffffff, 0xdfe3e8, 0xd4d9e0, 0x17191d, 0x555b66, 0x7440bd,
+            0xe5d8f7, 0x207a4b, 0x207a4b,
+        ))
     }
 
     fn high_contrast_theme() -> SemanticTheme {
         SemanticTheme::resolve(
-            light_theme().colors,
-            theme().colors,
+            light_theme().tokens(),
+            theme().tokens(),
             crate::ResolvedThemePreferences {
                 appearance: crate::ResolvedAppearance::Dark,
                 high_contrast: true,
@@ -2784,8 +2766,8 @@ mod semantic_control_tests {
             (
                 "automatic-dark",
                 SemanticTheme::resolve(
-                    light_theme().colors,
-                    theme().colors,
+                    light_theme().tokens(),
+                    theme().tokens(),
                     crate::ResolvedThemePreferences {
                         appearance: crate::ResolvedAppearance::Dark,
                         high_contrast: false,
@@ -2798,8 +2780,8 @@ mod semantic_control_tests {
             (
                 "reduced-transparency",
                 SemanticTheme::resolve(
-                    light_theme().colors,
-                    theme().colors,
+                    light_theme().tokens(),
+                    theme().tokens(),
                     crate::ResolvedThemePreferences {
                         appearance: crate::ResolvedAppearance::Dark,
                         high_contrast: false,

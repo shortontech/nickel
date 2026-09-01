@@ -307,6 +307,34 @@ fn consumers_cannot_restore_file_entry_prefix_navigation() {
 }
 
 #[test]
+fn transitional_theme_api_cannot_return() {
+    let root = workspace_root();
+    let mut files = Vec::new();
+    rust_files(&root.join("crates"), &mut files);
+    let this_test = root.join(file!());
+    let forbidden = ["SemanticColors", "SemanticTheme::new(", ".colors."];
+    let mut violations = Vec::new();
+    for path in files.into_iter().filter(|path| path != &this_test) {
+        let source = fs::read_to_string(&path).expect("Rust source must be UTF-8");
+        for needle in forbidden {
+            if source.contains(needle) {
+                violations.push(format!(
+                    "{}: forbidden transitional theme reference {needle}",
+                    path.strip_prefix(&root)
+                        .expect("workspace source is below root")
+                        .display()
+                ));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "construct themes from semantic token sets:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
 fn display_list_reference_counter_detects_seeded_regressions() {
     assert_eq!(
         display_list_references(

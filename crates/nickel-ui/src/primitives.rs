@@ -326,19 +326,9 @@ mod tests {
 
     #[test]
     fn item_presentation_exposes_state_and_named_content_without_custom_painting() {
-        let theme = SemanticTheme::new(crate::SemanticColors {
-            window: 1,
-            sidebar: 2,
-            card: 3,
-            raised: 4,
-            hover: 5,
-            primary_text: 6,
-            secondary_text: 7,
-            accent: 8,
-            accent_soft: 9,
-            secondary_accent: 10,
-            positive: 11,
-        });
+        let theme = SemanticTheme::from_tokens(crate::SemanticTokenSet::standard(
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+        ));
         let tree = UiFrame::<()>::layout(
             ItemPresentation::new("item", Text::new("Body"), theme)
                 .leading(Text::new("Lead"))
@@ -388,19 +378,9 @@ mod tests {
 
     #[test]
     fn product_fixtures_compose_from_the_same_item_and_surface_primitives() {
-        let theme = SemanticTheme::new(crate::SemanticColors {
-            window: 1,
-            sidebar: 2,
-            card: 3,
-            raised: 4,
-            hover: 5,
-            primary_text: 6,
-            secondary_text: 7,
-            accent: 8,
-            accent_soft: 9,
-            secondary_accent: 10,
-            positive: 11,
-        });
+        let theme = SemanticTheme::from_tokens(crate::SemanticTokenSet::standard(
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+        ));
         for (id, label) in [
             ("settings", "Appearance"),
             ("launcher", "Browser"),

@@ -67,10 +67,10 @@ ui! {
 ## Semantic visual system
 
 `SemanticTheme` is the product-neutral visual contract. Applications supply light and dark
-`SemanticColors`; `ThemePreferences::resolve` combines the stored appearance with platform and
+`semantic token sets`; `ThemePreferences::resolve` combines the stored appearance with platform and
 accessibility preferences, and `SemanticTheme::resolve` produces typed surface, border, text,
 accent, spacing, radius, sizing, typography, and motion roles. The ordinary accent communicates
-product selection; the contrasting `secondary_accent` communicates controller targeting. High
+product selection; the contrasting controller-focus border token communicates controller targeting. High
 contrast strengthens borders, reduced transparency resolves opaque structural surfaces, and reduced
 motion removes durations without changing hierarchy.
 

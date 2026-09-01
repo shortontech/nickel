@@ -50,9 +50,9 @@ pub use text_editor::TextEditor;
 pub use theme::{
     AccentColors, AccessibilityPreferences, AppearancePreference, BorderColors, ContrastPreference,
     EasingCurve, FontWeight, MotionPreference, MotionScale, PlatformThemePreferences, RadiusScale,
-    ResolvedAppearance, ResolvedThemePreferences, SemanticColors, SemanticTheme, SemanticTokenSet,
-    SizingScale, SpacingScale, SurfaceColors, TextColors, TextStyle, ThemePreferences,
-    TransparencyPreference, TypographyScale,
+    ResolvedAppearance, ResolvedThemePreferences, SemanticTheme, SemanticTokenSet, SizingScale,
+    SpacingScale, SurfaceColors, TextColors, TextStyle, ThemePreferences, TransparencyPreference,
+    TypographyScale,
 };
 pub use ui::{
     AccessibilityNode, AccountSummaryRow, ActionKind, ActionLegend, ActionLegendEntry,
@@ -121,16 +121,16 @@ pub mod prelude {
         ResolvedThemePreferences, ResponsiveNavigation, ResponsiveNavigationDestination,
         ResponsiveNavigationError, ResponsiveNavigationPresentation, Row,
         SETTINGS_SHELL_NARROW_BREAKPOINT, START_MENU_SINGLE_PANE_BREAKPOINT, SectionHeader,
-        SelectField, SelectionIndicator, SelectionRegion, SemanticColors, SemanticTheme,
-        SemanticTokenSet, SessionActionRow, SettingsCard, SettingsListCard, SettingsNavigation,
-        SettingsRow, SettingsSearchEntry, SettingsSection, SettingsShell, SettingsStatus,
-        SettingsStatusKind, Shortcut, ShortcutRow, ShortcutState, SizingScale, Slider, SliderField,
-        Spacer, SpacingScale, StartMenuNarrowPane, StartMenuShell, StatusRegion, Surface,
-        SurfaceColors, SurfaceRole, SurfaceScaffold, Switch, SwitchState, TabList, Text, TextAlign,
-        TextBoundary, TextColors, TextField, TextStyle, ThemePreferences, Tone, ToolRegion,
-        Tooltip, Track, TransientKind, TransientSurface, TransientTone, TransparencyPreference,
-        TypographyScale, UiEvent, UiId, UiStateStore, View, VirtualColumn, VirtualWindow,
-        component, id, place_transient, run, search_settings, ui,
+        SelectField, SelectionIndicator, SelectionRegion, SemanticTheme, SemanticTokenSet,
+        SessionActionRow, SettingsCard, SettingsListCard, SettingsNavigation, SettingsRow,
+        SettingsSearchEntry, SettingsSection, SettingsShell, SettingsStatus, SettingsStatusKind,
+        Shortcut, ShortcutRow, ShortcutState, SizingScale, Slider, SliderField, Spacer,
+        SpacingScale, StartMenuNarrowPane, StartMenuShell, StatusRegion, Surface, SurfaceColors,
+        SurfaceRole, SurfaceScaffold, Switch, SwitchState, TabList, Text, TextAlign, TextBoundary,
+        TextColors, TextField, TextStyle, ThemePreferences, Tone, ToolRegion, Tooltip, Track,
+        TransientKind, TransientSurface, TransientTone, TransparencyPreference, TypographyScale,
+        UiEvent, UiId, UiStateStore, View, VirtualColumn, VirtualWindow, component, id,
+        place_transient, run, search_settings, ui,
     };
 }
 

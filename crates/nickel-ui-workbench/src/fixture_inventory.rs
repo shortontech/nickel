@@ -14,14 +14,14 @@ use nickel_ui::{
     Icon, Image, InlineButtonGroup, Insets, ItemPresentation, LauncherSearchField, Menu, MenuBar,
     MenuItem, NavigationItem, NavigationSectionLabel, OverlayAnchor, OverlayStyle, PageHeader,
     Popover, PreviewTile, ProjectStatusRow, RadioButton, RadioGroup, RadioOption, Rect,
-    SectionHeader, SelectField, SelectionIndicator, SelectionRegion, SemanticColors,
-    SemanticControllerAction, SemanticRole, SemanticTheme, SessionActionRow, SettingsCard,
-    SettingsListCard, SettingsNavigation, SettingsRow, SettingsSearchField, SettingsSection,
-    SettingsShell, SettingsStatus, SettingsStatusKind, ShortcutRow, ShoulderHints, Sidebar,
-    SidebarFolder, SidebarItem, SidebarSection, Size, Slider, SliderField, Spacer, StartMenuShell,
-    StatusRegion, StyledText, StyledTextSpan, Surface, SurfaceRole, SurfaceScaffold, Switch,
-    TabList, Text, TextField, ToolRegion, Tooltip, UiId, VerticalScroll, ViewContext,
-    VirtualColumn, VirtualWindow,
+    SectionHeader, SelectField, SelectionIndicator, SelectionRegion, SemanticControllerAction,
+    SemanticRole, SemanticTheme, SessionActionRow, SettingsCard, SettingsListCard,
+    SettingsNavigation, SettingsRow, SettingsSearchField, SettingsSection, SettingsShell,
+    SettingsStatus, SettingsStatusKind, ShortcutRow, ShoulderHints, Sidebar, SidebarFolder,
+    SidebarItem, SidebarSection, Size, Slider, SliderField, Spacer, StartMenuShell, StatusRegion,
+    StyledText, StyledTextSpan, Surface, SurfaceRole, SurfaceScaffold, Switch, TabList, Text,
+    TextField, ToolRegion, Tooltip, UiId, VerticalScroll, ViewContext, VirtualColumn,
+    VirtualWindow,
 };
 use nickel_ui_testkit::{
     AccessibilityPreset, Fixture, FixtureDirection, FixtureMetadata, FixtureRegistry,
@@ -64,19 +64,10 @@ const fn variant(
 }
 
 fn theme() -> SemanticTheme {
-    SemanticTheme::new(SemanticColors {
-        window: 0x101722,
-        sidebar: 0x151f2d,
-        card: 0x1c2838,
-        raised: 0x243247,
-        hover: 0x2d405a,
-        primary_text: 0xf2f6fb,
-        secondary_text: 0x9cacc0,
-        accent: 0x7b61ff,
-        accent_soft: 0x332c61,
-        secondary_accent: 0x67b7ff,
-        positive: 0x61c993,
-    })
+    SemanticTheme::from_tokens(nickel_ui::SemanticTokenSet::standard(
+        0x101722, 0x151f2d, 0x1c2838, 0x243247, 0x2d405a, 0xf2f6fb, 0x9cacc0, 0x7b61ff, 0x332c61,
+        0x67b7ff, 0x61c993,
+    ))
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -299,8 +290,8 @@ impl InventoryApp {
                 .actions(
                     ActionRegion::new("sample-actions").child(SelectionIndicator::new(
                         true,
-                        palette.colors.accent,
-                        palette.colors.card,
+                        palette.accent.ordinary,
+                        palette.surfaces.card,
                     )),
                 )
                 .footer(StatusRegion::new("sample-status").child(Text::new("Ready"))),

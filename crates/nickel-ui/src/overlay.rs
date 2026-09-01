@@ -762,19 +762,9 @@ mod tests {
 
     #[test]
     fn transient_kind_and_semantic_style_are_typed_declarations() {
-        let theme = crate::SemanticTheme::new(crate::SemanticColors {
-            window: 1,
-            sidebar: 2,
-            card: 3,
-            raised: 4,
-            hover: 5,
-            primary_text: 6,
-            secondary_text: 7,
-            accent: 8,
-            accent_soft: 9,
-            secondary_accent: 10,
-            positive: 11,
-        });
+        let theme = crate::SemanticTheme::from_tokens(crate::SemanticTokenSet::standard(
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+        ));
         let style = OverlayStyle::from_theme(&theme);
         let menu = OverlayMenu::<Message>::new("tip", OverlayAnchor::Node("anchor".into()))
             .kind(TransientKind::Tooltip)

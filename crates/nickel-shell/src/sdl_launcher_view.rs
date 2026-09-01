@@ -21,7 +21,7 @@ use nickel_ui::{
     Collection, CollectionPresentation, CollectionState, Column, ComponentBuilderExt, Container,
     ControllerFamily, FallbackAvatar, FrameOverlay, Image, InputModality, Insets,
     LauncherSearchField, OverlayAnchor, OverlayMenu, OverlayMenuItem, ProjectStatusRow,
-    ReadingDirection, Row, START_MENU_SINGLE_PANE_BREAKPOINT, SectionHeader, SemanticColors,
+    ReadingDirection, Row, START_MENU_SINGLE_PANE_BREAKPOINT, SectionHeader,
     SemanticControllerAction, SemanticTheme, ShortcutRow, ShortcutState, StartMenuNarrowPane,
     StartMenuShell, Text, TextAlign, UiId, ViewContext,
 };
@@ -506,19 +506,19 @@ fn build_launcher_view(
         .saturating_sub(visible_rows);
     scroll_row = scroll_row.min(maximum_row);
 
-    let theme = SemanticTheme::new(SemanticColors {
-        window: context.palette.background,
-        sidebar: context.palette.panel,
-        card: context.palette.surface,
-        raised: context.palette.surface_hover,
-        hover: context.palette.surface_hover,
-        primary_text: context.palette.text,
-        secondary_text: context.palette.muted,
-        accent: context.palette.accent,
-        accent_soft: context.palette.accent_soft,
-        secondary_accent: context.palette.complement,
-        positive: context.palette.complement,
-    });
+    let theme = SemanticTheme::from_tokens(nickel_ui::SemanticTokenSet::standard(
+        context.palette.background,
+        context.palette.panel,
+        context.palette.surface,
+        context.palette.surface_hover,
+        context.palette.surface_hover,
+        context.palette.text,
+        context.palette.muted,
+        context.palette.accent,
+        context.palette.accent_soft,
+        context.palette.complement,
+        context.palette.complement,
+    ));
     let direction = launcher_reading_direction();
     let sidebar = Column::new()
         .gap(theme.spacing.compact)
@@ -697,19 +697,19 @@ fn build_dashboard_view_directional(
     let viewport = context.viewport;
     let (viewport_width, _viewport_height) = viewport;
     let width = PANEL_MAX_WIDTH.min(viewport_width.max(1) as f32);
-    let theme = SemanticTheme::new(SemanticColors {
-        window: context.palette.background,
-        sidebar: context.palette.panel,
-        card: context.palette.surface,
-        raised: context.palette.surface_hover,
-        hover: context.palette.surface_hover,
-        primary_text: context.palette.text,
-        secondary_text: context.palette.muted,
-        accent: context.palette.accent,
-        accent_soft: context.palette.accent_soft,
-        secondary_accent: context.palette.complement,
-        positive: context.palette.complement,
-    });
+    let theme = SemanticTheme::from_tokens(nickel_ui::SemanticTokenSet::standard(
+        context.palette.background,
+        context.palette.panel,
+        context.palette.surface,
+        context.palette.surface_hover,
+        context.palette.surface_hover,
+        context.palette.text,
+        context.palette.muted,
+        context.palette.accent,
+        context.palette.accent_soft,
+        context.palette.complement,
+        context.palette.complement,
+    ));
     let narrow = width < START_MENU_SINGLE_PANE_BREAKPOINT;
     let selected = |view| launcher.view() == view;
     let nav_state = |view| ShortcutState {

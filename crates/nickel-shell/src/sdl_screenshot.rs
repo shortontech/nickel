@@ -10,8 +10,8 @@ use nickel_ui::backend::PaintCommand;
 use nickel_ui::{
     ActionKind, Align, Application, Button, ButtonPresentation, Column, Completion,
     CompletionFailure, CompletionFailureKind, Container, EffectEvidence, FrameOverlay, HostBatch,
-    HostEvent, Image, ImageFit, Insets, Point, Rect, Row, SemanticColors, SemanticTheme, Spacer,
-    Text, Tone, UiEvent, UiHost, ViewContext,
+    HostEvent, Image, ImageFit, Insets, Point, Rect, Row, SemanticTheme, Spacer, Text, Tone,
+    UiEvent, UiHost, ViewContext,
 };
 
 use crate::platform;
@@ -673,19 +673,19 @@ fn screenshot_view(
 ) -> impl nickel_ui::View<ScreenshotMessage> {
     let width = context.viewport.size.width as u32;
     let palette = app.palette;
-    let theme = SemanticTheme::new(SemanticColors {
-        window: palette.background,
-        sidebar: palette.panel,
-        card: palette.surface,
-        raised: palette.surface_hover,
-        hover: palette.surface_hover,
-        primary_text: palette.text,
-        secondary_text: palette.muted,
-        accent: palette.accent,
-        accent_soft: palette.accent_soft,
-        secondary_accent: palette.complement,
-        positive: palette.complement,
-    });
+    let theme = SemanticTheme::from_tokens(nickel_ui::SemanticTokenSet::standard(
+        palette.background,
+        palette.panel,
+        palette.surface,
+        palette.surface_hover,
+        palette.surface_hover,
+        palette.text,
+        palette.muted,
+        palette.accent,
+        palette.accent_soft,
+        palette.complement,
+        palette.complement,
+    ));
     let mut toolbar = Row::new()
         .height(TOOLBAR_HEIGHT)
         .padding(Insets {

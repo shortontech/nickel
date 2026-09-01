@@ -990,7 +990,7 @@ impl<Message> Component<Message> for CompactIconTile<Message> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{PaintCommand, Point, Rect, SemanticColors, UiEvent, UiFrame, UiStateStore};
+    use crate::{PaintCommand, Point, Rect, UiEvent, UiFrame, UiStateStore};
 
     use super::*;
 
@@ -1017,35 +1017,17 @@ mod tests {
     }
 
     fn theme() -> SemanticTheme {
-        SemanticTheme::new(SemanticColors {
-            window: 0x101114,
-            sidebar: 0x15171b,
-            card: 0x1b1e23,
-            raised: 0x32363e,
-            hover: 0x3c414b,
-            primary_text: 0xf2f3f5,
-            secondary_text: 0xa8abb2,
-            accent: 0x9b62e8,
-            accent_soft: 0x45305f,
-            secondary_accent: 0x55b982,
-            positive: 0x55b982,
-        })
+        SemanticTheme::from_tokens(crate::SemanticTokenSet::standard(
+            0x101114, 0x15171b, 0x1b1e23, 0x32363e, 0x3c414b, 0xf2f3f5, 0xa8abb2, 0x9b62e8,
+            0x45305f, 0x55b982, 0x55b982,
+        ))
     }
 
     fn light_theme() -> SemanticTheme {
-        SemanticTheme::new(SemanticColors {
-            window: 0xf4f5f7,
-            sidebar: 0xe7e9ed,
-            card: 0xffffff,
-            raised: 0xdfe3e8,
-            hover: 0xd4d9e0,
-            primary_text: 0x17191d,
-            secondary_text: 0x555b66,
-            accent: 0x7440bd,
-            accent_soft: 0xe5d8f7,
-            secondary_accent: 0x207a4b,
-            positive: 0x207a4b,
-        })
+        SemanticTheme::from_tokens(crate::SemanticTokenSet::standard(
+            0xf4f5f7, 0xe7e9ed, 0xffffff, 0xdfe3e8, 0xd4d9e0, 0x17191d, 0x555b66, 0x7440bd,
+            0xe5d8f7, 0x207a4b, 0x207a4b,
+        ))
     }
 
     fn component_state_sheet(
@@ -1588,8 +1570,8 @@ mod tests {
     fn start_menu_component_state_sheets_cover_themes_scales_and_text_directions() {
         let dark = theme();
         let high_contrast = SemanticTheme::resolve(
-            light_theme().colors,
-            dark.colors,
+            light_theme().tokens(),
+            dark.tokens(),
             crate::ResolvedThemePreferences {
                 appearance: crate::ResolvedAppearance::Dark,
                 high_contrast: true,
@@ -1598,8 +1580,8 @@ mod tests {
             },
         );
         let reduced_transparency = SemanticTheme::resolve(
-            light_theme().colors,
-            dark.colors,
+            light_theme().tokens(),
+            dark.tokens(),
             crate::ResolvedThemePreferences {
                 appearance: crate::ResolvedAppearance::Dark,
                 high_contrast: false,
