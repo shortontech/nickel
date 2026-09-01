@@ -36,7 +36,18 @@ Final specification completion uses the stricter gate:
 cargo run -p nickel-ui-workbench -- validate --final-completion
 ```
 
-That command accepts only `removed`, `admitted_measured`, `measured_admitted`, and the narrowly
-validated `admitted_opaque` classification. In particular,
+That command accepts only `removed`, `admitted_measured`, `measured_admitted`, and
+the narrowly validated `admitted_opaque` and `resource_admitted` classifications.
+Performance-derived admission remains measured: it needs an authoritative
+bypass, output equivalence, release cold/warm/churn/low-reuse workloads, and a predeclared
+threshold. `resource_admitted` is deliberately different. It is only valid for retained resource
+or bounded-work ownership, must have nonzero entry and byte/metadata bounds, and its evidence must
+name `admission=resource_ownership`, `bounded=`, `release=`, and `authority=`. It does not claim that
+a lookup microbenchmark justifies ownership of an already-authoritative resource.
+
+`admitted_opaque` is limited to dependency-backed resources whose Nickel-owned cardinality and
+owner-drop lifecycle are bounded while dependency-retained bytes remain explicitly opaque.
+
+In particular,
 `pending_measure` and `lifecycle_fixed` remain honest provisional states and cannot satisfy final
 completion merely because bounds or lifecycle behavior have improved.

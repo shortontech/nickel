@@ -754,6 +754,7 @@ fn validate_cache_inventory_with(
                 | "admitted_measured"
                 | "measured_admitted"
                 | "admitted_opaque"
+                | "resource_admitted"
                 | "lifecycle_fixed"
                 | "lifecycle_fix_required"
         ) {
@@ -770,6 +771,33 @@ fn validate_cache_inventory_with(
                 "admitted cache `{}` has no entry or byte bound",
                 columns[0]
             ))));
+        }
+        if columns[13] == "resource_admitted" {
+            if !matches!(columns[2], "resource_reuse" | "speculative_background_work") {
+                return Err(Box::new(UsageError(format!(
+                    "resource-owned admission `{}` has performance-derived category `{}`",
+                    columns[0], columns[2]
+                ))));
+            }
+            if columns[7] == "0" || columns[8] == "0" {
+                return Err(Box::new(UsageError(format!(
+                    "resource-owned admission `{}` has no retained entry or byte bound",
+                    columns[0]
+                ))));
+            }
+            for field in [
+                "admission=resource_ownership",
+                "bounded=",
+                "release=",
+                "authority=",
+            ] {
+                if !columns[14].contains(field) {
+                    return Err(Box::new(UsageError(format!(
+                        "resource-owned admission `{}` is missing structured `{field}` evidence",
+                        columns[0]
+                    ))));
+                }
+            }
         }
         if columns[8] == "opaque_dependency" && !columns[14].contains("opaque") {
             return Err(Box::new(UsageError(format!(
@@ -800,7 +828,11 @@ fn validate_cache_inventory_with(
         if validation == CacheInventoryValidation::FinalCompletion
             && !matches!(
                 columns[13],
-                "removed" | "admitted_measured" | "measured_admitted" | "admitted_opaque"
+                "removed"
+                    | "admitted_measured"
+                    | "measured_admitted"
+                    | "admitted_opaque"
+                    | "resource_admitted"
             )
         {
             return Err(Box::new(UsageError(format!(
@@ -4152,6 +4184,28 @@ mod tests {
                 "dishonest opaque admission must fail validation"
             );
         }
+    }
+
+    #[test]
+    fn resource_admission_requires_ownership_bounds_release_and_authority() {
+        let missing_release =
+            CACHE_INVENTORY.replacen("release=remove and clear", "lifecycle=remove and clear", 1);
+        let error =
+            validate_cache_inventory_with(&missing_release, CacheInventoryValidation::Routine)
+                .expect_err("resource admission without release evidence must fail");
+        assert!(error.to_string().contains("release="));
+
+        let performance_laundering = CACHE_INVENTORY.replacen(
+            "shared_decoded_images\tnickel-render-assets/ImageAssetCache\tresource_reuse",
+            "shared_decoded_images\tnickel-render-assets/ImageAssetCache\tderived_performance",
+            1,
+        );
+        let error = validate_cache_inventory_with(
+            &performance_laundering,
+            CacheInventoryValidation::Routine,
+        )
+        .expect_err("performance-derived retention needs measured admission");
+        assert!(error.to_string().contains("performance-derived category"));
     }
 
     #[test]
