@@ -81,6 +81,7 @@ pub struct LauncherApplication {
     status: Option<String>,
     effects: Vec<LauncherAction>,
     dirty: bool,
+    reading_direction: Option<ReadingDirection>,
 }
 
 impl LauncherApplication {
@@ -98,6 +99,7 @@ impl LauncherApplication {
             status: None,
             effects: Vec::new(),
             dirty: false,
+            reading_direction: None,
         }
     }
 
@@ -116,6 +118,13 @@ impl LauncherApplication {
         self.state.borrow_mut().set_controller_family(family);
         self.dirty = true;
     }
+
+    /// Overrides locale-derived direction for deterministic fixture rendering.
+    #[allow(dead_code)] // The binary also compiles this module without fixture support.
+    pub fn set_reading_direction(&mut self, direction: ReadingDirection) {
+        self.reading_direction = Some(direction);
+        self.dirty = true;
+    }
 }
 
 impl UiApplication for LauncherApplication {
@@ -128,7 +137,7 @@ impl UiApplication for LauncherApplication {
     }
 
     fn view(&self, context: ViewContext) -> impl nickel_ui::View<Self::Message> {
-        let base = build_launcher_view(
+        let base = build_launcher_view_directional(
             &self.launcher,
             &self.state.borrow(),
             &mut self.icons.borrow_mut(),
@@ -142,6 +151,8 @@ impl UiApplication for LauncherApplication {
                 status: self.status.as_deref(),
                 legend_actions: ActionLegendActions::from_view_context(&context),
             },
+            self.reading_direction
+                .unwrap_or_else(launcher_reading_direction),
         );
         let width = context.viewport.size.width;
         let height = context.viewport.size.height;
@@ -474,15 +485,32 @@ struct LauncherViewContext<'a> {
     legend_actions: ActionLegendActions,
 }
 
+#[allow(dead_code)] // Directly exercised by focused module tests.
 fn build_launcher_view(
     launcher: &Launcher,
     state: &LauncherViewState,
     icons: &mut LauncherIconCache,
     context: LauncherViewContext<'_>,
 ) -> AnyView<LauncherAction> {
+    build_launcher_view_directional(
+        launcher,
+        state,
+        icons,
+        context,
+        launcher_reading_direction(),
+    )
+}
+
+fn build_launcher_view_directional(
+    launcher: &Launcher,
+    state: &LauncherViewState,
+    icons: &mut LauncherIconCache,
+    context: LauncherViewContext<'_>,
+    direction: ReadingDirection,
+) -> AnyView<LauncherAction> {
     let (viewport_width, viewport_height) = context.viewport;
     if launcher.mode() == LauncherMode::Dashboard {
-        return build_dashboard_view(launcher, state, icons, context);
+        return build_dashboard_view_directional(launcher, state, icons, context, direction);
     }
     let panel_width = PANEL_MAX_WIDTH.min(viewport_width.max(1) as f32).max(320.0);
     let panel_height = PANEL_MAX_HEIGHT
@@ -522,7 +550,6 @@ fn build_launcher_view(
         context.palette.complement,
         context.palette.complement,
     ));
-    let direction = launcher_reading_direction();
     let sidebar = Column::new()
         .gap(theme.spacing.compact)
         .padding(Insets::all(theme.spacing.control))
@@ -683,6 +710,7 @@ fn query_action(value: String) -> LauncherAction {
     LauncherAction::SetQuery(value)
 }
 
+#[allow(dead_code)] // Directly exercised by focused module tests.
 fn build_dashboard_view(
     launcher: &Launcher,
     state: &LauncherViewState,

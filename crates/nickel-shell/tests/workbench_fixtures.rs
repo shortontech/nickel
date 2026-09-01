@@ -18,6 +18,7 @@ fn registers_every_shell_surface_fixture() {
             "shell.codex-project-menu",
             "shell.control-center",
             "shell.desktop",
+            "shell.launcher-dashboard",
             "shell.launcher-search",
             "shell.lock",
             "shell.notification",
@@ -63,6 +64,14 @@ fn registers_every_shell_surface_fixture() {
                         && node.label.as_deref() == Some("Focus application search")
                 }));
             }
+            if entry.metadata.id == "shell.launcher-dashboard" {
+                assert!(session.accessibility_nodes().iter().any(|node| {
+                    node.id
+                        .as_str()
+                        .ends_with("launcher-dashboard-search-focus")
+                        && node.label.as_deref() == Some("Focus application search")
+                }));
+            }
             if entry.metadata.id == "shell.notification" {
                 let has_activate = session
                     .semantic_nodes()
@@ -93,5 +102,47 @@ fn registers_every_shell_surface_fixture() {
                 }));
             }
         }
+    }
+}
+
+#[test]
+fn launcher_dashboard_matrix_covers_every_required_axis() {
+    let mut registry = FixtureRegistry::new();
+    ShellFixtureProvider.register(&mut registry).unwrap();
+    let entry = registry
+        .finish()
+        .into_iter()
+        .find(|entry| entry.metadata.id == "shell.launcher-dashboard")
+        .unwrap();
+    let ids = entry
+        .metadata
+        .variants
+        .iter()
+        .map(|variant| variant.id)
+        .collect::<Vec<_>>()
+        .join("\n");
+    for required in [
+        "populated",
+        "empty",
+        "loading",
+        "partial-failure",
+        "wide",
+        "narrow",
+        "ltr",
+        "rtl",
+        "dark",
+        "light",
+        "high-contrast",
+        "1x",
+        "2x",
+        "pointer",
+        "keyboard",
+        "controller",
+        "a11y",
+    ] {
+        assert!(
+            ids.contains(required),
+            "launcher matrix does not cover {required}"
+        );
     }
 }

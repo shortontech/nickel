@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc, time::Instant};
 
-use nickel_core::theme::{Appearance, ThemePalette};
-use nickel_ui::{ControllerFamily, SemanticRole};
+use nickel_core::theme::{Appearance, ThemeMode, ThemePalette};
+use nickel_ui::{ControllerFamily, ReadingDirection, SemanticRole};
 use nickel_ui_testkit::{
     DEFAULT_ACCESSIBILITY, DEFAULT_LOCALE, DEFAULT_SCALE, Fixture, FixtureMetadata,
     FixtureProvider, FixtureRegistry, FixtureSource, FixtureTheme, FixtureVariant, RegistryError,
@@ -91,6 +91,136 @@ const SEARCH_VARIANTS: &[FixtureVariant] = &[
     variant("scroll", "Scroll", 920, 680),
 ];
 
+const RTL_LOCALE: nickel_ui_testkit::LocalePreset = nickel_ui_testkit::LocalePreset {
+    id: "ar-SA",
+    direction: nickel_ui_testkit::FixtureDirection::RightToLeft,
+};
+const SCALE_2X: nickel_ui_testkit::ScalePreset = nickel_ui_testkit::ScalePreset {
+    id: "2x",
+    factor: 2.0,
+};
+const HIGH_CONTRAST: nickel_ui_testkit::AccessibilityPreset =
+    nickel_ui_testkit::AccessibilityPreset {
+        id: "high-contrast",
+        high_contrast: true,
+        reduced_motion: false,
+        reduced_transparency: true,
+    };
+const LAUNCHER_DASHBOARD_VARIANTS: &[FixtureVariant] = &[
+    FixtureVariant {
+        id: "populated-wide-ltr-dark-1x-pointer",
+        title: "Populated pointer",
+        viewport: ViewportPreset {
+            id: "wide",
+            width: 920,
+            height: 680,
+        },
+        theme: FixtureTheme::Dark,
+        locale: DEFAULT_LOCALE,
+        scale: DEFAULT_SCALE,
+        controller_family: ControllerFamily::Generic,
+        accessibility: DEFAULT_ACCESSIBILITY,
+    },
+    FixtureVariant {
+        id: "empty-narrow-rtl-light-2x-keyboard",
+        title: "Empty keyboard",
+        viewport: ViewportPreset {
+            id: "narrow",
+            width: 540,
+            height: 680,
+        },
+        theme: FixtureTheme::Light,
+        locale: RTL_LOCALE,
+        scale: SCALE_2X,
+        controller_family: ControllerFamily::Generic,
+        accessibility: DEFAULT_ACCESSIBILITY,
+    },
+    FixtureVariant {
+        id: "loading-wide-ltr-high-contrast-1x-controller-playstation",
+        title: "Loading PlayStation",
+        viewport: ViewportPreset {
+            id: "wide",
+            width: 920,
+            height: 680,
+        },
+        theme: FixtureTheme::HighContrast,
+        locale: DEFAULT_LOCALE,
+        scale: DEFAULT_SCALE,
+        controller_family: ControllerFamily::PlayStation,
+        accessibility: HIGH_CONTRAST,
+    },
+    FixtureVariant {
+        id: "partial-failure-narrow-rtl-dark-2x-a11y",
+        title: "Partial failure accessibility",
+        viewport: ViewportPreset {
+            id: "narrow",
+            width: 540,
+            height: 680,
+        },
+        theme: FixtureTheme::Dark,
+        locale: RTL_LOCALE,
+        scale: SCALE_2X,
+        controller_family: ControllerFamily::Generic,
+        accessibility: DEFAULT_ACCESSIBILITY,
+    },
+    FixtureVariant {
+        id: "populated-narrow-ltr-light-1x-controller-xbox",
+        title: "Populated Xbox",
+        viewport: ViewportPreset {
+            id: "narrow",
+            width: 540,
+            height: 680,
+        },
+        theme: FixtureTheme::Light,
+        locale: DEFAULT_LOCALE,
+        scale: DEFAULT_SCALE,
+        controller_family: ControllerFamily::Xbox,
+        accessibility: DEFAULT_ACCESSIBILITY,
+    },
+    FixtureVariant {
+        id: "empty-wide-rtl-high-contrast-2x-controller-switch",
+        title: "Empty Switch",
+        viewport: ViewportPreset {
+            id: "wide",
+            width: 920,
+            height: 680,
+        },
+        theme: FixtureTheme::HighContrast,
+        locale: RTL_LOCALE,
+        scale: SCALE_2X,
+        controller_family: ControllerFamily::Switch,
+        accessibility: HIGH_CONTRAST,
+    },
+    FixtureVariant {
+        id: "loading-narrow-ltr-dark-2x-pointer",
+        title: "Loading pointer",
+        viewport: ViewportPreset {
+            id: "narrow",
+            width: 540,
+            height: 680,
+        },
+        theme: FixtureTheme::Dark,
+        locale: DEFAULT_LOCALE,
+        scale: SCALE_2X,
+        controller_family: ControllerFamily::Generic,
+        accessibility: DEFAULT_ACCESSIBILITY,
+    },
+    FixtureVariant {
+        id: "partial-failure-wide-rtl-light-1x-keyboard",
+        title: "Partial failure keyboard",
+        viewport: ViewportPreset {
+            id: "wide",
+            width: 920,
+            height: 680,
+        },
+        theme: FixtureTheme::Light,
+        locale: RTL_LOCALE,
+        scale: DEFAULT_SCALE,
+        controller_family: ControllerFamily::Generic,
+        accessibility: DEFAULT_ACCESSIBILITY,
+    },
+];
+
 macro_rules! metadata {
     ($name:ident, $id:literal, $title:literal, $description:literal, $variants:ident, $tags:expr) => {
         static $name: FixtureMetadata = FixtureMetadata {
@@ -117,6 +247,14 @@ metadata!(
     "Production shell-owned UiHost surface lifecycle representative",
     RUNTIME_VARIANTS,
     &["shell", "runtime", "lifecycle", "noninteractive"]
+);
+metadata!(
+    LAUNCHER_DASHBOARD_METADATA,
+    "shell.launcher-dashboard",
+    "Launcher dashboard",
+    "Production launcher dashboard state, appearance, direction, scale, and modality matrix",
+    LAUNCHER_DASHBOARD_VARIANTS,
+    &["shell", "launcher", "dashboard", "matrix"]
 );
 metadata!(
     DESKTOP_METADATA,
@@ -205,6 +343,28 @@ pub struct WindowPreviewFixture;
 pub struct ControlCenterFixture;
 pub struct CodexProjectMenuFixture;
 pub struct LauncherSearchFixture;
+pub struct LauncherDashboardFixture;
+
+fn fixture_palette(theme: FixtureTheme) -> ThemePalette {
+    match theme {
+        FixtureTheme::Light => ThemePalette::from_appearance(Appearance {
+            mode: ThemeMode::Light,
+            ..Appearance::default()
+        }),
+        FixtureTheme::Dark => palette(),
+        FixtureTheme::HighContrast => ThemePalette {
+            background: 0x000000,
+            panel: 0x000000,
+            surface: 0x111111,
+            surface_hover: 0x222222,
+            text: 0xffffff,
+            muted: 0xd8d8d8,
+            accent: 0xffff00,
+            accent_soft: 0x333300,
+            complement: 0x00ffff,
+        },
+    }
+}
 
 impl Fixture for RuntimeFixture {
     type App = DesktopApplication;
@@ -522,6 +682,75 @@ impl Fixture for LauncherSearchFixture {
     }
 }
 
+impl Fixture for LauncherDashboardFixture {
+    type App = LauncherApplication;
+    fn metadata() -> &'static FixtureMetadata {
+        &LAUNCHER_DASHBOARD_METADATA
+    }
+    fn create() -> Self::App {
+        Self::create_variant(&LAUNCHER_DASHBOARD_VARIANTS[0])
+    }
+    fn create_variant(v: &FixtureVariant) -> Self::App {
+        let populated = v.id.starts_with("populated");
+        let mut launcher = if populated {
+            Launcher::default()
+        } else {
+            Launcher::new(Vec::new())
+        };
+        launcher.set_codex_available(true);
+        use crate::launcher::{
+            DashboardAccount, DashboardProject, DashboardSection, ProjectActivity,
+        };
+        if v.id.starts_with("partial-failure") {
+            launcher.set_dashboard_projects(DashboardSection::Failed {
+                message: "Project service unavailable".into(),
+                recoverable: true,
+            });
+            launcher.set_dashboard_account(DashboardSection::Ready(DashboardAccount {
+                display_name: "Local user".into(),
+                supporting_text: "Offline".into(),
+            }));
+        } else if v.id.starts_with("loading") {
+            launcher.set_dashboard_projects(DashboardSection::Loading);
+            launcher.set_dashboard_account(DashboardSection::Loading);
+        } else if v.id.starts_with("empty") {
+            launcher.set_dashboard_projects(DashboardSection::Empty);
+            launcher.set_dashboard_account(DashboardSection::Empty);
+        } else {
+            launcher.set_dashboard_projects(DashboardSection::Ready(vec![DashboardProject {
+                id: "nickel".into(),
+                name: "Nickel".into(),
+                roots: Vec::new(),
+                chat_count: Some(2),
+                activity: ProjectActivity::Active,
+                last_used_at: Some(1),
+            }]));
+            launcher.set_dashboard_account(DashboardSection::Ready(DashboardAccount {
+                display_name: "Nickel user".into(),
+                supporting_text: "Local session".into(),
+            }));
+        }
+        let mut app = LauncherApplication::new(
+            launcher,
+            LauncherViewState::default(),
+            LauncherIconCache::new(),
+            fixture_palette(v.theme),
+        );
+        app.set_controller_family(v.controller_family);
+        app.set_reading_direction(match v.locale.direction {
+            nickel_ui_testkit::FixtureDirection::LeftToRight => ReadingDirection::LeftToRight,
+            nickel_ui_testkit::FixtureDirection::RightToLeft => ReadingDirection::RightToLeft,
+        });
+        app
+    }
+    fn surface_size() -> (u32, u32) {
+        (920, 680)
+    }
+    fn default_activation() -> Option<Selector> {
+        Some(Selector::role_name(SemanticRole::GridCell, "firefox"))
+    }
+}
+
 impl FixtureProvider for ShellFixtureProvider {
     fn register(&self, registry: &mut FixtureRegistry) -> Result<(), RegistryError> {
         registry.register::<RuntimeFixture>()?;
@@ -533,7 +762,9 @@ impl FixtureProvider for ShellFixtureProvider {
         registry.register::<WindowPreviewFixture>()?;
         registry.register::<ControlCenterFixture>()?;
         registry.register::<CodexProjectMenuFixture>()?;
-        registry.register::<LauncherSearchFixture>()
+        registry
+            .register::<LauncherSearchFixture>()
+            .and_then(|()| registry.register::<LauncherDashboardFixture>())
     }
 }
 
