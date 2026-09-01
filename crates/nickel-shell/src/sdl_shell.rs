@@ -560,7 +560,11 @@ impl SdlShell {
     pub fn hide(&mut self, id: SurfaceId) -> bool {
         self.surface_mut(id).is_some_and(|surface| {
             let hidden = surface.window_mut().hide();
-            if hidden && let Some(presenter) = surface.presenter.as_mut() {
+            // SDL reports whether native visibility changed, not whether the
+            // surface is hidden after the call. Repeated reconciliation must
+            // still release a presenter that was populated while the native
+            // window was already hidden (for example by prewarm or resize).
+            if let Some(presenter) = surface.presenter.as_mut() {
                 presenter.suspend();
             }
             hidden
