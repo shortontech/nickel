@@ -327,6 +327,7 @@ impl nickel_ui::Application for LockApplication {
                             LockMessage::Password,
                         )
                         .id("lock-password-input")
+                        .accessibility_label("Password")
                         .scale(18.0)
                         .color(password_color),
                     ),
@@ -3116,7 +3117,7 @@ mod tests {
     };
     use nickel_ui::{
         ActionKind, HostBatch, HostEvent, HostTelemetry, Point, Rect, SemanticAction, SemanticRole,
-        SemanticSelector, UiEvent, UiHost,
+        SemanticSelector, SemanticValueInput, SemanticValueSnapshot, UiEvent, UiHost,
     };
     use nickel_ui_testkit::{Scenario, Selector};
 
@@ -3665,6 +3666,42 @@ mod tests {
         assert!(application.password.is_empty());
         let super::LockEffect::Authenticate(password) = application.effects.pop().unwrap();
         assert_eq!(&**password, "secret");
+    }
+
+    #[test]
+    fn lock_password_is_a_named_protected_textbox_through_the_production_host() {
+        let mut scenario = Scenario::new(super::LockApplication::fixture("nickel", None), 960, 540);
+        let selector = Selector::RoleAndName {
+            role: SemanticRole::TextField,
+            name: "Password".into(),
+        };
+        let target = scenario
+            .host()
+            .query_unique(&SemanticSelector::RoleAndName {
+                role: SemanticRole::TextField,
+                name: "Password".into(),
+            })
+            .expect("lock password semantic target");
+
+        assert_eq!(target.role, Some(SemanticRole::TextField));
+        assert_eq!(target.name.as_deref(), Some("Password"));
+        assert_eq!(target.actions, vec![ActionKind::SetValue]);
+        scenario
+            .assert_value(
+                &selector,
+                &SemanticValueSnapshot::ProtectedText { character_count: 6 },
+            )
+            .unwrap();
+        scenario
+            .set_value(&selector, SemanticValueInput::Text("new secret".into()))
+            .unwrap()
+            .assert_value(
+                &selector,
+                &SemanticValueSnapshot::ProtectedText {
+                    character_count: 10,
+                },
+            )
+            .unwrap();
     }
 
     #[test]

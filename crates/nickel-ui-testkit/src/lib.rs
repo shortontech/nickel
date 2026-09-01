@@ -3556,12 +3556,18 @@ fn explore_controller_routes<A: Application>(
                 )),
             };
         }
+        let current_node = inspection.controller_target.as_ref().and_then(|target| {
+            seed.host
+                .semantic_nodes()
+                .into_iter()
+                .find(|node| &node.id == target)
+        });
         let step = if repeated {
             ControllerGraphStep::Action(ControllerAction::Cancel)
-        } else if inspection
-            .controller_target
-            .as_ref()
-            .is_some_and(|id| !seed.host.semantic_nodes().iter().any(|node| &node.id == id))
+        } else if inspection.controller_target.is_some()
+            && current_node
+                .as_ref()
+                .is_none_or(controller_node_reveals_topology)
         {
             ControllerGraphStep::Action(ControllerAction::Confirm)
         } else {
@@ -3672,14 +3678,7 @@ fn explore_controller_routes<A: Application>(
             ControllerAction::NextPane,
         ];
         let is_scope_waypoint = inspection.controller_target.is_some() && current_node.is_none();
-        let reveals_topology = current_node.is_some_and(|node| {
-            node.actions.iter().any(|action| {
-                matches!(
-                    action,
-                    ActionKind::Expand | ActionKind::EnterNavigation | ActionKind::ContextMenu
-                )
-            }) || matches!(node.role, Some(SemanticRole::Menu | SemanticRole::Dialog))
-        });
+        let reveals_topology = current_node.is_some_and(controller_node_reveals_topology);
         if is_scope_waypoint || reveals_topology {
             branches.push(ControllerAction::Confirm);
         }
@@ -3713,6 +3712,18 @@ fn explore_controller_routes<A: Application>(
             )),
         }
     }
+}
+
+fn controller_node_reveals_topology(node: &SemanticNodeSnapshot) -> bool {
+    node.actions.iter().any(|action| {
+        matches!(
+            action,
+            ActionKind::Expand | ActionKind::EnterNavigation | ActionKind::ContextMenu
+        )
+    }) || matches!(
+        node.role,
+        Some(SemanticRole::Grid | SemanticRole::Menu | SemanticRole::Dialog)
+    )
 }
 
 fn replay_controller_route<A: Application>(
@@ -3997,6 +4008,9 @@ fn semantic_action_for_target(target: &SemanticNodeSnapshot, action: ActionKind)
         }
         Some(SemanticValueSnapshot::Text(value)) => {
             SemanticValueInput::Text(format!("{value} scenario"))
+        }
+        Some(SemanticValueSnapshot::ProtectedText { .. }) => {
+            SemanticValueInput::Text("scenario protected value".into())
         }
         None => SemanticValueInput::Number(0.5),
     };

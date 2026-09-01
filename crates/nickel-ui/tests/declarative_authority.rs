@@ -282,6 +282,31 @@ fn consumers_cannot_grow_or_create_parallel_hit_authority() {
 }
 
 #[test]
+fn consumers_cannot_restore_file_entry_prefix_navigation() {
+    let root = workspace_root();
+    let mut files = Vec::new();
+    rust_files(&root.join("crates"), &mut files);
+    let violations = files
+        .into_iter()
+        .filter(|path| !path.starts_with(root.join("crates/nickel-ui")))
+        .filter_map(|path| {
+            let source = fs::read_to_string(&path).expect("Rust source must be UTF-8");
+            (code_references(&source, "strip_prefix(\"file-entry-\"") > 0).then(|| {
+                path.strip_prefix(&root)
+                    .expect("workspace source is below root")
+                    .display()
+                    .to_string()
+            })
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        violations.is_empty(),
+        "file entry identity must come from semantic structure, not string-prefix parsing:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
 fn display_list_reference_counter_detects_seeded_regressions() {
     assert_eq!(
         display_list_references(
@@ -302,6 +327,17 @@ fn display_list_reference_counter_detects_seeded_regressions() {
             r#"// LauncherHitTarget
                let diagnostic = "HitTarget and fn action_at";
                struct RealHitTarget;"#
+        ),
+        1
+    );
+}
+
+#[test]
+fn authority_counter_detects_seeded_file_entry_prefix_navigation() {
+    assert_eq!(
+        code_references(
+            r#"node.id.as_str().strip_prefix("file-entry-").and_then(|value| value.parse().ok())"#,
+            "strip_prefix(\"file-entry-\""
         ),
         1
     );

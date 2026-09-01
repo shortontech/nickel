@@ -456,6 +456,20 @@ impl<Message> FileGrid<Message> {
         self.grid = self.grid.grow(grow);
         self
     }
+
+    pub fn id(mut self, id: impl Into<UiId>) -> Self {
+        self.grid.0.id = Some(id.into());
+        self
+    }
+
+    pub fn accessibility_label(mut self, label: impl Into<String>) -> Self {
+        self.grid.0 = self
+            .grid
+            .0
+            .semantic_role(SemanticRole::Grid)
+            .accessibility_label(label);
+        self
+    }
 }
 
 impl<Message> Component<Message> for FileGrid<Message> {
@@ -1098,8 +1112,14 @@ impl<Message> TextField<Message> {
             text: Text::new(&displayed),
             displayed,
         };
-        if let Kind::Text { input_value, .. } = &mut field.text.0.kind {
+        if let Kind::Text {
+            input_value,
+            input_protected,
+            ..
+        } = &mut field.text.0.kind
+        {
             *input_value = Some(value.to_owned());
+            *input_protected = true;
         }
         field.text.0.text_mapper = Some(map);
         field
@@ -1120,8 +1140,14 @@ impl<Message> TextField<Message> {
             text: Text::new(&displayed),
             displayed,
         };
-        if let Kind::Text { input_value, .. } = &mut field.text.0.kind {
+        if let Kind::Text {
+            input_value,
+            input_protected,
+            ..
+        } = &mut field.text.0.kind
+        {
             *input_value = Some(value.to_owned());
+            *input_protected = true;
         }
         field.text.0.text_mapper = Some(map);
         field
@@ -1133,6 +1159,11 @@ impl<Message> TextField<Message> {
 
     pub fn id(mut self, id: impl Into<UiId>) -> Self {
         self.text = self.text.id(id);
+        self
+    }
+
+    pub fn accessibility_label(mut self, label: impl Into<String>) -> Self {
+        self.text.0 = self.text.0.accessibility_label(label);
         self
     }
 

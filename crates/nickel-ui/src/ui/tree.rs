@@ -4863,6 +4863,13 @@ fn layout_element<Message: Clone>(
             }),
             Kind::Text {
                 input_value: Some(value),
+                input_protected: true,
+                ..
+            } => Some(SemanticValueSnapshot::ProtectedText {
+                character_count: value.chars().count(),
+            }),
+            Kind::Text {
+                input_value: Some(value),
                 ..
             } => Some(SemanticValueSnapshot::Text(value.clone())),
             _ => None,

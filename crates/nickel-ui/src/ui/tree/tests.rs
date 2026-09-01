@@ -356,6 +356,25 @@ fn slider_and_text_field_semantic_values_use_production_mappers() {
 }
 
 #[test]
+fn masked_text_field_semantics_never_publish_the_input_value() {
+    let frame = UiFrame::layout(
+        TextField::on_change_masked_with_placeholder("secret", "Password", '•', map_query)
+            .id("password")
+            .accessibility_label("Password"),
+        Rect::new(0.0, 0.0, 320.0, 40.0),
+    );
+    let password = &frame.semantic_nodes()[0];
+
+    assert_eq!(password.role, Some(SemanticRole::TextField));
+    assert_eq!(password.name.as_deref(), Some("Password"));
+    assert_eq!(password.actions, vec![ActionKind::SetValue]);
+    assert_eq!(
+        password.value,
+        Some(SemanticValueSnapshot::ProtectedText { character_count: 6 })
+    );
+}
+
+#[test]
 fn image_presentations_resolve_deterministic_bounds_and_alignment() {
     let viewport = Rect::new(10.0, 20.0, 200.0, 100.0);
     let source = Size::new(100.0, 100.0);

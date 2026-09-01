@@ -19,7 +19,8 @@ use nickel_input::{
 use nickel_ui::{
     AdapterOutcome, AnyView, Application, Component, ComponentBuilderExt, FrameOverlay,
     HostAdapter, HostServices, Insets, LinearGradient, NavigationScope, OverlayAnchor, OverlayMenu,
-    OverlayMenuItem, Point, Rect, UiHost, UiId, ViewContext, ui,
+    OverlayMenuItem, Point, Rect, SemanticNodeSnapshot, SemanticRole, UiHost, UiId, ViewContext,
+    ui,
 };
 use sdl3::{event::Event, pixels::PixelFormat, surface::Surface, video::Window};
 
@@ -507,7 +508,8 @@ impl FileApp {
                     top: 14.0, right: 16.0, bottom: 14.0, left: 16.0,
                 }}>
                     <VerticalScroll id={"file-list"} on_scroll={FileMessage::FileScroll} offset={0.0}>
-                        <FileGrid min_width={self.tile_width} gap={10.0} items={tiles} />
+                        <FileGrid id={"file-grid"} accessibility_label={"Files"}
+                            min_width={self.tile_width} gap={10.0} items={tiles} />
                     </VerticalScroll>
                     <Container id={"file-content"} height={1.0} on_press={FileMessage::SelectionSurface}
                         context_message={FileMessage::ContextBackground} focus_border={palette.accent}
@@ -1043,19 +1045,11 @@ impl HostAdapter<FileApp> for FileHostAdapter {
                 let resizing = host.application().is_resizing_sidebar();
                 let selected_entries = selection_drag.map(|start| {
                     let selection = rect_between(start, cursor);
-                    host.semantic_nodes()
-                        .into_iter()
-                        .filter_map(|node| {
-                            node.id
-                                .as_str()
-                                .rsplit('/')
-                                .next()
-                                .unwrap_or_default()
-                                .strip_prefix("file-entry-")
-                                .and_then(|value| value.parse::<usize>().ok())
-                                .filter(|_| rects_intersect(selection, node.bounds))
-                        })
-                        .collect::<HashSet<_>>()
+                    entries_in_selection(
+                        &host.semantic_nodes(),
+                        selection,
+                        host.application().browser.entries().len(),
+                    )
                 });
                 let app = host.application_mut();
                 app.cursor = cursor;
@@ -1500,6 +1494,36 @@ fn rects_intersect(left: Rect, right: Rect) -> bool {
         && left.origin.y + left.size.height > right.origin.y
 }
 
+fn entries_in_selection(
+    nodes: &[SemanticNodeSnapshot],
+    selection: Rect,
+    entry_count: usize,
+) -> HashSet<usize> {
+    let grids = nodes
+        .iter()
+        .filter(|node| {
+            node.role == Some(SemanticRole::Grid) && node.name.as_deref() == Some("Files")
+        })
+        .collect::<Vec<_>>();
+    let [grid] = grids.as_slice() else {
+        return HashSet::new();
+    };
+    let entries = nodes
+        .iter()
+        .filter(|node| {
+            node.parent.as_ref() == Some(&grid.id) && node.role == Some(SemanticRole::Button)
+        })
+        .collect::<Vec<_>>();
+    if entries.len() != entry_count {
+        return HashSet::new();
+    }
+    entries
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, node)| rects_intersect(selection, node.bounds).then_some(index))
+        .collect()
+}
+
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let _log_path = nickel_logging::init("nickel-file").ok();
     let path = std::env::args_os()
@@ -1627,6 +1651,40 @@ mod ui_layout_tests {
                 .is_some_and(|extent| extent.can_scroll()),
             "all files should be measured and remain reachable through scrolling"
         );
+    }
+
+    #[test]
+    fn drag_selection_uses_semantic_grid_membership_and_fails_closed() {
+        let directory = tempfile::tempdir().unwrap();
+        for name in ["alpha.txt", "beta.txt"] {
+            std::fs::write(directory.path().join(name), b"x").unwrap();
+        }
+        let mut host = UiHost::new(FileApp::new(directory.path().to_path_buf()), 860, 620);
+        host.poll();
+        let mut nodes = host.semantic_nodes();
+        let all = Rect::new(0.0, 0.0, 860.0, 620.0);
+
+        assert_eq!(entries_in_selection(&nodes, all, 2), HashSet::from([0, 1]));
+
+        let grid = nodes
+            .iter()
+            .find(|node| {
+                node.role == Some(SemanticRole::Grid) && node.name.as_deref() == Some("Files")
+            })
+            .unwrap()
+            .id
+            .clone();
+        for (index, node) in nodes
+            .iter_mut()
+            .filter(|node| node.parent.as_ref() == Some(&grid))
+            .enumerate()
+        {
+            node.id = UiId::new(format!("opaque-{index}"));
+        }
+        assert_eq!(entries_in_selection(&nodes, all, 2), HashSet::from([0, 1]));
+
+        nodes.retain(|node| node.id != UiId::new("opaque-1"));
+        assert!(entries_in_selection(&nodes, all, 2).is_empty());
     }
 
     #[test]
@@ -1777,6 +1835,16 @@ mod ui_layout_tests {
                     .semantic_nodes()
                     .into_iter()
                     .find(|node| node.id == target)
+                    .filter(|node| {
+                        node.enabled
+                            && node.actions.iter().any(|action| {
+                                matches!(
+                                    action,
+                                    nickel_ui::ActionKind::Activate
+                                        | nickel_ui::ActionKind::ContextMenu
+                                )
+                            })
+                    })
                 {
                     return Some(node);
                 }
