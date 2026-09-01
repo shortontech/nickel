@@ -58,7 +58,15 @@ impl SharedSdlGraphics {
 pub struct SdlGpuPresenter {
     surface: softbuffer::Surface<DisplayHandleSource, WindowHandleSource>,
     renderer: SdlComponentRenderer,
+    surface_size: Option<(NonZeroU32, NonZeroU32)>,
     peak_pixel_bytes: usize,
+}
+
+fn surface_resize_required(
+    configured: Option<(NonZeroU32, NonZeroU32)>,
+    requested: (NonZeroU32, NonZeroU32),
+) -> bool {
+    configured != Some(requested)
 }
 
 impl SdlGpuPresenter {
@@ -77,6 +85,7 @@ impl SdlGpuPresenter {
         Ok(Self {
             surface,
             renderer,
+            surface_size: None,
             peak_pixel_bytes,
         })
     }
@@ -99,9 +108,17 @@ impl SdlGpuPresenter {
         if damage.is_empty() {
             return Ok(damage);
         }
-        self.surface
-            .resize(width, height)
-            .map_err(|error| error.to_string())?;
+        if surface_resize_required(self.surface_size, (width, height)) {
+            self.surface
+                .resize(width, height)
+                .map_err(|error| error.to_string())?;
+            self.surface_size = Some((width, height));
+        }
+        // On softbuffer's Wayland backend, any remaining warm-frame allocator
+        // activity is inside `buffer_mut`: while the back wl_buffer is still
+        // busy, softbuffer 0.4.8 blocks in wayland-client's event dispatch.
+        // Its public API has no released-state query or nonblocking acquire,
+        // so Nickel cannot safely skip or retain this borrowed buffer.
         let mut buffer = self
             .surface
             .buffer_mut()
@@ -141,6 +158,8 @@ fn pixel_buffer_diagnostics(
 
 #[cfg(test)]
 mod tests {
+    use super::surface_resize_required;
+    use std::num::NonZeroU32;
     use std::time::{Duration, Instant};
 
     use nickel_ui::{
@@ -242,6 +261,21 @@ mod tests {
                 assert_eq!(after - before, 0, "warm damaged frame {generation}");
             }
         }
+    }
+
+    #[test]
+    fn softbuffer_surface_resize_is_only_requested_for_new_dimensions() {
+        let width = NonZeroU32::new(320).unwrap();
+        let height = NonZeroU32::new(200).unwrap();
+        assert!(surface_resize_required(None, (width, height)));
+        assert!(!surface_resize_required(
+            Some((width, height)),
+            (width, height)
+        ));
+        assert!(surface_resize_required(
+            Some((width, height)),
+            (NonZeroU32::new(640).unwrap(), height)
+        ));
     }
 
     #[test]
