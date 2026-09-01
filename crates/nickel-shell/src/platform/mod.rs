@@ -271,6 +271,7 @@ pub enum ScreenshotAction {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub enum GlobalShortcut {
+    ReloadShellSettings,
     ToggleLauncher,
     ShowLauncher,
     HideLauncher,

@@ -66,6 +66,7 @@ pub enum Query {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum Command {
+    ReloadShellSettings,
     ToggleLauncher,
     SetLauncherVisible {
         visible: bool,
@@ -520,6 +521,7 @@ pub enum ErrorCode {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", content = "data", rename_all = "snake_case")]
 pub enum Event {
+    ShellSettingsChanged,
     Snapshot(Snapshot),
     LauncherVisibility { visible: bool },
     Windows(Vec<WindowSnapshot>),

@@ -965,6 +965,50 @@ fn expanded_dropdown_exposes_option_actions() {
 }
 
 #[test]
+fn controller_activation_opens_dropdown_and_enters_its_options() {
+    let mut state = UiStateStore::default();
+    let dropdown = || {
+        Dropdown::new(
+            TestMessage::Named("toggle"),
+            "Speakers",
+            [
+                ("Speakers", TestMessage::Option(0)),
+                ("Headphones", TestMessage::Option(1)),
+            ],
+        )
+        .id("audio")
+    };
+    let tree =
+        UiFrame::layout_with_state(dropdown(), Rect::new(0.0, 0.0, 240.0, 114.0), &mut state);
+
+    tree.handle_event(&mut state, UiEvent::ControllerDown);
+    let activated = tree.handle_event(&mut state, UiEvent::ControllerActivate);
+
+    assert_eq!(activated.messages, [TestMessage::Named("toggle")]);
+    assert_eq!(
+        state.navigation().controller_scope(),
+        Some(&UiId::from("root/audio"))
+    );
+    assert!(
+        state
+            .state(&UiId::from("root/audio"))
+            .is_some_and(|entry| entry.dropdown_open)
+    );
+    assert_eq!(
+        state.navigation().controller_selected(),
+        Some(&UiId::from("root/audio/option-0"))
+    );
+
+    let rebuilt =
+        UiFrame::layout_with_state(dropdown(), Rect::new(0.0, 0.0, 240.0, 114.0), &mut state);
+    assert!(
+        rebuilt
+            .message_for_id(&UiId::from("root/audio/option-1"))
+            .is_some()
+    );
+}
+
+#[test]
 fn sidebar_folder_separates_toggle_and_open_actions() {
     let tree = UiFrame::layout(
         Sidebar::new(220.0)

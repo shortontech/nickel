@@ -975,6 +975,9 @@ impl NickelSession {
         request_id: u64,
     ) -> ServerMessage {
         match command {
+            SessionCommand::ReloadShellSettings => {
+                self.notify_shell_settings_changed();
+            }
             SessionCommand::ToggleLauncher => self.toggle_launcher(),
             SessionCommand::SetLauncherVisible { visible } => self.set_launcher_visible(visible),
             SessionCommand::LogOut => self.loop_signal.stop(),
@@ -2275,6 +2278,20 @@ impl NickelSession {
             .retain(|path| socket.send_to(&event, path).is_ok());
     }
 
+    fn notify_shell_settings_changed(&mut self) {
+        let Ok(event) = encode(&ServerEnvelope {
+            request_id: 0,
+            message: ServerMessage::Event(SessionEvent::ShellSettingsChanged),
+        }) else {
+            return;
+        };
+        let Ok(socket) = UnixDatagram::unbound() else {
+            return;
+        };
+        self.launcher_subscribers
+            .retain(|path| socket.send_to(&event, path).is_ok());
+    }
+
     pub(crate) fn notify_global_shortcut(
         &mut self,
         action: nickel_session_protocol::ShortcutAction,
@@ -3340,6 +3357,36 @@ impl NickelSession {
         self.raise_panels();
         surface.send_pending_configure();
         self.notify_protocol_snapshot();
+    }
+
+    pub(crate) fn reconcile_maximized_toplevel_geometry(
+        &mut self,
+        surface: &ToplevelSurface,
+    ) -> bool {
+        if !self
+            .maximized_restore
+            .contains_key(&surface.wl_surface().id())
+        {
+            return false;
+        }
+        let Some(window) = self.window_for_surface(surface.wl_surface()) else {
+            return false;
+        };
+        let Some(output) = self.output_geometry_for_window(&window) else {
+            return false;
+        };
+        let geometry = maximized_content_geometry(
+            self.work_area_for_output(output),
+            self.server_decorated.contains(&surface.wl_surface().id()),
+        );
+        surface.with_pending_state(|state| {
+            state.size = Some(Size::from((geometry.width, geometry.height)));
+        });
+        self.space
+            .map_element(window, (geometry.x, geometry.y), true);
+        self.raise_panels();
+        self.notify_protocol_snapshot();
+        true
     }
 
     pub fn unmaximize_toplevel(&mut self, surface: &ToplevelSurface) {

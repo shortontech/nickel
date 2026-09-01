@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, VecDeque},
     sync::Arc,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(not(target_os = "macos"))]
@@ -66,6 +66,7 @@ const PANEL_TRAY_ICON_SIZE: u32 = 18;
 const PANEL_CODEX_WIDTH: f32 = 36.0;
 const PANEL_CODEX_ICON_SIZE: f32 = 28.0;
 const PREVIEW_LEAVE_DELAY: Duration = Duration::from_millis(500);
+const PREVIEW_HOVER_DELAY: Duration = Duration::from_millis(350);
 const PREVIEW_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 const RECURRING_DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(30);
 const WALLPAPER_MAX_WIDTH: u32 = 7680;
@@ -196,6 +197,8 @@ pub struct PanelApplication {
     launcher_visible: bool,
     codex_project_menu_visible: bool,
     control_visible: bool,
+    clock: String,
+    date: String,
     effects: Vec<PanelAction>,
 }
 
@@ -212,6 +215,20 @@ impl nickel_ui::Application for PanelApplication {
 
     fn title(&self) -> &str {
         "Nickel Panel"
+    }
+
+    fn poll(&mut self) -> bool {
+        let (clock, date) = panel_clock_text();
+        if self.clock == clock && self.date == date {
+            return false;
+        }
+        self.clock = clock;
+        self.date = date;
+        true
+    }
+
+    fn poll_interval(&self) -> Option<Duration> {
+        Some(duration_until_next_minute())
     }
 }
 
@@ -244,6 +261,7 @@ impl PanelApplication {
             1,
             image::Rgba([120, 90, 220, 255]),
         ));
+        let (clock, date) = panel_clock_text();
         Self {
             launcher,
             windows: Vec::new(),
@@ -257,9 +275,36 @@ impl PanelApplication {
             launcher_visible: false,
             codex_project_menu_visible: false,
             control_visible: false,
+            clock,
+            date,
             effects: Vec::new(),
         }
     }
+}
+
+fn panel_clock_text() -> (String, String) {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let now = Zoned::now();
+        (
+            now.strftime("%-I:%M %p").to_string(),
+            now.strftime("%-m/%-d/%Y").to_string(),
+        )
+    }
+    #[cfg(target_os = "macos")]
+    {
+        (String::new(), String::new())
+    }
+}
+
+fn duration_until_next_minute() -> Duration {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let elapsed_in_minute = Duration::new(elapsed.as_secs() % 60, elapsed.subsec_nanos());
+    Duration::from_secs(60)
+        .saturating_sub(elapsed_in_minute)
+        .max(Duration::from_millis(1))
 }
 
 impl nickel_ui::Application for LockApplication {
@@ -414,6 +459,7 @@ pub struct LiveShell {
     panel_change_token: HostChangeToken,
     panel_deadline: Option<Instant>,
     preview_group: Option<usize>,
+    preview_pending: Option<(usize, Instant)>,
     preview_focus_requested: bool,
     preview_pointer_inside: bool,
     preview_leave_deadline: Option<Instant>,
@@ -634,6 +680,7 @@ impl LiveShell {
             920,
             680,
         );
+        let (clock, date) = panel_clock_text();
         let panel_host = nickel_ui::UiHost::new(
             PanelApplication {
                 launcher: launcher.clone(),
@@ -648,6 +695,8 @@ impl LiveShell {
                 launcher_visible: false,
                 codex_project_menu_visible: false,
                 control_visible: false,
+                clock,
+                date,
                 effects: Vec::new(),
             },
             1920,
@@ -690,6 +739,7 @@ impl LiveShell {
             panel_change_token: HostChangeToken::default(),
             panel_deadline: None,
             preview_group: None,
+            preview_pending: None,
             preview_focus_requested: false,
             preview_pointer_inside: false,
             preview_leave_deadline: None,
@@ -789,6 +839,13 @@ impl LiveShell {
             .is_some_and(|deadline| Instant::now() >= deadline)
         {
             self.close_window_preview();
+            changed = true;
+        }
+        if let Some((index, deadline)) = self.preview_pending
+            && Instant::now() >= deadline
+        {
+            self.preview_pending = None;
+            self.open_window_preview(index);
             changed = true;
         }
         let preview_group = self.preview_group.and_then(|index| {
@@ -964,6 +1021,7 @@ impl LiveShell {
             self.preview_frame
                 .as_ref()
                 .and_then(WindowPreviewFrame::next_deadline),
+            self.preview_pending.map(|(_, deadline)| deadline),
         ]
         .into_iter()
         .flatten()
@@ -1049,6 +1107,16 @@ impl LiveShell {
         outcome.changed
     }
 
+    pub fn set_launcher_controller_family(&mut self, family: nickel_ui::ControllerFamily) {
+        self.launcher_host
+            .application_mut()
+            .set_controller_family(family);
+        self.launcher_host.step(HostBatch {
+            application_changed: true,
+            ..HostBatch::default()
+        });
+    }
+
     pub fn poll_host_deadlines(&mut self, now: Instant) -> bool {
         if self.control_deadline.is_none_or(|deadline| now < deadline) {
             return false;
@@ -1059,6 +1127,20 @@ impl LiveShell {
         });
         self.apply_control_effects();
         changed
+    }
+
+    pub fn poll_panel_deadline(&mut self, now: Instant) -> bool {
+        if self.panel_deadline.is_none_or(|deadline| now < deadline) {
+            return false;
+        }
+        let outcome = self.panel_host.step(HostBatch {
+            now: Some(now),
+            events: vec![HostEvent::Poll],
+            ..HostBatch::default()
+        });
+        self.panel_change_token = outcome.change_token;
+        self.panel_deadline = outcome.next_deadline;
+        outcome.changed
     }
 
     pub fn notification_click(&mut self, x: f32, y: f32, width: u32, height: u32) -> bool {
@@ -1314,10 +1396,17 @@ impl LiveShell {
         let changed = hovered != self.panel_hover;
         self.panel_hover = hovered;
         if let Some(PanelHover::Task(index)) = hovered {
-            self.open_window_preview(index);
+            if self.preview_group != Some(index)
+                && self.preview_pending.map(|(pending, _)| pending) != Some(index)
+            {
+                self.preview_pending = Some((index, Instant::now() + PREVIEW_HOVER_DELAY));
+            }
             self.preview_leave_deadline = None;
-        } else if self.preview_group.is_some() && !self.preview_pointer_inside {
-            self.preview_leave_deadline = Some(Instant::now() + PREVIEW_LEAVE_DELAY);
+        } else {
+            self.preview_pending = None;
+            if self.preview_group.is_some() && !self.preview_pointer_inside {
+                self.preview_leave_deadline = Some(Instant::now() + PREVIEW_LEAVE_DELAY);
+            }
         }
         changed
     }
@@ -1358,6 +1447,7 @@ impl LiveShell {
             return false;
         }
         self.panel_hover = None;
+        self.preview_pending = None;
         if self.preview_group.is_some() && !self.preview_pointer_inside {
             self.preview_leave_deadline = Some(Instant::now() + PREVIEW_LEAVE_DELAY);
         }
@@ -1688,9 +1778,7 @@ impl LiveShell {
                     .map(|window| window.id)
                     .collect::<Vec<_>>();
                 let (width, height) = preview_dimensions(windows.len());
-                let x = self.panel_origin_x
-                    + (PANEL_ITEM_WIDTH + index as f32 * PANEL_ITEM_WIDTH + PANEL_ITEM_WIDTH / 2.0
-                        - width as f32 / 2.0) as i32;
+                let x = self.preview_origin_x(index, width);
                 let _ = send_session_command(
                     "show-preview",
                     ShellCommand::ShowPreview {
@@ -1723,6 +1811,17 @@ impl LiveShell {
         }
     }
 
+    fn preview_origin_x(&self, index: usize, width: u32) -> i32 {
+        let icon_center = self
+            .panel_host
+            .semantic_targets_for_message(&PanelAction::Task(index))
+            .into_iter()
+            .next()
+            .map(|target| target.bounds.origin.x + target.bounds.size.width / 2.0)
+            .unwrap_or(PANEL_ITEM_WIDTH + index as f32 * PANEL_ITEM_WIDTH + PANEL_ITEM_WIDTH / 2.0);
+        self.panel_origin_x + (icon_center - width as f32 / 2.0).round() as i32
+    }
+
     fn send_window_action(&self, window: crate::model::WindowId, action: WindowAction) {
         let _ = send_session_command(
             "window-action",
@@ -1732,12 +1831,14 @@ impl LiveShell {
 
     fn open_window_preview(&mut self, index: usize) {
         if self.preview_group == Some(index) {
+            self.preview_pending = None;
             return;
         }
         let groups = self.launcher.group_windows(&self.windows);
         if groups.get(index).is_none() {
             return;
         }
+        self.preview_pending = None;
         self.preview_group = Some(index);
         self.preview_images.clear();
         self.preview_refresh_deadline = None;
@@ -1748,6 +1849,7 @@ impl LiveShell {
 
     fn close_window_preview(&mut self) {
         self.preview_group = None;
+        self.preview_pending = None;
         self.preview_focus_requested = false;
         self.preview_pointer_inside = false;
         self.preview_leave_deadline = None;
@@ -1763,6 +1865,7 @@ impl LiveShell {
 
     pub fn global_shortcut(&mut self, shortcut: platform::GlobalShortcut) -> bool {
         match shortcut {
+            platform::GlobalShortcut::ReloadShellSettings => self.refresh_system(),
             platform::GlobalShortcut::ToggleLauncher => {
                 self.apply_launcher_signal(!self.launcher_visible);
                 true
@@ -1866,7 +1969,12 @@ impl LiveShell {
     }
 
     pub fn screenshot_pointer_moved(&mut self, x: f32, y: f32, width: u32, height: u32) -> bool {
-        self.screenshot.pointer_moved(x, y, width, height)
+        self.screenshot.queue_pointer_moved(x, y, width, height);
+        false
+    }
+
+    pub fn poll_screenshot_pointer(&mut self, now: Instant) -> bool {
+        self.screenshot.poll_pointer_deadline(now)
     }
 
     pub fn screenshot_pointer_pressed(&mut self, x: f32, y: f32, width: u32, height: u32) -> bool {
@@ -2426,8 +2534,9 @@ impl LiveShell {
     }
 
     fn panel_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
-        self.sync_panel_host();
+        let application_changed = self.sync_panel_host();
         let outcome = self.panel_host.step(HostBatch {
+            application_changed,
             surface_size: Some((width, height)),
             ..HostBatch::default()
         });
@@ -2437,9 +2546,9 @@ impl LiveShell {
         self.panel_host.commands().to_vec()
     }
 
-    fn sync_panel_host(&mut self) {
+    fn sync_panel_host(&mut self) -> bool {
         let groups = self.launcher.group_windows(&self.windows);
-        let task_icons = groups
+        let task_icons: Vec<Option<(u16, Arc<image::RgbaImage>)>> = groups
             .iter()
             .take(12)
             .map(|group| {
@@ -2462,6 +2571,27 @@ impl LiveShell {
             })
             .collect();
         let application = self.panel_host.application_mut();
+        let task_icons_changed = application.task_icons.len() != task_icons.len()
+            || application
+                .task_icons
+                .iter()
+                .zip(&task_icons)
+                .any(|(current, next)| match (current, next) {
+                    (Some((current_id, current)), Some((next_id, next))) => {
+                        current_id != next_id || !Arc::ptr_eq(current, next)
+                    }
+                    (None, None) => false,
+                    _ => true,
+                });
+        let application_changed = application.palette != self.palette
+            || application.windows != self.windows
+            || application.tray != self.tray
+            || application.panel_hover != self.panel_hover
+            || application.launcher_visible != self.launcher_visible
+            || application.codex_project_menu_visible != self.codex_project_menu_visible
+            || application.control_visible != self.control_visible
+            || application.launcher.codex_available() != self.launcher.codex_available()
+            || task_icons_changed;
         application.launcher.clone_from(&self.launcher);
         application.windows.clone_from(&self.windows);
         application.tray.clone_from(&self.tray);
@@ -2474,6 +2604,7 @@ impl LiveShell {
         application.launcher_visible = self.launcher_visible;
         application.codex_project_menu_visible = self.codex_project_menu_visible;
         application.control_visible = self.control_visible;
+        application_changed
     }
 
     fn apply_panel_effects(&mut self) -> bool {
@@ -2637,9 +2768,6 @@ impl PanelApplication {
         }
         #[cfg(not(target_os = "macos"))]
         {
-            let now = Zoned::now();
-            let clock = now.strftime("%-I:%M %p").to_string();
-            let date = now.strftime("%-m/%-d/%Y").to_string();
             row = row.child(
                 Container::new()
                     .id("panel-control")
@@ -2662,14 +2790,14 @@ impl PanelApplication {
                     .child(
                         Column::new()
                             .child(
-                                Text::new(clock)
+                                Text::new(&self.clock)
                                     .height(22.0)
                                     .scale(1.0)
                                     .color(self.palette.text)
                                     .align(TextAlign::Center),
                             )
                             .child(
-                                Text::new(date)
+                                Text::new(&self.date)
                                     .height(20.0)
                                     .scale(0.72)
                                     .color(self.palette.text)
@@ -3162,7 +3290,7 @@ mod tests {
         sdl_window_preview::{MenuAction, build_preview_frame},
     };
     use nickel_core::launcher_preferences::LauncherPreferences;
-    use nickel_core::theme::Appearance;
+    use nickel_core::theme::{Appearance, ThemeMode, ThemePalette};
     use std::time::Instant;
 
     #[test]
@@ -3595,6 +3723,15 @@ mod tests {
         assert_eq!(panel.output.as_deref(), Some("DP-1"));
         assert!(shell.panel_pointer_moved(panel.x as f32, 1280));
         assert_eq!(shell.panel_hover, Some(super::PanelHover::Task(0)));
+        assert!(shell.preview_group.is_none());
+        assert_eq!(shell.preview_pending.map(|(index, _)| index), Some(0));
+        assert!(shell.preview_pending.unwrap().1 > Instant::now());
+
+        let (preview_width, _) = super::preview_dimensions(2);
+        assert_eq!(
+            shell.preview_origin_x(0, preview_width),
+            panel.x - i32::try_from(preview_width / 2).unwrap()
+        );
 
         let group = shell.launcher.group_windows(&shell.windows).remove(0);
         shell.preview_frame = Some(build_preview_frame(
@@ -3926,6 +4063,67 @@ mod tests {
                 })
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn panel_scene_rebuilds_when_persisted_appearance_changes() {
+        let mut shell = LiveShell::new().unwrap();
+        let before_commands = shell.scene(SurfaceRole::Panel, 1280, 56);
+        let before = shell.panel_change_token;
+        let light = ThemePalette::from_appearance(Appearance {
+            mode: ThemeMode::Light,
+            accent: nickel_core::theme::accent_from_hue(167),
+            intensity: 100,
+        });
+        let dark = ThemePalette::from_appearance(Appearance {
+            mode: ThemeMode::Dark,
+            accent: nickel_core::theme::accent_from_hue(167),
+            intensity: 100,
+        });
+        shell.palette = if shell.palette == light { dark } else { light };
+
+        let commands = shell.scene(SurfaceRole::Panel, 1280, 56);
+
+        assert_ne!(shell.panel_change_token, before);
+        assert_ne!(commands, before_commands);
+    }
+
+    #[test]
+    fn panel_scene_rebuilds_when_a_window_feed_adds_an_application() {
+        let mut shell = LiveShell::new().unwrap();
+        let _ = shell.scene(SurfaceRole::Panel, 1280, 56);
+        let before = shell.panel_change_token;
+        shell.windows.push(OpenWindow {
+            id: WindowId(77),
+            application_id: Some(ApplicationId::new("google-chrome")),
+            active: true,
+            title: "Chrome".into(),
+        });
+
+        let _ = shell.scene(SurfaceRole::Panel, 1280, 56);
+
+        assert_ne!(shell.panel_change_token, before);
+        assert_eq!(
+            shell
+                .panel_host
+                .semantic_targets_for_message(&super::PanelAction::Task(0))
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn due_panel_clock_deadline_rebuilds_only_when_the_minute_changes() {
+        let mut shell = LiveShell::new().unwrap();
+        let _ = shell.scene(SurfaceRole::Panel, 1280, 56);
+        shell.panel_host.application_mut().clock = "stale".into();
+        shell.panel_host.application_mut().date = "stale".into();
+        let now = Instant::now();
+        shell.panel_deadline = Some(now);
+
+        assert!(shell.poll_panel_deadline(now));
+        assert_ne!(shell.panel_host.application().clock, "stale");
+        assert!(shell.panel_deadline.is_some_and(|deadline| deadline > now));
     }
 
     #[test]

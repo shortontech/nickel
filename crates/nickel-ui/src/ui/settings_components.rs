@@ -200,6 +200,7 @@ impl<Message> NavigationItem<Message> {
                 } else {
                     theme.surfaces.sidebar
                 })
+                .controller_focus_border(theme.borders.controller_focus)
                 .message(message)
                 .child(row)
                 .semantic_role(SemanticRole::NavigationItem)
@@ -410,20 +411,30 @@ pub struct SettingsNavigation<Message = String>(Container<Message>);
 
 impl<Message> SettingsNavigation<Message> {
     pub fn new(theme: SemanticTheme, width: f32) -> Self {
-        Self(
-            Container::new()
-                .id("settings-navigation-pane")
-                .width(width)
-                .min_width(width)
+        Self::build(theme, width, true)
+    }
+
+    pub fn embedded_header(theme: SemanticTheme, width: f32) -> Self {
+        Self::build(theme, width, false)
+    }
+
+    fn build(theme: SemanticTheme, width: f32, owns_pane: bool) -> Self {
+        let mut navigation = Container::new()
+            .id("settings-navigation-pane")
+            .width(width)
+            .min_width(width)
+            .padding(Insets::all(theme.spacing.content))
+            .gap(theme.spacing.compact)
+            .background(theme.surfaces.sidebar);
+        if owns_pane {
+            navigation = navigation
                 .fill_height()
                 .border(theme.borders.subtle, 1.0)
-                .navigation_scope(NavigationScope::pane(false))
-                .navigation_scope_highlight(theme.borders.controller_focus)
-                .padding(Insets::all(theme.spacing.content))
-                .gap(theme.spacing.compact)
                 .overflow_y(Overflow::Auto)
-                .background(theme.surfaces.sidebar),
-        )
+                .navigation_scope(NavigationScope::pane(false))
+                .navigation_scope_highlight(theme.borders.controller_focus);
+        }
+        Self(navigation)
     }
 
     pub fn section(mut self, theme: SemanticTheme, label: impl Into<String>) -> Self {
@@ -746,9 +757,7 @@ impl<Message> SettingsCard<Message> {
                 .padding(Insets::all(theme.spacing.content))
                 .background(theme.surfaces.card)
                 .border(theme.surfaces.raised, 1.0)
-                .radius(theme.radii.card)
-                .navigation_scope(NavigationScope::group())
-                .controller_focus_border(theme.borders.controller_focus),
+                .radius(theme.radii.card),
         )
     }
 
@@ -1016,6 +1025,7 @@ impl<Message> SelectField<Message> {
                 theme.surfaces.hover,
                 theme.text.primary,
             )
+            .controller_focus_border(theme.borders.controller_focus)
             .accessibility_label(label.clone());
         Self(
             SettingsRow::new(theme, label, supporting_text)

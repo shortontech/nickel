@@ -2524,6 +2524,11 @@ impl<Message> Dropdown<Message> {
     pub fn colors_triplet(self, colors: (Color, Color, Color)) -> Self {
         self.colors(colors.0, colors.1, colors.2)
     }
+
+    pub fn controller_focus_border(mut self, color: Color) -> Self {
+        self.0.style.controller_focus_border = Some(color);
+        self
+    }
 }
 
 impl<Message> Component<Message> for Dropdown<Message> {

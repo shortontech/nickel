@@ -2,6 +2,7 @@ use super::*;
 use crate::persistence::{load_shell_settings, load_wallpaper_settings};
 
 pub(super) struct SettingsApp {
+    pub(super) controller_family: nickel_ui::ControllerFamily,
     pub(super) localizer: Localizer,
     pub(super) redraw_requested: Cell<bool>,
     pub(super) displays: Vec<DisplayCard>,
@@ -60,6 +61,7 @@ impl Default for SettingsApp {
                 Err(error) => (None, None, Some(error.to_string())),
             };
         Self {
+            controller_family: nickel_ui::ControllerFamily::Generic,
             localizer,
             redraw_requested: Cell::new(true),
             displays: vec![

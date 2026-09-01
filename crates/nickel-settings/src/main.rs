@@ -709,6 +709,9 @@ impl SettingsApp {
     }
 
     fn record_appearance_persistence(&mut self, result: Result<(), String>) {
+        if result.is_ok() {
+            let _ = session_request(SessionRequest::Command(SessionCommand::ReloadShellSettings));
+        }
         self.appearance_notice = result.err().map(|error| {
             AppearanceNotice::Error(self.localizer.value(
                 "settings-appearance-save-failed",
@@ -1040,6 +1043,15 @@ impl Application for SettingsApp {
 
     fn update(&mut self, message: Self::Message) {
         self.handle_settings_message(message);
+    }
+
+    fn controller_family_changed(&mut self, family: nickel_ui::ControllerFamily) -> bool {
+        if self.controller_family == family {
+            false
+        } else {
+            self.controller_family = family;
+            true
+        }
     }
 
     fn take_focus_request(&mut self) -> Option<UiId> {
@@ -1902,6 +1914,72 @@ mod tests {
     }
 
     #[test]
+    fn directional_controller_navigation_reaches_appearance_controls() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Appearance);
+        app.shell_settings.accent_intensity = Some(50);
+        let mut host = UiHost::new(app, 850, 580);
+        host.handle_controller_action(ControllerAction::NextPane);
+
+        let mut reached_slider = false;
+        let mut reached_dropdown = false;
+        for _ in 0..40 {
+            if let Some(selected) = host.inspect().controller_target
+                && let Some(node) = host
+                    .semantic_nodes()
+                    .into_iter()
+                    .find(|node| node.id == selected)
+            {
+                reached_dropdown |= node.id.as_str().contains("/appearance-animations/");
+                if node.role == Some(nickel_ui::SemanticRole::Slider)
+                    && node.id.as_str().contains("/appearance-intensity/")
+                {
+                    reached_slider = true;
+                    host.handle_controller_action(ControllerAction::Confirm);
+                    host.handle_controller_action(ControllerAction::Right);
+                    assert!(host.inspect().controller_editing);
+                    host.handle_controller_action(ControllerAction::Cancel);
+                }
+            }
+            if reached_slider && reached_dropdown {
+                break;
+            }
+            host.handle_controller_action(ControllerAction::Down);
+        }
+
+        assert!(
+            reached_slider,
+            "D-pad traversal skipped the appearance sliders"
+        );
+        assert!(
+            reached_dropdown,
+            "D-pad traversal skipped the animations dropdown"
+        );
+        assert_eq!(host.application().shell_settings.accent_intensity, Some(55));
+    }
+
+    #[test]
+    fn settings_legend_uses_the_active_playstation_controller_family() {
+        let mut host = UiHost::new(
+            SettingsApp::with_initial_page(SettingsPage::Appearance),
+            850,
+            580,
+        );
+        assert!(host.set_controller_family(nickel_ui::ControllerFamily::PlayStation));
+        host.handle_controller_action(ControllerAction::NextPane);
+
+        let labels = host
+            .accessibility_nodes()
+            .iter()
+            .filter_map(|node| node.label.as_deref())
+            .collect::<Vec<_>>();
+        assert!(labels.contains(&"Cross: Select"));
+        assert!(labels.contains(&"L1: Navigation"));
+        assert!(labels.contains(&"R1: Content"));
+        assert!(labels.contains(&"Circle: Back"));
+        assert!(!labels.contains(&"L: Navigation"));
+    }
+
+    #[test]
     fn normalized_keyboard_and_pointer_reach_production_navigation_once() {
         let destination = SettingsMessage::Navigate(SettingsPage::Appearance);
 
@@ -1932,6 +2010,13 @@ mod tests {
         pointer.handle_input(&primary_event(1, KeyEdge::Pressed, x, y), None);
         pointer.handle_input(&primary_event(2, KeyEdge::Released, x, y), None);
         assert_eq!(pointer.application_mut().page, SettingsPage::Appearance);
+        let navigation_states = pointer
+            .accessibility_nodes()
+            .iter()
+            .filter_map(|node| Some((node.label.as_deref()?, node.state.as_deref()?)))
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(navigation_states.get("Appearance"), Some(&"selected"));
+        assert_eq!(navigation_states.get("Display"), Some(&"unselected"));
     }
 
     #[test]

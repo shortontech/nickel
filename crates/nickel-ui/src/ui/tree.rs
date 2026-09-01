@@ -2426,6 +2426,30 @@ impl<Message: Clone> UiFrame<Message> {
                     .as_ref()
                     .and_then(|id| self.resolved.nodes.iter().find(|node| &node.id == id))
                 {
+                    if node.component == "Dropdown" {
+                        let dropdown = node.id.clone();
+                        if let Some(message) = self.message_for_id(&dropdown).cloned() {
+                            outcome.messages.push(message);
+                        }
+                        let first_option = self
+                            .messages
+                            .iter()
+                            .find(|region| region.navigation_owner.as_ref() == Some(&dropdown))
+                            .map(|region| region.id.clone());
+                        let invalidation = state
+                            .navigation_mut()
+                            .set_controller_scope(Some(dropdown.clone()))
+                            .merge(state.navigation_mut().set_controller_selected(None))
+                            .merge(state.set_dropdown_open(dropdown.clone(), true))
+                            .merge(first_option.map_or(Invalidation::None, |option| {
+                                self.select_controller_id(state, option)
+                            }));
+                        return EventOutcome {
+                            messages: outcome.messages,
+                            invalidation,
+                            clipboard_text: None,
+                        };
+                    }
                     if node.navigation_scope.is_some() {
                         let scope = node.id.clone();
                         state.navigation_mut().set_controller_scope(Some(scope));

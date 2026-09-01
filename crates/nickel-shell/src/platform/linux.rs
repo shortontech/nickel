@@ -1066,6 +1066,7 @@ fn session_request_operation(request: &SessionRequest) -> &'static str {
             SessionQuery::ShellRuntimeDiagnostics => "query-shell-runtime-diagnostics",
         },
         SessionRequest::Command(command) => match command {
+            SessionCommand::ReloadShellSettings => "reload-shell-settings",
             SessionCommand::ToggleLauncher => "toggle-launcher",
             SessionCommand::SetLauncherVisible { .. } => "set-launcher-visible",
             SessionCommand::LogOut => "log-out",
@@ -1615,6 +1616,9 @@ fn subscription_shortcut(
     state: &mut SubscriptionState,
 ) -> Option<GlobalShortcut> {
     match message {
+        ServerMessage::Event(SessionEvent::ShellSettingsChanged) => {
+            Some(GlobalShortcut::ReloadShellSettings)
+        }
         ServerMessage::Event(SessionEvent::LauncherVisibility { visible })
         | ServerMessage::LauncherVisibility { visible } => {
             if state.launcher_visible.replace(visible) == Some(visible) {

@@ -1081,6 +1081,15 @@ fn controller_launcher_shortcut(action: ControllerAction) -> Option<platform::Gl
     (action == ControllerAction::Launcher).then_some(platform::GlobalShortcut::ToggleLauncher)
 }
 
+fn controller_target_role(
+    launcher_visible: bool,
+    focused_role: Option<SurfaceRole>,
+) -> Option<SurfaceRole> {
+    launcher_visible
+        .then_some(SurfaceRole::Launcher)
+        .or(focused_role)
+}
+
 fn handle_controller_action(
     shell: &mut SdlShell,
     state: &mut LiveShell,
@@ -1089,6 +1098,7 @@ fn handle_controller_action(
     family: nickel_ui::ControllerFamily,
 ) -> Result<(), String> {
     if controller_launcher_shortcut(action).is_some() {
+        state.set_launcher_controller_family(family);
         let changed = state.request_launcher_toggle();
         if changed {
             sync_visibility(shell, state);
@@ -1097,11 +1107,22 @@ fn handle_controller_action(
         }
         return Ok(());
     }
-    let Some(surface) = shell
+    let focused_surface = shell
         .surfaces()
         .find(|surface| surface.window().has_input_focus())
-        .map(|surface| surface.id())
-    else {
+        .map(|surface| surface.id());
+    let focused_role =
+        focused_surface.and_then(|surface| shell.surface(surface).map(|entry| entry.role()));
+    if controller_target_role(state.surface_visible(SurfaceRole::Launcher), focused_role)
+        == Some(SurfaceRole::Launcher)
+    {
+        if state.launcher_host_controller(action, family) {
+            sync_visibility(shell, state);
+            render_role(shell, state, SurfaceRole::Launcher)?;
+        }
+        return Ok(());
+    }
+    let Some(surface) = focused_surface else {
         return Ok(());
     };
     let Some(entry) = shell.surface(surface) else {
@@ -1263,6 +1284,32 @@ fn wait_for_shell_readiness() -> Result<(), String> {
     .map(|_| ())
 }
 
+fn wait_for_initial_display_with(
+    mut wait_step: impl FnMut() -> Result<bool, String>,
+) -> Result<(), String> {
+    while !wait_step()? {}
+    Ok(())
+}
+
+fn wait_for_initial_display(shell: &mut SdlShell) -> Result<(), String> {
+    let mut logged = false;
+    wait_for_initial_display_with(|| {
+        if !shell.display_geometries()?.is_empty() {
+            return Ok(true);
+        }
+        if !logged {
+            tracing::info!("SDL shell is waiting for a display instead of restarting");
+            logged = true;
+        }
+        let _ = shell.wait_event_timeout(Duration::from_secs(1));
+        Ok(false)
+    })
+}
+
+fn shell_event_ends_process(event: &ShellEvent) -> bool {
+    matches!(event, ShellEvent::Quit | ShellEvent::CloseRequested(_)) && !cfg!(target_os = "linux")
+}
+
 fn main() -> Result<(), String> {
     nickel_logging::init("nickel-sdl-shell").map_err(|error| error.to_string())?;
     // The supervisor publishes its expected child PID and releases this
@@ -1282,6 +1329,7 @@ fn main() -> Result<(), String> {
     })?;
     let started = Instant::now();
     let mut shell = SdlShell::new(started)?;
+    wait_for_initial_display(&mut shell)?;
     shell.create_shell_surfaces()?;
     #[cfg(target_os = "linux")]
     wait_for_shell_readiness()?;
@@ -1491,6 +1539,8 @@ fn main() -> Result<(), String> {
                 if state.global_shortcut(shortcut) {
                     sync_visibility(&mut shell, &state);
                     focus_visible_overlay(&mut shell, &state);
+                    render_role(&mut shell, &mut state, SurfaceRole::Desktop)?;
+                    render_role(&mut shell, &mut state, SurfaceRole::Panel)?;
                     render_role(&mut shell, &mut state, SurfaceRole::Launcher)?;
                     render_role(&mut shell, &mut state, SurfaceRole::ControlCenter)?;
                     render_role(&mut shell, &mut state, SurfaceRole::Lock)?;
@@ -1519,7 +1569,15 @@ fn main() -> Result<(), String> {
                 state.hide_overlay(SurfaceRole::Screenshot);
                 sync_visibility(&mut shell, &state);
             }
-            Some(ShellEvent::Quit) | Some(ShellEvent::CloseRequested(_)) => break,
+            Some(event @ (ShellEvent::Quit | ShellEvent::CloseRequested(_)))
+                if shell_event_ends_process(&event) =>
+            {
+                break;
+            }
+            Some(ShellEvent::Quit | ShellEvent::CloseRequested(_)) => {
+                shell.sync_display_geometry()?;
+                sync_visibility(&mut shell, &state);
+            }
             // SDL reports an initial focus loss while a newly shown Wayland
             // surface is waiting for the compositor's focus configure. Hiding
             // an overlay here races its first frame and leaves a brief blank
@@ -1652,6 +1710,14 @@ fn main() -> Result<(), String> {
             && state.surface_visible(SurfaceRole::ControlCenter)
         {
             render_role(&mut shell, &mut state, SurfaceRole::ControlCenter)?;
+        }
+        if state.poll_panel_deadline(Instant::now()) {
+            render_role(&mut shell, &mut state, SurfaceRole::Panel)?;
+        }
+        if state.poll_screenshot_pointer(Instant::now())
+            && state.surface_visible(SurfaceRole::Screenshot)
+        {
+            render_role(&mut shell, &mut state, SurfaceRole::Screenshot)?;
         }
         if hover_repaint.is_some_and(|(_, deadline)| Instant::now() >= deadline)
             && let Some((role, _)) = hover_repaint.take()
@@ -2036,6 +2102,18 @@ mod tests {
     }
 
     #[test]
+    fn visible_launcher_owns_controller_input_without_sdl_focus() {
+        assert_eq!(
+            super::controller_target_role(true, Some(super::SurfaceRole::Panel)),
+            Some(super::SurfaceRole::Launcher)
+        );
+        assert_eq!(
+            super::controller_target_role(false, Some(super::SurfaceRole::Panel)),
+            Some(super::SurfaceRole::Panel)
+        );
+    }
+
+    #[test]
     fn ordinary_controller_surfaces_do_not_translate_actions_to_keys() {
         let source = include_str!("nickel-sdl-shell.rs");
         let handler = source
@@ -2214,6 +2292,25 @@ mod tests {
         .unwrap_err();
         assert!(error.contains("did not converge within 0 ms"));
         assert!(error.contains("outputs=2 desktops=1 panels=2"));
+    }
+
+    #[test]
+    fn headless_start_waits_in_one_process_until_a_display_returns() {
+        let mut steps = 0;
+        super::wait_for_initial_display_with(|| {
+            steps += 1;
+            Ok(steps == 3)
+        })
+        .unwrap();
+        assert_eq!(steps, 3);
+    }
+
+    #[test]
+    fn linux_output_loss_does_not_end_the_shell_process() {
+        assert_eq!(
+            super::shell_event_ends_process(&super::ShellEvent::Quit),
+            !cfg!(target_os = "linux")
+        );
     }
 
     #[test]

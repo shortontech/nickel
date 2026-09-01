@@ -12,12 +12,13 @@ use sdl3::{
 };
 
 use crate::{
-    AccessibilityNode, ActionKind, Color, ControllerAction, ControllerInput, DamageRegion,
-    EffectiveHitRoute, FocusedInputDispatcher, FrameRequest, FrameResourceDiagnostics,
-    InputCommand, InputContext, InputModality, InputSource, InteractionIntent, Invalidation,
-    LayoutDiagnostic, OverlayId, OverlayMenu, PointerIcon, Rect, SdlCanvasPresenter,
-    SdlComponentRenderer, SemanticAction, SemanticActionError, SemanticNodeSnapshot,
-    SemanticQueryError, SemanticSelector, UiEvent, UiFrame, UiId, UiStateStore, View,
+    AccessibilityNode, ActionKind, Color, ControllerAction, ControllerFamily, ControllerInput,
+    DamageRegion, EffectiveHitRoute, FocusedInputDispatcher, FrameRequest,
+    FrameResourceDiagnostics, InputCommand, InputContext, InputModality, InputSource,
+    InteractionIntent, Invalidation, LayoutDiagnostic, OverlayId, OverlayMenu, PointerIcon, Rect,
+    SdlCanvasPresenter, SdlComponentRenderer, SemanticAction, SemanticActionError,
+    SemanticNodeSnapshot, SemanticQueryError, SemanticSelector, UiEvent, UiFrame, UiId,
+    UiStateStore, View,
 };
 
 #[derive(Debug, Default)]
@@ -357,6 +358,13 @@ pub trait Application: Sized {
 
     /// Handle application-level keyboard semantics before ordinary component activation.
     fn shortcut(&mut self, _shortcut: Shortcut) -> bool {
+        false
+    }
+
+    /// Reports the controller presentation currently driving this host.
+    /// Applications can retain it when controller-specific legends are part
+    /// of their declarative view.
+    fn controller_family_changed(&mut self, _family: ControllerFamily) -> bool {
         false
     }
 
@@ -880,6 +888,14 @@ pub struct SemanticActionFailure {
 }
 
 impl<A: Application> UiHost<A> {
+    pub fn set_controller_family(&mut self, family: ControllerFamily) -> bool {
+        if self.application.controller_family_changed(family) {
+            self.rebuild();
+            true
+        } else {
+            false
+        }
+    }
     pub fn new(application: A, width: u32, height: u32) -> Self {
         Self::new_at(application, width, height, Instant::now())
     }
@@ -1699,7 +1715,13 @@ pub fn run_with_adapter<A: Application>(
             next_adapter_poll = adapter.poll_interval().map(|interval| now + interval);
         }
         if controller_schedule.is_due(now) {
-            for action in controller.poll(now, host.inspect().window_focused) {
+            let actions = controller.poll(now, host.inspect().window_focused);
+            if let Some(family) = controller.active_family()
+                && host.set_controller_family(family)
+            {
+                scheduler.invalidate();
+            }
+            for action in actions {
                 let outcome = host.handle_controller_action(action);
                 if outcome.changed {
                     scheduler.invalidate();

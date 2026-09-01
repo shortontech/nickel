@@ -135,16 +135,15 @@ impl SettingsApp {
             &about_label,
             false,
         );
-        let mut navigation = SettingsNavigation::new(theme, SIDEBAR_WIDTH as f32).child(
-            SettingsSearchField::with_leading(
+        let mut navigation = SettingsNavigation::embedded_header(theme, SIDEBAR_WIDTH as f32)
+            .child(SettingsSearchField::with_leading(
                 theme,
                 "settings-sidebar-search",
                 &self.sidebar_query,
                 self.localizer.text("settings-search-placeholder"),
                 sidebar_search_message,
                 sidebar_icon(SidebarIconKind::Search),
-            ),
-        );
+            ));
         if !query.is_empty() {
             let appearance_section = self.localizer.text("settings-interface-settings");
             let entries = [
@@ -424,7 +423,7 @@ impl SettingsApp {
                     .child(root)
                     .child(ActionLegend::new_directional(
                         theme,
-                        Default::default(),
+                        self.controller_family,
                         [
                             ActionLegendEntry::available(
                                 SemanticControllerAction::Confirm,
