@@ -339,12 +339,9 @@ pub fn init_winit(
                             overlay_elements.splice(0..0, icon_elements);
                         }
 
-                        let recovery_banner = state
-                            .shell_recovery_visible()
-                            .then(crate::window_frame::render_recovery_panel)
-                            .flatten()
-                            .and_then(|panel| {
-                                let layout = crate::window_frame::recovery_layout(
+                        let recovery_banner = state.shell_recovery_visible().then(|| {
+                                let panel = state.recovery_ui.render_buffer();
+                                let panel_geometry = crate::recovery_ui::RecoveryUi::panel_geometry(
                                     crate::shell_layout::Geometry {
                                         x: 0,
                                         y: 0,
@@ -354,11 +351,11 @@ pub fn init_winit(
                                 );
                                 MemoryRenderBufferRenderElement::from_buffer(
                                     renderer,
-                                    (f64::from(layout.panel.x), f64::from(layout.panel.y)),
+                                    (f64::from(panel_geometry.x), f64::from(panel_geometry.y)),
                                     &panel,
                                     None,
                                     None,
-                                    Some((layout.panel.width, layout.panel.height).into()),
+                                    Some((panel_geometry.width, panel_geometry.height).into()),
                                     Kind::Unspecified,
                                 )
                                 .map_err(|error| {
@@ -366,7 +363,7 @@ pub fn init_winit(
                                 })
                                 .ok()
                                 .map(WinitFrameElement::from)
-                            });
+                            }).flatten();
 
                         if !overlay_elements.is_empty() || recovery_banner.is_some() {
                             if let Some(banner) = recovery_banner {

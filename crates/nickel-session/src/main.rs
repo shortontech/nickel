@@ -7,6 +7,7 @@ mod focus;
 mod grabs;
 mod input;
 mod login_services;
+mod recovery_ui;
 mod session_services;
 mod shell_layout;
 mod state;

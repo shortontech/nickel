@@ -2771,6 +2771,7 @@ dependencies = [
  "nickel-core",
  "nickel-input",
  "nickel-session-protocol",
+ "nickel-ui",
  "nix 0.31.3",
  "resvg",
  "serde_json",

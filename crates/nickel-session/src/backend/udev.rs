@@ -1293,23 +1293,23 @@ impl NickelSession {
                     .current_mode()
                     .map(|mode| mode.size)
                     .unwrap_or_else(|| (1, 1).into());
-                let layout = crate::window_frame::recovery_layout(crate::shell_layout::Geometry {
-                    x: 0,
-                    y: 0,
-                    width: recovery_size.w,
-                    height: recovery_size.h,
-                });
-                if let Some(panel) = crate::window_frame::render_recovery_panel()
-                    && let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
-                        &mut renderer,
-                        (f64::from(layout.panel.x), f64::from(layout.panel.y)),
-                        &panel,
-                        None,
-                        None,
-                        Some((layout.panel.width, layout.panel.height).into()),
-                        Kind::Unspecified,
-                    )
-                {
+                let panel_geometry =
+                    crate::recovery_ui::RecoveryUi::panel_geometry(crate::shell_layout::Geometry {
+                        x: 0,
+                        y: 0,
+                        width: recovery_size.w,
+                        height: recovery_size.h,
+                    });
+                let panel = self.recovery_ui.render_buffer();
+                if let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
+                    &mut renderer,
+                    (f64::from(panel_geometry.x), f64::from(panel_geometry.y)),
+                    &panel,
+                    None,
+                    None,
+                    Some((panel_geometry.width, panel_geometry.height).into()),
+                    Kind::Unspecified,
+                ) {
                     elements.insert(0, NativeCustomElement::from(element).into());
                 }
             }

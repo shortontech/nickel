@@ -12,6 +12,7 @@ image.workspace = true
 nickel-core = { path = "../nickel-core" }
 nickel-input = { path = "../nickel-input" }
 nickel-session-protocol = { path = "../nickel-session-protocol" }
+nickel-ui = { path = "../nickel-ui" }
 nix.workspace = true
 resvg.workspace = true
 serde_json.workspace = true

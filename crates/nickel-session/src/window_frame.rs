@@ -17,8 +17,6 @@ pub const MINIMIZE_GLYPH: char = '\u{f2d1}';
 pub const MAXIMIZE_GLYPH: char = '\u{f2d0}';
 pub const RESTORE_GLYPH: char = '\u{f2d2}';
 pub const CLOSE_GLYPH: char = '\u{f2d3}';
-const RECOVERY_PANEL_WIDTH: i32 = 560;
-const RECOVERY_PANEL_HEIGHT: i32 = 144;
 const TITLEBAR_CACHE_MAX_ENTRIES: usize = 128;
 const TITLEBAR_CACHE_MAX_BYTES: usize = 16 * 1024 * 1024;
 
@@ -71,58 +69,6 @@ pub fn titlebar_cache_diagnostics() -> TitlebarCacheDiagnostics {
                 invalidations: cache.invalidations,
             }
         })
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RecoveryAction {
-    Retry,
-    Exit,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RecoveryLayout {
-    pub panel: Geometry,
-    pub retry: Geometry,
-    pub exit: Geometry,
-}
-
-pub fn recovery_layout(output: Geometry) -> RecoveryLayout {
-    let width = output.width.clamp(1, RECOVERY_PANEL_WIDTH);
-    let height = output.height.clamp(1, RECOVERY_PANEL_HEIGHT);
-    let panel = Geometry {
-        x: output.x + (output.width - width) / 2,
-        y: output.y + (output.height - height) / 2,
-        width,
-        height,
-    };
-    let scaled = |x: i32, y: i32, width: i32, height: i32| Geometry {
-        x: panel.x + x * panel.width / RECOVERY_PANEL_WIDTH,
-        y: panel.y + y * panel.height / RECOVERY_PANEL_HEIGHT,
-        width: (width * panel.width / RECOVERY_PANEL_WIDTH).max(1),
-        height: (height * panel.height / RECOVERY_PANEL_HEIGHT).max(1),
-    };
-    RecoveryLayout {
-        panel,
-        retry: scaled(28, 94, 156, 30),
-        exit: scaled(198, 94, 180, 30),
-    }
-}
-
-pub fn recovery_action_at(output: Geometry, x: f64, y: f64) -> Option<RecoveryAction> {
-    let contains = |geometry: Geometry| {
-        x >= f64::from(geometry.x)
-            && x < f64::from(geometry.x + geometry.width)
-            && y >= f64::from(geometry.y)
-            && y < f64::from(geometry.y + geometry.height)
-    };
-    let layout = recovery_layout(output);
-    if contains(layout.retry) {
-        Some(RecoveryAction::Retry)
-    } else if contains(layout.exit) {
-        Some(RecoveryAction::Exit)
-    } else {
-        None
-    }
 }
 
 #[derive(Clone)]
@@ -189,47 +135,6 @@ fn render_glyph(glyph: char) -> Option<MemoryRenderBuffer> {
         pixmap.data(),
         Fourcc::Abgr8888,
         (SIZE as i32, SIZE as i32),
-        1,
-        Transform::Normal,
-        None,
-    ))
-}
-
-pub fn render_recovery_panel() -> Option<MemoryRenderBuffer> {
-    static PANEL: OnceLock<Option<MemoryRenderBuffer>> = OnceLock::new();
-    PANEL
-        .get_or_init(render_recovery_panel_uncached)
-        .as_ref()
-        .cloned()
-}
-
-fn render_recovery_panel_uncached() -> Option<MemoryRenderBuffer> {
-    const WIDTH: u32 = RECOVERY_PANEL_WIDTH as u32;
-    const HEIGHT: u32 = RECOVERY_PANEL_HEIGHT as u32;
-    let svg = format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{WIDTH}" height="{HEIGHT}">
-<rect width="{WIDTH}" height="{HEIGHT}" rx="14" fill="#24191c" stroke="#d05a68"/>
-<text x="28" y="42" font-family="sans-serif" font-size="20" font-weight="600" fill="#fff4f5">Nickel shell needs attention</text>
-<text x="28" y="72" font-family="sans-serif" font-size="14" fill="#e8c9cd">The compositor is still running and your applications are safe.</text>
-<rect x="28" y="94" width="156" height="30" rx="7" fill="#9d3444"/>
-<text x="45" y="114" font-family="sans-serif" font-size="13" font-weight="600" fill="white">Enter  Retry now</text>
-<rect x="198" y="94" width="180" height="30" rx="7" fill="#37272b" stroke="#6b4b52"/>
-<text x="212" y="114" font-family="sans-serif" font-size="13" fill="#e8c9cd">Esc  Log out safely</text>
-</svg>"##
-    );
-    let mut options = resvg::usvg::Options::default();
-    options.fontdb_mut().load_system_fonts();
-    let tree = resvg::usvg::Tree::from_data(svg.as_bytes(), &options).ok()?;
-    let mut pixmap = resvg::tiny_skia::Pixmap::new(WIDTH, HEIGHT)?;
-    resvg::render(
-        &tree,
-        resvg::tiny_skia::Transform::identity(),
-        &mut pixmap.as_mut(),
-    );
-    Some(MemoryRenderBuffer::from_slice(
-        pixmap.data(),
-        Fourcc::Abgr8888,
-        (WIDTH as i32, HEIGHT as i32),
         1,
         Transform::Normal,
         None,
@@ -467,10 +372,10 @@ pub fn hit_test(content: Geometry, x: i32, y: i32) -> Option<FramePart> {
 #[cfg(test)]
 mod tests {
     use super::{
-        FramePart, RESIZE_BORDER, RecoveryAction, TITLEBAR_CACHE, TITLEBAR_CACHE_MAX_BYTES,
-        TITLEBAR_CACHE_MAX_ENTRIES, TITLEBAR_HEIGHT, hit_test, outer_geometry, recovery_action_at,
-        recovery_layout, render_recovery_panel, render_titlebar, render_titlebar_pixels,
-        titlebar_cache_diagnostics, titlebar_geometry, topmost_frame_target,
+        FramePart, RESIZE_BORDER, TITLEBAR_CACHE, TITLEBAR_CACHE_MAX_BYTES,
+        TITLEBAR_CACHE_MAX_ENTRIES, TITLEBAR_HEIGHT, hit_test, outer_geometry, render_titlebar,
+        render_titlebar_pixels, titlebar_cache_diagnostics, titlebar_geometry,
+        topmost_frame_target,
     };
     use crate::shell_layout::Geometry;
 
@@ -608,41 +513,5 @@ mod tests {
         );
         assert_eq!(FramePart::ResizeEast.cursor(), super::FrameCursor::East);
         assert_eq!(FramePart::Titlebar.cursor(), super::FrameCursor::Arrow);
-    }
-
-    #[test]
-    fn compositor_recovery_panel_rasterizes_without_the_shell() {
-        assert!(render_recovery_panel().is_some());
-    }
-
-    #[test]
-    fn recovery_actions_use_the_renderers_production_layout() {
-        let output = Geometry {
-            x: 100,
-            y: 40,
-            width: 320,
-            height: 120,
-        };
-        let layout = recovery_layout(output);
-        let center = |geometry: Geometry| {
-            (
-                f64::from(geometry.x) + f64::from(geometry.width) / 2.0,
-                f64::from(geometry.y) + f64::from(geometry.height) / 2.0,
-            )
-        };
-        let retry = center(layout.retry);
-        let exit = center(layout.exit);
-        assert_eq!(
-            recovery_action_at(output, retry.0, retry.1),
-            Some(RecoveryAction::Retry)
-        );
-        assert_eq!(
-            recovery_action_at(output, exit.0, exit.1),
-            Some(RecoveryAction::Exit)
-        );
-        assert_eq!(
-            recovery_action_at(output, output.x.into(), output.y.into()),
-            None
-        );
     }
 }

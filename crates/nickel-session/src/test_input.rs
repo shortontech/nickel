@@ -575,39 +575,23 @@ impl NickelSession {
         if !self.shell_recovery_visible() {
             return Err("compositor recovery is not visible".into());
         }
-        let output = self
-            .space
+        self.space
             .outputs()
             .find(|output| output_name.is_none_or(|name| output.name() == name))
             .ok_or_else(|| match output_name {
                 Some(name) => format!("unknown output {name:?}"),
                 None => "session has no output".into(),
             })?;
-        let geometry = self
-            .space
-            .output_geometry(output)
-            .ok_or("recovery output has no geometry")?;
-        let layout = crate::window_frame::recovery_layout(crate::shell_layout::Geometry {
-            x: geometry.loc.x,
-            y: geometry.loc.y,
-            width: geometry.size.w,
-            height: geometry.size.h,
-        });
-        let target = match action {
-            RecoveryTargetAction::Retry => layout.retry,
-            RecoveryTargetAction::Exit => layout.exit,
+        let action = match action {
+            RecoveryTargetAction::Retry => crate::recovery_ui::RecoveryAction::Retry,
+            RecoveryTargetAction::Exit => crate::recovery_ui::RecoveryAction::Exit,
         };
-        let x = target.x + target.width / 2;
-        let y = target.y + target.height / 2;
-        self.inject_test_input(TestInput::PointerMove { x, y })?;
-        self.inject_test_input(TestInput::PointerButton {
-            button: TestPointerButton::Left,
-            state: InputState::Pressed,
-        })?;
-        self.inject_test_input(TestInput::PointerButton {
-            button: TestPointerButton::Left,
-            state: InputState::Released,
-        })
+        let action = self
+            .recovery_ui
+            .activate(action)
+            .ok_or("recovery semantic target did not activate")?;
+        self.apply_recovery_action(action);
+        Ok(())
     }
 
     fn inject_window_pointer(

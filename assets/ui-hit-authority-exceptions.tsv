@@ -1,3 +1,1 @@
 # file	max_references	semantic_owner	reason	review
-crates/nickel-session/src/input.rs	1	shell recovery input	Routes pointer and touch input only while the ordinary declarative shell is unavailable	Remove when the compositor recovery surface is hosted by nickel-ui
-crates/nickel-session/src/window_frame.rs	1	shell recovery surface	Bounds the retry and exit targets for the compositor-owned last-resort recovery surface	Remove when the compositor recovery surface is hosted by nickel-ui

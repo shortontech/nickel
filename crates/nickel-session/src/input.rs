@@ -28,11 +28,12 @@ use crate::{
 };
 
 impl NickelSession {
-    fn recovery_action_at(
-        &self,
+    fn recovery_pointer_action(
+        &mut self,
         position: smithay::utils::Point<f64, Logical>,
-    ) -> Option<window_frame::RecoveryAction> {
-        self.space.outputs().find_map(|output| {
+        pressed: bool,
+    ) -> Option<crate::recovery_ui::RecoveryAction> {
+        let output = self.space.outputs().find_map(|output| {
             let geometry = self.space.output_geometry(output)?;
             let output = crate::shell_layout::Geometry {
                 x: geometry.loc.x,
@@ -40,16 +41,22 @@ impl NickelSession {
                 width: geometry.size.w,
                 height: geometry.size.h,
             };
-            window_frame::recovery_action_at(output, position.x, position.y)
-        })
+            (position.x >= f64::from(output.x)
+                && position.x < f64::from(output.x + output.width)
+                && position.y >= f64::from(output.y)
+                && position.y < f64::from(output.y + output.height))
+            .then_some(output)
+        })?;
+        self.recovery_ui
+            .pointer(output, position.x, position.y, pressed)
     }
 
-    fn apply_recovery_action(&mut self, action: window_frame::RecoveryAction) {
+    pub(crate) fn apply_recovery_action(&mut self, action: crate::recovery_ui::RecoveryAction) {
         match action {
-            window_frame::RecoveryAction::Retry => {
+            crate::recovery_ui::RecoveryAction::Retry => {
                 self.retry_shell_from_recovery();
             }
-            window_frame::RecoveryAction::Exit => {
+            crate::recovery_ui::RecoveryAction::Exit => {
                 self.exit_from_recovery();
             }
         }
@@ -172,11 +179,12 @@ impl NickelSession {
                     return None;
                 }
                 InputEvent::PointerButton { event, .. }
-                    if event.button() == Some(MouseButton::Left)
-                        && event.state() == ButtonState::Pressed =>
+                    if event.button() == Some(MouseButton::Left) =>
                 {
                     let position = self.seat.get_pointer().unwrap().current_location();
-                    if let Some(action) = self.recovery_action_at(position) {
+                    if let Some(action) = self
+                        .recovery_pointer_action(position, event.state() == ButtonState::Pressed)
+                    {
                         self.apply_recovery_action(action);
                     }
                     return None;
@@ -186,7 +194,13 @@ impl NickelSession {
                     let geometry = self.space.output_geometry(output)?;
                     let position =
                         event.position_transformed(geometry.size) + geometry.loc.to_f64();
-                    if let Some(action) = self.recovery_action_at(position) {
+                    let output = crate::shell_layout::Geometry {
+                        x: geometry.loc.x,
+                        y: geometry.loc.y,
+                        width: geometry.size.w,
+                        height: geometry.size.h,
+                    };
+                    if let Some(action) = self.recovery_ui.touch(output, position.x, position.y) {
                         self.apply_recovery_action(action);
                     }
                     return None;
@@ -227,16 +241,11 @@ impl NickelSession {
                                 );
                             }
                             if session.shell_recovery_visible() {
-                                if state == KeyState::Pressed {
-                                    match recovery_action_from_keysym(sym) {
-                                        Some(window_frame::RecoveryAction::Retry) => {
-                                            session.retry_shell_from_recovery();
-                                        }
-                                        Some(window_frame::RecoveryAction::Exit) => {
-                                            session.exit_from_recovery();
-                                        }
-                                        None => {}
-                                    }
+                                if state == KeyState::Pressed
+                                    && let Some(shortcut) = recovery_shortcut_from_keysym(sym)
+                                    && let Some(action) = session.recovery_ui.shortcut(shortcut)
+                                {
+                                    session.apply_recovery_action(action);
                                 }
                                 return FilterResult::Intercept(None);
                             }
@@ -1030,10 +1039,10 @@ fn vt_from_keysym(sym: Keysym) -> Option<i32> {
     }
 }
 
-fn recovery_action_from_keysym(sym: Keysym) -> Option<window_frame::RecoveryAction> {
+fn recovery_shortcut_from_keysym(sym: Keysym) -> Option<nickel_ui::Shortcut> {
     match sym.raw() {
-        keysyms::KEY_Return | keysyms::KEY_KP_Enter => Some(window_frame::RecoveryAction::Retry),
-        keysyms::KEY_Escape => Some(window_frame::RecoveryAction::Exit),
+        keysyms::KEY_Return | keysyms::KEY_KP_Enter => Some(nickel_ui::Shortcut::Submit),
+        keysyms::KEY_Escape => Some(nickel_ui::Shortcut::Escape),
         _ => None,
     }
 }
@@ -1044,8 +1053,7 @@ mod tests {
 
     use smithay::input::keyboard::{Keysym, keysyms};
 
-    use super::{ResizeEdge, recovery_action_from_keysym, resize_edges_at, vt_from_keysym};
-    use crate::window_frame::RecoveryAction;
+    use super::{ResizeEdge, recovery_shortcut_from_keysym, resize_edges_at, vt_from_keysym};
 
     #[test]
     fn resize_edges_follow_pointer_region() {
@@ -1105,19 +1113,19 @@ mod tests {
     #[test]
     fn recovery_keys_offer_retry_and_safe_exit_without_forwarding_text() {
         assert_eq!(
-            recovery_action_from_keysym(Keysym::new(keysyms::KEY_Return)),
-            Some(RecoveryAction::Retry)
+            recovery_shortcut_from_keysym(Keysym::new(keysyms::KEY_Return)),
+            Some(nickel_ui::Shortcut::Submit)
         );
         assert_eq!(
-            recovery_action_from_keysym(Keysym::new(keysyms::KEY_KP_Enter)),
-            Some(RecoveryAction::Retry)
+            recovery_shortcut_from_keysym(Keysym::new(keysyms::KEY_KP_Enter)),
+            Some(nickel_ui::Shortcut::Submit)
         );
         assert_eq!(
-            recovery_action_from_keysym(Keysym::new(keysyms::KEY_Escape)),
-            Some(RecoveryAction::Exit)
+            recovery_shortcut_from_keysym(Keysym::new(keysyms::KEY_Escape)),
+            Some(nickel_ui::Shortcut::Escape)
         );
         assert_eq!(
-            recovery_action_from_keysym(Keysym::new(keysyms::KEY_a)),
+            recovery_shortcut_from_keysym(Keysym::new(keysyms::KEY_a)),
             None
         );
     }
