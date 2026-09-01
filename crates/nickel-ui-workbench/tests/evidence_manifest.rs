@@ -98,12 +98,12 @@ fn durable_ui_evidence_is_complete_content_addressed_and_within_budget() {
             .contains("--full-comparison")
     );
     let incremental = performance["clean_incremental_ms"].as_f64().unwrap();
-    let old_matrix = performance["old_launcher_matrix_ms"].as_f64().unwrap();
+    let full_matrix = performance["full_start_menu_matrix_ms"].as_f64().unwrap();
     assert!(incremental <= performance["incremental_budget_ms"].as_f64().unwrap());
-    assert!(old_matrix <= performance["full_matrix_budget_ms"].as_f64().unwrap());
-    assert!(old_matrix / incremental >= performance["minimum_speedup"].as_f64().unwrap());
+    assert!(full_matrix <= performance["full_matrix_budget_ms"].as_f64().unwrap());
+    assert!(full_matrix / incremental >= performance["minimum_speedup"].as_f64().unwrap());
     assert!(
-        (performance["measured_speedup"].as_f64().unwrap() - old_matrix / incremental).abs() < 0.1
+        (performance["measured_speedup"].as_f64().unwrap() - full_matrix / incremental).abs() < 0.1
     );
 
     for field in ["rustc", "cpu", "renderer", "profile"] {

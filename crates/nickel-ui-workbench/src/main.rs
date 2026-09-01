@@ -3354,9 +3354,9 @@ fn validate_durable_evidence() -> Result<(), Box<dyn Error>> {
     let incremental = performance["clean_incremental_ms"]
         .as_f64()
         .ok_or_else(|| UsageError("missing clean incremental evidence".into()))?;
-    let matrix = performance["old_launcher_matrix_ms"]
+    let matrix = performance["full_start_menu_matrix_ms"]
         .as_f64()
-        .ok_or_else(|| UsageError("missing old matrix evidence".into()))?;
+        .ok_or_else(|| UsageError("missing full start-menu matrix evidence".into()))?;
     if incremental > performance["incremental_budget_ms"].as_f64().unwrap_or(0.0)
         || matrix > performance["full_matrix_budget_ms"].as_f64().unwrap_or(0.0)
         || matrix / incremental
@@ -3638,13 +3638,14 @@ fn feedback_full_comparison() -> Result<(), Box<dyn Error>> {
             &["check", "-p", "nickel-ui-workbench"],
             Some(&isolated_target),
         )?;
-        let old_matrix_ms = measure(
+        let full_matrix_ms = measure(
             &[
                 "test",
                 "-p",
-                "nickel-shell",
-                "dashboard_fixture_matrix_rasterizes_without_empty_or_nonfinite_frames",
+                "nickel-ui",
+                "ui::start_menu_components::tests::start_menu_component_state_sheets_cover_themes_scales_and_text_directions",
                 "--",
+                "--exact",
                 "--nocapture",
             ],
             None,
@@ -3655,21 +3656,21 @@ fn feedback_full_comparison() -> Result<(), Box<dyn Error>> {
                 budgets.fast.incremental_compile_ms
             ))) as Box<dyn Error>);
         }
-        if old_matrix_ms > budgets.full_visual.full_matrix_ms {
+        if full_matrix_ms > budgets.full_visual.full_matrix_ms {
             return Err(Box::new(UsageError(format!(
-                "old launcher matrix exceeded {:.1}ms: {old_matrix_ms:.1}ms",
+                "full declarative start-menu matrix exceeded {:.1}ms: {full_matrix_ms:.1}ms",
                 budgets.full_visual.full_matrix_ms
             ))) as Box<dyn Error>);
         }
-        if clean_incremental_ms * 4.0 >= old_matrix_ms {
+        if clean_incremental_ms * 4.0 >= full_matrix_ms {
             return Err(Box::new(UsageError(format!(
-                "focused clean incremental loop is not materially faster: {clean_incremental_ms:.1}ms vs {old_matrix_ms:.1}ms"
+                "focused clean incremental loop is not materially faster: {clean_incremental_ms:.1}ms vs {full_matrix_ms:.1}ms"
             ))) as Box<dyn Error>);
         }
         let execution = execution_metadata();
         println!(
-            "clean_bootstrap_ms={bootstrap_ms:.1} clean_incremental_ms={clean_incremental_ms:.1} old_launcher_matrix_ms={old_matrix_ms:.1} measured_speedup={:.1}x rustc={} cpu={} renderer={}",
-            old_matrix_ms / clean_incremental_ms,
+            "clean_bootstrap_ms={bootstrap_ms:.1} clean_incremental_ms={clean_incremental_ms:.1} full_start_menu_matrix_ms={full_matrix_ms:.1} measured_speedup={:.1}x rustc={} cpu={} renderer={}",
+            full_matrix_ms / clean_incremental_ms,
             execution.rustc,
             execution.cpu,
             execution.renderer,

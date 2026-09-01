@@ -62,18 +62,18 @@
   "performance_comparison": {
     "generator_command": "cargo run -q -p nickel-ui-workbench -- feedback-evidence --full-comparison",
     "captured_at": "2026-08-31",
-    "clean_bootstrap_ms": 11109.6,
-    "clean_incremental_ms": 120.6,
-    "old_launcher_matrix_ms": 10637.4,
-    "measured_speedup": 88.2,
+    "clean_bootstrap_ms": 12285.9,
+    "clean_incremental_ms": 155.1,
+    "full_start_menu_matrix_ms": 8441.0,
+    "measured_speedup": 54.4,
     "incremental_budget_ms": 6000.0,
     "full_matrix_budget_ms": 300000.0,
     "minimum_speedup": 4.0,
     "samples": {
       "clean_bootstrap": 1,
       "clean_incremental": 1,
-      "old_launcher_matrix": 1
+      "full_start_menu_matrix": 1
     },
-    "interpretation": "The command enforces absolute tier budgets and a predeclared four-times material-speedup floor. These isolated Cargo measurements are developer feedback evidence, not native frame or input latency evidence."
+    "interpretation": "The command enforces absolute tier budgets and a predeclared four-times material-speedup floor against the current declarative start-menu state-sheet matrix. These isolated Cargo measurements are developer feedback evidence, not native frame or input latency evidence."
   }
 }
