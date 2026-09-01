@@ -81,16 +81,8 @@ pub struct ShadowLayer {
 
 #[cfg(feature = "backend-udev")]
 pub fn shadow_layers(width: i32, height: i32) -> Vec<ShadowLayer> {
-    type ShadowCache = HashMap<(i32, i32), Vec<ShadowLayer>>;
-    static CACHE: OnceLock<Mutex<ShadowCache>> = OnceLock::new();
     let key = (width.max(1), height.max(1));
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(cache) = cache.lock()
-        && let Some(layers) = cache.get(&key)
-    {
-        return layers.clone();
-    }
-    let layers = [(16, 7, 0.08), (10, 5, 0.12), (5, 3, 0.18)]
+    [(16, 7, 0.08), (10, 5, 0.12), (5, 3, 0.18)]
         .into_iter()
         .map(|(spread, vertical_offset, alpha)| ShadowLayer {
             buffer: SolidColorBuffer::new(
@@ -99,14 +91,7 @@ pub fn shadow_layers(width: i32, height: i32) -> Vec<ShadowLayer> {
             ),
             offset: (-spread, -spread + vertical_offset),
         })
-        .collect::<Vec<_>>();
-    if let Ok(mut cache) = cache.lock() {
-        if cache.len() >= 128 {
-            cache.clear();
-        }
-        cache.insert(key, layers.clone());
-    }
-    layers
+        .collect()
 }
 
 #[derive(Clone)]

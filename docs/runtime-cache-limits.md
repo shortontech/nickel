@@ -14,7 +14,10 @@ window titles, icons, scales, and preview targets cannot grow a desktop session 
 | SDL uploaded image textures | 512 | Whole-cache reset with explicit texture destruction |
 | Compositor window previews | 1,024 | Removed when no longer requested or when the window closes |
 | Notification history | 100 entries; 256-character app, 512-character summary, 4,096-character body, 3 actions | Oldest notification is closed with the expired reason |
-| Server-decoration title and shadow rasters | 128 each | Whole-cache reset at the limit |
+| Server-decoration title rasters | 128 | Whole-cache reset at the limit |
+
+Window shadows are three cheap solid-color descriptors reconstructed from authoritative frame
+geometry. They are intentionally not cached or retained between frames.
 
 `nickel-test-input caches` reports the compositor preview entry count, hard limit, and current RGBA
 byte total for an explicitly test-controlled nested session. The shared asset and launcher cache APIs
