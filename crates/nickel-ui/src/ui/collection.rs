@@ -335,7 +335,6 @@ where
             CollectionPresentation::UniformGrid { .. }
             | CollectionPresentation::AdaptiveGrid { .. } => SemanticRole::GridCell,
         };
-        let item_id_prefix = self.id.as_str().to_owned();
         let total = self.keyed_items.len();
         let mut window = 0..total;
         let mut virtual_window = None;
@@ -359,11 +358,9 @@ where
                 })
                 .or_else(|| {
                     let target = self.reveal_target.as_ref()?;
-                    self.keyed_items.iter().position(|(key, _)| {
-                        target
-                            .as_str()
-                            .ends_with(&format!("/{}/{}", self.id.as_str(), key))
-                    })
+                    self.keyed_items
+                        .iter()
+                        .position(|(key, _)| target.as_str().ends_with(&format!("/{key}")))
                 });
             if let Some(index) = reveal_index
                 && !resolved.range.contains(&index)
@@ -400,7 +397,7 @@ where
                 let is_selected = selected.as_ref().is_some_and(|predicate| predicate(&key));
                 let is_disabled = disabled.as_ref().is_some_and(|predicate| predicate(&key));
                 let mut element = Container::new()
-                    .id(format!("{item_id_prefix}/{}", key))
+                    .id(key.to_string())
                     .semantic_role(item_role)
                     .accessibility_label(accessible_name)
                     .accessibility_description(if let Some(columns) = columns {

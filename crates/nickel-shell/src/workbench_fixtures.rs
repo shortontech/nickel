@@ -462,6 +462,9 @@ impl Fixture for NotificationFixture {
     fn surface_size() -> (u32, u32) {
         (420, 180)
     }
+    fn default_activation() -> Option<Selector> {
+        Some(Selector::role_name(SemanticRole::Button, "Dismiss"))
+    }
 }
 
 impl Fixture for LockFixture {

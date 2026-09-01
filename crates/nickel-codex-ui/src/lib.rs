@@ -1320,6 +1320,7 @@ mod tests {
 
     #[cfg(feature = "authenticated-live-tests")]
     #[test]
+    #[ignore = "requires NICKEL_CODEX_LIVE=1 and an authenticated Codex app-server"]
     fn authenticated_live_first_turn_and_fresh_connection_resume() {
         assert_eq!(
             std::env::var("NICKEL_CODEX_LIVE").as_deref(),

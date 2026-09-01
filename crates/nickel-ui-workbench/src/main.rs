@@ -2005,7 +2005,7 @@ gallery_fixture!(
     &["collection", "grid", "empty", "loading", "error"],
     GalleryKind::CollectionStates,
     (700, 520),
-    Selector::id("root/ready/ready/one"),
+    Selector::id("root/ready/one"),
     &[fixture_variant!(
         "lifecycle",
         "Lifecycle states",
@@ -4171,7 +4171,7 @@ mod tests {
     #[test]
     fn core_catalog_is_valid_and_stably_identified() {
         let entries = registry().expect("valid catalog");
-        assert_eq!(entries.len(), 27);
+        assert_eq!(entries.len(), 28);
         assert_eq!(
             entries
                 .iter()
@@ -4198,6 +4198,7 @@ mod tests {
                 "shell.codex-project-menu",
                 "shell.control-center",
                 "shell.desktop",
+                "shell.launcher-dashboard",
                 "shell.launcher-search",
                 "shell.lock",
                 "shell.notification",

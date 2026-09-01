@@ -42,6 +42,33 @@ fn dashboard_application_anchor(id: &str) -> UiId {
     UiId::new(format!("launcher-applications/{id}"))
 }
 
+fn dashboard_applications(launcher: &Launcher) -> Vec<&Application> {
+    let mut seen = std::collections::HashSet::new();
+    match launcher.view() {
+        LauncherView::Favorites => {
+            let home = launcher
+                .favorite_applications()
+                .into_iter()
+                .chain(launcher.recent_applications())
+                .filter(|application| seen.insert(application.id().to_owned()))
+                .take(8)
+                .collect::<Vec<_>>();
+            if home.is_empty() {
+                (0..launcher.result_count())
+                    .filter_map(|index| launcher.result_at(index))
+                    .take(8)
+                    .collect()
+            } else {
+                home
+            }
+        }
+        LauncherView::Applications | LauncherView::Places => (0..launcher.result_count())
+            .filter_map(|index| launcher.result_at(index))
+            .take(24)
+            .collect(),
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LauncherAction {
     SetView(LauncherView),
@@ -160,16 +187,31 @@ impl UiApplication for LauncherApplication {
         AnyView::new(Container::new().width(width).height(height).child(base))
     }
 
-    fn frame_overlays(&self, _context: ViewContext) -> Vec<FrameOverlay<Self::Message>> {
+    fn frame_overlays(&self, context: ViewContext) -> Vec<FrameOverlay<Self::Message>> {
         let theme = launcher_semantic_theme(self.palette);
         let style = OverlayStyle::from_theme(&theme);
         let direction = launcher_reading_direction();
-        let mut overlays = (0..self.launcher.result_count())
-            .filter_map(|index| {
-                self.launcher
-                    .result_at(index)
-                    .map(|application| (index, application))
-            })
+        let dashboard_detail_visible = context.viewport.size.width
+            >= START_MENU_SINGLE_PANE_BREAKPOINT
+            || self.state.borrow().dashboard_narrow_page != DashboardNarrowPage::Primary;
+        let applications = if self.launcher.mode() == LauncherMode::Search {
+            (0..self.launcher.result_count())
+                .filter_map(|index| {
+                    self.launcher
+                        .result_at(index)
+                        .map(|application| (index, application))
+                })
+                .collect::<Vec<_>>()
+        } else if dashboard_detail_visible {
+            dashboard_applications(&self.launcher)
+                .into_iter()
+                .map(|application| (0, application))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mut overlays = applications
+            .into_iter()
             .map(|(index, application)| {
                 let id = application.id().to_owned();
                 let (anchor, launch) = if self.launcher.mode() == LauncherMode::Search {
@@ -857,31 +899,7 @@ fn build_dashboard_view_directional(
         .gap(theme.spacing.compact)
         .child(account.id("launcher-account"));
 
-    let mut seen = std::collections::HashSet::new();
-    let applications = match launcher.view() {
-        LauncherView::Favorites => {
-            let home = launcher
-                .favorite_applications()
-                .into_iter()
-                .chain(launcher.recent_applications())
-                .filter(|application| seen.insert(application.id().to_owned()))
-                .take(8)
-                .collect::<Vec<_>>();
-            if home.is_empty() {
-                (0..launcher.result_count())
-                    .filter_map(|index| launcher.result_at(index))
-                    .take(8)
-                    .collect()
-            } else {
-                home
-            }
-        }
-        LauncherView::Applications | LauncherView::Places => (0..launcher.result_count())
-            .filter_map(|index| launcher.result_at(index))
-            .take(24)
-            .collect::<Vec<_>>(),
-    };
-    let application_cards = applications
+    let application_cards = dashboard_applications(launcher)
         .into_iter()
         .map(|application| {
             let id = application.id().to_owned();
