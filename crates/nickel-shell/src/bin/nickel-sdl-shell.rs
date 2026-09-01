@@ -123,6 +123,12 @@ struct EmbeddedUiSurface<A: Application> {
     change_token: HostChangeToken,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct EmbeddedControllerTransition {
+    changed: bool,
+    dismiss_surface: bool,
+}
+
 impl<A: Application> EmbeddedUiSurface<A> {
     fn new(application: A, width: u32, height: u32, now: Instant) -> Self {
         Self {
@@ -137,6 +143,44 @@ impl<A: Application> EmbeddedUiSurface<A> {
 
     fn commands(&self) -> &[nickel_ui::backend::PaintCommand] {
         self.host.commands()
+    }
+
+    #[cfg(test)]
+    fn accessibility_nodes(&self) -> &[nickel_ui::AccessibilityNode] {
+        self.host.accessibility_nodes()
+    }
+
+    #[cfg(test)]
+    fn inspection(&self) -> nickel_ui::HostInspection {
+        self.host.inspect()
+    }
+
+    fn normalized_input(
+        &mut self,
+        input: InputEvent,
+        clipboard_text: Option<String>,
+    ) -> HostEventOutcome {
+        self.step(HostBatch {
+            events: vec![HostEvent::Normalized {
+                input,
+                clipboard_text,
+            }],
+            ..HostBatch::default()
+        })
+    }
+
+    fn window_focus(&mut self, focused: bool) -> HostEventOutcome {
+        self.step(HostBatch {
+            window_focused: Some(focused),
+            ..HostBatch::default()
+        })
+    }
+
+    fn suspend(&mut self) -> HostEventOutcome {
+        self.step(HostBatch {
+            events: vec![HostEvent::Ui(nickel_ui::UiEvent::Suspended)],
+            ..HostBatch::default()
+        })
     }
 
     fn step(&mut self, batch: HostBatch) -> HostEventOutcome {
@@ -160,6 +204,27 @@ impl<A: Application> EmbeddedUiSurface<A> {
             ..HostBatch::default()
         });
         Some(outcome)
+    }
+}
+
+fn step_embedded_codex_controller(
+    host: &mut EmbeddedUiSurface<ChatApplication>,
+    project_menu: bool,
+    action: ControllerAction,
+) -> EmbeddedControllerTransition {
+    if project_menu && action == ControllerAction::Cancel {
+        return EmbeddedControllerTransition {
+            dismiss_surface: true,
+            ..EmbeddedControllerTransition::default()
+        };
+    }
+    let outcome = host.step(HostBatch {
+        events: vec![HostEvent::Controller(action)],
+        ..HostBatch::default()
+    });
+    EmbeddedControllerTransition {
+        changed: outcome.changed,
+        dismiss_surface: false,
     }
 }
 
@@ -642,6 +707,8 @@ fn handle_codex_event(
         | ShellEvent::FocusChanged { surface, .. }
         | ShellEvent::LogicalResize { surface, .. }
         | ShellEvent::PixelResize { surface, .. }
+        | ShellEvent::Shown(surface)
+        | ShellEvent::Hidden(surface)
         | ShellEvent::Redraw(surface)
         | ShellEvent::CloseRequested(surface) => *surface,
         _ => return Ok(false),
@@ -654,30 +721,33 @@ fn handle_codex_event(
     }) {
         return Ok(false);
     }
-    if matches!(
-        event,
-        ShellEvent::FocusChanged { focused: true, .. }
-            | ShellEvent::Input {
-                event: InputEvent::Pointer(PointerEvent::Button {
-                    button: PointerButton::Primary,
-                    edge: KeyEdge::Pressed,
-                    ..
-                }),
-                ..
-            }
-    ) {
-        shell.start_text_input(surface);
-    }
     if surface == codex.project_menu {
         codex.ensure_project_menu(shell)?;
     }
+    if matches!(event, ShellEvent::FocusChanged { focused: false, .. }) {
+        shell.stop_text_input(surface);
+    }
     if matches!(event, ShellEvent::CloseRequested(_)) {
+        shell.stop_text_input(surface);
         if surface == codex.project_menu {
             state.hide_overlay(SurfaceRole::CodexProjectMenu);
             shell.hide(surface);
         } else {
             codex.remove(shell, surface);
         }
+        return Ok(true);
+    }
+    if matches!(event, ShellEvent::Hidden(_)) {
+        shell.stop_text_input(surface);
+        if let Some(host) = codex.host_mut(surface) {
+            host.suspend();
+        }
+        return Ok(true);
+    }
+    if matches!(event, ShellEvent::Shown(_)) {
+        codex
+            .present(shell, surface)
+            .map_err(|error| format!("{error:?}"))?;
         return Ok(true);
     }
     if surface == codex.project_menu
@@ -718,22 +788,23 @@ fn handle_codex_event(
         ShellEvent::Input { event, .. } => codex
             .host_mut(surface)
             .expect("Codex host exists")
-            .step(HostBatch {
-                events: vec![HostEvent::Normalized {
-                    input: event.clone(),
-                    clipboard_text: shell.clipboard_text(),
-                }],
-                ..HostBatch::default()
-            }),
+            .normalized_input(event.clone(), shell.clipboard_text()),
         ShellEvent::FocusChanged { focused, .. } => codex
             .host_mut(surface)
             .expect("Codex host exists")
-            .step(HostBatch {
-                window_focused: Some(*focused),
-                ..HostBatch::default()
-            }),
+            .window_focus(*focused),
         _ => HostEventOutcome::default(),
     };
+    if matches!(
+        event,
+        ShellEvent::Input { .. } | ShellEvent::FocusChanged { .. }
+    ) {
+        if outcome.text_input_active {
+            shell.start_text_input(surface);
+        } else {
+            shell.stop_text_input(surface);
+        }
+    }
     for failure in &outcome.failures {
         tracing::warn!(
             ?failure,
@@ -1013,6 +1084,7 @@ fn controller_launcher_shortcut(action: ControllerAction) -> Option<platform::Gl
 fn handle_controller_action(
     shell: &mut SdlShell,
     state: &mut LiveShell,
+    codex: &mut CodexSurfaces,
     action: ControllerAction,
     family: nickel_ui::ControllerFamily,
 ) -> Result<(), String> {
@@ -1040,6 +1112,24 @@ fn handle_controller_action(
         if state.launcher_host_controller(action, family) {
             sync_visibility(shell, state);
             render_role(shell, state, role)?;
+        }
+        return Ok(());
+    }
+    if matches!(role, SurfaceRole::CodexProjectMenu | SurfaceRole::CodexChat) {
+        let transition = codex
+            .host_mut(surface)
+            .map(|host| {
+                step_embedded_codex_controller(host, role == SurfaceRole::CodexProjectMenu, action)
+            })
+            .unwrap_or_default();
+        if transition.changed {
+            codex
+                .present(shell, surface)
+                .map_err(|error| format!("{error:?}"))?;
+        }
+        if transition.dismiss_surface {
+            state.hide_overlay(SurfaceRole::CodexProjectMenu);
+            shell.hide(surface);
         }
         return Ok(());
     }
@@ -1295,6 +1385,7 @@ fn main() -> Result<(), String> {
                 let result = handle_controller_action(
                     &mut shell,
                     &mut state,
+                    &mut codex,
                     action,
                     controller.active_family().unwrap_or_default(),
                 );
@@ -1690,6 +1781,200 @@ mod tests {
     use nickel_ui::ControllerAction;
     use std::time::{Duration, Instant};
 
+    fn embedded_chat() -> EmbeddedUiSurface<ChatApplication> {
+        let backend = ReplayBackend::from_json(r#"{"name":"embedded-shell-host","events":[]}"#)
+            .expect("static replay backend");
+        let mut application = ChatApplication::new(BackendMode::Replay {
+            backend,
+            cwd: "/projects/nickel".into(),
+        })
+        .as_shell_chat(std::path::Path::new("/projects/nickel"));
+        application.state.status = ConnectionStatus::Ready;
+        EmbeddedUiSurface::new(application, 900, 640, Instant::now())
+    }
+
+    fn pointer_button(
+        order: u64,
+        button: nickel_input::PointerButton,
+        edge: nickel_input::KeyEdge,
+        point: InputPoint,
+    ) -> InputEvent {
+        InputEvent::Pointer(PointerEvent::Button {
+            device: DeviceId(1),
+            order: EventOrder(order),
+            button,
+            edge,
+            position: Some(point),
+        })
+    }
+
+    fn center(node: &nickel_ui::AccessibilityNode) -> InputPoint {
+        InputPoint {
+            x: f64::from(node.rect.origin.x + node.rect.size.width / 2.0),
+            y: f64::from(node.rect.origin.y + node.rect.size.height / 2.0),
+        }
+    }
+
+    #[test]
+    fn production_embedded_chat_host_exposes_accessibility_and_restores_text_focus() {
+        let mut surface = embedded_chat();
+        for role in [
+            SemanticRole::Button,
+            SemanticRole::TextField,
+            SemanticRole::Menu,
+        ] {
+            assert!(
+                surface
+                    .accessibility_nodes()
+                    .iter()
+                    .any(|node| node.semantic_role == Some(role)),
+                "missing embedded accessibility role {role:?}"
+            );
+        }
+        assert!(
+            surface
+                .accessibility_nodes()
+                .iter()
+                .any(|node| node.component == "Text"),
+            "embedded accessibility tree omitted visible text"
+        );
+
+        let draft = surface
+            .accessibility_nodes()
+            .iter()
+            .find(|node| node.semantic_role == Some(SemanticRole::TextField))
+            .expect("chat composer text field")
+            .clone();
+        let point = center(&draft);
+        surface.normalized_input(
+            pointer_button(
+                1,
+                nickel_input::PointerButton::Primary,
+                nickel_input::KeyEdge::Pressed,
+                point,
+            ),
+            None,
+        );
+        surface.normalized_input(
+            pointer_button(
+                2,
+                nickel_input::PointerButton::Primary,
+                nickel_input::KeyEdge::Released,
+                point,
+            ),
+            None,
+        );
+        assert_eq!(surface.inspection().keyboard_focus, Some(draft.id.clone()));
+
+        surface.window_focus(false);
+        assert!(!surface.inspection().window_focused);
+        assert_eq!(surface.inspection().keyboard_focus, Some(draft.id.clone()));
+        surface.window_focus(true);
+        assert!(surface.inspection().window_focused);
+        assert_eq!(surface.inspection().keyboard_focus, Some(draft.id));
+
+        let preedit = surface.normalized_input(
+            InputEvent::Text(TextEvent::Preedit {
+                device: DeviceId(1),
+                order: EventOrder(3),
+                text: "世".into(),
+                selection: Some((0, 3)),
+            }),
+            None,
+        );
+        assert!(preedit.changed);
+        assert!(surface.application_mut().state.draft.is_empty());
+        let commit = surface.normalized_input(
+            InputEvent::Text(TextEvent::Commit {
+                device: DeviceId(1),
+                order: EventOrder(4),
+                text: "世界".into(),
+            }),
+            None,
+        );
+        assert!(commit.changed);
+        assert_eq!(surface.application_mut().state.draft, "世界");
+    }
+
+    #[test]
+    fn production_embedded_chat_host_routes_scroll_context_menu_and_suspend() {
+        let mut surface = embedded_chat();
+        for index in 0..200 {
+            surface.application_mut().state.items.push_back(ChatItem {
+                id: format!("item-{index}"),
+                kind: ChatItemKind::Agent,
+                text: format!("history item {index}"),
+                complete: true,
+            });
+        }
+        surface.step(HostBatch {
+            surface_size: Some((901, 640)),
+            ..HostBatch::default()
+        });
+
+        let conversation = surface
+            .accessibility_nodes()
+            .iter()
+            .find(|node| node.label.as_deref() == Some("Conversation"))
+            .expect("accessible conversation scroll surface")
+            .clone();
+        let scroll = surface.normalized_input(
+            InputEvent::Pointer(PointerEvent::Axis {
+                device: DeviceId(1),
+                order: EventOrder(1),
+                delta: Vector { x: 0.0, y: 1.0 },
+                discrete: Some((0, 1)),
+                position: Some(center(&conversation)),
+            }),
+            None,
+        );
+        assert!(scroll.changed);
+        assert!(!surface.application_mut().state.conversation_pinned);
+
+        let file_menu = surface
+            .accessibility_nodes()
+            .iter()
+            .find(|node| {
+                node.semantic_role == Some(SemanticRole::Menu)
+                    && node.label.as_deref() == Some("File")
+            })
+            .expect("File menu")
+            .clone();
+        assert!(file_menu.actions.contains(&ActionKind::ContextMenu));
+        let menu = surface.normalized_input(
+            pointer_button(
+                2,
+                nickel_input::PointerButton::Secondary,
+                nickel_input::KeyEdge::Pressed,
+                center(&file_menu),
+            ),
+            None,
+        );
+        assert!(menu.changed);
+        assert!(surface.accessibility_nodes().iter().any(|node| {
+            node.semantic_role == Some(SemanticRole::MenuItem)
+                && node.label.as_deref() == Some("New conversation")
+        }));
+
+        let primary = pointer_button(
+            3,
+            nickel_input::PointerButton::Primary,
+            nickel_input::KeyEdge::Pressed,
+            center(&file_menu),
+        );
+        surface.normalized_input(primary, None);
+        surface.suspend();
+        assert!(surface.inspection().pointer_capture.is_none());
+        assert_eq!(surface.application_mut().state.items.len(), 200);
+        assert!(!surface.accessibility_nodes().is_empty());
+
+        surface.step(HostBatch {
+            events: vec![HostEvent::Ui(UiEvent::FocusGained)],
+            ..HostBatch::default()
+        });
+        assert!(surface.inspection().window_focused);
+    }
+
     #[test]
     fn unchanged_domain_subscriptions_back_off_and_changes_reset_the_deadline() {
         let started = Instant::now();
@@ -1775,9 +2060,50 @@ mod tests {
 
     use std::path::Path;
 
-    use nickel_codex::ThreadId;
+    use nickel_codex::{Project, ReplayBackend, ThreadId};
+    use nickel_codex_ui::{
+        BackendMode, ChatApplication, ChatItem, ChatItemKind, ConnectionStatus, ShellRequest,
+    };
+    use nickel_input::{
+        DeviceId, EventOrder, InputEvent, Point as InputPoint, PointerEvent, TextEvent, Vector,
+    };
+    use nickel_ui::{
+        ActionKind, HostBatch, HostEvent, SemanticAction, SemanticRole, SemanticValueInput, UiEvent,
+    };
 
-    use super::{WriterLeases, codex_project_application_id};
+    use super::{
+        EmbeddedUiSurface, WriterLeases, codex_project_application_id,
+        step_embedded_codex_controller,
+    };
+
+    fn embedded_project_menu() -> EmbeddedUiSurface<ChatApplication> {
+        let backend = ReplayBackend::from_json(r#"{"name":"embedded-menu","events":[]}"#)
+            .expect("static replay is valid");
+        let mut application = ChatApplication::new(BackendMode::Replay {
+            backend,
+            cwd: "/projects/nickel".into(),
+        })
+        .as_shell_project_menu();
+        application.state.projects = vec![
+            Project {
+                id: "nickel".into(),
+                name: "Nickel".into(),
+                roots: vec!["/projects/nickel".into()],
+            },
+            Project {
+                id: "vesalius".into(),
+                name: "Vesalius".into(),
+                roots: vec!["/projects/vesalius".into()],
+            },
+        ];
+        application.state.status = nickel_codex_ui::ConnectionStatus::Ready;
+        let mut embedded = EmbeddedUiSurface::new(application, 920, 680, std::time::Instant::now());
+        embedded.step(HostBatch {
+            window_focused: Some(true),
+            ..HostBatch::default()
+        });
+        embedded
+    }
 
     #[cfg(target_os = "linux")]
     #[test]
@@ -1905,6 +2231,82 @@ mod tests {
         let other = codex_project_application_id(None, Path::new("/other/sample"));
         assert_eq!(first, same);
         assert_ne!(first, other);
+    }
+
+    #[test]
+    fn embedded_project_menu_accessibility_set_value_uses_the_production_host() {
+        let mut embedded = embedded_project_menu();
+        let search = embedded
+            .host
+            .accessibility_nodes()
+            .iter()
+            .find(|node| node.semantic_role == Some(SemanticRole::TextField))
+            .expect("project search is exposed as a textbox")
+            .clone();
+        assert!(search.actions.contains(&ActionKind::SetValue));
+
+        let outcome = embedded.step(HostBatch {
+            events: vec![HostEvent::Accessibility {
+                target: search.id,
+                action: SemanticAction::SetValue(SemanticValueInput::Text("nick".into())),
+            }],
+            ..HostBatch::default()
+        });
+
+        assert!(outcome.changed);
+        assert!(outcome.semantic_failures.is_empty());
+        assert_eq!(embedded.host.application().state.draft, "nick");
+        let labels = embedded
+            .host
+            .accessibility_nodes()
+            .iter()
+            .filter_map(|node| node.label.as_deref())
+            .collect::<Vec<_>>();
+        assert!(labels.contains(&"Nickel"));
+        assert!(!labels.contains(&"Vesalius"));
+    }
+
+    #[test]
+    fn embedded_project_menu_controller_opens_the_selected_project() {
+        let mut embedded = embedded_project_menu();
+        for action in [
+            ControllerAction::Down,
+            ControllerAction::Down,
+            ControllerAction::Down,
+            ControllerAction::Confirm,
+        ] {
+            step_embedded_codex_controller(&mut embedded, true, action);
+        }
+
+        assert_eq!(
+            embedded.host.application_mut().take_shell_requests(),
+            vec![ShellRequest::OpenProject {
+                cwd: "/projects/nickel".into(),
+                project_id: "nickel".into(),
+                name: "Nickel".into(),
+                initial_thread: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn embedded_project_menu_cancel_requests_dismiss_and_retains_selection_for_reopen() {
+        let mut embedded = embedded_project_menu();
+        step_embedded_codex_controller(&mut embedded, true, ControllerAction::Down);
+        step_embedded_codex_controller(&mut embedded, true, ControllerAction::Down);
+        let selected = embedded.host.inspect().controller_target;
+        assert!(selected.is_some(), "controller acquired a semantic target");
+
+        let transition =
+            step_embedded_codex_controller(&mut embedded, true, ControllerAction::Cancel);
+        assert!(transition.dismiss_surface);
+        assert!(!transition.changed);
+        assert_eq!(embedded.host.inspect().controller_target, selected);
+
+        // Production dismissal hides and suspends this reusable overlay; it
+        // does not destroy the host or route an ordinary-window focus loss.
+        embedded.suspend();
+        assert_eq!(embedded.host.inspect().controller_target, selected);
     }
 
     #[test]

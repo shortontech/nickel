@@ -632,6 +632,13 @@ impl SdlShell {
         })
     }
 
+    pub fn stop_text_input(&self, id: SurfaceId) -> bool {
+        self.surface(id).is_some_and(|surface| {
+            self.video.text_input().stop(surface.window());
+            true
+        })
+    }
+
     pub fn poll_events(&mut self) -> Vec<ShellEvent> {
         let mut translated = self.pending_events.drain(..).collect::<Vec<_>>();
         let raw = self.events.poll_iter().collect::<Vec<_>>();

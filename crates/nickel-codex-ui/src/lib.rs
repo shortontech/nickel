@@ -575,7 +575,11 @@ mod tests {
             app
         };
         let project = Selector::role_name(SemanticRole::Button, "Nickel");
-        for via in [ActivationVia::Keyboard, ActivationVia::Controller] {
+        for via in [
+            ActivationVia::Pointer,
+            ActivationVia::Keyboard,
+            ActivationVia::Controller,
+        ] {
             let mut scenario = Scenario::new(make_app(), 360, 420);
             assert!(
                 scenario

@@ -2555,7 +2555,7 @@ impl<Message> MenuItem<Message> {
 
 pub struct Menu<Message = String>(Element<Message>);
 
-impl<Message> Menu<Message> {
+impl<Message: Clone> Menu<Message> {
     pub fn new(
         toggle_message: Message,
         label: impl Into<String>,
@@ -2575,8 +2575,11 @@ impl<Message> Menu<Message> {
                 foreground: 0xe8edf4,
             },
             style: Style::default(),
-            message: Some(toggle_message),
-            context_message: None,
+            message: Some(toggle_message.clone()),
+            // A menu header is itself a valid context-menu affordance. Keep
+            // secondary-click, Shift+F10, controller menu, and accessibility
+            // invocation on the same typed transition as ordinary activation.
+            context_message: Some(toggle_message),
             message_mapper: None,
             drag_mapper: None,
             text_mapper: None,

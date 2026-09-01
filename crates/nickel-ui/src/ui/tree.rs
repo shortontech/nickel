@@ -1434,6 +1434,18 @@ impl<Message: Clone> UiFrame<Message> {
                         invalidation: state.open_overlay(overlay, invocation_target),
                         ..EventOutcome::default()
                     }
+                } else if action == SemanticAction::Invoke(ActionKind::ContextMenu)
+                    && self.is_dropdown(&target)
+                {
+                    EventOutcome {
+                        messages: self
+                            .context_message_for_id(&target)
+                            .cloned()
+                            .into_iter()
+                            .collect(),
+                        invalidation: state.set_dropdown_open(target, true),
+                        ..EventOutcome::default()
+                    }
                 } else {
                     let dismisses = matches!(action, SemanticAction::Invoke(ActionKind::Activate))
                         && self
@@ -2083,14 +2095,17 @@ impl<Message: Clone> UiFrame<Message> {
                         ..outcome
                     };
                 }
-                if let Some(message) = self
-                    .id_at(point)
+                let target = self.id_at(point).cloned();
+                if let Some(message) = target
+                    .as_ref()
                     .and_then(|id| self.context_message_for_id(id))
                     .cloned()
                 {
                     outcome.messages.push(message);
                 }
-                Invalidation::None
+                target
+                    .filter(|id| self.is_dropdown(id))
+                    .map_or(Invalidation::None, |id| state.set_dropdown_open(id, true))
             }
             UiEvent::PointerPressed(point) => {
                 if self
@@ -2487,16 +2502,21 @@ impl<Message: Clone> UiFrame<Message> {
                         ..outcome
                     };
                 }
-                if let Some(message) = state
+                let target = state
                     .navigation()
                     .controller_selected()
                     .or_else(|| state.focused())
+                    .cloned();
+                if let Some(message) = target
+                    .as_ref()
                     .and_then(|id| self.context_message_for_id(id))
                     .cloned()
                 {
                     outcome.messages.push(message);
                 }
-                Invalidation::None
+                target
+                    .filter(|id| self.is_dropdown(id))
+                    .map_or(Invalidation::None, |id| state.set_dropdown_open(id, true))
             }
             UiEvent::KeyboardContextMenu => {
                 if let Some((target, overlay)) = state
@@ -2513,14 +2533,17 @@ impl<Message: Clone> UiFrame<Message> {
                         ..outcome
                     };
                 }
-                if let Some(message) = state
-                    .focused()
+                let target = state.focused().cloned();
+                if let Some(message) = target
+                    .as_ref()
                     .and_then(|id| self.context_message_for_id(id))
                     .cloned()
                 {
                     outcome.messages.push(message);
                 }
-                Invalidation::None
+                target
+                    .filter(|id| self.is_dropdown(id))
+                    .map_or(Invalidation::None, |id| state.set_dropdown_open(id, true))
             }
             UiEvent::AccessibilityFocus(id) => {
                 if self.hits.iter().any(|hit| hit.id == id) {
@@ -2550,7 +2573,11 @@ impl<Message: Clone> UiFrame<Message> {
                 if let Some(message) = self.context_message_for_id(&id).cloned() {
                     outcome.messages.push(message);
                 }
-                Invalidation::None
+                if self.is_dropdown(&id) {
+                    state.set_dropdown_open(id, true)
+                } else {
+                    Invalidation::None
+                }
             }
             UiEvent::TextInput(text) => {
                 if let Some(id) = state.focused().cloned() {
@@ -2925,6 +2952,12 @@ impl<Message: Clone> UiFrame<Message> {
             .rev()
             .find(|region| &region.id == id)
             .map(|region| &region.message)
+    }
+
+    fn is_dropdown(&self, id: &UiId) -> bool {
+        self.resolved
+            .find(id)
+            .is_some_and(|node| node.component == "Dropdown")
     }
 
     fn move_controller_spatial(

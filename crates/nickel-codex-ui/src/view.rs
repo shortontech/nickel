@@ -1119,9 +1119,26 @@ fn connection_menu(settings: &CodexSettings) -> Menu<ChatMessage> {
 
 fn project_menu_view(state: &ChatState, settings_error: Option<&str>) -> impl View<ChatMessage> {
     let controller_focus = semantic_theme().borders.controller_focus;
+    let project_query = state.draft.trim().to_lowercase();
+    let matching_projects = state
+        .projects
+        .iter()
+        .filter(|project| {
+            !project.roots.is_empty()
+                && (project_query.is_empty()
+                    || project.name.to_lowercase().contains(&project_query)
+                    || project.id.to_lowercase().contains(&project_query)
+                    || project.roots.iter().any(|root| {
+                        root.to_string_lossy()
+                            .to_lowercase()
+                            .contains(&project_query)
+                    }))
+        })
+        .collect::<Vec<_>>();
     let status = match state.status {
         ConnectionStatus::Loading => "Loading projects…",
         ConnectionStatus::Ready if state.projects.is_empty() => "No projects available",
+        ConnectionStatus::Ready if matching_projects.is_empty() => "No matching projects",
         ConnectionStatus::Ready => "Choose a project",
         ConnectionStatus::Disconnected => "Codex is disconnected",
         ConnectionStatus::Incompatible => "Codex is incompatible",
@@ -1135,6 +1152,13 @@ fn project_menu_view(state: &ChatState, settings_error: Option<&str>) -> impl Vi
                     controller_focus_border={controller_focus}>{"Retry"}</Button>
             </Row>
             <Text color={MUTED} shrink={0.0}>{status}</Text>
+            <Container id={id!(project_search_container)} accessibility_label={"Search projects"}
+                semantic_role={SemanticRole::Group} fill_width shrink={0.0}
+                padding={Insets::symmetric(10.0, 8.0)} background={PANEL}
+                border={Border::new(BORDER, 1.0)} radius={6.0}>
+                <TextField id={id!(project_search)} value={&state.draft}
+                    on_change={draft_changed} color={TEXT} />
+            </Container>
             {state.diagnostics.back().map(|diagnostic| ui! {
                 <Container fill_width padding={Insets::all(8.0)} background={ERROR} radius={6.0}>
                     <Text color={TEXT} max_lines={3}>{diagnostic}</Text>
@@ -1147,7 +1171,7 @@ fn project_menu_view(state: &ChatState, settings_error: Option<&str>) -> impl Vi
             })}
             <Column id={id!(project_menu_list)} grow={1.0} min_height={0.0}
                 overflow_y={Overflow::Auto} gap={6.0}>
-                {state.projects.iter().filter(|project| !project.roots.is_empty()).map(|project| {
+                {matching_projects.into_iter().map(|project| {
                     let root = project.roots[0].clone();
                     ui! {
                         <Button key={project.id.clone()} height={42.0}
@@ -1207,6 +1231,7 @@ fn configured_chat_view(
             } else { AnyView::new(ui! {
             <Column grow={1.0} min_width={0.0} fill_height padding={Insets::all(18.0)} gap={12.0}>
                 <Column id={id!(conversation)} grow={1.0} fill_width gap={10.0}
+                    accessibility_label={"Conversation"} semantic_role={SemanticRole::Group}
                     overflow_y={Overflow::Auto} follow_scroll_end={state.conversation_pinned}
                     on_scroll={conversation_scrolled}>
                     {if state.items.is_empty() {
