@@ -472,6 +472,8 @@ const NESTED_RUNTIME_EVIDENCE: &str =
     include_str!("../../../assets/evidence/nested-runtime-performance.json");
 const UI_REACHABILITY_REPORT: &[u8] =
     include_bytes!("../../../assets/evidence/ui-reachability-report.json");
+const SOFTWARE_PRESENTER_CACHE_DIAGNOSTICS: &str =
+    "unavailable (software preview does not instantiate a GPU presenter)";
 
 #[derive(Debug, Deserialize)]
 struct VisualFixtureManifest {
@@ -2400,10 +2402,6 @@ impl Application for WorkbenchApp {
                 AnyView::new(primary_preview)
             };
         let inspection = self.session.inspect();
-        let presenter_cache =
-            nickel_ui::AggregatePresenterCacheDiagnostics::from_presenters(std::iter::empty::<
-                nickel_ui::PresenterCacheDiagnostics,
-            >());
         let accessibility_count = self.session.accessibility_nodes().len();
         let semantic_nodes = self.session.semantic_nodes();
         let clipped_nodes = semantic_nodes
@@ -2692,9 +2690,9 @@ impl Application for WorkbenchApp {
                                             )
                                             .child(
                                                 Text::new(format!(
-                                                    "frame_timing: software_render={:.3}ms · presenter_cache={:?} · software preview has no GPU presenter · retained={} bytes · scratch={} bytes",
+                                                    "frame_timing: software_render={:.3}ms · presenter_cache={} · retained={} bytes · scratch={} bytes",
                                                     self.last_render_ms,
-                                                    presenter_cache,
+                                                    SOFTWARE_PRESENTER_CACHE_DIAGNOSTICS,
                                                     inspection.resources.estimated_retained_bytes,
                                                     inspection.resources.retained_build_scratch_bytes,
                                                 ))
@@ -3267,17 +3265,6 @@ fn benchmark(id: &str) -> Result<(), Box<dyn Error>> {
     let warm_frame_allocations_p95 = p95_u64(&mut warm_frame_allocations);
     let input_visible_p95 = p95(&mut input_visible);
     let retained_bytes = entry.open().inspect().resources.estimated_retained_bytes;
-    let cache_before =
-        nickel_ui::AggregatePresenterCacheDiagnostics::from_presenters(std::iter::empty::<
-            nickel_ui::PresenterCacheDiagnostics,
-        >());
-    let cache_after =
-        nickel_ui::AggregatePresenterCacheDiagnostics::from_presenters(std::iter::empty::<
-            nickel_ui::PresenterCacheDiagnostics,
-        >());
-    let cache_growth_bytes = cache_after
-        .live_bytes
-        .saturating_sub(cache_before.live_bytes);
     let rss_after = linux_rss_bytes();
     let execution = execution_metadata();
     if semantic_p95 > budgets.focused.semantic_scenario_p95_ms
@@ -3285,7 +3272,6 @@ fn benchmark(id: &str) -> Result<(), Box<dyn Error>> {
         || workbench_open_p95 > budgets.focused.workbench_open_p95_ms
         || warm_frame_allocations_p95 > budgets.focused.frame_allocations as u64
         || retained_bytes > budgets.focused.retained_frame_bytes
-        || cache_growth_bytes > budgets.focused.cache_growth_bytes
         || command_started.elapsed().as_secs_f64() * 1000.0 > budgets.focused.hard_command_ms
     {
         return Err(Box::new(UsageError(format!(
@@ -3293,7 +3279,7 @@ fn benchmark(id: &str) -> Result<(), Box<dyn Error>> {
         ))));
     }
     println!(
-        "fixture={} samples={} semantic_p95_ms={:.3} render_p95_ms={:.3} workbench_open_p95_ms={:.3} warm_software_frame_p95_ms={:.3} software_input_to_visible_p95_ms={:.3} retained_frame_bytes={} presenter_cache_growth_bytes={} rss_before_bytes={:?} rss_after_bytes={:?} warm_frame_allocations_p95={} allocator_scope=process allocator_metric=allocation_operations nested_warm_present_p95_us={} nested_input_to_visible_p95_us={} nested_retained_presenter_bytes={} nested_hardware_claim=false nested_frame_allocations_scope={} nested_live_samples={} hard_command_ms={:.1} idle_frames={} profile={} rustc={} cpu={} renderer={} scale={}",
+        "fixture={} samples={} semantic_p95_ms={:.3} render_p95_ms={:.3} workbench_open_p95_ms={:.3} warm_software_frame_p95_ms={:.3} software_input_to_visible_p95_ms={:.3} retained_frame_bytes={} presenter_cache_growth_bytes=unavailable presenter_cache_growth_reason=software_preview_has_no_gpu_presenter rss_before_bytes={:?} rss_after_bytes={:?} warm_frame_allocations_p95={} allocator_scope=process allocator_metric=allocation_operations nested_warm_present_p95_us={} nested_input_to_visible_p95_us={} nested_retained_presenter_bytes={} nested_hardware_claim=false nested_frame_allocations_scope={} nested_live_samples={} hard_command_ms={:.1} idle_frames={} profile={} rustc={} cpu={} renderer={} scale={}",
         id,
         budgets.focused.samples,
         semantic_p95,
@@ -3302,7 +3288,6 @@ fn benchmark(id: &str) -> Result<(), Box<dyn Error>> {
         warm_frame_p95,
         input_visible_p95,
         retained_bytes,
-        cache_growth_bytes,
         rss_before,
         rss_after,
         warm_frame_allocations_p95,

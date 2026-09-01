@@ -245,8 +245,9 @@ impl<Message> ActionLegend<Message> {
                     .accessibility_label(accessible)
                     .child(
                         Container::new()
-                            .min_width(26.0)
+                            .min_width(38.0)
                             .min_height(26.0)
+                            .shrink(0.0)
                             .radius(theme.radii.control)
                             .border(theme.borders.controller_focus, 1.5)
                             .align_items(Align::Center)

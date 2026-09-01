@@ -131,35 +131,19 @@ impl UiApplication for LauncherApplication {
             &self.launcher,
             &self.state.borrow(),
             &mut self.icons.borrow_mut(),
-            context.viewport.size.width.max(1.0) as u32,
-            context.viewport.size.height.max(1.0) as u32,
-            self.palette,
-            context.modality,
+            LauncherViewContext {
+                viewport: (
+                    context.viewport.size.width.max(1.0) as u32,
+                    context.viewport.size.height.max(1.0) as u32,
+                ),
+                palette: self.palette,
+                modality: context.modality,
+                status: self.status.as_deref(),
+            },
         );
         let width = context.viewport.size.width;
         let height = context.viewport.size.height;
-        let mut root = Container::new().width(width).height(height).child(base);
-        if let Some(status) = &self.status {
-            root = root.child(
-                Column::new()
-                    .width(width)
-                    .height(height)
-                    .child(nickel_ui::Spacer::vertical(72.0))
-                    .child(
-                        Row::new()
-                            .height(28.0)
-                            .child(nickel_ui::Spacer::fixed(250.0))
-                            .child(
-                                Text::new(status)
-                                    .width((width - 280.0).max(1.0))
-                                    .height(28.0)
-                                    .scale(14.0)
-                                    .color(0xd98a32),
-                            ),
-                    ),
-            );
-        }
-        AnyView::new(root)
+        AnyView::new(Container::new().width(width).height(height).child(base))
     }
 
     fn frame_overlays(&self, _context: ViewContext) -> Vec<FrameOverlay<Self::Message>> {
@@ -479,25 +463,23 @@ pub struct LauncherIconCacheDiagnostics {
     pub evictions: u64,
 }
 
+#[derive(Clone, Copy)]
+struct LauncherViewContext<'a> {
+    viewport: (u32, u32),
+    palette: ThemePalette,
+    modality: InputModality,
+    status: Option<&'a str>,
+}
+
 fn build_launcher_view(
     launcher: &Launcher,
     state: &LauncherViewState,
     icons: &mut LauncherIconCache,
-    viewport_width: u32,
-    viewport_height: u32,
-    palette: ThemePalette,
-    modality: InputModality,
+    context: LauncherViewContext<'_>,
 ) -> AnyView<LauncherAction> {
+    let (viewport_width, viewport_height) = context.viewport;
     if launcher.mode() == LauncherMode::Dashboard {
-        return build_dashboard_view(
-            launcher,
-            state,
-            icons,
-            viewport_width,
-            viewport_height,
-            palette,
-            modality,
-        );
+        return build_dashboard_view(launcher, state, icons, context);
     }
     let panel_width = PANEL_MAX_WIDTH.min(viewport_width.max(1) as f32).max(320.0);
     let panel_height = PANEL_MAX_HEIGHT
@@ -525,17 +507,17 @@ fn build_launcher_view(
     scroll_row = scroll_row.min(maximum_row);
 
     let theme = SemanticTheme::new(SemanticColors {
-        window: palette.background,
-        sidebar: palette.panel,
-        card: palette.surface,
-        raised: palette.surface_hover,
-        hover: palette.surface_hover,
-        primary_text: palette.text,
-        secondary_text: palette.muted,
-        accent: palette.accent,
-        accent_soft: palette.accent_soft,
-        secondary_accent: palette.complement,
-        positive: palette.complement,
+        window: context.palette.background,
+        sidebar: context.palette.panel,
+        card: context.palette.surface,
+        raised: context.palette.surface_hover,
+        hover: context.palette.surface_hover,
+        primary_text: context.palette.text,
+        secondary_text: context.palette.muted,
+        accent: context.palette.accent,
+        accent_soft: context.palette.accent_soft,
+        secondary_accent: context.palette.complement,
+        positive: context.palette.complement,
     });
     let direction = launcher_reading_direction();
     let sidebar = Column::new()
@@ -677,9 +659,12 @@ fn build_launcher_view(
             query_action,
             direction,
         ));
-    let shell = StartMenuShell::new(theme, panel_width, sidebar, detail)
+    let mut shell = StartMenuShell::new(theme, panel_width, sidebar, detail)
         .direction(direction)
         .header(search);
+    if let Some(status) = context.status {
+        shell = shell.detail_footer(launcher_status(theme, status));
+    }
     AnyView::new(shell)
 }
 
@@ -691,19 +676,14 @@ fn build_dashboard_view(
     launcher: &Launcher,
     state: &LauncherViewState,
     icons: &mut LauncherIconCache,
-    viewport_width: u32,
-    viewport_height: u32,
-    palette: ThemePalette,
-    modality: InputModality,
+    context: LauncherViewContext<'_>,
 ) -> AnyView<LauncherAction> {
     build_dashboard_view_directional(
         launcher,
         state,
         icons,
-        (viewport_width, viewport_height),
-        palette,
+        context,
         launcher_reading_direction(),
-        modality,
     )
 }
 
@@ -711,25 +691,24 @@ fn build_dashboard_view_directional(
     launcher: &Launcher,
     state: &LauncherViewState,
     icons: &mut LauncherIconCache,
-    viewport: (u32, u32),
-    palette: ThemePalette,
+    context: LauncherViewContext<'_>,
     direction: ReadingDirection,
-    modality: InputModality,
 ) -> AnyView<LauncherAction> {
+    let viewport = context.viewport;
     let (viewport_width, _viewport_height) = viewport;
     let width = PANEL_MAX_WIDTH.min(viewport_width.max(1) as f32);
     let theme = SemanticTheme::new(SemanticColors {
-        window: palette.background,
-        sidebar: palette.panel,
-        card: palette.surface,
-        raised: palette.surface_hover,
-        hover: palette.surface_hover,
-        primary_text: palette.text,
-        secondary_text: palette.muted,
-        accent: palette.accent,
-        accent_soft: palette.accent_soft,
-        secondary_accent: palette.complement,
-        positive: palette.complement,
+        window: context.palette.background,
+        sidebar: context.palette.panel,
+        card: context.palette.surface,
+        raised: context.palette.surface_hover,
+        hover: context.palette.surface_hover,
+        primary_text: context.palette.text,
+        secondary_text: context.palette.muted,
+        accent: context.palette.accent,
+        accent_soft: context.palette.accent_soft,
+        secondary_accent: context.palette.complement,
+        positive: context.palette.complement,
     });
     let narrow = width < START_MENU_SINGLE_PANE_BREAKPOINT;
     let selected = |view| launcher.view() == view;
@@ -1073,7 +1052,7 @@ fn build_dashboard_view_directional(
                 StartMenuNarrowPane::Primary
             },
         );
-    if modality == InputModality::Controller {
+    if context.modality == InputModality::Controller {
         let entries = vec![
             ActionLegendEntry::available(SemanticControllerAction::Confirm, "Open"),
             ActionLegendEntry::available(SemanticControllerAction::ContextMenu, "Actions"),
@@ -1088,7 +1067,20 @@ fn build_dashboard_view_directional(
             direction,
         ));
     }
+    if let Some(status) = context.status {
+        shell = shell.detail_footer(launcher_status(theme, status));
+    }
     AnyView::new(shell)
+}
+
+fn launcher_status(theme: SemanticTheme, status: &str) -> Container<LauncherAction> {
+    Container::new()
+        .fill_width()
+        .padding(Insets::all(theme.spacing.control))
+        .radius(theme.radii.control)
+        .background(theme.surfaces.raised)
+        .accessibility_label("Launcher status")
+        .child(Text::new(status).color(0xd98a32).wrap(true))
 }
 
 #[allow(dead_code)]
@@ -1231,6 +1223,29 @@ mod tests {
         let second = launcher_host();
         assert_eq!(first.commands(), second.commands());
         assert_eq!(first.semantic_nodes(), second.semantic_nodes());
+    }
+
+    #[test]
+    fn visible_status_does_not_shrink_the_launcher_surface() {
+        let mut host = launcher_host();
+        let launcher = Launcher::default();
+        host.application_mut().sync(
+            &launcher,
+            palette(),
+            Some("Some applications could not be loaded.".into()),
+        );
+        host.step(nickel_ui::HostBatch {
+            events: vec![nickel_ui::HostEvent::Poll],
+            ..nickel_ui::HostBatch::default()
+        });
+
+        let status = host
+            .accessibility_nodes()
+            .iter()
+            .find(|node| node.label.as_deref() == Some("Launcher status"))
+            .expect("launcher status remains accessible");
+        assert!(status.rect.origin.y > 500.0);
+        assert!(status.rect.origin.y + status.rect.size.height <= 680.0);
     }
 
     #[test]
