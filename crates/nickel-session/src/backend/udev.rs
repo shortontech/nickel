@@ -1210,6 +1210,11 @@ impl NickelSession {
         }) {
             return Err(format!("output {name} is already active"));
         }
+        if !self.output_global_admission_available() {
+            return Err(format!(
+                "output {name} is waiting for retired Wayland globals to drain"
+            ));
+        }
         let Some(mode) = connector
             .modes()
             .iter()
@@ -1347,7 +1352,7 @@ impl NickelSession {
             self.space.unmap_output(&surface.output);
             surface.output.leave_all();
             if let Some(global) = surface.global.take() {
-                self.display_handle.remove_global::<NickelSession>(global);
+                self.defer_output_global_retirement(global);
             }
         }
         self.reconcile_output_removal(&name);
@@ -1459,7 +1464,7 @@ impl NickelSession {
         self.space.unmap_output(&surface.output);
         surface.output.leave_all();
         if let Some(global) = surface.global {
-            self.display_handle.remove_global::<NickelSession>(global);
+            self.defer_output_global_retirement(global);
         }
         let output = surface.output;
         drop(surface.drm);
@@ -1558,7 +1563,7 @@ impl NickelSession {
             self.space.unmap_output(&surface.output);
             surface.output.leave_all();
             if let Some(global) = surface.global.take() {
-                self.display_handle.remove_global::<NickelSession>(global);
+                self.defer_output_global_retirement(global);
             }
         }
         for name in removed_names {

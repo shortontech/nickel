@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     ffi::OsString,
     hash::Hash,
     os::fd::AsFd,
@@ -10,6 +10,7 @@ use std::{
         Arc,
         atomic::{AtomicU8, AtomicU32, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 use nickel_core::{
@@ -70,6 +71,56 @@ use crate::{
     shell_layout::{self, Geometry},
     window_registry::{WindowId, WindowRegistry},
 };
+
+const OUTPUT_GLOBAL_RETIREMENT_GRACE: Duration = Duration::from_secs(3);
+const MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS: usize = nickel_session_protocol::MAX_OUTPUTS;
+
+fn output_global_capacity_available(pending: usize, live: usize) -> bool {
+    pending.saturating_add(live) < MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS
+}
+
+struct DeferredGlobalRetirements<T> {
+    pending: VecDeque<(Instant, T)>,
+}
+
+impl<T> Default for DeferredGlobalRetirements<T> {
+    fn default() -> Self {
+        Self {
+            pending: VecDeque::new(),
+        }
+    }
+}
+
+impl<T> DeferredGlobalRetirements<T> {
+    fn has_capacity(&self) -> bool {
+        self.pending.len() < MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS
+    }
+
+    fn defer(&mut self, now: Instant, value: T) -> Result<(), T> {
+        if !self.has_capacity() {
+            return Err(value);
+        }
+        self.pending
+            .push_back((now + OUTPUT_GLOBAL_RETIREMENT_GRACE, value));
+        Ok(())
+    }
+
+    fn take_expired(&mut self, now: Instant) -> Vec<T> {
+        let expired = self
+            .pending
+            .iter()
+            .take_while(|(deadline, _)| *deadline <= now)
+            .count();
+        self.pending
+            .drain(..expired)
+            .map(|(_, value)| value)
+            .collect()
+    }
+
+    fn len(&self) -> usize {
+        self.pending.len()
+    }
+}
 
 fn protocol_error(code: ErrorCode, message: impl Into<String>) -> ServerMessage {
     ServerMessage::Error {
@@ -337,6 +388,7 @@ pub struct NickelSession {
     pub server_decorated: HashSet<ObjectId>,
     pub primary_output_name: Option<String>,
     virtual_test_outputs: HashMap<String, (Output, GlobalId)>,
+    pending_output_global_retirements: DeferredGlobalRetirements<GlobalId>,
     pub preview_frames: HashMap<WindowId, PreviewFrame>,
     preview_spares: HashMap<WindowId, Vec<u8>>,
     preview_switcher_interest: Vec<WindowId>,
@@ -959,6 +1011,7 @@ impl NickelSession {
     }
 
     pub(crate) fn poll_idle_policy(&mut self) {
+        self.reap_output_global_retirements(Instant::now());
         self.prune_dead_idle_inhibitors();
         let effects = self.idle_controller.poll(
             self.start_time.elapsed(),
@@ -993,6 +1046,34 @@ impl NickelSession {
                     );
                 }
             }
+        }
+    }
+
+    pub(crate) fn output_global_admission_available(&mut self) -> bool {
+        self.reap_output_global_retirements(Instant::now());
+        output_global_capacity_available(
+            self.pending_output_global_retirements.len(),
+            self.space.outputs().count(),
+        )
+    }
+
+    pub(crate) fn defer_output_global_retirement(&mut self, global: GlobalId) {
+        self.defer_output_global_retirement_at(global, Instant::now());
+    }
+
+    fn defer_output_global_retirement_at(&mut self, global: GlobalId, now: Instant) {
+        self.display_handle
+            .disable_global::<NickelSession>(global.clone());
+        let mut display = self.display_handle.clone();
+        let _ = display.flush_clients();
+        self.pending_output_global_retirements
+            .defer(now, global)
+            .expect("output-global admission keeps the retirement queue bounded");
+    }
+
+    fn reap_output_global_retirements(&mut self, now: Instant) {
+        for global in self.pending_output_global_retirements.take_expired(now) {
+            self.display_handle.remove_global::<NickelSession>(global);
         }
     }
 
@@ -1191,6 +1272,7 @@ impl NickelSession {
             server_decorated: HashSet::new(),
             primary_output_name: None,
             virtual_test_outputs: HashMap::new(),
+            pending_output_global_retirements: DeferredGlobalRetirements::default(),
             preview_frames: HashMap::new(),
             preview_spares: HashMap::new(),
             preview_switcher_interest: Vec::new(),
@@ -1977,6 +2059,9 @@ impl NickelSession {
                 if self.space.outputs().count() >= nickel_session_protocol::MAX_OUTPUTS {
                     return Err("output limit reached");
                 }
+                if !self.output_global_admission_available() {
+                    return Err("output global retirement backlog is full");
+                }
                 if logical_width < 320 || logical_height < 240 || !(60..=480).contains(&scale_120) {
                     return Err("invalid test output geometry or scale");
                 }
@@ -2041,7 +2126,7 @@ impl NickelSession {
                 self.stage_output_removal(&output);
                 self.space.unmap_output(&output);
                 output.leave_all();
-                self.display_handle.remove_global::<NickelSession>(global);
+                self.defer_output_global_retirement(global);
                 self.reconcile_output_removal(&name);
                 self.rescue_stranded_windows();
                 self.relayout_maximized_windows();
@@ -5019,12 +5104,15 @@ impl ClientData for ClientState {
 #[cfg(test)]
 mod protocol_tests {
     use super::{
-        DisplacedWindow, PREVIEW_BYTE_CAPACITY, PREVIEW_ENTRIES_PER_VISIBLE_CONSUMER,
-        PREVIEW_ENTRY_CAPACITY, PREVIEW_FRAME_BYTES, RegisteredShellRole,
-        ShellRegistrationRejection, admitted_preview_ids, advance_preview_content_generation,
-        bounded_preview_ids, clamp_decorated_content_to_work_area, clamp_window_location,
+        DeferredGlobalRetirements, DisplacedWindow, MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS,
+        OUTPUT_GLOBAL_RETIREMENT_GRACE, PREVIEW_BYTE_CAPACITY,
+        PREVIEW_ENTRIES_PER_VISIBLE_CONSUMER, PREVIEW_ENTRY_CAPACITY, PREVIEW_FRAME_BYTES,
+        RegisteredShellRole, ShellRegistrationRejection, admitted_preview_ids,
+        advance_preview_content_generation, bounded_preview_ids,
+        clamp_decorated_content_to_work_area, clamp_window_location,
         command_requires_shell_identity, drag_icon_location, identification_expiry_is_current,
-        maximized_content_geometry, output_index_for_shell_surface, preview_mapping_has_exact_size,
+        maximized_content_geometry, output_global_capacity_available,
+        output_index_for_shell_surface, preview_mapping_has_exact_size,
         protocol_preview_from_cached, record_preview_capture_attempt,
         restored_drag_content_geometry, retain_live_idle_inhibitors, retire_displaced_window,
         retire_pointer_surface, retire_shell_surface, reuse_preview_pixels,
@@ -5034,9 +5122,11 @@ mod protocol_tests {
     };
     use crate::shell_layout::Geometry;
     use nickel_session_protocol::{
-        Command, Query, ServerEnvelope, ServerMessage, SessionAction, ShellRole,
+        Command, OutputTransform, Query, ServerEnvelope, ServerMessage, SessionAction, ShellRole,
+        TestOutput,
     };
     use smithay::{
+        output::{Output, PhysicalProperties, Subpixel},
         reexports::{
             calloop::EventLoop,
             wayland_server::{Display, backend::ObjectId},
@@ -5044,6 +5134,7 @@ mod protocol_tests {
         utils::Point,
     };
     use std::collections::{HashMap, HashSet};
+    use std::time::{Duration, Instant};
 
     #[test]
     fn pointer_identity_churn_returns_all_collections_to_baseline() {
@@ -5178,6 +5269,139 @@ mod protocol_tests {
         let display = Display::new().unwrap();
         let session = super::NickelSession::new(&mut event_loop, display, true);
         (event_loop, session)
+    }
+
+    #[test]
+    fn deferred_global_queue_is_bounded_and_reaps_only_after_grace() {
+        let started = Instant::now();
+        let mut retirements = DeferredGlobalRetirements::default();
+        for value in 0..MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS {
+            assert_eq!(retirements.defer(started, value), Ok(()));
+        }
+        assert_eq!(retirements.len(), MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS);
+        assert!(!output_global_capacity_available(
+            MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS - 1,
+            1,
+        ));
+        assert_eq!(
+            retirements.defer(started, MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS),
+            Err(MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS)
+        );
+        assert!(
+            retirements
+                .take_expired(started + OUTPUT_GLOBAL_RETIREMENT_GRACE - Duration::from_millis(1))
+                .is_empty()
+        );
+        assert_eq!(retirements.len(), MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS);
+        assert_eq!(
+            retirements.take_expired(started + OUTPUT_GLOBAL_RETIREMENT_GRACE),
+            (0..MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS).collect::<Vec<_>>()
+        );
+        assert_eq!(retirements.len(), 0);
+    }
+
+    #[test]
+    fn rapid_unique_global_churn_returns_to_baseline_each_grace_window() {
+        let started = Instant::now();
+        let mut retirements = DeferredGlobalRetirements::default();
+        for generation in 0..64 {
+            let cycle = started + OUTPUT_GLOBAL_RETIREMENT_GRACE * generation;
+            for output in 0..MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS {
+                retirements
+                    .defer(cycle, (generation, output))
+                    .expect("one admitted window of churn fits the bound");
+            }
+            assert!(!retirements.has_capacity());
+            assert_eq!(
+                retirements
+                    .take_expired(cycle + OUTPUT_GLOBAL_RETIREMENT_GRACE)
+                    .len(),
+                MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS
+            );
+            assert_eq!(retirements.len(), 0);
+        }
+    }
+
+    #[test]
+    fn disabled_output_global_remains_allocated_until_grace_expires() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = preview_test_session();
+        let output = Output::new(
+            "deferred-test".into(),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "Nickel".into(),
+                model: "Deferred test output".into(),
+                serial_number: "deferred-test".into(),
+            },
+        );
+        let global = output.create_global::<super::NickelSession>(&session.display_handle);
+        let retained = global.clone();
+        let started = Instant::now();
+
+        session.defer_output_global_retirement_at(global, started);
+        let info = session
+            .display_handle
+            .backend_handle()
+            .global_info(retained.clone())
+            .expect("disabled global remains bindable during grace");
+        assert!(info.disabled);
+
+        session.reap_output_global_retirements(
+            started + OUTPUT_GLOBAL_RETIREMENT_GRACE - Duration::from_millis(1),
+        );
+        assert!(
+            session
+                .display_handle
+                .backend_handle()
+                .global_info(retained.clone())
+                .is_ok()
+        );
+        session.reap_output_global_retirements(started + OUTPUT_GLOBAL_RETIREMENT_GRACE);
+        assert!(
+            session
+                .display_handle
+                .backend_handle()
+                .global_info(retained)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn rapid_virtual_output_churn_applies_backpressure_until_reap() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = preview_test_session();
+        let connect = |name: String| TestOutput::Connect {
+            name,
+            logical_width: 640,
+            logical_height: 480,
+            scale_120: 120,
+            transform: OutputTransform::Normal,
+        };
+
+        for generation in 0..MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS {
+            let name = format!("rapid-{generation}");
+            session
+                .apply_test_output(connect(name.clone()))
+                .expect("churn within the deferred-global bound is admitted");
+            session
+                .apply_test_output(TestOutput::Disconnect { name })
+                .expect("admitted output disconnects into the grace queue");
+        }
+        assert_eq!(
+            session.pending_output_global_retirements.len(),
+            MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS
+        );
+        assert_eq!(
+            session.apply_test_output(connect("backpressured".into())),
+            Err("output global retirement backlog is full")
+        );
+
+        session.reap_output_global_retirements(Instant::now() + OUTPUT_GLOBAL_RETIREMENT_GRACE);
+        session
+            .apply_test_output(connect("after-reap".into()))
+            .expect("global admission resumes after the grace queue drains");
     }
 
     #[test]
