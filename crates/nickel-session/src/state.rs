@@ -72,7 +72,8 @@ use crate::{
     window_registry::{WindowId, WindowRegistry},
 };
 
-const OUTPUT_GLOBAL_RETIREMENT_GRACE: Duration = Duration::from_secs(3);
+const OUTPUT_GLOBAL_BIND_SETTLE_GRACE: Duration = Duration::from_secs(3);
+const OUTPUT_GLOBAL_DISABLED_GRACE: Duration = Duration::from_secs(3);
 const MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS: usize = nickel_session_protocol::MAX_OUTPUTS;
 
 fn output_global_capacity_available(pending: usize, live: usize) -> bool {
@@ -80,7 +81,19 @@ fn output_global_capacity_available(pending: usize, live: usize) -> bool {
 }
 
 struct DeferredGlobalRetirements<T> {
-    pending: VecDeque<(Instant, T)>,
+    pending: VecDeque<DeferredGlobalRetirement<T>>,
+}
+
+struct DeferredGlobalRetirement<T> {
+    deadline: Instant,
+    disabled: bool,
+    value: T,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum GlobalRetirementAction<T> {
+    Disable(T),
+    Remove(T),
 }
 
 impl<T> Default for DeferredGlobalRetirements<T> {
@@ -100,21 +113,34 @@ impl<T> DeferredGlobalRetirements<T> {
         if !self.has_capacity() {
             return Err(value);
         }
-        self.pending
-            .push_back((now + OUTPUT_GLOBAL_RETIREMENT_GRACE, value));
+        self.pending.push_back(DeferredGlobalRetirement {
+            deadline: now + OUTPUT_GLOBAL_BIND_SETTLE_GRACE,
+            disabled: false,
+            value,
+        });
         Ok(())
     }
 
-    fn take_expired(&mut self, now: Instant) -> Vec<T> {
-        let expired = self
-            .pending
-            .iter()
-            .take_while(|(deadline, _)| *deadline <= now)
-            .count();
-        self.pending
-            .drain(..expired)
-            .map(|(_, value)| value)
-            .collect()
+    fn advance(&mut self, now: Instant) -> Vec<GlobalRetirementAction<T>>
+    where
+        T: Clone,
+    {
+        let mut actions = Vec::new();
+        let mut retained = VecDeque::with_capacity(self.pending.len());
+        while let Some(mut pending) = self.pending.pop_front() {
+            if pending.deadline > now {
+                retained.push_back(pending);
+            } else if pending.disabled {
+                actions.push(GlobalRetirementAction::Remove(pending.value));
+            } else {
+                pending.disabled = true;
+                pending.deadline = now + OUTPUT_GLOBAL_DISABLED_GRACE;
+                actions.push(GlobalRetirementAction::Disable(pending.value.clone()));
+                retained.push_back(pending);
+            }
+        }
+        self.pending = retained;
+        actions
     }
 
     fn len(&self) -> usize {
@@ -1062,18 +1088,27 @@ impl NickelSession {
     }
 
     fn defer_output_global_retirement_at(&mut self, global: GlobalId, now: Instant) {
-        self.display_handle
-            .disable_global::<NickelSession>(global.clone());
-        let mut display = self.display_handle.clone();
-        let _ = display.flush_clients();
         self.pending_output_global_retirements
             .defer(now, global)
             .expect("output-global admission keeps the retirement queue bounded");
     }
 
     fn reap_output_global_retirements(&mut self, now: Instant) {
-        for global in self.pending_output_global_retirements.take_expired(now) {
-            self.display_handle.remove_global::<NickelSession>(global);
+        let mut disabled = false;
+        for action in self.pending_output_global_retirements.advance(now) {
+            match action {
+                GlobalRetirementAction::Disable(global) => {
+                    self.display_handle.disable_global::<NickelSession>(global);
+                    disabled = true;
+                }
+                GlobalRetirementAction::Remove(global) => {
+                    self.display_handle.remove_global::<NickelSession>(global);
+                }
+            }
+        }
+        if disabled {
+            let mut display = self.display_handle.clone();
+            let _ = display.flush_clients();
         }
     }
 
@@ -5104,12 +5139,12 @@ impl ClientData for ClientState {
 #[cfg(test)]
 mod protocol_tests {
     use super::{
-        DeferredGlobalRetirements, DisplacedWindow, MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS,
-        OUTPUT_GLOBAL_RETIREMENT_GRACE, PREVIEW_BYTE_CAPACITY,
-        PREVIEW_ENTRIES_PER_VISIBLE_CONSUMER, PREVIEW_ENTRY_CAPACITY, PREVIEW_FRAME_BYTES,
-        RegisteredShellRole, ShellRegistrationRejection, admitted_preview_ids,
-        advance_preview_content_generation, bounded_preview_ids,
-        clamp_decorated_content_to_work_area, clamp_window_location,
+        DeferredGlobalRetirements, DisplacedWindow, GlobalRetirementAction,
+        MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS, OUTPUT_GLOBAL_BIND_SETTLE_GRACE,
+        OUTPUT_GLOBAL_DISABLED_GRACE, PREVIEW_BYTE_CAPACITY, PREVIEW_ENTRIES_PER_VISIBLE_CONSUMER,
+        PREVIEW_ENTRY_CAPACITY, PREVIEW_FRAME_BYTES, RegisteredShellRole,
+        ShellRegistrationRejection, admitted_preview_ids, advance_preview_content_generation,
+        bounded_preview_ids, clamp_decorated_content_to_work_area, clamp_window_location,
         command_requires_shell_identity, drag_icon_location, identification_expiry_is_current,
         maximized_content_geometry, output_global_capacity_available,
         output_index_for_shell_surface, preview_mapping_has_exact_size,
@@ -5272,7 +5307,7 @@ mod protocol_tests {
     }
 
     #[test]
-    fn deferred_global_queue_is_bounded_and_reaps_only_after_grace() {
+    fn deferred_global_queue_is_bounded_and_advances_through_both_grace_periods() {
         let started = Instant::now();
         let mut retirements = DeferredGlobalRetirements::default();
         for value in 0..MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS {
@@ -5289,13 +5324,31 @@ mod protocol_tests {
         );
         assert!(
             retirements
-                .take_expired(started + OUTPUT_GLOBAL_RETIREMENT_GRACE - Duration::from_millis(1))
+                .advance(started + OUTPUT_GLOBAL_BIND_SETTLE_GRACE - Duration::from_millis(1))
                 .is_empty()
         );
         assert_eq!(retirements.len(), MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS);
         assert_eq!(
-            retirements.take_expired(started + OUTPUT_GLOBAL_RETIREMENT_GRACE),
-            (0..MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS).collect::<Vec<_>>()
+            retirements.advance(started + OUTPUT_GLOBAL_BIND_SETTLE_GRACE),
+            (0..MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS)
+                .map(GlobalRetirementAction::Disable)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(retirements.len(), MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS);
+        assert!(
+            retirements
+                .advance(
+                    started + OUTPUT_GLOBAL_BIND_SETTLE_GRACE + OUTPUT_GLOBAL_DISABLED_GRACE
+                        - Duration::from_millis(1),
+                )
+                .is_empty()
+        );
+        assert_eq!(
+            retirements
+                .advance(started + OUTPUT_GLOBAL_BIND_SETTLE_GRACE + OUTPUT_GLOBAL_DISABLED_GRACE,),
+            (0..MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS)
+                .map(GlobalRetirementAction::Remove)
+                .collect::<Vec<_>>()
         );
         assert_eq!(retirements.len(), 0);
     }
@@ -5305,7 +5358,8 @@ mod protocol_tests {
         let started = Instant::now();
         let mut retirements = DeferredGlobalRetirements::default();
         for generation in 0..64 {
-            let cycle = started + OUTPUT_GLOBAL_RETIREMENT_GRACE * generation;
+            let cycle = started
+                + (OUTPUT_GLOBAL_BIND_SETTLE_GRACE + OUTPUT_GLOBAL_DISABLED_GRACE) * generation;
             for output in 0..MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS {
                 retirements
                     .defer(cycle, (generation, output))
@@ -5314,7 +5368,16 @@ mod protocol_tests {
             assert!(!retirements.has_capacity());
             assert_eq!(
                 retirements
-                    .take_expired(cycle + OUTPUT_GLOBAL_RETIREMENT_GRACE)
+                    .advance(cycle + OUTPUT_GLOBAL_BIND_SETTLE_GRACE)
+                    .len(),
+                MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS
+            );
+            assert_eq!(retirements.len(), MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS);
+            assert_eq!(
+                retirements
+                    .advance(
+                        cycle + OUTPUT_GLOBAL_BIND_SETTLE_GRACE + OUTPUT_GLOBAL_DISABLED_GRACE,
+                    )
                     .len(),
                 MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS
             );
@@ -5323,7 +5386,7 @@ mod protocol_tests {
     }
 
     #[test]
-    fn disabled_output_global_remains_allocated_until_grace_expires() {
+    fn output_global_settles_before_disable_and_remains_until_final_grace_expires() {
         let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
         let (_event_loop, mut session) = preview_test_session();
         let output = Output::new(
@@ -5341,15 +5404,32 @@ mod protocol_tests {
         let started = Instant::now();
 
         session.defer_output_global_retirement_at(global, started);
-        let info = session
+        let active = session
             .display_handle
             .backend_handle()
             .global_info(retained.clone())
-            .expect("disabled global remains bindable during grace");
-        assert!(info.disabled);
+            .expect("settling global remains advertised");
+        assert!(!active.disabled);
 
         session.reap_output_global_retirements(
-            started + OUTPUT_GLOBAL_RETIREMENT_GRACE - Duration::from_millis(1),
+            started + OUTPUT_GLOBAL_BIND_SETTLE_GRACE - Duration::from_millis(1),
+        );
+        assert!(
+            !session
+                .display_handle
+                .backend_handle()
+                .global_info(retained.clone())
+                .unwrap()
+                .disabled
+        );
+        session.reap_output_global_retirements(started + OUTPUT_GLOBAL_BIND_SETTLE_GRACE);
+        assert!(
+            session
+                .display_handle
+                .backend_handle()
+                .global_info(retained.clone())
+                .expect("disabled global remains bindable during final grace")
+                .disabled
         );
         assert!(
             session
@@ -5358,7 +5438,9 @@ mod protocol_tests {
                 .global_info(retained.clone())
                 .is_ok()
         );
-        session.reap_output_global_retirements(started + OUTPUT_GLOBAL_RETIREMENT_GRACE);
+        session.reap_output_global_retirements(
+            started + OUTPUT_GLOBAL_BIND_SETTLE_GRACE + OUTPUT_GLOBAL_DISABLED_GRACE,
+        );
         assert!(
             session
                 .display_handle
@@ -5398,7 +5480,13 @@ mod protocol_tests {
             Err("output global retirement backlog is full")
         );
 
-        session.reap_output_global_retirements(Instant::now() + OUTPUT_GLOBAL_RETIREMENT_GRACE);
+        let disable_at = Instant::now() + OUTPUT_GLOBAL_BIND_SETTLE_GRACE;
+        session.reap_output_global_retirements(disable_at);
+        assert_eq!(
+            session.apply_test_output(connect("still-backpressured".into())),
+            Err("output global retirement backlog is full")
+        );
+        session.reap_output_global_retirements(disable_at + OUTPUT_GLOBAL_DISABLED_GRACE);
         session
             .apply_test_output(connect("after-reap".into()))
             .expect("global admission resumes after the grace queue drains");
