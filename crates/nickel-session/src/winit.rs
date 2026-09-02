@@ -407,8 +407,23 @@ pub fn init_winit(
                                 .map_err(|error| error.to_string())?
                                 .wait()
                                 .map_err(|error| error.to_string())?;
-                            let captured =
-                                capture_bound_framebuffer_rgba(renderer, &framebuffer, size);
+                            let captured = capture_bound_framebuffer(
+                                renderer,
+                                &framebuffer,
+                                size,
+                                output_capture_path.is_some(),
+                                |mapped, flipped| {
+                                    if image_copy_requested {
+                                        state.complete_image_copy_frames(
+                                            &output,
+                                            mapped,
+                                            size.w as usize,
+                                            size.h as usize,
+                                            flipped,
+                                        );
+                                    }
+                                },
+                            );
                             // Mapping a GLES framebuffer changes the active EGL target. Restore
                             // the presentation target before the winit backend swaps it.
                             let rebind = renderer
@@ -422,17 +437,17 @@ pub fn init_winit(
                     };
                     backend.submit(Some(&[damage])).unwrap();
 
-                    if image_copy_requested {
+                    if image_copy_requested
+                        && captured_frame
+                            .as_ref()
+                            .expect("requested capture has a framebuffer result")
+                            .is_err()
+                    {
                         match captured_frame
                             .as_ref()
                             .expect("requested capture has a framebuffer result")
                         {
-                            Ok(rgba) => state.complete_image_copy_frames(
-                                &output,
-                                rgba,
-                                size.w as usize,
-                                size.h as usize,
-                            ),
+                            Ok(_) => unreachable!("successful portal delivery completed while mapped"),
                             Err(error) => {
                                 tracing::warn!(%error, "failed to capture nested portal frame");
                                 state.fail_image_copy_frames(
@@ -459,7 +474,7 @@ pub fn init_winit(
                         let result = save_output_capture(
                             captured_frame
                                 .as_ref()
-                                .map(Vec::as_slice)
+                                .map(|rgba| rgba.as_deref().expect("file capture retains encoder input"))
                                 .map_err(String::as_str),
                             size,
                             &path,
@@ -687,11 +702,13 @@ fn save_output_capture(
     }
 }
 
-fn capture_bound_framebuffer_rgba(
+fn capture_bound_framebuffer(
     renderer: &mut GlesRenderer,
     framebuffer: &GlesTarget<'_>,
     size: smithay::utils::Size<i32, smithay::utils::Physical>,
-) -> Result<Vec<u8>, String> {
+    retain_normalized: bool,
+    mut consume_mapped: impl FnMut(&[u8], bool),
+) -> Result<Option<Vec<u8>>, String> {
     if size.w <= 0 || size.h <= 0 {
         return Err("output has no drawable size".into());
     }
@@ -705,7 +722,12 @@ fn capture_bound_framebuffer_rgba(
         .map_err(|error| error.to_string())?;
     // The nested output uses `Flipped180` for presentation, so restore its
     // mapped framebuffer rows to top-down image order unconditionally.
-    normalize_capture_rows(mapped, size.w as usize, size.h as usize, false)
+    consume_mapped(mapped, false);
+    if retain_normalized {
+        normalize_capture_rows(mapped, size.w as usize, size.h as usize, false).map(Some)
+    } else {
+        Ok(None)
+    }
 }
 
 fn capture_preview(renderer: &mut GlesRenderer, window: &Window) -> Option<PreviewFrame> {

@@ -18,9 +18,27 @@ use crate::NickelSession;
 
 const MAX_CAPTURE_SESSIONS: usize = 16;
 const MAX_PENDING_CAPTURE_FRAMES: usize = 32;
+const MAX_PENDING_CAPTURE_FRAMES_PER_OUTPUT: usize = 16;
+const MAX_PENDING_CAPTURE_FRAMES_PER_SESSION: usize = 4;
+const MAX_PENDING_CAPTURE_BYTES: usize = 256 * 1024 * 1024;
+const MAX_PENDING_CAPTURE_BYTES_PER_OUTPUT: usize = 128 * 1024 * 1024;
+const MAX_PENDING_CAPTURE_BYTES_PER_SESSION: usize = 64 * 1024 * 1024;
 const _: () = assert!(MAX_CAPTURE_SESSIONS > 0);
 const _: () = assert!(MAX_PENDING_CAPTURE_FRAMES >= MAX_CAPTURE_SESSIONS);
 const _: () = assert!(MAX_PENDING_CAPTURE_FRAMES <= 64);
+
+pub(crate) struct PendingImageCopyFrame {
+    output: Output,
+    session: SessionRef,
+    frame: Frame,
+    shared_bytes: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ImageCopyCaptureDiagnostics {
+    pub frames: usize,
+    pub shared_bytes: usize,
+}
 
 pub(crate) fn is_portal_capture_client(client: &Client) -> bool {
     client
@@ -46,29 +64,47 @@ impl NickelSession {
     pub(crate) fn has_pending_image_copy_frames(&self, output: &Output) -> bool {
         self.pending_image_copy_frames
             .iter()
-            .any(|(candidate, _)| candidate == output)
+            .any(|pending| pending.output == *output)
+    }
+
+    pub(crate) fn image_copy_capture_diagnostics(&self) -> ImageCopyCaptureDiagnostics {
+        ImageCopyCaptureDiagnostics {
+            frames: self.pending_image_copy_frames.len(),
+            shared_bytes: self
+                .pending_image_copy_frames
+                .iter()
+                .map(|pending| pending.shared_bytes)
+                .sum(),
+        }
     }
 
     pub(crate) fn complete_image_copy_frames(
         &mut self,
         output: &Output,
-        rgba: &[u8],
+        mapped: &[u8],
         width: usize,
         height: usize,
+        flipped: bool,
     ) {
         let mut remaining = Vec::with_capacity(self.pending_image_copy_frames.len());
         let mut ready = Vec::new();
-        for (candidate, frame) in self.pending_image_copy_frames.drain(..) {
-            if candidate == *output {
-                ready.push(frame);
+        for pending in self.pending_image_copy_frames.drain(..) {
+            if pending.output == *output {
+                ready.push(pending.frame);
             } else {
-                remaining.push((candidate, frame));
+                remaining.push(pending);
             }
         }
         self.pending_image_copy_frames = remaining;
+        let diagnostics = self.image_copy_capture_diagnostics();
+        tracing::debug!(
+            pending_frames = diagnostics.frames,
+            pending_shared_bytes = diagnostics.shared_bytes,
+            "retired completed image-copy frames"
+        );
 
         for frame in ready {
-            if copy_rgba_to_shm(&frame.buffer(), rgba, width, height).is_err() {
+            if copy_mapped_rgba_to_shm(&frame.buffer(), mapped, width, height, flipped).is_err() {
                 frame.fail(CaptureFailureReason::BufferConstraints);
                 continue;
             }
@@ -79,26 +115,44 @@ impl NickelSession {
 
     pub(crate) fn fail_image_copy_frames(&mut self, output: &Output, reason: CaptureFailureReason) {
         let mut remaining = Vec::with_capacity(self.pending_image_copy_frames.len());
-        for (candidate, frame) in self.pending_image_copy_frames.drain(..) {
-            if candidate == *output {
-                frame.fail(reason);
+        for pending in self.pending_image_copy_frames.drain(..) {
+            if pending.output == *output {
+                pending.frame.fail(reason);
             } else {
-                remaining.push((candidate, frame));
+                remaining.push(pending);
             }
         }
         self.pending_image_copy_frames = remaining;
+        let diagnostics = self.image_copy_capture_diagnostics();
+        tracing::debug!(
+            pending_frames = diagnostics.frames,
+            pending_shared_bytes = diagnostics.shared_bytes,
+            "retired failed image-copy frames"
+        );
+    }
+
+    pub(crate) fn fail_all_image_copy_frames(&mut self, reason: CaptureFailureReason) {
+        for pending in self.pending_image_copy_frames.drain(..) {
+            pending.frame.fail(reason);
+        }
+        tracing::debug!(
+            pending_frames = 0,
+            pending_shared_bytes = 0,
+            "retired all image-copy frames"
+        );
     }
 }
 
-fn copy_rgba_to_shm(
+fn copy_mapped_rgba_to_shm(
     buffer: &smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer,
-    rgba: &[u8],
+    mapped: &[u8],
     width: usize,
     height: usize,
+    flipped: bool,
 ) -> Result<(), ()> {
     let row_bytes = width.checked_mul(4).ok_or(())?;
     let source_bytes = row_bytes.checked_mul(height).ok_or(())?;
-    if rgba.len() < source_bytes {
+    if mapped.len() < source_bytes {
         return Err(());
     }
     smithay::wayland::shm::with_buffer_contents_mut(buffer, |pointer, pool_len, data| {
@@ -120,8 +174,13 @@ fn copy_rgba_to_shm(
             return Err(());
         }
         let mut converted = vec![0; row_bytes];
-        for row in 0..height {
-            let source = &rgba[row * row_bytes..(row + 1) * row_bytes];
+        for destination_y in 0..height {
+            let source_y = if flipped {
+                destination_y
+            } else {
+                height - 1 - destination_y
+            };
+            let source = &mapped[source_y * row_bytes..(source_y + 1) * row_bytes];
             let source = match data.format {
                 wl_shm::Format::Abgr8888 => source,
                 wl_shm::Format::Xbgr8888 => {
@@ -138,7 +197,7 @@ fn copy_rgba_to_shm(
                 }
                 _ => return Err(()),
             };
-            let destination = pointer.wrapping_add(offset + row * stride);
+            let destination = pointer.wrapping_add(offset + destination_y * stride);
             // SAFETY: both ranges were bounds-checked above, they do not overlap,
             // and no Rust reference is created to client-owned shared memory.
             unsafe { std::ptr::copy_nonoverlapping(source.as_ptr(), destination, row_bytes) };
@@ -221,27 +280,124 @@ impl ImageCopyCaptureHandler for NickelSession {
             frame.fail(CaptureFailureReason::Stopped);
             return;
         };
-        if self.pending_image_copy_frames.len() >= MAX_PENDING_CAPTURE_FRAMES {
+        let shared_bytes = estimated_shm_bytes(&frame.buffer()).unwrap_or(usize::MAX);
+        let diagnostics = self.image_copy_capture_diagnostics();
+        let output_bytes = self
+            .pending_image_copy_frames
+            .iter()
+            .filter(|pending| pending.output == output)
+            .map(|pending| pending.shared_bytes)
+            .sum::<usize>();
+        let output_frames = self
+            .pending_image_copy_frames
+            .iter()
+            .filter(|pending| pending.output == output)
+            .count();
+        let session_bytes = self
+            .pending_image_copy_frames
+            .iter()
+            .filter(|pending| pending.session == *session)
+            .map(|pending| pending.shared_bytes)
+            .sum::<usize>();
+        let session_frames = self
+            .pending_image_copy_frames
+            .iter()
+            .filter(|pending| pending.session == *session)
+            .count();
+        let over_limit = !capture_admitted(
+            diagnostics.frames,
+            diagnostics.shared_bytes,
+            output_frames,
+            output_bytes,
+            session_frames,
+            session_bytes,
+            shared_bytes,
+        );
+        if over_limit {
             tracing::warn!(
-                limit = MAX_PENDING_CAPTURE_FRAMES,
-                "rejecting image-copy frame at resource limit"
+                frames = diagnostics.frames,
+                shared_bytes = diagnostics.shared_bytes,
+                requested_shared_bytes = shared_bytes,
+                "rejecting image-copy frame at count or byte limit"
             );
             frame.fail(CaptureFailureReason::Unknown);
             return;
         }
-        self.pending_image_copy_frames.push((output, frame));
+        self.pending_image_copy_frames.push(PendingImageCopyFrame {
+            output,
+            session: session.clone(),
+            frame,
+            shared_bytes,
+        });
+        let diagnostics = self.image_copy_capture_diagnostics();
+        tracing::debug!(
+            pending_frames = diagnostics.frames,
+            pending_shared_bytes = diagnostics.shared_bytes,
+            "admitted image-copy frame"
+        );
         self.request_output_redraw();
     }
 
     fn session_destroyed(&mut self, session: SessionRef) {
+        let mut remaining = Vec::with_capacity(self.pending_image_copy_frames.len());
+        for pending in self.pending_image_copy_frames.drain(..) {
+            if pending.session == session {
+                pending.frame.fail(CaptureFailureReason::Stopped);
+            } else {
+                remaining.push(pending);
+            }
+        }
+        self.pending_image_copy_frames = remaining;
+        let diagnostics = self.image_copy_capture_diagnostics();
+        tracing::debug!(
+            pending_frames = diagnostics.frames,
+            pending_shared_bytes = diagnostics.shared_bytes,
+            "retired destroyed image-copy session"
+        );
         self.image_copy_sessions
             .retain(|candidate| candidate != &session);
     }
 }
 
+fn capture_admitted(
+    frames: usize,
+    total_bytes: usize,
+    output_frames: usize,
+    output_bytes: usize,
+    session_frames: usize,
+    session_bytes: usize,
+    requested_bytes: usize,
+) -> bool {
+    frames < MAX_PENDING_CAPTURE_FRAMES
+        && output_frames < MAX_PENDING_CAPTURE_FRAMES_PER_OUTPUT
+        && session_frames < MAX_PENDING_CAPTURE_FRAMES_PER_SESSION
+        && total_bytes.saturating_add(requested_bytes) <= MAX_PENDING_CAPTURE_BYTES
+        && output_bytes.saturating_add(requested_bytes) <= MAX_PENDING_CAPTURE_BYTES_PER_OUTPUT
+        && session_bytes.saturating_add(requested_bytes) <= MAX_PENDING_CAPTURE_BYTES_PER_SESSION
+}
+
+fn estimated_shm_bytes(
+    buffer: &smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer,
+) -> Option<usize> {
+    smithay::wayland::shm::with_buffer_contents(buffer, |_, pool_len, data| {
+        let offset = usize::try_from(data.offset).ok()?;
+        let stride = usize::try_from(data.stride).ok()?;
+        let height = usize::try_from(data.height).ok()?;
+        let end = offset.checked_add(stride.checked_mul(height)?)?;
+        (end <= pool_len).then_some(end - offset)
+    })
+    .ok()
+    .flatten()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{convert_rgba_row, portal_capture_executable};
+    use super::{
+        MAX_PENDING_CAPTURE_BYTES, MAX_PENDING_CAPTURE_BYTES_PER_OUTPUT,
+        MAX_PENDING_CAPTURE_BYTES_PER_SESSION, MAX_PENDING_CAPTURE_FRAMES,
+        MAX_PENDING_CAPTURE_FRAMES_PER_OUTPUT, MAX_PENDING_CAPTURE_FRAMES_PER_SESSION,
+        capture_admitted, convert_rgba_row, portal_capture_executable,
+    };
     use std::path::Path;
 
     #[test]
@@ -272,5 +428,73 @@ mod tests {
         assert!(!portal_capture_executable(Path::new(
             "/usr/bin/wayland-info"
         )));
+    }
+
+    #[test]
+    fn pending_capture_admission_enforces_every_independent_limit() {
+        assert!(capture_admitted(0, 0, 0, 0, 0, 0, 4096));
+        assert!(!capture_admitted(
+            MAX_PENDING_CAPTURE_FRAMES,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1
+        ));
+        assert!(!capture_admitted(
+            0,
+            MAX_PENDING_CAPTURE_BYTES,
+            0,
+            0,
+            0,
+            0,
+            1
+        ));
+        assert!(!capture_admitted(
+            0,
+            0,
+            MAX_PENDING_CAPTURE_FRAMES_PER_OUTPUT,
+            0,
+            0,
+            0,
+            1
+        ));
+        assert!(!capture_admitted(
+            0,
+            0,
+            0,
+            0,
+            MAX_PENDING_CAPTURE_FRAMES_PER_SESSION,
+            0,
+            1
+        ));
+        assert!(!capture_admitted(
+            0,
+            0,
+            0,
+            MAX_PENDING_CAPTURE_BYTES_PER_OUTPUT,
+            0,
+            0,
+            1
+        ));
+        assert!(!capture_admitted(
+            0,
+            0,
+            0,
+            0,
+            0,
+            MAX_PENDING_CAPTURE_BYTES_PER_SESSION,
+            1
+        ));
+        assert!(capture_admitted(
+            MAX_PENDING_CAPTURE_FRAMES - 1,
+            MAX_PENDING_CAPTURE_BYTES - 1,
+            MAX_PENDING_CAPTURE_FRAMES_PER_OUTPUT - 1,
+            MAX_PENDING_CAPTURE_BYTES_PER_OUTPUT - 1,
+            MAX_PENDING_CAPTURE_FRAMES_PER_SESSION - 1,
+            MAX_PENDING_CAPTURE_BYTES_PER_SESSION - 1,
+            1
+        ));
     }
 }

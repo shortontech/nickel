@@ -45,7 +45,7 @@ use smithay::{
         compositor::{CompositorClientState, CompositorState},
         idle_inhibit::IdleInhibitManagerState,
         image_capture_source::{ImageCaptureSourceState, OutputCaptureSourceState},
-        image_copy_capture::{Frame as ImageCopyFrame, ImageCopyCaptureState, Session},
+        image_copy_capture::{ImageCopyCaptureState, Session},
         input_method::InputMethodManagerState,
         output::OutputManagerState,
         pointer_constraints::PointerConstraintsState,
@@ -287,7 +287,7 @@ pub struct NickelSession {
     pub output_capture_source_state: OutputCaptureSourceState,
     pub image_copy_capture_state: ImageCopyCaptureState,
     pub image_copy_sessions: Vec<Session>,
-    pub pending_image_copy_frames: Vec<(Output, ImageCopyFrame)>,
+    pub(crate) pending_image_copy_frames: Vec<crate::handlers::PendingImageCopyFrame>,
     pub xwm: Option<(XwmId, X11Wm)>,
     pub xwayland_restart_pending: bool,
     pub xwayland_display: Option<u32>,
@@ -1910,6 +1910,10 @@ impl NickelSession {
     }
 
     pub(crate) fn stage_output_removal(&mut self, output: &Output) {
+        self.fail_image_copy_frames(
+            output,
+            smithay::wayland::image_copy_capture::CaptureFailureReason::Stopped,
+        );
         let Some(removed) = self.space.output_geometry(output) else {
             return;
         };
