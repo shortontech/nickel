@@ -1012,6 +1012,7 @@ impl NickelSession {
                     metadata_app_id_bytes: metadata.app_id_bytes as u64,
                     metadata_peak_app_id_bytes: metadata.peak_app_id_bytes as u64,
                     metadata_truncations: metadata.truncations,
+                    metadata_canonicalizations: metadata.canonicalizations,
                     metadata_updates: metadata.updates,
                     metadata_live_snapshot_bytes: metadata.live_snapshot_bytes as u64,
                     metadata_peak_snapshot_bytes: metadata.peak_snapshot_bytes as u64,

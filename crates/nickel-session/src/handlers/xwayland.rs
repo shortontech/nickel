@@ -32,7 +32,7 @@ use crate::{
     focus::KeyboardFocusTarget,
     grabs::{MoveSurfaceGrab, ResizeEdge, ResizeSurfaceGrab},
     handlers::{SelectionOwner, bounded_selection_mime_types},
-    window_registry::{WindowId, WindowMetadataSource},
+    window_registry::{WindowAdmission, WindowId, WindowMetadataSource},
 };
 
 fn x11_retirement_identities<K: Clone + Eq + Hash>(
@@ -53,6 +53,12 @@ fn x11_retirement_identities<K: Clone + Eq + Hash>(
 const XWAYLAND_RESTART_DELAY: Duration = Duration::from_secs(1);
 const DEFAULT_X11_WIDTH: i32 = 800;
 const DEFAULT_X11_HEIGHT: i32 = 600;
+
+fn admit_managed_x11_window(
+    windows: &mut crate::window_registry::WindowRegistry,
+) -> Option<WindowId> {
+    windows.insert(WindowAdmission::Ordinary)
+}
 
 fn x11_pointer_button(button: u32) -> Option<u32> {
     match button {
@@ -206,7 +212,7 @@ impl NickelSession {
         let window = Window::new_x11_window(surface.clone());
         self.space.map_element(window.clone(), geometry.loc, true);
         if managed {
-            let Some(id) = self.windows.insert() else {
+            let Some(id) = admit_managed_x11_window(&mut self.windows) else {
                 tracing::warn!(
                     window = surface.window_id(),
                     limit = nickel_session_protocol::MAX_WINDOWS,
@@ -785,6 +791,18 @@ mod tests {
                 "background X11 teardown changed Wayland focus while locked={locked}"
             );
         }
+    }
+
+    #[test]
+    fn managed_x11_admission_respects_the_ordinary_window_watermark() {
+        let mut windows = crate::window_registry::WindowRegistry::default();
+        let ordinary_capacity = nickel_session_protocol::MAX_WINDOWS
+            - crate::window_registry::RESERVED_AUTHENTICATED_SHELL_WINDOWS;
+        for _ in 0..ordinary_capacity {
+            assert!(admit_managed_x11_window(&mut windows).is_some());
+        }
+        assert_eq!(admit_managed_x11_window(&mut windows), None);
+        assert_eq!(windows.len(), ordinary_capacity);
     }
 
     #[test]

@@ -395,6 +395,7 @@ pub struct CacheDiagnostics {
     pub metadata_app_id_bytes: u64,
     pub metadata_peak_app_id_bytes: u64,
     pub metadata_truncations: u64,
+    pub metadata_canonicalizations: u64,
     pub metadata_updates: u64,
     pub metadata_live_snapshot_bytes: u64,
     pub metadata_peak_snapshot_bytes: u64,

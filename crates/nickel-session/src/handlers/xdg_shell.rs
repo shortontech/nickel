@@ -31,8 +31,19 @@ use crate::{
     focus::KeyboardFocusTarget,
     grabs::{MoveSurfaceGrab, ResizeSurfaceGrab},
     shell_layout,
-    window_registry::WindowMetadataSource,
+    window_registry::{WindowAdmission, WindowId, WindowMetadataSource, WindowRegistry},
 };
+
+fn admit_xdg_toplevel(
+    windows: &mut WindowRegistry,
+    authenticated_shell_client: bool,
+) -> Option<WindowId> {
+    windows.insert_inactive(if authenticated_shell_client {
+        WindowAdmission::AuthenticatedShell
+    } else {
+        WindowAdmission::Ordinary
+    })
+}
 
 fn is_codex_project_chat(app_id: Option<&str>) -> bool {
     app_id.is_some_and(|app_id| app_id.starts_with("io.nickel.codex.project."))
@@ -77,7 +88,7 @@ impl XdgShellHandler for NickelSession {
                     .same_client_as(&surface_id)
             });
         let cascade = i32::try_from(self.windows.len() % 8).unwrap_or(0) * 32;
-        let Some(id) = self.windows.insert_inactive() else {
+        let Some(id) = admit_xdg_toplevel(&mut self.windows, is_shell_client) else {
             tracing::warn!(
                 limit = nickel_session_protocol::MAX_WINDOWS,
                 "rejected XDG toplevel because the live window limit was reached"
@@ -699,10 +710,27 @@ impl NickelSession {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_codex_project_chat, new_toplevel_may_focus, shell_owned_window_is_application,
-        unauthenticated_reserved_shell_role,
+        admit_xdg_toplevel, is_codex_project_chat, new_toplevel_may_focus,
+        shell_owned_window_is_application, unauthenticated_reserved_shell_role,
     };
     use nickel_session_protocol::ShellRole;
+
+    #[test]
+    fn ordinary_exhaustion_preserves_critical_authenticated_shell_admission() {
+        let mut windows = crate::window_registry::WindowRegistry::default();
+        let reserved = crate::window_registry::RESERVED_AUTHENTICATED_SHELL_WINDOWS;
+        let ordinary_capacity = nickel_session_protocol::MAX_WINDOWS - reserved;
+
+        for _ in 0..ordinary_capacity {
+            assert!(admit_xdg_toplevel(&mut windows, false).is_some());
+        }
+        assert_eq!(admit_xdg_toplevel(&mut windows, false), None);
+        for _ in 0..reserved {
+            assert!(admit_xdg_toplevel(&mut windows, true).is_some());
+        }
+        assert_eq!(windows.len(), nickel_session_protocol::MAX_WINDOWS);
+        assert_eq!(admit_xdg_toplevel(&mut windows, true), None);
+    }
 
     #[test]
     fn codex_project_chat_uses_canonical_application_identity() {
