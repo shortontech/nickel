@@ -85,6 +85,7 @@ struct DeferredGlobalRetirements<T> {
 }
 
 struct DeferredGlobalRetirement<T> {
+    identity: String,
     deadline: Instant,
     disabled: bool,
     value: T,
@@ -92,8 +93,8 @@ struct DeferredGlobalRetirement<T> {
 
 #[derive(Debug, Eq, PartialEq)]
 enum GlobalRetirementAction<T> {
-    Disable(T),
-    Remove(T),
+    Disable { identity: String, value: T },
+    Remove { identity: String, value: T },
 }
 
 impl<T> Default for DeferredGlobalRetirements<T> {
@@ -109,11 +110,12 @@ impl<T> DeferredGlobalRetirements<T> {
         self.pending.len() < MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS
     }
 
-    fn defer(&mut self, now: Instant, value: T) -> Result<(), T> {
+    fn defer(&mut self, now: Instant, identity: String, value: T) -> Result<(), T> {
         if !self.has_capacity() {
             return Err(value);
         }
         self.pending.push_back(DeferredGlobalRetirement {
+            identity,
             deadline: now + OUTPUT_GLOBAL_BIND_SETTLE_GRACE,
             disabled: false,
             value,
@@ -131,11 +133,17 @@ impl<T> DeferredGlobalRetirements<T> {
             if pending.deadline > now {
                 retained.push_back(pending);
             } else if pending.disabled {
-                actions.push(GlobalRetirementAction::Remove(pending.value));
+                actions.push(GlobalRetirementAction::Remove {
+                    identity: pending.identity,
+                    value: pending.value,
+                });
             } else {
                 pending.disabled = true;
                 pending.deadline = now + OUTPUT_GLOBAL_DISABLED_GRACE;
-                actions.push(GlobalRetirementAction::Disable(pending.value.clone()));
+                actions.push(GlobalRetirementAction::Disable {
+                    identity: pending.identity.clone(),
+                    value: pending.value.clone(),
+                });
                 retained.push_back(pending);
             }
         }
@@ -145,6 +153,12 @@ impl<T> DeferredGlobalRetirements<T> {
 
     fn len(&self) -> usize {
         self.pending.len()
+    }
+
+    fn has_enabled_identity(&self, identity: &str) -> bool {
+        self.pending
+            .iter()
+            .any(|pending| !pending.disabled && pending.identity == identity)
     }
 }
 
@@ -413,7 +427,7 @@ pub struct NickelSession {
     pub preview_window: Option<Window>,
     pub server_decorated: HashSet<ObjectId>,
     pub primary_output_name: Option<String>,
-    virtual_test_outputs: HashMap<String, (Output, GlobalId)>,
+    virtual_test_outputs: HashMap<String, (Output, Option<GlobalId>)>,
     pending_output_global_retirements: DeferredGlobalRetirements<GlobalId>,
     pub preview_frames: HashMap<WindowId, PreviewFrame>,
     preview_spares: HashMap<WindowId, Vec<u8>>,
@@ -1083,33 +1097,73 @@ impl NickelSession {
         )
     }
 
-    pub(crate) fn defer_output_global_retirement(&mut self, global: GlobalId) {
-        self.defer_output_global_retirement_at(global, Instant::now());
+    pub(crate) fn defer_output_global_retirement(&mut self, identity: String, global: GlobalId) {
+        self.defer_output_global_retirement_at(identity, global, Instant::now());
     }
 
-    fn defer_output_global_retirement_at(&mut self, global: GlobalId, now: Instant) {
+    fn defer_output_global_retirement_at(
+        &mut self,
+        identity: String,
+        global: GlobalId,
+        now: Instant,
+    ) {
         self.pending_output_global_retirements
-            .defer(now, global)
+            .defer(now, identity, global)
             .expect("output-global admission keeps the retirement queue bounded");
+    }
+
+    pub(crate) fn output_global_identity_available(&self, identity: &str) -> bool {
+        !self
+            .pending_output_global_retirements
+            .has_enabled_identity(identity)
     }
 
     fn reap_output_global_retirements(&mut self, now: Instant) {
         let mut disabled = false;
+        let mut identities_to_publish = HashSet::new();
         for action in self.pending_output_global_retirements.advance(now) {
             match action {
-                GlobalRetirementAction::Disable(global) => {
-                    self.display_handle.disable_global::<NickelSession>(global);
+                GlobalRetirementAction::Disable { identity, value } => {
+                    self.display_handle.disable_global::<NickelSession>(value);
+                    identities_to_publish.insert(identity);
                     disabled = true;
                 }
-                GlobalRetirementAction::Remove(global) => {
-                    self.display_handle.remove_global::<NickelSession>(global);
+                GlobalRetirementAction::Remove { value, .. } => {
+                    self.display_handle.remove_global::<NickelSession>(value);
                 }
+            }
+        }
+        for identity in identities_to_publish {
+            if self.output_global_identity_available(&identity) {
+                self.publish_live_output_global(&identity);
             }
         }
         if disabled {
             let mut display = self.display_handle.clone();
             let _ = display.flush_clients();
         }
+    }
+
+    fn publish_live_output_global(&mut self, identity: &str) {
+        let virtual_output = self
+            .virtual_test_outputs
+            .get(identity)
+            .filter(|(_, global)| global.is_none())
+            .map(|(output, _)| output.clone());
+        #[cfg(feature = "backend-udev")]
+        let native_output = self.native_output_without_global(identity);
+        #[cfg(not(feature = "backend-udev"))]
+        let native_output: Option<Output> = None;
+        let Some(output) = virtual_output.or(native_output) else {
+            return;
+        };
+        let global = output.create_global::<NickelSession>(&self.display_handle);
+        if let Some((_, slot)) = self.virtual_test_outputs.get_mut(identity) {
+            *slot = Some(global);
+            return;
+        }
+        #[cfg(feature = "backend-udev")]
+        let _ = self.set_native_output_global(identity, global);
     }
 
     pub(crate) fn prune_dead_idle_inhibitors(&mut self) {
@@ -2149,7 +2203,9 @@ impl NickelSession {
                     Some(OutputScale::Fractional(scale)),
                     Some((x, 0).into()),
                 );
-                let global = output.create_global::<NickelSession>(&self.display_handle);
+                let global = self
+                    .output_global_identity_available(&name)
+                    .then(|| output.create_global::<NickelSession>(&self.display_handle));
                 self.space.map_output(&output, (x, 0));
                 self.restore_output_windows(&output);
                 self.virtual_test_outputs.insert(name, (output, global));
@@ -2161,7 +2217,9 @@ impl NickelSession {
                 self.stage_output_removal(&output);
                 self.space.unmap_output(&output);
                 output.leave_all();
-                self.defer_output_global_retirement(global);
+                if let Some(global) = global {
+                    self.defer_output_global_retirement(name.clone(), global);
+                }
                 self.reconcile_output_removal(&name);
                 self.rescue_stranded_windows();
                 self.relayout_maximized_windows();
@@ -5311,7 +5369,10 @@ mod protocol_tests {
         let started = Instant::now();
         let mut retirements = DeferredGlobalRetirements::default();
         for value in 0..MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS {
-            assert_eq!(retirements.defer(started, value), Ok(()));
+            assert_eq!(
+                retirements.defer(started, format!("output-{value}"), value),
+                Ok(())
+            );
         }
         assert_eq!(retirements.len(), MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS);
         assert!(!output_global_capacity_available(
@@ -5319,7 +5380,11 @@ mod protocol_tests {
             1,
         ));
         assert_eq!(
-            retirements.defer(started, MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS),
+            retirements.defer(
+                started,
+                "overflow".into(),
+                MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS,
+            ),
             Err(MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS)
         );
         assert!(
@@ -5331,7 +5396,10 @@ mod protocol_tests {
         assert_eq!(
             retirements.advance(started + OUTPUT_GLOBAL_BIND_SETTLE_GRACE),
             (0..MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS)
-                .map(GlobalRetirementAction::Disable)
+                .map(|value| GlobalRetirementAction::Disable {
+                    identity: format!("output-{value}"),
+                    value,
+                })
                 .collect::<Vec<_>>()
         );
         assert_eq!(retirements.len(), MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS);
@@ -5347,7 +5415,10 @@ mod protocol_tests {
             retirements
                 .advance(started + OUTPUT_GLOBAL_BIND_SETTLE_GRACE + OUTPUT_GLOBAL_DISABLED_GRACE,),
             (0..MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS)
-                .map(GlobalRetirementAction::Remove)
+                .map(|value| GlobalRetirementAction::Remove {
+                    identity: format!("output-{value}"),
+                    value,
+                })
                 .collect::<Vec<_>>()
         );
         assert_eq!(retirements.len(), 0);
@@ -5362,7 +5433,7 @@ mod protocol_tests {
                 + (OUTPUT_GLOBAL_BIND_SETTLE_GRACE + OUTPUT_GLOBAL_DISABLED_GRACE) * generation;
             for output in 0..MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS {
                 retirements
-                    .defer(cycle, (generation, output))
+                    .defer(cycle, format!("output-{output}"), (generation, output))
                     .expect("one admitted window of churn fits the bound");
             }
             assert!(!retirements.has_capacity());
@@ -5403,7 +5474,7 @@ mod protocol_tests {
         let retained = global.clone();
         let started = Instant::now();
 
-        session.defer_output_global_retirement_at(global, started);
+        session.defer_output_global_retirement_at("deferred-test".into(), global, started);
         let active = session
             .display_handle
             .backend_handle()
@@ -5448,6 +5519,127 @@ mod protocol_tests {
                 .global_info(retained)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn same_name_reconnect_waits_to_publish_until_the_old_global_is_disabled() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = preview_test_session();
+        let connect = || TestOutput::Connect {
+            name: "same".into(),
+            logical_width: 640,
+            logical_height: 480,
+            scale_120: 120,
+            transform: OutputTransform::Normal,
+        };
+
+        session.apply_test_output(connect()).unwrap();
+        let old = session.virtual_test_outputs["same"].1.clone().unwrap();
+        session
+            .apply_test_output(TestOutput::Disconnect {
+                name: "same".into(),
+            })
+            .unwrap();
+        session.apply_test_output(connect()).unwrap();
+
+        assert!(session.virtual_test_outputs["same"].1.is_none());
+        assert!(
+            !session
+                .display_handle
+                .backend_handle()
+                .global_info(old.clone())
+                .unwrap()
+                .disabled
+        );
+
+        session.reap_output_global_retirements(Instant::now() + OUTPUT_GLOBAL_BIND_SETTLE_GRACE);
+        assert!(
+            session
+                .display_handle
+                .backend_handle()
+                .global_info(old)
+                .unwrap()
+                .disabled
+        );
+        let replacement = session.virtual_test_outputs["same"].1.clone().unwrap();
+        assert!(
+            !session
+                .display_handle
+                .backend_handle()
+                .global_info(replacement)
+                .unwrap()
+                .disabled
+        );
+    }
+
+    #[test]
+    fn rapid_same_name_reconnect_keeps_only_the_latest_live_generation_unpublished() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = preview_test_session();
+        let connect = || TestOutput::Connect {
+            name: "repeat".into(),
+            logical_width: 640,
+            logical_height: 480,
+            scale_120: 120,
+            transform: OutputTransform::Normal,
+        };
+
+        session.apply_test_output(connect()).unwrap();
+        for _ in 0..64 {
+            session
+                .apply_test_output(TestOutput::Disconnect {
+                    name: "repeat".into(),
+                })
+                .unwrap();
+            session.apply_test_output(connect()).unwrap();
+            assert!(session.virtual_test_outputs["repeat"].1.is_none());
+            assert_eq!(session.pending_output_global_retirements.len(), 1);
+        }
+
+        let first_disable = Instant::now() + OUTPUT_GLOBAL_BIND_SETTLE_GRACE;
+        session.reap_output_global_retirements(first_disable);
+        assert!(session.virtual_test_outputs["repeat"].1.is_some());
+        assert_eq!(session.pending_output_global_retirements.len(), 1);
+
+        session
+            .apply_test_output(TestOutput::Disconnect {
+                name: "repeat".into(),
+            })
+            .unwrap();
+        session.apply_test_output(connect()).unwrap();
+        assert!(session.virtual_test_outputs["repeat"].1.is_none());
+        assert_eq!(session.pending_output_global_retirements.len(), 2);
+
+        let second_disable = first_disable + OUTPUT_GLOBAL_DISABLED_GRACE;
+        session.reap_output_global_retirements(second_disable);
+        assert!(session.virtual_test_outputs["repeat"].1.is_some());
+        assert_eq!(session.pending_output_global_retirements.len(), 1);
+        session.reap_output_global_retirements(second_disable + OUTPUT_GLOBAL_DISABLED_GRACE);
+        assert_eq!(session.pending_output_global_retirements.len(), 0);
+    }
+
+    #[test]
+    fn shutdown_drops_pending_and_unpublished_same_name_generations() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (event_loop, mut session) = preview_test_session();
+        let connect = || TestOutput::Connect {
+            name: "shutdown".into(),
+            logical_width: 640,
+            logical_height: 480,
+            scale_120: 120,
+            transform: OutputTransform::Normal,
+        };
+        session.apply_test_output(connect()).unwrap();
+        session
+            .apply_test_output(TestOutput::Disconnect {
+                name: "shutdown".into(),
+            })
+            .unwrap();
+        session.apply_test_output(connect()).unwrap();
+        assert_eq!(session.pending_output_global_retirements.len(), 1);
+        assert!(session.virtual_test_outputs["shutdown"].1.is_none());
+        drop(session);
+        drop(event_loop);
     }
 
     #[test]

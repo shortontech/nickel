@@ -795,6 +795,33 @@ fn select_primary_gpu(session: &LibSeatSession) -> Result<DrmNode, Box<dyn std::
 }
 
 impl NickelSession {
+    pub(crate) fn native_output_without_global(&self, identity: &str) -> Option<Output> {
+        self.native.as_ref().and_then(|native| {
+            native.devices.values().find_map(|device| {
+                device
+                    .surfaces
+                    .values()
+                    .find(|surface| surface.output.name() == identity && surface.global.is_none())
+                    .map(|surface| surface.output.clone())
+            })
+        })
+    }
+
+    pub(crate) fn set_native_output_global(&mut self, identity: &str, global: GlobalId) -> bool {
+        let Some(surface) = self.native.as_mut().and_then(|native| {
+            native.devices.values_mut().find_map(|device| {
+                device
+                    .surfaces
+                    .values_mut()
+                    .find(|surface| surface.output.name() == identity)
+            })
+        }) else {
+            return false;
+        };
+        surface.global = Some(global);
+        true
+    }
+
     fn discover_drm_device(&mut self, node: DrmNode, path: &Path) {
         let native = self.native.as_mut().expect("native backend should exist");
         let is_evdi = is_evdi_device(path);
@@ -1244,6 +1271,7 @@ impl NickelSession {
             None,
             Some((0, 0).into()),
         );
+        let publish_global = self.output_global_identity_available(&name);
         let native = self.native.as_mut().expect("native backend should exist");
         let device = native
             .devices
@@ -1287,7 +1315,8 @@ impl NickelSession {
             .expect("connected output should be in layout");
         let location = (position.x, position.y).into();
         output.change_current_state(None, None, None, Some(location));
-        let global = output.create_global::<NickelSession>(&self.display_handle);
+        let global =
+            publish_global.then(|| output.create_global::<NickelSession>(&self.display_handle));
         self.space.map_output(&output, location);
         for position in &positions {
             let mapped = {
@@ -1312,7 +1341,7 @@ impl NickelSession {
         device.surfaces.insert(
             crtc,
             SurfaceData {
-                global: Some(global),
+                global,
                 output: output.clone(),
                 drm,
                 background: SolidColorBuffer::new(
@@ -1352,7 +1381,7 @@ impl NickelSession {
             self.space.unmap_output(&surface.output);
             surface.output.leave_all();
             if let Some(global) = surface.global.take() {
-                self.defer_output_global_retirement(global);
+                self.defer_output_global_retirement(name.clone(), global);
             }
         }
         self.reconcile_output_removal(&name);
@@ -1464,7 +1493,7 @@ impl NickelSession {
         self.space.unmap_output(&surface.output);
         surface.output.leave_all();
         if let Some(global) = surface.global {
-            self.defer_output_global_retirement(global);
+            self.defer_output_global_retirement(name.to_owned(), global);
         }
         let output = surface.output;
         drop(surface.drm);
@@ -1559,11 +1588,12 @@ impl NickelSession {
             "removed DRM resource must have a lifecycle generation"
         );
         for mut surface in removed_surfaces.drain(..) {
+            let name = surface.output.name();
             self.stage_output_removal(&surface.output);
             self.space.unmap_output(&surface.output);
             surface.output.leave_all();
             if let Some(global) = surface.global.take() {
-                self.defer_output_global_retirement(global);
+                self.defer_output_global_retirement(name.clone(), global);
             }
         }
         for name in removed_names {
