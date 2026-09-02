@@ -339,6 +339,8 @@ pub struct NickelSession {
     virtual_test_outputs: HashMap<String, (Output, GlobalId)>,
     pub preview_frames: HashMap<WindowId, PreviewFrame>,
     pub preview_requests: HashSet<WindowId>,
+    preview_dirty: HashSet<WindowId>,
+    preview_counters: PreviewCacheCounters,
     pub hotkeys: CompositorShortcutAdapter,
     pub task_switcher: TaskSwitcher<WindowId>,
     pub workspaces: Workspaces<WindowId>,
@@ -380,6 +382,139 @@ pub struct PreviewFrame {
     pub width: u16,
     pub height: u16,
     pub rgba: Vec<u8>,
+}
+
+pub const PREVIEW_WIDTH: usize = 240;
+pub const PREVIEW_HEIGHT: usize = 135;
+pub const PREVIEW_FRAME_BYTES: usize = PREVIEW_WIDTH * PREVIEW_HEIGHT * 4;
+pub const PREVIEW_ENTRY_CAPACITY: usize = 7;
+pub const PREVIEW_BYTE_CAPACITY: usize = PREVIEW_ENTRY_CAPACITY * PREVIEW_FRAME_BYTES;
+
+fn bounded_preview_ids(ids: Vec<WindowId>, selected: usize) -> Vec<WindowId> {
+    let start = selected
+        .saturating_sub(PREVIEW_ENTRY_CAPACITY / 2)
+        .min(ids.len().saturating_sub(PREVIEW_ENTRY_CAPACITY));
+    ids.into_iter()
+        .skip(start)
+        .take(PREVIEW_ENTRY_CAPACITY)
+        .collect()
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct PreviewCacheCounters {
+    peak_bytes: u64,
+    admissions: u64,
+    evictions: u64,
+    invalidations: u64,
+    captures: u64,
+    skipped_unchanged: u64,
+    readback_bytes: u64,
+    protocol_copy_bytes: u64,
+}
+
+impl NickelSession {
+    pub(crate) fn preview_bytes(&self) -> usize {
+        self.preview_frames
+            .values()
+            .map(|frame| frame.rgba.len())
+            .sum()
+    }
+
+    fn retire_preview(&mut self, id: &WindowId) {
+        self.preview_requests.remove(id);
+        self.preview_dirty.remove(id);
+        if self.preview_frames.remove(id).is_some() {
+            self.preview_counters.evictions += 1;
+        }
+    }
+
+    fn replace_preview_requests(&mut self, ids: impl IntoIterator<Item = WindowId>) {
+        let admitted = ids
+            .into_iter()
+            .take(PREVIEW_ENTRY_CAPACITY)
+            .collect::<HashSet<_>>();
+        let retired = self
+            .preview_requests
+            .difference(&admitted)
+            .copied()
+            .collect::<Vec<_>>();
+        for id in retired {
+            self.retire_preview(&id);
+        }
+        for id in admitted.difference(&self.preview_requests) {
+            self.preview_counters.admissions += 1;
+            self.preview_dirty.insert(*id);
+        }
+        self.preview_requests = admitted;
+    }
+
+    pub(crate) fn invalidate_preview_for_surface(&mut self, surface: &WlSurface) {
+        let mut root = surface.clone();
+        while let Some(parent) = smithay::wayland::compositor::get_parent(&root) {
+            root = parent;
+        }
+        if let Some(id) = self.surface_windows.get(&root.id()).copied()
+            && self.preview_requests.contains(&id)
+            && self.preview_dirty.insert(id)
+        {
+            self.preview_counters.invalidations += 1;
+        }
+    }
+
+    pub(crate) fn preview_capture_candidates(&mut self) -> Vec<(WindowId, Window)> {
+        let requested = self.preview_requests.clone();
+        let dirty = self.preview_dirty.clone();
+        let mut candidates = Vec::new();
+        for window in self.space.elements() {
+            let Some(id) = window
+                .wl_surface()
+                .and_then(|surface| self.surface_windows.get(&surface.id()))
+                .copied()
+            else {
+                continue;
+            };
+            if !requested.contains(&id) {
+                continue;
+            }
+            if dirty.contains(&id) || !self.preview_frames.contains_key(&id) {
+                candidates.push((id, window.clone()));
+            } else {
+                self.preview_counters.skipped_unchanged += 1;
+            }
+        }
+        candidates
+    }
+
+    pub(crate) fn store_preview(&mut self, id: WindowId, frame: PreviewFrame) {
+        let replaced_bytes = self.preview_frames.get(&id).map_or(0, |old| old.rgba.len());
+        if !self.preview_requests.contains(&id)
+            || frame.rgba.len() != PREVIEW_FRAME_BYTES
+            || (self.preview_frames.len() >= PREVIEW_ENTRY_CAPACITY
+                && !self.preview_frames.contains_key(&id))
+            || self.preview_bytes().saturating_sub(replaced_bytes) + frame.rgba.len()
+                > PREVIEW_BYTE_CAPACITY
+        {
+            return;
+        }
+        self.preview_counters.captures += 1;
+        self.preview_counters.readback_bytes += frame.rgba.len() as u64;
+        self.preview_frames.insert(id, frame);
+        self.preview_dirty.remove(&id);
+        self.preview_counters.peak_bytes = self
+            .preview_counters
+            .peak_bytes
+            .max(self.preview_bytes() as u64);
+    }
+
+    fn clear_previews(&mut self) {
+        self.preview_counters.evictions += self.preview_frames.len() as u64;
+        self.preview_requests.clear();
+        self.preview_dirty.clear();
+        self.preview_frames.clear();
+        self.preview_frames.shrink_to_fit();
+        self.preview_requests.shrink_to_fit();
+        self.preview_dirty.shrink_to_fit();
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -759,6 +894,8 @@ impl NickelSession {
             virtual_test_outputs: HashMap::new(),
             preview_frames: HashMap::new(),
             preview_requests: HashSet::new(),
+            preview_dirty: HashSet::new(),
+            preview_counters: PreviewCacheCounters::default(),
             hotkeys: CompositorShortcutAdapter::default(),
             task_switcher: TaskSwitcher::default(),
             workspaces: Workspaces::default(),
@@ -1062,13 +1199,17 @@ impl NickelSession {
                     .unwrap_or_default();
                 ServerMessage::CacheDiagnostics(nickel_session_protocol::CacheDiagnostics {
                     preview_entries: u16::try_from(self.preview_frames.len()).unwrap_or(u16::MAX),
-                    preview_capacity: u16::try_from(nickel_session_protocol::MAX_WINDOWS)
-                        .unwrap_or(u16::MAX),
-                    preview_bytes: self
-                        .preview_frames
-                        .values()
-                        .map(|frame| frame.rgba.len() as u64)
-                        .sum(),
+                    preview_capacity: u16::try_from(PREVIEW_ENTRY_CAPACITY).unwrap_or(u16::MAX),
+                    preview_bytes: self.preview_bytes() as u64,
+                    preview_byte_capacity: PREVIEW_BYTE_CAPACITY as u64,
+                    preview_peak_bytes: self.preview_counters.peak_bytes,
+                    preview_admissions: self.preview_counters.admissions,
+                    preview_evictions: self.preview_counters.evictions,
+                    preview_invalidations: self.preview_counters.invalidations,
+                    preview_captures: self.preview_counters.captures,
+                    preview_skipped_unchanged: self.preview_counters.skipped_unchanged,
+                    preview_readback_bytes: self.preview_counters.readback_bytes,
+                    preview_protocol_copy_bytes: self.preview_counters.protocol_copy_bytes,
                     metadata_entries: u16::try_from(metadata.entries).unwrap_or(u16::MAX),
                     metadata_title_bytes: metadata.title_bytes as u64,
                     metadata_peak_title_bytes: metadata.peak_title_bytes as u64,
@@ -1134,15 +1275,10 @@ impl NickelSession {
                 if !self.windows.snapshot().iter().any(|entry| entry.id == id) {
                     return protocol_error(ErrorCode::InvalidWindow, "unknown window id");
                 }
-                if !self.preview_requests.contains(&id)
-                    && self.preview_requests.len() >= nickel_session_protocol::MAX_WINDOWS
-                {
-                    return protocol_error(ErrorCode::ResourceLimit, "preview cache is full");
-                }
-                self.preview_requests.insert(id);
                 let Some(frame) = self.preview_frames.get(&id) else {
                     return protocol_error(ErrorCode::InvalidRequest, "preview is not ready");
                 };
+                self.preview_counters.protocol_copy_bytes += frame.rgba.len() as u64;
                 let preview = ProtocolPreview {
                     window,
                     width: frame.width,
@@ -1229,7 +1365,7 @@ impl NickelSession {
                     self.show_context_menu(geometry.x, geometry.width, geometry.height, true)
                 }
                 ShellRole::Preview => {
-                    if windows.len() > nickel_session_protocol::MAX_WINDOWS {
+                    if windows.len() > PREVIEW_ENTRY_CAPACITY {
                         return protocol_error(
                             ErrorCode::ResourceLimit,
                             "too many preview windows",
@@ -1238,10 +1374,7 @@ impl NickelSession {
                     if windows.iter().any(|window| !self.window_exists(*window)) {
                         return protocol_error(ErrorCode::InvalidWindow, "unknown preview window");
                     }
-                    self.preview_requests =
-                        windows.iter().map(|window| WindowId(window.0)).collect();
-                    self.preview_frames
-                        .retain(|window, _| self.preview_requests.contains(window));
+                    self.replace_preview_requests(windows.iter().map(|window| WindowId(window.0)));
                     self.show_preview(geometry.x, geometry.width, geometry.height)
                 }
                 _ => {
@@ -3415,8 +3548,7 @@ impl NickelSession {
             self.space.unmap_elem(&window);
         }
         self.preview_highlight = None;
-        self.preview_requests.clear();
-        self.preview_frames.clear();
+        self.clear_previews();
         eprintln!("nickel-session: transient overlays hidden");
     }
 
@@ -3540,8 +3672,7 @@ impl NickelSession {
     }
 
     pub(crate) fn remove_window_from_switcher(&mut self, id: WindowId) {
-        self.preview_requests.remove(&id);
-        self.preview_frames.remove(&id);
+        self.retire_preview(&id);
         let effects = self.task_switcher.remove_candidate(&id);
         self.apply_task_switch_effects(effects);
     }
@@ -3571,11 +3702,20 @@ impl NickelSession {
     fn apply_task_switch_effects(&mut self, effects: Vec<TaskSwitchEffect<WindowId>>) {
         for effect in effects {
             match effect {
-                TaskSwitchEffect::RequestPreviews(ids) => self.preview_requests.extend(ids),
+                TaskSwitchEffect::RequestPreviews(ids) => {
+                    let ids = bounded_preview_ids(ids, self.task_switcher.selected_index());
+                    self.replace_preview_requests(ids);
+                }
                 TaskSwitchEffect::ActivateWindow(id) => self.activate_window(id),
-                TaskSwitchEffect::ShowFlip { .. }
-                | TaskSwitchEffect::SelectPreview(_)
-                | TaskSwitchEffect::HideFlip { .. } => {}
+                TaskSwitchEffect::ShowFlip { .. } => {}
+                TaskSwitchEffect::SelectPreview(_) => {
+                    let ids = bounded_preview_ids(
+                        self.task_switcher.candidates().to_vec(),
+                        self.task_switcher.selected_index(),
+                    );
+                    self.replace_preview_requests(ids);
+                }
+                TaskSwitchEffect::HideFlip { .. } => self.clear_previews(),
             }
         }
     }
@@ -4541,7 +4681,8 @@ impl ClientData for ClientState {
 #[cfg(test)]
 mod protocol_tests {
     use super::{
-        DisplacedWindow, RegisteredShellRole, ShellRegistrationRejection,
+        DisplacedWindow, PREVIEW_BYTE_CAPACITY, PREVIEW_ENTRY_CAPACITY, PREVIEW_FRAME_BYTES,
+        RegisteredShellRole, ShellRegistrationRejection, bounded_preview_ids,
         clamp_decorated_content_to_work_area, clamp_window_location,
         command_requires_shell_identity, drag_icon_location, identification_expiry_is_current,
         maximized_content_geometry, output_index_for_shell_surface, restored_drag_content_geometry,
@@ -4676,6 +4817,29 @@ mod protocol_tests {
         assert!(identification_expiry_is_current(7, 7));
         assert!(!identification_expiry_is_current(8, 7));
         assert!(!identification_expiry_is_current(7, 8));
+    }
+
+    #[test]
+    fn preview_workload_is_bounded_around_the_selected_window() {
+        let ids = (0..nickel_session_protocol::MAX_WINDOWS as u64)
+            .map(super::WindowId)
+            .collect::<Vec<_>>();
+        let admitted = bounded_preview_ids(ids, 500);
+
+        assert_eq!(admitted.len(), PREVIEW_ENTRY_CAPACITY);
+        assert!(admitted.contains(&super::WindowId(500)));
+        assert_eq!(
+            PREVIEW_BYTE_CAPACITY,
+            PREVIEW_ENTRY_CAPACITY * PREVIEW_FRAME_BYTES
+        );
+        assert_eq!(PREVIEW_BYTE_CAPACITY, 907_200);
+    }
+
+    #[test]
+    fn preview_workload_clamps_at_both_candidate_edges() {
+        let ids = (0..12).map(super::WindowId).collect::<Vec<_>>();
+        assert_eq!(bounded_preview_ids(ids.clone(), 0), ids[..7]);
+        assert_eq!(bounded_preview_ids(ids.clone(), 11), ids[5..]);
     }
 
     #[test]

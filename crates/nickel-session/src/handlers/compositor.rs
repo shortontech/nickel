@@ -46,6 +46,7 @@ impl CompositorHandler for NickelSession {
         on_commit_buffer_handler::<Self>(surface);
         let render_visible = commit_is_render_visible(is_sync_subsurface(surface));
         if render_visible {
+            self.invalidate_preview_for_surface(surface);
             let mut root = surface.clone();
             while let Some(parent) = get_parent(&root) {
                 root = parent;

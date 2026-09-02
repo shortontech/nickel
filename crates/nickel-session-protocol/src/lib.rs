@@ -389,6 +389,24 @@ pub struct CacheDiagnostics {
     pub preview_entries: u16,
     pub preview_capacity: u16,
     pub preview_bytes: u64,
+    #[serde(default)]
+    pub preview_byte_capacity: u64,
+    #[serde(default)]
+    pub preview_peak_bytes: u64,
+    #[serde(default)]
+    pub preview_admissions: u64,
+    #[serde(default)]
+    pub preview_evictions: u64,
+    #[serde(default)]
+    pub preview_invalidations: u64,
+    #[serde(default)]
+    pub preview_captures: u64,
+    #[serde(default)]
+    pub preview_skipped_unchanged: u64,
+    #[serde(default)]
+    pub preview_readback_bytes: u64,
+    #[serde(default)]
+    pub preview_protocol_copy_bytes: u64,
     pub metadata_entries: u16,
     pub metadata_title_bytes: u64,
     pub metadata_peak_title_bytes: u64,

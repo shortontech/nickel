@@ -1671,15 +1671,7 @@ impl NickelSession {
             let preview_windows = if self.locked {
                 Vec::new()
             } else {
-                self.space
-                    .elements()
-                    .filter_map(|window| {
-                        let id = self.surface_windows.get(&window.wl_surface()?.id())?;
-                        self.preview_requests
-                            .contains(id)
-                            .then(|| (*id, window.clone()))
-                    })
-                    .collect::<Vec<_>>()
+                self.preview_capture_candidates()
             };
             if surface.invalidate_pending {
                 surface
@@ -1727,7 +1719,7 @@ impl NickelSession {
             };
             for (id, window) in preview_windows {
                 if let Some(frame) = capture_preview(&mut renderer, &window) {
-                    self.preview_frames.insert(id, frame);
+                    self.store_preview(id, frame);
                 }
             }
             let mut elements: Vec<
@@ -2621,10 +2613,10 @@ fn task_switcher_buffer(
         let Some(frame) = state.preview_frames.get(&id) else {
             continue;
         };
-        let Some(source) = image::RgbaImage::from_raw(
+        let Some(source) = image::ImageBuffer::<image::Rgba<u8>, &[u8]>::from_raw(
             u32::from(frame.width),
             u32::from(frame.height),
-            frame.rgba.clone(),
+            frame.rgba.as_slice(),
         ) else {
             continue;
         };

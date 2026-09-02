@@ -488,22 +488,11 @@ pub fn init_winit(
 
                     if !state.locked && last_preview_capture.elapsed() >= Duration::from_millis(200)
                     {
-                        let windows: Vec<_> = state
-                            .space
-                            .elements()
-                            .filter(|window| !state.shell_windows().any(|shell| shell == *window))
-                            .filter_map(|window| {
-                                let id = state.surface_windows.get(&window.wl_surface()?.id())?;
-                                state
-                                    .preview_requests
-                                    .contains(id)
-                                    .then(|| (*id, window.clone()))
-                            })
-                            .collect();
+                        let windows = state.preview_capture_candidates();
                         let (renderer, _) = backend.bind().unwrap();
                         for (id, window) in windows {
                             if let Some(frame) = capture_preview(renderer, &window) {
-                                state.preview_frames.insert(id, frame);
+                                state.store_preview(id, frame);
                             }
                         }
                         last_preview_capture = Instant::now();
