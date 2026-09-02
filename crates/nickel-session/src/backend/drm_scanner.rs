@@ -86,6 +86,20 @@ impl DrmScanner {
         Ok(events)
     }
 
+    pub fn connected_connectors(
+        &self,
+    ) -> impl Iterator<Item = (&connector::Info, Option<crtc::Handle>)> {
+        self.connectors
+            .values()
+            .filter(|connector| connector.state() == connector::State::Connected)
+            .map(|connector| (connector, self.crtcs.get(&connector.handle()).copied()))
+    }
+
+    pub fn retry_connector(&mut self, handle: connector::Handle) {
+        self.connectors.remove(&handle);
+        self.crtcs.remove(&handle);
+    }
+
     fn assign_crtcs(&mut self, drm: &impl Device, connectors: &[connector::Info]) {
         let needs_crtc: Vec<_> = connectors
             .iter()
