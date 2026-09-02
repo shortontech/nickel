@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     ffi::OsString,
+    hash::Hash,
     os::fd::AsFd,
     os::fd::AsRawFd,
     os::unix::net::UnixDatagram,
@@ -307,7 +308,7 @@ pub struct NickelSession {
     launcher_subscribers: Vec<PathBuf>,
     protocol_token: String,
     authenticated_shell_pids: HashSet<u32>,
-    registered_shell_role_slots: Vec<(ShellRole, Option<String>)>,
+    registered_shell_role_slots: Vec<RegisteredShellRole>,
     last_logged_shell_readiness: Option<nickel_session_protocol::ShellReadinessSnapshot>,
     test_control_enabled: bool,
     #[cfg(target_os = "linux")]
@@ -377,6 +378,63 @@ struct DisplacedWindow {
     id: WindowId,
     relative_location: Point<i32, Logical>,
     rescue_location: Point<i32, Logical>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RegisteredShellRole {
+    role: ShellRole,
+    output: Option<String>,
+    surface: ObjectId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct LifecycleCollectionCounts {
+    pub pointer_hints: usize,
+    pub pointer_locks: usize,
+    pub pointer_origins: usize,
+    pub displaced_outputs: usize,
+    pub displaced_windows: usize,
+    pub shell_roles: usize,
+}
+
+fn retire_pointer_surface<K: Eq + Hash>(
+    hints: &mut HashMap<K, Point<f64, Logical>>,
+    locks: &mut HashSet<K>,
+    origins: &mut HashMap<K, Point<f64, Logical>>,
+    surface: &K,
+) {
+    hints.remove(surface);
+    locks.remove(surface);
+    origins.remove(surface);
+    if hints.is_empty() {
+        hints.shrink_to_fit();
+    }
+    if locks.is_empty() {
+        locks.shrink_to_fit();
+    }
+    if origins.is_empty() {
+        origins.shrink_to_fit();
+    }
+}
+
+fn retire_displaced_window(
+    outputs: &mut HashMap<String, Vec<DisplacedWindow>>,
+    window_id: WindowId,
+) {
+    for displaced in outputs.values_mut() {
+        displaced.retain(|window| window.id != window_id);
+    }
+    outputs.retain(|_, displaced| !displaced.is_empty());
+    if outputs.is_empty() {
+        outputs.shrink_to_fit();
+    }
+}
+
+fn retire_shell_surface(registrations: &mut Vec<RegisteredShellRole>, surface_id: &ObjectId) {
+    registrations.retain(|registration| registration.surface != *surface_id);
+    if registrations.is_empty() {
+        registrations.shrink_to_fit();
+    }
 }
 
 pub struct SurfaceBufferCommit {
@@ -1583,7 +1641,7 @@ impl NickelSession {
             u16::try_from(
                 self.registered_shell_role_slots
                     .iter()
-                    .filter(|(registered, _)| *registered == role)
+                    .filter(|registration| registration.role == role)
                     .count(),
             )
             .unwrap_or(u16::MAX)
@@ -1624,8 +1682,8 @@ impl NickelSession {
         let registered_role_outputs = |role| {
             self.registered_shell_role_slots
                 .iter()
-                .filter(|(registered, _)| *registered == role)
-                .filter_map(|(_, output)| output.clone())
+                .filter(|registration| registration.role == role)
+                .filter_map(|registration| registration.output.clone())
                 .collect::<HashSet<_>>()
         };
         let live_role_outputs = |role| {
@@ -2456,22 +2514,45 @@ impl NickelSession {
     }
 
     pub fn register_launcher(&mut self, window: Window) {
+        if let Some(previous) = self.launcher_window.clone()
+            && previous != window
+        {
+            self.retire_replaced_shell_window(previous);
+        }
         self.space.unmap_elem(&window);
         self.launcher_window = Some(window);
         self.apply_launcher_visibility(self.launcher_visibility.is_visible());
     }
 
+    fn retire_replaced_shell_window(&mut self, window: Window) {
+        self.space.unmap_elem(&window);
+        if let Some(toplevel) = window.toplevel() {
+            toplevel.send_close();
+        }
+        let surface_id = window.wl_surface().map(|surface| surface.id());
+        let window_id = surface_id
+            .as_ref()
+            .and_then(|surface| self.surface_windows.get(surface))
+            .copied();
+        self.retire_surface_window_references(surface_id.as_ref(), window_id);
+    }
+
     fn retire_shell_surface_roles(&mut self) {
         // A replacement shell generation must never expose the previous
-        // generation through the ordinary Space render/input paths. Keep the
-        // registry IDs shell-owned until destruction, but unmap and close all
-        // role surfaces atomically before dropping their role collections.
+        // generation through the ordinary Space render/input paths or retain
+        // its derived identity until a later destruction callback.
         let retired = self.shell_windows().cloned().collect::<Vec<_>>();
         for window in retired {
             self.space.unmap_elem(&window);
             if let Some(toplevel) = window.toplevel() {
                 toplevel.send_close();
             }
+            let surface_id = window.wl_surface().map(|surface| surface.id());
+            let window_id = surface_id
+                .as_ref()
+                .and_then(|surface| self.surface_windows.get(surface))
+                .copied();
+            self.retire_surface_window_references(surface_id.as_ref(), window_id);
         }
         self.launcher_window = None;
         self.desktop_windows.clear();
@@ -2481,6 +2562,140 @@ impl NickelSession {
         self.context_menu_window = None;
         self.preview_window = None;
         self.registered_shell_role_slots.clear();
+    }
+
+    /// Remove every derived reference owned for a surface/window identity.
+    ///
+    /// Destruction callbacks must use this operation instead of independently
+    /// editing lifecycle collections. X11 windows can lack a Wayland surface,
+    /// while shell surfaces can be retired before their client destroys the
+    /// underlying object, so both halves of the identity are optional.
+    pub(crate) fn retire_surface_window_references(
+        &mut self,
+        surface_id: Option<&ObjectId>,
+        window_id: Option<WindowId>,
+    ) {
+        if let Some(surface_id) = surface_id {
+            retire_pointer_surface(
+                &mut self.pointer_lock_hints,
+                &mut self.active_pointer_locks,
+                &mut self.active_pointer_constraint_origins,
+                surface_id,
+            );
+            self.server_decorated.remove(surface_id);
+            self.maximized_restore.remove(surface_id);
+            self.fullscreen_restore.remove(surface_id);
+            self.surface_windows.remove(surface_id);
+            retire_shell_surface(&mut self.registered_shell_role_slots, surface_id);
+            self.idle_inhibitors
+                .retain(|surface, _| surface.id() != *surface_id);
+            if self
+                .last_titlebar_click
+                .as_ref()
+                .is_some_and(|(surface, _, _)| surface == surface_id)
+            {
+                self.last_titlebar_click = None;
+            }
+
+            let matches_surface = |window: &Window| {
+                window
+                    .wl_surface()
+                    .is_some_and(|surface| surface.id() == *surface_id)
+            };
+            if self.launcher_window.as_ref().is_some_and(&matches_surface) {
+                self.launcher_window = None;
+                self.launcher_visibility.set(false);
+            }
+            self.desktop_windows
+                .retain(|window| !matches_surface(window));
+            self.panel_windows.retain(|window| !matches_surface(window));
+            self.lock_windows.retain(|window| !matches_surface(window));
+            self.utility_windows
+                .retain(|window| !matches_surface(window));
+            if self
+                .context_menu_window
+                .as_ref()
+                .is_some_and(&matches_surface)
+            {
+                self.context_menu_window = None;
+            }
+            if self.preview_window.as_ref().is_some_and(&matches_surface) {
+                self.preview_window = None;
+            }
+        }
+
+        if let Some(window_id) = window_id {
+            self.surface_windows
+                .retain(|_, retained| *retained != window_id);
+            self.shell_owned_windows.remove(&window_id);
+            self.minimized_windows.remove(&window_id);
+            self.workspace_hidden_windows.remove(&window_id);
+            self.workspaces.remove_window(&window_id);
+            self.remove_window_from_switcher(window_id);
+            self.windows.remove(window_id);
+            self.preview_highlight = self
+                .preview_highlight
+                .filter(|candidate| *candidate != window_id);
+            self.launcher_restore_window = self
+                .launcher_restore_window
+                .filter(|candidate| *candidate != window_id);
+            self.lock_restore_window = self
+                .lock_restore_window
+                .filter(|candidate| *candidate != window_id);
+            self.shell_focus_restore_window = self
+                .shell_focus_restore_window
+                .filter(|candidate| *candidate != window_id);
+            retire_displaced_window(&mut self.displaced_output_windows, window_id);
+        }
+
+        // Churn of dead identities must not retain admission-sized backing
+        // allocations once the logical collections return to baseline.
+        let counts = self.lifecycle_collection_counts();
+        tracing::trace!(
+            pointer_hints = counts.pointer_hints,
+            pointer_locks = counts.pointer_locks,
+            pointer_origins = counts.pointer_origins,
+            displaced_outputs = counts.displaced_outputs,
+            displaced_windows = counts.displaced_windows,
+            shell_roles = counts.shell_roles,
+            "retired session identity references"
+        );
+        debug_assert!(self.lifecycle_references_are_live());
+    }
+
+    pub(crate) fn lifecycle_collection_counts(&self) -> LifecycleCollectionCounts {
+        LifecycleCollectionCounts {
+            pointer_hints: self.pointer_lock_hints.len(),
+            pointer_locks: self.active_pointer_locks.len(),
+            pointer_origins: self.active_pointer_constraint_origins.len(),
+            displaced_outputs: self.displaced_output_windows.len(),
+            displaced_windows: self.displaced_output_windows.values().map(Vec::len).sum(),
+            shell_roles: self.registered_shell_role_slots.len(),
+        }
+    }
+
+    fn lifecycle_references_are_live(&self) -> bool {
+        let backend = self.display_handle.backend_handle();
+        let live_surface = |surface: &ObjectId| backend.object_info(surface.clone()).is_ok();
+        self.pointer_lock_hints.keys().all(live_surface)
+            && self.active_pointer_locks.iter().all(live_surface)
+            && self
+                .active_pointer_constraint_origins
+                .keys()
+                .all(live_surface)
+            && self
+                .registered_shell_role_slots
+                .iter()
+                .all(|registration| live_surface(&registration.surface))
+            && self
+                .surface_windows
+                .iter()
+                .all(|(surface, window)| live_surface(surface) && self.windows.contains(*window))
+            && self
+                .displaced_output_windows
+                .values()
+                .flatten()
+                .all(|displaced| self.windows.contains(displaced.id))
     }
 
     pub(crate) fn record_shell_role_registration(&mut self, window: &Window, role: ShellRole) {
@@ -2502,9 +2717,46 @@ impl NickelSession {
         {
             return;
         }
-        let slot = (role, output);
-        if !self.registered_shell_role_slots.contains(&slot) {
-            self.registered_shell_role_slots.push(slot);
+        let Some(surface) = window.wl_surface() else {
+            return;
+        };
+        let registration = RegisteredShellRole {
+            role,
+            output,
+            surface: surface.id(),
+        };
+        let replacements = self
+            .registered_shell_role_slots
+            .iter()
+            .filter(|existing| {
+                existing.role == registration.role
+                    && existing.output == registration.output
+                    && existing.surface != registration.surface
+            })
+            .map(|existing| existing.surface.clone())
+            .collect::<Vec<_>>();
+        for replaced_surface in replacements {
+            let window_id = self.surface_windows.get(&replaced_surface).copied();
+            let replaced_window = self
+                .shell_windows()
+                .find(|candidate| {
+                    candidate
+                        .wl_surface()
+                        .is_some_and(|surface| surface.id() == replaced_surface)
+                })
+                .cloned();
+            if let Some(replaced_window) = replaced_window {
+                self.retire_replaced_shell_window(replaced_window);
+            } else {
+                self.retire_surface_window_references(Some(&replaced_surface), window_id);
+            }
+        }
+        if !self
+            .registered_shell_role_slots
+            .iter()
+            .any(|existing| existing.surface == registration.surface)
+        {
+            self.registered_shell_role_slots.push(registration);
         }
     }
 
@@ -2697,7 +2949,7 @@ impl NickelSession {
             let output_count = self.space.outputs().count().max(1);
             while self.lock_windows.len() >= output_count {
                 let stale = self.lock_windows.remove(0);
-                self.space.unmap_elem(&stale);
+                self.retire_replaced_shell_window(stale);
             }
             self.lock_windows.push(window.clone());
         }
@@ -2840,11 +3092,21 @@ impl NickelSession {
     }
 
     pub fn register_context_menu(&mut self, window: Window) {
+        if let Some(previous) = self.context_menu_window.clone()
+            && previous != window
+        {
+            self.retire_replaced_shell_window(previous);
+        }
         window.override_z_index(50);
         self.context_menu_window = Some(window);
     }
 
     pub fn register_preview(&mut self, window: Window) {
+        if let Some(previous) = self.preview_window.clone()
+            && previous != window
+        {
+            self.retire_replaced_shell_window(previous);
+        }
         window.override_z_index(49);
         self.preview_window = Some(window);
     }
@@ -4074,17 +4336,83 @@ impl ClientData for ClientState {
 #[cfg(test)]
 mod protocol_tests {
     use super::{
-        ShellRegistrationRejection, clamp_decorated_content_to_work_area, clamp_window_location,
+        DisplacedWindow, RegisteredShellRole, ShellRegistrationRejection,
+        clamp_decorated_content_to_work_area, clamp_window_location,
         command_requires_shell_identity, drag_icon_location, maximized_content_geometry,
         output_index_for_shell_surface, restored_drag_content_geometry,
-        retain_live_idle_inhibitors, shell_registration_rejection,
-        shell_role_accepts_ordinary_focus, shell_surface_output_from_title,
-        test_control_may_invoke,
+        retain_live_idle_inhibitors, retire_displaced_window, retire_pointer_surface,
+        retire_shell_surface, shell_registration_rejection, shell_role_accepts_ordinary_focus,
+        shell_surface_output_from_title, test_control_may_invoke,
     };
     use crate::shell_layout::Geometry;
     use nickel_session_protocol::{Command, SessionAction, ShellRole};
-    use smithay::utils::Point;
-    use std::collections::HashMap;
+    use smithay::{reexports::wayland_server::backend::ObjectId, utils::Point};
+    use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn pointer_identity_churn_returns_all_collections_to_baseline() {
+        let mut hints = HashMap::new();
+        let mut locks = HashSet::new();
+        let mut origins = HashMap::new();
+
+        for surface in 0_u16..300 {
+            hints.insert(surface, Point::from((1.0, 2.0)));
+            locks.insert(surface);
+            origins.insert(surface, Point::from((3.0, 4.0)));
+            retire_pointer_surface(&mut hints, &mut locks, &mut origins, &surface);
+            assert!(hints.is_empty());
+            assert!(locks.is_empty());
+            assert!(origins.is_empty());
+        }
+
+        assert_eq!(hints.capacity(), 0);
+        assert_eq!(locks.capacity(), 0);
+        assert_eq!(origins.capacity(), 0);
+        hints.insert(301, Point::from((5.0, 6.0)));
+        assert_eq!(hints.len(), 1, "new hints remain admissible after churn");
+    }
+
+    #[test]
+    fn closed_displaced_windows_do_not_preserve_output_history() {
+        let mut outputs = HashMap::new();
+        for index in 0_u64..300 {
+            let id = super::WindowId(index + 1);
+            outputs.insert(
+                format!("virtual-{index}"),
+                vec![DisplacedWindow {
+                    id,
+                    relative_location: Point::from((10, 20)),
+                    rescue_location: Point::from((30, 40)),
+                }],
+            );
+            retire_displaced_window(&mut outputs, id);
+            assert!(outputs.is_empty());
+        }
+        assert_eq!(outputs.capacity(), 0);
+    }
+
+    #[test]
+    fn destroying_a_shell_surface_retires_only_its_registration() {
+        let retired = ObjectId::null();
+        let retained = retired.clone();
+        let mut registrations = vec![RegisteredShellRole {
+            role: ShellRole::Launcher,
+            output: None,
+            surface: retired.clone(),
+        }];
+        retire_shell_surface(&mut registrations, &retired);
+        assert!(registrations.is_empty());
+        assert_eq!(registrations.capacity(), 0);
+
+        // Re-registration after independent destruction is not blocked by a
+        // historical singleton slot.
+        registrations.push(RegisteredShellRole {
+            role: ShellRole::Launcher,
+            output: None,
+            surface: retained,
+        });
+        assert_eq!(registrations.len(), 1);
+    }
 
     #[test]
     fn only_the_exact_supervised_shell_pid_can_register() {

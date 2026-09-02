@@ -226,16 +226,12 @@ impl NickelSession {
         if let Some(window) = self.x11_window(surface) {
             self.space.unmap_elem(&window);
         }
-        if let Some(id) = self.x11_windows.remove(&surface.window_id()) {
-            let restore_focus = self.windows.is_active(id);
-            self.workspace_hidden_windows.remove(&id);
-            self.workspaces.remove_window(&id);
-            self.windows.remove(id);
-            self.remove_window_from_switcher(id);
+        let window_id = self.x11_windows.remove(&surface.window_id());
+        let restore_focus = window_id.is_some_and(|id| self.windows.is_active(id));
+        let surface_id = surface.wl_surface().map(|surface| surface.id());
+        self.retire_surface_window_references(surface_id.as_ref(), window_id);
+        if window_id.is_some() {
             self.restore_focus_after_window_removal(restore_focus);
-        }
-        if let Some(wl_surface) = surface.wl_surface() {
-            self.surface_windows.remove(&wl_surface.id());
         }
         self.request_output_redraw();
         self.notify_protocol_snapshot();

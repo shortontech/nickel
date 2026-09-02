@@ -98,6 +98,10 @@ impl WindowRegistry {
         self.windows.get(&id).is_some_and(|window| window.active)
     }
 
+    pub fn contains(&self, id: WindowId) -> bool {
+        self.windows.contains_key(&id)
+    }
+
     pub fn title(&self, id: WindowId) -> Option<&str> {
         self.windows.get(&id).map(|window| window.title.as_str())
     }

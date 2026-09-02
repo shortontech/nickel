@@ -9,7 +9,7 @@ use smithay::{
         idle_inhibit::IdleInhibitHandler,
         input_method::{InputMethodHandler, PopupSurface},
         pointer_constraints::{
-            PointerConstraint, PointerConstraintsHandler, with_pointer_constraint,
+            ConstraintRemove, PointerConstraint, PointerConstraintsHandler, with_pointer_constraint,
         },
         seat::WaylandFocus,
         selection::primary_selection::{PrimarySelectionHandler, PrimarySelectionState},
@@ -306,6 +306,22 @@ impl PointerConstraintsHandler for NickelSession {
             if activated_lock {
                 self.remember_active_pointer_lock(surface);
             }
+        }
+    }
+
+    fn remove_constraint(
+        &mut self,
+        surface: &WlSurface,
+        _pointer: &PointerHandle<Self>,
+        _constraint_remove: ConstraintRemove,
+    ) {
+        // A constraint object can be destroyed while its surface remains live;
+        // in that case the pending lock hint is intentionally consumed by the
+        // normal unlock path. A dead surface has no future motion path, so its
+        // identity must be retired here (including for constrained subsurfaces).
+        if !surface.is_alive() {
+            let surface_id = surface.id();
+            self.retire_surface_window_references(Some(&surface_id), None);
         }
     }
 

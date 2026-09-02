@@ -142,43 +142,13 @@ impl XdgShellHandler for NickelSession {
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
-        self.forget_toplevel_geometry(&surface);
-        if self
-            .launcher_window
-            .as_ref()
-            .is_some_and(|window| window.toplevel().unwrap().wl_surface() == surface.wl_surface())
-        {
-            self.launcher_window = None;
-            self.launcher_visibility.set(false);
-        }
-        self.panel_windows
-            .retain(|window| window.toplevel().unwrap().wl_surface() != surface.wl_surface());
-        self.desktop_windows
-            .retain(|window| window.toplevel().unwrap().wl_surface() != surface.wl_surface());
-        self.utility_windows
-            .retain(|window| window.toplevel().unwrap().wl_surface() != surface.wl_surface());
-        self.server_decorated.remove(&surface.wl_surface().id());
-        if self
-            .context_menu_window
-            .as_ref()
-            .is_some_and(|window| window.toplevel().unwrap().wl_surface() == surface.wl_surface())
-        {
-            self.context_menu_window = None;
-        }
-        if self
-            .preview_window
-            .as_ref()
-            .is_some_and(|window| window.toplevel().unwrap().wl_surface() == surface.wl_surface())
-        {
-            self.preview_window = None;
-        }
-        if let Some(id) = self.surface_windows.remove(&surface.wl_surface().id()) {
-            let restore_focus = self.windows.is_active(id) && !self.shell_owned_windows.remove(&id);
-            self.minimized_windows.remove(&id);
-            self.workspace_hidden_windows.remove(&id);
-            self.workspaces.remove_window(&id);
-            self.remove_window_from_switcher(id);
-            self.windows.remove(id);
+        let surface_id = surface.wl_surface().id();
+        let window_id = self.surface_windows.get(&surface_id).copied();
+        let restore_focus = window_id.is_some_and(|id| {
+            self.windows.is_active(id) && !self.shell_owned_windows.contains(&id)
+        });
+        self.retire_surface_window_references(Some(&surface_id), window_id);
+        if window_id.is_some() {
             self.restore_focus_after_window_removal(restore_focus);
         }
         self.notify_protocol_snapshot();
