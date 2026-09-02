@@ -773,7 +773,10 @@ mod tests {
 
         for locked in [false, true] {
             session.locked = locked;
-            let background = session.windows.insert_inactive();
+            let background = session
+                .windows
+                .insert_inactive(WindowAdmission::Ordinary)
+                .expect("background X11 test window should be admitted");
             session
                 .x11_windows
                 .insert(70 + u32::from(locked), background);
