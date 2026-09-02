@@ -507,7 +507,7 @@ pub fn init_winit(
                                 state.preview_capture_failed(id, rgba, had_frame);
                             }
                         }
-                        state.advance_preview_retry_generation();
+                        state.schedule_preview_retry();
                         last_preview_capture = Instant::now();
                     }
 
@@ -788,10 +788,11 @@ fn capture_preview(renderer: &mut GlesRenderer, window: &Window, rgba: &mut Vec<
         let mapping = renderer
             .copy_framebuffer(&framebuffer, buffer_region, Fourcc::Abgr8888)
             .ok()?;
-        let replacement = crate::state::reuse_preview_pixels(
-            std::mem::take(rgba),
-            renderer.map_texture(&mapping).ok()?,
-        );
+        let mapped = renderer.map_texture(&mapping).ok()?;
+        if !crate::state::preview_mapping_has_exact_size(mapped) {
+            return None;
+        }
+        let replacement = crate::state::reuse_preview_pixels(std::mem::take(rgba), mapped);
         *rgba = replacement;
         Some(())
     })()

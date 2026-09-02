@@ -808,7 +808,7 @@ impl NickelSession {
         );
     }
 
-    pub(crate) fn render_all_outputs(&mut self) {
+    pub(crate) fn render_all_outputs_once(&mut self) {
         let wave = self.begin_preview_render_wave();
         let nodes = self
             .native
@@ -818,6 +818,15 @@ impl NickelSession {
         for node in &nodes {
             self.render_node_in_wave(*node, wave);
         }
+    }
+
+    pub(crate) fn render_all_outputs(&mut self) {
+        self.render_all_outputs_once();
+        let nodes = self
+            .native
+            .as_ref()
+            .map(|native| native.devices.keys().copied().collect::<Vec<_>>())
+            .unwrap_or_default();
         let timer = Timer::from_duration(Duration::from_millis(3050));
         let _ = self
             .event_loop_handle
@@ -1611,22 +1620,6 @@ impl NickelSession {
             });
     }
 
-    fn schedule_preview_retry(&mut self) {
-        if self.preview_retry_is_scheduled() {
-            return;
-        }
-        self.mark_preview_retry_scheduled();
-        let timer = Timer::from_duration(Duration::from_millis(16));
-        let _ = self
-            .event_loop_handle
-            .insert_source(timer, move |_, _, data| {
-                if data.advance_preview_retry_generation() {
-                    data.render_all_outputs();
-                }
-                TimeoutAction::Drop
-            });
-    }
-
     fn reflow_windows_to_connected_outputs(&mut self) {
         let output_geometries: Vec<_> = self
             .space
@@ -2296,9 +2289,7 @@ impl NickelSession {
             Some((output, retry || preview_retry))
         })();
         self.native = Some(native);
-        if self.preview_retry_is_pending() {
-            self.schedule_preview_retry();
-        }
+        self.schedule_preview_retry();
         let Some((output, retry)) = rendered else {
             return;
         };
@@ -2813,10 +2804,11 @@ fn capture_preview(
         let mapping = renderer
             .copy_framebuffer(&framebuffer, region, Fourcc::Abgr8888)
             .ok()?;
-        let replacement = crate::state::reuse_preview_pixels(
-            std::mem::take(rgba),
-            renderer.map_texture(&mapping).ok()?,
-        );
+        let mapped = renderer.map_texture(&mapping).ok()?;
+        if !crate::state::preview_mapping_has_exact_size(mapped) {
+            return None;
+        }
+        let replacement = crate::state::reuse_preview_pixels(std::mem::take(rgba), mapped);
         *rgba = replacement;
         Some(())
     })()

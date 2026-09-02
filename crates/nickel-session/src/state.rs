@@ -347,7 +347,8 @@ pub struct NickelSession {
     preview_attempted: HashMap<WindowId, (u64, u64)>,
     preview_render_wave: u64,
     preview_retry_pending: HashSet<WindowId>,
-    preview_retry_scheduled: bool,
+    preview_retry_scheduled: Option<u64>,
+    preview_retry_epoch: u64,
     preview_counters: PreviewCacheCounters,
     pub hotkeys: CompositorShortcutAdapter,
     pub task_switcher: TaskSwitcher<WindowId>,
@@ -463,6 +464,10 @@ pub(crate) fn reuse_preview_pixels(mut rgba: Vec<u8>, mapped: &[u8]) -> Vec<u8> 
     rgba
 }
 
+pub(crate) fn preview_mapping_has_exact_size(mapped: &[u8]) -> bool {
+    mapped.len() == PREVIEW_FRAME_BYTES
+}
+
 fn record_preview_capture_attempt(
     attempted: &mut HashMap<WindowId, (u64, u64)>,
     id: WindowId,
@@ -498,6 +503,13 @@ struct PreviewCacheCounters {
 }
 
 impl NickelSession {
+    fn update_preview_peak_bytes(&mut self) {
+        self.preview_counters.peak_bytes = self
+            .preview_counters
+            .peak_bytes
+            .max(self.preview_bytes() as u64);
+    }
+
     pub(crate) fn preview_bytes(&self) -> usize {
         self.preview_frames
             .values()
@@ -537,6 +549,12 @@ impl NickelSession {
             &self.preview_switcher_interest,
             &self.preview_overlay_interest,
         );
+        if admitted != self.preview_admitted {
+            self.preview_retry_epoch = self.preview_retry_epoch.wrapping_add(1).max(1);
+            self.preview_retry_scheduled = None;
+            self.preview_retry_pending
+                .retain(|id| admitted.contains(id));
+        }
         let retired = retired_preview_ids(&self.preview_admitted, &admitted);
         for id in retired {
             self.drop_preview_frame(&id);
@@ -551,6 +569,7 @@ impl NickelSession {
             );
         }
         self.preview_admitted = admitted;
+        self.schedule_preview_retry();
     }
 
     fn set_switcher_preview_interest(&mut self, ids: Vec<WindowId>) {
@@ -694,6 +713,7 @@ impl NickelSession {
             self.preview_spares.insert(id, rgba);
         }
         self.preview_retry_pending.insert(id);
+        self.update_preview_peak_bytes();
     }
 
     pub(crate) fn preview_renderer_failed(&mut self, id: WindowId) {
@@ -703,7 +723,7 @@ impl NickelSession {
 
     pub(crate) fn advance_preview_retry_generation(&mut self) -> bool {
         let pending = std::mem::take(&mut self.preview_retry_pending);
-        self.preview_retry_scheduled = false;
+        self.preview_retry_scheduled = None;
         for id in pending.iter().copied() {
             advance_preview_content_generation(
                 &mut self.preview_content_generation,
@@ -714,16 +734,30 @@ impl NickelSession {
         !pending.is_empty()
     }
 
-    pub(crate) fn preview_retry_is_scheduled(&self) -> bool {
-        self.preview_retry_scheduled
-    }
-
-    pub(crate) fn preview_retry_is_pending(&self) -> bool {
-        !self.preview_retry_pending.is_empty()
-    }
-
-    pub(crate) fn mark_preview_retry_scheduled(&mut self) {
-        self.preview_retry_scheduled = true;
+    pub(crate) fn schedule_preview_retry(&mut self) {
+        if self.preview_retry_pending.is_empty() || self.preview_retry_scheduled.is_some() {
+            return;
+        }
+        let epoch = self.preview_retry_epoch;
+        let timer = Timer::from_duration(std::time::Duration::from_millis(16));
+        match self
+            .event_loop_handle
+            .insert_source(timer, move |_, _, data| {
+                if data.preview_retry_epoch == epoch
+                    && data.preview_retry_scheduled == Some(epoch)
+                    && data.advance_preview_retry_generation()
+                {
+                    data.request_output_redraw();
+                    #[cfg(feature = "backend-udev")]
+                    if data.native.is_some() {
+                        data.render_all_outputs_once();
+                    }
+                }
+                TimeoutAction::Drop
+            }) {
+            Ok(_) => self.preview_retry_scheduled = Some(epoch),
+            Err(error) => tracing::warn!(?error, "failed to schedule preview capture retry"),
+        }
     }
 
     fn record_preview_protocol_encoding(&mut self, json_payload_bytes: usize, framed_bytes: usize) {
@@ -733,16 +767,11 @@ impl NickelSession {
     }
 
     pub(crate) fn store_preview(&mut self, id: WindowId, frame: PreviewFrame) {
-        let replaced_bytes = self.preview_frames.get(&id).map_or(0, |old| old.rgba.len());
-        if !self.preview_admitted.contains(&id)
-            || frame.rgba.len() != PREVIEW_FRAME_BYTES
-            || (self.preview_frames.len() >= PREVIEW_ENTRY_CAPACITY
-                && !self.preview_frames.contains_key(&id))
-            || self.preview_bytes().saturating_sub(replaced_bytes) + frame.rgba.len()
-                > PREVIEW_BYTE_CAPACITY
-        {
-            return;
-        }
+        // Capture leases are created only for admitted IDs after the byte/entry ceiling has
+        // already been reconciled. No event dispatch can change admission while the synchronous
+        // renderer call owns the lease, so commit is intentionally infallible.
+        assert!(self.preview_admitted.contains(&id));
+        assert_eq!(frame.rgba.len(), PREVIEW_FRAME_BYTES);
         self.preview_counters.captures += 1;
         self.preview_counters.cache_generation = self
             .preview_counters
@@ -754,10 +783,7 @@ impl NickelSession {
         self.preview_spares.remove(&id);
         self.preview_dirty.remove(&id);
         self.preview_attempted.remove(&id);
-        self.preview_counters.peak_bytes = self
-            .preview_counters
-            .peak_bytes
-            .max(self.preview_bytes() as u64);
+        self.update_preview_peak_bytes();
     }
 
     fn clear_all_previews(&mut self) {
@@ -772,7 +798,8 @@ impl NickelSession {
         self.preview_frames.clear();
         self.preview_spares.clear();
         self.preview_retry_pending.clear();
-        self.preview_retry_scheduled = false;
+        self.preview_retry_epoch = self.preview_retry_epoch.wrapping_add(1).max(1);
+        self.preview_retry_scheduled = None;
         self.preview_frames.shrink_to_fit();
         self.preview_spares.shrink_to_fit();
         self.preview_switcher_interest.shrink_to_fit();
@@ -1174,7 +1201,8 @@ impl NickelSession {
             preview_attempted: HashMap::new(),
             preview_render_wave: 0,
             preview_retry_pending: HashSet::new(),
-            preview_retry_scheduled: false,
+            preview_retry_scheduled: None,
+            preview_retry_epoch: 1,
             preview_counters: PreviewCacheCounters::default(),
             hotkeys: CompositorShortcutAdapter::default(),
             task_switcher: TaskSwitcher::default(),
@@ -4997,12 +5025,12 @@ mod protocol_tests {
         bounded_preview_ids, clamp_decorated_content_to_work_area, clamp_window_location,
         command_requires_shell_identity, drag_icon_location, identification_expiry_is_current,
         maximized_content_geometry, output_index_for_shell_surface, preview_capture_attempt_due,
-        protocol_preview_from_cached, record_preview_capture_attempt,
-        restored_drag_content_geometry, retain_live_idle_inhibitors, retire_displaced_window,
-        retire_pointer_surface, retire_shell_surface, reuse_preview_pixels,
-        shell_registration_rejection, shell_registration_role_changed,
-        shell_role_accepts_ordinary_focus, shell_surface_output_from_title,
-        test_control_may_invoke,
+        preview_mapping_has_exact_size, protocol_preview_from_cached,
+        record_preview_capture_attempt, restored_drag_content_geometry,
+        retain_live_idle_inhibitors, retire_displaced_window, retire_pointer_surface,
+        retire_shell_surface, reuse_preview_pixels, shell_registration_rejection,
+        shell_registration_role_changed, shell_role_accepts_ordinary_focus,
+        shell_surface_output_from_title, test_control_may_invoke,
     };
     use crate::shell_layout::Geometry;
     use nickel_session_protocol::{
@@ -5175,6 +5203,64 @@ mod protocol_tests {
         assert_eq!(session.preview_frames[&id].rgba[0], 41);
         assert_eq!(session.preview_counters.evictions, 0);
         assert_eq!(session.preview_counters.capture_failures, 1);
+    }
+
+    #[test]
+    fn fourteen_first_capture_failures_retain_exactly_the_declared_capacity() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = preview_test_session();
+        let ids = (0..PREVIEW_ENTRY_CAPACITY)
+            .map(|_| session.windows.insert())
+            .collect::<Vec<_>>();
+        session.preview_admitted.extend(ids.iter().copied());
+        for id in ids {
+            let (rgba, had_frame) = session.take_preview_capture_buffer(id);
+            assert!(!had_frame);
+            session.preview_capture_failed(id, rgba, false);
+        }
+
+        assert_eq!(session.preview_bytes(), PREVIEW_BYTE_CAPACITY);
+        assert_eq!(
+            session.preview_counters.peak_bytes,
+            PREVIEW_BYTE_CAPACITY as u64
+        );
+        assert_eq!(session.preview_spares.len(), PREVIEW_ENTRY_CAPACITY);
+    }
+
+    #[test]
+    fn invalid_mapped_length_leaves_the_capture_lease_untouched() {
+        let pixels = vec![23; PREVIEW_FRAME_BYTES];
+        let allocation = pixels.as_ptr();
+        assert!(!preview_mapping_has_exact_size(&vec![
+            0;
+            PREVIEW_FRAME_BYTES
+                - 1
+        ]));
+        assert_eq!(pixels.as_ptr(), allocation);
+        assert_eq!(pixels[0], 23);
+    }
+
+    #[test]
+    fn stale_retry_epoch_cannot_consume_new_generation_pending_work() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (mut event_loop, mut session) = preview_test_session();
+        let old = session.windows.insert();
+        session.preview_retry_pending.insert(old);
+        session.schedule_preview_retry();
+        let stale_epoch = session.preview_retry_scheduled.unwrap();
+
+        session.clear_all_previews();
+        let current = session.windows.insert();
+        session.preview_content_generation.insert(current, 10);
+        session.preview_retry_pending.insert(current);
+        session.schedule_preview_retry();
+        assert_ne!(session.preview_retry_scheduled, Some(stale_epoch));
+
+        event_loop
+            .dispatch(std::time::Duration::from_millis(25), &mut session)
+            .unwrap();
+        assert_eq!(session.preview_content_generation[&current], 11);
+        assert!(session.preview_retry_pending.is_empty());
     }
 
     #[test]
