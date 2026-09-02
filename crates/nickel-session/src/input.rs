@@ -116,6 +116,37 @@ impl NickelSession {
             .unwrap_or_default();
     }
 
+    /// Reconcile retained pointer focus with current compositor stacking when no
+    /// physical motion has occurred. Active constraints and grabs continue to own
+    /// focus until their protocol lifetimes end.
+    fn refresh_stationary_pointer_focus(&mut self, time: InputTime) {
+        let pointer = self.seat.get_pointer().unwrap();
+        if pointer.is_grabbed() {
+            return;
+        }
+
+        let location = pointer.current_location();
+        let hit = self.pointer_surface_under(location);
+        let constraint_focus = pointer.current_focus().and_then(|focus| {
+            let surface = focus.wl_surface()?.into_owned();
+            let origin = self
+                .active_pointer_constraint_origins
+                .get(&surface.id())
+                .copied()?;
+            Some((focus, origin))
+        });
+        pointer.motion(
+            self,
+            constraint_focus.or(hit),
+            &MotionEvent {
+                location,
+                serial: SERIAL_COUNTER.next_serial(),
+                time,
+            },
+        );
+        pointer.frame(self);
+    }
+
     pub fn process_input_event<I: InputBackend>(&mut self, event: InputEvent<I>) -> Option<i32> {
         self.note_input_activity();
         if self.shell_recovery_visible() {
@@ -441,6 +472,10 @@ impl NickelSession {
                 let button = event.button_code();
 
                 let button_state = event.state();
+
+                if button_state == ButtonState::Pressed {
+                    self.refresh_stationary_pointer_focus(event.time());
+                }
 
                 const DOUBLE_CLICK_MS: u32 = 500;
                 const DOUBLE_CLICK_DISTANCE: f64 = 6.0;
@@ -845,6 +880,9 @@ impl NickelSession {
                 pointer.frame(self);
             }
             InputEvent::PointerAxis { event, .. } => {
+                let pointer = self.seat.get_pointer().unwrap();
+                self.refresh_stationary_pointer_focus(event.time());
+
                 let source = event.source();
 
                 let horizontal_amount = event.amount(Axis::Horizontal).unwrap_or_else(|| {
@@ -879,7 +917,6 @@ impl NickelSession {
                     }
                 }
 
-                let pointer = self.seat.get_pointer().unwrap();
                 pointer.axis(self, frame);
                 pointer.frame(self);
             }
