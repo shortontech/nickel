@@ -271,6 +271,7 @@ impl SettingsApp {
                         h: (f64::from(bounds.height()) * self.pixels_per_logical).round() as i32,
                     },
                     primary: primary == Some(monitor.to_ll()),
+                    enabled: true,
                 }
             })
             .collect();
