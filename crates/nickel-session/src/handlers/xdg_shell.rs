@@ -161,6 +161,7 @@ impl XdgShellHandler for NickelSession {
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
+        self.forget_toplevel_geometry(&surface);
         let surface_id = surface.wl_surface().id();
         let window_id = self.surface_windows.get(&surface_id).copied();
         let restore_focus = window_id.is_some_and(|id| {

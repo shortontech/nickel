@@ -108,6 +108,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let smithay::reexports::calloop::channel::Event::Msg(failures) = event else {
                 return;
             };
+            // Every health message follows a supervised shell exit, explicit restart, or
+            // failed spawn. No preview interest from that shell generation survives it.
+            data.retire_shell_preview_memory();
             data.shell_failure_count = failures;
             data.request_output_redraw();
             #[cfg(feature = "backend-udev")]

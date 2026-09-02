@@ -490,8 +490,8 @@ pub fn init_winit(
                     {
                         let windows = state.preview_capture_candidates();
                         let (renderer, _) = backend.bind().unwrap();
-                        for (id, window) in windows {
-                            if let Some(frame) = capture_preview(renderer, &window) {
+                        for (id, window, rgba) in windows {
+                            if let Some(frame) = capture_preview(renderer, &window, rgba) {
                                 state.store_preview(id, frame);
                             }
                         }
@@ -727,7 +727,11 @@ fn capture_bound_framebuffer(
     }
 }
 
-fn capture_preview(renderer: &mut GlesRenderer, window: &Window) -> Option<PreviewFrame> {
+fn capture_preview(
+    renderer: &mut GlesRenderer,
+    window: &Window,
+    mut rgba: Vec<u8>,
+) -> Option<PreviewFrame> {
     const WIDTH: i32 = 240;
     const HEIGHT: i32 = 135;
     let geometry = window.geometry();
@@ -768,7 +772,7 @@ fn capture_preview(renderer: &mut GlesRenderer, window: &Window) -> Option<Previ
     let mapping = renderer
         .copy_framebuffer(&framebuffer, buffer_region, Fourcc::Abgr8888)
         .ok()?;
-    let rgba = renderer.map_texture(&mapping).ok()?.to_vec();
+    rgba = crate::state::reuse_preview_pixels(rgba, renderer.map_texture(&mapping).ok()?);
     Some(PreviewFrame {
         width: WIDTH as u16,
         height: HEIGHT as u16,

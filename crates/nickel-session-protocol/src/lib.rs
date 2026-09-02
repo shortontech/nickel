@@ -407,6 +407,12 @@ pub struct CacheDiagnostics {
     pub preview_readback_bytes: u64,
     #[serde(default)]
     pub preview_protocol_copy_bytes: u64,
+    /// Raw RGBA bytes cloned into protocol response values.
+    #[serde(default)]
+    pub preview_protocol_raw_copy_bytes: u64,
+    /// Base64 payload bytes expected during JSON serialization; framing overhead is excluded.
+    #[serde(default)]
+    pub preview_protocol_base64_bytes: u64,
     pub metadata_entries: u16,
     pub metadata_title_bytes: u64,
     pub metadata_peak_title_bytes: u64,

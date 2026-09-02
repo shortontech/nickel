@@ -1737,8 +1737,8 @@ impl NickelSession {
                     return None;
                 }
             };
-            for (id, window) in preview_windows {
-                if let Some(frame) = capture_preview(&mut renderer, &window) {
+            for (id, window, rgba) in preview_windows {
+                if let Some(frame) = capture_preview(&mut renderer, &window, rgba) {
                     self.store_preview(id, frame);
                 }
             }
@@ -2713,6 +2713,7 @@ fn fill_rgba_rect(
 fn capture_preview(
     renderer: &mut NativeRenderer<'_>,
     window: &smithay::desktop::Window,
+    mut rgba: Vec<u8>,
 ) -> Option<PreviewFrame> {
     const WIDTH: i32 = 240;
     const HEIGHT: i32 = 135;
@@ -2757,7 +2758,7 @@ fn capture_preview(
     let mapping = renderer
         .copy_framebuffer(&framebuffer, region, Fourcc::Abgr8888)
         .ok()?;
-    let rgba = renderer.map_texture(&mapping).ok()?.to_vec();
+    rgba = crate::state::reuse_preview_pixels(rgba, renderer.map_texture(&mapping).ok()?);
     Some(PreviewFrame {
         width: WIDTH as u16,
         height: HEIGHT as u16,

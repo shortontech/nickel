@@ -283,6 +283,8 @@ impl XWaylandShellHandler for NickelSession {
 
     fn surface_associated(&mut self, _xwm: XwmId, wl_surface: WlSurface, surface: X11Surface) {
         if let Some(id) = self.x11_window_id(&surface) {
+            self.reassociate_preview_surface(id);
+            self.surface_windows.retain(|_, window| *window != id);
             self.surface_windows.insert(wl_surface.id(), id);
         }
         self.request_output_redraw();

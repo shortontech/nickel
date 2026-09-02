@@ -1,12 +1,37 @@
 use super::{
     DisabledOutput, IDENTIFY_BADGE_BYTES, IdentifyBadgeCache, RendererLifecycleLedger,
-    RendererRetainedReason, consume_pending_dependent, dependent_renderers_after_primary_removal,
-    device_activation_priority, mark_disabled_outputs_absent, normalize_capture_rows,
-    parse_kde_cursor_settings, pending_recovery_devices, primary_dependency_to_activate,
-    published_disabled_outputs, render_primary_available, renderer_retained_reason,
-    switcher_visible_range,
+    RendererRetainedReason, TaskSwitcherBufferKey, consume_pending_dependent,
+    dependent_renderers_after_primary_removal, device_activation_priority,
+    mark_disabled_outputs_absent, normalize_capture_rows, parse_kde_cursor_settings,
+    pending_recovery_devices, primary_dependency_to_activate, published_disabled_outputs,
+    render_primary_available, renderer_retained_reason, switcher_visible_range,
 };
 use std::collections::HashMap;
+
+#[test]
+fn task_switcher_overlay_key_reuses_only_unchanged_composition() {
+    let key = TaskSwitcherBufferKey {
+        candidates: vec![crate::window_registry::WindowId(1)],
+        selected: 0,
+        output_size: (1920, 1080),
+        preview_generation: 3,
+    };
+    assert_eq!(key, key.clone());
+    assert_ne!(
+        key,
+        TaskSwitcherBufferKey {
+            preview_generation: 4,
+            ..key.clone()
+        }
+    );
+    assert_ne!(
+        key,
+        TaskSwitcherBufferKey {
+            output_size: (1280, 720),
+            ..key.clone()
+        }
+    );
+}
 
 #[test]
 fn output_identification_badges_are_lazy_reused_and_retired() {
