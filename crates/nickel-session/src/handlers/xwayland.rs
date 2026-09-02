@@ -8,6 +8,7 @@ use smithay::{
     },
     utils::{Logical, Rectangle, Size},
     wayland::{
+        seat::WaylandFocus,
         selection::{
             SelectionTarget,
             data_device::{
@@ -533,6 +534,13 @@ impl XwmHandler for NickelSession {
         {
             self.xwm = None;
         }
+        self.retire_xwm_windows();
+        self.schedule_xwayland_restart();
+    }
+}
+
+impl NickelSession {
+    fn retire_xwm_windows(&mut self) {
         let x11_surfaces = self
             .space
             .elements()
@@ -551,30 +559,176 @@ impl XwmHandler for NickelSession {
             self.space.unmap_elem(&window);
         }
         self.forget_all_x11_geometry();
+        let focused_disconnected_x11 = self
+            .seat
+            .get_keyboard()
+            .and_then(|keyboard| keyboard.current_focus())
+            .and_then(|focus| match focus {
+                KeyboardFocusTarget::X11(surface) => {
+                    self.x11_windows.get(&surface.window_id()).copied()
+                }
+                KeyboardFocusTarget::Wayland(_) => None,
+            })
+            .is_some();
         let removed_ids = self
             .x11_windows
             .drain()
             .map(|(_, id)| id)
             .collect::<Vec<_>>();
         let removed = x11_retirement_identities(removed_ids, &self.surface_windows);
-        let restore_focus = removed.iter().any(|(_, id)| self.windows.is_active(*id));
         for (surface_id, id) in removed {
             self.retire_surface_window_references(surface_id.as_ref(), Some(id));
         }
-        self.seat.get_keyboard().unwrap().set_focus(
-            self,
-            Option::<KeyboardFocusTarget>::None,
-            smithay::utils::SERIAL_COUNTER.next_serial(),
-        );
-        self.restore_focus_after_window_removal(restore_focus);
+        if focused_disconnected_x11 {
+            if self.locked {
+                let lock_focus = self
+                    .lock_windows
+                    .first()
+                    .and_then(Window::wl_surface)
+                    .map(|surface| KeyboardFocusTarget::Wayland(surface.into_owned()));
+                self.seat.get_keyboard().unwrap().set_focus(
+                    self,
+                    lock_focus,
+                    smithay::utils::SERIAL_COUNTER.next_serial(),
+                );
+            } else {
+                self.restore_focus_after_window_removal(true);
+            }
+        }
         self.request_output_redraw();
-        self.schedule_xwayland_restart();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use smithay::reexports::{
+        calloop::EventLoop,
+        wayland_server::{Display, protocol::wl_surface::WlSurface},
+    };
+    use smithay_client_toolkit::reexports::client::{
+        Connection, Dispatch, Proxy, QueueHandle, delegate_noop,
+        protocol::{wl_compositor, wl_registry, wl_surface},
+    };
+    use std::{
+        os::unix::net::UnixStream,
+        sync::{Arc, mpsc},
+        thread,
+        time::Duration,
+    };
+
+    struct FocusClient {
+        compositor: Option<wl_compositor::WlCompositor>,
+        surface: Option<wl_surface::WlSurface>,
+    }
+
+    impl Dispatch<wl_registry::WlRegistry, ()> for FocusClient {
+        fn event(
+            state: &mut Self,
+            registry: &wl_registry::WlRegistry,
+            event: wl_registry::Event,
+            _data: &(),
+            _connection: &Connection,
+            qh: &QueueHandle<Self>,
+        ) {
+            if let wl_registry::Event::Global {
+                name,
+                interface,
+                version,
+            } = event
+                && interface == "wl_compositor"
+            {
+                let compositor = registry.bind::<wl_compositor::WlCompositor, _, _>(
+                    name,
+                    version.min(6),
+                    qh,
+                    (),
+                );
+                state.surface = Some(compositor.create_surface(qh, ()));
+                state.compositor = Some(compositor);
+            }
+        }
+    }
+
+    delegate_noop!(FocusClient: ignore wl_compositor::WlCompositor);
+    delegate_noop!(FocusClient: ignore wl_surface::WlSurface);
+
+    struct FocusClientGuard {
+        done: mpsc::Sender<()>,
+        thread: Option<thread::JoinHandle<()>>,
+    }
+
+    impl Drop for FocusClientGuard {
+        fn drop(&mut self) {
+            let _ = self.done.send(());
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    fn session_with_wayland_focus() -> (NickelSession, WlSurface, FocusClientGuard) {
+        let mut event_loop = EventLoop::try_new().expect("test event loop");
+        let display = Display::new().expect("test Wayland display");
+        let mut display_handle = display.handle();
+        let (server, peer) = UnixStream::pair().expect("test Wayland socket pair");
+        let server_client = display_handle
+            .insert_client(server, Arc::new(crate::state::ClientState::default()))
+            .expect("test Wayland client");
+        let mut session = NickelSession::new(&mut event_loop, display, false);
+        let (surface_tx, surface_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let client_thread = thread::spawn(move || {
+            let connection = Connection::from_socket(peer).expect("test client connection");
+            let mut event_queue = connection.new_event_queue::<FocusClient>();
+            let qh = event_queue.handle();
+            connection.display().get_registry(&qh, ());
+            let mut client = FocusClient {
+                compositor: None,
+                surface: None,
+            };
+            event_queue
+                .roundtrip(&mut client)
+                .expect("test registry roundtrip");
+            connection.flush().expect("flush focus surface request");
+            let surface_id = client
+                .surface
+                .as_ref()
+                .expect("compositor advertised")
+                .id()
+                .protocol_id();
+            surface_tx.send(surface_id).expect("publish focus surface");
+            let _ = done_rx.recv();
+        });
+        let surface_id = loop {
+            if let Ok(surface_id) = surface_rx.try_recv() {
+                break surface_id;
+            }
+            event_loop
+                .dispatch(Some(Duration::from_millis(20)), &mut session)
+                .expect("dispatch test Wayland client");
+        };
+        event_loop
+            .dispatch(Some(Duration::from_millis(20)), &mut session)
+            .expect("dispatch focus surface creation");
+        let focus_surface = server_client
+            .object_from_protocol_id::<WlSurface>(&session.display_handle, surface_id)
+            .expect("server focus surface");
+        let keyboard = session.seat.get_keyboard().expect("session keyboard");
+        keyboard.set_focus(
+            &mut session,
+            Some(KeyboardFocusTarget::Wayland(focus_surface.clone())),
+            smithay::utils::SERIAL_COUNTER.next_serial(),
+        );
+        (
+            session,
+            focus_surface,
+            FocusClientGuard {
+                done: done_tx,
+                thread: Some(client_thread),
+            },
+        )
+    }
 
     #[test]
     fn xwm_disconnect_retires_every_window_with_or_without_a_wayland_surface() {
@@ -585,6 +739,32 @@ mod tests {
         let retired = x11_retirement_identities([mapped, surface_less], &surfaces);
 
         assert_eq!(retired, [(Some(7), mapped), (None, surface_less)]);
+    }
+
+    #[test]
+    fn background_xwm_teardown_preserves_wayland_and_lock_focus() {
+        let (mut session, focus_surface, _client) = session_with_wayland_focus();
+
+        for locked in [false, true] {
+            session.locked = locked;
+            let background = session.windows.insert_inactive();
+            session
+                .x11_windows
+                .insert(70 + u32::from(locked), background);
+
+            session.retire_xwm_windows();
+
+            assert!(session.x11_windows.is_empty());
+            assert!(!session.windows.contains(background));
+            assert_eq!(
+                session
+                    .seat
+                    .get_keyboard()
+                    .and_then(|keyboard| keyboard.current_focus()),
+                Some(KeyboardFocusTarget::Wayland(focus_surface.clone())),
+                "background X11 teardown changed Wayland focus while locked={locked}"
+            );
+        }
     }
 
     #[test]
