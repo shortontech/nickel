@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    path::Path,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -159,13 +159,51 @@ struct DeviceData {
     surfaces: HashMap<crtc::Handle, SurfaceData>,
 }
 
+#[derive(Clone)]
+struct DiscoveredDevice {
+    path: PathBuf,
+    is_evdi: bool,
+    driver: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum RendererRetainedReason {
+    ActiveSurfaces,
+    PrimaryForCrossGpu,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RendererDeviceDiagnostics {
+    pub node: DrmNode,
+    pub render_node: Option<DrmNode>,
+    pub device_path: PathBuf,
+    pub driver: String,
+    pub active_surfaces: usize,
+    pub reason: Option<RendererRetainedReason>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RendererLifecycleDiagnostics {
+    pub discovered_devices: usize,
+    pub live_gpu_nodes: usize,
+    pub live_output_managers: usize,
+    pub active_surfaces: usize,
+    pub retained_primary_renderers: usize,
+    pub activations: u64,
+    pub retirements: u64,
+    pub devices: Vec<RendererDeviceDiagnostics>,
+}
+
 pub struct UdevData {
     _renderer_owner: DependencyOwnerToken,
     session: LibSeatSession,
     activity: SessionActivity,
     gpus: GpuManager<RendererBackend>,
     primary_gpu: DrmNode,
+    discovered_devices: HashMap<DrmNode, DiscoveredDevice>,
     devices: HashMap<DrmNode, DeviceData>,
+    renderer_activations: u64,
+    renderer_retirements: u64,
     disabled_outputs: HashMap<String, DisabledOutput>,
     layout: OutputLayout,
     bootstrap_render_until: Instant,
@@ -255,6 +293,62 @@ impl UdevData {
     pub(crate) fn reconcile_identify_badges(&mut self, output_count: usize) {
         self.identify_badges.retain_output_count(output_count);
     }
+
+    pub(crate) fn renderer_lifecycle_diagnostics(&self) -> RendererLifecycleDiagnostics {
+        let secondary_surfaces = self
+            .devices
+            .iter()
+            .filter(|(node, _)| **node != self.primary_gpu)
+            .map(|(_, device)| device.surfaces.len())
+            .sum::<usize>();
+        RendererLifecycleDiagnostics {
+            discovered_devices: self.discovered_devices.len(),
+            live_gpu_nodes: self.devices.len(),
+            live_output_managers: self.devices.len(),
+            active_surfaces: self
+                .devices
+                .values()
+                .map(|device| device.surfaces.len())
+                .sum(),
+            retained_primary_renderers: usize::from(self.devices.contains_key(&self.primary_gpu)),
+            activations: self.renderer_activations,
+            retirements: self.renderer_retirements,
+            devices: self
+                .discovered_devices
+                .iter()
+                .map(|(node, discovered)| {
+                    let live = self.devices.get(node);
+                    let active_surfaces = live.map_or(0, |device| device.surfaces.len());
+                    RendererDeviceDiagnostics {
+                        node: *node,
+                        render_node: live.map(|device| device.render_node),
+                        device_path: discovered.path.clone(),
+                        driver: discovered.driver.clone(),
+                        active_surfaces,
+                        reason: renderer_retained_reason(
+                            *node == self.primary_gpu,
+                            active_surfaces,
+                            secondary_surfaces > 0,
+                        ),
+                    }
+                })
+                .collect(),
+        }
+    }
+}
+
+fn renderer_retained_reason(
+    is_primary: bool,
+    active_surfaces: usize,
+    secondary_active: bool,
+) -> Option<RendererRetainedReason> {
+    if active_surfaces > 0 {
+        Some(RendererRetainedReason::ActiveSurfaces)
+    } else if is_primary && secondary_active {
+        Some(RendererRetainedReason::PrimaryForCrossGpu)
+    } else {
+        None
+    }
 }
 
 #[derive(Clone)]
@@ -275,6 +369,8 @@ enum DeviceError {
     Egl(#[from] smithay::backend::egl::Error),
     #[error("failed to acquire renderer: {0}")]
     Renderer(String),
+    #[error("failed to register DRM event source: {0}")]
+    Registration(String),
 }
 
 pub fn init_udev(
@@ -294,7 +390,10 @@ pub fn init_udev(
         activity: SessionActivity::default(),
         gpus,
         primary_gpu,
+        discovered_devices: HashMap::new(),
         devices: HashMap::new(),
+        renderer_activations: 0,
+        renderer_retirements: 0,
         disabled_outputs: HashMap::new(),
         layout: OutputLayout::default(),
         bootstrap_render_until: Instant::now() + BOOTSTRAP_RENDER_TIMEOUT,
@@ -567,10 +666,18 @@ impl NickelSession {
         path: &Path,
     ) -> Result<(), DeviceError> {
         let native = self.native.as_mut().expect("native backend should exist");
+        let is_evdi = is_evdi_device(path);
+        native.discovered_devices.insert(
+            node,
+            DiscoveredDevice {
+                path: path.to_owned(),
+                is_evdi,
+                driver: drm_driver_name(path, is_evdi),
+            },
+        );
         if native.devices.contains_key(&node) {
             return Ok(());
         }
-        let is_evdi = is_evdi_device(path);
         if is_evdi
             && matches!(
                 has_connected_drm_connector(Path::new("/sys/class/drm"), path),
@@ -580,8 +687,31 @@ impl NickelSession {
             tracing::debug!(%node, path = %path.display(), "deferring disconnected EVDI device");
             return Ok(());
         }
+        let primary_to_scan = self.activate_drm_device_with_dependencies(handle, node)?;
+        self.scan_connectors(node);
+        if let Some(primary_gpu) = primary_to_scan {
+            self.scan_connectors(primary_gpu);
+        }
+        self.retire_inactive_renderers();
+        Ok(())
+    }
+
+    fn activate_drm_device(
+        &mut self,
+        handle: &smithay::reexports::calloop::LoopHandle<'static, Self>,
+        node: DrmNode,
+    ) -> Result<(), DeviceError> {
+        let native = self.native.as_mut().expect("native backend should exist");
+        if native.devices.contains_key(&node) {
+            return Ok(());
+        }
+        let discovered = native
+            .discovered_devices
+            .get(&node)
+            .expect("only discovered DRM devices can be activated")
+            .clone();
         let fd = native.session.open(
-            path,
+            &discovered.path,
             OFlags::RDWR | OFlags::CLOEXEC | OFlags::NOCTTY | OFlags::NONBLOCK,
         )?;
         let fd = DrmDeviceFd::new(DeviceFd::from(fd));
@@ -589,10 +719,13 @@ impl NickelSession {
         let gbm = GbmDevice::new(fd)?;
         native.gpus.as_mut().add_node(node, gbm.clone())?;
         let render_node = node;
-        let renderer = native
-            .gpus
-            .single_renderer(&render_node)
-            .map_err(|error| DeviceError::Renderer(error.to_string()))?;
+        let renderer = match native.gpus.single_renderer(&render_node) {
+            Ok(renderer) => renderer,
+            Err(error) => {
+                native.gpus.as_mut().remove_node(&render_node);
+                return Err(DeviceError::Renderer(error.to_string()));
+            }
+        };
         let formats = renderer
             .dmabuf_formats()
             .iter()
@@ -611,12 +744,16 @@ impl NickelSession {
         );
         drop(renderer);
 
-        let registration = handle
-            .insert_source(notifier, move |event, _, data| match event {
-                DrmEvent::VBlank(crtc) => data.frame_submitted(node, crtc),
-                DrmEvent::Error(error) => tracing::error!(%node, ?error, "DRM event error"),
-            })
-            .expect("DRM notifier registration should succeed");
+        let registration = match handle.insert_source(notifier, move |event, _, data| match event {
+            DrmEvent::VBlank(crtc) => data.frame_submitted(node, crtc),
+            DrmEvent::Error(error) => tracing::error!(%node, ?error, "DRM event error"),
+        }) {
+            Ok(registration) => registration,
+            Err(error) => {
+                native.gpus.as_mut().remove_node(&render_node);
+                return Err(DeviceError::Registration(format!("{error:?}")));
+            }
+        };
         native.devices.insert(
             node,
             DeviceData {
@@ -624,13 +761,71 @@ impl NickelSession {
                 manager,
                 scanner: DrmScanner::new(),
                 render_node,
-                is_evdi,
+                is_evdi: discovered.is_evdi,
                 render_scheduled: false,
                 surfaces: HashMap::new(),
             },
         );
-        self.scan_connectors(node);
+        native.renderer_activations = native.renderer_activations.saturating_add(1);
+        let diagnostics = native.renderer_lifecycle_diagnostics();
+        tracing::debug!(?diagnostics, "DRM renderer lifecycle state");
+        tracing::info!(%node, path = %discovered.path.display(), "DRM renderer activated");
         Ok(())
+    }
+
+    fn activate_drm_device_with_dependencies(
+        &mut self,
+        handle: &smithay::reexports::calloop::LoopHandle<'static, Self>,
+        node: DrmNode,
+    ) -> Result<Option<DrmNode>, DeviceError> {
+        let primary_to_activate = self.native.as_ref().and_then(|native| {
+            (node != native.primary_gpu
+                && native.discovered_devices.contains_key(&native.primary_gpu)
+                && !native.devices.contains_key(&native.primary_gpu))
+            .then_some(native.primary_gpu)
+        });
+        if let Some(primary_gpu) = primary_to_activate {
+            self.activate_drm_device(handle, primary_gpu)?;
+        }
+        if let Err(error) = self.activate_drm_device(handle, node) {
+            self.retire_inactive_renderers();
+            return Err(error);
+        }
+        Ok(primary_to_activate)
+    }
+
+    fn retire_inactive_renderers(&mut self) {
+        let Some(native) = self.native.as_mut() else {
+            return;
+        };
+        let secondary_active = native
+            .devices
+            .iter()
+            .any(|(node, device)| *node != native.primary_gpu && !device.surfaces.is_empty());
+        let retired = native
+            .devices
+            .iter()
+            .filter(|(node, device)| {
+                renderer_retained_reason(
+                    **node == native.primary_gpu,
+                    device.surfaces.len(),
+                    secondary_active,
+                )
+                .is_none()
+            })
+            .map(|(node, _)| *node)
+            .collect::<Vec<_>>();
+        for node in retired {
+            let Some(device) = native.devices.remove(&node) else {
+                continue;
+            };
+            native.gpus.as_mut().remove_node(&device.render_node);
+            self.event_loop_handle.remove(device.registration);
+            native.renderer_retirements = native.renderer_retirements.saturating_add(1);
+            tracing::info!(%node, "inactive DRM renderer retired");
+        }
+        let diagnostics = native.renderer_lifecycle_diagnostics();
+        tracing::debug!(?diagnostics, "DRM renderer lifecycle state");
     }
 
     fn scan_connectors(&mut self, node: DrmNode) {
@@ -655,7 +850,20 @@ impl NickelSession {
                 DrmScanEvent::Connected {
                     connector,
                     crtc: Some(crtc),
-                } => self.connect_output(node, connector, crtc),
+                } => {
+                    let name = format!(
+                        "{}-{}",
+                        connector.interface().as_str(),
+                        connector.interface_id()
+                    );
+                    let administratively_disabled = self
+                        .native
+                        .as_ref()
+                        .is_some_and(|native| native.disabled_outputs.contains_key(&name));
+                    if !administratively_disabled {
+                        self.connect_output(node, connector, crtc);
+                    }
+                }
                 DrmScanEvent::Disconnected {
                     connector,
                     crtc: Some(crtc),
@@ -663,6 +871,7 @@ impl NickelSession {
                 _ => {}
             }
         }
+        self.retire_inactive_renderers();
     }
 
     fn connect_output(&mut self, node: DrmNode, connector: connector::Info, crtc: crtc::Handle) {
@@ -858,12 +1067,33 @@ impl NickelSession {
         enabled: bool,
     ) -> Result<(), &'static str> {
         if enabled {
+            let node = self
+                .native
+                .as_ref()
+                .and_then(|native| native.disabled_outputs.get(name))
+                .map(|disabled| disabled.node);
+            let primary_to_scan = if let Some(node) = node {
+                let handle = self.event_loop_handle.clone();
+                match self.activate_drm_device_with_dependencies(&handle, node) {
+                    Ok(primary_gpu) => primary_gpu,
+                    Err(error) => {
+                        tracing::error!(%node, ?error, "failed to reactivate disabled DRM output");
+                        return Err("failed to reactivate output renderer");
+                    }
+                }
+            } else {
+                None
+            };
             let disabled = self
                 .native
                 .as_mut()
                 .and_then(|native| native.disabled_outputs.remove(name));
             if let Some(disabled) = disabled {
                 self.connect_output(disabled.node, disabled.connector, disabled.crtc);
+                if let Some(primary_gpu) = primary_to_scan {
+                    self.scan_connectors(primary_gpu);
+                }
+                self.retire_inactive_renderers();
             }
             return Ok(());
         }
@@ -919,6 +1149,7 @@ impl NickelSession {
         self.relayout_maximized_windows();
         self.relayout_fullscreen_windows();
         self.relayout_shell_surfaces();
+        self.retire_inactive_renderers();
         tracing::info!(output = %name, "DRM output disabled by user");
         Ok(())
     }
@@ -927,7 +1158,12 @@ impl NickelSession {
         let Some(native) = self.native.as_mut() else {
             return;
         };
+        native.discovered_devices.remove(&node);
+        native
+            .disabled_outputs
+            .retain(|_, disabled| disabled.node != node);
         let Some(mut device) = native.devices.remove(&node) else {
+            self.retire_inactive_renderers();
             return;
         };
         let mut positions = Vec::new();
@@ -971,6 +1207,7 @@ impl NickelSession {
         self.relayout_maximized_windows();
         self.relayout_fullscreen_windows();
         self.relayout_shell_surfaces();
+        self.retire_inactive_renderers();
         tracing::info!(%node, "DRM device removed");
     }
 
@@ -1695,6 +1932,22 @@ fn is_evdi_device(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+fn drm_driver_name(path: &Path, is_evdi: bool) -> String {
+    if is_evdi {
+        return "evdi".to_owned();
+    }
+    path.file_name()
+        .and_then(|card| {
+            std::fs::read_link(Path::new("/sys/class/drm").join(card).join("device/driver")).ok()
+        })
+        .and_then(|driver| {
+            driver
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "unknown".to_owned())
+}
+
 fn has_connected_drm_connector(sysfs_drm: &Path, path: &Path) -> Option<bool> {
     let card = path.file_name()?.to_string_lossy();
     let connector_prefix = format!("{card}-");
@@ -2233,8 +2486,9 @@ fn normalize_capture_rows(
 #[cfg(test)]
 mod tests {
     use super::{
-        IDENTIFY_BADGE_BYTES, IdentifyBadgeCache, normalize_capture_rows,
-        parse_kde_cursor_settings, switcher_visible_range,
+        IDENTIFY_BADGE_BYTES, IdentifyBadgeCache, RendererRetainedReason,
+        normalize_capture_rows, parse_kde_cursor_settings, renderer_retained_reason,
+        switcher_visible_range,
     };
 
     #[test]
@@ -2287,6 +2541,20 @@ mod tests {
         assert_eq!(cache.diagnostics().entries, 0);
         assert_eq!(cache.diagnostics().live_bytes, 0);
         assert_eq!(cache.diagnostics().evictions, 2);
+    }
+
+    #[test]
+    fn renderer_retention_requires_active_output_or_cross_gpu_primary_dependency() {
+        assert_eq!(
+            renderer_retained_reason(false, 1, false),
+            Some(RendererRetainedReason::ActiveSurfaces)
+        );
+        assert_eq!(
+            renderer_retained_reason(true, 0, true),
+            Some(RendererRetainedReason::PrimaryForCrossGpu)
+        );
+        assert_eq!(renderer_retained_reason(false, 0, true), None);
+        assert_eq!(renderer_retained_reason(true, 0, false), None);
     }
 
     #[test]
