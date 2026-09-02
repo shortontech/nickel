@@ -41,6 +41,7 @@ pub struct WindowInfo {
     pub title: String,
     pub app_id: String,
     pub active: bool,
+    admission: WindowAdmission,
 }
 
 #[derive(Debug, Default)]
@@ -48,6 +49,7 @@ pub struct WindowRegistry {
     windows: BTreeMap<WindowId, WindowInfo>,
     stacking_order: Vec<WindowId>,
     next_id: u64,
+    ordinary_entries: usize,
     metadata_diagnostics: WindowMetadataDiagnostics,
 }
 
@@ -63,12 +65,11 @@ impl WindowRegistry {
     }
 
     pub fn insert_inactive(&mut self, admission: WindowAdmission) -> Option<WindowId> {
-        let admission_limit = match admission {
-            WindowAdmission::Ordinary => nickel_session_protocol::MAX_WINDOWS
-                .saturating_sub(RESERVED_AUTHENTICATED_SHELL_WINDOWS),
-            WindowAdmission::AuthenticatedShell => nickel_session_protocol::MAX_WINDOWS,
-        };
-        if self.windows.len() >= admission_limit {
+        let ordinary_limit = nickel_session_protocol::MAX_WINDOWS
+            .saturating_sub(RESERVED_AUTHENTICATED_SHELL_WINDOWS);
+        if self.windows.len() >= nickel_session_protocol::MAX_WINDOWS
+            || (admission == WindowAdmission::Ordinary && self.ordinary_entries >= ordinary_limit)
+        {
             return None;
         }
         self.next_id += 1;
@@ -80,8 +81,10 @@ impl WindowRegistry {
                 title: String::new(),
                 app_id: String::new(),
                 active: false,
+                admission,
             },
         );
+        self.ordinary_entries += usize::from(admission == WindowAdmission::Ordinary);
         self.stacking_order.push(id);
         eprintln!("nickel-session: mapped window {}", id.0);
         Some(id)
@@ -156,6 +159,9 @@ impl WindowRegistry {
 
     pub fn remove(&mut self, id: WindowId) {
         if let Some(window) = self.windows.remove(&id) {
+            self.ordinary_entries = self
+                .ordinary_entries
+                .saturating_sub(usize::from(window.admission == WindowAdmission::Ordinary));
             self.metadata_diagnostics.title_bytes = self
                 .metadata_diagnostics
                 .title_bytes
@@ -250,8 +256,8 @@ fn bounded_utf8(mut value: String, limit: usize) -> (String, bool, bool) {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_WINDOW_APP_ID_BYTES, MAX_WINDOW_TITLE_BYTES, WindowAdmission, WindowMetadataSource,
-        WindowRegistry, bounded_utf8,
+        MAX_WINDOW_APP_ID_BYTES, MAX_WINDOW_TITLE_BYTES, RESERVED_AUTHENTICATED_SHELL_WINDOWS,
+        WindowAdmission, WindowMetadataSource, WindowRegistry, bounded_utf8,
     };
 
     #[test]
@@ -435,6 +441,69 @@ mod tests {
             registry.insert_inactive(WindowAdmission::AuthenticatedShell),
             None
         );
+        assert_eq!(registry.len(), nickel_session_protocol::MAX_WINDOWS);
+    }
+
+    #[test]
+    fn shell_first_and_interleaved_admission_preserve_both_pool_limits() {
+        let mut registry = WindowRegistry::default();
+        let ordinary_limit =
+            nickel_session_protocol::MAX_WINDOWS - RESERVED_AUTHENTICATED_SHELL_WINDOWS;
+
+        for _ in 0..8 {
+            registry
+                .insert_inactive(WindowAdmission::AuthenticatedShell)
+                .unwrap();
+        }
+        for index in 0..ordinary_limit {
+            registry.insert_inactive(WindowAdmission::Ordinary).unwrap();
+            if index < 8 {
+                registry
+                    .insert_inactive(WindowAdmission::AuthenticatedShell)
+                    .unwrap();
+            }
+        }
+
+        assert_eq!(registry.ordinary_entries, ordinary_limit);
+        assert_eq!(registry.len(), nickel_session_protocol::MAX_WINDOWS);
+        assert_eq!(registry.insert_inactive(WindowAdmission::Ordinary), None);
+        assert_eq!(
+            registry.insert_inactive(WindowAdmission::AuthenticatedShell),
+            None
+        );
+    }
+
+    #[test]
+    fn removal_restores_only_the_matching_admission_pool() {
+        let mut registry = WindowRegistry::default();
+        let ordinary_limit =
+            nickel_session_protocol::MAX_WINDOWS - RESERVED_AUTHENTICATED_SHELL_WINDOWS;
+        let ordinary = (0..ordinary_limit)
+            .map(|_| registry.insert_inactive(WindowAdmission::Ordinary).unwrap())
+            .collect::<Vec<_>>();
+        let shell = (0..RESERVED_AUTHENTICATED_SHELL_WINDOWS)
+            .map(|_| {
+                registry
+                    .insert_inactive(WindowAdmission::AuthenticatedShell)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+
+        registry.remove(shell[0]);
+        assert_eq!(registry.insert_inactive(WindowAdmission::Ordinary), None);
+        assert!(
+            registry
+                .insert_inactive(WindowAdmission::AuthenticatedShell)
+                .is_some()
+        );
+
+        registry.remove(ordinary[0]);
+        assert!(
+            registry
+                .insert_inactive(WindowAdmission::Ordinary)
+                .is_some()
+        );
+        assert_eq!(registry.ordinary_entries, ordinary_limit);
         assert_eq!(registry.len(), nickel_session_protocol::MAX_WINDOWS);
     }
 }
