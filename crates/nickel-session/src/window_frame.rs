@@ -6,8 +6,11 @@ use smithay::{
     utils::Transform,
 };
 use std::{
-    collections::HashMap,
-    sync::{Mutex, OnceLock},
+    collections::{HashSet, VecDeque},
+    sync::{
+        Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 pub const TITLEBAR_HEIGHT: i32 = 40;
@@ -17,19 +20,23 @@ pub const MINIMIZE_GLYPH: char = '\u{f2d1}';
 pub const MAXIMIZE_GLYPH: char = '\u{f2d0}';
 pub const RESTORE_GLYPH: char = '\u{f2d2}';
 pub const CLOSE_GLYPH: char = '\u{f2d3}';
-const TITLEBAR_CACHE_MAX_ENTRIES: usize = 128;
-const TITLEBAR_CACHE_MAX_BYTES: usize = 16 * 1024 * 1024;
-
-type TitlebarCacheKey = (i32, String, u32, u32);
+const TITLEBAR_CACHE_MAX_ENTRIES: usize = 16;
+const TITLEBAR_CACHE_MAX_BYTES: usize = 512 * 1024;
 
 #[derive(Clone)]
 struct TitlebarCacheEntry {
+    owner: Option<u64>,
+    width: i32,
+    title: String,
+    background: u32,
+    foreground: u32,
     buffer: MemoryRenderBuffer,
+    bytes: usize,
 }
 
 #[derive(Default)]
 struct TitlebarCache {
-    entries: HashMap<TitlebarCacheKey, TitlebarCacheEntry>,
+    entries: VecDeque<TitlebarCacheEntry>,
     live_bytes: usize,
     peak_bytes: usize,
     hits: u64,
@@ -37,6 +44,9 @@ struct TitlebarCache {
     insertions: u64,
     evictions: u64,
     invalidations: u64,
+    rasterizations: u64,
+    avoided_rasterizations: u64,
+    generation: u64,
 }
 
 static TITLEBAR_CACHE: OnceLock<Mutex<TitlebarCache>> = OnceLock::new();
@@ -51,6 +61,12 @@ pub struct TitlebarCacheDiagnostics {
     pub insertions: u64,
     pub evictions: u64,
     pub invalidations: u64,
+    pub rasterizations: u64,
+    pub avoided_rasterizations: u64,
+    pub generation: u64,
+    pub font_database_loads: u64,
+    /// Smithay owns renderer imports; their byte cost is not exposed by its API.
+    pub renderer_bytes: Option<usize>,
 }
 
 /// Selects whether server-decoration rasters may be retained and reused.
@@ -75,6 +91,11 @@ pub fn titlebar_cache_diagnostics() -> TitlebarCacheDiagnostics {
                 insertions: cache.insertions,
                 evictions: cache.evictions,
                 invalidations: cache.invalidations,
+                rasterizations: cache.rasterizations,
+                avoided_rasterizations: cache.avoided_rasterizations,
+                generation: cache.generation,
+                font_database_loads: TITLEBAR_FONT_DATABASE_LOADS.load(Ordering::Relaxed),
+                renderer_bytes: None,
             }
         })
 }
@@ -149,13 +170,25 @@ fn render_glyph(glyph: char) -> Option<MemoryRenderBuffer> {
     ))
 }
 
+#[cfg(test)]
 pub fn render_titlebar(
     width: i32,
     title: &str,
     background: u32,
     foreground: u32,
 ) -> Option<MemoryRenderBuffer> {
+    render_titlebar_for(None, width, title, background, foreground)
+}
+
+pub fn render_titlebar_for(
+    owner: Option<u64>,
+    width: i32,
+    title: &str,
+    background: u32,
+    foreground: u32,
+) -> Option<MemoryRenderBuffer> {
     render_titlebar_with_mode(
+        owner,
         width,
         title,
         background,
@@ -165,6 +198,7 @@ pub fn render_titlebar(
 }
 
 pub fn render_titlebar_with_mode(
+    owner: Option<u64>,
     width: i32,
     title: &str,
     background: u32,
@@ -177,40 +211,71 @@ pub fn render_titlebar_with_mode(
     if mode == TitlebarCacheMode::Bypass {
         return render_titlebar_uncached(width, title, background, foreground);
     }
-    let key = (width, title.to_owned(), background, foreground);
     let cache = TITLEBAR_CACHE.get_or_init(|| Mutex::new(TitlebarCache::default()));
     {
         let mut cache = cache.lock().ok()?;
-        if let Some(buffer) = cache.entries.get(&key).map(|entry| entry.buffer.clone()) {
+        if let Some(index) = cache.entries.iter().position(|entry| {
+            entry.width == width
+                && entry.owner == owner
+                && entry.title == title
+                && entry.background == background
+                && entry.foreground == foreground
+        }) {
+            let entry = cache.entries.remove(index)?;
+            let buffer = entry.buffer.clone();
+            cache.entries.push_back(entry);
             cache.hits = cache.hits.saturating_add(1);
+            cache.avoided_rasterizations = cache.avoided_rasterizations.saturating_add(1);
             return Some(buffer);
         }
         cache.misses = cache.misses.saturating_add(1);
     }
     let buffer = render_titlebar_uncached(width, title, background, foreground)?;
+    let title = title.to_owned();
     let retained_bytes = usize::try_from(width)
         .unwrap_or(usize::MAX)
         .saturating_mul(TITLEBAR_HEIGHT as usize)
         .saturating_mul(4)
-        .saturating_add(key.1.len());
+        .saturating_add(title.len());
     let mut cache = cache.lock().ok()?;
+    cache.rasterizations = cache.rasterizations.saturating_add(1);
     if retained_bytes > TITLEBAR_CACHE_MAX_BYTES {
         return Some(buffer);
     }
-    if cache.entries.len() >= TITLEBAR_CACHE_MAX_ENTRIES
+    if let Some(owner) = owner {
+        let mut index = 0;
+        while index < cache.entries.len() {
+            if cache.entries[index].owner == Some(owner) {
+                let obsolete = cache.entries.remove(index)?;
+                cache.live_bytes = cache.live_bytes.saturating_sub(obsolete.bytes);
+                cache.evictions = cache.evictions.saturating_add(1);
+                cache.invalidations = cache.invalidations.saturating_add(1);
+                cache.generation = cache.generation.saturating_add(1);
+            } else {
+                index += 1;
+            }
+        }
+    }
+    while cache.entries.len() >= TITLEBAR_CACHE_MAX_ENTRIES
         || cache.live_bytes.saturating_add(retained_bytes) > TITLEBAR_CACHE_MAX_BYTES
     {
-        cache.evictions = cache.evictions.saturating_add(cache.entries.len() as u64);
+        let Some(evicted) = cache.entries.pop_front() else {
+            break;
+        };
+        cache.live_bytes = cache.live_bytes.saturating_sub(evicted.bytes);
+        cache.evictions = cache.evictions.saturating_add(1);
         cache.invalidations = cache.invalidations.saturating_add(1);
-        cache.entries.clear();
-        cache.live_bytes = 0;
+        cache.generation = cache.generation.saturating_add(1);
     }
-    cache.entries.insert(
-        key,
-        TitlebarCacheEntry {
-            buffer: buffer.clone(),
-        },
-    );
+    cache.entries.push_back(TitlebarCacheEntry {
+        owner,
+        width,
+        title,
+        background,
+        foreground,
+        buffer: buffer.clone(),
+        bytes: retained_bytes,
+    });
     cache.live_bytes = cache.live_bytes.saturating_add(retained_bytes);
     cache.peak_bytes = cache.peak_bytes.max(cache.live_bytes);
     cache.insertions = cache.insertions.saturating_add(1);
@@ -228,6 +293,31 @@ pub fn render_titlebar_with_mode(
         "server-decoration titlebar cache updated"
     );
     Some(buffer)
+}
+
+pub fn retain_titlebars_for_windows(owners: impl IntoIterator<Item = u64>) {
+    let owners = owners.into_iter().collect::<HashSet<_>>();
+    let Some(cache) = TITLEBAR_CACHE.get() else {
+        return;
+    };
+    let Ok(mut cache) = cache.lock() else {
+        return;
+    };
+    let mut index = 0;
+    while index < cache.entries.len() {
+        let retire = cache.entries[index]
+            .owner
+            .is_some_and(|owner| !owners.contains(&owner));
+        if retire {
+            let obsolete = cache.entries.remove(index).expect("known titlebar index");
+            cache.live_bytes = cache.live_bytes.saturating_sub(obsolete.bytes);
+            cache.evictions = cache.evictions.saturating_add(1);
+            cache.invalidations = cache.invalidations.saturating_add(1);
+            cache.generation = cache.generation.saturating_add(1);
+        } else {
+            index += 1;
+        }
+    }
 }
 
 fn render_titlebar_uncached(
@@ -261,8 +351,13 @@ fn render_titlebar_pixels(
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&apos;");
-    let mut options = resvg::usvg::Options::default();
-    options.fontdb_mut().load_system_fonts();
+    static OPTIONS: OnceLock<Mutex<resvg::usvg::Options<'static>>> = OnceLock::new();
+    let options = OPTIONS.get_or_init(|| {
+        let mut options = resvg::usvg::Options::default();
+        options.fontdb_mut().load_system_fonts();
+        TITLEBAR_FONT_DATABASE_LOADS.fetch_add(1, Ordering::Relaxed);
+        Mutex::new(options)
+    });
     let right = width.saturating_sub(10);
     let svg = format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{TITLEBAR_HEIGHT}">
@@ -271,6 +366,7 @@ fn render_titlebar_pixels(
 <text x="16" y="26" clip-path="url(#title)" font-family="sans-serif" font-size="14" font-weight="500" fill="#{foreground:06x}">{escaped_title}</text>
 </svg>"##,
     );
+    let options = options.lock().ok()?;
     let tree = resvg::usvg::Tree::from_data(svg.as_bytes(), &options).ok()?;
     let mut pixmap = resvg::tiny_skia::Pixmap::new(width, TITLEBAR_HEIGHT as u32)?;
     resvg::render(
@@ -280,6 +376,8 @@ fn render_titlebar_pixels(
     );
     Some((pixmap.data().to_vec(), width))
 }
+
+static TITLEBAR_FONT_DATABASE_LOADS: AtomicU64 = AtomicU64::new(0);
 
 pub fn titlebar_geometry(content: Geometry) -> Geometry {
     Geometry {
@@ -396,11 +494,14 @@ pub fn hit_test(content: Geometry, x: i32, y: i32) -> Option<FramePart> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex, MutexGuard};
+
     use super::{
         FramePart, RESIZE_BORDER, TITLEBAR_CACHE, TITLEBAR_CACHE_MAX_BYTES,
         TITLEBAR_CACHE_MAX_ENTRIES, TITLEBAR_HEIGHT, TitlebarCacheMode, hit_test, outer_geometry,
-        render_titlebar, render_titlebar_pixels, render_titlebar_with_mode,
-        titlebar_cache_diagnostics, titlebar_geometry, topmost_frame_target,
+        render_titlebar, render_titlebar_for, render_titlebar_pixels, render_titlebar_with_mode,
+        retain_titlebars_for_windows, titlebar_cache_diagnostics, titlebar_geometry,
+        topmost_frame_target,
     };
     use crate::shell_layout::Geometry;
 
@@ -410,6 +511,12 @@ mod tests {
         width: 500,
         height: 300,
     };
+
+    fn cache_test_lock() -> MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 
     #[test]
     fn frame_extends_outside_client_content() {
@@ -462,14 +569,15 @@ mod tests {
 
     #[test]
     fn titlebar_cache_is_byte_bounded_and_reports_churn() {
+        let _test_lock = cache_test_lock();
         if let Some(cache) = TITLEBAR_CACHE.get() {
             *cache.lock().unwrap() = super::TitlebarCache::default();
         }
         for index in 0..(TITLEBAR_CACHE_MAX_ENTRIES + 16) {
-            render_titlebar(4096, &format!("Window {index}"), 0x20242c, 0xe8edf4)
+            render_titlebar(1024, &format!("Window {index}"), 0x20242c, 0xe8edf4)
                 .expect("titlebar raster");
         }
-        render_titlebar(4096, "Window 143", 0x20242c, 0xe8edf4).expect("cached titlebar raster");
+        render_titlebar(1024, "Window 31", 0x20242c, 0xe8edf4).expect("cached titlebar raster");
 
         let diagnostics = titlebar_cache_diagnostics();
         assert!(diagnostics.entries <= TITLEBAR_CACHE_MAX_ENTRIES);
@@ -480,6 +588,27 @@ mod tests {
         assert_eq!(diagnostics.insertions, diagnostics.misses);
         assert!(diagnostics.evictions > 0);
         assert!(diagnostics.invalidations > 0);
+        assert_eq!(diagnostics.rasterizations, diagnostics.misses);
+        assert_eq!(diagnostics.avoided_rasterizations, diagnostics.hits);
+    }
+
+    #[test]
+    fn titlebar_owner_changes_and_closed_windows_retire_obsolete_rasters() {
+        let _test_lock = cache_test_lock();
+        if let Some(cache) = TITLEBAR_CACHE.get() {
+            *cache.lock().unwrap() = super::TitlebarCache::default();
+        }
+        render_titlebar_for(Some(7), 640, "Before", 0x20242c, 0xe8edf4).unwrap();
+        render_titlebar_for(Some(7), 640, "After", 0x20242c, 0xe8edf4).unwrap();
+        render_titlebar_for(Some(9), 640, "Other", 0x20242c, 0xe8edf4).unwrap();
+        let renamed = titlebar_cache_diagnostics();
+        assert_eq!(renamed.entries, 2);
+        assert!(renamed.invalidations >= 1);
+
+        retain_titlebars_for_windows([9]);
+        let closed = titlebar_cache_diagnostics();
+        assert_eq!(closed.entries, 1);
+        assert!(closed.invalidations >= 2);
     }
 
     #[derive(Clone, Copy)]
@@ -501,6 +630,7 @@ mod tests {
     #[test]
     #[ignore = "release-mode cache admission benchmark"]
     fn window_titlebar_rasters_admission_workloads() {
+        let _test_lock = cache_test_lock();
         const SAMPLES: usize = 31;
         const WARM_P95_BENEFIT_US: f64 = 100.0;
         if let Some(cache) = TITLEBAR_CACHE.get() {
@@ -524,6 +654,7 @@ mod tests {
                 };
                 let started = std::time::Instant::now();
                 let cached = render_titlebar_with_mode(
+                    None,
                     1280,
                     &title,
                     0x20242c,
@@ -536,6 +667,7 @@ mod tests {
 
                 let started = std::time::Instant::now();
                 let bypass = render_titlebar_with_mode(
+                    None,
                     1280,
                     &title,
                     0x20242c,

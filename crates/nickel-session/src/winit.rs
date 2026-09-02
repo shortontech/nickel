@@ -343,8 +343,12 @@ pub fn init_winit(
                             overlay_elements.splice(0..0, icon_elements);
                         }
 
-                        let recovery_banner = state.shell_recovery_visible().then(|| {
-                                let panel = state.recovery_ui.render_buffer();
+                        let recovery_visible = state.shell_recovery_visible();
+                        if !recovery_visible {
+                            state.recovery_ui.release_raster();
+                        }
+                        let recovery_banner = recovery_visible.then(|| {
+                                let panel = state.recovery_ui.render_buffer(1000);
                                 let panel_geometry = crate::recovery_ui::RecoveryUi::panel_geometry(
                                     crate::shell_layout::Geometry {
                                         x: 0,
@@ -568,6 +572,9 @@ fn window_frame_elements(
     icons: Option<&crate::window_frame::FrameIcons>,
     palette: &ThemePalette,
 ) -> Vec<WinitFrameElement<GlesRenderer>> {
+    crate::window_frame::retain_titlebars_for_windows(
+        state.surface_windows.values().map(|id| id.0),
+    );
     let Some(output_geometry) = state.space.output_geometry(output) else {
         return Vec::new();
     };
@@ -624,7 +631,8 @@ fn window_frame_elements(
                 width: bounds.size.w,
                 height: bounds.size.h,
             });
-        if let Some(titlebar) = crate::window_frame::render_titlebar(
+        if let Some(titlebar) = crate::window_frame::render_titlebar_for(
+            registry_id.map(|id| id.0),
             titlebar_geometry.width,
             title,
             palette.panel,

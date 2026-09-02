@@ -8,6 +8,7 @@ use smithay::{
     backend::{allocator::Fourcc, renderer::element::memory::MemoryRenderBuffer},
     utils::Transform,
 };
+use std::cell::RefCell;
 
 pub const WIDTH: u32 = 560;
 pub const HEIGHT: u32 = 144;
@@ -95,12 +96,40 @@ impl Application for RecoveryApplication {
 
 pub struct RecoveryUi {
     host: UiHost<RecoveryApplication>,
+    raster: RefCell<RecoveryRasterCache>,
 }
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RecoveryRasterDiagnostics {
+    pub live_bytes: usize,
+    pub peak_bytes: usize,
+    pub entries: usize,
+    pub generation: u64,
+    pub rasterizations: u64,
+    pub avoided_rasterizations: u64,
+    pub evictions: u64,
+    /// Smithay owns renderer imports; their byte cost is not exposed by its API.
+    pub renderer_bytes: Option<usize>,
+}
+
+#[derive(Default)]
+struct RecoveryRasterCache {
+    generation: u64,
+    entries: Vec<(u32, u64, MemoryRenderBuffer)>,
+    peak_bytes: usize,
+    rasterizations: u64,
+    avoided_rasterizations: u64,
+    evictions: u64,
+}
+
+const RECOVERY_RASTER_BYTES: usize = WIDTH as usize * HEIGHT as usize * 4;
+const RECOVERY_RASTER_MAX_ENTRIES: usize = 2;
 
 impl RecoveryUi {
     pub fn new() -> Self {
         Self {
             host: UiHost::new(RecoveryApplication::default(), WIDTH, HEIGHT),
+            raster: RefCell::new(RecoveryRasterCache::default()),
         }
     }
 
@@ -144,6 +173,7 @@ impl RecoveryUi {
             UiEvent::PointerReleased(point)
         };
         self.host.handle_event(event);
+        self.invalidate_raster();
         self.take_action()
     }
 
@@ -151,11 +181,13 @@ impl RecoveryUi {
         let point = Self::local_point(output, x, y)?;
         self.host.handle_event(UiEvent::PointerPressed(point));
         self.host.handle_event(UiEvent::PointerReleased(point));
+        self.invalidate_raster();
         self.take_action()
     }
 
     pub fn shortcut(&mut self, shortcut: Shortcut) -> Option<RecoveryAction> {
         self.host.shortcut(shortcut);
+        self.invalidate_raster();
         self.take_action()
     }
 
@@ -169,6 +201,7 @@ impl RecoveryUi {
             target,
             nickel_ui::SemanticAction::Invoke(ActionKind::Activate),
         );
+        self.invalidate_raster();
         self.take_action()
     }
 
@@ -186,15 +219,79 @@ impl RecoveryUi {
             .collect()
     }
 
-    pub fn render_buffer(&self) -> MemoryRenderBuffer {
-        MemoryRenderBuffer::from_slice(
+    fn invalidate_raster(&self) {
+        let mut cache = self.raster.borrow_mut();
+        cache.generation = cache.generation.saturating_add(1);
+        cache.evictions = cache.evictions.saturating_add(cache.entries.len() as u64);
+        cache.entries.clear();
+    }
+
+    pub fn raster_diagnostics(&self) -> RecoveryRasterDiagnostics {
+        let cache = self.raster.borrow();
+        RecoveryRasterDiagnostics {
+            live_bytes: cache.entries.len() * RECOVERY_RASTER_BYTES,
+            peak_bytes: cache.peak_bytes,
+            entries: cache.entries.len(),
+            generation: cache.generation,
+            rasterizations: cache.rasterizations,
+            avoided_rasterizations: cache.avoided_rasterizations,
+            evictions: cache.evictions,
+            renderer_bytes: None,
+        }
+    }
+
+    pub fn release_raster(&self) {
+        let mut cache = self.raster.borrow_mut();
+        if cache.entries.is_empty() {
+            return;
+        }
+        cache.evictions = cache.evictions.saturating_add(cache.entries.len() as u64);
+        cache.entries.clear();
+        drop(cache);
+        tracing::trace!(diagnostics = ?self.raster_diagnostics(), "recovery raster retired");
+    }
+
+    pub fn render_buffer(&self, scale_millis: u32) -> MemoryRenderBuffer {
+        let scale_millis = scale_millis.max(1);
+        let generation = self.raster.borrow().generation;
+        let cached = {
+            let cache = self.raster.borrow();
+            cache
+                .entries
+                .iter()
+                .find(|(scale, entry_generation, _)| {
+                    *scale == scale_millis && *entry_generation == generation
+                })
+                .map(|(_, _, buffer)| buffer.clone())
+        };
+        if let Some(buffer) = cached {
+            let mut cache = self.raster.borrow_mut();
+            cache.avoided_rasterizations = cache.avoided_rasterizations.saturating_add(1);
+            return buffer;
+        }
+        let buffer = MemoryRenderBuffer::from_slice(
             &self.render_pixels(),
             Fourcc::Abgr8888,
             (WIDTH as i32, HEIGHT as i32),
             1,
             Transform::Normal,
             None,
-        )
+        );
+        let mut cache = self.raster.borrow_mut();
+        cache.rasterizations = cache.rasterizations.saturating_add(1);
+        if cache.entries.len() == RECOVERY_RASTER_MAX_ENTRIES {
+            cache.entries.remove(0);
+            cache.evictions = cache.evictions.saturating_add(1);
+        }
+        cache
+            .entries
+            .push((scale_millis, generation, buffer.clone()));
+        cache.peak_bytes = cache
+            .peak_bytes
+            .max(cache.entries.len() * RECOVERY_RASTER_BYTES);
+        drop(cache);
+        tracing::trace!(diagnostics = ?self.raster_diagnostics(), "recovery raster cached");
+        buffer
     }
 }
 
@@ -265,5 +362,38 @@ mod tests {
         let pixels = RecoveryUi::new().render_pixels();
         assert_eq!(pixels.len(), WIDTH as usize * HEIGHT as usize * 4);
         assert!(pixels.chunks_exact(4).any(|pixel| pixel[3] != 0));
+    }
+
+    #[test]
+    fn unchanged_recovery_visual_reuses_one_raster_per_scale() {
+        let ui = RecoveryUi::new();
+        ui.render_buffer(1000);
+        ui.render_buffer(1000);
+        ui.render_buffer(1500);
+        ui.render_buffer(1500);
+
+        let diagnostics = ui.raster_diagnostics();
+        assert_eq!(diagnostics.entries, 2);
+        assert_eq!(diagnostics.live_bytes, RECOVERY_RASTER_BYTES * 2);
+        assert_eq!(diagnostics.rasterizations, 2);
+        assert_eq!(diagnostics.avoided_rasterizations, 2);
+    }
+
+    #[test]
+    fn recovery_visual_changes_and_hiding_retire_rasters() {
+        let mut ui = RecoveryUi::new();
+        ui.render_buffer(1000);
+        let generation = ui.raster_diagnostics().generation;
+        ui.shortcut(Shortcut::Submit);
+        let invalidated = ui.raster_diagnostics();
+        assert_eq!(invalidated.generation, generation + 1);
+        assert_eq!(invalidated.live_bytes, 0);
+
+        ui.render_buffer(1000);
+        ui.release_raster();
+        let released = ui.raster_diagnostics();
+        assert_eq!(released.live_bytes, 0);
+        assert_eq!(released.entries, 0);
+        assert!(released.evictions >= 2);
     }
 }

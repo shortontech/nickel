@@ -172,7 +172,61 @@ pub struct UdevData {
     client_bootstrap_started: bool,
     cursors: HashMap<crate::window_frame::FrameCursor, CursorBuffer>,
     frame_icons: Option<crate::window_frame::FrameIcons>,
-    identify_badges: Vec<MemoryRenderBuffer>,
+    identify_badges: IdentifyBadgeCache,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct IdentifyBadgeDiagnostics {
+    live_bytes: usize,
+    peak_bytes: usize,
+    entries: usize,
+    rasterizations: u64,
+    avoided_rasterizations: u64,
+    evictions: u64,
+    /// Smithay owns renderer imports; their byte cost is not exposed by its API.
+    renderer_bytes: Option<usize>,
+}
+
+#[derive(Default)]
+struct IdentifyBadgeCache {
+    entries: HashMap<usize, MemoryRenderBuffer>,
+    peak_bytes: usize,
+    rasterizations: u64,
+    avoided_rasterizations: u64,
+    evictions: u64,
+}
+
+impl IdentifyBadgeCache {
+    fn get(&mut self, index: usize) -> MemoryRenderBuffer {
+        if let Some(badge) = self.entries.get(&index) {
+            self.avoided_rasterizations = self.avoided_rasterizations.saturating_add(1);
+            return badge.clone();
+        }
+        let badge = identify_badge(index + 1);
+        self.entries.insert(index, badge.clone());
+        self.rasterizations = self.rasterizations.saturating_add(1);
+        self.peak_bytes = self
+            .peak_bytes
+            .max(self.entries.len() * IDENTIFY_BADGE_BYTES);
+        badge
+    }
+
+    fn retire(&mut self) {
+        self.evictions = self.evictions.saturating_add(self.entries.len() as u64);
+        self.entries.clear();
+    }
+
+    fn diagnostics(&self) -> IdentifyBadgeDiagnostics {
+        IdentifyBadgeDiagnostics {
+            live_bytes: self.entries.len() * IDENTIFY_BADGE_BYTES,
+            peak_bytes: self.peak_bytes,
+            entries: self.entries.len(),
+            rasterizations: self.rasterizations,
+            avoided_rasterizations: self.avoided_rasterizations,
+            evictions: self.evictions,
+            renderer_bytes: None,
+        }
+    }
 }
 
 impl UdevData {
@@ -227,7 +281,7 @@ pub fn init_udev(
         client_bootstrap_started: false,
         cursors: themed_cursors(),
         frame_icons: crate::window_frame::FrameIcons::load(),
-        identify_badges: (1..=9).map(identify_badge).collect(),
+        identify_badges: IdentifyBadgeCache::default(),
     });
     let (buffer_commit_tx, buffer_commit_rx) = channel::channel();
     data.buffer_commit_tx = Some(buffer_commit_tx);
@@ -1014,9 +1068,14 @@ impl NickelSession {
                 .unwrap_or_else(fallback_arrow_cursor);
             let frame_icons = native.frame_icons.clone();
             let background = surface.background.clone();
-            let identify_badge = identify_index
-                .and_then(|index| native.identify_badges.get(index))
-                .cloned();
+            if identify_index.is_none() && !native.identify_badges.entries.is_empty() {
+                native.identify_badges.retire();
+                tracing::trace!(
+                    diagnostics = ?native.identify_badges.diagnostics(),
+                    "output-identification rasters retired"
+                );
+            }
+            let identify_badge = identify_index.map(|index| native.identify_badges.get(index));
             let preview_windows = if self.locked {
                 Vec::new()
             } else {
@@ -1094,6 +1153,9 @@ impl NickelSession {
             let frame_palette = ThemePalette::from_appearance(
                 ShellSettings::load_default().resolve_appearance(Appearance::default()),
             );
+            crate::window_frame::retain_titlebars_for_windows(
+                self.surface_windows.values().map(|id| id.0),
+            );
             if let Some(output_geometry) = self.space.output_geometry(&output) {
                 // Space stores windows back-to-front. Build each window and its
                 // frame together, front-to-back, so overlapping frames obey the
@@ -1155,7 +1217,8 @@ impl NickelSession {
                             width: bounds.size.w,
                             height: bounds.size.h,
                         });
-                    if let Some(titlebar) = crate::window_frame::render_titlebar(
+                    if let Some(titlebar) = crate::window_frame::render_titlebar_for(
+                        registry_id.map(|id| id.0),
                         titlebar_geometry.width,
                         title,
                         frame_palette.panel,
@@ -1309,7 +1372,8 @@ impl NickelSession {
                         width: recovery_size.w,
                         height: recovery_size.h,
                     });
-                let panel = self.recovery_ui.render_buffer();
+                let scale_millis = (output.current_scale().fractional_scale() * 1000.0) as u32;
+                let panel = self.recovery_ui.render_buffer(scale_millis);
                 if let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
                     &mut renderer,
                     (f64::from(panel_geometry.x), f64::from(panel_geometry.y)),
@@ -1321,6 +1385,8 @@ impl NickelSession {
                 ) {
                     elements.insert(0, NativeCustomElement::from(element).into());
                 }
+            } else {
+                self.recovery_ui.release_raster();
             }
             if self.dimmed && !self.locked {
                 let size = self
@@ -1892,6 +1958,8 @@ fn identify_badge(number: usize) -> MemoryRenderBuffer {
     )
 }
 
+const IDENTIFY_BADGE_BYTES: usize = 180 * 180 * 4;
+
 fn switcher_visible_range(count: usize, selected: usize) -> std::ops::Range<usize> {
     let visible = count.min(SWITCHER_MAX_CARDS);
     let start = selected
@@ -2151,7 +2219,31 @@ fn normalize_capture_rows(
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_capture_rows, parse_kde_cursor_settings, switcher_visible_range};
+    use super::{
+        IDENTIFY_BADGE_BYTES, IdentifyBadgeCache, normalize_capture_rows,
+        parse_kde_cursor_settings, switcher_visible_range,
+    };
+
+    #[test]
+    fn output_identification_badges_are_lazy_reused_and_retired() {
+        let mut cache = IdentifyBadgeCache::default();
+        assert_eq!(cache.diagnostics().live_bytes, 0);
+
+        cache.get(0);
+        cache.get(0);
+        cache.get(1);
+        let active = cache.diagnostics();
+        assert_eq!(active.entries, 2);
+        assert_eq!(active.live_bytes, IDENTIFY_BADGE_BYTES * 2);
+        assert_eq!(active.rasterizations, 2);
+        assert_eq!(active.avoided_rasterizations, 1);
+
+        cache.retire();
+        let retired = cache.diagnostics();
+        assert_eq!(retired.entries, 0);
+        assert_eq!(retired.live_bytes, 0);
+        assert_eq!(retired.evictions, 2);
+    }
 
     #[test]
     fn task_switcher_keeps_the_selection_in_a_centered_bounded_window() {
