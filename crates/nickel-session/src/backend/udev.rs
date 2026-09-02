@@ -474,6 +474,14 @@ fn pending_recovery_devices<K: Copy + Eq + Hash, V>(
         .collect()
 }
 
+fn consume_pending_dependent<K: Copy + Eq + Hash>(
+    pending: &mut HashSet<K>,
+    node: K,
+    primary_gpu: K,
+) -> bool {
+    node != primary_gpu && pending.remove(&node)
+}
+
 #[derive(Clone)]
 struct CursorBuffer {
     buffer: MemoryRenderBuffer,
@@ -821,6 +829,8 @@ impl NickelSession {
             if retry_pending {
                 self.recover_primary_dependents(handle);
                 self.retire_inactive_renderers();
+            } else {
+                self.complete_pending_dependent(node);
             }
             return Ok(());
         }
@@ -832,6 +842,7 @@ impl NickelSession {
         {
             mark_disabled_outputs_absent(&mut native.disabled_outputs, &node);
             tracing::debug!(%node, path = %path.display(), "deferring disconnected EVDI device");
+            self.complete_pending_dependent(node);
             return Ok(());
         }
         let primary_to_scan = self.activate_drm_device_with_dependencies(handle, node)?;
@@ -845,6 +856,8 @@ impl NickelSession {
             .is_some_and(|native| node == native.primary_gpu);
         if is_primary {
             self.recover_primary_dependents(handle);
+        } else {
+            self.complete_pending_dependent(node);
         }
         self.retire_inactive_renderers();
         Ok(())
@@ -870,9 +883,6 @@ impl NickelSession {
         for (node, path) in pending {
             match self.add_drm_device_with_handle(handle, node, &path) {
                 Ok(()) => {
-                    if let Some(native) = self.native.as_mut() {
-                        native.pending_primary_dependents.remove(&node);
-                    }
                     tracing::info!(%node, "recovered DRM device after primary returned");
                 }
                 Err(error) => {
@@ -880,6 +890,17 @@ impl NickelSession {
                 }
             }
         }
+    }
+
+    fn complete_pending_dependent(&mut self, node: DrmNode) {
+        if let Some(native) = self.native.as_mut() {
+            consume_pending_dependent(
+                &mut native.pending_primary_dependents,
+                node,
+                native.primary_gpu,
+            );
+        }
+        self.retire_inactive_renderers();
     }
 
     fn activate_drm_device(
@@ -1423,6 +1444,13 @@ impl NickelSession {
     }
 
     fn remove_drm_device(&mut self, node: DrmNode) {
+        if let Some(native) = self.native.as_mut() {
+            consume_pending_dependent(
+                &mut native.pending_primary_dependents,
+                node,
+                native.primary_gpu,
+            );
+        }
         let dependent_nodes = self
             .native
             .as_ref()

@@ -1,10 +1,10 @@
 use super::{
     DisabledOutput, IDENTIFY_BADGE_BYTES, IdentifyBadgeCache, RendererLifecycleLedger,
-    RendererRetainedReason,
-    dependent_renderers_after_primary_removal, device_activation_priority,
-    mark_disabled_outputs_absent, normalize_capture_rows, parse_kde_cursor_settings,
-    pending_recovery_devices, primary_dependency_to_activate, published_disabled_outputs,
-    render_primary_available, renderer_retained_reason, switcher_visible_range,
+    RendererRetainedReason, consume_pending_dependent, dependent_renderers_after_primary_removal,
+    device_activation_priority, mark_disabled_outputs_absent, normalize_capture_rows,
+    parse_kde_cursor_settings, pending_recovery_devices, primary_dependency_to_activate,
+    published_disabled_outputs, render_primary_available, renderer_retained_reason,
+    switcher_visible_range,
 };
 use std::collections::HashMap;
 
@@ -163,13 +163,38 @@ fn primary_return_consumes_preserved_secondary_and_evdi_recovery_without_hotplug
     assert_eq!(recovery.len(), 2);
     for node in recovery {
         lifecycle.activate(node);
-        pending.remove(&node);
+        assert!(consume_pending_dependent(&mut pending, node, primary));
     }
 
     assert!(pending.is_empty());
     assert_eq!(lifecycle.live_generations.len(), 3);
     assert!(lifecycle.generation(2).is_some());
     assert!(lifecycle.generation(3).is_some());
+}
+
+#[test]
+fn direct_changed_and_secondary_removal_consume_pending_without_forgetting_primary_state() {
+    let primary = 1_u8;
+    let mut pending = std::collections::HashSet::from([2_u8, 3_u8]);
+
+    // A secondary recovered by its own Changed event uses the same production transaction as
+    // primary-return recovery and releases that portion of the primary pin.
+    assert!(consume_pending_dependent(&mut pending, 2, primary));
+    assert_eq!(pending, std::collections::HashSet::from([3]));
+    assert_eq!(
+        renderer_retained_reason(true, 0, false, !pending.is_empty()),
+        Some(RendererRetainedReason::PendingDependentRecovery)
+    );
+
+    // Removing the primary does not consume records needed when it returns.
+    assert!(!consume_pending_dependent(&mut pending, primary, primary));
+    assert_eq!(pending, std::collections::HashSet::from([3]));
+
+    // Physically forgetting the final pending secondary consumes its record and releases an
+    // otherwise zero-surface primary.
+    assert!(consume_pending_dependent(&mut pending, 3, primary));
+    assert!(pending.is_empty());
+    assert_eq!(renderer_retained_reason(true, 0, false, false), None);
 }
 
 #[test]
