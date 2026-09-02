@@ -1,9 +1,12 @@
 use super::{
-    IDENTIFY_BADGE_BYTES, IdentifyBadgeCache, RendererLifecycleLedger,
-    RendererRetainedReason, device_activation_priority, normalize_capture_rows,
-    parse_kde_cursor_settings, primary_dependency_to_activate, renderer_retained_reason,
-    switcher_visible_range,
+    DisabledOutput, IDENTIFY_BADGE_BYTES, IdentifyBadgeCache, RendererLifecycleLedger,
+    RendererRetainedReason,
+    dependent_renderers_after_primary_removal, device_activation_priority,
+    mark_disabled_outputs_absent, normalize_capture_rows, parse_kde_cursor_settings,
+    primary_dependency_to_activate, published_disabled_outputs, render_primary_available,
+    renderer_retained_reason, switcher_visible_range,
 };
+use std::collections::HashMap;
 
 #[test]
 fn output_identification_badges_are_lazy_reused_and_retired() {
@@ -107,6 +110,73 @@ fn primary_is_activated_first_and_only_when_cross_gpu_composition_requires_it() 
     assert_eq!(
         primary_dependency_to_activate(secondary, primary, false, false),
         None
+    );
+    assert!(!render_primary_available(secondary, primary, false, false));
+    assert!(render_primary_available(secondary, primary, false, true));
+    assert!(render_primary_available(secondary, primary, true, false));
+}
+
+#[test]
+fn primary_removal_retires_every_dependent_device_and_notifier_generation() {
+    let primary = 1_u8;
+    let mut lifecycle = RendererLifecycleLedger::<u8>::default();
+    lifecycle.activate(primary);
+    lifecycle.activate(2);
+    lifecycle.activate(3);
+    let dependents = dependent_renderers_after_primary_removal(
+        primary,
+        primary,
+        lifecycle.live_generations.keys().copied(),
+    );
+    assert_eq!(dependents.len(), 2);
+    for dependent in dependents {
+        assert!(lifecycle.retire(dependent));
+    }
+    assert!(lifecycle.retire(primary));
+    assert!(lifecycle.live_generations.is_empty());
+    assert_eq!(lifecycle.retirements, 3);
+
+    assert!(
+        dependent_renderers_after_primary_removal(
+            2,
+            primary,
+            lifecycle.live_generations.keys().copied(),
+        )
+        .is_empty()
+    );
+    assert!(!render_primary_available(2, primary, false, false));
+}
+
+#[test]
+fn unplugged_ordinary_and_deferred_evdi_outputs_are_absent_from_snapshots() {
+    let mut outputs = HashMap::from([
+        (
+            "ordinary",
+            DisabledOutput {
+                node: 1_u8,
+                output: "DP-1",
+                present: true,
+            },
+        ),
+        (
+            "evdi",
+            DisabledOutput {
+                node: 2_u8,
+                output: "DVI-I-1",
+                present: true,
+            },
+        ),
+    ]);
+    mark_disabled_outputs_absent(&mut outputs, &1);
+    mark_disabled_outputs_absent(&mut outputs, &2);
+    assert!(published_disabled_outputs(&outputs).next().is_none());
+
+    outputs.get_mut("ordinary").unwrap().present = true;
+    assert_eq!(
+        published_disabled_outputs(&outputs)
+            .copied()
+            .collect::<Vec<_>>(),
+        ["DP-1"]
     );
 }
 

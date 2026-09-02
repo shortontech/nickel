@@ -150,10 +150,31 @@ struct SurfaceData {
     invalidate_pending: bool,
 }
 
-struct DisabledOutput {
-    node: DrmNode,
-    output: Output,
+struct DisabledOutput<N = DrmNode, T = Output> {
+    node: N,
+    output: T,
     present: bool,
+}
+
+fn published_disabled_outputs<K, N, T>(
+    outputs: &HashMap<K, DisabledOutput<N, T>>,
+) -> impl Iterator<Item = &T> {
+    outputs
+        .values()
+        .filter(|disabled| disabled.present)
+        .map(|disabled| &disabled.output)
+}
+
+fn mark_disabled_outputs_absent<K, N: Eq, T>(
+    outputs: &mut HashMap<K, DisabledOutput<N, T>>,
+    node: &N,
+) {
+    for disabled in outputs
+        .values_mut()
+        .filter(|disabled| &disabled.node == node)
+    {
+        disabled.present = false;
+    }
 }
 
 struct DeviceData {
@@ -328,9 +349,7 @@ impl IdentifyBadgeCache {
 
 impl UdevData {
     pub(crate) fn disabled_outputs(&self) -> impl Iterator<Item = &Output> {
-        self.disabled_outputs
-            .values()
-            .map(|disabled| &disabled.output)
+        published_disabled_outputs(&self.disabled_outputs)
     }
 
     pub(crate) fn identify_badge_diagnostics(&self) -> IdentifyBadgeDiagnostics {
@@ -415,6 +434,29 @@ fn primary_dependency_to_activate<K: Copy + Eq>(
     (node != primary_gpu && primary_discovered && !primary_live).then_some(primary_gpu)
 }
 
+fn render_primary_available<K: Eq>(
+    node: K,
+    primary_gpu: K,
+    primary_live: bool,
+    primary_will_activate: bool,
+) -> bool {
+    node == primary_gpu || primary_live || primary_will_activate
+}
+
+fn dependent_renderers_after_primary_removal<K: Copy + Eq>(
+    removed: K,
+    primary_gpu: K,
+    live_nodes: impl IntoIterator<Item = K>,
+) -> Vec<K> {
+    if removed != primary_gpu {
+        return Vec::new();
+    }
+    live_nodes
+        .into_iter()
+        .filter(|candidate| *candidate != primary_gpu)
+        .collect()
+}
+
 #[derive(Clone)]
 struct CursorBuffer {
     buffer: MemoryRenderBuffer,
@@ -435,6 +477,8 @@ enum DeviceError {
     Renderer(String),
     #[error("failed to register DRM event source: {0}")]
     Registration(String),
+    #[error("secondary DRM device cannot render while the primary GPU is unavailable")]
+    MissingPrimary,
 }
 
 pub fn init_udev(
@@ -762,6 +806,7 @@ impl NickelSession {
                 Some(false)
             )
         {
+            mark_disabled_outputs_absent(&mut native.disabled_outputs, &node);
             tracing::debug!(%node, path = %path.display(), "deferring disconnected EVDI device");
             return Ok(());
         }
@@ -865,6 +910,17 @@ impl NickelSession {
                 native.devices.contains_key(&native.primary_gpu),
             )
         });
+        let primary_available = self.native.as_ref().is_some_and(|native| {
+            render_primary_available(
+                node,
+                native.primary_gpu,
+                native.devices.contains_key(&native.primary_gpu),
+                primary_to_activate.is_some(),
+            )
+        });
+        if !primary_available {
+            return Err(DeviceError::MissingPrimary);
+        }
         if let Some(primary_gpu) = primary_to_activate {
             self.activate_drm_device(handle, primary_gpu)?;
         }
@@ -1303,13 +1359,38 @@ impl NickelSession {
     }
 
     fn remove_drm_device(&mut self, node: DrmNode) {
+        let dependent_nodes = self
+            .native
+            .as_ref()
+            .map(|native| {
+                dependent_renderers_after_primary_removal(
+                    node,
+                    native.primary_gpu,
+                    native.devices.keys().copied(),
+                )
+            })
+            .unwrap_or_default();
+        for dependent in dependent_nodes {
+            tracing::warn!(
+                primary = %node,
+                dependent = %dependent,
+                "retiring DRM outputs whose render primary was removed"
+            );
+            self.retire_live_drm_device(dependent, false);
+        }
+        self.retire_live_drm_device(node, true);
+    }
+
+    fn retire_live_drm_device(&mut self, node: DrmNode, forget_discovery: bool) {
         let Some(native) = self.native.as_mut() else {
             return;
         };
-        native.discovered_devices.remove(&node);
-        native
-            .disabled_outputs
-            .retain(|_, disabled| disabled.node != node);
+        if forget_discovery {
+            native.discovered_devices.remove(&node);
+            native
+                .disabled_outputs
+                .retain(|_, disabled| disabled.node != node);
+        }
         let Some(mut device) = native.devices.remove(&node) else {
             self.retire_inactive_renderers();
             return;
@@ -1361,7 +1442,7 @@ impl NickelSession {
         self.relayout_fullscreen_windows();
         self.relayout_shell_surfaces();
         self.retire_inactive_renderers();
-        tracing::info!(%node, "DRM device removed");
+        tracing::info!(%node, forget_discovery, "DRM device resources retired");
     }
 
     fn schedule_render(&mut self, node: DrmNode, delay: Duration) {
