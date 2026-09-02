@@ -8,7 +8,7 @@ use smithay::{
             OutputCaptureSourceState,
         },
         image_copy_capture::{
-            BufferConstraints, CaptureFailureReason, Frame, ImageCopyCaptureHandler,
+            BufferConstraints, CaptureFailureReason, Frame, FrameRef, ImageCopyCaptureHandler,
             ImageCopyCaptureState, Session, SessionRef,
         },
     },
@@ -37,7 +37,11 @@ pub(crate) struct PendingImageCopyFrame {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ImageCopyCaptureDiagnostics {
     pub frames: usize,
-    pub shared_bytes: usize,
+    pub sessions: usize,
+    pub outputs: usize,
+    pub client_owned_shared_bytes: usize,
+    pub session_owned_cpu_bytes: usize,
+    pub retained_gpu_readback_bytes: usize,
 }
 
 pub(crate) fn is_portal_capture_client(client: &Client) -> bool {
@@ -60,6 +64,13 @@ fn portal_capture_executable(executable: &std::path::Path) -> bool {
     })
 }
 
+fn capture_transform_supported(transform: Transform) -> bool {
+    // Native outputs are Normal. The nested backend deliberately presents Flipped180 and its
+    // readback path restores top-down rows. Other transforms require column/axis conversion that
+    // the direct-copy path does not perform, so do not advertise invalid constraints for them.
+    matches!(transform, Transform::Normal | Transform::Flipped180)
+}
+
 impl NickelSession {
     pub(crate) fn has_pending_image_copy_frames(&self, output: &Output) -> bool {
         self.pending_image_copy_frames
@@ -68,13 +79,30 @@ impl NickelSession {
     }
 
     pub(crate) fn image_copy_capture_diagnostics(&self) -> ImageCopyCaptureDiagnostics {
+        let mut sessions = Vec::<SessionRef>::new();
+        let mut outputs = Vec::<String>::new();
+        for pending in &self.pending_image_copy_frames {
+            if !sessions.contains(&pending.session) {
+                sessions.push(pending.session.clone());
+            }
+            let output = pending.output.name();
+            if !outputs.contains(&output) {
+                outputs.push(output);
+            }
+        }
         ImageCopyCaptureDiagnostics {
             frames: self.pending_image_copy_frames.len(),
-            shared_bytes: self
+            sessions: sessions.len(),
+            outputs: outputs.len(),
+            client_owned_shared_bytes: self
                 .pending_image_copy_frames
                 .iter()
                 .map(|pending| pending.shared_bytes)
                 .sum(),
+            // Pending frames retain protocol handles only. Readback mappings are request-scoped,
+            // and portal delivery does not retain a normalized CPU image.
+            session_owned_cpu_bytes: 0,
+            retained_gpu_readback_bytes: 0,
         }
     }
 
@@ -86,24 +114,23 @@ impl NickelSession {
         height: usize,
         flipped: bool,
     ) {
-        let mut remaining = Vec::with_capacity(self.pending_image_copy_frames.len());
-        let mut ready = Vec::new();
-        for pending in self.pending_image_copy_frames.drain(..) {
-            if pending.output == *output {
-                ready.push(pending.frame);
-            } else {
-                remaining.push(pending);
-            }
-        }
-        self.pending_image_copy_frames = remaining;
+        let ready = retire_matching(&mut self.pending_image_copy_frames, |pending| {
+            pending.output == *output
+        });
         let diagnostics = self.image_copy_capture_diagnostics();
         tracing::debug!(
             pending_frames = diagnostics.frames,
-            pending_shared_bytes = diagnostics.shared_bytes,
+            pending_sessions = diagnostics.sessions,
+            pending_outputs = diagnostics.outputs,
+            client_owned_shared_bytes = diagnostics.client_owned_shared_bytes,
+            session_owned_cpu_bytes = diagnostics.session_owned_cpu_bytes,
+            retained_gpu_readback_bytes = diagnostics.retained_gpu_readback_bytes,
+            output = %output.name(),
             "retired completed image-copy frames"
         );
 
-        for frame in ready {
+        for pending in ready {
+            let frame = pending.frame;
             if copy_mapped_rgba_to_shm(&frame.buffer(), mapped, width, height, flipped).is_err() {
                 frame.fail(CaptureFailureReason::BufferConstraints);
                 continue;
@@ -114,19 +141,24 @@ impl NickelSession {
     }
 
     pub(crate) fn fail_image_copy_frames(&mut self, output: &Output, reason: CaptureFailureReason) {
-        let mut remaining = Vec::with_capacity(self.pending_image_copy_frames.len());
-        for pending in self.pending_image_copy_frames.drain(..) {
-            if pending.output == *output {
-                pending.frame.fail(reason);
-            } else {
-                remaining.push(pending);
-            }
+        let failed = retire_matching(&mut self.pending_image_copy_frames, |pending| {
+            pending.output == *output
+        });
+        let retired_frames = failed.len();
+        let retired_client_owned_shared_bytes = failed
+            .iter()
+            .map(|pending| pending.shared_bytes)
+            .sum::<usize>();
+        for pending in failed {
+            pending.frame.fail(reason);
         }
-        self.pending_image_copy_frames = remaining;
         let diagnostics = self.image_copy_capture_diagnostics();
         tracing::debug!(
             pending_frames = diagnostics.frames,
-            pending_shared_bytes = diagnostics.shared_bytes,
+            client_owned_shared_bytes = diagnostics.client_owned_shared_bytes,
+            output = %output.name(),
+            retired_frames,
+            retired_client_owned_shared_bytes,
             "retired failed image-copy frames"
         );
     }
@@ -137,7 +169,9 @@ impl NickelSession {
         }
         tracing::debug!(
             pending_frames = 0,
-            pending_shared_bytes = 0,
+            client_owned_shared_bytes = 0,
+            session_owned_cpu_bytes = 0,
+            retained_gpu_readback_bytes = 0,
             "retired all image-copy frames"
         );
     }
@@ -173,38 +207,63 @@ fn copy_mapped_rgba_to_shm(
         if required > pool_len {
             return Err(());
         }
-        let mut converted = vec![0; row_bytes];
-        for destination_y in 0..height {
-            let source_y = if flipped {
-                destination_y
-            } else {
-                height - 1 - destination_y
-            };
-            let source = &mapped[source_y * row_bytes..(source_y + 1) * row_bytes];
-            let source = match data.format {
-                wl_shm::Format::Abgr8888 => source,
-                wl_shm::Format::Xbgr8888 => {
-                    convert_rgba_row(source, &mut converted, false, false);
-                    &converted
-                }
-                wl_shm::Format::Argb8888 => {
-                    convert_rgba_row(source, &mut converted, true, true);
-                    &converted
-                }
-                wl_shm::Format::Xrgb8888 => {
-                    convert_rgba_row(source, &mut converted, true, false);
-                    &converted
-                }
-                _ => return Err(()),
-            };
-            let destination = pointer.wrapping_add(offset + destination_y * stride);
-            // SAFETY: both ranges were bounds-checked above, they do not overlap,
-            // and no Rust reference is created to client-owned shared memory.
-            unsafe { std::ptr::copy_nonoverlapping(source.as_ptr(), destination, row_bytes) };
-        }
-        Ok(())
+        visit_mapped_rows(
+            mapped,
+            width,
+            height,
+            flipped,
+            data.format,
+            |destination_y, source| {
+                let destination = pointer.wrapping_add(offset + destination_y * stride);
+                // SAFETY: both ranges were bounds-checked above, they do not overlap,
+                // and no Rust reference is created to client-owned shared memory.
+                unsafe { std::ptr::copy_nonoverlapping(source.as_ptr(), destination, row_bytes) };
+                Ok(())
+            },
+        )
     })
     .map_err(|_| ())?
+}
+
+fn visit_mapped_rows(
+    mapped: &[u8],
+    width: usize,
+    height: usize,
+    flipped: bool,
+    format: wl_shm::Format,
+    mut visit: impl FnMut(usize, &[u8]) -> Result<(), ()>,
+) -> Result<(), ()> {
+    let row_bytes = width.checked_mul(4).ok_or(())?;
+    if mapped.len() < row_bytes.checked_mul(height).ok_or(())? {
+        return Err(());
+    }
+    let mut converted = vec![0; row_bytes];
+    for destination_y in 0..height {
+        let source_y = if flipped {
+            destination_y
+        } else {
+            height - 1 - destination_y
+        };
+        let source = &mapped[source_y * row_bytes..(source_y + 1) * row_bytes];
+        let source = match format {
+            wl_shm::Format::Abgr8888 => source,
+            wl_shm::Format::Xbgr8888 => {
+                convert_rgba_row(source, &mut converted, false, false);
+                &converted
+            }
+            wl_shm::Format::Argb8888 => {
+                convert_rgba_row(source, &mut converted, true, true);
+                &converted
+            }
+            wl_shm::Format::Xrgb8888 => {
+                convert_rgba_row(source, &mut converted, true, false);
+                &converted
+            }
+            _ => return Err(()),
+        };
+        visit(destination_y, source)?;
+    }
+    Ok(())
 }
 
 fn convert_rgba_row(
@@ -242,6 +301,9 @@ impl ImageCopyCaptureHandler for NickelSession {
 
     fn capture_constraints(&mut self, source: &ImageCaptureSource) -> Option<BufferConstraints> {
         let output = source.user_data().get::<WeakOutput>()?.upgrade()?;
+        if !capture_transform_supported(output.current_transform()) {
+            return None;
+        }
         let size = output
             .current_transform()
             .transform_size(output.current_mode()?.size);
@@ -280,6 +342,10 @@ impl ImageCopyCaptureHandler for NickelSession {
             frame.fail(CaptureFailureReason::Stopped);
             return;
         };
+        if !capture_transform_supported(output.current_transform()) {
+            frame.fail(CaptureFailureReason::Stopped);
+            return;
+        }
         let shared_bytes = estimated_shm_bytes(&frame.buffer()).unwrap_or(usize::MAX);
         let diagnostics = self.image_copy_capture_diagnostics();
         let output_bytes = self
@@ -306,7 +372,7 @@ impl ImageCopyCaptureHandler for NickelSession {
             .count();
         let over_limit = !capture_admitted(
             diagnostics.frames,
-            diagnostics.shared_bytes,
+            diagnostics.client_owned_shared_bytes,
             output_frames,
             output_bytes,
             session_frames,
@@ -316,7 +382,12 @@ impl ImageCopyCaptureHandler for NickelSession {
         if over_limit {
             tracing::warn!(
                 frames = diagnostics.frames,
-                shared_bytes = diagnostics.shared_bytes,
+                client_owned_shared_bytes = diagnostics.client_owned_shared_bytes,
+                output = %output.name(),
+                output_frames,
+                output_client_owned_shared_bytes = output_bytes,
+                session_frames,
+                session_client_owned_shared_bytes = session_bytes,
                 requested_shared_bytes = shared_bytes,
                 "rejecting image-copy frame at count or byte limit"
             );
@@ -332,31 +403,70 @@ impl ImageCopyCaptureHandler for NickelSession {
         let diagnostics = self.image_copy_capture_diagnostics();
         tracing::debug!(
             pending_frames = diagnostics.frames,
-            pending_shared_bytes = diagnostics.shared_bytes,
+            client_owned_shared_bytes = diagnostics.client_owned_shared_bytes,
+            output = %self.pending_image_copy_frames.last().expect("just admitted").output.name(),
+            session_frames = session_frames + 1,
+            session_client_owned_shared_bytes = session_bytes + shared_bytes,
             "admitted image-copy frame"
         );
         self.request_output_redraw();
     }
 
     fn session_destroyed(&mut self, session: SessionRef) {
-        let mut remaining = Vec::with_capacity(self.pending_image_copy_frames.len());
-        for pending in self.pending_image_copy_frames.drain(..) {
-            if pending.session == session {
-                pending.frame.fail(CaptureFailureReason::Stopped);
-            } else {
-                remaining.push(pending);
-            }
+        let retired = retire_matching(&mut self.pending_image_copy_frames, |pending| {
+            pending.session == session
+        });
+        let retired_frames = retired.len();
+        let retired_client_owned_shared_bytes = retired
+            .iter()
+            .map(|pending| pending.shared_bytes)
+            .sum::<usize>();
+        for pending in retired {
+            pending.frame.fail(CaptureFailureReason::Stopped);
         }
-        self.pending_image_copy_frames = remaining;
         let diagnostics = self.image_copy_capture_diagnostics();
         tracing::debug!(
             pending_frames = diagnostics.frames,
-            pending_shared_bytes = diagnostics.shared_bytes,
+            client_owned_shared_bytes = diagnostics.client_owned_shared_bytes,
+            retired_frames,
+            retired_client_owned_shared_bytes,
             "retired destroyed image-copy session"
         );
         self.image_copy_sessions
             .retain(|candidate| candidate != &session);
     }
+
+    fn frame_aborted(&mut self, frame: FrameRef) {
+        let retired = retire_matching(&mut self.pending_image_copy_frames, |pending| {
+            pending.frame == frame
+        });
+        let retired_client_owned_shared_bytes = retired
+            .iter()
+            .map(|pending| pending.shared_bytes)
+            .sum::<usize>();
+        let diagnostics = self.image_copy_capture_diagnostics();
+        tracing::debug!(
+            pending_frames = diagnostics.frames,
+            client_owned_shared_bytes = diagnostics.client_owned_shared_bytes,
+            retired_frames = retired.len(),
+            retired_client_owned_shared_bytes,
+            "retired aborted image-copy frame"
+        );
+    }
+}
+
+fn retire_matching<T>(items: &mut Vec<T>, mut predicate: impl FnMut(&T) -> bool) -> Vec<T> {
+    let mut remaining = Vec::with_capacity(items.len());
+    let mut retired = Vec::new();
+    for item in items.drain(..) {
+        if predicate(&item) {
+            retired.push(item);
+        } else {
+            remaining.push(item);
+        }
+    }
+    *items = remaining;
+    retired
 }
 
 fn capture_admitted(
@@ -379,15 +489,16 @@ fn capture_admitted(
 fn estimated_shm_bytes(
     buffer: &smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer,
 ) -> Option<usize> {
-    smithay::wayland::shm::with_buffer_contents(buffer, |_, pool_len, data| {
-        let offset = usize::try_from(data.offset).ok()?;
-        let stride = usize::try_from(data.stride).ok()?;
-        let height = usize::try_from(data.height).ok()?;
-        let end = offset.checked_add(stride.checked_mul(height)?)?;
-        (end <= pool_len).then_some(end - offset)
+    smithay::wayland::shm::with_buffer_contents(buffer, |_, pool_len, _| {
+        Some(retained_shm_bytes(pool_len))
     })
     .ok()
     .flatten()
+}
+
+fn retained_shm_bytes(pool_len: usize) -> usize {
+    // A live wl_buffer keeps its wl_shm_pool mapping alive, including bytes outside this image.
+    pool_len
 }
 
 #[cfg(test)]
@@ -396,8 +507,10 @@ mod tests {
         MAX_PENDING_CAPTURE_BYTES, MAX_PENDING_CAPTURE_BYTES_PER_OUTPUT,
         MAX_PENDING_CAPTURE_BYTES_PER_SESSION, MAX_PENDING_CAPTURE_FRAMES,
         MAX_PENDING_CAPTURE_FRAMES_PER_OUTPUT, MAX_PENDING_CAPTURE_FRAMES_PER_SESSION,
-        capture_admitted, convert_rgba_row, portal_capture_executable,
+        capture_admitted, capture_transform_supported, convert_rgba_row, portal_capture_executable,
+        retained_shm_bytes, retire_matching, visit_mapped_rows,
     };
+    use smithay::{reexports::wayland_server::protocol::wl_shm, utils::Transform};
     use std::path::Path;
 
     #[test]
@@ -412,6 +525,62 @@ mod tests {
         assert_eq!(converted, [3, 2, 1, 4, 7, 6, 5, 8]);
         convert_rgba_row(&rgba, &mut converted, true, false);
         assert_eq!(converted, [3, 2, 1, 255, 7, 6, 5, 255]);
+    }
+
+    #[test]
+    fn direct_mapped_rows_apply_orientation_format_and_destination_stride() {
+        let mapped = [
+            1, 2, 3, 4, 5, 6, 7, 8, // renderer row zero
+            9, 10, 11, 12, 13, 14, 15, 16, // renderer row one
+        ];
+        let mut destination = [0x55; 24];
+        visit_mapped_rows(
+            &mapped,
+            2,
+            2,
+            false,
+            wl_shm::Format::Xrgb8888,
+            |row, bytes| {
+                destination[row * 12..row * 12 + bytes.len()].copy_from_slice(bytes);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(&destination[..8], &[11, 10, 9, 255, 15, 14, 13, 255]);
+        assert_eq!(&destination[8..12], &[0x55; 4]);
+        assert_eq!(&destination[12..20], &[3, 2, 1, 255, 7, 6, 5, 255]);
+        assert_eq!(&destination[20..], &[0x55; 4]);
+
+        let mut flipped = Vec::new();
+        visit_mapped_rows(&mapped, 2, 2, true, wl_shm::Format::Abgr8888, |_, bytes| {
+            flipped.extend_from_slice(bytes);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(flipped, mapped);
+    }
+
+    #[test]
+    fn capture_only_advertises_transforms_implemented_by_direct_copy() {
+        assert!(capture_transform_supported(Transform::Normal));
+        assert!(capture_transform_supported(Transform::Flipped180));
+        for unsupported in [
+            Transform::_90,
+            Transform::_180,
+            Transform::_270,
+            Transform::Flipped,
+            Transform::Flipped90,
+            Transform::Flipped270,
+        ] {
+            assert!(!capture_transform_supported(unsupported));
+        }
+    }
+
+    #[test]
+    fn retained_buffer_accounting_charges_the_whole_shm_pool() {
+        let oversized_pool = MAX_PENDING_CAPTURE_BYTES_PER_SESSION + 1;
+        assert_eq!(retained_shm_bytes(oversized_pool), oversized_pool);
+        assert!(!capture_admitted(0, 0, 0, 0, 0, 0, oversized_pool));
     }
 
     #[test]
@@ -496,5 +665,67 @@ mod tests {
             MAX_PENDING_CAPTURE_BYTES_PER_SESSION - 1,
             1
         ));
+    }
+
+    #[test]
+    fn per_session_fairness_does_not_prevent_another_session_from_admission() {
+        assert!(!capture_admitted(
+            MAX_PENDING_CAPTURE_FRAMES_PER_SESSION,
+            4096,
+            MAX_PENDING_CAPTURE_FRAMES_PER_SESSION,
+            4096,
+            MAX_PENDING_CAPTURE_FRAMES_PER_SESSION,
+            4096,
+            1,
+        ));
+        assert!(capture_admitted(
+            MAX_PENDING_CAPTURE_FRAMES_PER_SESSION,
+            4096,
+            MAX_PENDING_CAPTURE_FRAMES_PER_SESSION,
+            4096,
+            0,
+            0,
+            1,
+        ));
+    }
+
+    #[test]
+    fn session_output_and_abort_retirement_return_accounting_to_zero() {
+        #[derive(Clone, Copy)]
+        struct Entry {
+            frame: u8,
+            session: u8,
+            output: u8,
+            bytes: usize,
+        }
+
+        let mut pending = vec![
+            Entry {
+                frame: 1,
+                session: 1,
+                output: 1,
+                bytes: 10,
+            },
+            Entry {
+                frame: 2,
+                session: 2,
+                output: 1,
+                bytes: 20,
+            },
+            Entry {
+                frame: 3,
+                session: 2,
+                output: 2,
+                bytes: 30,
+            },
+        ];
+        let session = retire_matching(&mut pending, |entry| entry.session == 1);
+        assert_eq!(session.iter().map(|entry| entry.bytes).sum::<usize>(), 10);
+        let output = retire_matching(&mut pending, |entry| entry.output == 1);
+        assert_eq!(output.iter().map(|entry| entry.bytes).sum::<usize>(), 20);
+        let abort = retire_matching(&mut pending, |entry| entry.frame == 3);
+        assert_eq!(abort.iter().map(|entry| entry.bytes).sum::<usize>(), 30);
+        assert!(pending.is_empty());
+        assert_eq!(pending.iter().map(|entry| entry.bytes).sum::<usize>(), 0);
     }
 }
