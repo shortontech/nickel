@@ -142,6 +142,7 @@ pub struct ShellSurface {
     display_index: usize,
     output_name: String,
     display_connected: bool,
+    initial_exposed: bool,
     presenter: Option<SdlCanvasPresenter>,
     last_host_change_token: Option<HostChangeToken>,
     window: Option<Window>,
@@ -290,6 +291,7 @@ impl SdlShell {
     pub fn sync_display_geometry(&mut self) -> Result<(), String> {
         let displays = self.display_geometries()?;
         let output_names = self.display_names()?;
+        self.retire_disconnected_output_surfaces(&output_names);
         if displays.is_empty() {
             for surface in &mut self.surfaces {
                 surface.display_connected = false;
@@ -429,6 +431,22 @@ impl SdlShell {
         Ok(())
     }
 
+    fn retire_disconnected_output_surfaces(&mut self, output_names: &[String]) {
+        if !self.surfaces.iter().any(|surface| {
+            output_role_surface_is_disconnected(surface.role, &surface.output_name, output_names)
+        }) {
+            return;
+        }
+
+        // Preserve the durable high-water mark before dropping the last
+        // presenter diagnostics for a disconnected output.
+        let _ = self.memory_diagnostics();
+        self.surfaces.retain(|surface| {
+            !output_role_surface_is_disconnected(surface.role, &surface.output_name, output_names)
+        });
+        self.rebuild_surface_indices();
+    }
+
     fn rebuild_surface_indices(&mut self) {
         self.surface_indices.clear();
         for (index, surface) in self
@@ -463,6 +481,18 @@ impl SdlShell {
         self.surfaces.get_mut(index)
     }
 
+    pub fn mark_initial_exposed(&mut self, id: SurfaceId) -> bool {
+        let Some(surface) = self.surface_mut(id) else {
+            return false;
+        };
+        if surface.initial_exposed {
+            false
+        } else {
+            surface.initial_exposed = true;
+            true
+        }
+    }
+
     pub fn create_codex_chat_surface(
         &mut self,
         title: &str,
@@ -489,6 +519,7 @@ impl SdlShell {
             display_index: 0,
             output_name: String::new(),
             display_connected: true,
+            initial_exposed: false,
             presenter: None,
             last_host_change_token: None,
             window: Some(window),
@@ -833,6 +864,7 @@ impl SdlShell {
             display_index,
             output_name: output_name.to_owned(),
             display_connected: true,
+            initial_exposed: false,
             presenter: None,
             last_host_change_token: None,
             window: Some(window),
@@ -1046,6 +1078,17 @@ fn require_displays(displays: Vec<DisplayGeometry>) -> Result<Vec<DisplayGeometr
     }
 }
 
+fn output_role_surface_is_disconnected(
+    role: SurfaceRole,
+    output_name: &str,
+    output_names: &[String],
+) -> bool {
+    matches!(
+        role,
+        SurfaceRole::Desktop | SurfaceRole::Panel | SurfaceRole::Lock
+    ) && !output_names.iter().any(|name| name == output_name)
+}
+
 #[cfg(test)]
 mod runtime_diagnostics_tests {
     use super::{RUNTIME_SAMPLE_CAPACITY, push_bounded};
@@ -1095,8 +1138,8 @@ pub(crate) fn parse_proc_status_rss(status: &str) -> Option<usize> {
 mod tests {
     use super::{
         DESKTOP_TITLE, DisplayGeometry, LAUNCHER_TITLE, PANEL_TITLE, SurfaceRole,
-        durable_presenter_peak, parse_proc_status_rss, require_displays, shell_surface_title,
-        surface_geometry, surface_is_borderless,
+        durable_presenter_peak, output_role_surface_is_disconnected, parse_proc_status_rss,
+        require_displays, shell_surface_title, surface_geometry, surface_is_borderless,
     };
 
     use nickel_ui::AggregatePresenterCacheDiagnostics;
@@ -1249,5 +1292,54 @@ mod tests {
             shell_surface_title(SurfaceRole::Launcher, LAUNCHER_TITLE, "DP-1"),
             LAUNCHER_TITLE
         );
+    }
+
+    #[test]
+    fn disconnected_output_roles_are_retired_even_when_live_outputs_have_panels() {
+        let outputs = vec!["winit".to_owned()];
+        let mut surfaces = vec![
+            (SurfaceRole::Desktop, "winit".to_owned()),
+            (SurfaceRole::Panel, "winit".to_owned()),
+            (SurfaceRole::Lock, "winit".to_owned()),
+            (SurfaceRole::Desktop, "memory-a".to_owned()),
+            (SurfaceRole::Panel, "memory-a".to_owned()),
+            (SurfaceRole::Lock, "memory-a".to_owned()),
+            (SurfaceRole::Desktop, "memory-b".to_owned()),
+            (SurfaceRole::Panel, "memory-b".to_owned()),
+            (SurfaceRole::Lock, "memory-b".to_owned()),
+            (SurfaceRole::Launcher, "memory-b".to_owned()),
+        ];
+
+        surfaces
+            .retain(|(role, output)| !output_role_surface_is_disconnected(*role, output, &outputs));
+
+        assert_eq!(surfaces.len(), 4);
+        assert!(
+            surfaces
+                .iter()
+                .all(|(role, output)| { output == "winit" || *role == SurfaceRole::Launcher })
+        );
+    }
+
+    #[test]
+    fn unique_output_name_churn_retains_only_live_output_roles() {
+        let outputs = vec!["winit".to_owned()];
+        let mut surfaces = [SurfaceRole::Desktop, SurfaceRole::Panel, SurfaceRole::Lock]
+            .into_iter()
+            .map(|role| (role, "winit".to_owned()))
+            .collect::<Vec<_>>();
+
+        for generation in 0..512 {
+            let historical = format!("memory-{generation}");
+            surfaces.extend(
+                [SurfaceRole::Desktop, SurfaceRole::Panel, SurfaceRole::Lock]
+                    .into_iter()
+                    .map(|role| (role, historical.clone())),
+            );
+            surfaces.retain(|(role, output)| {
+                !output_role_surface_is_disconnected(*role, output, &outputs)
+            });
+            assert_eq!(surfaces.len(), 3);
+        }
     }
 }

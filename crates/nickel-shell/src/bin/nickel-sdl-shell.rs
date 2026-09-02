@@ -1420,7 +1420,6 @@ fn main() -> Result<(), String> {
     let mut hover_repaint: Option<(SurfaceRole, Instant)> = None;
     let mut controller = ControllerInput::new();
     let mut controller_schedule = nickel_ui::ControllerPollSchedule::new(Instant::now());
-    let mut initial_exposures = HashSet::new();
     #[cfg(not(target_os = "linux"))]
     let mut focused_overlays = HashSet::new();
     #[cfg(not(target_os = "linux"))]
@@ -1685,7 +1684,7 @@ fn main() -> Result<(), String> {
                     render_role(&mut shell, &mut state, role)?;
                 }
             }
-            Some(ShellEvent::Redraw(surface)) if initial_exposures.insert(surface) => {
+            Some(ShellEvent::Redraw(surface)) if shell.mark_initial_exposed(surface) => {
                 let Some(entry) = shell.surface(surface) else {
                     continue;
                 };
