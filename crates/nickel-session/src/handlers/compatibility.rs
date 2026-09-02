@@ -312,15 +312,19 @@ impl PointerConstraintsHandler for NickelSession {
     fn remove_constraint(
         &mut self,
         surface: &WlSurface,
-        _pointer: &PointerHandle<Self>,
-        _constraint_remove: ConstraintRemove,
+        pointer: &PointerHandle<Self>,
+        constraint_remove: ConstraintRemove,
     ) {
-        // A constraint object can be destroyed while its surface remains live;
-        // in that case the pending lock hint is intentionally consumed by the
-        // normal unlock path. A dead surface has no future motion path, so its
-        // identity must be retired here (including for constrained subsurfaces).
+        let surface_id = surface.id();
+        if matches!(constraint_remove, ConstraintRemove::Destroyed(_)) {
+            // Resource destruction is the final lifecycle event for this
+            // constraint even when its surface remains live. Apply the last
+            // committed lock hint immediately, then free all admission state.
+            if let Some(location) = self.retire_pointer_constraint_references(&surface_id) {
+                pointer.set_location(location);
+            }
+        }
         if !surface.is_alive() {
-            let surface_id = surface.id();
             self.retire_surface_window_references(Some(&surface_id), None);
         }
     }

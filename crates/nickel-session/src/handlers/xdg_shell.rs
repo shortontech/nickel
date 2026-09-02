@@ -473,6 +473,7 @@ impl NickelSession {
             .copied()
         {
             self.windows.update_metadata(id, title, app_id);
+            self.clear_changed_shell_surface_role(&surface.wl_surface().id(), shell_role);
             if let Some(role) =
                 unauthenticated_reserved_shell_role(self.windows.app_id(id), authenticated)
             {
@@ -492,6 +493,10 @@ impl NickelSession {
                     "rejected reserved Nickel shell role from unauthenticated client"
                 );
                 surface.send_close();
+                let surface_id = surface.wl_surface().id();
+                let restore_focus = self.windows.is_active(id);
+                self.retire_surface_window_references(Some(&surface_id), Some(id));
+                self.restore_focus_after_window_removal(restore_focus);
                 self.notify_protocol_snapshot();
                 return;
             }

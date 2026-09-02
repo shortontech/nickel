@@ -1,4 +1,4 @@
-use std::{os::fd::OwnedFd, process::Stdio, time::Duration};
+use std::{collections::HashMap, hash::Hash, os::fd::OwnedFd, process::Stdio, time::Duration};
 
 use smithay::{
     desktop::Window,
@@ -33,6 +33,21 @@ use crate::{
     handlers::{SelectionOwner, bounded_selection_mime_types},
     window_registry::WindowId,
 };
+
+fn x11_retirement_identities<K: Clone + Eq + Hash>(
+    window_ids: impl IntoIterator<Item = WindowId>,
+    surface_windows: &HashMap<K, WindowId>,
+) -> Vec<(Option<K>, WindowId)> {
+    window_ids
+        .into_iter()
+        .map(|window_id| {
+            let surface = surface_windows
+                .iter()
+                .find_map(|(surface, retained)| (*retained == window_id).then(|| surface.clone()));
+            (surface, window_id)
+        })
+        .collect()
+}
 
 const XWAYLAND_RESTART_DELAY: Duration = Duration::from_secs(1);
 const DEFAULT_X11_WIDTH: i32 = 800;
@@ -535,31 +550,23 @@ impl XwmHandler for NickelSession {
         for window in x11_windows {
             self.space.unmap_elem(&window);
         }
+        self.forget_all_x11_geometry();
         let removed_ids = self
             .x11_windows
             .drain()
             .map(|(_, id)| id)
             .collect::<Vec<_>>();
-        for id in &removed_ids {
-            self.workspace_hidden_windows.remove(id);
-            self.workspaces.remove_window(id);
-            self.windows.remove(*id);
+        let removed = x11_retirement_identities(removed_ids, &self.surface_windows);
+        let restore_focus = removed.iter().any(|(_, id)| self.windows.is_active(*id));
+        for (surface_id, id) in removed {
+            self.retire_surface_window_references(surface_id.as_ref(), Some(id));
         }
-        self.surface_windows
-            .retain(|_, id| !removed_ids.contains(id));
         self.seat.get_keyboard().unwrap().set_focus(
             self,
             Option::<KeyboardFocusTarget>::None,
             smithay::utils::SERIAL_COUNTER.next_serial(),
         );
-        if let Some(window) = self
-            .windows
-            .snapshot()
-            .into_iter()
-            .find(|window| window.active)
-        {
-            self.activate_window(window.id);
-        }
+        self.restore_focus_after_window_removal(restore_focus);
         self.request_output_redraw();
         self.schedule_xwayland_restart();
     }
@@ -568,6 +575,17 @@ impl XwmHandler for NickelSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn xwm_disconnect_retires_every_window_with_or_without_a_wayland_surface() {
+        let mapped = WindowId(41);
+        let surface_less = WindowId(42);
+        let surfaces = HashMap::from([(7_u32, mapped)]);
+
+        let retired = x11_retirement_identities([mapped, surface_less], &surfaces);
+
+        assert_eq!(retired, [(Some(7), mapped), (None, surface_less)]);
+    }
 
     #[test]
     fn override_redirect_windows_use_the_client_configured_location() {

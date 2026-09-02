@@ -402,10 +402,10 @@ fn retire_pointer_surface<K: Eq + Hash>(
     locks: &mut HashSet<K>,
     origins: &mut HashMap<K, Point<f64, Logical>>,
     surface: &K,
-) {
-    hints.remove(surface);
-    locks.remove(surface);
-    origins.remove(surface);
+) -> Option<Point<f64, Logical>> {
+    let hint = hints.remove(surface);
+    let was_locked = locks.remove(surface);
+    let origin = origins.remove(surface);
     if hints.is_empty() {
         hints.shrink_to_fit();
     }
@@ -415,6 +415,7 @@ fn retire_pointer_surface<K: Eq + Hash>(
     if origins.is_empty() {
         origins.shrink_to_fit();
     }
+    was_locked.then(|| origin.zip(hint).map(|(origin, hint)| origin + hint))?
 }
 
 fn retire_displaced_window(
@@ -435,6 +436,17 @@ fn retire_shell_surface(registrations: &mut Vec<RegisteredShellRole>, surface_id
     if registrations.is_empty() {
         registrations.shrink_to_fit();
     }
+}
+
+fn shell_registration_role_changed(
+    registrations: &[RegisteredShellRole],
+    surface_id: &ObjectId,
+    next_role: Option<ShellRole>,
+) -> bool {
+    registrations
+        .iter()
+        .find(|registration| registration.surface == *surface_id)
+        .is_some_and(|registration| Some(registration.role) != next_role)
 }
 
 pub struct SurfaceBufferCommit {
@@ -2576,7 +2588,7 @@ impl NickelSession {
         window_id: Option<WindowId>,
     ) {
         if let Some(surface_id) = surface_id {
-            retire_pointer_surface(
+            let _ = retire_pointer_surface(
                 &mut self.pointer_lock_hints,
                 &mut self.active_pointer_locks,
                 &mut self.active_pointer_constraint_origins,
@@ -2663,6 +2675,59 @@ impl NickelSession {
         debug_assert!(self.lifecycle_references_are_live());
     }
 
+    pub(crate) fn retire_pointer_constraint_references(
+        &mut self,
+        surface_id: &ObjectId,
+    ) -> Option<Point<f64, Logical>> {
+        retire_pointer_surface(
+            &mut self.pointer_lock_hints,
+            &mut self.active_pointer_locks,
+            &mut self.active_pointer_constraint_origins,
+            surface_id,
+        )
+    }
+
+    pub(crate) fn clear_changed_shell_surface_role(
+        &mut self,
+        surface_id: &ObjectId,
+        next_role: Option<ShellRole>,
+    ) {
+        let role_changed = shell_registration_role_changed(
+            &self.registered_shell_role_slots,
+            surface_id,
+            next_role,
+        );
+        if !role_changed {
+            return;
+        }
+        retire_shell_surface(&mut self.registered_shell_role_slots, surface_id);
+        let matches_surface = |window: &Window| {
+            window
+                .wl_surface()
+                .is_some_and(|surface| surface.id() == *surface_id)
+        };
+        if self.launcher_window.as_ref().is_some_and(&matches_surface) {
+            self.launcher_window = None;
+            self.launcher_visibility.set(false);
+        }
+        self.desktop_windows
+            .retain(|window| !matches_surface(window));
+        self.panel_windows.retain(|window| !matches_surface(window));
+        self.lock_windows.retain(|window| !matches_surface(window));
+        self.utility_windows
+            .retain(|window| !matches_surface(window));
+        if self
+            .context_menu_window
+            .as_ref()
+            .is_some_and(&matches_surface)
+        {
+            self.context_menu_window = None;
+        }
+        if self.preview_window.as_ref().is_some_and(&matches_surface) {
+            self.preview_window = None;
+        }
+    }
+
     pub(crate) fn lifecycle_collection_counts(&self) -> LifecycleCollectionCounts {
         LifecycleCollectionCounts {
             pointer_hints: self.pointer_lock_hints.len(),
@@ -2725,6 +2790,10 @@ impl NickelSession {
             output,
             surface: surface.id(),
         };
+        // A title/app-id update on the same live surface may change its output
+        // slot. Replace that registration rather than treating the original
+        // tuple as permanent history.
+        retire_shell_surface(&mut self.registered_shell_role_slots, &registration.surface);
         let replacements = self
             .registered_shell_role_slots
             .iter()
@@ -3774,6 +3843,13 @@ impl NickelSession {
         self.x11_fullscreen_restore.remove(&surface.window_id());
     }
 
+    pub(crate) fn forget_all_x11_geometry(&mut self) {
+        self.x11_maximized_restore.clear();
+        self.x11_maximized_restore.shrink_to_fit();
+        self.x11_fullscreen_restore.clear();
+        self.x11_fullscreen_restore.shrink_to_fit();
+    }
+
     pub fn toggle_maximized_toplevel(&mut self, surface: &ToplevelSurface) {
         if self
             .maximized_restore
@@ -4341,8 +4417,9 @@ mod protocol_tests {
         command_requires_shell_identity, drag_icon_location, maximized_content_geometry,
         output_index_for_shell_surface, restored_drag_content_geometry,
         retain_live_idle_inhibitors, retire_displaced_window, retire_pointer_surface,
-        retire_shell_surface, shell_registration_rejection, shell_role_accepts_ordinary_focus,
-        shell_surface_output_from_title, test_control_may_invoke,
+        retire_shell_surface, shell_registration_rejection, shell_registration_role_changed,
+        shell_role_accepts_ordinary_focus, shell_surface_output_from_title,
+        test_control_may_invoke,
     };
     use crate::shell_layout::Geometry;
     use nickel_session_protocol::{Command, SessionAction, ShellRole};
@@ -4359,7 +4436,8 @@ mod protocol_tests {
             hints.insert(surface, Point::from((1.0, 2.0)));
             locks.insert(surface);
             origins.insert(surface, Point::from((3.0, 4.0)));
-            retire_pointer_surface(&mut hints, &mut locks, &mut origins, &surface);
+            let restored = retire_pointer_surface(&mut hints, &mut locks, &mut origins, &surface);
+            assert_eq!(restored, Some(Point::from((4.0, 6.0))));
             assert!(hints.is_empty());
             assert!(locks.is_empty());
             assert!(origins.is_empty());
@@ -4392,6 +4470,30 @@ mod protocol_tests {
     }
 
     #[test]
+    fn displaced_mapped_minimized_and_hidden_windows_retire_independently() {
+        let mapped = super::WindowId(1);
+        let minimized = super::WindowId(2);
+        let hidden = super::WindowId(3);
+        let displaced = |id| DisplacedWindow {
+            id,
+            relative_location: Point::from((10, 20)),
+            rescue_location: Point::from((30, 40)),
+        };
+        let mut outputs = HashMap::from([(
+            "removed-output".to_owned(),
+            vec![displaced(mapped), displaced(minimized), displaced(hidden)],
+        )]);
+
+        retire_displaced_window(&mut outputs, mapped);
+        assert_eq!(outputs["removed-output"].len(), 2);
+        retire_displaced_window(&mut outputs, minimized);
+        assert_eq!(outputs["removed-output"].len(), 1);
+        retire_displaced_window(&mut outputs, hidden);
+        assert!(outputs.is_empty());
+        assert_eq!(outputs.capacity(), 0);
+    }
+
+    #[test]
     fn destroying_a_shell_surface_retires_only_its_registration() {
         let retired = ObjectId::null();
         let retained = retired.clone();
@@ -4412,6 +4514,32 @@ mod protocol_tests {
             surface: retained,
         });
         assert_eq!(registrations.len(), 1);
+    }
+
+    #[test]
+    fn live_surface_role_transitions_invalidate_historical_readiness() {
+        let surface = ObjectId::null();
+        let registrations = vec![RegisteredShellRole {
+            role: ShellRole::Launcher,
+            output: None,
+            surface: surface.clone(),
+        }];
+
+        assert!(!shell_registration_role_changed(
+            &registrations,
+            &surface,
+            Some(ShellRole::Launcher)
+        ));
+        assert!(shell_registration_role_changed(
+            &registrations,
+            &surface,
+            Some(ShellRole::ControlCenter)
+        ));
+        assert!(shell_registration_role_changed(
+            &registrations,
+            &surface,
+            None
+        ));
     }
 
     #[test]
