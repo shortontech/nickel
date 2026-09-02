@@ -13,7 +13,8 @@ pub const MAX_WORKSPACES: usize = 32;
 pub const MAX_RUNTIME_PERFORMANCE_SAMPLES: usize = 64;
 
 const MAGIC: [u8; 4] = *b"NIKL";
-const HEADER_BYTES: usize = 10;
+pub const FRAME_HEADER_BYTES: usize = 10;
+const HEADER_BYTES: usize = FRAME_HEADER_BYTES;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientEnvelope {
@@ -413,6 +414,16 @@ pub struct CacheDiagnostics {
     /// Base64 payload bytes expected during JSON serialization; framing overhead is excluded.
     #[serde(default)]
     pub preview_protocol_base64_bytes: u64,
+    /// Exact serialized JSON payload bytes produced for preview responses.
+    #[serde(default)]
+    pub preview_protocol_json_payload_bytes: u64,
+    /// Exact framed response bytes copied into the datagram send buffer.
+    #[serde(default)]
+    pub preview_protocol_framed_copy_bytes: u64,
+    #[serde(default)]
+    pub preview_capture_failures: u64,
+    #[serde(default)]
+    pub preview_cache_generation: u64,
     pub metadata_entries: u16,
     pub metadata_title_bytes: u64,
     pub metadata_peak_title_bytes: u64,

@@ -465,6 +465,7 @@ fn supervise_shell(program: OsString, arguments: Vec<OsString>, context: ShellSu
                     ShellWait::SecureStorageLost => {
                         consecutive_failures = 0;
                         tracing::warn!("secure storage readiness revoked; Nickel shell stopped");
+                        let _ = shell_health.send(0);
                         continue;
                     }
                 }

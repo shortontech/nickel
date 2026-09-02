@@ -488,11 +488,15 @@ pub fn init_winit(
 
                     if !state.locked && last_preview_capture.elapsed() >= Duration::from_millis(200)
                     {
-                        let windows = state.preview_capture_candidates();
+                        let wave = state.begin_preview_render_wave();
+                        let windows = state.preview_capture_candidates(wave);
                         let (renderer, _) = backend.bind().unwrap();
-                        for (id, window, rgba) in windows {
+                        for (id, window) in windows {
+                            let (rgba, had_frame) = state.take_preview_capture_buffer(id);
                             if let Some(frame) = capture_preview(renderer, &window, rgba) {
                                 state.store_preview(id, frame);
+                            } else {
+                                state.preview_capture_failed(id, had_frame);
                             }
                         }
                         last_preview_capture = Instant::now();

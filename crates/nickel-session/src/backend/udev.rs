@@ -809,14 +809,25 @@ impl NickelSession {
     }
 
     pub(crate) fn render_all_outputs(&mut self) {
+        let wave = self.begin_preview_render_wave();
         let nodes = self
             .native
             .as_ref()
             .map(|native| native.devices.keys().copied().collect::<Vec<_>>())
             .unwrap_or_default();
         for node in &nodes {
-            self.render_node(*node);
+            self.render_node_in_wave(*node, wave);
         }
+        let timer = Timer::from_duration(Duration::from_millis(3050));
+        let _ = self
+            .event_loop_handle
+            .insert_source(timer, move |_, _, data| {
+                let wave = data.begin_preview_render_wave();
+                for node in &nodes {
+                    data.render_node_in_wave(*node, wave);
+                }
+                TimeoutAction::Drop
+            });
     }
 
     fn add_drm_device(
@@ -1627,6 +1638,11 @@ impl NickelSession {
     }
 
     fn render_node(&mut self, node: DrmNode) {
+        let wave = self.begin_preview_render_wave();
+        self.render_node_in_wave(node, wave);
+    }
+
+    fn render_node_in_wave(&mut self, node: DrmNode, wave: u64) {
         let crtcs: Vec<_> = self
             .native
             .as_ref()
@@ -1634,11 +1650,11 @@ impl NickelSession {
             .map(|device| device.surfaces.keys().copied().collect())
             .unwrap_or_default();
         for crtc in crtcs {
-            self.render_output(node, crtc);
+            self.render_output(node, crtc, wave);
         }
     }
 
-    fn render_output(&mut self, node: DrmNode, crtc: crtc::Handle) {
+    fn render_output(&mut self, node: DrmNode, crtc: crtc::Handle, wave: u64) {
         let shell_bootstrapping = self.launcher_window.is_none();
         let mut identified_outputs = self.space.outputs().cloned().collect::<Vec<_>>();
         identified_outputs.sort_by_key(|output| {
@@ -1691,7 +1707,7 @@ impl NickelSession {
             let preview_windows = if self.locked {
                 Vec::new()
             } else {
-                self.preview_capture_candidates()
+                self.preview_capture_candidates(wave)
             };
             if surface.invalidate_pending {
                 surface
@@ -1728,18 +1744,26 @@ impl NickelSession {
             let mut renderer = match renderer {
                 Ok(renderer) => renderer,
                 Err(error) => {
+                    for (id, _) in &preview_windows {
+                        self.preview_capture_failed(*id, false);
+                    }
                     tracing::error!(
                         ?error,
                         render = %native.primary_gpu,
                         target = %target_gpu,
                         "failed to acquire multi-GPU renderer"
                     );
-                    return None;
+                    return Some((output, true));
                 }
             };
-            for (id, window, rgba) in preview_windows {
+            let mut preview_retry = false;
+            for (id, window) in preview_windows {
+                let (rgba, had_frame) = self.take_preview_capture_buffer(id);
                 if let Some(frame) = capture_preview(&mut renderer, &window, rgba) {
                     self.store_preview(id, frame);
+                } else {
+                    self.preview_capture_failed(id, had_frame);
+                    preview_retry = true;
                 }
             }
             let mut elements: Vec<
@@ -2245,7 +2269,7 @@ impl NickelSession {
                     true
                 }
             };
-            Some((output, retry))
+            Some((output, retry || preview_retry))
         })();
         self.native = Some(native);
         let Some((output, retry)) = rendered else {
