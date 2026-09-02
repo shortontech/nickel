@@ -493,12 +493,21 @@ pub fn init_winit(
                         let (renderer, _) = backend.bind().unwrap();
                         for (id, window) in windows {
                             let (rgba, had_frame) = state.take_preview_capture_buffer(id);
-                            if let Some(frame) = capture_preview(renderer, &window, rgba) {
-                                state.store_preview(id, frame);
+                            let mut rgba = rgba;
+                            if capture_preview(renderer, &window, &mut rgba) {
+                                state.store_preview(
+                                    id,
+                                    PreviewFrame {
+                                        width: crate::state::PREVIEW_WIDTH as u16,
+                                        height: crate::state::PREVIEW_HEIGHT as u16,
+                                        rgba,
+                                    },
+                                );
                             } else {
-                                state.preview_capture_failed(id, had_frame);
+                                state.preview_capture_failed(id, rgba, had_frame);
                             }
                         }
+                        state.advance_preview_retry_generation();
                         last_preview_capture = Instant::now();
                     }
 
@@ -731,57 +740,62 @@ fn capture_bound_framebuffer(
     }
 }
 
-fn capture_preview(
-    renderer: &mut GlesRenderer,
-    window: &Window,
-    mut rgba: Vec<u8>,
-) -> Option<PreviewFrame> {
-    const WIDTH: i32 = 240;
-    const HEIGHT: i32 = 135;
-    let geometry = window.geometry();
-    if geometry.size.w <= 0 || geometry.size.h <= 0 {
-        return None;
-    }
-    let mut texture =
-        Offscreen::<GlesTexture>::create_buffer(renderer, Fourcc::Abgr8888, (WIDTH, HEIGHT).into())
+fn capture_preview(renderer: &mut GlesRenderer, window: &Window, rgba: &mut Vec<u8>) -> bool {
+    (|| {
+        const WIDTH: i32 = 240;
+        const HEIGHT: i32 = 135;
+        let geometry = window.geometry();
+        if geometry.size.w <= 0 || geometry.size.h <= 0 {
+            return None;
+        }
+        let mut texture = Offscreen::<GlesTexture>::create_buffer(
+            renderer,
+            Fourcc::Abgr8888,
+            (WIDTH, HEIGHT).into(),
+        )
+        .ok()?;
+        let mut framebuffer = renderer.bind(&mut texture).ok()?;
+        let elements = window.render_elements::<WaylandSurfaceRenderElement<GlesRenderer>>(
+            renderer,
+            (-geometry.loc.x, -geometry.loc.y).into(),
+            Scale::from(1.0),
+            1.0,
+        );
+        let damage = Rectangle::from_size((WIDTH, HEIGHT).into());
+        let reference = Rectangle::from_size(geometry.size.to_physical(1));
+        let elements = constrain_render_elements(
+            elements,
+            (0, 0),
+            damage,
+            reference,
+            ConstrainScaleBehavior::Fit,
+            ConstrainAlign::TOP
+                | ConstrainAlign::BOTTOM
+                | ConstrainAlign::LEFT
+                | ConstrainAlign::RIGHT,
+            1.0,
+        )
+        .collect::<Vec<_>>();
+        let mut frame = renderer
+            .render(&mut framebuffer, (WIDTH, HEIGHT).into(), Transform::Normal)
             .ok()?;
-    let mut framebuffer = renderer.bind(&mut texture).ok()?;
-    let elements = window.render_elements::<WaylandSurfaceRenderElement<GlesRenderer>>(
-        renderer,
-        (-geometry.loc.x, -geometry.loc.y).into(),
-        Scale::from(1.0),
-        1.0,
-    );
-    let damage = Rectangle::from_size((WIDTH, HEIGHT).into());
-    let reference = Rectangle::from_size(geometry.size.to_physical(1));
-    let elements = constrain_render_elements(
-        elements,
-        (0, 0),
-        damage,
-        reference,
-        ConstrainScaleBehavior::Fit,
-        ConstrainAlign::TOP | ConstrainAlign::BOTTOM | ConstrainAlign::LEFT | ConstrainAlign::RIGHT,
-        1.0,
-    )
-    .collect::<Vec<_>>();
-    let mut frame = renderer
-        .render(&mut framebuffer, (WIDTH, HEIGHT).into(), Transform::Normal)
-        .ok()?;
-    frame
-        .clear(Color32F::new(0.03, 0.04, 0.06, 1.0), &[damage])
-        .ok()?;
-    draw_render_elements(&mut frame, 1.0, &elements, &[damage]).ok()?;
-    frame.finish().ok()?.wait().ok()?;
-    let buffer_region = Rectangle::<i32, Buffer>::from_size((WIDTH, HEIGHT).into());
-    let mapping = renderer
-        .copy_framebuffer(&framebuffer, buffer_region, Fourcc::Abgr8888)
-        .ok()?;
-    rgba = crate::state::reuse_preview_pixels(rgba, renderer.map_texture(&mapping).ok()?);
-    Some(PreviewFrame {
-        width: WIDTH as u16,
-        height: HEIGHT as u16,
-        rgba,
-    })
+        frame
+            .clear(Color32F::new(0.03, 0.04, 0.06, 1.0), &[damage])
+            .ok()?;
+        draw_render_elements(&mut frame, 1.0, &elements, &[damage]).ok()?;
+        frame.finish().ok()?.wait().ok()?;
+        let buffer_region = Rectangle::<i32, Buffer>::from_size((WIDTH, HEIGHT).into());
+        let mapping = renderer
+            .copy_framebuffer(&framebuffer, buffer_region, Fourcc::Abgr8888)
+            .ok()?;
+        let replacement = crate::state::reuse_preview_pixels(
+            std::mem::take(rgba),
+            renderer.map_texture(&mapping).ok()?,
+        );
+        *rgba = replacement;
+        Some(())
+    })()
+    .is_some()
 }
 
 fn normalize_capture_rows(

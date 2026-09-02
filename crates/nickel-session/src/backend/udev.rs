@@ -1611,6 +1611,22 @@ impl NickelSession {
             });
     }
 
+    fn schedule_preview_retry(&mut self) {
+        if self.preview_retry_is_scheduled() {
+            return;
+        }
+        self.mark_preview_retry_scheduled();
+        let timer = Timer::from_duration(Duration::from_millis(16));
+        let _ = self
+            .event_loop_handle
+            .insert_source(timer, move |_, _, data| {
+                if data.advance_preview_retry_generation() {
+                    data.render_all_outputs();
+                }
+                TimeoutAction::Drop
+            });
+    }
+
     fn reflow_windows_to_connected_outputs(&mut self) {
         let output_geometries: Vec<_> = self
             .space
@@ -1745,7 +1761,7 @@ impl NickelSession {
                 Ok(renderer) => renderer,
                 Err(error) => {
                     for (id, _) in &preview_windows {
-                        self.preview_capture_failed(*id, false);
+                        self.preview_renderer_failed(*id);
                     }
                     tracing::error!(
                         ?error,
@@ -1759,10 +1775,18 @@ impl NickelSession {
             let mut preview_retry = false;
             for (id, window) in preview_windows {
                 let (rgba, had_frame) = self.take_preview_capture_buffer(id);
-                if let Some(frame) = capture_preview(&mut renderer, &window, rgba) {
-                    self.store_preview(id, frame);
+                let mut rgba = rgba;
+                if capture_preview(&mut renderer, &window, &mut rgba) {
+                    self.store_preview(
+                        id,
+                        PreviewFrame {
+                            width: crate::state::PREVIEW_WIDTH as u16,
+                            height: crate::state::PREVIEW_HEIGHT as u16,
+                            rgba,
+                        },
+                    );
                 } else {
-                    self.preview_capture_failed(id, had_frame);
+                    self.preview_capture_failed(id, rgba, had_frame);
                     preview_retry = true;
                 }
             }
@@ -2272,6 +2296,9 @@ impl NickelSession {
             Some((output, retry || preview_retry))
         })();
         self.native = Some(native);
+        if self.preview_retry_is_pending() {
+            self.schedule_preview_retry();
+        }
         let Some((output, retry)) = rendered else {
             return;
         };
@@ -2737,57 +2764,63 @@ fn fill_rgba_rect(
 fn capture_preview(
     renderer: &mut NativeRenderer<'_>,
     window: &smithay::desktop::Window,
-    mut rgba: Vec<u8>,
-) -> Option<PreviewFrame> {
-    const WIDTH: i32 = 240;
-    const HEIGHT: i32 = 135;
-    let geometry = window.geometry();
-    if geometry.size.w <= 0 || geometry.size.h <= 0 {
-        return None;
-    }
-    let mut texture = <NativeRenderer<'_> as Offscreen<GlesTexture>>::create_buffer(
-        renderer,
-        Fourcc::Abgr8888,
-        (WIDTH, HEIGHT).into(),
-    )
-    .ok()?;
-    let mut framebuffer = renderer.bind(&mut texture).ok()?;
-    let elements = window.render_elements::<WaylandSurfaceRenderElement<NativeRenderer<'_>>>(
-        renderer,
-        (-geometry.loc.x, -geometry.loc.y).into(),
-        Scale::from(1.0),
-        1.0,
-    );
-    let damage = Rectangle::from_size((WIDTH, HEIGHT).into());
-    let reference = Rectangle::from_size(geometry.size.to_physical(1));
-    let elements = constrain_render_elements(
-        elements,
-        (0, 0),
-        damage,
-        reference,
-        ConstrainScaleBehavior::Fit,
-        ConstrainAlign::TOP | ConstrainAlign::BOTTOM | ConstrainAlign::LEFT | ConstrainAlign::RIGHT,
-        1.0,
-    )
-    .collect::<Vec<_>>();
-    let mut frame = renderer
-        .render(&mut framebuffer, (WIDTH, HEIGHT).into(), Transform::Normal)
+    rgba: &mut Vec<u8>,
+) -> bool {
+    (|| {
+        const WIDTH: i32 = 240;
+        const HEIGHT: i32 = 135;
+        let geometry = window.geometry();
+        if geometry.size.w <= 0 || geometry.size.h <= 0 {
+            return None;
+        }
+        let mut texture = <NativeRenderer<'_> as Offscreen<GlesTexture>>::create_buffer(
+            renderer,
+            Fourcc::Abgr8888,
+            (WIDTH, HEIGHT).into(),
+        )
         .ok()?;
-    frame
-        .clear(Color32F::new(0.03, 0.04, 0.06, 1.0), &[damage])
-        .ok()?;
-    draw_render_elements(&mut frame, 1.0, &elements, &[damage]).ok()?;
-    frame.finish().ok()?.wait().ok()?;
-    let region = Rectangle::<i32, Buffer>::from_size((WIDTH, HEIGHT).into());
-    let mapping = renderer
-        .copy_framebuffer(&framebuffer, region, Fourcc::Abgr8888)
-        .ok()?;
-    rgba = crate::state::reuse_preview_pixels(rgba, renderer.map_texture(&mapping).ok()?);
-    Some(PreviewFrame {
-        width: WIDTH as u16,
-        height: HEIGHT as u16,
-        rgba,
-    })
+        let mut framebuffer = renderer.bind(&mut texture).ok()?;
+        let elements = window.render_elements::<WaylandSurfaceRenderElement<NativeRenderer<'_>>>(
+            renderer,
+            (-geometry.loc.x, -geometry.loc.y).into(),
+            Scale::from(1.0),
+            1.0,
+        );
+        let damage = Rectangle::from_size((WIDTH, HEIGHT).into());
+        let reference = Rectangle::from_size(geometry.size.to_physical(1));
+        let elements = constrain_render_elements(
+            elements,
+            (0, 0),
+            damage,
+            reference,
+            ConstrainScaleBehavior::Fit,
+            ConstrainAlign::TOP
+                | ConstrainAlign::BOTTOM
+                | ConstrainAlign::LEFT
+                | ConstrainAlign::RIGHT,
+            1.0,
+        )
+        .collect::<Vec<_>>();
+        let mut frame = renderer
+            .render(&mut framebuffer, (WIDTH, HEIGHT).into(), Transform::Normal)
+            .ok()?;
+        frame
+            .clear(Color32F::new(0.03, 0.04, 0.06, 1.0), &[damage])
+            .ok()?;
+        draw_render_elements(&mut frame, 1.0, &elements, &[damage]).ok()?;
+        frame.finish().ok()?.wait().ok()?;
+        let region = Rectangle::<i32, Buffer>::from_size((WIDTH, HEIGHT).into());
+        let mapping = renderer
+            .copy_framebuffer(&framebuffer, region, Fourcc::Abgr8888)
+            .ok()?;
+        let replacement = crate::state::reuse_preview_pixels(
+            std::mem::take(rgba),
+            renderer.map_texture(&mapping).ok()?,
+        );
+        *rgba = replacement;
+        Some(())
+    })()
+    .is_some()
 }
 
 fn save_mapped_capture(

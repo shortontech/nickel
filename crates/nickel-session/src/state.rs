@@ -338,6 +338,7 @@ pub struct NickelSession {
     pub primary_output_name: Option<String>,
     virtual_test_outputs: HashMap<String, (Output, GlobalId)>,
     pub preview_frames: HashMap<WindowId, PreviewFrame>,
+    preview_spares: HashMap<WindowId, Vec<u8>>,
     preview_switcher_interest: Vec<WindowId>,
     preview_overlay_interest: Vec<WindowId>,
     preview_admitted: HashSet<WindowId>,
@@ -345,6 +346,8 @@ pub struct NickelSession {
     preview_content_generation: HashMap<WindowId, u64>,
     preview_attempted: HashMap<WindowId, (u64, u64)>,
     preview_render_wave: u64,
+    preview_retry_pending: HashSet<WindowId>,
+    preview_retry_scheduled: bool,
     preview_counters: PreviewCacheCounters,
     pub hotkeys: CompositorShortcutAdapter,
     pub task_switcher: TaskSwitcher<WindowId>,
@@ -466,7 +469,10 @@ fn record_preview_capture_attempt(
     content_generation: u64,
     render_wave: u64,
 ) -> bool {
-    if attempted.get(&id) == Some(&(content_generation, render_wave)) {
+    if attempted
+        .get(&id)
+        .is_some_and(|(generation, _)| *generation == content_generation)
+    {
         return false;
     }
     attempted.insert(id, (content_generation, render_wave));
@@ -483,6 +489,7 @@ struct PreviewCacheCounters {
     skipped_unchanged: u64,
     readback_bytes: u64,
     protocol_copy_bytes: u64,
+    protocol_raw_copy_bytes: u64,
     protocol_base64_bytes: u64,
     protocol_json_payload_bytes: u64,
     protocol_framed_copy_bytes: u64,
@@ -495,7 +502,12 @@ impl NickelSession {
         self.preview_frames
             .values()
             .map(|frame| frame.rgba.len())
-            .sum()
+            .sum::<usize>()
+            + self
+                .preview_spares
+                .values()
+                .map(Vec::capacity)
+                .sum::<usize>()
     }
 
     #[cfg(feature = "backend-udev")]
@@ -507,7 +519,10 @@ impl NickelSession {
         self.preview_dirty.remove(id);
         self.preview_content_generation.remove(id);
         self.preview_attempted.remove(id);
-        if self.preview_frames.remove(id).is_some() {
+        self.preview_retry_pending.remove(id);
+        let released =
+            self.preview_spares.remove(id).is_some() || self.preview_frames.remove(id).is_some();
+        if released {
             self.preview_counters.evictions += 1;
             self.preview_counters.cache_generation = self
                 .preview_counters
@@ -652,27 +667,69 @@ impl NickelSession {
 
     pub(crate) fn take_preview_capture_buffer(&mut self, id: WindowId) -> (Vec<u8>, bool) {
         self.preview_frames.remove(&id).map_or_else(
-            || (Vec::with_capacity(PREVIEW_FRAME_BYTES), false),
+            || {
+                (
+                    self.preview_spares
+                        .remove(&id)
+                        .unwrap_or_else(|| vec![0; PREVIEW_FRAME_BYTES]),
+                    false,
+                )
+            },
             |frame| (frame.rgba, true),
         )
     }
 
-    pub(crate) fn preview_capture_failed(&mut self, _id: WindowId, evicted_frame: bool) {
+    pub(crate) fn preview_capture_failed(&mut self, id: WindowId, rgba: Vec<u8>, had_frame: bool) {
         self.preview_counters.capture_failures += 1;
-        if evicted_frame {
-            self.preview_counters.evictions += 1;
-            self.preview_counters.cache_generation = self
-                .preview_counters
-                .cache_generation
-                .wrapping_add(1)
-                .max(1);
+        if had_frame {
+            self.preview_frames.insert(
+                id,
+                PreviewFrame {
+                    width: PREVIEW_WIDTH as u16,
+                    height: PREVIEW_HEIGHT as u16,
+                    rgba,
+                },
+            );
+        } else {
+            self.preview_spares.insert(id, rgba);
         }
+        self.preview_retry_pending.insert(id);
+    }
+
+    pub(crate) fn preview_renderer_failed(&mut self, id: WindowId) {
+        self.preview_counters.capture_failures += 1;
+        self.preview_retry_pending.insert(id);
+    }
+
+    pub(crate) fn advance_preview_retry_generation(&mut self) -> bool {
+        let pending = std::mem::take(&mut self.preview_retry_pending);
+        self.preview_retry_scheduled = false;
+        for id in pending.iter().copied() {
+            advance_preview_content_generation(
+                &mut self.preview_content_generation,
+                &mut self.preview_attempted,
+                id,
+            );
+        }
+        !pending.is_empty()
+    }
+
+    pub(crate) fn preview_retry_is_scheduled(&self) -> bool {
+        self.preview_retry_scheduled
+    }
+
+    pub(crate) fn preview_retry_is_pending(&self) -> bool {
+        !self.preview_retry_pending.is_empty()
+    }
+
+    pub(crate) fn mark_preview_retry_scheduled(&mut self) {
+        self.preview_retry_scheduled = true;
     }
 
     fn record_preview_protocol_encoding(&mut self, json_payload_bytes: usize, framed_bytes: usize) {
         self.preview_counters.protocol_json_payload_bytes += json_payload_bytes as u64;
         self.preview_counters.protocol_framed_copy_bytes += framed_bytes as u64;
-        self.preview_counters.protocol_copy_bytes += framed_bytes as u64;
+        self.preview_counters.protocol_copy_bytes += (json_payload_bytes + framed_bytes) as u64;
     }
 
     pub(crate) fn store_preview(&mut self, id: WindowId, frame: PreviewFrame) {
@@ -694,6 +751,7 @@ impl NickelSession {
             .max(1);
         self.preview_counters.readback_bytes += frame.rgba.len() as u64;
         self.preview_frames.insert(id, frame);
+        self.preview_spares.remove(&id);
         self.preview_dirty.remove(&id);
         self.preview_attempted.remove(&id);
         self.preview_counters.peak_bytes = self
@@ -703,7 +761,8 @@ impl NickelSession {
     }
 
     fn clear_all_previews(&mut self) {
-        self.preview_counters.evictions += self.preview_frames.len() as u64;
+        self.preview_counters.evictions +=
+            (self.preview_frames.len() + self.preview_spares.len()) as u64;
         self.preview_switcher_interest.clear();
         self.preview_overlay_interest.clear();
         self.preview_admitted.clear();
@@ -711,13 +770,18 @@ impl NickelSession {
         self.preview_content_generation.clear();
         self.preview_attempted.clear();
         self.preview_frames.clear();
+        self.preview_spares.clear();
+        self.preview_retry_pending.clear();
+        self.preview_retry_scheduled = false;
         self.preview_frames.shrink_to_fit();
+        self.preview_spares.shrink_to_fit();
         self.preview_switcher_interest.shrink_to_fit();
         self.preview_overlay_interest.shrink_to_fit();
         self.preview_admitted.shrink_to_fit();
         self.preview_dirty.shrink_to_fit();
         self.preview_content_generation.shrink_to_fit();
         self.preview_attempted.shrink_to_fit();
+        self.preview_retry_pending.shrink_to_fit();
         #[cfg(feature = "backend-udev")]
         if let Some(native) = self.native.as_mut() {
             native.clear_task_switcher_cache();
@@ -1101,6 +1165,7 @@ impl NickelSession {
             primary_output_name: None,
             virtual_test_outputs: HashMap::new(),
             preview_frames: HashMap::new(),
+            preview_spares: HashMap::new(),
             preview_switcher_interest: Vec::new(),
             preview_overlay_interest: Vec::new(),
             preview_admitted: HashSet::new(),
@@ -1108,6 +1173,8 @@ impl NickelSession {
             preview_content_generation: HashMap::new(),
             preview_attempted: HashMap::new(),
             preview_render_wave: 0,
+            preview_retry_pending: HashSet::new(),
+            preview_retry_scheduled: false,
             preview_counters: PreviewCacheCounters::default(),
             hotkeys: CompositorShortcutAdapter::default(),
             task_switcher: TaskSwitcher::default(),
@@ -1431,7 +1498,7 @@ impl NickelSession {
                     preview_skipped_unchanged: self.preview_counters.skipped_unchanged,
                     preview_readback_bytes: self.preview_counters.readback_bytes,
                     preview_protocol_copy_bytes: self.preview_counters.protocol_copy_bytes,
-                    preview_protocol_raw_copy_bytes: self.preview_counters.protocol_copy_bytes,
+                    preview_protocol_raw_copy_bytes: self.preview_counters.protocol_raw_copy_bytes,
                     preview_protocol_base64_bytes: self.preview_counters.protocol_base64_bytes,
                     preview_protocol_json_payload_bytes: self
                         .preview_counters
@@ -1512,8 +1579,10 @@ impl NickelSession {
                     return protocol_error(ErrorCode::InvalidRequest, "preview is not ready");
                 };
                 self.preview_counters.protocol_copy_bytes += preview.rgba.len() as u64;
-                self.preview_counters.protocol_base64_bytes +=
-                    (4 * preview.rgba.len().div_ceil(3)) as u64;
+                self.preview_counters.protocol_raw_copy_bytes += preview.rgba.len() as u64;
+                let base64_bytes = 4 * preview.rgba.len().div_ceil(3);
+                self.preview_counters.protocol_base64_bytes += base64_bytes as u64;
+                self.preview_counters.protocol_copy_bytes += base64_bytes as u64;
                 if preview.validate().is_err() {
                     return protocol_error(ErrorCode::ResourceLimit, "preview exceeds bounds");
                 }
@@ -4936,8 +5005,16 @@ mod protocol_tests {
         test_control_may_invoke,
     };
     use crate::shell_layout::Geometry;
-    use nickel_session_protocol::{Command, SessionAction, ShellRole};
-    use smithay::{reexports::wayland_server::backend::ObjectId, utils::Point};
+    use nickel_session_protocol::{
+        Command, Query, ServerEnvelope, ServerMessage, SessionAction, ShellRole,
+    };
+    use smithay::{
+        reexports::{
+            calloop::EventLoop,
+            wayland_server::{Display, backend::ObjectId},
+        },
+        utils::Point,
+    };
     use std::collections::{HashMap, HashSet};
 
     #[test]
@@ -5063,6 +5140,143 @@ mod protocol_tests {
         assert!(!identification_expiry_is_current(7, 8));
     }
 
+    static PREVIEW_SESSION_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn preview_test_session() -> (
+        EventLoop<'static, super::NickelSession>,
+        super::NickelSession,
+    ) {
+        let mut event_loop = EventLoop::try_new().unwrap();
+        let display = Display::new().unwrap();
+        let session = super::NickelSession::new(&mut event_loop, display, true);
+        (event_loop, session)
+    }
+
+    #[test]
+    fn failed_capture_rolls_the_real_frame_and_allocation_back_into_session() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = preview_test_session();
+        let id = session.windows.insert();
+        session.preview_admitted.insert(id);
+        session.preview_frames.insert(
+            id,
+            super::PreviewFrame {
+                width: super::PREVIEW_WIDTH as u16,
+                height: super::PREVIEW_HEIGHT as u16,
+                rgba: vec![41; PREVIEW_FRAME_BYTES],
+            },
+        );
+        let allocation = session.preview_frames[&id].rgba.as_ptr();
+
+        let (rgba, had_frame) = session.take_preview_capture_buffer(id);
+        session.preview_capture_failed(id, rgba, had_frame);
+
+        assert_eq!(session.preview_frames[&id].rgba.as_ptr(), allocation);
+        assert_eq!(session.preview_frames[&id].rgba[0], 41);
+        assert_eq!(session.preview_counters.evictions, 0);
+        assert_eq!(session.preview_counters.capture_failures, 1);
+    }
+
+    #[test]
+    fn real_session_reconcile_preserves_seven_frames_for_each_visible_consumer() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = preview_test_session();
+        let switcher = (0..7).map(|_| session.windows.insert()).collect::<Vec<_>>();
+        let overlay = (0..7).map(|_| session.windows.insert()).collect::<Vec<_>>();
+        session.set_switcher_preview_interest(switcher.clone());
+        session.set_overlay_preview_interest(overlay.clone());
+        for id in switcher.iter().chain(&overlay).copied() {
+            session.preview_frames.insert(
+                id,
+                super::PreviewFrame {
+                    width: super::PREVIEW_WIDTH as u16,
+                    height: super::PREVIEW_HEIGHT as u16,
+                    rgba: vec![id.0 as u8; PREVIEW_FRAME_BYTES],
+                },
+            );
+        }
+
+        session.clear_switcher_preview_interest();
+
+        assert!(
+            overlay
+                .iter()
+                .all(|id| session.preview_frames.contains_key(id))
+        );
+        assert_eq!(session.preview_bytes(), 7 * PREVIEW_FRAME_BYTES);
+    }
+
+    #[test]
+    fn real_preview_query_and_encode_counters_partition_the_aggregate() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = preview_test_session();
+        let id = session.windows.insert();
+        session.preview_admitted.insert(id);
+        session.preview_frames.insert(
+            id,
+            super::PreviewFrame {
+                width: super::PREVIEW_WIDTH as u16,
+                height: super::PREVIEW_HEIGHT as u16,
+                rgba: vec![5; PREVIEW_FRAME_BYTES],
+            },
+        );
+        let message = session.handle_protocol_query(Query::Preview {
+            window: nickel_session_protocol::WindowId(id.0),
+        });
+        assert!(matches!(message, ServerMessage::Preview(_)));
+        let framed = nickel_session_protocol::encode(&ServerEnvelope {
+            request_id: 9,
+            message,
+        })
+        .unwrap();
+        session.record_preview_protocol_encoding(
+            framed.len() - nickel_session_protocol::FRAME_HEADER_BYTES,
+            framed.len(),
+        );
+
+        let counters = session.preview_counters;
+        assert_eq!(
+            counters.protocol_copy_bytes,
+            counters.protocol_raw_copy_bytes
+                + counters.protocol_base64_bytes
+                + counters.protocol_json_payload_bytes
+                + counters.protocol_framed_copy_bytes
+        );
+        assert_eq!(counters.protocol_raw_copy_bytes, PREVIEW_FRAME_BYTES as u64);
+    }
+
+    #[test]
+    fn real_session_attempt_generation_blocks_other_nodes_until_explicit_retry() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = preview_test_session();
+        let id = session.windows.insert();
+        session.preview_content_generation.insert(id, 6);
+        let first_node_wave = session.begin_preview_render_wave();
+        assert!(record_preview_capture_attempt(
+            &mut session.preview_attempted,
+            id,
+            6,
+            first_node_wave
+        ));
+        let second_node_wave = session.begin_preview_render_wave();
+        assert!(!record_preview_capture_attempt(
+            &mut session.preview_attempted,
+            id,
+            6,
+            second_node_wave
+        ));
+
+        session.preview_renderer_failed(id);
+        assert!(session.advance_preview_retry_generation());
+        let retry_wave = session.begin_preview_render_wave();
+        assert!(record_preview_capture_attempt(
+            &mut session.preview_attempted,
+            id,
+            7,
+            retry_wave
+        ));
+    }
+
     #[test]
     fn preview_workload_is_bounded_around_the_selected_window() {
         let ids = (0..nickel_session_protocol::MAX_WINDOWS as u64)
@@ -5128,14 +5342,14 @@ mod protocol_tests {
     }
 
     #[test]
-    fn failed_capture_is_attempted_once_per_render_wave_across_outputs() {
+    fn failed_capture_is_attempted_once_per_generation_across_outputs_and_nodes() {
         let id = super::WindowId(7);
         let mut attempted = HashMap::new();
         assert!(record_preview_capture_attempt(&mut attempted, id, 3, 11));
         for _ in 0..3 {
             assert!(!record_preview_capture_attempt(&mut attempted, id, 3, 11));
         }
-        assert!(record_preview_capture_attempt(&mut attempted, id, 3, 12));
+        assert!(!record_preview_capture_attempt(&mut attempted, id, 3, 12));
         assert!(record_preview_capture_attempt(&mut attempted, id, 4, 12));
     }
 

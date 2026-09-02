@@ -407,6 +407,8 @@ pub struct CacheDiagnostics {
     #[serde(default)]
     pub preview_readback_bytes: u64,
     #[serde(default)]
+    /// Aggregate transient bytes allocated/copied for raw clone, base64 string, JSON payload,
+    /// and framed response. Explicit fields below partition this value.
     pub preview_protocol_copy_bytes: u64,
     /// Raw RGBA bytes cloned into protocol response values.
     #[serde(default)]
