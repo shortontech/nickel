@@ -1,13 +1,29 @@
 use super::{
-    DisabledOutput, IDENTIFY_BADGE_BYTES, IdentifyBadgeCache, RendererLifecycleLedger,
-    RendererRetainedReason, TaskSwitcherBufferKey, consume_pending_dependent,
-    dependent_renderers_after_primary_removal, device_activation_priority,
-    draw_memory_render_buffer, mark_disabled_outputs_absent, normalize_capture_rows,
-    parse_kde_cursor_settings, pending_recovery_devices, primary_dependency_to_activate,
-    published_disabled_outputs, render_primary_available, renderer_retained_reason,
-    switcher_visible_range,
+    DisabledOutput, DrmRenderStrategy, IDENTIFY_BADGE_BYTES, IdentifyBadgeCache,
+    RendererLifecycleLedger, RendererRetainedReason, TaskSwitcherBufferKey,
+    consume_pending_dependent, copy_capture_damage, copy_mapped_damage_to_strided,
+    copy_mapped_region_to_strided, damage_bounding_box, dependent_renderers_after_primary_removal,
+    device_activation_priority, draw_memory_render_buffer, drm_render_strategy, mapped_damage_rows,
+    mark_disabled_outputs_absent, normalize_capture_rows, parse_kde_cursor_settings,
+    pending_recovery_devices, primary_dependency_to_activate, published_disabled_outputs,
+    render_primary_available, renderer_retained_reason, switcher_visible_range, union_rectangles,
 };
+use smithay::utils::{Buffer, Physical, Rectangle, Size};
 use std::collections::HashMap;
+
+#[test]
+fn render_strategy_keeps_evdi_copyout_and_explicit_fallback_distinct() {
+    assert_eq!(drm_render_strategy(false, false), DrmRenderStrategy::Gbm);
+    assert_eq!(drm_render_strategy(false, true), DrmRenderStrategy::Gbm);
+    assert_eq!(
+        drm_render_strategy(true, false),
+        DrmRenderStrategy::EvdiCpuCopyout
+    );
+    assert_eq!(
+        drm_render_strategy(true, true),
+        DrmRenderStrategy::EvdiLlvmpipeFallback
+    );
+}
 
 #[test]
 fn overlay_pixels_are_drawn_into_the_persistent_render_buffer_allocation() {
@@ -361,4 +377,132 @@ fn reverses_rows_from_an_unflipped_renderer_mapping() {
     let normalized = normalize_capture_rows(&mapped, 2, 2, false).unwrap();
     assert_eq!(&normalized[..8], &top);
     assert_eq!(&normalized[8..], &bottom);
+}
+
+#[test]
+fn copyout_reports_only_changed_row_runs() {
+    let mut destination = vec![0_u8; 4 * 4 * 4];
+    let mut mapped = destination.clone();
+    mapped[4 * 4..4 * 8].fill(7);
+    mapped[4 * 12..4 * 16].fill(9);
+
+    let damage = copy_capture_damage(&mut destination, &mapped, 4, 4, true).unwrap();
+
+    assert_eq!(destination, mapped);
+    assert_eq!(damage.len(), 2);
+    assert_eq!(damage[0].loc.y, 1);
+    assert_eq!(damage[0].size.h, 1);
+    assert_eq!(damage[1].loc.y, 3);
+    assert_eq!(damage[1].size.h, 1);
+    assert!(
+        copy_capture_damage(&mut destination, &mapped, 4, 4, true)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn copyout_damage_respects_renderer_row_orientation() {
+    let mut destination = vec![0_u8; 2 * 2 * 4];
+    let mapped = [[8_u8; 8], [3_u8; 8]].concat();
+
+    let damage = copy_capture_damage(&mut destination, &mapped, 2, 2, false).unwrap();
+
+    assert_eq!(&destination[..8], &[3_u8; 8]);
+    assert_eq!(&destination[8..], &[8_u8; 8]);
+    assert_eq!(damage.len(), 1);
+    assert_eq!(damage[0].size.h, 2);
+}
+
+#[test]
+fn copyout_writes_damage_into_padded_dumb_buffer_rows() {
+    let source = (0_u8..24).collect::<Vec<_>>();
+    let mut destination = vec![99_u8; 32];
+    let damage = [smithay::utils::Rectangle::new((1, 1).into(), (2, 1).into())];
+
+    copy_mapped_damage_to_strided(&mut destination, 16, &source, 3, 2, true, &damage).unwrap();
+
+    assert_eq!(&destination[20..28], &source[16..24]);
+    assert!(destination[..20].iter().all(|pixel| *pixel == 99));
+    assert!(destination[28..].iter().all(|pixel| *pixel == 99));
+}
+
+#[test]
+fn mapped_damage_compares_display_order_across_padded_rows() {
+    let mapped = [[3_u8; 8], [7_u8; 8]].concat();
+    let mut displayed = vec![0_u8; 24];
+    displayed[..8].fill(7);
+    displayed[12..20].fill(3);
+
+    assert!(
+        mapped_damage_rows(&displayed, 12, &mapped, 2, 2, false)
+            .unwrap()
+            .is_empty()
+    );
+    displayed[12] = 9;
+    let damage = mapped_damage_rows(&displayed, 12, &mapped, 2, 2, false).unwrap();
+    assert_eq!(damage.len(), 1);
+    assert_eq!(damage[0].loc.y, 1);
+}
+
+#[test]
+fn alternating_copyout_bounds_current_and_previous_damage() {
+    let damage = [
+        Rectangle::<i32, Physical>::new((40, 30).into(), (20, 10).into()),
+        Rectangle::<i32, Physical>::new((10, 50).into(), (15, 5).into()),
+    ];
+
+    let bounds = damage_bounding_box(&damage).unwrap();
+
+    assert_eq!(bounds.loc, (10, 30).into());
+    assert_eq!(bounds.size, (50, 25).into());
+
+    let previous = Rectangle::<i32, Buffer>::new((70, 20).into(), (10, 15).into());
+    let accumulated = union_rectangles(previous, bounds);
+    assert_eq!(accumulated.loc, (10, 20).into());
+    assert_eq!(accumulated.size, (70, 35).into());
+}
+
+#[test]
+fn damaged_region_copy_preserves_pixels_outside_region_and_padding() {
+    let region = Rectangle::<i32, Buffer>::new((1, 1).into(), (2, 2).into());
+    let mapped = (0_u8..16).collect::<Vec<_>>();
+    let mut destination = vec![99_u8; 4 * 20];
+
+    let copied = copy_mapped_region_to_strided(
+        &mut destination,
+        20,
+        &mapped,
+        true,
+        region,
+        Size::from((4, 4)),
+    )
+    .unwrap();
+
+    assert_eq!(copied, 16);
+    assert_eq!(&destination[24..32], &mapped[..8]);
+    assert_eq!(&destination[44..52], &mapped[8..]);
+    assert!(destination[..24].iter().all(|byte| *byte == 99));
+    assert!(destination[32..44].iter().all(|byte| *byte == 99));
+    assert!(destination[52..].iter().all(|byte| *byte == 99));
+}
+
+#[test]
+fn damaged_region_copy_respects_unflipped_readback() {
+    let region = Rectangle::<i32, Buffer>::new((0, 1).into(), (2, 2).into());
+    let mapped = [[3_u8; 8], [7_u8; 8]].concat();
+    let mut destination = vec![0_u8; 3 * 8];
+
+    copy_mapped_region_to_strided(
+        &mut destination,
+        8,
+        &mapped,
+        false,
+        region,
+        Size::from((2, 3)),
+    )
+    .unwrap();
+
+    assert_eq!(&destination[8..16], &[7_u8; 8]);
+    assert_eq!(&destination[16..24], &[3_u8; 8]);
 }

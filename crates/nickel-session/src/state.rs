@@ -2727,6 +2727,7 @@ impl NickelSession {
         let stranded: Vec<_> = self
             .space
             .elements()
+            .filter(|window| !self.is_shell_owned_window(window))
             .filter(|window| {
                 self.space
                     .element_bbox(window)
@@ -3646,12 +3647,11 @@ impl NickelSession {
     }
 
     pub fn is_server_decorated(&self, window: &Window) -> bool {
-        window
-            .x11_surface()
-            .is_some_and(|surface| self.x11_windows.contains_key(&surface.window_id()))
-            || window
-                .toplevel()
-                .is_some_and(|surface| self.server_decorated.contains(&surface.wl_surface().id()))
+        window.x11_surface().is_some_and(|surface| {
+            self.x11_windows.contains_key(&surface.window_id()) && !surface.is_decorated()
+        }) || window
+            .toplevel()
+            .is_some_and(|surface| self.server_decorated.contains(&surface.wl_surface().id()))
     }
 
     pub(crate) fn clamp_initial_managed_x11_geometry(
@@ -4782,6 +4782,15 @@ impl NickelSession {
             pointer,
             decorated,
             self.work_area_for_output(output),
+        );
+        tracing::info!(
+            surface = ?surface.wl_surface().id(),
+            current = ?current,
+            restore = ?restore,
+            decorated,
+            pointer = ?pointer,
+            result = ?geometry,
+            "diagnostic: restoring maximized Wayland window for drag"
         );
         surface.with_pending_state(|state| {
             state

@@ -92,7 +92,7 @@ impl NickelSession {
                             .surface_under(position - loc.to_f64(), WindowSurfaceType::ALL)
                             .is_some()
                     });
-                let bounds = self.space.element_bbox(window)?;
+                let bounds = self.space.element_geometry(window)?;
                 let geometry = crate::shell_layout::Geometry {
                     x: bounds.loc.x,
                     y: bounds.loc.y,
@@ -135,9 +135,13 @@ impl NickelSession {
                 .copied()?;
             Some((focus, origin))
         });
+        let target = constraint_focus.or(hit);
+        if !pointer_focus_needs_refresh(pointer.current_focus().as_ref(), target.as_ref()) {
+            return;
+        }
         pointer.motion(
             self,
-            constraint_focus.or(hit),
+            target,
             &MotionEvent {
                 location,
                 serial: SERIAL_COUNTER.next_serial(),
@@ -523,7 +527,7 @@ impl NickelSession {
                                         )
                                         .is_some()
                                 });
-                            let bounds = self.space.element_bbox(window)?;
+                            let bounds = self.space.element_geometry(window)?;
                             let geometry = crate::shell_layout::Geometry {
                                 x: bounds.loc.x,
                                 y: bounds.loc.y,
@@ -744,39 +748,44 @@ impl NickelSession {
                         .element_under(pointer_position)
                         .map(|(w, l)| (w.clone(), l))
                     {
-                        self.space.raise_element(&window, true);
-                        if let Some(surface) = window.x11_surface() {
-                            self.raise_x11_surface(surface);
-                        }
-                        let actual_window = self
-                            .surface_windows
-                            .get(&window.wl_surface()?.id())
-                            .copied();
-                        for effect in window_effects {
-                            match effect {
-                                WindowPointerEffect::ActivateWindow(id)
-                                    if actual_window == Some(id) =>
-                                {
-                                    self.windows.raise(id);
-                                    self.workspaces.focused(&id);
-                                }
-                                WindowPointerEffect::ActivateWindow(_) => {}
+                        let unmanaged_x11_popup = window
+                            .x11_surface()
+                            .is_some_and(|surface| surface.is_override_redirect());
+                        if !unmanaged_x11_popup {
+                            self.space.raise_element(&window, true);
+                            if let Some(surface) = window.x11_surface() {
+                                self.raise_x11_surface(surface);
                             }
-                        }
-                        if !self.is_panel_window(&window) {
-                            self.space.elements().for_each(|candidate| {
-                                candidate.set_activated(candidate == &window);
-                            });
-                            keyboard.set_focus(
-                                self,
-                                crate::focus::KeyboardFocusTarget::for_window(&window),
-                                serial,
-                            );
-                            self.space.elements().for_each(|window| {
-                                if let Some(toplevel) = window.toplevel() {
-                                    toplevel.send_pending_configure();
+                            let actual_window = self
+                                .surface_windows
+                                .get(&window.wl_surface()?.id())
+                                .copied();
+                            for effect in window_effects {
+                                match effect {
+                                    WindowPointerEffect::ActivateWindow(id)
+                                        if actual_window == Some(id) =>
+                                    {
+                                        self.windows.raise(id);
+                                        self.workspaces.focused(&id);
+                                    }
+                                    WindowPointerEffect::ActivateWindow(_) => {}
                                 }
-                            });
+                            }
+                            if !self.is_panel_window(&window) {
+                                self.space.elements().for_each(|candidate| {
+                                    candidate.set_activated(candidate == &window);
+                                });
+                                keyboard.set_focus(
+                                    self,
+                                    crate::focus::KeyboardFocusTarget::for_window(&window),
+                                    serial,
+                                );
+                                self.space.elements().for_each(|window| {
+                                    if let Some(toplevel) = window.toplevel() {
+                                        toplevel.send_pending_configure();
+                                    }
+                                });
+                            }
                         }
                     } else {
                         self.space.elements().for_each(|window| {
@@ -885,14 +894,12 @@ impl NickelSession {
 
                 let source = event.source();
 
-                let horizontal_amount = event.amount(Axis::Horizontal).unwrap_or_else(|| {
-                    event.amount_v120(Axis::Horizontal).unwrap_or(0.0) * 15.0 / 120.
-                });
-                let vertical_amount = event.amount(Axis::Vertical).unwrap_or_else(|| {
-                    event.amount_v120(Axis::Vertical).unwrap_or(0.0) * 15.0 / 120.
-                });
                 let horizontal_amount_discrete = event.amount_v120(Axis::Horizontal);
                 let vertical_amount_discrete = event.amount_v120(Axis::Vertical);
+                let horizontal_amount =
+                    axis_amount(event.amount(Axis::Horizontal), horizontal_amount_discrete);
+                let vertical_amount =
+                    axis_amount(event.amount(Axis::Vertical), vertical_amount_discrete);
 
                 let mut frame = AxisFrame::new(event.time()).source(source);
                 if horizontal_amount != 0.0 {
@@ -973,6 +980,22 @@ impl NickelSession {
         }
         None
     }
+}
+
+fn axis_amount(continuous: Option<f64>, v120: Option<f64>) -> f64 {
+    let continuous = continuous.unwrap_or(0.0);
+    if continuous != 0.0 {
+        continuous
+    } else {
+        v120.unwrap_or(0.0) * 15.0 / 120.0
+    }
+}
+
+fn pointer_focus_needs_refresh<T: PartialEq, P>(
+    current: Option<&T>,
+    resolved: Option<&(T, P)>,
+) -> bool {
+    current != resolved.map(|(target, _)| target)
 }
 
 fn resize_edges_at(
@@ -1090,7 +1113,27 @@ mod tests {
 
     use smithay::input::keyboard::{Keysym, keysyms};
 
-    use super::{ResizeEdge, recovery_shortcut_from_keysym, resize_edges_at, vt_from_keysym};
+    use super::{
+        ResizeEdge, axis_amount, pointer_focus_needs_refresh, recovery_shortcut_from_keysym,
+        resize_edges_at, vt_from_keysym,
+    };
+
+    #[test]
+    fn stationary_focus_refreshes_only_when_the_resolved_target_changes() {
+        assert!(!pointer_focus_needs_refresh(Some(&7_u8), Some(&(7_u8, ()))));
+        assert!(pointer_focus_needs_refresh(Some(&7_u8), Some(&(9_u8, ()))));
+        assert!(pointer_focus_needs_refresh(Some(&7_u8), None::<&(u8, ())>));
+        assert!(pointer_focus_needs_refresh(None, Some(&(9_u8, ()))));
+        assert!(!pointer_focus_needs_refresh(None, None::<&(u8, ())>));
+    }
+
+    #[test]
+    fn wheel_v120_survives_a_spurious_zero_continuous_amount() {
+        assert_eq!(axis_amount(Some(0.0), Some(120.0)), 15.0);
+        assert_eq!(axis_amount(Some(0.0), Some(-120.0)), -15.0);
+        assert_eq!(axis_amount(Some(7.5), Some(120.0)), 7.5);
+        assert_eq!(axis_amount(None, None), 0.0);
+    }
 
     #[test]
     fn resize_edges_follow_pointer_region() {

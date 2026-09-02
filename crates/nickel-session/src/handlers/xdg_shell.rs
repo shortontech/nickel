@@ -226,8 +226,18 @@ impl XdgShellHandler for NickelSession {
         let seat = Seat::from_resource(&seat).unwrap();
 
         let wl_surface = surface.wl_surface();
+        tracing::info!(
+            surface = ?wl_surface.id(),
+            ?serial,
+            "diagnostic: xdg toplevel move requested"
+        );
 
         if let Some(start_data) = check_grab(&seat, wl_surface, serial) {
+            tracing::info!(
+                surface = ?wl_surface.id(),
+                ?serial,
+                "diagnostic: xdg toplevel move accepted"
+            );
             let pointer = seat.get_pointer().unwrap();
 
             let Some(window) = self
@@ -309,11 +319,18 @@ impl XdgShellHandler for NickelSession {
         let Some(seat) = Seat::from_resource(&seat) else {
             return;
         };
+        let popup_id = surface.wl_surface().id();
         let popup = PopupKind::Xdg(surface);
         let Ok(root_surface) = find_popup_root_surface(&popup) else {
             return;
         };
         let root = KeyboardFocusTarget::Wayland(root_surface);
+        tracing::info!(
+            popup = ?popup_id,
+            root = ?root.wl_surface().map(|surface| surface.id()),
+            ?serial,
+            "diagnostic: xdg popup requested a seat grab"
+        );
         match self.popups.grab_popup(root, popup, &seat, serial) {
             Ok(grab) => {
                 if let Some(keyboard) = seat.get_keyboard() {
@@ -331,6 +348,10 @@ impl XdgShellHandler for NickelSession {
 // Xdg Shell
 impl XdgDecorationHandler for NickelSession {
     fn new_decoration(&mut self, toplevel: ToplevelSurface) {
+        tracing::info!(
+            surface = ?toplevel.wl_surface().id(),
+            "diagnostic: xdg decoration object created"
+        );
         self.prefer_server_decoration(toplevel);
     }
 
@@ -339,11 +360,24 @@ impl XdgDecorationHandler for NickelSession {
         toplevel: ToplevelSurface,
         mode: smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode,
     ) {
+        tracing::info!(
+            surface = ?toplevel.wl_surface().id(),
+            ?mode,
+            "diagnostic: xdg decoration mode requested"
+        );
         self.configure_decoration(toplevel, mode);
     }
 
     fn unset_mode(&mut self, toplevel: ToplevelSurface) {
-        self.prefer_server_decoration(toplevel);
+        tracing::info!(
+            surface = ?toplevel.wl_surface().id(),
+            "diagnostic: xdg decoration mode unset"
+        );
+        use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode;
+        // A client can unset its server-decoration preference at runtime when
+        // switching back to its own titlebar. Keeping ServerSide here leaves
+        // both the compositor frame and the new client-side frame visible.
+        self.configure_decoration(toplevel, Mode::ClientSide);
     }
 }
 
@@ -375,6 +409,17 @@ impl NickelSession {
             Mode::ClientSide => self.server_decorated.remove(&toplevel.wl_surface().id()),
             _ => return,
         };
+        tracing::info!(
+            surface = ?toplevel.wl_surface().id(),
+            ?mode,
+            decoration_changed,
+            server_decorated = self.server_decorated.contains(&toplevel.wl_surface().id()),
+            "diagnostic: xdg decoration state configured"
+        );
+        if decoration_changed {
+            #[cfg(feature = "backend-udev")]
+            self.invalidate_native_outputs();
+        }
         toplevel.with_pending_state(|state| state.decoration_mode = Some(mode));
         if decoration_changed {
             self.reconcile_maximized_toplevel_geometry(&toplevel);
@@ -391,15 +436,41 @@ fn check_grab(
     let pointer = seat.get_pointer()?;
 
     // Check that this surface has a click grab.
-    if !pointer.has_grab(serial) {
+    let has_grab = pointer.has_grab(serial);
+    if !has_grab {
+        tracing::info!(
+            surface = ?surface.id(),
+            ?serial,
+            "diagnostic: xdg interactive request rejected without matching pointer grab"
+        );
         return None;
     }
 
-    let start_data = pointer.grab_start_data()?;
+    let Some(start_data) = pointer.grab_start_data() else {
+        tracing::info!(
+            surface = ?surface.id(),
+            ?serial,
+            "diagnostic: xdg interactive request rejected without grab start data"
+        );
+        return None;
+    };
 
-    let (focus, _) = start_data.focus.as_ref()?;
+    let Some((focus, _)) = start_data.focus.as_ref() else {
+        tracing::info!(
+            surface = ?surface.id(),
+            ?serial,
+            "diagnostic: xdg interactive request rejected without grab focus"
+        );
+        return None;
+    };
     // If the focus was for a different surface, ignore the request.
     if !focus.same_client_as(&surface.id()) {
+        tracing::info!(
+            surface = ?surface.id(),
+            ?serial,
+            focus = ?focus.wl_surface().map(|surface| surface.id()),
+            "diagnostic: xdg interactive request rejected for mismatched focus client"
+        );
         return None;
     }
 

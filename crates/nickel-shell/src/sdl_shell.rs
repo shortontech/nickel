@@ -12,11 +12,11 @@ use std::time::Instant;
 use nickel_input::InputEvent;
 use nickel_session_protocol::ShellRole as SessionShellRole;
 use nickel_ui::backend::PaintCommand;
-use nickel_ui::{
-    AggregatePresenterCacheDiagnostics, DamageRegion, HostChangeToken, SdlCanvasPresenter,
-};
+use nickel_ui::{AggregatePresenterCacheDiagnostics, DamageRegion, HostChangeToken};
 use sdl3::event::{Event, WindowEvent};
 use sdl3::video::{Window, WindowPos};
+
+use crate::sdl_gpu::{SdlGpuPresenter, SharedSdlGraphics};
 
 pub const DESKTOP_TITLE: &str = "Nickel Desktop";
 pub const PANEL_TITLE: &str = "Nickel Panel";
@@ -184,9 +184,9 @@ pub struct ShellSurface {
     output_name: String,
     display_connected: bool,
     initial_exposed: bool,
-    presenter: Option<SdlCanvasPresenter>,
+    presenter: Option<SdlGpuPresenter>,
     last_host_change_token: Option<HostChangeToken>,
-    window: Option<Window>,
+    window: Window,
 }
 
 impl ShellSurface {
@@ -207,25 +207,18 @@ impl ShellSurface {
     }
 
     pub fn window(&self) -> &Window {
-        self.presenter
-            .as_ref()
-            .map(SdlCanvasPresenter::window)
-            .or(self.window.as_ref())
-            .expect("shell surface owns a window")
+        &self.window
     }
 
     pub fn window_mut(&mut self) -> &mut Window {
-        if let Some(presenter) = self.presenter.as_mut() {
-            presenter.window_mut()
-        } else {
-            self.window.as_mut().expect("shell surface owns a window")
-        }
+        &mut self.window
     }
 }
 
 pub struct SdlShell {
-    // Presenters own their native windows and must drop before SDL's video subsystem.
+    // Presenters borrow native window handles and must drop before SDL's video subsystem.
     surfaces: Vec<ShellSurface>,
+    graphics: Option<SharedSdlGraphics>,
     surface_indices: HashMap<u32, usize>,
     events: sdl3::EventPump,
     pending_events: VecDeque<ShellEvent>,
@@ -274,6 +267,7 @@ impl SdlShell {
         }
         Ok(Self {
             surfaces: Vec::new(),
+            graphics: None,
             surface_indices: HashMap::new(),
             events,
             pending_events: VecDeque::new(),
@@ -340,11 +334,7 @@ impl SdlShell {
             for surface in &mut self.surfaces {
                 surface.display_connected = false;
                 let _ = surface.window_mut().hide();
-                if let Some(presenter) = surface.presenter.as_mut()
-                    && let Err(error) = presenter.suspend()
-                {
-                    tracing::warn!(%error, "failed to suspend headless presenter");
-                }
+                surface.presenter = None;
             }
             self.rebuild_surface_indices();
             tracing::info!("SDL shell is dormant while no displays are available");
@@ -366,11 +356,7 @@ impl SdlShell {
                 {
                     surface.display_connected = false;
                     let _ = surface.window_mut().hide();
-                    if let Some(presenter) = surface.presenter.as_mut()
-                        && let Err(error) = presenter.suspend()
-                    {
-                        tracing::warn!(%error, "failed to suspend disconnected presenter");
-                    }
+                    surface.presenter = None;
                 }
             }
             self.rebuild_surface_indices();
@@ -580,7 +566,7 @@ impl SdlShell {
             initial_exposed: false,
             presenter: None,
             last_host_change_token: None,
-            window: Some(window),
+            window,
         });
         Ok(id)
     }
@@ -606,10 +592,9 @@ impl SdlShell {
 
     pub fn memory_diagnostics(&self) -> ShellMemoryDiagnostics {
         let mut presenter_caches = AggregatePresenterCacheDiagnostics::from_presenters(
-            self.surfaces
-                .iter()
-                .filter_map(|surface| surface.presenter.as_ref())
-                .map(SdlCanvasPresenter::cache_diagnostics),
+            self.graphics
+                .as_ref()
+                .map(SharedSdlGraphics::cache_diagnostics),
         );
         let process_peak =
             durable_presenter_peak(self.presenter_cache_peak_bytes.get(), &presenter_caches);
@@ -656,27 +641,23 @@ impl SdlShell {
             .surface_indices
             .get(&id.0)
             .ok_or_else(|| "unknown SDL shell surface".to_owned())?;
+        if self.graphics.is_none() {
+            self.graphics = Some(SharedSdlGraphics::new(self.surfaces[index].window())?);
+        }
+        let graphics = self.graphics.as_ref().expect("shared renderer initialized");
         let entry = &mut self.surfaces[index];
         let warm = entry.presenter.is_some();
         if entry.presenter.is_none() {
-            let window = entry
-                .window
-                .take()
-                .expect("unpresented surface owns a window");
-            let previous_app_id = sdl3::hint::get("SDL_APP_ID");
-            sdl3::hint::set("SDL_APP_ID", &entry.application_id);
-            let presenter = SdlCanvasPresenter::new(window);
-            restore_sdl_app_id(previous_app_id);
-            entry.presenter = Some(presenter?);
+            entry.presenter = Some(SdlGpuPresenter::new(&entry.window, graphics)?);
         }
-        let scale = entry.window().display_scale();
         let started = Instant::now();
         let allocations_before = crate::allocation_counter::allocation_operations();
+        let window = &entry.window;
         let damage = entry
             .presenter
             .as_mut()
             .expect("shell presenter initialized")
-            .present_accelerated(commands, scale)?;
+            .present(window, graphics, commands)?;
         let elapsed_us = started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
         if warm {
             push_bounded(&mut self.warm_present_us, elapsed_us);
@@ -731,13 +712,9 @@ impl SdlShell {
             let hidden = surface.window_mut().hide();
             // SDL reports whether native visibility changed, not whether the
             // surface is hidden after the call. Repeated reconciliation must
-            // still release a presenter that was populated while the native
-            // window was already hidden (for example by prewarm or resize).
-            if let Some(presenter) = surface.presenter.as_mut()
-                && let Err(error) = presenter.suspend()
-            {
-                tracing::warn!(%error, "failed to suspend hidden presenter");
-            }
+            // still release a lightweight presentation surface populated while
+            // the native window was already hidden (for example by prewarm).
+            surface.presenter = None;
             hidden
         })
     }
@@ -806,11 +783,22 @@ impl SdlShell {
             return Some(event);
         }
         let deadline = Instant::now() + timeout;
+        let mut discarded = 0_u64;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             let event = self.events.wait_event_timeout(remaining)?;
+            let event_summary = (discarded == 9_999).then(|| format!("{event:?}"));
             if let Some(event) = self.translate_event(event) {
                 return Some(event);
+            }
+            discarded = discarded.saturating_add(1);
+            if discarded == 10_000 {
+                tracing::info!(
+                    discarded,
+                    last_event = %event_summary.as_deref().unwrap_or("unavailable"),
+                    ?timeout,
+                    "diagnostic: SDL event pump discarded events while waiting"
+                );
             }
             if Instant::now() >= deadline {
                 if let Some(event) = self.pending_events.pop_front() {
@@ -925,7 +913,7 @@ impl SdlShell {
             initial_exposed: false,
             presenter: None,
             last_host_change_token: None,
-            window: Some(window),
+            window,
         });
         Ok(())
     }

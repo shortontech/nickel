@@ -635,12 +635,16 @@ fn window_frame_elements(
             .and_then(|id| state.windows.title(id))
             .unwrap_or_default();
         let foreground = if active { palette.text } else { palette.muted };
+        // Popups expand element_bbox, but they do not resize their owner's frame.
+        let Some(frame_bounds) = state.space.element_geometry(window) else {
+            continue;
+        };
         let titlebar_geometry =
             crate::window_frame::titlebar_geometry(crate::shell_layout::Geometry {
-                x: bounds.loc.x,
-                y: bounds.loc.y,
-                width: bounds.size.w,
-                height: bounds.size.h,
+                x: frame_bounds.loc.x,
+                y: frame_bounds.loc.y,
+                width: frame_bounds.size.w,
+                height: frame_bounds.size.h,
             });
         if let Some(titlebar) = crate::window_frame::render_titlebar_for(
             registry_id.map(|id| id.0),
@@ -664,8 +668,9 @@ fn window_frame_elements(
         }
         if let Some(icons) = icons {
             let icon_y =
-                bounds.loc.y - output_geometry.loc.y - crate::window_frame::TITLEBAR_HEIGHT + 8;
-            let icon_x = bounds.loc.x - output_geometry.loc.x + bounds.size.w;
+                frame_bounds.loc.y - output_geometry.loc.y - crate::window_frame::TITLEBAR_HEIGHT
+                    + 8;
+            let icon_x = frame_bounds.loc.x - output_geometry.loc.x + frame_bounds.size.w;
             let maximized = state.is_maximized_window(window);
             for (buffer, offset) in [
                 (&icons.close, 35),

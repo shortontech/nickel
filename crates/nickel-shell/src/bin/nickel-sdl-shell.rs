@@ -61,6 +61,8 @@ mod places;
 mod platform;
 #[path = "../sdl_control_view.rs"]
 mod sdl_control_view;
+#[path = "../sdl_gpu.rs"]
+mod sdl_gpu;
 #[path = "../sdl_launcher_view.rs"]
 mod sdl_launcher_view;
 #[path = "../sdl_live_shell.rs"]
@@ -1424,7 +1426,10 @@ fn main() -> Result<(), String> {
     let mut focused_overlays = HashSet::new();
     #[cfg(not(target_os = "linux"))]
     let mut overlay_focus_loss: Option<(SurfaceId, SurfaceRole, Instant)> = None;
+    let mut diagnostic_loop_started = Instant::now();
+    let mut diagnostic_loop_iterations = 0_u64;
     loop {
+        diagnostic_loop_iterations = diagnostic_loop_iterations.saturating_add(1);
         let now = Instant::now();
         if controller_schedule.is_due(now) {
             for action in controller.poll_global(now) {
@@ -1466,6 +1471,21 @@ fn main() -> Result<(), String> {
             .unwrap_or(next_deadline);
         let timeout = next_deadline.saturating_duration_since(Instant::now());
         let event = shell.wait_event_timeout(timeout);
+        if diagnostic_loop_started.elapsed() >= Duration::from_secs(1) {
+            if diagnostic_loop_iterations >= 1 {
+                tracing::info!(
+                    iterations = diagnostic_loop_iterations,
+                    ?timeout,
+                    ?event,
+                    fast_due = fast_subscription.is_due(Instant::now()),
+                    system_due = system_subscription.is_due(Instant::now()),
+                    host_deadline = ?state.next_host_deadline(),
+                    "diagnostic: SDL shell event loop is busy"
+                );
+            }
+            diagnostic_loop_started = Instant::now();
+            diagnostic_loop_iterations = 0;
+        }
         if let Some(ref event) = event
             && handle_codex_event(&mut codex, &mut shell, &mut state, event)?
         {

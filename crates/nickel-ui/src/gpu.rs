@@ -1235,6 +1235,26 @@ impl SdlComponentRenderer {
         &self.pixels
     }
 
+    /// Reports bounded derived data retained by the software rasterizer. The
+    /// frame-sized pixel buffer is presentation storage, not a cache.
+    pub fn cache_diagnostics(&self) -> PresenterCacheDiagnostics {
+        let text_layouts = self.text_rasters.iter().flatten().count();
+        let text_layout_bytes = self
+            .text_rasters
+            .iter()
+            .flatten()
+            .map(CachedSoftwareText::retained_bytes)
+            .sum::<usize>()
+            .saturating_add(self.swash_source_bytes);
+        PresenterCacheDiagnostics {
+            text_layouts,
+            text_layout_bytes,
+            live_bytes: text_layout_bytes,
+            peak_bytes: text_layout_bytes,
+            ..PresenterCacheDiagnostics::default()
+        }
+    }
+
     pub fn invalidate(&mut self) {
         self.previous_commands.clear();
     }

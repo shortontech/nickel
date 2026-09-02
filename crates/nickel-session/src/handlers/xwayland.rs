@@ -69,6 +69,13 @@ fn x11_pointer_button(button: u32) -> Option<u32> {
     }
 }
 
+fn x11_button_matches_grab(button: u32, grab_button: u32) -> bool {
+    // XCB_BUTTON_INDEX_ANY (zero) asks the window manager to use whichever
+    // pointer button initiated the active grab. Chromium uses this form for
+    // client-side decoration drags.
+    button == 0 || x11_pointer_button(button) == Some(grab_button)
+}
+
 fn x11_map_geometry(
     mut surface_geometry: Rectangle<i32, Logical>,
     last_configure: Rectangle<i32, Logical>,
@@ -76,9 +83,10 @@ fn x11_map_geometry(
 ) -> Rectangle<i32, Logical> {
     if override_redirect {
         // Override-redirect windows (menus, tooltips, and similar popups) are
-        // positioned directly by the X11 client. `geometry()` is local to the
-        // surface and therefore does not contain that global position.
-        surface_geometry.loc = last_configure.loc;
+        // positioned directly by the X11 client. `geometry()` is the content
+        // rectangle within the outer surface (and can be inset by shadows),
+        // while `last_configure` supplies that outer surface's root position.
+        surface_geometry.loc += last_configure.loc;
     }
     surface_geometry
 }
@@ -197,6 +205,17 @@ impl NickelSession {
             surface.geometry(),
             surface.last_configure(),
             surface.is_override_redirect(),
+        );
+        tracing::info!(
+            window = surface.window_id(),
+            class = %surface.class(),
+            managed,
+            override_redirect = surface.is_override_redirect(),
+            surface_geometry = ?surface.geometry(),
+            last_configure = ?surface.last_configure(),
+            mapped_geometry = ?geometry,
+            wl_surface = ?surface.wl_surface().map(|surface| surface.id()),
+            "diagnostic: X11 window mapped"
         );
         if geometry.size.w <= 1 || geometry.size.h <= 1 {
             geometry.size = Size::from((DEFAULT_X11_WIDTH, DEFAULT_X11_HEIGHT));
@@ -336,6 +355,21 @@ impl XwmHandler for NickelSession {
         height: Option<u32>,
         _reorder: Option<Reorder>,
     ) {
+        let old = window.geometry();
+        tracing::info!(
+            window = window.window_id(),
+            class = %window.class(),
+            override_redirect = window.is_override_redirect(),
+            ?x,
+            ?y,
+            ?width,
+            ?height,
+            old = ?old,
+            last_configure = ?window.last_configure(),
+            frame_extents = ?window.frame_extents(),
+            client_side_decorated = window.is_decorated(),
+            "diagnostic: X11 configure requested"
+        );
         if let Some(mapped) = self.x11_window(&window)
             && self.is_maximized_window(&mapped)
         {
@@ -343,7 +377,6 @@ impl XwmHandler for NickelSession {
             self.request_output_redraw();
             return;
         }
-        let old = window.geometry();
         let geometry = Rectangle::new(
             (x.unwrap_or(old.loc.x), y.unwrap_or(old.loc.y)).into(),
             (
@@ -357,6 +390,11 @@ impl XwmHandler for NickelSession {
                     .max(1),
             )
                 .into(),
+        );
+        tracing::info!(
+            window = window.window_id(),
+            result = ?geometry,
+            "diagnostic: X11 configure accepted"
         );
         if let Err(error) = window.configure(geometry) {
             tracing::warn!(?error, window = window.window_id(), "X11 configure failed");
@@ -380,7 +418,17 @@ impl XwmHandler for NickelSession {
         }
     }
 
-    fn property_notify(&mut self, _xwm: XwmId, window: X11Surface, _property: WmWindowProperty) {
+    fn property_notify(&mut self, _xwm: XwmId, window: X11Surface, property: WmWindowProperty) {
+        if property == WmWindowProperty::MotifHints {
+            tracing::info!(
+                window = window.window_id(),
+                class = %window.class(),
+                client_side_decorated = window.is_decorated(),
+                motif_hints = ?window.motif_hints(),
+                "diagnostic: X11 decoration hints changed"
+            );
+            self.request_output_redraw();
+        }
         if let Some(id) = self.x11_window_id(&window) {
             self.windows.update_metadata(
                 id,
@@ -437,7 +485,7 @@ impl XwmHandler for NickelSession {
         let Some(start_data) = pointer.grab_start_data() else {
             return;
         };
-        if x11_pointer_button(button) != Some(start_data.button)
+        if !x11_button_matches_grab(button, start_data.button)
             || start_data.focus.as_ref().map(|(surface, _)| surface)
                 != Some(&crate::focus::PointerFocusTarget::X11(window.clone()))
         {
@@ -466,20 +514,51 @@ impl XwmHandler for NickelSession {
     fn move_request(&mut self, _xwm: XwmId, window: X11Surface, button: u32) {
         let pointer = self.seat.get_pointer().unwrap();
         let Some(start_data) = pointer.grab_start_data() else {
+            tracing::info!(
+                window = window.window_id(),
+                class = %window.class(),
+                button,
+                "diagnostic: X11 move rejected without pointer grab start"
+            );
             return;
         };
-        if x11_pointer_button(button) != Some(start_data.button)
-            || start_data.focus.as_ref().map(|(surface, _)| surface)
-                != Some(&crate::focus::PointerFocusTarget::X11(window.clone()))
+        let requested_button = x11_pointer_button(button);
+        let expected_focus = crate::focus::PointerFocusTarget::X11(window.clone());
+        let start_focus = start_data.focus.as_ref().map(|(surface, _)| surface);
+        tracing::info!(
+            window = window.window_id(),
+            class = %window.class(),
+            button,
+            ?requested_button,
+            start_button = start_data.button,
+            ?start_focus,
+            focus_matches = start_focus == Some(&expected_focus),
+            "diagnostic: X11 move requested"
+        );
+        if !x11_button_matches_grab(button, start_data.button)
+            || start_focus != Some(&expected_focus)
         {
             return;
         }
         let Some(mapped) = self.x11_window(&window) else {
+            tracing::info!(
+                window = window.window_id(),
+                "diagnostic: X11 move rejected unmapped"
+            );
             return;
         };
         let Some(initial_window_location) = self.space.element_location(&mapped) else {
+            tracing::info!(
+                window = window.window_id(),
+                "diagnostic: X11 move rejected without location"
+            );
             return;
         };
+        tracing::info!(
+            window = window.window_id(),
+            ?initial_window_location,
+            "diagnostic: X11 move accepted"
+        );
         pointer.set_grab(
             self,
             MoveSurfaceGrab {
@@ -811,13 +890,20 @@ mod tests {
     }
 
     #[test]
+    fn any_x11_button_uses_the_active_pointer_grab() {
+        assert!(x11_button_matches_grab(0, 0x110));
+        assert!(x11_button_matches_grab(1, 0x110));
+        assert!(!x11_button_matches_grab(3, 0x110));
+    }
+
+    #[test]
     fn override_redirect_windows_use_the_client_configured_location() {
         let surface_geometry = Rectangle::new((7, 0).into(), (320, 240).into());
         let last_configure = Rectangle::new((843, 612).into(), (300, 200).into());
 
         let mapped = x11_map_geometry(surface_geometry, last_configure, true);
 
-        assert_eq!(mapped.loc, (843, 612).into());
+        assert_eq!(mapped.loc, (850, 612).into());
         assert_eq!(mapped.size, (320, 240).into());
     }
 

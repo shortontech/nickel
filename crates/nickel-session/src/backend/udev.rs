@@ -8,13 +8,15 @@ use std::{
 use smithay::{
     backend::{
         allocator::{
-            Fourcc,
+            Allocator, Fourcc, Modifier,
+            dumb::{DumbAllocator, DumbBuffer},
             format::FormatSet,
             gbm::{GbmAllocator, GbmBufferFlags, GbmDevice},
         },
         drm::{
-            DrmDevice, DrmDeviceFd, DrmEvent, DrmNode,
+            DrmDevice, DrmDeviceFd, DrmEvent, DrmNode, DrmSurface, PlaneConfig, PlaneState,
             compositor::{FrameFlags, PrimaryPlaneElement},
+            dumb::{DumbFramebuffer, framebuffer_from_dumb_buffer},
             exporter::gbm::GbmFramebufferExporter,
             output::{DrmOutput, DrmOutputManager, DrmOutputRenderElements},
         },
@@ -23,6 +25,7 @@ use smithay::{
         renderer::{
             Bind, Color32F, ExportMem, Frame, ImportAll, ImportDma, ImportMem, Offscreen, Renderer,
             TextureMapping,
+            damage::OutputDamageTracker,
             element::{
                 AsRenderElements, Kind,
                 memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
@@ -47,7 +50,10 @@ use smithay::{
             EventLoop, RegistrationToken, channel,
             timer::{TimeoutAction, Timer},
         },
-        drm::control::{ModeTypeFlags, connector, crtc},
+        drm::{
+            buffer::Buffer as _,
+            control::{Device as _, Mode as DrmMode, ModeTypeFlags, connector, crtc},
+        },
         input::Libinput,
         rustix::fs::OFlags,
         wayland_server::{Resource, backend::GlobalId},
@@ -134,6 +140,347 @@ type NativeOutputManager = DrmOutputManager<
     (),
     DrmDeviceFd,
 >;
+enum OutputManager {
+    Gbm(NativeOutputManager),
+    Evdi(DrmDevice),
+}
+
+impl OutputManager {
+    fn device(&self) -> &DrmDevice {
+        match self {
+            Self::Gbm(manager) => manager.device(),
+            Self::Evdi(device) => device,
+        }
+    }
+
+    fn pause(&mut self) {
+        match self {
+            Self::Gbm(manager) => manager.pause(),
+            Self::Evdi(device) => device.pause(),
+        }
+    }
+
+    fn activate(&mut self) -> Result<(), smithay::backend::drm::DrmError> {
+        match self {
+            Self::Gbm(manager) => manager.lock().activate(false),
+            Self::Evdi(device) => device.activate(false),
+        }
+    }
+}
+
+enum OutputDrm {
+    Gbm(NativeDrmOutput),
+    Evdi(Box<EvdiOutput>),
+}
+
+impl OutputDrm {
+    fn reset_buffer_ages(&mut self) {
+        match self {
+            Self::Gbm(output) => {
+                output.with_compositor(|compositor| compositor.reset_buffer_ages())
+            }
+            Self::Evdi(output) => output.invalidate(),
+        }
+    }
+
+    fn format(&self) -> Fourcc {
+        match self {
+            Self::Gbm(output) => output.format(),
+            Self::Evdi(output) => output.format,
+        }
+    }
+
+    fn frame_submitted(&mut self) -> Result<(), String> {
+        match self {
+            Self::Gbm(output) => output
+                .frame_submitted()
+                .map(|_| ())
+                .map_err(|error| error.to_string()),
+            Self::Evdi(output) => {
+                output.frame_submitted();
+                Ok(())
+            }
+        }
+    }
+}
+
+struct EvdiScanoutBuffer {
+    buffer: DumbBuffer,
+    framebuffer: DumbFramebuffer,
+}
+
+struct EvdiOutput {
+    surface: DrmSurface,
+    buffers: [EvdiScanoutBuffer; 2],
+    displayed: usize,
+    format: Fourcc,
+    size: Size<i32, Physical>,
+    render_target: Option<GlesTexture>,
+    damage_tracker: OutputDamageTracker,
+    previous_damage: Option<Rectangle<i32, Buffer>>,
+    diagnostics: EvdiCopyoutDiagnostics,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct EvdiCopyoutDiagnostics {
+    rendered_bytes: u64,
+    mapped_bytes: u64,
+    copied_bytes: u64,
+    submitted_bytes: u64,
+    full_copies: u64,
+    partial_copies: u64,
+    unchanged_frames: u64,
+    submissions: u64,
+    retries: u64,
+    failures: u64,
+    total_copy_micros: u64,
+    max_copy_micros: u64,
+    total_present_micros: u64,
+    max_present_micros: u64,
+}
+
+impl EvdiOutput {
+    fn new(
+        device: &mut DrmDevice,
+        crtc: crtc::Handle,
+        mode: DrmMode,
+        connector: connector::Handle,
+    ) -> Result<Self, String> {
+        let size = Size::<i32, Physical>::from((mode.size().0 as i32, mode.size().1 as i32));
+        let fd = device.device_fd().clone();
+        let surface = device
+            .create_surface(crtc, mode, &[connector])
+            .map_err(|error| error.to_string())?;
+        let mut allocator = DumbAllocator::new(fd.clone());
+        let mut create = || -> Result<EvdiScanoutBuffer, String> {
+            let buffer = allocator
+                .create_buffer(
+                    size.w as u32,
+                    size.h as u32,
+                    Fourcc::Abgr8888,
+                    &[Modifier::Linear],
+                )
+                .map_err(|error| error.to_string())?;
+            let framebuffer = framebuffer_from_dumb_buffer(&fd, &buffer, false)
+                .map_err(|error| error.to_string())?;
+            Ok(EvdiScanoutBuffer {
+                buffer,
+                framebuffer,
+            })
+        };
+        let buffers = [create()?, create()?];
+        let output = Self {
+            surface,
+            buffers,
+            displayed: 0,
+            format: Fourcc::Abgr8888,
+            size,
+            render_target: None,
+            damage_tracker: OutputDamageTracker::new(size, Scale::from(1.0), Transform::Normal),
+            previous_damage: None,
+            diagnostics: EvdiCopyoutDiagnostics::default(),
+        };
+        output
+            .surface
+            .commit([output.plane_state(0)], false)
+            .map_err(|error| error.to_string())?;
+        Ok(output)
+    }
+
+    fn plane_state(&self, buffer: usize) -> PlaneState<'_> {
+        PlaneState {
+            handle: self.surface.plane(),
+            config: Some(PlaneConfig {
+                src: Rectangle::from_size(Size::<i32, Buffer>::from((self.size.w, self.size.h)))
+                    .to_f64(),
+                dst: Rectangle::from_size(self.size),
+                transform: Transform::Normal,
+                alpha: 1.0,
+                damage_clips: None,
+                fb: *self.buffers[buffer].framebuffer.as_ref(),
+                fence: None,
+            }),
+        }
+    }
+
+    fn invalidate(&mut self) {
+        self.damage_tracker =
+            OutputDamageTracker::new(self.size, Scale::from(1.0), Transform::Normal);
+        self.previous_damage = None;
+    }
+
+    fn frame_submitted(&mut self) {
+        // EVDI does not reliably emit page-flip completion events. Its atomic
+        // framebuffer update is committed synchronously without an event.
+    }
+
+    fn reactivate(&mut self) -> Result<(), String> {
+        self.surface
+            .reset_state()
+            .map_err(|error| error.to_string())?;
+        self.surface
+            .commit([self.plane_state(self.displayed)], false)
+            .map_err(|error| error.to_string())?;
+        self.invalidate();
+        Ok(())
+    }
+
+    fn retained_bytes(&self) -> usize {
+        self.buffers
+            .iter()
+            .map(|buffer| buffer.buffer.handle().pitch() as usize * self.size.h as usize)
+            .sum()
+    }
+
+    fn render_and_present<'a>(
+        &mut self,
+        renderer: &mut NativeRenderer<'a>,
+        elements: &[NativeElement<
+            NativeRenderer<'a>,
+            WaylandSurfaceRenderElement<NativeRenderer<'a>>,
+        >],
+    ) -> Result<bool, String> {
+        let started = Instant::now();
+        if self.render_target.is_none() {
+            self.render_target = Some(
+                <NativeRenderer<'a> as Offscreen<GlesTexture>>::create_buffer(
+                    renderer,
+                    Fourcc::Abgr8888,
+                    Size::<i32, Buffer>::from((self.size.w, self.size.h)),
+                )
+                .map_err(|error| error.to_string())?,
+            );
+        }
+        let mut framebuffer = renderer
+            .bind(
+                self.render_target
+                    .as_mut()
+                    .expect("render target initialized"),
+            )
+            .map_err(|error| error.to_string())?;
+        let rendered = self
+            .damage_tracker
+            .render_output(
+                renderer,
+                &mut framebuffer,
+                1,
+                elements,
+                [0.1, 0.1, 0.1, 1.0],
+            )
+            .map_err(|error| error.to_string())?;
+        let Some(current_damage) = rendered.damage.cloned() else {
+            self.diagnostics.unchanged_frames = self.diagnostics.unchanged_frames.saturating_add(1);
+            return Ok(false);
+        };
+        rendered.sync.wait().map_err(|error| error.to_string())?;
+        self.diagnostics.rendered_bytes = self
+            .diagnostics
+            .rendered_bytes
+            .saturating_add(damage_bytes(&current_damage));
+
+        // The target dumb buffer was displayed two submissions ago. Include
+        // the preceding frame's damage so alternating buffers converge on the
+        // current persistent render target without a full-frame copy.
+        let current_region = damage_bounding_box(&current_damage)
+            .ok_or_else(|| "damaged EVDI frame had no copy region".to_owned())?;
+        let copy_region = self.previous_damage.map_or(current_region, |previous| {
+            union_rectangles(previous, current_region)
+        });
+        let mapping = renderer
+            .copy_framebuffer(&framebuffer, copy_region, Fourcc::Abgr8888)
+            .map_err(|error| error.to_string())?;
+        let flipped = mapping.flipped();
+        let mapped = renderer
+            .map_texture(&mapping)
+            .map_err(|error| error.to_string())?;
+        let mapped_bytes = copy_region.size.w as u64 * copy_region.size.h as u64 * 4;
+        self.diagnostics.mapped_bytes = self.diagnostics.mapped_bytes.saturating_add(mapped_bytes);
+        drop(framebuffer);
+        let result = self.present_region(mapped, flipped, copy_region);
+        if result.is_ok() {
+            self.previous_damage = Some(current_region);
+        }
+        let elapsed = elapsed_micros(started);
+        self.diagnostics.total_present_micros = self
+            .diagnostics
+            .total_present_micros
+            .saturating_add(elapsed);
+        self.diagnostics.max_present_micros = self.diagnostics.max_present_micros.max(elapsed);
+        match &result {
+            Ok(true) => {}
+            Ok(false) => {}
+            Err(_) => {
+                self.diagnostics.failures = self.diagnostics.failures.saturating_add(1);
+                self.diagnostics.retries = self.diagnostics.retries.saturating_add(1);
+            }
+        }
+        result
+    }
+
+    fn present_region(
+        &mut self,
+        mapped: &[u8],
+        flipped: bool,
+        region: Rectangle<i32, Buffer>,
+    ) -> Result<bool, String> {
+        let next = 1 - self.displayed;
+        {
+            let fd = self.surface.device_fd();
+            let buffer = &mut self.buffers[next];
+            let mut raw = *buffer.buffer.handle();
+            let pitch = raw.pitch() as usize;
+            let mut mapping = fd
+                .map_dumb_buffer(&mut raw)
+                .map_err(|error| error.to_string())?;
+            let copy_started = Instant::now();
+            let copied = copy_mapped_region_to_strided(
+                &mut mapping,
+                pitch,
+                mapped,
+                flipped,
+                region,
+                self.size,
+            )?;
+            let copy_micros = elapsed_micros(copy_started);
+            self.diagnostics.total_copy_micros = self
+                .diagnostics
+                .total_copy_micros
+                .saturating_add(copy_micros);
+            self.diagnostics.max_copy_micros = self.diagnostics.max_copy_micros.max(copy_micros);
+            self.diagnostics.copied_bytes =
+                self.diagnostics.copied_bytes.saturating_add(copied as u64);
+            if copied
+                == (self.size.w as usize)
+                    .saturating_mul(self.size.h as usize)
+                    .saturating_mul(4)
+            {
+                self.diagnostics.full_copies = self.diagnostics.full_copies.saturating_add(1);
+            } else if copied > 0 {
+                self.diagnostics.partial_copies = self.diagnostics.partial_copies.saturating_add(1);
+            }
+        }
+        self.surface
+            .commit([self.plane_state(next)], false)
+            .map_err(|error| error.to_string())?;
+        self.displayed = next;
+        self.diagnostics.submissions = self.diagnostics.submissions.saturating_add(1);
+        self.diagnostics.submitted_bytes = self
+            .diagnostics
+            .submitted_bytes
+            .saturating_add(region.size.w as u64 * region.size.h as u64 * 4);
+        if self.diagnostics.submissions.is_multiple_of(300) {
+            tracing::info!(
+                diagnostics = ?self.diagnostics,
+                "EVDI copyout runtime diagnostics"
+            );
+        }
+        Ok(true)
+    }
+}
+
+fn elapsed_micros(started: Instant) -> u64 {
+    started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
+}
 
 #[derive(Debug, Eq, PartialEq)]
 struct OutputId {
@@ -144,7 +491,7 @@ struct OutputId {
 struct SurfaceData {
     global: Option<GlobalId>,
     output: Output,
-    drm: NativeDrmOutput,
+    drm: OutputDrm,
     background: SolidColorBuffer,
     render_path_logged: bool,
     invalidate_pending: bool,
@@ -180,12 +527,46 @@ fn mark_disabled_outputs_absent<K, N: Eq, T>(
 struct DeviceData {
     generation: u64,
     registration: RegistrationToken,
-    manager: NativeOutputManager,
+    manager: OutputManager,
     scanner: DrmScanner,
     render_node: DrmNode,
+    owns_renderer: bool,
     is_evdi: bool,
     render_scheduled: bool,
     surfaces: HashMap<crtc::Handle, SurfaceData>,
+}
+
+fn release_device_data(
+    native: &mut UdevData,
+    event_loop_handle: &smithay::reexports::calloop::LoopHandle<'static, NickelSession>,
+    node: DrmNode,
+    device: DeviceData,
+) {
+    if device.owns_renderer {
+        native.gpus.as_mut().remove_node(&device.render_node);
+    }
+    let session_fd = device.manager.device().device_fd().device_fd();
+    event_loop_handle.remove(device.registration);
+    drop(device);
+    close_libseat_device(&mut native.session, node, session_fd);
+    let retired = native.renderer_lifecycle.retire(node);
+    debug_assert!(
+        retired,
+        "retired DRM resource must have a lifecycle generation"
+    );
+}
+
+fn close_libseat_device(session: &mut LibSeatSession, node: DrmNode, fd: DeviceFd) {
+    match fd.try_into() {
+        Ok(fd) => {
+            if let Err(error) = session.close(fd) {
+                tracing::error!(%node, %error, "failed to close DRM device through libseat");
+            }
+        }
+        Err(_) => {
+            tracing::error!(%node, "retired DRM device still has live file-descriptor owners");
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -193,6 +574,21 @@ struct DiscoveredDevice {
     path: PathBuf,
     is_evdi: bool,
     driver: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DrmRenderStrategy {
+    Gbm,
+    EvdiCpuCopyout,
+    EvdiLlvmpipeFallback,
+}
+
+fn drm_render_strategy(is_evdi: bool, force_evdi_fallback: bool) -> DrmRenderStrategy {
+    match (is_evdi, force_evdi_fallback) {
+        (true, true) => DrmRenderStrategy::EvdiLlvmpipeFallback,
+        (true, false) => DrmRenderStrategy::EvdiCpuCopyout,
+        (false, _) => DrmRenderStrategy::Gbm,
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -390,7 +786,11 @@ impl UdevData {
             .sum::<usize>();
         RendererLifecycleDiagnostics {
             discovered_devices: self.discovered_devices.len(),
-            live_gpu_nodes: self.devices.len(),
+            live_gpu_nodes: self
+                .devices
+                .values()
+                .filter(|device| device.owns_renderer)
+                .count(),
             live_output_managers: self.devices.len(),
             active_surfaces: self
                 .devices
@@ -728,8 +1128,15 @@ pub fn init_udev(
                     }
                     native.activity.activate();
                     for device in native.devices.values_mut() {
-                        if let Err(error) = device.manager.lock().activate(false) {
+                        if let Err(error) = device.manager.activate() {
                             tracing::error!(?error, "failed to reactivate DRM device");
+                        }
+                        for surface in device.surfaces.values_mut() {
+                            if let OutputDrm::Evdi(output) = &mut surface.drm
+                                && let Err(error) = output.reactivate()
+                            {
+                                tracing::error!(%error, "failed to reactivate EVDI output");
+                            }
                         }
                     }
                     let nodes: Vec<_> = native.devices.keys().copied().collect();
@@ -988,64 +1395,91 @@ impl NickelSession {
             &discovered.path,
             OFlags::RDWR | OFlags::CLOEXEC | OFlags::NOCTTY | OFlags::NONBLOCK,
         )?;
-        let fd = DrmDeviceFd::new(DeviceFd::from(fd));
-        let (drm, notifier) = DrmDevice::new(fd.clone(), true)?;
-        let gbm = GbmDevice::new(fd)?;
-        native.gpus.as_mut().add_node(node, gbm.clone())?;
-        let render_node = node;
-        let renderer = match native.gpus.single_renderer(&render_node) {
-            Ok(renderer) => renderer,
-            Err(error) => {
-                native.gpus.as_mut().remove_node(&render_node);
-                return Err(DeviceError::Renderer(error.to_string()));
+        let fd = DeviceFd::from(fd);
+        let close_fd = fd.clone();
+        let activation = (|| {
+            let fd = DrmDeviceFd::new(fd);
+            let (drm, notifier) = DrmDevice::new(fd.clone(), true)?;
+            let strategy = drm_render_strategy(
+                discovered.is_evdi,
+                std::env::var_os("NICKEL_EVDI_LLVMPIPE_FALLBACK").is_some(),
+            );
+            if strategy == DrmRenderStrategy::EvdiLlvmpipeFallback {
+                tracing::warn!(%node, "EVDI CPU copyout disabled; using temporary llvmpipe fallback");
             }
-        };
-        let formats = renderer
-            .dmabuf_formats()
-            .iter()
-            .copied()
-            .collect::<FormatSet>();
-        let manager = DrmOutputManager::new(
-            drm,
-            GbmAllocator::new(
-                gbm.clone(),
-                GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT,
-            ),
-            GbmFramebufferExporter::new(gbm.clone(), Some(render_node).into()),
-            Some(gbm),
-            FORMATS.iter().copied(),
-            formats,
-        );
-        drop(renderer);
+            let (manager, render_node, owns_renderer) =
+                if strategy == DrmRenderStrategy::EvdiCpuCopyout {
+                    (OutputManager::Evdi(drm), native.primary_gpu, false)
+                } else {
+                    let gbm = GbmDevice::new(fd)?;
+                    native.gpus.as_mut().add_node(node, gbm.clone())?;
+                    let render_node = node;
+                    let renderer = match native.gpus.single_renderer(&render_node) {
+                        Ok(renderer) => renderer,
+                        Err(error) => {
+                            native.gpus.as_mut().remove_node(&render_node);
+                            return Err(DeviceError::Renderer(error.to_string()));
+                        }
+                    };
+                    let formats = renderer
+                        .dmabuf_formats()
+                        .iter()
+                        .copied()
+                        .collect::<FormatSet>();
+                    let manager = DrmOutputManager::new(
+                        drm,
+                        GbmAllocator::new(
+                            gbm.clone(),
+                            GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT,
+                        ),
+                        GbmFramebufferExporter::new(gbm.clone(), Some(render_node).into()),
+                        Some(gbm),
+                        FORMATS.iter().copied(),
+                        formats,
+                    );
+                    drop(renderer);
+                    (OutputManager::Gbm(manager), render_node, true)
+                };
 
-        let registration = match handle.insert_source(notifier, move |event, _, data| match event {
-            DrmEvent::VBlank(crtc) => data.frame_submitted(node, crtc),
-            DrmEvent::Error(error) => tracing::error!(%node, ?error, "DRM event error"),
-        }) {
-            Ok(registration) => registration,
-            Err(error) => {
-                native.gpus.as_mut().remove_node(&render_node);
-                return Err(DeviceError::Registration(format!("{error:?}")));
-            }
-        };
-        let generation = native.renderer_lifecycle.activate(node);
-        native.devices.insert(
-            node,
-            DeviceData {
-                generation,
-                registration,
-                manager,
-                scanner: DrmScanner::new(),
-                render_node,
-                is_evdi: discovered.is_evdi,
-                render_scheduled: false,
-                surfaces: HashMap::new(),
-            },
-        );
-        let diagnostics = native.renderer_lifecycle_diagnostics();
-        tracing::debug!(?diagnostics, "DRM renderer lifecycle state");
-        tracing::info!(%node, path = %discovered.path.display(), "DRM renderer activated");
-        Ok(())
+            let registration =
+                match handle.insert_source(notifier, move |event, _, data| match event {
+                    DrmEvent::VBlank(crtc) => data.frame_submitted(node, crtc),
+                    DrmEvent::Error(error) => {
+                        tracing::error!(%node, ?error, "DRM event error")
+                    }
+                }) {
+                    Ok(registration) => registration,
+                    Err(error) => {
+                        if owns_renderer {
+                            native.gpus.as_mut().remove_node(&render_node);
+                        }
+                        return Err(DeviceError::Registration(format!("{error:?}")));
+                    }
+                };
+            let generation = native.renderer_lifecycle.activate(node);
+            native.devices.insert(
+                node,
+                DeviceData {
+                    generation,
+                    registration,
+                    manager,
+                    scanner: DrmScanner::new(),
+                    render_node,
+                    owns_renderer,
+                    is_evdi: discovered.is_evdi,
+                    render_scheduled: false,
+                    surfaces: HashMap::new(),
+                },
+            );
+            let diagnostics = native.renderer_lifecycle_diagnostics();
+            tracing::debug!(?diagnostics, "DRM renderer lifecycle state");
+            tracing::info!(%node, path = %discovered.path.display(), "DRM renderer activated");
+            Ok(())
+        })();
+        if activation.is_err() {
+            close_libseat_device(&mut native.session, node, close_fd);
+        }
+        activation
     }
 
     fn activate_drm_device_with_dependencies(
@@ -1108,13 +1542,7 @@ impl NickelSession {
             let Some(device) = native.devices.remove(&node) else {
                 continue;
             };
-            native.gpus.as_mut().remove_node(&device.render_node);
-            self.event_loop_handle.remove(device.registration);
-            let retired = native.renderer_lifecycle.retire(node);
-            debug_assert!(
-                retired,
-                "live DRM resource must have a lifecycle generation"
-            );
+            release_device_data(native, &self.event_loop_handle, node, device);
             tracing::info!(%node, "inactive DRM renderer retired");
         }
         let diagnostics = native.renderer_lifecycle_diagnostics();
@@ -1279,29 +1707,38 @@ impl NickelSession {
             .ok_or_else(|| format!("DRM renderer for {name} retired during connection"))?;
         let is_primary = node == native.primary_gpu;
         let is_evdi = device.is_evdi;
-        let mut renderer = native
-            .gpus
-            .single_renderer(&device.render_node)
-            .map_err(|error| format!("renderer for {name} is unavailable: {error}"))?;
-        let empty = DrmOutputRenderElements::<
-            NativeRenderer<'_>,
-            NativeElement<NativeRenderer<'_>, WaylandSurfaceRenderElement<NativeRenderer<'_>>>,
-        >::default();
-        let drm = {
-            let mut manager = device.manager.lock();
-            manager
-                .initialize_output(
-                    crtc,
-                    mode,
-                    &[connector.handle()],
-                    &output,
-                    None,
-                    &mut renderer,
-                    &empty,
-                )
-                .map_err(|error| format!("failed to initialize output {name}: {error}"))?
+        let drm = match &mut device.manager {
+            OutputManager::Gbm(manager) => {
+                let mut renderer = native
+                    .gpus
+                    .single_renderer(&device.render_node)
+                    .map_err(|error| format!("renderer for {name} is unavailable: {error}"))?;
+                let empty = DrmOutputRenderElements::<
+                    NativeRenderer<'_>,
+                    NativeElement<
+                        NativeRenderer<'_>,
+                        WaylandSurfaceRenderElement<NativeRenderer<'_>>,
+                    >,
+                >::default();
+                let drm = manager
+                    .lock()
+                    .initialize_output(
+                        crtc,
+                        mode,
+                        &[connector.handle()],
+                        &output,
+                        None,
+                        &mut renderer,
+                        &empty,
+                    )
+                    .map_err(|error| format!("failed to initialize output {name}: {error}"))?;
+                OutputDrm::Gbm(drm)
+            }
+            OutputManager::Evdi(manager) => OutputDrm::Evdi(Box::new(
+                EvdiOutput::new(manager, crtc, mode, connector.handle())
+                    .map_err(|error| format!("failed to initialize EVDI output {name}: {error}"))?,
+            )),
         };
-        drop(renderer);
 
         let positions = native.layout.connect(
             name.clone(),
@@ -1435,6 +1872,9 @@ impl NickelSession {
         enabled: bool,
     ) -> Result<(), &'static str> {
         if enabled {
+            if self.space.outputs().any(|output| output.name() == name) {
+                return Ok(());
+            }
             let node = self
                 .native
                 .as_ref()
@@ -1580,13 +2020,7 @@ impl NickelSession {
             positions = native.layout.disconnect(&name);
             removed_names.push(name);
         }
-        native.gpus.as_mut().remove_node(&device.render_node);
-        self.event_loop_handle.remove(device.registration);
-        let retired = native.renderer_lifecycle.retire(node);
-        debug_assert!(
-            retired,
-            "removed DRM resource must have a lifecycle generation"
-        );
+        release_device_data(native, &self.event_loop_handle, node, device);
         for mut surface in removed_surfaces.drain(..) {
             let name = surface.output.name();
             self.stage_output_removal(&surface.output);
@@ -1655,6 +2089,26 @@ impl NickelSession {
             });
     }
 
+    pub(crate) fn invalidate_native_outputs(&mut self) {
+        let nodes = self
+            .native
+            .as_mut()
+            .map(|native| {
+                for surface in native
+                    .devices
+                    .values_mut()
+                    .flat_map(|device| device.surfaces.values_mut())
+                {
+                    surface.invalidate_pending = true;
+                }
+                native.devices.keys().copied().collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for node in nodes {
+            self.schedule_render(node, Duration::ZERO);
+        }
+    }
+
     fn reflow_windows_to_connected_outputs(&mut self) {
         let output_geometries: Vec<_> = self
             .space
@@ -1667,6 +2121,7 @@ impl NickelSession {
         let stranded: Vec<_> = self
             .space
             .elements()
+            .filter(|window| !self.is_shell_owned_window(window))
             .filter(|window| {
                 self.space.element_bbox(window).is_some_and(|bounds| {
                     !output_geometries
@@ -1754,18 +2209,30 @@ impl NickelSession {
                 self.preview_capture_candidates(wave)
             };
             if surface.invalidate_pending {
-                surface
-                    .drm
-                    .with_compositor(|compositor| compositor.reset_buffer_ages());
+                surface.drm.reset_buffer_ages();
                 surface.invalidate_pending = false;
             }
             if !surface.render_path_logged {
+                let cpu_copyout = matches!(&surface.drm, OutputDrm::Evdi(_));
+                let copyout_bytes = output.current_mode().map_or(0, |mode| {
+                    (mode.size.w as usize)
+                        .saturating_mul(mode.size.h as usize)
+                        .saturating_mul(4)
+                });
+                let retained_copyout_bytes = match &surface.drm {
+                    OutputDrm::Evdi(output) => output.retained_bytes(),
+                    OutputDrm::Gbm(_) => 0,
+                };
                 tracing::info!(
                     output = %output.name(),
                     render_gpu = %native.primary_gpu,
                     target_gpu = %device.render_node,
                     format = ?surface.drm.format(),
                     cross_gpu = native.primary_gpu != device.render_node,
+                    cpu_copyout,
+                    copyout_bytes,
+                    dumb_scanout_buffers = if cpu_copyout { 2 } else { 0 },
+                    retained_copyout_bytes,
                     "DRM output render path selected"
                 );
                 surface.render_path_logged = true;
@@ -1885,6 +2352,11 @@ impl NickelSession {
                         .unwrap_or_default();
                     let maximized = self.is_maximized_window(window);
                     let frame_index = elements.len();
+                    // element_bbox includes popups. A transient popup must not stretch the
+                    // owning window's server-side frame beyond its content geometry.
+                    let Some(frame_bounds) = self.space.element_geometry(window) else {
+                        continue;
+                    };
                     let foreground = if active {
                         frame_palette.text
                     } else {
@@ -1892,10 +2364,10 @@ impl NickelSession {
                     };
                     let titlebar_geometry =
                         crate::window_frame::titlebar_geometry(crate::shell_layout::Geometry {
-                            x: bounds.loc.x,
-                            y: bounds.loc.y,
-                            width: bounds.size.w,
-                            height: bounds.size.h,
+                            x: frame_bounds.loc.x,
+                            y: frame_bounds.loc.y,
+                            width: frame_bounds.size.w,
+                            height: frame_bounds.size.h,
                         });
                     if let Some(titlebar) = crate::window_frame::render_titlebar_for(
                         registry_id.map(|id| id.0),
@@ -1917,14 +2389,16 @@ impl NickelSession {
                     ) {
                         elements.push(NativeCustomElement::from(element).into());
                     }
-                    let frame_height = bounds.size.h + crate::window_frame::TITLEBAR_HEIGHT;
-                    for shadow in crate::window_frame::shadow_layers(bounds.size.w, frame_height) {
+                    let frame_height = frame_bounds.size.h + crate::window_frame::TITLEBAR_HEIGHT;
+                    for shadow in
+                        crate::window_frame::shadow_layers(frame_bounds.size.w, frame_height)
+                    {
                         elements.push(
                             NativeCustomElement::from(SolidColorRenderElement::from_buffer(
                                 &shadow.buffer,
                                 (
-                                    bounds.loc.x - output_geometry.loc.x + shadow.offset.0,
-                                    bounds.loc.y
+                                    frame_bounds.loc.x - output_geometry.loc.x + shadow.offset.0,
+                                    frame_bounds.loc.y
                                         - output_geometry.loc.y
                                         - crate::window_frame::TITLEBAR_HEIGHT
                                         + shadow.offset.1,
@@ -1937,11 +2411,12 @@ impl NickelSession {
                         );
                     }
                     if let Some(icons) = &frame_icons {
-                        let icon_y = bounds.loc.y
+                        let icon_y = frame_bounds.loc.y
                             - output_geometry.loc.y
                             - crate::window_frame::TITLEBAR_HEIGHT
                             + 8;
-                        let icon_x = bounds.loc.x - output_geometry.loc.x + bounds.size.w;
+                        let icon_x =
+                            frame_bounds.loc.x - output_geometry.loc.x + frame_bounds.size.w;
                         for (buffer, offset) in [
                             (&icons.close, 35),
                             (
@@ -2269,56 +2744,75 @@ impl NickelSession {
                     self.complete_output_capture(&path, response);
                 }
             }
-            let retry = match surface.drm.render_frame(
-                &mut renderer,
-                &elements,
-                [0.1, 0.1, 0.1, 1.0],
-                frame_flags,
-            ) {
-                Ok(frame) if !frame.is_empty => {
-                    let synchronized = if frame.needs_sync()
-                        && let PrimaryPlaneElement::Swapchain(element) = frame.primary_element
-                    {
-                        element.sync.wait().map_err(|error| {
+            let retry = match &mut surface.drm {
+                OutputDrm::Gbm(drm) => match drm.render_frame(
+                    &mut renderer,
+                    &elements,
+                    [0.1, 0.1, 0.1, 1.0],
+                    frame_flags,
+                ) {
+                    Ok(frame) if !frame.is_empty => {
+                        let synchronized = if frame.needs_sync()
+                            && let PrimaryPlaneElement::Swapchain(element) = frame.primary_element
+                        {
+                            element.sync.wait().map_err(|error| {
+                                tracing::warn!(
+                                    output = %output.name(),
+                                    render_gpu = %native.primary_gpu,
+                                    target_gpu = %target_gpu,
+                                    ?error,
+                                    "failed to synchronize rendered DRM frame"
+                                );
+                            })
+                        } else {
+                            Ok(())
+                        };
+                        if synchronized.is_err() {
+                            true
+                        } else if let Err(error) = drm.queue_frame(()) {
                             tracing::warn!(
                                 output = %output.name(),
                                 render_gpu = %native.primary_gpu,
                                 target_gpu = %target_gpu,
                                 ?error,
-                                "failed to synchronize rendered DRM frame"
+                                "failed to queue DRM frame"
                             );
-                        })
-                    } else {
-                        Ok(())
-                    };
-                    if synchronized.is_err() {
-                        true
-                    } else if let Err(error) = surface.drm.queue_frame(()) {
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    Ok(_) => {
+                        tracing::trace!(output = %output.name(), "DRM frame contained no damage");
+                        bootstrapping
+                    }
+                    Err(error) => {
                         tracing::warn!(
                             output = %output.name(),
                             render_gpu = %native.primary_gpu,
                             target_gpu = %target_gpu,
                             ?error,
-                            "failed to queue DRM frame"
+                            "failed to render DRM frame"
                         );
                         true
-                    } else {
-                        false
                     }
-                }
-                Ok(_) => {
-                    tracing::trace!(output = %output.name(), "DRM frame contained no damage");
-                    bootstrapping
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        output = %output.name(),
-                        render_gpu = %native.primary_gpu,
-                        target_gpu = %target_gpu,
-                        ?error,
-                        "failed to render DRM frame"
-                    );
-                    true
+                },
+                OutputDrm::Evdi(drm) => {
+                    let presented = drm.render_and_present(&mut renderer, &elements);
+                    if let Err(error) = presented {
+                        // Damage tracking advances when primary-GPU rendering
+                        // succeeds. Roll it back after any later readback or
+                        // submission failure so the bounded retry redraws a
+                        // complete frame while the last scanout stays visible.
+                        drm.invalidate();
+                        tracing::warn!(%error, output = %output.name(), "failed to copy EVDI frame from primary GPU");
+                        true
+                    } else {
+                        match presented.expect("checked successful EVDI presentation") {
+                            true => false,
+                            false => bootstrapping,
+                        }
+                    }
                 }
             };
             Some((output, retry || preview_retry))
@@ -2933,6 +3427,24 @@ fn normalize_capture_rows(
     let expected = row_bytes
         .checked_mul(height)
         .ok_or_else(|| "capture buffer size overflowed".to_owned())?;
+    let mut rgba = vec![0; expected];
+    copy_capture_rows(&mut rgba, mapped, width, height, flipped)?;
+    Ok(rgba)
+}
+
+fn copy_capture_rows(
+    destination: &mut [u8],
+    mapped: &[u8],
+    width: usize,
+    height: usize,
+    flipped: bool,
+) -> Result<(), String> {
+    let row_bytes = width
+        .checked_mul(4)
+        .ok_or_else(|| "capture row size overflowed".to_owned())?;
+    let expected = row_bytes
+        .checked_mul(height)
+        .ok_or_else(|| "capture buffer size overflowed".to_owned())?;
     if mapped.len() < expected {
         return Err(format!(
             "renderer returned {} bytes for a {} byte output",
@@ -2940,17 +3452,284 @@ fn normalize_capture_rows(
             expected
         ));
     }
-    let mut rgba = vec![0; expected];
+    if destination.len() < expected {
+        return Err(format!(
+            "copyout destination has {} bytes for a {} byte output",
+            destination.len(),
+            expected
+        ));
+    }
     for destination_y in 0..height {
         let source_y = if flipped {
             destination_y
         } else {
             height - 1 - destination_y
         };
-        rgba[destination_y * row_bytes..(destination_y + 1) * row_bytes]
+        destination[destination_y * row_bytes..(destination_y + 1) * row_bytes]
             .copy_from_slice(&mapped[source_y * row_bytes..(source_y + 1) * row_bytes]);
     }
-    Ok(rgba)
+    Ok(())
+}
+
+#[cfg(test)]
+fn copy_capture_damage(
+    destination: &mut [u8],
+    mapped: &[u8],
+    width: usize,
+    height: usize,
+    flipped: bool,
+) -> Result<Vec<Rectangle<i32, Buffer>>, String> {
+    let row_bytes = width
+        .checked_mul(4)
+        .ok_or_else(|| "capture row size overflowed".to_owned())?;
+    let expected = row_bytes
+        .checked_mul(height)
+        .ok_or_else(|| "capture buffer size overflowed".to_owned())?;
+    if mapped.len() < expected || destination.len() < expected {
+        return Err(format!(
+            "copyout buffers are {} and {} bytes for a {} byte output",
+            mapped.len(),
+            destination.len(),
+            expected
+        ));
+    }
+
+    let mut damage = Vec::new();
+    let mut first_changed_row = None;
+    for destination_y in 0..height {
+        let source_y = if flipped {
+            destination_y
+        } else {
+            height - 1 - destination_y
+        };
+        let destination_range = destination_y * row_bytes..(destination_y + 1) * row_bytes;
+        let source = &mapped[source_y * row_bytes..(source_y + 1) * row_bytes];
+        if destination[destination_range.clone()] == *source {
+            if let Some(first) = first_changed_row.take() {
+                damage.push(Rectangle::new(
+                    (0, first as i32).into(),
+                    (width as i32, (destination_y - first) as i32).into(),
+                ));
+            }
+            continue;
+        }
+        destination[destination_range].copy_from_slice(source);
+        first_changed_row.get_or_insert(destination_y);
+    }
+    if let Some(first) = first_changed_row {
+        damage.push(Rectangle::new(
+            (0, first as i32).into(),
+            (width as i32, (height - first) as i32).into(),
+        ));
+    }
+    Ok(damage)
+}
+
+#[cfg(test)]
+fn mapped_damage_rows(
+    existing: &[u8],
+    existing_stride: usize,
+    mapped: &[u8],
+    width: usize,
+    height: usize,
+    flipped: bool,
+) -> Result<Vec<Rectangle<i32, Buffer>>, String> {
+    let row_bytes = width
+        .checked_mul(4)
+        .ok_or_else(|| "copyout row size overflowed".to_owned())?;
+    let mapped_bytes = row_bytes
+        .checked_mul(height)
+        .ok_or_else(|| "mapped copyout size overflowed".to_owned())?;
+    let existing_bytes = existing_stride
+        .checked_mul(height)
+        .ok_or_else(|| "dumb buffer size overflowed".to_owned())?;
+    if mapped.len() < mapped_bytes || existing.len() < existing_bytes {
+        return Err(format!(
+            "copyout buffers are {} and {} bytes for {} mapped and {} scanout bytes",
+            mapped.len(),
+            existing.len(),
+            mapped_bytes,
+            existing_bytes
+        ));
+    }
+
+    let mut damage = Vec::new();
+    let mut first_changed_row = None;
+    for destination_y in 0..height {
+        let source_y = if flipped {
+            destination_y
+        } else {
+            height - 1 - destination_y
+        };
+        let source = &mapped[source_y * row_bytes..(source_y + 1) * row_bytes];
+        let destination =
+            &existing[destination_y * existing_stride..destination_y * existing_stride + row_bytes];
+        if destination == source {
+            if let Some(first) = first_changed_row.take() {
+                damage.push(Rectangle::new(
+                    (0, first as i32).into(),
+                    (width as i32, (destination_y - first) as i32).into(),
+                ));
+            }
+        } else {
+            first_changed_row.get_or_insert(destination_y);
+        }
+    }
+    if let Some(first) = first_changed_row {
+        damage.push(Rectangle::new(
+            (0, first as i32).into(),
+            (width as i32, (height - first) as i32).into(),
+        ));
+    }
+    Ok(damage)
+}
+
+#[cfg(test)]
+fn copy_mapped_damage_to_strided(
+    destination: &mut [u8],
+    destination_stride: usize,
+    mapped: &[u8],
+    width: usize,
+    height: usize,
+    flipped: bool,
+    damage: &[Rectangle<i32, Buffer>],
+) -> Result<usize, String> {
+    let source_stride = width
+        .checked_mul(4)
+        .ok_or_else(|| "copyout row size overflowed".to_owned())?;
+    let mut copied = 0_usize;
+    for rectangle in damage {
+        if rectangle.loc.x < 0
+            || rectangle.loc.y < 0
+            || rectangle.size.w < 0
+            || rectangle.size.h < 0
+        {
+            return Err("copyout damage lies outside the buffer".into());
+        }
+        let x = rectangle.loc.x as usize * 4;
+        let copy_width = rectangle.size.w as usize * 4;
+        for destination_y in rectangle.loc.y as usize..(rectangle.loc.y + rectangle.size.h) as usize
+        {
+            if destination_y >= height {
+                return Err("copyout damage exceeds mapped buffer height".into());
+            }
+            let source_y = if flipped {
+                destination_y
+            } else {
+                height - 1 - destination_y
+            };
+            let source_start = source_y
+                .checked_mul(source_stride)
+                .and_then(|offset| offset.checked_add(x))
+                .ok_or_else(|| "copyout source offset overflowed".to_owned())?;
+            let destination_start = destination_y
+                .checked_mul(destination_stride)
+                .and_then(|offset| offset.checked_add(x))
+                .ok_or_else(|| "copyout destination offset overflowed".to_owned())?;
+            let source_row = mapped
+                .get(source_start..source_start + copy_width)
+                .ok_or_else(|| "copyout damage exceeds source buffer".to_owned())?;
+            let destination_row = destination
+                .get_mut(destination_start..destination_start + copy_width)
+                .ok_or_else(|| "copyout damage exceeds dumb buffer".to_owned())?;
+            destination_row.copy_from_slice(source_row);
+            copied = copied.saturating_add(copy_width);
+        }
+    }
+    Ok(copied)
+}
+
+fn damage_bytes(damage: &[Rectangle<i32, Physical>]) -> u64 {
+    damage.iter().fold(0_u64, |total, rectangle| {
+        total.saturating_add(rectangle.size.w.max(0) as u64 * rectangle.size.h.max(0) as u64 * 4)
+    })
+}
+
+fn damage_bounding_box(damage: &[Rectangle<i32, Physical>]) -> Option<Rectangle<i32, Buffer>> {
+    let first = damage.first()?;
+    let mut x1 = first.loc.x;
+    let mut y1 = first.loc.y;
+    let mut x2 = first.loc.x.saturating_add(first.size.w);
+    let mut y2 = first.loc.y.saturating_add(first.size.h);
+    for rectangle in &damage[1..] {
+        x1 = x1.min(rectangle.loc.x);
+        y1 = y1.min(rectangle.loc.y);
+        x2 = x2.max(rectangle.loc.x.saturating_add(rectangle.size.w));
+        y2 = y2.max(rectangle.loc.y.saturating_add(rectangle.size.h));
+    }
+    Some(Rectangle::new((x1, y1).into(), (x2 - x1, y2 - y1).into()))
+}
+
+fn union_rectangles(
+    first: Rectangle<i32, Buffer>,
+    second: Rectangle<i32, Buffer>,
+) -> Rectangle<i32, Buffer> {
+    let x1 = first.loc.x.min(second.loc.x);
+    let y1 = first.loc.y.min(second.loc.y);
+    let x2 = first
+        .loc
+        .x
+        .saturating_add(first.size.w)
+        .max(second.loc.x.saturating_add(second.size.w));
+    let y2 = first
+        .loc
+        .y
+        .saturating_add(first.size.h)
+        .max(second.loc.y.saturating_add(second.size.h));
+    Rectangle::new((x1, y1).into(), (x2 - x1, y2 - y1).into())
+}
+
+fn copy_mapped_region_to_strided(
+    destination: &mut [u8],
+    destination_stride: usize,
+    mapped: &[u8],
+    flipped: bool,
+    region: Rectangle<i32, Buffer>,
+    destination_size: Size<i32, Physical>,
+) -> Result<usize, String> {
+    if region.loc.x < 0
+        || region.loc.y < 0
+        || region.size.w <= 0
+        || region.size.h <= 0
+        || region.loc.x.saturating_add(region.size.w) > destination_size.w
+        || region.loc.y.saturating_add(region.size.h) > destination_size.h
+    {
+        return Err("copyout region lies outside the EVDI buffer".into());
+    }
+    let width = region.size.w as usize;
+    let height = region.size.h as usize;
+    let row_bytes = width
+        .checked_mul(4)
+        .ok_or_else(|| "copyout region row size overflowed".to_owned())?;
+    let expected = row_bytes
+        .checked_mul(height)
+        .ok_or_else(|| "copyout region size overflowed".to_owned())?;
+    if mapped.len() < expected {
+        return Err(format!(
+            "renderer returned {} bytes for a {} byte damaged region",
+            mapped.len(),
+            expected
+        ));
+    }
+    let destination_x = region.loc.x as usize * 4;
+    for local_y in 0..height {
+        let source_y = if flipped {
+            local_y
+        } else {
+            height - 1 - local_y
+        };
+        let destination_y = region.loc.y as usize + local_y;
+        let source_start = source_y * row_bytes;
+        let destination_start = destination_y
+            .checked_mul(destination_stride)
+            .and_then(|offset| offset.checked_add(destination_x))
+            .ok_or_else(|| "copyout destination offset overflowed".to_owned())?;
+        destination
+            .get_mut(destination_start..destination_start + row_bytes)
+            .ok_or_else(|| "copyout region exceeds the dumb buffer".to_owned())?
+            .copy_from_slice(&mapped[source_start..source_start + row_bytes]);
+    }
+    Ok(expected)
 }
 
 #[cfg(test)]

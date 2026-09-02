@@ -17,6 +17,7 @@ Usage:
   nickel-test-input windows
   nickel-test-input workspaces
   nickel-test-input outputs
+  nickel-test-input output-set NAME enabled|disabled
   nickel-test-input surfaces
   nickel-test-input readiness
   nickel-test-input output-connect NAME WIDTH HEIGHT SCALE_120 normal|90|180|270
@@ -55,6 +56,10 @@ enum Parsed {
     Windows,
     Workspaces,
     Outputs,
+    OutputSet {
+        name: String,
+        enabled: bool,
+    },
     Surfaces,
     Readiness,
     OutputConnect {
@@ -103,6 +108,14 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, String> {
         [command] if command == "windows" => Ok(Parsed::Windows),
         [command] if command == "workspaces" => Ok(Parsed::Workspaces),
         [command] if command == "outputs" => Ok(Parsed::Outputs),
+        [command, name, state] if command == "output-set" => Ok(Parsed::OutputSet {
+            name: name.clone(),
+            enabled: match state.as_str() {
+                "enabled" => true,
+                "disabled" => false,
+                _ => return Err(format!("unknown output state {state:?}")),
+            },
+        }),
         [command] if command == "surfaces" => Ok(Parsed::Surfaces),
         [command] if command == "readiness" => Ok(Parsed::Readiness),
         [command, name] if command == "output-disconnect" => {
@@ -622,6 +635,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let parsed = parse(env::args_os().skip(1))?;
     let shell_runtime_query = matches!(&parsed, Parsed::RuntimeDiagnostics);
+    let output_set = match &parsed {
+        Parsed::OutputSet { name, enabled } => Some((name.clone(), *enabled)),
+        _ => None,
+    };
     if let Parsed::GroupedWindowsScenario(application_id) = &parsed {
         return run_grouped_windows_scenario(application_id);
     }
@@ -642,6 +659,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             None,
         ),
         Parsed::Outputs => (
+            Some(Request::Query(nickel_session_protocol::Query::Outputs)),
+            None,
+        ),
+        Parsed::OutputSet { .. } => (
             Some(Request::Query(nickel_session_protocol::Query::Outputs)),
             None,
         ),
@@ -779,6 +800,79 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if response_envelope.request_id != request_id {
         return Err("test input response has the wrong request ID".into());
     }
+    if let Some((name, enabled)) = output_set {
+        let ServerMessage::Outputs(outputs) = response_envelope.message.clone() else {
+            return Err("output query returned the wrong response".into());
+        };
+        if !outputs.iter().any(|output| output.name == name) {
+            return Err(format!("unknown output {name:?}").into());
+        }
+        let enabled_count = outputs
+            .iter()
+            .filter(|output| {
+                if output.name == name {
+                    enabled
+                } else {
+                    output.enabled
+                }
+            })
+            .count();
+        if enabled_count == 0 {
+            return Err("cannot disable the last active output".into());
+        }
+        let primary = outputs
+            .iter()
+            .find(|output| {
+                output.primary
+                    && if output.name == name {
+                        enabled
+                    } else {
+                        output.enabled
+                    }
+            })
+            .or_else(|| {
+                outputs.iter().find(|output| {
+                    if output.name == name {
+                        enabled
+                    } else {
+                        output.enabled
+                    }
+                })
+            })
+            .expect("at least one output remains enabled")
+            .name
+            .clone();
+        let layout = nickel_session_protocol::OutputLayout {
+            primary,
+            placements: outputs
+                .into_iter()
+                .map(|output| nickel_session_protocol::OutputPlacement {
+                    enabled: if output.name == name {
+                        enabled
+                    } else {
+                        output.enabled
+                    },
+                    name: output.name,
+                    x: output.geometry.x,
+                    y: output.geometry.y,
+                })
+                .collect(),
+        };
+        request_id += 1;
+        socket.send_to(
+            &encode(&ClientEnvelope {
+                token: token.clone(),
+                request_id,
+                request: Request::Command(Command::ApplyOutputs { layout }),
+            })?,
+            &control,
+        )?;
+        length = socket.recv(&mut response)?;
+        response_envelope = decode::<ServerEnvelope>(&response[..length])?;
+        if response_envelope.request_id != request_id {
+            return Err("output update response has the wrong request ID".into());
+        }
+    }
     if let ServerMessage::ShellSemanticTarget(target) = response_envelope.message.clone() {
         request_id += 1;
         socket.send_to(
@@ -880,9 +974,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     output.scale_120,
                     output.transform,
                     if output.primary {
-                        "primary"
+                        if output.enabled {
+                            "primary enabled"
+                        } else {
+                            "primary disabled"
+                        }
+                    } else if output.enabled {
+                        "secondary enabled"
                     } else {
-                        "secondary"
+                        "secondary disabled"
                     }
                 );
             }
@@ -940,6 +1040,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         | Parsed::Windows
         | Parsed::Workspaces
         | Parsed::Outputs
+        | Parsed::OutputSet { .. }
         | Parsed::Surfaces
         | Parsed::Readiness
         | Parsed::OutputConnect { .. }
@@ -987,6 +1088,13 @@ mod tests {
             Ok(Parsed::RuntimeDiagnostics)
         ));
         assert!(matches!(parse(["readiness".into()]), Ok(Parsed::Readiness)));
+        assert!(matches!(
+            parse(["output-set".into(), "DVI-I-1".into(), "disabled".into()]),
+            Ok(Parsed::OutputSet {
+                name,
+                enabled: false,
+            }) if name == "DVI-I-1"
+        ));
         assert!(matches!(
             parse(["workspaces".into()]),
             Ok(Parsed::Workspaces)
