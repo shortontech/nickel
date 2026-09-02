@@ -176,15 +176,15 @@ pub struct UdevData {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct IdentifyBadgeDiagnostics {
-    live_bytes: usize,
-    peak_bytes: usize,
-    entries: usize,
-    rasterizations: u64,
-    avoided_rasterizations: u64,
-    evictions: u64,
+pub(crate) struct IdentifyBadgeDiagnostics {
+    pub(crate) live_bytes: usize,
+    pub(crate) peak_bytes: usize,
+    pub(crate) entries: usize,
+    pub(crate) rasterizations: u64,
+    pub(crate) avoided_rasterizations: u64,
+    pub(crate) evictions: u64,
     /// Smithay owns renderer imports; their byte cost is not exposed by its API.
-    renderer_bytes: Option<usize>,
+    pub(crate) renderer_bytes: Option<usize>,
 }
 
 #[derive(Default)]
@@ -216,6 +216,14 @@ impl IdentifyBadgeCache {
         self.entries.clear();
     }
 
+    fn retain_output_count(&mut self, output_count: usize) {
+        let before = self.entries.len();
+        self.entries.retain(|index, _| *index < output_count);
+        self.evictions = self
+            .evictions
+            .saturating_add(before.saturating_sub(self.entries.len()) as u64);
+    }
+
     fn diagnostics(&self) -> IdentifyBadgeDiagnostics {
         IdentifyBadgeDiagnostics {
             live_bytes: self.entries.len() * IDENTIFY_BADGE_BYTES,
@@ -234,6 +242,10 @@ impl UdevData {
         self.disabled_outputs
             .values()
             .map(|disabled| &disabled.output)
+    }
+
+    pub(crate) fn identify_badge_diagnostics(&self) -> IdentifyBadgeDiagnostics {
+        self.identify_badges.diagnostics()
     }
 }
 
@@ -527,15 +539,6 @@ impl NickelSession {
         for node in &nodes {
             self.render_node(*node);
         }
-        let timer = Timer::from_duration(Duration::from_millis(3050));
-        let _ = self
-            .event_loop_handle
-            .insert_source(timer, move |_, _, data| {
-                for node in &nodes {
-                    data.render_node(*node);
-                }
-                TimeoutAction::Drop
-            });
     }
 
     fn add_drm_device(
@@ -1031,17 +1034,19 @@ impl NickelSession {
 
     fn render_output(&mut self, node: DrmNode, crtc: crtc::Handle) {
         let shell_bootstrapping = self.launcher_window.is_none();
+        let mut identified_outputs = self.space.outputs().cloned().collect::<Vec<_>>();
+        identified_outputs.sort_by_key(|output| {
+            self.space
+                .output_geometry(output)
+                .map(|geometry| (geometry.loc.x, geometry.loc.y))
+                .unwrap_or_default()
+        });
+        let identify_output_count = identified_outputs.len();
         let identify_index = self
             .identify_outputs_until
             .filter(|deadline| *deadline > std::time::Instant::now())
             .and_then(|_| {
-                let mut outputs = self.space.outputs().cloned().collect::<Vec<_>>();
-                outputs.sort_by_key(|output| {
-                    self.space
-                        .output_geometry(output)
-                        .map(|geometry| (geometry.loc.x, geometry.loc.y))
-                        .unwrap_or_default()
-                });
+                let outputs = &identified_outputs;
                 outputs.iter().position(|output| {
                     self.native
                         .as_ref()
@@ -1068,6 +1073,9 @@ impl NickelSession {
                 .unwrap_or_else(fallback_arrow_cursor);
             let frame_icons = native.frame_icons.clone();
             let background = surface.background.clone();
+            native
+                .identify_badges
+                .retain_output_count(identify_output_count);
             if identify_index.is_none() && !native.identify_badges.entries.is_empty() {
                 native.identify_badges.retire();
                 tracing::trace!(
@@ -1372,8 +1380,7 @@ impl NickelSession {
                         width: recovery_size.w,
                         height: recovery_size.h,
                     });
-                let scale_millis = (output.current_scale().fractional_scale() * 1000.0) as u32;
-                let panel = self.recovery_ui.render_buffer(scale_millis);
+                let panel = self.recovery_ui.render_buffer();
                 if let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
                     &mut renderer,
                     (f64::from(panel_geometry.x), f64::from(panel_geometry.y)),
@@ -2243,6 +2250,20 @@ mod tests {
         assert_eq!(retired.entries, 0);
         assert_eq!(retired.live_bytes, 0);
         assert_eq!(retired.evictions, 2);
+    }
+
+    #[test]
+    fn output_identification_topology_shrink_retires_removed_labels() {
+        let mut cache = IdentifyBadgeCache::default();
+        for index in 0..4 {
+            cache.get(index);
+        }
+        cache.retain_output_count(2);
+        let diagnostics = cache.diagnostics();
+        assert_eq!(diagnostics.entries, 2);
+        assert_eq!(diagnostics.live_bytes, IDENTIFY_BADGE_BYTES * 2);
+        assert_eq!(diagnostics.evictions, 2);
+        assert!(cache.entries.keys().all(|index| *index < 2));
     }
 
     #[test]

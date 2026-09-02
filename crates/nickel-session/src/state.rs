@@ -34,7 +34,11 @@ use smithay::{
     input::{Seat, SeatState},
     output::{Mode as OutputMode, Output, PhysicalProperties, Scale as OutputScale, Subpixel},
     reexports::{
-        calloop::{EventLoop, Interest, LoopSignal, Mode, PostAction, channel, generic::Generic},
+        calloop::{
+            EventLoop, Interest, LoopSignal, Mode, PostAction, channel,
+            generic::Generic,
+            timer::{TimeoutAction, Timer},
+        },
         wayland_server::{
             Display, DisplayHandle, Resource,
             backend::{ClientData, ClientId, DisconnectReason, GlobalId, ObjectId},
@@ -351,6 +355,7 @@ pub struct NickelSession {
     pub frame_cursor: crate::window_frame::FrameCursor,
     pub buffer_commit_tx: Option<smithay::reexports::calloop::channel::Sender<SurfaceBufferCommit>>,
     pub identify_outputs_until: Option<std::time::Instant>,
+    identify_outputs_generation: u64,
     pub output_capture_path: Option<PathBuf>,
     pub output_capture_name: Option<String>,
     pub output_capture_reply_path: Option<PathBuf>,
@@ -455,6 +460,39 @@ pub struct SurfaceBufferCommit {
 }
 
 impl NickelSession {
+    fn begin_output_identification(&mut self) {
+        const IDENTIFY_DURATION: std::time::Duration = std::time::Duration::from_secs(3);
+        self.identify_outputs_generation = self.identify_outputs_generation.wrapping_add(1);
+        let generation = self.identify_outputs_generation;
+        self.identify_outputs_until = Some(std::time::Instant::now() + IDENTIFY_DURATION);
+        self.request_output_redraw();
+        #[cfg(feature = "backend-udev")]
+        if self.native.is_some() {
+            self.render_all_outputs();
+        }
+
+        let timer = Timer::from_duration(IDENTIFY_DURATION);
+        if let Err(error) = self
+            .event_loop_handle
+            .insert_source(timer, move |_, _, data| {
+                if data.identify_outputs_generation == generation {
+                    data.identify_outputs_until = None;
+                    data.request_output_redraw();
+                    #[cfg(feature = "backend-udev")]
+                    if data.native.is_some() {
+                        data.render_all_outputs();
+                    }
+                }
+                TimeoutAction::Drop
+            })
+        {
+            tracing::warn!(
+                ?error,
+                "failed to schedule output-identification retirement"
+            );
+        }
+    }
+
     pub(crate) fn note_input_activity(&mut self) {
         if self
             .idle_controller
@@ -725,6 +763,7 @@ impl NickelSession {
             frame_cursor: crate::window_frame::FrameCursor::Arrow,
             buffer_commit_tx: None,
             identify_outputs_until: None,
+            identify_outputs_generation: 0,
             output_capture_path: None,
             output_capture_name: None,
             output_capture_reply_path: None,
@@ -997,6 +1036,14 @@ impl NickelSession {
             },
             Query::CacheDiagnostics => {
                 let metadata = self.windows.metadata_diagnostics();
+                let titlebar = crate::window_frame::titlebar_cache_diagnostics();
+                let recovery = self.recovery_ui.raster_diagnostics();
+                #[cfg(feature = "backend-udev")]
+                let identify = self
+                    .native
+                    .as_ref()
+                    .map(crate::backend::udev::UdevData::identify_badge_diagnostics)
+                    .unwrap_or_default();
                 ServerMessage::CacheDiagnostics(nickel_session_protocol::CacheDiagnostics {
                     preview_entries: u16::try_from(self.preview_frames.len()).unwrap_or(u16::MAX),
                     preview_capacity: u16::try_from(nickel_session_protocol::MAX_WINDOWS)
@@ -1016,6 +1063,53 @@ impl NickelSession {
                     metadata_updates: metadata.updates,
                     metadata_live_snapshot_bytes: metadata.live_snapshot_bytes as u64,
                     metadata_peak_snapshot_bytes: metadata.peak_snapshot_bytes as u64,
+                    titlebar_entries: u16::try_from(titlebar.entries).unwrap_or(u16::MAX),
+                    titlebar_live_bytes: titlebar.live_bytes as u64,
+                    titlebar_peak_bytes: titlebar.peak_bytes as u64,
+                    titlebar_hits: titlebar.hits,
+                    titlebar_misses: titlebar.misses,
+                    titlebar_rasterizations: titlebar.rasterizations,
+                    titlebar_avoided_rasterizations: titlebar.avoided_rasterizations,
+                    titlebar_evictions: titlebar.evictions,
+                    titlebar_generation: titlebar.generation,
+                    titlebar_font_database_loads: titlebar.font_database_loads,
+                    titlebar_renderer_bytes: titlebar.renderer_bytes.map(|bytes| bytes as u64),
+                    recovery_entries: u16::try_from(recovery.entries).unwrap_or(u16::MAX),
+                    recovery_live_bytes: recovery.live_bytes as u64,
+                    recovery_peak_bytes: recovery.peak_bytes as u64,
+                    recovery_rasterizations: recovery.rasterizations,
+                    recovery_avoided_rasterizations: recovery.avoided_rasterizations,
+                    recovery_evictions: recovery.evictions,
+                    recovery_generation: recovery.generation,
+                    recovery_renderer_bytes: recovery.renderer_bytes.map(|bytes| bytes as u64),
+                    #[cfg(feature = "backend-udev")]
+                    identify_entries: u16::try_from(identify.entries).unwrap_or(u16::MAX),
+                    #[cfg(not(feature = "backend-udev"))]
+                    identify_entries: 0,
+                    #[cfg(feature = "backend-udev")]
+                    identify_live_bytes: identify.live_bytes as u64,
+                    #[cfg(not(feature = "backend-udev"))]
+                    identify_live_bytes: 0,
+                    #[cfg(feature = "backend-udev")]
+                    identify_peak_bytes: identify.peak_bytes as u64,
+                    #[cfg(not(feature = "backend-udev"))]
+                    identify_peak_bytes: 0,
+                    #[cfg(feature = "backend-udev")]
+                    identify_rasterizations: identify.rasterizations,
+                    #[cfg(not(feature = "backend-udev"))]
+                    identify_rasterizations: 0,
+                    #[cfg(feature = "backend-udev")]
+                    identify_avoided_rasterizations: identify.avoided_rasterizations,
+                    #[cfg(not(feature = "backend-udev"))]
+                    identify_avoided_rasterizations: 0,
+                    #[cfg(feature = "backend-udev")]
+                    identify_evictions: identify.evictions,
+                    #[cfg(not(feature = "backend-udev"))]
+                    identify_evictions: 0,
+                    #[cfg(feature = "backend-udev")]
+                    identify_renderer_bytes: identify.renderer_bytes.map(|bytes| bytes as u64),
+                    #[cfg(not(feature = "backend-udev"))]
+                    identify_renderer_bytes: None,
                 })
             }
             Query::Workspaces => ServerMessage::Workspaces(self.protocol_workspaces()),
@@ -1151,10 +1245,7 @@ impl NickelSession {
                 self.focus_shell_role(role);
             }
             SessionCommand::RestoreApplicationFocus => self.restore_application_focus(),
-            SessionCommand::IdentifyOutputs => {
-                self.identify_outputs_until =
-                    Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
-            }
+            SessionCommand::IdentifyOutputs => self.begin_output_identification(),
             SessionCommand::CaptureOutput { path, output } => {
                 if path.is_empty() {
                     return protocol_error(ErrorCode::InvalidRequest, "capture path is empty");

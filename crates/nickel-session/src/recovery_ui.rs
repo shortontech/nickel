@@ -115,7 +115,7 @@ pub struct RecoveryRasterDiagnostics {
 #[derive(Default)]
 struct RecoveryRasterCache {
     generation: u64,
-    entries: Vec<(u32, u64, MemoryRenderBuffer)>,
+    entry: Option<(u64, MemoryRenderBuffer)>,
     peak_bytes: usize,
     rasterizations: u64,
     avoided_rasterizations: u64,
@@ -123,7 +123,6 @@ struct RecoveryRasterCache {
 }
 
 const RECOVERY_RASTER_BYTES: usize = WIDTH as usize * HEIGHT as usize * 4;
-const RECOVERY_RASTER_MAX_ENTRIES: usize = 2;
 
 impl RecoveryUi {
     pub fn new() -> Self {
@@ -222,16 +221,18 @@ impl RecoveryUi {
     fn invalidate_raster(&self) {
         let mut cache = self.raster.borrow_mut();
         cache.generation = cache.generation.saturating_add(1);
-        cache.evictions = cache.evictions.saturating_add(cache.entries.len() as u64);
-        cache.entries.clear();
+        cache.evictions = cache
+            .evictions
+            .saturating_add(u64::from(cache.entry.is_some()));
+        cache.entry = None;
     }
 
     pub fn raster_diagnostics(&self) -> RecoveryRasterDiagnostics {
         let cache = self.raster.borrow();
         RecoveryRasterDiagnostics {
-            live_bytes: cache.entries.len() * RECOVERY_RASTER_BYTES,
+            live_bytes: usize::from(cache.entry.is_some()) * RECOVERY_RASTER_BYTES,
             peak_bytes: cache.peak_bytes,
-            entries: cache.entries.len(),
+            entries: usize::from(cache.entry.is_some()),
             generation: cache.generation,
             rasterizations: cache.rasterizations,
             avoided_rasterizations: cache.avoided_rasterizations,
@@ -242,27 +243,24 @@ impl RecoveryUi {
 
     pub fn release_raster(&self) {
         let mut cache = self.raster.borrow_mut();
-        if cache.entries.is_empty() {
+        if cache.entry.is_none() {
             return;
         }
-        cache.evictions = cache.evictions.saturating_add(cache.entries.len() as u64);
-        cache.entries.clear();
+        cache.evictions = cache.evictions.saturating_add(1);
+        cache.entry = None;
         drop(cache);
         tracing::trace!(diagnostics = ?self.raster_diagnostics(), "recovery raster retired");
     }
 
-    pub fn render_buffer(&self, scale_millis: u32) -> MemoryRenderBuffer {
-        let scale_millis = scale_millis.max(1);
+    pub fn render_buffer(&self) -> MemoryRenderBuffer {
         let generation = self.raster.borrow().generation;
         let cached = {
             let cache = self.raster.borrow();
             cache
-                .entries
-                .iter()
-                .find(|(scale, entry_generation, _)| {
-                    *scale == scale_millis && *entry_generation == generation
-                })
-                .map(|(_, _, buffer)| buffer.clone())
+                .entry
+                .as_ref()
+                .filter(|(entry_generation, _)| *entry_generation == generation)
+                .map(|(_, buffer)| buffer.clone())
         };
         if let Some(buffer) = cached {
             let mut cache = self.raster.borrow_mut();
@@ -279,16 +277,11 @@ impl RecoveryUi {
         );
         let mut cache = self.raster.borrow_mut();
         cache.rasterizations = cache.rasterizations.saturating_add(1);
-        if cache.entries.len() == RECOVERY_RASTER_MAX_ENTRIES {
-            cache.entries.remove(0);
+        if cache.entry.is_some() {
             cache.evictions = cache.evictions.saturating_add(1);
         }
-        cache
-            .entries
-            .push((scale_millis, generation, buffer.clone()));
-        cache.peak_bytes = cache
-            .peak_bytes
-            .max(cache.entries.len() * RECOVERY_RASTER_BYTES);
+        cache.entry = Some((generation, buffer.clone()));
+        cache.peak_bytes = cache.peak_bytes.max(RECOVERY_RASTER_BYTES);
         drop(cache);
         tracing::trace!(diagnostics = ?self.raster_diagnostics(), "recovery raster cached");
         buffer
@@ -365,31 +358,31 @@ mod tests {
     }
 
     #[test]
-    fn unchanged_recovery_visual_reuses_one_raster_per_scale() {
+    fn unchanged_recovery_visual_reuses_one_scale_independent_raster() {
         let ui = RecoveryUi::new();
-        ui.render_buffer(1000);
-        ui.render_buffer(1000);
-        ui.render_buffer(1500);
-        ui.render_buffer(1500);
+        ui.render_buffer();
+        ui.render_buffer();
+        ui.render_buffer();
+        ui.render_buffer();
 
         let diagnostics = ui.raster_diagnostics();
-        assert_eq!(diagnostics.entries, 2);
-        assert_eq!(diagnostics.live_bytes, RECOVERY_RASTER_BYTES * 2);
-        assert_eq!(diagnostics.rasterizations, 2);
-        assert_eq!(diagnostics.avoided_rasterizations, 2);
+        assert_eq!(diagnostics.entries, 1);
+        assert_eq!(diagnostics.live_bytes, RECOVERY_RASTER_BYTES);
+        assert_eq!(diagnostics.rasterizations, 1);
+        assert_eq!(diagnostics.avoided_rasterizations, 3);
     }
 
     #[test]
     fn recovery_visual_changes_and_hiding_retire_rasters() {
         let mut ui = RecoveryUi::new();
-        ui.render_buffer(1000);
+        ui.render_buffer();
         let generation = ui.raster_diagnostics().generation;
         ui.shortcut(Shortcut::Submit);
         let invalidated = ui.raster_diagnostics();
         assert_eq!(invalidated.generation, generation + 1);
         assert_eq!(invalidated.live_bytes, 0);
 
-        ui.render_buffer(1000);
+        ui.render_buffer();
         ui.release_raster();
         let released = ui.raster_diagnostics();
         assert_eq!(released.live_bytes, 0);

@@ -840,22 +840,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         ServerMessage::CacheDiagnostics(diagnostics) => {
-            println!(
-                "previews={}/{} bytes={} metadata_entries={} title_bytes={} peak_title_bytes={} app_id_bytes={} peak_app_id_bytes={} truncations={} canonicalizations={} updates={} live_snapshot_bytes={} peak_snapshot_bytes={}",
-                diagnostics.preview_entries,
-                diagnostics.preview_capacity,
-                diagnostics.preview_bytes,
-                diagnostics.metadata_entries,
-                diagnostics.metadata_title_bytes,
-                diagnostics.metadata_peak_title_bytes,
-                diagnostics.metadata_app_id_bytes,
-                diagnostics.metadata_peak_app_id_bytes,
-                diagnostics.metadata_truncations,
-                diagnostics.metadata_canonicalizations,
-                diagnostics.metadata_updates,
-                diagnostics.metadata_live_snapshot_bytes,
-                diagnostics.metadata_peak_snapshot_bytes,
-            );
+            println!("{}", serde_json::to_string(&diagnostics)?);
             Ok(())
         }
         ServerMessage::ShellRuntimeDiagnostics(diagnostics) => {

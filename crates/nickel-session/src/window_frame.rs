@@ -20,8 +20,11 @@ pub const MINIMIZE_GLYPH: char = '\u{f2d1}';
 pub const MAXIMIZE_GLYPH: char = '\u{f2d0}';
 pub const RESTORE_GLYPH: char = '\u{f2d2}';
 pub const CLOSE_GLYPH: char = '\u{f2d3}';
-const TITLEBAR_CACHE_MAX_ENTRIES: usize = 16;
-const TITLEBAR_CACHE_MAX_BYTES: usize = 512 * 1024;
+// One current raster per ordinary window fits comfortably: 16 MiB holds more
+// than fifty 1920 px titlebars or twenty-five 4K titlebars. Owner retirement
+// prevents that budget from becoming historical title storage.
+const TITLEBAR_CACHE_MAX_ENTRIES: usize = 64;
+const TITLEBAR_CACHE_MAX_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone)]
 struct TitlebarCacheEntry {
@@ -32,6 +35,8 @@ struct TitlebarCacheEntry {
     foreground: u32,
     buffer: MemoryRenderBuffer,
     bytes: usize,
+    #[cfg(test)]
+    pixels: Vec<u8>,
 }
 
 #[derive(Default)]
@@ -230,7 +235,9 @@ pub fn render_titlebar_with_mode(
         }
         cache.misses = cache.misses.saturating_add(1);
     }
-    let buffer = render_titlebar_uncached(width, title, background, foreground)?;
+    let (buffer, raster_pixels) = render_titlebar_raster(width, title, background, foreground)?;
+    #[cfg(not(test))]
+    let _ = raster_pixels;
     let title = title.to_owned();
     let retained_bytes = usize::try_from(width)
         .unwrap_or(usize::MAX)
@@ -275,6 +282,8 @@ pub fn render_titlebar_with_mode(
         foreground,
         buffer: buffer.clone(),
         bytes: retained_bytes,
+        #[cfg(test)]
+        pixels: raster_pixels,
     });
     cache.live_bytes = cache.live_bytes.saturating_add(retained_bytes);
     cache.peak_bytes = cache.peak_bytes.max(cache.live_bytes);
@@ -320,21 +329,53 @@ pub fn retain_titlebars_for_windows(owners: impl IntoIterator<Item = u64>) {
     }
 }
 
+#[cfg(test)]
+fn cached_titlebar_pixels(
+    owner: Option<u64>,
+    width: i32,
+    title: &str,
+    background: u32,
+    foreground: u32,
+) -> Option<Vec<u8>> {
+    let cache = TITLEBAR_CACHE.get()?.lock().ok()?;
+    cache
+        .entries
+        .iter()
+        .find(|entry| {
+            entry.owner == owner
+                && entry.width == width
+                && entry.title == title
+                && entry.background == background
+                && entry.foreground == foreground
+        })
+        .map(|entry| entry.pixels.clone())
+}
+
 fn render_titlebar_uncached(
     width: i32,
     title: &str,
     background: u32,
     foreground: u32,
 ) -> Option<MemoryRenderBuffer> {
+    render_titlebar_raster(width, title, background, foreground).map(|(buffer, _)| buffer)
+}
+
+fn render_titlebar_raster(
+    width: i32,
+    title: &str,
+    background: u32,
+    foreground: u32,
+) -> Option<(MemoryRenderBuffer, Vec<u8>)> {
     let (pixels, width) = render_titlebar_pixels(width, title, background, foreground)?;
-    Some(MemoryRenderBuffer::from_slice(
+    let buffer = MemoryRenderBuffer::from_slice(
         &pixels,
         Fourcc::Abgr8888,
         (width as i32, TITLEBAR_HEIGHT),
         1,
         Transform::Normal,
         None,
-    ))
+    );
+    Some((buffer, pixels))
 }
 
 fn render_titlebar_pixels(
@@ -498,10 +539,10 @@ mod tests {
 
     use super::{
         FramePart, RESIZE_BORDER, TITLEBAR_CACHE, TITLEBAR_CACHE_MAX_BYTES,
-        TITLEBAR_CACHE_MAX_ENTRIES, TITLEBAR_HEIGHT, TitlebarCacheMode, hit_test, outer_geometry,
-        render_titlebar, render_titlebar_for, render_titlebar_pixels, render_titlebar_with_mode,
-        retain_titlebars_for_windows, titlebar_cache_diagnostics, titlebar_geometry,
-        topmost_frame_target,
+        TITLEBAR_CACHE_MAX_ENTRIES, TITLEBAR_HEIGHT, TitlebarCacheMode, cached_titlebar_pixels,
+        hit_test, outer_geometry, render_titlebar, render_titlebar_for, render_titlebar_pixels,
+        render_titlebar_with_mode, retain_titlebars_for_windows, titlebar_cache_diagnostics,
+        titlebar_geometry, topmost_frame_target,
     };
     use crate::shell_layout::Geometry;
 
@@ -577,7 +618,7 @@ mod tests {
             render_titlebar(1024, &format!("Window {index}"), 0x20242c, 0xe8edf4)
                 .expect("titlebar raster");
         }
-        render_titlebar(1024, "Window 31", 0x20242c, 0xe8edf4).expect("cached titlebar raster");
+        render_titlebar(1024, "Window 79", 0x20242c, 0xe8edf4).expect("cached titlebar raster");
 
         let diagnostics = titlebar_cache_diagnostics();
         assert!(diagnostics.entries <= TITLEBAR_CACHE_MAX_ENTRIES);
@@ -611,6 +652,40 @@ mod tests {
         assert!(closed.invalidations >= 2);
     }
 
+    #[test]
+    fn realistic_multi_window_steady_frames_do_not_thrash() {
+        let _test_lock = cache_test_lock();
+        if let Some(cache) = TITLEBAR_CACHE.get() {
+            *cache.lock().unwrap() = super::TitlebarCache::default();
+        }
+        let windows = (0_u64..12)
+            .map(|owner| {
+                let width = if owner % 4 == 0 { 3840 } else { 1920 };
+                (owner, width, format!("Nickel window {owner}"))
+            })
+            .collect::<Vec<_>>();
+        for (owner, width, title) in &windows {
+            render_titlebar_for(Some(*owner), *width, title, 0x20242c, 0xe8edf4).unwrap();
+        }
+        let warm = titlebar_cache_diagnostics();
+        assert_eq!(warm.entries, windows.len());
+        assert!(warm.live_bytes <= TITLEBAR_CACHE_MAX_BYTES);
+
+        for _ in 0..120 {
+            for (owner, width, title) in &windows {
+                render_titlebar_for(Some(*owner), *width, title, 0x20242c, 0xe8edf4).unwrap();
+            }
+        }
+        let steady = titlebar_cache_diagnostics();
+        assert_eq!(steady.misses, warm.misses);
+        assert_eq!(steady.rasterizations, warm.rasterizations);
+        assert_eq!(steady.hits - warm.hits, (windows.len() * 120) as u64);
+        assert_eq!(steady.font_database_loads, 1);
+
+        retain_titlebars_for_windows(windows.iter().take(3).map(|(owner, _, _)| *owner));
+        assert_eq!(titlebar_cache_diagnostics().entries, 3);
+    }
+
     #[derive(Clone, Copy)]
     struct AdmissionStats {
         median_us: f64,
@@ -636,9 +711,30 @@ mod tests {
         if let Some(cache) = TITLEBAR_CACHE.get() {
             *cache.lock().unwrap() = super::TitlebarCache::default();
         }
-        render_titlebar(1280, "Nickel File", 0x20242c, 0xe8edf4).expect("warm titlebar");
+        for owner in 0..8 {
+            render_titlebar_for(
+                Some(owner),
+                if owner % 3 == 0 { 3840 } else { 1920 },
+                &format!("Nickel window {owner}"),
+                0x20242c,
+                0xe8edf4,
+            )
+            .expect("warm production titlebar");
+        }
 
         for workload in ["cold", "warm", "churn", "low_reuse"] {
+            if workload == "warm" {
+                for owner in 0..8 {
+                    render_titlebar_for(
+                        Some(owner),
+                        if owner % 3 == 0 { 3840 } else { 1920 },
+                        &format!("Nickel window {owner}"),
+                        0x20242c,
+                        0xe8edf4,
+                    )
+                    .expect("rewarm multi-owner production cache");
+                }
+            }
             let mut cached_samples = Vec::with_capacity(SAMPLES);
             let mut bypass_samples = Vec::with_capacity(SAMPLES);
             for sample in 0..SAMPLES {
@@ -647,15 +743,20 @@ mod tests {
                 {
                     *cache.lock().unwrap() = super::TitlebarCache::default();
                 }
+                let owner = match workload {
+                    "low_reuse" => sample as u64 + 100,
+                    _ => (sample % 8) as u64,
+                };
+                let width = if owner % 3 == 0 { 3840 } else { 1920 };
                 let title = match workload {
-                    "churn" => format!("Nickel workspace {}", sample % 4),
+                    "churn" => format!("Nickel window {owner}, generation {sample}"),
                     "low_reuse" => format!("Nickel document {sample}"),
-                    _ => "Nickel File".to_owned(),
+                    _ => format!("Nickel window {owner}"),
                 };
                 let started = std::time::Instant::now();
                 let cached = render_titlebar_with_mode(
-                    None,
-                    1280,
+                    Some(owner),
+                    width,
                     &title,
                     0x20242c,
                     0xe8edf4,
@@ -667,8 +768,8 @@ mod tests {
 
                 let started = std::time::Instant::now();
                 let bypass = render_titlebar_with_mode(
-                    None,
-                    1280,
+                    Some(owner),
+                    width,
                     &title,
                     0x20242c,
                     0xe8edf4,
@@ -678,17 +779,19 @@ mod tests {
                 std::hint::black_box(bypass);
                 bypass_samples.push(started.elapsed().as_secs_f64() * 1_000_000.0);
 
-                let cached_pixels = render_titlebar_pixels(1280, &title, 0x20242c, 0xe8edf4)
-                    .expect("cached-path authoritative pixels");
-                let bypass_pixels = render_titlebar_pixels(1280, &title, 0x20242c, 0xe8edf4)
-                    .expect("bypass authoritative pixels");
+                let cached_pixels =
+                    cached_titlebar_pixels(Some(owner), width, &title, 0x20242c, 0xe8edf4)
+                        .expect("pixels retained by production cache path");
+                let bypass_pixels = render_titlebar_pixels(width, &title, 0x20242c, 0xe8edf4)
+                    .expect("bypass authoritative pixels")
+                    .0;
                 assert_eq!(cached_pixels, bypass_pixels);
             }
             let cached = admission_stats(cached_samples);
             let bypass = admission_stats(bypass_samples);
             let retained_bytes = titlebar_cache_diagnostics().live_bytes;
             println!(
-                "{{\"schema\":\"nickel-cache-admission-v1\",\"cache\":\"window_titlebar_rasters\",\"workload\":\"{workload}\",\"fixture\":\"deterministic_headless\",\"profile\":\"release\",\"samples\":{SAMPLES},\"cached_median_us\":{:.3},\"cached_p95_us\":{:.3},\"bypass_median_us\":{:.3},\"bypass_p95_us\":{:.3},\"retained_bytes\":{retained_bytes},\"complexity\":{{\"key_fields\":4,\"invalidation_triggers\":3,\"storage_collections\":1}},\"output_equivalence\":\"exact_rgba\"}}",
+                "{{\"schema\":\"nickel-cache-admission-v1\",\"cache\":\"window_titlebar_rasters\",\"workload\":\"{workload}\",\"fixture\":\"multi_owner_mixed_1920_3840\",\"profile\":\"release\",\"samples\":{SAMPLES},\"cached_median_us\":{:.3},\"cached_p95_us\":{:.3},\"bypass_median_us\":{:.3},\"bypass_p95_us\":{:.3},\"retained_bytes\":{retained_bytes},\"complexity\":{{\"key_fields\":5,\"invalidation_triggers\":5,\"storage_collections\":1}},\"output_equivalence\":\"exact_cached_source_rgba\"}}",
                 cached.median_us, cached.p95_us, bypass.median_us, bypass.p95_us
             );
             if workload == "warm" {

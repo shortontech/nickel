@@ -399,6 +399,58 @@ pub struct CacheDiagnostics {
     pub metadata_updates: u64,
     pub metadata_live_snapshot_bytes: u64,
     pub metadata_peak_snapshot_bytes: u64,
+    #[serde(default)]
+    pub titlebar_entries: u16,
+    #[serde(default)]
+    pub titlebar_live_bytes: u64,
+    #[serde(default)]
+    pub titlebar_peak_bytes: u64,
+    #[serde(default)]
+    pub titlebar_hits: u64,
+    #[serde(default)]
+    pub titlebar_misses: u64,
+    #[serde(default)]
+    pub titlebar_rasterizations: u64,
+    #[serde(default)]
+    pub titlebar_avoided_rasterizations: u64,
+    #[serde(default)]
+    pub titlebar_evictions: u64,
+    #[serde(default)]
+    pub titlebar_generation: u64,
+    #[serde(default)]
+    pub titlebar_font_database_loads: u64,
+    #[serde(default)]
+    pub titlebar_renderer_bytes: Option<u64>,
+    #[serde(default)]
+    pub recovery_entries: u16,
+    #[serde(default)]
+    pub recovery_live_bytes: u64,
+    #[serde(default)]
+    pub recovery_peak_bytes: u64,
+    #[serde(default)]
+    pub recovery_rasterizations: u64,
+    #[serde(default)]
+    pub recovery_avoided_rasterizations: u64,
+    #[serde(default)]
+    pub recovery_evictions: u64,
+    #[serde(default)]
+    pub recovery_generation: u64,
+    #[serde(default)]
+    pub recovery_renderer_bytes: Option<u64>,
+    #[serde(default)]
+    pub identify_entries: u16,
+    #[serde(default)]
+    pub identify_live_bytes: u64,
+    #[serde(default)]
+    pub identify_peak_bytes: u64,
+    #[serde(default)]
+    pub identify_rasterizations: u64,
+    #[serde(default)]
+    pub identify_avoided_rasterizations: u64,
+    #[serde(default)]
+    pub identify_evictions: u64,
+    #[serde(default)]
+    pub identify_renderer_bytes: Option<u64>,
 }
 
 /// Bounded runtime evidence retained by a shell presenter.

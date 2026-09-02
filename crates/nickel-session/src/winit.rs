@@ -348,7 +348,7 @@ pub fn init_winit(
                             state.recovery_ui.release_raster();
                         }
                         let recovery_banner = recovery_visible.then(|| {
-                                let panel = state.recovery_ui.render_buffer(1000);
+                                let panel = state.recovery_ui.render_buffer();
                                 let panel_geometry = crate::recovery_ui::RecoveryUi::panel_geometry(
                                     crate::shell_layout::Geometry {
                                         x: 0,
