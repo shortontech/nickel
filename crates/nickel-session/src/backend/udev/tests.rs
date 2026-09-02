@@ -2,11 +2,34 @@ use super::{
     DisabledOutput, IDENTIFY_BADGE_BYTES, IdentifyBadgeCache, RendererLifecycleLedger,
     RendererRetainedReason, TaskSwitcherBufferKey, consume_pending_dependent,
     dependent_renderers_after_primary_removal, device_activation_priority,
-    mark_disabled_outputs_absent, normalize_capture_rows, parse_kde_cursor_settings,
-    pending_recovery_devices, primary_dependency_to_activate, published_disabled_outputs,
-    render_primary_available, renderer_retained_reason, switcher_visible_range,
+    draw_memory_render_buffer, mark_disabled_outputs_absent, normalize_capture_rows,
+    parse_kde_cursor_settings, pending_recovery_devices, primary_dependency_to_activate,
+    published_disabled_outputs, render_primary_available, renderer_retained_reason,
+    switcher_visible_range,
 };
 use std::collections::HashMap;
+
+#[test]
+fn overlay_pixels_are_drawn_into_the_persistent_render_buffer_allocation() {
+    let mut drawn_at = std::ptr::null();
+    let mut buffer = draw_memory_render_buffer(32, 16, |pixels| {
+        drawn_at = pixels.as_ptr();
+        pixels[0] = 73;
+    });
+    let mut observed_at = std::ptr::null();
+    let mut observed_pixel = 0;
+    buffer
+        .render()
+        .draw(|pixels| {
+            observed_at = pixels.as_ptr();
+            observed_pixel = pixels[0];
+            Ok::<_, std::convert::Infallible>(Vec::new())
+        })
+        .unwrap();
+
+    assert_eq!(observed_at, drawn_at);
+    assert_eq!(observed_pixel, 73);
+}
 
 #[test]
 fn task_switcher_overlay_key_reuses_only_unchanged_composition() {

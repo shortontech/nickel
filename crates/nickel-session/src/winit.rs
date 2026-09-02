@@ -35,6 +35,12 @@ use nickel_core::{
 
 use crate::{NickelSession, state::PreviewFrame};
 
+const PREVIEW_CAPTURE_INTERVAL: Duration = Duration::from_millis(200);
+
+fn preview_retry_delay(last_capture: Instant, now: Instant) -> Duration {
+    PREVIEW_CAPTURE_INTERVAL.saturating_sub(now.saturating_duration_since(last_capture))
+}
+
 smithay::backend::renderer::element::render_elements! {
     WinitFrameElement<R> where R: ImportAll + ImportMem;
     Surface=WaylandSurfaceRenderElement<R>,
@@ -486,7 +492,7 @@ pub fn init_winit(
                         state.complete_output_capture(&path, result);
                     }
 
-                    if !state.locked && last_preview_capture.elapsed() >= Duration::from_millis(200)
+                    if !state.locked && last_preview_capture.elapsed() >= PREVIEW_CAPTURE_INTERVAL
                     {
                         let wave = state.begin_preview_render_wave();
                         let windows = state.preview_capture_candidates(wave);
@@ -507,8 +513,11 @@ pub fn init_winit(
                                 state.preview_capture_failed(id, rgba, had_frame);
                             }
                         }
-                        state.schedule_preview_retry();
                         last_preview_capture = Instant::now();
+                        state.schedule_preview_retry_after(preview_retry_delay(
+                            last_preview_capture,
+                            Instant::now(),
+                        ));
                     }
 
                     state.space.elements().for_each(|window| {
@@ -833,9 +842,14 @@ fn normalize_capture_rows(
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{
+        path::PathBuf,
+        time::{Duration, Instant},
+    };
 
-    use super::{advance_output_capture, flatten_frame_groups};
+    use super::{
+        PREVIEW_CAPTURE_INTERVAL, advance_output_capture, flatten_frame_groups, preview_retry_delay,
+    };
 
     #[test]
     fn window_frames_preserve_front_to_back_stacking_order() {
@@ -869,5 +883,18 @@ mod tests {
             (Some(request), false)
         );
         assert_eq!(pending, None);
+    }
+
+    #[test]
+    fn nested_preview_retry_deadline_matches_capture_eligibility() {
+        let last_capture = Instant::now();
+        assert_eq!(
+            preview_retry_delay(last_capture, last_capture + Duration::from_millis(16)),
+            PREVIEW_CAPTURE_INTERVAL - Duration::from_millis(16)
+        );
+        assert_eq!(
+            preview_retry_delay(last_capture, last_capture + PREVIEW_CAPTURE_INTERVAL),
+            Duration::ZERO
+        );
     }
 }

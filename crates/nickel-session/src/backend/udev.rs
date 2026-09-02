@@ -2677,74 +2677,81 @@ fn task_switcher_buffer(
     let card_height = 180_u32;
     let width = padding * 2 + card_width * count as u32 + gap * count.saturating_sub(1) as u32;
     let height = card_height + padding * 2;
-    let mut image = image::RgbaImage::from_pixel(width, height, image::Rgba([17, 24, 39, 244]));
-
-    for (slot, index) in range.enumerate() {
-        let x = padding + slot as u32 * (card_width + gap);
-        let selected = index == selected_index;
-        let border = if selected {
-            image::Rgba([101, 184, 255, 255])
-        } else {
-            image::Rgba([66, 81, 108, 255])
-        };
-        fill_rgba_rect(&mut image, x, padding, card_width, card_height, border);
-        fill_rgba_rect(
-            &mut image,
-            x + 4,
-            padding + 4,
-            card_width - 8,
-            card_height - 8,
-            image::Rgba([43, 56, 82, 255]),
-        );
-        let id = candidates[index];
-        let Some(frame) = state.preview_frames.get(&id) else {
-            continue;
-        };
-        let Some(source) = image::ImageBuffer::<image::Rgba<u8>, &[u8]>::from_raw(
-            u32::from(frame.width),
-            u32::from(frame.height),
-            frame.rgba.as_slice(),
-        ) else {
-            continue;
-        };
-        let target_width = card_width - 16;
-        let target_height = card_height - 16;
-        let thumbnail = image::imageops::resize(
-            &source,
-            target_width,
-            target_height,
-            image::imageops::FilterType::Triangle,
-        );
-        image::imageops::overlay(
-            &mut image,
-            &thumbnail,
-            i64::from(x + 8),
-            i64::from(padding + 8),
-        );
-    }
-
     let size = (width as i32, height as i32);
-    Some((
-        MemoryRenderBuffer::from_slice(
-            image.as_raw(),
-            Fourcc::Abgr8888,
-            size,
-            1,
-            Transform::Normal,
-            None,
-        ),
-        size.into(),
-    ))
+    let buffer = draw_memory_render_buffer(width, height, |pixels| {
+        let mut image =
+            image::ImageBuffer::<image::Rgba<u8>, &mut [u8]>::from_raw(width, height, pixels)
+                .expect("memory render buffer has the requested RGBA dimensions");
+        image.pixels_mut().for_each(|pixel| {
+            *pixel = image::Rgba([17, 24, 39, 244]);
+        });
+
+        for (slot, index) in range.enumerate() {
+            let x = padding + slot as u32 * (card_width + gap);
+            let selected = index == selected_index;
+            let border = if selected {
+                image::Rgba([101, 184, 255, 255])
+            } else {
+                image::Rgba([66, 81, 108, 255])
+            };
+            fill_rgba_rect(&mut image, x, padding, card_width, card_height, border);
+            fill_rgba_rect(
+                &mut image,
+                x + 4,
+                padding + 4,
+                card_width - 8,
+                card_height - 8,
+                image::Rgba([43, 56, 82, 255]),
+            );
+            let id = candidates[index];
+            let Some(frame) = state.preview_frames.get(&id) else {
+                continue;
+            };
+            let Some(source) = image::ImageBuffer::<image::Rgba<u8>, &[u8]>::from_raw(
+                u32::from(frame.width),
+                u32::from(frame.height),
+                frame.rgba.as_slice(),
+            ) else {
+                continue;
+            };
+            let thumbnail = image::imageops::resize(
+                &source,
+                card_width - 16,
+                card_height - 16,
+                image::imageops::FilterType::Triangle,
+            );
+            image::imageops::overlay(
+                &mut image,
+                &thumbnail,
+                i64::from(x + 8),
+                i64::from(padding + 8),
+            );
+        }
+    });
+    Some((buffer, size.into()))
 }
 
-fn fill_rgba_rect(
-    image: &mut image::RgbaImage,
-    x: u32,
-    y: u32,
+fn draw_memory_render_buffer(
     width: u32,
     height: u32,
-    color: image::Rgba<u8>,
-) {
+    draw: impl FnOnce(&mut [u8]),
+) -> MemoryRenderBuffer {
+    let size = (width as i32, height as i32);
+    let mut buffer = MemoryRenderBuffer::new(Fourcc::Abgr8888, size, 1, Transform::Normal, None);
+    buffer
+        .render()
+        .draw(|pixels| {
+            draw(pixels);
+            Ok::<_, std::convert::Infallible>(vec![Rectangle::from_size(size.into())])
+        })
+        .expect("infallible task switcher drawing");
+    buffer
+}
+
+fn fill_rgba_rect<I>(image: &mut I, x: u32, y: u32, width: u32, height: u32, color: image::Rgba<u8>)
+where
+    I: image::GenericImage<Pixel = image::Rgba<u8>>,
+{
     for row in y..y.saturating_add(height).min(image.height()) {
         for column in x..x.saturating_add(width).min(image.width()) {
             image.put_pixel(column, row, color);

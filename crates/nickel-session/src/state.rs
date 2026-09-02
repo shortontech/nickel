@@ -731,11 +731,15 @@ impl NickelSession {
     }
 
     pub(crate) fn schedule_preview_retry(&mut self) {
+        self.schedule_preview_retry_after(std::time::Duration::from_millis(16));
+    }
+
+    pub(crate) fn schedule_preview_retry_after(&mut self, delay: std::time::Duration) {
         if self.preview_retry_pending.is_empty() || self.preview_retry_scheduled.is_some() {
             return;
         }
         let epoch = self.preview_retry_epoch;
-        let timer = Timer::from_duration(std::time::Duration::from_millis(16));
+        let timer = Timer::from_duration(delay);
         match self
             .event_loop_handle
             .insert_source(timer, move |_, _, data| {
@@ -5271,6 +5275,39 @@ mod protocol_tests {
             .unwrap();
         assert_eq!(session.preview_content_generation[&current], 11);
         assert!(session.preview_retry_pending.is_empty());
+    }
+
+    #[test]
+    fn nested_retry_waits_for_capture_cadence_and_fires_only_once() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (mut event_loop, mut session) = preview_test_session();
+        let id = session
+            .windows
+            .insert(crate::window_registry::WindowAdmission::Ordinary)
+            .unwrap();
+        session.preview_content_generation.insert(id, 4);
+        session.preview_retry_pending.insert(id);
+        session.schedule_preview_retry_after(std::time::Duration::from_millis(200));
+
+        event_loop
+            .dispatch(std::time::Duration::from_millis(30), &mut session)
+            .unwrap();
+        assert_eq!(session.preview_content_generation[&id], 4);
+        assert_eq!(session.preview_retry_pending.len(), 1);
+        assert!(session.preview_retry_scheduled.is_some());
+
+        event_loop
+            .dispatch(std::time::Duration::from_millis(220), &mut session)
+            .unwrap();
+        assert_eq!(session.preview_content_generation[&id], 5);
+        assert!(session.preview_retry_pending.is_empty());
+        assert!(session.preview_retry_scheduled.is_none());
+
+        event_loop
+            .dispatch(std::time::Duration::from_millis(30), &mut session)
+            .unwrap();
+        assert_eq!(session.preview_content_generation[&id], 5);
+        assert!(session.preview_retry_scheduled.is_none());
     }
 
     #[test]
