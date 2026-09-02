@@ -446,9 +446,20 @@ impl NickelSession {
             .and_then(|client| client.get_credentials(&self.display_handle).ok())
             .and_then(|credentials| u32::try_from(credentials.pid).ok());
         let authenticated = client_pid.is_some_and(|pid| self.is_authenticated_shell_pid(pid));
+        let registry_id = self
+            .surface_windows
+            .get(&surface.wl_surface().id())
+            .copied();
+        if let Some(id) = registry_id {
+            self.windows.update_metadata(id, title, app_id);
+        }
+        // The registry is the canonical session projection. Role, grouping,
+        // decoration, and protocol consumers all derive from the same bounded
+        // application identity rather than the protocol role's unbounded copy.
+        let projected_app_id = registry_id.and_then(|id| self.windows.app_id(id));
         let shell_role = client_pid
             .filter(|_| authenticated)
-            .and_then(|_| app_id.as_deref().and_then(ShellRole::from_application_id));
+            .and_then(|_| projected_app_id.and_then(ShellRole::from_application_id));
         let is_launcher = shell_role == Some(ShellRole::Launcher);
         let is_desktop = shell_role == Some(ShellRole::Desktop);
         let is_panel = shell_role == Some(ShellRole::Panel);
@@ -456,7 +467,7 @@ impl NickelSession {
         let is_preview = shell_role == Some(ShellRole::Preview);
         let is_notification = shell_role == Some(ShellRole::Notification);
         let is_lock = shell_role == Some(ShellRole::Lock);
-        let is_codex_project_chat = is_codex_project_chat(app_id.as_deref());
+        let is_codex_project_chat = is_codex_project_chat(projected_app_id);
         let is_utility = matches!(
             shell_role,
             Some(
@@ -467,12 +478,7 @@ impl NickelSession {
                     | ShellRole::Recovery
             )
         );
-        if let Some(id) = self
-            .surface_windows
-            .get(&surface.wl_surface().id())
-            .copied()
-        {
-            self.windows.update_metadata(id, title, app_id);
+        if let Some(id) = registry_id {
             self.clear_changed_shell_surface_role(&surface.wl_surface().id(), shell_role);
             if let Some(role) =
                 unauthenticated_reserved_shell_role(self.windows.app_id(id), authenticated)

@@ -994,6 +994,7 @@ impl NickelSession {
                 },
             },
             Query::CacheDiagnostics => {
+                let metadata = self.windows.metadata_diagnostics();
                 ServerMessage::CacheDiagnostics(nickel_session_protocol::CacheDiagnostics {
                     preview_entries: u16::try_from(self.preview_frames.len()).unwrap_or(u16::MAX),
                     preview_capacity: u16::try_from(nickel_session_protocol::MAX_WINDOWS)
@@ -1003,6 +1004,15 @@ impl NickelSession {
                         .values()
                         .map(|frame| frame.rgba.len() as u64)
                         .sum(),
+                    metadata_entries: u16::try_from(metadata.entries).unwrap_or(u16::MAX),
+                    metadata_title_bytes: metadata.title_bytes as u64,
+                    metadata_peak_title_bytes: metadata.peak_title_bytes as u64,
+                    metadata_app_id_bytes: metadata.app_id_bytes as u64,
+                    metadata_peak_app_id_bytes: metadata.peak_app_id_bytes as u64,
+                    metadata_truncations: metadata.truncations,
+                    metadata_updates: metadata.updates,
+                    metadata_snapshot_bytes: metadata.snapshot_bytes as u64,
+                    metadata_peak_snapshot_bytes: metadata.peak_snapshot_bytes as u64,
                 })
             }
             Query::Workspaces => ServerMessage::Workspaces(self.protocol_workspaces()),
@@ -1287,7 +1297,7 @@ impl NickelSession {
             .any(|window| window.id.0 == id.0 && !self.shell_owned_windows.contains(&window.id))
     }
 
-    fn protocol_windows(&self) -> Vec<WindowSnapshot> {
+    fn protocol_windows(&mut self) -> Vec<WindowSnapshot> {
         let mut shell_ids = self
             .shell_windows()
             .filter_map(|window| {
@@ -1297,7 +1307,8 @@ impl NickelSession {
             .copied()
             .collect::<HashSet<_>>();
         shell_ids.extend(self.shell_owned_windows.iter().copied());
-        self.windows
+        let windows = self
+            .windows
             .snapshot()
             .into_iter()
             .filter(|window| !shell_ids.contains(&window.id))
@@ -1374,7 +1385,13 @@ impl NickelSession {
                     ),
                 }
             })
-            .collect()
+            .collect::<Vec<_>>();
+        let snapshot_bytes = windows
+            .iter()
+            .map(|window| window.title.len() + window.application_id.len())
+            .sum();
+        self.windows.record_snapshot_bytes(snapshot_bytes);
+        windows
     }
 
     fn apply_test_output(&mut self, operation: TestOutput) -> Result<(), &'static str> {
@@ -1755,7 +1772,7 @@ impl NickelSession {
         self.last_logged_shell_readiness = Some(readiness);
     }
 
-    fn protocol_snapshot(&self) -> SessionSnapshot {
+    fn protocol_snapshot(&mut self) -> SessionSnapshot {
         let windows = self.protocol_windows();
         SessionSnapshot {
             focused: windows

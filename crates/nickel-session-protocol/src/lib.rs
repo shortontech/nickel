@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-pub const PROTOCOL_VERSION: u16 = 16;
+pub const PROTOCOL_VERSION: u16 = 17;
 pub const MAX_FRAME_BYTES: usize = 196_608;
 pub const MAX_PREVIEW_WIDTH: u16 = 256;
 pub const MAX_PREVIEW_HEIGHT: u16 = 144;
@@ -387,6 +387,15 @@ pub struct CacheDiagnostics {
     pub preview_entries: u16,
     pub preview_capacity: u16,
     pub preview_bytes: u64,
+    pub metadata_entries: u16,
+    pub metadata_title_bytes: u64,
+    pub metadata_peak_title_bytes: u64,
+    pub metadata_app_id_bytes: u64,
+    pub metadata_peak_app_id_bytes: u64,
+    pub metadata_truncations: u64,
+    pub metadata_updates: u64,
+    pub metadata_snapshot_bytes: u64,
+    pub metadata_peak_snapshot_bytes: u64,
 }
 
 /// Bounded runtime evidence retained by a shell presenter.
