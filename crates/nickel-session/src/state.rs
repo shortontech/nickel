@@ -865,10 +865,11 @@ impl NickelSession {
                             ),
                         };
                         if let Some(path) = source.as_deref() {
-                            match encode(&ServerEnvelope {
+                            let response = encode(&ServerEnvelope {
                                 request_id,
                                 message,
-                            }) {
+                            });
+                            match response {
                                 Ok(response) => {
                                     if let Err(error) = socket.as_ref().send_to(&response, path) {
                                         tracing::warn!(
@@ -885,6 +886,7 @@ impl NickelSession {
                                 ),
                             }
                         }
+                        data.windows.finish_snapshot();
                         data.request_output_redraw();
                     }
                     Ok(PostAction::Continue)
@@ -1011,7 +1013,7 @@ impl NickelSession {
                     metadata_peak_app_id_bytes: metadata.peak_app_id_bytes as u64,
                     metadata_truncations: metadata.truncations,
                     metadata_updates: metadata.updates,
-                    metadata_snapshot_bytes: metadata.snapshot_bytes as u64,
+                    metadata_live_snapshot_bytes: metadata.live_snapshot_bytes as u64,
                     metadata_peak_snapshot_bytes: metadata.peak_snapshot_bytes as u64,
                 })
             }
@@ -1390,7 +1392,7 @@ impl NickelSession {
             .iter()
             .map(|window| window.title.len() + window.application_id.len())
             .sum();
-        self.windows.record_snapshot_bytes(snapshot_bytes);
+        self.windows.begin_snapshot(snapshot_bytes);
         windows
     }
 
@@ -2402,10 +2404,12 @@ impl NickelSession {
     }
 
     pub(crate) fn notify_protocol_snapshot(&mut self) {
-        let Ok(event) = encode(&ServerEnvelope {
+        let event = encode(&ServerEnvelope {
             request_id: 0,
             message: ServerMessage::Event(SessionEvent::Snapshot(self.protocol_snapshot())),
-        }) else {
+        });
+        self.windows.finish_snapshot();
+        let Ok(event) = event else {
             return;
         };
         let Ok(socket) = UnixDatagram::unbound() else {

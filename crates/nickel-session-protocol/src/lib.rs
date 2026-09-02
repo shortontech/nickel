@@ -5,7 +5,9 @@ pub const MAX_FRAME_BYTES: usize = 196_608;
 pub const MAX_PREVIEW_WIDTH: u16 = 256;
 pub const MAX_PREVIEW_HEIGHT: u16 = 144;
 pub const MAX_SUBSCRIBERS: usize = 8;
-pub const MAX_WINDOWS: usize = 1_024;
+pub const MAX_WINDOWS: usize = 128;
+pub const MAX_WINDOW_TITLE_BYTES: usize = 384;
+pub const MAX_WINDOW_APP_ID_BYTES: usize = 96;
 pub const MAX_OUTPUTS: usize = 32;
 pub const MAX_WORKSPACES: usize = 32;
 pub const MAX_RUNTIME_PERFORMANCE_SAMPLES: usize = 64;
@@ -394,7 +396,7 @@ pub struct CacheDiagnostics {
     pub metadata_peak_app_id_bytes: u64,
     pub metadata_truncations: u64,
     pub metadata_updates: u64,
-    pub metadata_snapshot_bytes: u64,
+    pub metadata_live_snapshot_bytes: u64,
     pub metadata_peak_snapshot_bytes: u64,
 }
 
@@ -1411,5 +1413,78 @@ mod tests {
             decode::<ServerEnvelope>(&encoded).unwrap().message,
             ServerMessage::Preview(preview)
         );
+    }
+
+    #[test]
+    fn maximum_bounded_window_metadata_population_fits_one_wire_response() {
+        let windows = (0..MAX_WINDOWS)
+            .map(|index| WindowSnapshot {
+                id: WindowId(index as u64 + 1),
+                // Backslash exercises the maximum expansion admitted by the
+                // canonical projection (ASCII controls are normalized).
+                application_id: "\\".repeat(MAX_WINDOW_APP_ID_BYTES),
+                title: "\\".repeat(MAX_WINDOW_TITLE_BYTES),
+                active: index == 0,
+                minimized: false,
+                maximized: false,
+                fullscreen: false,
+                geometry: Some(Geometry {
+                    x: i32::MAX,
+                    y: i32::MIN,
+                    width: i32::MAX,
+                    height: i32::MAX,
+                }),
+                workspace: WorkspaceId(u64::MAX),
+            })
+            .collect::<Vec<_>>();
+        let ids = windows.iter().map(|window| window.id).collect::<Vec<_>>();
+        let outputs = (0..MAX_OUTPUTS)
+            .map(|index| OutputSnapshot {
+                name: format!("connector-{index:02}"),
+                model: "model".repeat(32),
+                geometry: Geometry {
+                    x: i32::MAX,
+                    y: i32::MIN,
+                    width: i32::MAX,
+                    height: i32::MAX,
+                },
+                work_area: Geometry {
+                    x: i32::MAX,
+                    y: i32::MIN,
+                    width: i32::MAX,
+                    height: i32::MAX,
+                },
+                scale_120: u32::MAX,
+                transform: OutputTransform::Flipped270,
+                physical_width_mm: i32::MAX,
+                physical_height_mm: i32::MAX,
+                primary: index == 0,
+                enabled: true,
+            })
+            .collect();
+        let envelope = ServerEnvelope {
+            request_id: u64::MAX,
+            message: ServerMessage::Event(Event::Snapshot(Snapshot {
+                outputs,
+                windows: windows.clone(),
+                focused: Some(windows[0].id),
+                stacking_front_to_back: ids.clone(),
+                launcher_visible: true,
+                locked: true,
+                workspaces: WorkspaceState {
+                    active: WorkspaceId(1),
+                    active_output: Some("connector-00".into()),
+                    ordered: vec![WorkspaceSnapshot {
+                        id: WorkspaceId(1),
+                        windows: ids,
+                        focused: Some(windows[0].id),
+                    }],
+                },
+            })),
+        };
+
+        let encoded = encode(&envelope).expect("bounded metadata population fits one frame");
+        assert!(encoded.len() <= MAX_FRAME_BYTES);
+        assert_eq!(decode::<ServerEnvelope>(&encoded).unwrap(), envelope);
     }
 }

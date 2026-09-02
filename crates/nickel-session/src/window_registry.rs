@@ -1,9 +1,12 @@
 use std::collections::BTreeMap;
 
-/// Maximum UTF-8 bytes retained for one client-controlled window title.
-pub const MAX_WINDOW_TITLE_BYTES: usize = 4_096;
-/// Maximum UTF-8 bytes retained for one client-controlled application identity.
-pub const MAX_WINDOW_APP_ID_BYTES: usize = 1_024;
+pub use nickel_session_protocol::{MAX_WINDOW_APP_ID_BYTES, MAX_WINDOW_TITLE_BYTES};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WindowMetadataSource {
+    Xdg,
+    X11,
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct WindowMetadataDiagnostics {
@@ -14,7 +17,7 @@ pub struct WindowMetadataDiagnostics {
     pub peak_app_id_bytes: usize,
     pub truncations: u64,
     pub updates: u64,
-    pub snapshot_bytes: usize,
+    pub live_snapshot_bytes: usize,
     pub peak_snapshot_bytes: usize,
 }
 
@@ -42,13 +45,16 @@ impl WindowRegistry {
         self.windows.len()
     }
 
-    pub fn insert(&mut self) -> WindowId {
-        let id = self.insert_inactive();
+    pub fn insert(&mut self) -> Option<WindowId> {
+        let id = self.insert_inactive()?;
         self.set_active(id);
-        id
+        Some(id)
     }
 
-    pub fn insert_inactive(&mut self) -> WindowId {
+    pub fn insert_inactive(&mut self) -> Option<WindowId> {
+        if self.windows.len() >= nickel_session_protocol::MAX_WINDOWS {
+            return None;
+        }
         self.next_id += 1;
         let id = WindowId(self.next_id);
         self.windows.insert(
@@ -62,10 +68,16 @@ impl WindowRegistry {
         );
         self.stacking_order.push(id);
         eprintln!("nickel-session: mapped window {}", id.0);
-        id
+        Some(id)
     }
 
-    pub fn update_metadata(&mut self, id: WindowId, title: Option<String>, app_id: Option<String>) {
+    pub fn update_metadata(
+        &mut self,
+        id: WindowId,
+        _source: WindowMetadataSource,
+        title: Option<String>,
+        app_id: Option<String>,
+    ) {
         if let Some(window) = self.windows.get_mut(&id) {
             if let Some(title) = title {
                 self.metadata_diagnostics.title_bytes = self
@@ -171,10 +183,14 @@ impl WindowRegistry {
     /// Record the owned UTF-8 payload of one request-scoped protocol projection.
     /// The projection itself remains owned by the synchronous response and is
     /// not retained by the registry.
-    pub fn record_snapshot_bytes(&mut self, bytes: usize) {
-        self.metadata_diagnostics.snapshot_bytes = bytes;
+    pub fn begin_snapshot(&mut self, bytes: usize) {
+        self.metadata_diagnostics.live_snapshot_bytes = bytes;
         self.metadata_diagnostics.peak_snapshot_bytes =
             self.metadata_diagnostics.peak_snapshot_bytes.max(bytes);
+    }
+
+    pub fn finish_snapshot(&mut self) {
+        self.metadata_diagnostics.live_snapshot_bytes = 0;
     }
 
     #[cfg(test)]
@@ -184,9 +200,22 @@ impl WindowRegistry {
 }
 
 fn bounded_utf8(mut value: String, limit: usize) -> (String, bool) {
+    let normalized = value.chars().any(char::is_control);
+    if normalized {
+        value = value
+            .chars()
+            .map(|character| {
+                if character.is_control() {
+                    '\u{fffd}'
+                } else {
+                    character
+                }
+            })
+            .collect();
+    }
     if value.len() <= limit {
         value.shrink_to_fit();
-        return (value, false);
+        return (value, normalized);
     }
     let mut end = limit;
     while !value.is_char_boundary(end) {
@@ -199,14 +228,22 @@ fn bounded_utf8(mut value: String, limit: usize) -> (String, bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_WINDOW_APP_ID_BYTES, MAX_WINDOW_TITLE_BYTES, WindowRegistry, bounded_utf8};
+    use super::{
+        MAX_WINDOW_APP_ID_BYTES, MAX_WINDOW_TITLE_BYTES, WindowMetadataSource, WindowRegistry,
+        bounded_utf8,
+    };
 
     #[test]
     fn lifecycle_tracks_metadata_focus_and_stacking() {
         let mut registry = WindowRegistry::default();
-        let terminal = registry.insert();
-        registry.update_metadata(terminal, Some("Terminal".into()), Some("terminal".into()));
-        let browser = registry.insert();
+        let terminal = registry.insert().unwrap();
+        registry.update_metadata(
+            terminal,
+            WindowMetadataSource::Xdg,
+            Some("Terminal".into()),
+            Some("terminal".into()),
+        );
+        let browser = registry.insert().unwrap();
 
         let windows = registry.test_snapshot();
         assert_eq!(
@@ -239,8 +276,8 @@ mod tests {
     #[test]
     fn inactive_insertion_preserves_existing_activation() {
         let mut registry = WindowRegistry::default();
-        let focused = registry.insert();
-        let background = registry.insert_inactive();
+        let focused = registry.insert().unwrap();
+        let background = registry.insert_inactive().unwrap();
         assert!(registry.is_active(focused));
         assert!(!registry.is_active(background));
         assert_eq!(
@@ -256,13 +293,14 @@ mod tests {
     #[test]
     fn metadata_is_utf8_bounded_and_replacement_does_not_follow_history() {
         let mut registry = WindowRegistry::default();
-        let window = registry.insert();
+        let window = registry.insert().unwrap();
         let oversized_title = "🙂".repeat(MAX_WINDOW_TITLE_BYTES);
         let oversized_app_id = "é".repeat(MAX_WINDOW_APP_ID_BYTES);
 
         for _ in 0..32 {
             registry.update_metadata(
                 window,
+                WindowMetadataSource::Xdg,
                 Some(oversized_title.clone()),
                 Some(oversized_app_id.clone()),
             );
@@ -284,13 +322,18 @@ mod tests {
         assert_eq!(registry.windows[&window].title.capacity(), title.len());
         assert_eq!(registry.windows[&window].app_id.capacity(), app_id.len());
 
-        registry.record_snapshot_bytes(title.len() + app_id.len());
+        registry.begin_snapshot(title.len() + app_id.len());
         let diagnostics = registry.metadata_diagnostics();
         assert_eq!(
-            diagnostics.snapshot_bytes,
+            diagnostics.live_snapshot_bytes,
             diagnostics.title_bytes + diagnostics.app_id_bytes
         );
-        assert_eq!(diagnostics.peak_snapshot_bytes, diagnostics.snapshot_bytes);
+        assert_eq!(
+            diagnostics.peak_snapshot_bytes,
+            diagnostics.live_snapshot_bytes
+        );
+        registry.finish_snapshot();
+        assert_eq!(registry.metadata_diagnostics().live_snapshot_bytes, 0);
 
         registry.remove(window);
         let diagnostics = registry.metadata_diagnostics();
@@ -312,15 +355,20 @@ mod tests {
             bounded_utf8("abcdef".to_owned(), 6),
             ("abcdef".to_owned(), false)
         );
+        assert_eq!(
+            bounded_utf8("line\nname".to_owned(), 32),
+            ("line\u{fffd}name".to_owned(), true)
+        );
     }
 
     #[test]
     fn maximum_window_population_has_a_declared_metadata_ceiling() {
         let mut registry = WindowRegistry::default();
         for _ in 0..nickel_session_protocol::MAX_WINDOWS {
-            let window = registry.insert_inactive();
+            let window = registry.insert_inactive().unwrap();
             registry.update_metadata(
                 window,
+                WindowMetadataSource::X11,
                 Some("x".repeat(MAX_WINDOW_TITLE_BYTES * 2)),
                 Some("y".repeat(MAX_WINDOW_APP_ID_BYTES * 2)),
             );
@@ -335,5 +383,7 @@ mod tests {
             diagnostics.app_id_bytes,
             nickel_session_protocol::MAX_WINDOWS * MAX_WINDOW_APP_ID_BYTES
         );
+        assert_eq!(registry.insert_inactive(), None);
+        assert_eq!(registry.len(), nickel_session_protocol::MAX_WINDOWS);
     }
 }

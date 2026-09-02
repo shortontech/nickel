@@ -31,6 +31,7 @@ use crate::{
     focus::KeyboardFocusTarget,
     grabs::{MoveSurfaceGrab, ResizeSurfaceGrab},
     shell_layout,
+    window_registry::WindowMetadataSource,
 };
 
 fn is_codex_project_chat(app_id: Option<&str>) -> bool {
@@ -76,7 +77,14 @@ impl XdgShellHandler for NickelSession {
                     .same_client_as(&surface_id)
             });
         let cascade = i32::try_from(self.windows.len() % 8).unwrap_or(0) * 32;
-        let id = self.windows.insert_inactive();
+        let Some(id) = self.windows.insert_inactive() else {
+            tracing::warn!(
+                limit = nickel_session_protocol::MAX_WINDOWS,
+                "rejected XDG toplevel because the live window limit was reached"
+            );
+            surface.send_close();
+            return;
+        };
         if is_shell_client {
             self.shell_owned_windows.insert(id);
         } else {
@@ -451,7 +459,8 @@ impl NickelSession {
             .get(&surface.wl_surface().id())
             .copied();
         if let Some(id) = registry_id {
-            self.windows.update_metadata(id, title, app_id);
+            self.windows
+                .update_metadata(id, WindowMetadataSource::Xdg, title, app_id);
         }
         // The registry is the canonical session projection. Role, grouping,
         // decoration, and protocol consumers all derive from the same bounded

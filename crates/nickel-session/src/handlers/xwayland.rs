@@ -32,7 +32,7 @@ use crate::{
     focus::KeyboardFocusTarget,
     grabs::{MoveSurfaceGrab, ResizeEdge, ResizeSurfaceGrab},
     handlers::{SelectionOwner, bounded_selection_mime_types},
-    window_registry::WindowId,
+    window_registry::{WindowId, WindowMetadataSource},
 };
 
 fn x11_retirement_identities<K: Clone + Eq + Hash>(
@@ -206,10 +206,26 @@ impl NickelSession {
         let window = Window::new_x11_window(surface.clone());
         self.space.map_element(window.clone(), geometry.loc, true);
         if managed {
-            let id = self.windows.insert();
+            let Some(id) = self.windows.insert() else {
+                tracing::warn!(
+                    window = surface.window_id(),
+                    limit = nickel_session_protocol::MAX_WINDOWS,
+                    "rejected X11 window because the live window limit was reached"
+                );
+                self.space.unmap_elem(&window);
+                if let Err(error) = surface.set_mapped(false) {
+                    tracing::warn!(?error, "failed to unmap rejected X11 window");
+                }
+                self.request_output_redraw();
+                return;
+            };
             self.workspaces.add_window(id);
-            self.windows
-                .update_metadata(id, Some(surface.title()), Some(surface.class()));
+            self.windows.update_metadata(
+                id,
+                WindowMetadataSource::X11,
+                Some(surface.title()),
+                Some(surface.class()),
+            );
             self.x11_windows.insert(surface.window_id(), id);
             if let Some(wl_surface) = surface.wl_surface() {
                 self.surface_windows.insert(wl_surface.id(), id);
@@ -358,8 +374,12 @@ impl XwmHandler for NickelSession {
 
     fn property_notify(&mut self, _xwm: XwmId, window: X11Surface, _property: WmWindowProperty) {
         if let Some(id) = self.x11_window_id(&window) {
-            self.windows
-                .update_metadata(id, Some(window.title()), Some(window.class()));
+            self.windows.update_metadata(
+                id,
+                WindowMetadataSource::X11,
+                Some(window.title()),
+                Some(window.class()),
+            );
             self.notify_protocol_snapshot();
         }
     }

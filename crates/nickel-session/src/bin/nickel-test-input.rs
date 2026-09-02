@@ -841,7 +841,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         ServerMessage::CacheDiagnostics(diagnostics) => {
             println!(
-                "previews={}/{} bytes={} metadata_entries={} title_bytes={} peak_title_bytes={} app_id_bytes={} peak_app_id_bytes={} truncations={} updates={} snapshot_bytes={} peak_snapshot_bytes={}",
+                "previews={}/{} bytes={} metadata_entries={} title_bytes={} peak_title_bytes={} app_id_bytes={} peak_app_id_bytes={} truncations={} updates={} live_snapshot_bytes={} peak_snapshot_bytes={}",
                 diagnostics.preview_entries,
                 diagnostics.preview_capacity,
                 diagnostics.preview_bytes,
@@ -852,7 +852,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 diagnostics.metadata_peak_app_id_bytes,
                 diagnostics.metadata_truncations,
                 diagnostics.metadata_updates,
-                diagnostics.metadata_snapshot_bytes,
+                diagnostics.metadata_live_snapshot_bytes,
                 diagnostics.metadata_peak_snapshot_bytes,
             );
             Ok(())
