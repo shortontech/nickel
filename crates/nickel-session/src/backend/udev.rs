@@ -285,6 +285,7 @@ pub struct UdevData {
     cursors: HashMap<crate::window_frame::FrameCursor, CursorBuffer>,
     frame_icons: Option<crate::window_frame::FrameIcons>,
     identify_badges: IdentifyBadgeCache,
+    task_switcher_cache: Option<TaskSwitcherBufferCache>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -349,6 +350,20 @@ impl IdentifyBadgeCache {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TaskSwitcherBufferKey {
+    candidates: Vec<crate::window_registry::WindowId>,
+    selected: usize,
+    output_size: (i32, i32),
+    preview_generation: u64,
+}
+
+struct TaskSwitcherBufferCache {
+    key: TaskSwitcherBufferKey,
+    buffer: MemoryRenderBuffer,
+    size: smithay::utils::Size<i32, Physical>,
+}
+
 impl UdevData {
     pub(crate) fn disabled_outputs(&self) -> impl Iterator<Item = &Output> {
         published_disabled_outputs(&self.disabled_outputs)
@@ -407,6 +422,10 @@ impl UdevData {
                 })
                 .collect(),
         }
+    }
+
+    pub(crate) fn clear_task_switcher_cache(&mut self) {
+        self.task_switcher_cache = None;
     }
 }
 
@@ -534,6 +553,7 @@ pub fn init_udev(
         cursors: themed_cursors(),
         frame_icons: crate::window_frame::FrameIcons::load(),
         identify_badges: IdentifyBadgeCache::default(),
+        task_switcher_cache: None,
     });
     let (buffer_commit_tx, buffer_commit_rx) = channel::channel();
     data.buffer_commit_tx = Some(buffer_commit_tx);
@@ -2004,14 +2024,39 @@ impl NickelSession {
                 .primary_output_name
                 .as_deref()
                 .is_none_or(|name| name == output.name());
-            if !self.locked
-                && is_primary
-                && let Some(mode) = output.current_mode()
-                && let Some((switcher, switcher_size)) = task_switcher_buffer(self, mode.size)
-            {
+            let mode_size = output.current_mode().map(|mode| mode.size);
+            let switcher = (!self.locked && is_primary)
+                .then_some(mode_size)
+                .flatten()
+                .and_then(|mode_size| {
+                    let key = TaskSwitcherBufferKey {
+                        candidates: self.task_switcher.candidates().to_vec(),
+                        selected: self.task_switcher.selected_index(),
+                        output_size: (mode_size.w, mode_size.h),
+                        preview_generation: self.preview_generation(),
+                    };
+                    if key.candidates.len() < 2 {
+                        native.task_switcher_cache = None;
+                        return None;
+                    }
+                    let stale = native
+                        .task_switcher_cache
+                        .as_ref()
+                        .is_none_or(|cached| cached.key != key);
+                    if stale {
+                        native.task_switcher_cache = task_switcher_buffer(self, mode_size)
+                            .map(|(buffer, size)| TaskSwitcherBufferCache { key, buffer, size });
+                    }
+                    native
+                        .task_switcher_cache
+                        .as_ref()
+                        .map(|cached| (cached.buffer.clone(), cached.size))
+                });
+            if let Some((switcher, switcher_size)) = switcher {
+                let mode_size = mode_size.expect("switcher requires a current output mode");
                 let location = (
-                    (mode.size.w - switcher_size.w).max(0) / 2,
-                    (mode.size.h - switcher_size.h).max(0) / 2,
+                    (mode_size.w - switcher_size.w).max(0) / 2,
+                    (mode_size.h - switcher_size.h).max(0) / 2,
                 );
                 match MemoryRenderBufferRenderElement::from_buffer(
                     &mut renderer,

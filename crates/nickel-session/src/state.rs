@@ -420,6 +420,11 @@ impl NickelSession {
             .sum()
     }
 
+    #[cfg(feature = "backend-udev")]
+    pub(crate) fn preview_generation(&self) -> u64 {
+        self.preview_counters.captures
+    }
+
     fn retire_preview(&mut self, id: &WindowId) {
         self.preview_requests.remove(id);
         self.preview_dirty.remove(id);
@@ -514,6 +519,10 @@ impl NickelSession {
         self.preview_frames.shrink_to_fit();
         self.preview_requests.shrink_to_fit();
         self.preview_dirty.shrink_to_fit();
+        #[cfg(feature = "backend-udev")]
+        if let Some(native) = self.native.as_mut() {
+            native.clear_task_switcher_cache();
+        }
     }
 }
 
