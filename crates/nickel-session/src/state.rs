@@ -592,10 +592,6 @@ impl NickelSession {
         self.reconcile_preview_admission();
     }
 
-    pub(crate) fn clear_preview_surface_interest(&mut self) {
-        self.clear_overlay_preview_interest();
-    }
-
     pub(crate) fn retire_shell_preview_memory(&mut self) {
         self.clear_all_previews();
     }
@@ -5024,13 +5020,13 @@ mod protocol_tests {
         ShellRegistrationRejection, admitted_preview_ids, advance_preview_content_generation,
         bounded_preview_ids, clamp_decorated_content_to_work_area, clamp_window_location,
         command_requires_shell_identity, drag_icon_location, identification_expiry_is_current,
-        maximized_content_geometry, output_index_for_shell_surface, preview_capture_attempt_due,
-        preview_mapping_has_exact_size, protocol_preview_from_cached,
-        record_preview_capture_attempt, restored_drag_content_geometry,
-        retain_live_idle_inhibitors, retire_displaced_window, retire_pointer_surface,
-        retire_shell_surface, reuse_preview_pixels, shell_registration_rejection,
-        shell_registration_role_changed, shell_role_accepts_ordinary_focus,
-        shell_surface_output_from_title, test_control_may_invoke,
+        maximized_content_geometry, output_index_for_shell_surface, preview_mapping_has_exact_size,
+        protocol_preview_from_cached, record_preview_capture_attempt,
+        restored_drag_content_geometry, retain_live_idle_inhibitors, retire_displaced_window,
+        retire_pointer_surface, retire_shell_surface, reuse_preview_pixels,
+        shell_registration_rejection, shell_registration_role_changed,
+        shell_role_accepts_ordinary_focus, shell_surface_output_from_title,
+        test_control_may_invoke,
     };
     use crate::shell_layout::Geometry;
     use nickel_session_protocol::{
@@ -5184,7 +5180,10 @@ mod protocol_tests {
     fn failed_capture_rolls_the_real_frame_and_allocation_back_into_session() {
         let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
         let (_event_loop, mut session) = preview_test_session();
-        let id = session.windows.insert();
+        let id = session
+            .windows
+            .insert(crate::window_registry::WindowAdmission::Ordinary)
+            .unwrap();
         session.preview_admitted.insert(id);
         session.preview_frames.insert(
             id,
@@ -5210,7 +5209,12 @@ mod protocol_tests {
         let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
         let (_event_loop, mut session) = preview_test_session();
         let ids = (0..PREVIEW_ENTRY_CAPACITY)
-            .map(|_| session.windows.insert())
+            .map(|_| {
+                session
+                    .windows
+                    .insert(crate::window_registry::WindowAdmission::Ordinary)
+                    .unwrap()
+            })
             .collect::<Vec<_>>();
         session.preview_admitted.extend(ids.iter().copied());
         for id in ids {
@@ -5244,13 +5248,19 @@ mod protocol_tests {
     fn stale_retry_epoch_cannot_consume_new_generation_pending_work() {
         let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
         let (mut event_loop, mut session) = preview_test_session();
-        let old = session.windows.insert();
+        let old = session
+            .windows
+            .insert(crate::window_registry::WindowAdmission::Ordinary)
+            .unwrap();
         session.preview_retry_pending.insert(old);
         session.schedule_preview_retry();
         let stale_epoch = session.preview_retry_scheduled.unwrap();
 
         session.clear_all_previews();
-        let current = session.windows.insert();
+        let current = session
+            .windows
+            .insert(crate::window_registry::WindowAdmission::Ordinary)
+            .unwrap();
         session.preview_content_generation.insert(current, 10);
         session.preview_retry_pending.insert(current);
         session.schedule_preview_retry();
@@ -5267,8 +5277,22 @@ mod protocol_tests {
     fn real_session_reconcile_preserves_seven_frames_for_each_visible_consumer() {
         let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
         let (_event_loop, mut session) = preview_test_session();
-        let switcher = (0..7).map(|_| session.windows.insert()).collect::<Vec<_>>();
-        let overlay = (0..7).map(|_| session.windows.insert()).collect::<Vec<_>>();
+        let switcher = (0..7)
+            .map(|_| {
+                session
+                    .windows
+                    .insert(crate::window_registry::WindowAdmission::Ordinary)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let overlay = (0..7)
+            .map(|_| {
+                session
+                    .windows
+                    .insert(crate::window_registry::WindowAdmission::Ordinary)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
         session.set_switcher_preview_interest(switcher.clone());
         session.set_overlay_preview_interest(overlay.clone());
         for id in switcher.iter().chain(&overlay).copied() {
@@ -5296,7 +5320,10 @@ mod protocol_tests {
     fn real_preview_query_and_encode_counters_partition_the_aggregate() {
         let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
         let (_event_loop, mut session) = preview_test_session();
-        let id = session.windows.insert();
+        let id = session
+            .windows
+            .insert(crate::window_registry::WindowAdmission::Ordinary)
+            .unwrap();
         session.preview_admitted.insert(id);
         session.preview_frames.insert(
             id,
@@ -5335,7 +5362,10 @@ mod protocol_tests {
     fn real_session_attempt_generation_blocks_other_nodes_until_explicit_retry() {
         let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
         let (_event_loop, mut session) = preview_test_session();
-        let id = session.windows.insert();
+        let id = session
+            .windows
+            .insert(crate::window_registry::WindowAdmission::Ordinary)
+            .unwrap();
         session.preview_content_generation.insert(id, 6);
         let first_node_wave = session.begin_preview_render_wave();
         assert!(record_preview_capture_attempt(
@@ -5368,10 +5398,11 @@ mod protocol_tests {
         let ids = (0..nickel_session_protocol::MAX_WINDOWS as u64)
             .map(super::WindowId)
             .collect::<Vec<_>>();
-        let admitted = bounded_preview_ids(ids, 500);
+        let selected = nickel_session_protocol::MAX_WINDOWS / 2;
+        let admitted = bounded_preview_ids(ids, selected);
 
         assert_eq!(admitted.len(), PREVIEW_ENTRIES_PER_VISIBLE_CONSUMER);
-        assert!(admitted.contains(&super::WindowId(500)));
+        assert!(admitted.contains(&super::WindowId(selected as u64)));
         assert_eq!(
             PREVIEW_BYTE_CAPACITY,
             PREVIEW_ENTRY_CAPACITY * PREVIEW_FRAME_BYTES
