@@ -903,6 +903,11 @@ impl SdlShell {
                     tracing::warn!(?role, "failed to configure Windows shell window");
                 }
             }
+            SurfaceRole::WindowPreview => {
+                if !crate::platform::configure_preview_window(&window) {
+                    tracing::warn!(?role, "failed to configure Windows shell window");
+                }
+            }
             SurfaceRole::WindowContextMenu => {
                 if !crate::platform::configure_context_menu_window(&window) {
                     tracing::warn!(?role, "failed to configure Windows shell window");
@@ -1102,9 +1107,9 @@ fn surface_geometry(
         ),
         SurfaceRole::WindowPreview => (
             WINDOW_PREVIEW_TITLE,
-            geometry.x,
-            geometry.y,
-            300.min(geometry.width),
+            geometry.x + geometry.width.saturating_sub(1160.min(geometry.width)) as i32 / 2,
+            geometry.y + geometry.height.saturating_sub(220.min(geometry.height)) as i32 / 2,
+            1160.min(geometry.width),
             220.min(geometry.height),
             true,
         ),

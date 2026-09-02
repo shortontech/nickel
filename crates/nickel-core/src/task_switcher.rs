@@ -66,6 +66,15 @@ impl<Id: Clone + Eq> TaskSwitcher<Id> {
         self.selected
     }
 
+    pub fn visible_range(&self, maximum: usize) -> std::ops::Range<usize> {
+        let visible = self.candidates.len().min(maximum);
+        let start = self
+            .selected
+            .saturating_sub(visible / 2)
+            .min(self.candidates.len().saturating_sub(visible));
+        start..start + visible
+    }
+
     pub fn apply(
         &mut self,
         action: HotkeyAction,

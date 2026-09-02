@@ -674,6 +674,7 @@ fn focus_visible_overlay(shell: &mut SdlShell, state: &LiveShell) {
         SurfaceRole::Launcher,
         SurfaceRole::ControlCenter,
         SurfaceRole::CodexProjectMenu,
+        SurfaceRole::WindowPreview,
     ] {
         #[cfg(target_os = "linux")]
         if role == SurfaceRole::Launcher {
@@ -1336,7 +1337,9 @@ fn main() -> Result<(), String> {
         .name("nickel-shortcut-events".into())
         .spawn(move || {
             while let Ok(shortcut) = hotkey_rx.recv() {
+                tracing::debug!(?shortcut, "forwarding global shortcut to SDL");
                 if event_sender.push_custom_event(shortcut).is_err() {
+                    tracing::warn!("could not forward global shortcut to SDL");
                     break;
                 }
             }
@@ -1541,14 +1544,17 @@ fn main() -> Result<(), String> {
                 }
             },
             Some(ShellEvent::GlobalShortcut(shortcut)) => {
+                tracing::debug!(?shortcut, "handling global shortcut");
                 shell.begin_input_observation(Instant::now());
                 if state.global_shortcut(shortcut) {
                     sync_visibility(&mut shell, &state);
+                    state.sync_transient_overlays();
                     focus_visible_overlay(&mut shell, &state);
                     render_role(&mut shell, &mut state, SurfaceRole::Desktop)?;
                     render_role(&mut shell, &mut state, SurfaceRole::Panel)?;
                     render_role(&mut shell, &mut state, SurfaceRole::Launcher)?;
                     render_role(&mut shell, &mut state, SurfaceRole::ControlCenter)?;
+                    render_role(&mut shell, &mut state, SurfaceRole::WindowPreview)?;
                     render_role(&mut shell, &mut state, SurfaceRole::Lock)?;
                     render_role(&mut shell, &mut state, SurfaceRole::Screenshot)?;
                 }
