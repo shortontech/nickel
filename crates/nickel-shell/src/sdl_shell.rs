@@ -38,6 +38,47 @@ pub const LOCK_TITLE: &str = "Nickel Lock";
 pub const SCREENSHOT_TITLE: &str = "Nickel Screenshot";
 pub const PANEL_HEIGHT: u32 = 56;
 const RUNTIME_SAMPLE_CAPACITY: usize = 64;
+const OUTPUT_RETIREMENT_SETTLE: Duration = Duration::from_millis(500);
+
+#[derive(Default)]
+struct OutputRetirementTracker {
+    missing_since: HashMap<String, Instant>,
+}
+
+impl OutputRetirementTracker {
+    fn observe<'a>(
+        &mut self,
+        now: Instant,
+        live_outputs: &[String],
+        owned_outputs: impl IntoIterator<Item = &'a str>,
+    ) -> Vec<String> {
+        self.missing_since
+            .retain(|output, _| !live_outputs.iter().any(|live| live == output));
+
+        for output in owned_outputs {
+            if live_outputs.iter().any(|live| live == output) {
+                self.missing_since.remove(output);
+            } else {
+                self.missing_since.entry(output.to_owned()).or_insert(now);
+            }
+        }
+
+        self.missing_since
+            .iter()
+            .filter(|(_, missing_since)| {
+                now.saturating_duration_since(**missing_since) >= OUTPUT_RETIREMENT_SETTLE
+            })
+            .map(|(output, _)| output.clone())
+            .collect()
+    }
+
+    fn next_deadline(&self) -> Option<Instant> {
+        self.missing_since
+            .values()
+            .map(|missing_since| *missing_since + OUTPUT_RETIREMENT_SETTLE)
+            .min()
+    }
+}
 
 fn push_bounded(samples: &mut VecDeque<u64>, sample: u64) {
     if samples.len() == RUNTIME_SAMPLE_CAPACITY {
@@ -193,6 +234,7 @@ pub struct SdlShell {
     input_to_present_us: VecDeque<u64>,
     warm_present_allocations: VecDeque<u64>,
     presenter_cache_peak_bytes: Cell<usize>,
+    output_retirements: OutputRetirementTracker,
     pending_input_started: Option<Instant>,
     video: sdl3::VideoSubsystem,
     _sdl: sdl3::Sdl,
@@ -240,6 +282,7 @@ impl SdlShell {
             input_to_present_us: VecDeque::with_capacity(RUNTIME_SAMPLE_CAPACITY),
             warm_present_allocations: VecDeque::with_capacity(RUNTIME_SAMPLE_CAPACITY),
             presenter_cache_peak_bytes: Cell::new(0),
+            output_retirements: OutputRetirementTracker::default(),
             pending_input_started: None,
             video,
             _sdl: sdl,
@@ -257,6 +300,7 @@ impl SdlShell {
     pub fn create_shell_surfaces(&mut self) -> Result<(), String> {
         self.surfaces.clear();
         self.surface_indices.clear();
+        self.output_retirements = OutputRetirementTracker::default();
         let displays = require_displays(self.display_geometries()?)?;
         let output_names = self.display_names()?;
         for (display_index, geometry) in displays.iter().copied().enumerate() {
@@ -291,7 +335,7 @@ impl SdlShell {
     pub fn sync_display_geometry(&mut self) -> Result<(), String> {
         let displays = self.display_geometries()?;
         let output_names = self.display_names()?;
-        self.retire_disconnected_output_surfaces(&output_names);
+        self.retire_settled_output_surfaces(&output_names, Instant::now());
         if displays.is_empty() {
             for surface in &mut self.surfaces {
                 surface.display_connected = false;
@@ -431,10 +475,17 @@ impl SdlShell {
         Ok(())
     }
 
-    fn retire_disconnected_output_surfaces(&mut self, output_names: &[String]) {
-        if !self.surfaces.iter().any(|surface| {
-            output_role_surface_is_disconnected(surface.role, &surface.output_name, output_names)
-        }) {
+    fn retire_settled_output_surfaces(&mut self, output_names: &[String], now: Instant) {
+        let owned_outputs = self
+            .surfaces
+            .iter()
+            .filter(|surface| output_role(surface.role))
+            .map(|surface| surface.output_name.as_str())
+            .collect::<Vec<_>>();
+        let retired = self
+            .output_retirements
+            .observe(now, output_names, owned_outputs);
+        if retired.is_empty() {
             return;
         }
 
@@ -442,9 +493,16 @@ impl SdlShell {
         // presenter diagnostics for a disconnected output.
         let _ = self.memory_diagnostics();
         self.surfaces.retain(|surface| {
-            !output_role_surface_is_disconnected(surface.role, &surface.output_name, output_names)
+            !output_role_is_retired(surface.role, &surface.output_name, &retired)
         });
+        for output in retired {
+            self.output_retirements.missing_since.remove(&output);
+        }
         self.rebuild_surface_indices();
+    }
+
+    pub fn next_output_retirement_deadline(&self) -> Option<Instant> {
+        self.output_retirements.next_deadline()
     }
 
     fn rebuild_surface_indices(&mut self) {
@@ -1078,15 +1136,15 @@ fn require_displays(displays: Vec<DisplayGeometry>) -> Result<Vec<DisplayGeometr
     }
 }
 
-fn output_role_surface_is_disconnected(
-    role: SurfaceRole,
-    output_name: &str,
-    output_names: &[String],
-) -> bool {
+fn output_role(role: SurfaceRole) -> bool {
     matches!(
         role,
         SurfaceRole::Desktop | SurfaceRole::Panel | SurfaceRole::Lock
-    ) && !output_names.iter().any(|name| name == output_name)
+    )
+}
+
+fn output_role_is_retired(role: SurfaceRole, output_name: &str, retired: &[String]) -> bool {
+    output_role(role) && retired.iter().any(|output| output == output_name)
 }
 
 #[cfg(test)]
@@ -1137,12 +1195,14 @@ pub(crate) fn parse_proc_status_rss(status: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DESKTOP_TITLE, DisplayGeometry, LAUNCHER_TITLE, PANEL_TITLE, SurfaceRole,
-        durable_presenter_peak, output_role_surface_is_disconnected, parse_proc_status_rss,
-        require_displays, shell_surface_title, surface_geometry, surface_is_borderless,
+        DESKTOP_TITLE, DisplayGeometry, LAUNCHER_TITLE, OUTPUT_RETIREMENT_SETTLE,
+        OutputRetirementTracker, PANEL_TITLE, SurfaceRole, durable_presenter_peak,
+        output_role_is_retired, parse_proc_status_rss, require_displays, shell_surface_title,
+        surface_geometry, surface_is_borderless,
     };
 
     use nickel_ui::AggregatePresenterCacheDiagnostics;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn dummy_sdl_presenter_has_zero_warm_frame_allocations() {
@@ -1295,51 +1355,122 @@ mod tests {
     }
 
     #[test]
-    fn disconnected_output_roles_are_retired_even_when_live_outputs_have_panels() {
-        let outputs = vec!["winit".to_owned()];
+    fn unchanged_output_surface_ids_survive_transient_missing_snapshots() {
+        let started = Instant::now();
+        let mut tracker = OutputRetirementTracker::default();
         let mut surfaces = vec![
-            (SurfaceRole::Desktop, "winit".to_owned()),
-            (SurfaceRole::Panel, "winit".to_owned()),
-            (SurfaceRole::Lock, "winit".to_owned()),
-            (SurfaceRole::Desktop, "memory-a".to_owned()),
-            (SurfaceRole::Panel, "memory-a".to_owned()),
-            (SurfaceRole::Lock, "memory-a".to_owned()),
-            (SurfaceRole::Desktop, "memory-b".to_owned()),
-            (SurfaceRole::Panel, "memory-b".to_owned()),
-            (SurfaceRole::Lock, "memory-b".to_owned()),
-            (SurfaceRole::Launcher, "memory-b".to_owned()),
+            (SurfaceRole::Desktop, "winit".to_owned(), 11_u32),
+            (SurfaceRole::Panel, "winit".to_owned(), 12),
+            (SurfaceRole::Lock, "winit".to_owned(), 13),
         ];
 
-        surfaces
-            .retain(|(role, output)| !output_role_surface_is_disconnected(*role, output, &outputs));
-
-        assert_eq!(surfaces.len(), 4);
         assert!(
-            surfaces
-                .iter()
-                .all(|(role, output)| { output == "winit" || *role == SurfaceRole::Launcher })
+            tracker
+                .observe(started, &[], ["winit", "winit", "winit"])
+                .is_empty()
+        );
+        assert!(
+            tracker
+                .observe(
+                    started + Duration::from_millis(100),
+                    &["winit".to_owned()],
+                    ["winit", "winit", "winit"],
+                )
+                .is_empty()
+        );
+        surfaces.retain(|(role, output, _)| !output_role_is_retired(*role, output, &[]));
+        assert_eq!(
+            surfaces.iter().map(|(_, _, id)| *id).collect::<Vec<_>>(),
+            vec![11, 12, 13],
+            "transient snapshots must not replace unchanged-output surfaces"
+        );
+        assert_eq!(tracker.next_deadline(), None);
+    }
+
+    #[test]
+    fn removed_output_roles_retire_only_after_settled_confirmation() {
+        let started = Instant::now();
+        let mut tracker = OutputRetirementTracker::default();
+        assert!(tracker.observe(started, &[], ["memory-a"]).is_empty());
+        assert!(
+            tracker
+                .observe(
+                    started + OUTPUT_RETIREMENT_SETTLE - Duration::from_millis(1),
+                    &[],
+                    ["memory-a"],
+                )
+                .is_empty()
+        );
+        let retired = tracker.observe(started + OUTPUT_RETIREMENT_SETTLE, &[], ["memory-a"]);
+        assert_eq!(retired, vec!["memory-a".to_owned()]);
+        let mut surfaces = vec![
+            (SurfaceRole::Desktop, "winit".to_owned(), 11_u32),
+            (SurfaceRole::Desktop, "memory-a".to_owned(), 21),
+            (SurfaceRole::Panel, "memory-a".to_owned(), 22),
+            (SurfaceRole::Lock, "memory-a".to_owned(), 23),
+        ];
+        surfaces.retain(|(role, output, _)| !output_role_is_retired(*role, output, &retired));
+        assert_eq!(
+            surfaces,
+            vec![(SurfaceRole::Desktop, "winit".to_owned(), 11)]
         );
     }
 
     #[test]
-    fn unique_output_name_churn_retains_only_live_output_roles() {
-        let outputs = vec!["winit".to_owned()];
-        let mut surfaces = [SurfaceRole::Desktop, SurfaceRole::Panel, SurfaceRole::Lock]
-            .into_iter()
-            .map(|role| (role, "winit".to_owned()))
-            .collect::<Vec<_>>();
+    fn reconnect_after_retirement_starts_a_fresh_settlement_generation() {
+        let started = Instant::now();
+        let mut tracker = OutputRetirementTracker::default();
+        assert!(tracker.observe(started, &[], ["memory-a"]).is_empty());
+        let retired = tracker.observe(started + OUTPUT_RETIREMENT_SETTLE, &[], ["memory-a"]);
+        assert_eq!(retired, vec!["memory-a".to_owned()]);
+        let retired_ids = [21_u32, 22, 23];
+
+        let reconnected = started + OUTPUT_RETIREMENT_SETTLE + Duration::from_millis(1);
+        assert!(
+            tracker
+                .observe(reconnected, &["memory-a".to_owned()], ["memory-a"])
+                .is_empty()
+        );
+        assert!(
+            tracker
+                .observe(reconnected + Duration::from_millis(1), &[], ["memory-a"])
+                .is_empty()
+        );
+        assert_eq!(
+            tracker.next_deadline(),
+            Some(reconnected + Duration::from_millis(1) + OUTPUT_RETIREMENT_SETTLE)
+        );
+        let fresh_ids = [31_u32, 32, 33];
+        assert_ne!(retired_ids, fresh_ids);
+    }
+
+    #[test]
+    fn unique_output_name_churn_has_one_bounded_pending_generation() {
+        let started = Instant::now();
+        let mut tracker = OutputRetirementTracker::default();
+        let mut now = started;
 
         for generation in 0..512 {
             let historical = format!("memory-{generation}");
-            surfaces.extend(
-                [SurfaceRole::Desktop, SurfaceRole::Panel, SurfaceRole::Lock]
-                    .into_iter()
-                    .map(|role| (role, historical.clone())),
+            assert!(
+                tracker
+                    .observe(now, &["winit".to_owned()], ["winit", &historical])
+                    .is_empty()
             );
-            surfaces.retain(|(role, output)| {
-                !output_role_surface_is_disconnected(*role, output, &outputs)
-            });
-            assert_eq!(surfaces.len(), 3);
+            now += Duration::from_millis(1);
+            assert!(
+                tracker
+                    .observe(now, &["winit".to_owned()], ["winit", &historical])
+                    .is_empty()
+            );
+            now += OUTPUT_RETIREMENT_SETTLE;
+            assert_eq!(
+                tracker.observe(now, &["winit".to_owned()], ["winit", &historical]),
+                vec![historical]
+            );
+            tracker.missing_since.clear();
+            assert_eq!(tracker.missing_since.len(), 0);
+            now += Duration::from_millis(1);
         }
     }
 }

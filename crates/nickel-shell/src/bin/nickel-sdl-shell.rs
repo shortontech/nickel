@@ -1456,6 +1456,10 @@ fn main() -> Result<(), String> {
         let next_deadline = hover_repaint
             .map(|(_, deadline)| deadline.min(next_deadline))
             .unwrap_or(next_deadline);
+        let next_deadline = shell
+            .next_output_retirement_deadline()
+            .map(|deadline| deadline.min(next_deadline))
+            .unwrap_or(next_deadline);
         #[cfg(not(target_os = "linux"))]
         let next_deadline = overlay_focus_loss
             .map(|(_, _, deadline)| deadline.min(next_deadline))
@@ -1695,6 +1699,14 @@ fn main() -> Result<(), String> {
             Some(ShellEvent::Redraw(_)) => {}
             Some(event) => tracing::debug!(?event, "SDL shell event"),
             None => {}
+        }
+        if shell
+            .next_output_retirement_deadline()
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            shell.sync_display_geometry()?;
+            sync_visibility(&mut shell, &state);
+            render_all(&mut shell, &mut state)?;
         }
         if let Some(project_id) = state.take_requested_codex_project() {
             codex.open_project_by_id(&mut shell, &project_id)?;
