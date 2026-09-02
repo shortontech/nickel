@@ -2776,6 +2776,7 @@ dependencies = [
  "nix 0.31.3",
  "resvg",
  "serde_json",
+ "sha2",
  "smithay",
  "smithay-client-toolkit 0.20.0",
  "softbuffer",

@@ -1,4 +1,6 @@
 use crate::shell_layout::Geometry;
+#[cfg(test)]
+use sha2::{Digest, Sha256};
 #[cfg(feature = "backend-udev")]
 use smithay::backend::renderer::element::solid::SolidColorBuffer;
 use smithay::{
@@ -36,7 +38,7 @@ struct TitlebarCacheEntry {
     buffer: MemoryRenderBuffer,
     bytes: usize,
     #[cfg(test)]
-    pixels: Vec<u8>,
+    pixel_digest: [u8; 32],
 }
 
 #[derive(Default)]
@@ -236,6 +238,8 @@ pub fn render_titlebar_with_mode(
         cache.misses = cache.misses.saturating_add(1);
     }
     let (buffer, raster_pixels) = render_titlebar_raster(width, title, background, foreground)?;
+    #[cfg(test)]
+    let pixel_digest = Sha256::digest(&raster_pixels).into();
     #[cfg(not(test))]
     let _ = raster_pixels;
     let title = title.to_owned();
@@ -283,7 +287,7 @@ pub fn render_titlebar_with_mode(
         buffer: buffer.clone(),
         bytes: retained_bytes,
         #[cfg(test)]
-        pixels: raster_pixels,
+        pixel_digest,
     });
     cache.live_bytes = cache.live_bytes.saturating_add(retained_bytes);
     cache.peak_bytes = cache.peak_bytes.max(cache.live_bytes);
@@ -330,13 +334,13 @@ pub fn retain_titlebars_for_windows(owners: impl IntoIterator<Item = u64>) {
 }
 
 #[cfg(test)]
-fn cached_titlebar_pixels(
+fn cached_titlebar_pixel_digest(
     owner: Option<u64>,
     width: i32,
     title: &str,
     background: u32,
     foreground: u32,
-) -> Option<Vec<u8>> {
+) -> Option<[u8; 32]> {
     let cache = TITLEBAR_CACHE.get()?.lock().ok()?;
     cache
         .entries
@@ -348,7 +352,7 @@ fn cached_titlebar_pixels(
                 && entry.background == background
                 && entry.foreground == foreground
         })
-        .map(|entry| entry.pixels.clone())
+        .map(|entry| entry.pixel_digest)
 }
 
 fn render_titlebar_uncached(
@@ -535,14 +539,16 @@ pub fn hit_test(content: Geometry, x: i32, y: i32) -> Option<FramePart> {
 
 #[cfg(test)]
 mod tests {
+    use sha2::{Digest, Sha256};
     use std::sync::{Mutex, MutexGuard};
 
     use super::{
         FramePart, RESIZE_BORDER, TITLEBAR_CACHE, TITLEBAR_CACHE_MAX_BYTES,
-        TITLEBAR_CACHE_MAX_ENTRIES, TITLEBAR_HEIGHT, TitlebarCacheMode, cached_titlebar_pixels,
-        hit_test, outer_geometry, render_titlebar, render_titlebar_for, render_titlebar_pixels,
-        render_titlebar_with_mode, retain_titlebars_for_windows, titlebar_cache_diagnostics,
-        titlebar_geometry, topmost_frame_target,
+        TITLEBAR_CACHE_MAX_ENTRIES, TITLEBAR_HEIGHT, TitlebarCacheMode,
+        cached_titlebar_pixel_digest, hit_test, outer_geometry, render_titlebar,
+        render_titlebar_for, render_titlebar_pixels, render_titlebar_with_mode,
+        retain_titlebars_for_windows, titlebar_cache_diagnostics, titlebar_geometry,
+        topmost_frame_target,
     };
     use crate::shell_layout::Geometry;
 
@@ -779,19 +785,22 @@ mod tests {
                 std::hint::black_box(bypass);
                 bypass_samples.push(started.elapsed().as_secs_f64() * 1_000_000.0);
 
-                let cached_pixels =
-                    cached_titlebar_pixels(Some(owner), width, &title, 0x20242c, 0xe8edf4)
-                        .expect("pixels retained by production cache path");
+                let cached_digest =
+                    cached_titlebar_pixel_digest(Some(owner), width, &title, 0x20242c, 0xe8edf4)
+                        .expect("digest retained by production cache path");
                 let bypass_pixels = render_titlebar_pixels(width, &title, 0x20242c, 0xe8edf4)
                     .expect("bypass authoritative pixels")
                     .0;
-                assert_eq!(cached_pixels, bypass_pixels);
+                let bypass_digest: [u8; 32] = Sha256::digest(&bypass_pixels).into();
+                assert_eq!(cached_digest, bypass_digest);
             }
             let cached = admission_stats(cached_samples);
             let bypass = admission_stats(bypass_samples);
-            let retained_bytes = titlebar_cache_diagnostics().live_bytes;
+            let diagnostics = titlebar_cache_diagnostics();
+            let retained_bytes = diagnostics.live_bytes;
+            let oracle_bytes = diagnostics.entries * std::mem::size_of::<[u8; 32]>();
             println!(
-                "{{\"schema\":\"nickel-cache-admission-v1\",\"cache\":\"window_titlebar_rasters\",\"workload\":\"{workload}\",\"fixture\":\"multi_owner_mixed_1920_3840\",\"profile\":\"release\",\"samples\":{SAMPLES},\"cached_median_us\":{:.3},\"cached_p95_us\":{:.3},\"bypass_median_us\":{:.3},\"bypass_p95_us\":{:.3},\"retained_bytes\":{retained_bytes},\"complexity\":{{\"key_fields\":5,\"invalidation_triggers\":5,\"storage_collections\":1}},\"output_equivalence\":\"exact_cached_source_rgba\"}}",
+                "{{\"schema\":\"nickel-cache-admission-v1\",\"cache\":\"window_titlebar_rasters\",\"workload\":\"{workload}\",\"fixture\":\"multi_owner_mixed_1920_3840\",\"profile\":\"release\",\"samples\":{SAMPLES},\"cached_median_us\":{:.3},\"cached_p95_us\":{:.3},\"bypass_median_us\":{:.3},\"bypass_p95_us\":{:.3},\"retained_bytes\":{retained_bytes},\"test_oracle_bytes\":{oracle_bytes},\"complexity\":{{\"key_fields\":5,\"invalidation_triggers\":5,\"storage_collections\":1}},\"output_equivalence\":\"sha256_cached_source_rgba\"}}",
                 cached.median_us, cached.p95_us, bypass.median_us, bypass.p95_us
             );
             if workload == "warm" {

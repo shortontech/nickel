@@ -85,6 +85,10 @@ fn retain_live_idle_inhibitors<K: Eq + std::hash::Hash>(
     inhibitors.retain(|surface, _| is_alive(surface));
 }
 
+fn identification_expiry_is_current(current_generation: u64, scheduled_generation: u64) -> bool {
+    current_generation == scheduled_generation
+}
+
 fn workspace_error(error: WorkspaceError) -> &'static str {
     match error {
         WorkspaceError::UnknownWorkspace => "unknown workspace",
@@ -460,6 +464,19 @@ pub struct SurfaceBufferCommit {
 }
 
 impl NickelSession {
+    fn expire_output_identification(&mut self, scheduled_generation: u64) -> bool {
+        if !identification_expiry_is_current(self.identify_outputs_generation, scheduled_generation)
+        {
+            return false;
+        }
+        self.identify_outputs_until = None;
+        #[cfg(feature = "backend-udev")]
+        if let Some(native) = self.native.as_mut() {
+            native.retire_identify_badges();
+        }
+        true
+    }
+
     fn begin_output_identification(&mut self) {
         const IDENTIFY_DURATION: std::time::Duration = std::time::Duration::from_secs(3);
         self.identify_outputs_generation = self.identify_outputs_generation.wrapping_add(1);
@@ -475,8 +492,7 @@ impl NickelSession {
         if let Err(error) = self
             .event_loop_handle
             .insert_source(timer, move |_, _, data| {
-                if data.identify_outputs_generation == generation {
-                    data.identify_outputs_until = None;
+                if data.expire_output_identification(generation) {
                     data.request_output_redraw();
                     #[cfg(feature = "backend-udev")]
                     if data.native.is_some() {
@@ -4527,8 +4543,8 @@ mod protocol_tests {
     use super::{
         DisplacedWindow, RegisteredShellRole, ShellRegistrationRejection,
         clamp_decorated_content_to_work_area, clamp_window_location,
-        command_requires_shell_identity, drag_icon_location, maximized_content_geometry,
-        output_index_for_shell_surface, restored_drag_content_geometry,
+        command_requires_shell_identity, drag_icon_location, identification_expiry_is_current,
+        maximized_content_geometry, output_index_for_shell_surface, restored_drag_content_geometry,
         retain_live_idle_inhibitors, retire_displaced_window, retire_pointer_surface,
         retire_shell_surface, shell_registration_rejection, shell_registration_role_changed,
         shell_role_accepts_ordinary_focus, shell_surface_output_from_title,
@@ -4653,6 +4669,13 @@ mod protocol_tests {
             &surface,
             None
         ));
+    }
+
+    #[test]
+    fn only_the_latest_output_identification_generation_may_expire() {
+        assert!(identification_expiry_is_current(7, 7));
+        assert!(!identification_expiry_is_current(8, 7));
+        assert!(!identification_expiry_is_current(7, 8));
     }
 
     #[test]

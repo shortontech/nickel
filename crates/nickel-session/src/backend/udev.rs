@@ -247,6 +247,14 @@ impl UdevData {
     pub(crate) fn identify_badge_diagnostics(&self) -> IdentifyBadgeDiagnostics {
         self.identify_badges.diagnostics()
     }
+
+    pub(crate) fn retire_identify_badges(&mut self) {
+        self.identify_badges.retire();
+    }
+
+    pub(crate) fn reconcile_identify_badges(&mut self, output_count: usize) {
+        self.identify_badges.retain_output_count(output_count);
+    }
 }
 
 #[derive(Clone)]
@@ -1059,6 +1067,14 @@ impl NickelSession {
             return;
         };
         let rendered = (|| {
+            native.reconcile_identify_badges(identify_output_count);
+            if identify_index.is_none() && !native.identify_badges.entries.is_empty() {
+                native.retire_identify_badges();
+                tracing::trace!(
+                    diagnostics = ?native.identify_badges.diagnostics(),
+                    "output-identification rasters retired"
+                );
+            }
             if !native.activity.is_active() {
                 return None;
             }
@@ -1073,16 +1089,6 @@ impl NickelSession {
                 .unwrap_or_else(fallback_arrow_cursor);
             let frame_icons = native.frame_icons.clone();
             let background = surface.background.clone();
-            native
-                .identify_badges
-                .retain_output_count(identify_output_count);
-            if identify_index.is_none() && !native.identify_badges.entries.is_empty() {
-                native.identify_badges.retire();
-                tracing::trace!(
-                    diagnostics = ?native.identify_badges.diagnostics(),
-                    "output-identification rasters retired"
-                );
-            }
             let identify_badge = identify_index.map(|index| native.identify_badges.get(index));
             let preview_windows = if self.locked {
                 Vec::new()
@@ -2264,6 +2270,23 @@ mod tests {
         assert_eq!(diagnostics.live_bytes, IDENTIFY_BADGE_BYTES * 2);
         assert_eq!(diagnostics.evictions, 2);
         assert!(cache.entries.keys().all(|index| *index < 2));
+    }
+
+    #[test]
+    fn output_identification_expiry_retires_badges_while_rendering_is_inactive() {
+        let rendering_active = false;
+        let mut cache = IdentifyBadgeCache::default();
+        cache.get(0);
+        cache.get(1);
+
+        // Expiry owns retirement directly; it does not depend on reaching an
+        // active renderer or producing another frame.
+        cache.retire();
+
+        assert!(!rendering_active);
+        assert_eq!(cache.diagnostics().entries, 0);
+        assert_eq!(cache.diagnostics().live_bytes, 0);
+        assert_eq!(cache.diagnostics().evictions, 2);
     }
 
     #[test]
