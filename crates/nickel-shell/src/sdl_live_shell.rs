@@ -6,6 +6,7 @@ use std::{
 
 #[cfg(not(target_os = "macos"))]
 use jiff::Zoned;
+use nickel_core::task_switcher::{SwitchWindow, TaskSwitchEffect, TaskSwitcher};
 use nickel_core::{
     launcher_preferences::LauncherPreferences,
     shell_settings::ShellSettings,
@@ -307,6 +308,14 @@ fn duration_until_next_minute() -> Duration {
         .max(Duration::from_millis(1))
 }
 
+fn future_panel_deadline(deadline: Instant, now: Instant) -> Instant {
+    if deadline > now {
+        deadline
+    } else {
+        now + duration_until_next_minute()
+    }
+}
+
 impl nickel_ui::Application for LockApplication {
     type Message = LockMessage;
 
@@ -429,6 +438,7 @@ pub struct LiveShell {
     tray_feed: TrayFeed,
     notification_feed: NotificationFeed,
     windows: Vec<OpenWindow>,
+    task_switcher: TaskSwitcher<crate::model::WindowId>,
     workspaces: Vec<platform::WorkspaceSummary>,
     window_feed_status: FeedStatus,
     workspace_feed_status: FeedStatus,
@@ -709,6 +719,7 @@ impl LiveShell {
             tray_feed,
             notification_feed,
             windows,
+            task_switcher: TaskSwitcher::default(),
             workspaces,
             window_feed_status: FeedStatus::Loading,
             workspace_feed_status: FeedStatus::Loading,
@@ -1013,9 +1024,7 @@ impl LiveShell {
 
     pub fn next_host_deadline(&self) -> Option<Instant> {
         [
-            self.desktop_deadline,
             self.panel_deadline,
-            self.lock_deadline,
             self.control_deadline,
             self.screenshot.next_deadline(),
             self.preview_frame
@@ -1122,6 +1131,7 @@ impl LiveShell {
             return false;
         }
         let changed = self.step_control_host(HostBatch {
+            now: Some(now),
             events: vec![HostEvent::Poll],
             ..HostBatch::default()
         });
@@ -1139,7 +1149,9 @@ impl LiveShell {
             ..HostBatch::default()
         });
         self.panel_change_token = outcome.change_token;
-        self.panel_deadline = outcome.next_deadline;
+        self.panel_deadline = outcome
+            .next_deadline
+            .map(|deadline| future_panel_deadline(deadline, now));
         outcome.changed
     }
 
@@ -1878,6 +1890,20 @@ impl LiveShell {
                 self.apply_launcher_signal(false);
                 true
             }
+            platform::GlobalShortcut::SwitchNext => {
+                self.apply_task_switch_action(nickel_core::hotkeys::HotkeyAction::SwitchNext)
+            }
+            platform::GlobalShortcut::SwitchPrevious => {
+                self.apply_task_switch_action(nickel_core::hotkeys::HotkeyAction::SwitchPrevious)
+            }
+            platform::GlobalShortcut::SwitchGroupNext => {
+                self.apply_task_switch_action(nickel_core::hotkeys::HotkeyAction::SwitchGroupNext)
+            }
+            platform::GlobalShortcut::SwitchGroupPrevious => self
+                .apply_task_switch_action(nickel_core::hotkeys::HotkeyAction::SwitchGroupPrevious),
+            platform::GlobalShortcut::CommitSwitch => {
+                self.apply_task_switch_action(nickel_core::hotkeys::HotkeyAction::CommitSwitch)
+            }
             platform::GlobalShortcut::LockState { locked } => {
                 self.locked = locked;
                 let application = self.lock_host.application_mut();
@@ -1935,6 +1961,36 @@ impl LiveShell {
             }
             _ => false,
         }
+    }
+
+    fn apply_task_switch_action(&mut self, action: nickel_core::hotkeys::HotkeyAction) -> bool {
+        let windows = self
+            .windows
+            .iter()
+            .map(|window| SwitchWindow {
+                id: window.id,
+                application_id: window
+                    .application_id
+                    .as_ref()
+                    .map(|id| id.as_str().to_owned())
+                    .unwrap_or_else(|| window.title.clone()),
+                active: window.active,
+            })
+            .collect::<Vec<_>>();
+        let effects = self.task_switcher.apply(action, &windows);
+        let changed = !effects.is_empty();
+        for effect in effects {
+            if let TaskSwitchEffect::ActivateWindow(window) = effect {
+                let _ = send_session_command(
+                    "task-switcher-activate",
+                    ShellCommand::WindowAction {
+                        window,
+                        action: WindowAction::Activate,
+                    },
+                );
+            }
+        }
+        changed
     }
 
     /// Requests a launcher toggle initiated by shell-owned input such as a controller.
@@ -4124,6 +4180,37 @@ mod tests {
         assert!(shell.poll_panel_deadline(now));
         assert_ne!(shell.panel_host.application().clock, "stale");
         assert!(shell.panel_deadline.is_some_and(|deadline| deadline > now));
+    }
+
+    #[test]
+    fn expired_panel_deadline_is_advanced_out_of_the_event_loop() {
+        let now = Instant::now();
+        let expired = now - std::time::Duration::from_secs(1);
+
+        assert!(super::future_panel_deadline(expired, now) > now);
+    }
+
+    #[test]
+    fn event_loop_deadline_excludes_hosts_without_poll_paths() {
+        let mut shell = LiveShell::new().unwrap();
+        let stale = Instant::now() - std::time::Duration::from_secs(1);
+        shell.desktop_deadline = Some(stale);
+        shell.lock_deadline = Some(stale);
+        shell.panel_deadline = None;
+        shell.control_deadline = None;
+
+        assert_ne!(shell.next_host_deadline(), Some(stale));
+    }
+
+    #[test]
+    fn due_control_deadline_is_consumed_with_current_time() {
+        let mut shell = LiveShell::new().unwrap();
+        let now = Instant::now();
+        shell.control_deadline = Some(now - std::time::Duration::from_secs(1));
+
+        shell.poll_host_deadlines(now);
+
+        assert!(shell.control_deadline.is_none_or(|deadline| deadline > now));
     }
 
     #[test]

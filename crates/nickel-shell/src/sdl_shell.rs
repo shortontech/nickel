@@ -882,6 +882,34 @@ impl SdlShell {
         let window = builder.build().map_err(|error| error.to_string());
         restore_sdl_app_id(previous_app_id);
         let mut window = window?;
+        #[cfg(target_os = "windows")]
+        match role {
+            SurfaceRole::Desktop => {
+                if !crate::platform::configure_desktop_window(
+                    &window,
+                    (geometry.x, geometry.y),
+                    (geometry.width, geometry.height),
+                ) {
+                    tracing::warn!(?role, "failed to configure Windows shell window");
+                }
+            }
+            SurfaceRole::Panel => {
+                if !crate::platform::configure_panel_window(&window) {
+                    tracing::warn!(?role, "failed to configure Windows shell window");
+                }
+            }
+            SurfaceRole::Launcher => {
+                if !crate::platform::configure_launcher_window(&window) {
+                    tracing::warn!(?role, "failed to configure Windows shell window");
+                }
+            }
+            SurfaceRole::WindowContextMenu => {
+                if !crate::platform::configure_context_menu_window(&window) {
+                    tracing::warn!(?role, "failed to configure Windows shell window");
+                }
+            }
+            _ => {}
+        }
         if role == SurfaceRole::Screenshot {
             window
                 .set_minimum_size(720, 480)

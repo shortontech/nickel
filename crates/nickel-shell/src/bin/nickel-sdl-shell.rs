@@ -191,10 +191,6 @@ impl<A: Application> EmbeddedUiSurface<A> {
         outcome
     }
 
-    fn deadline(&self) -> Option<Instant> {
-        self.host.next_deadline()
-    }
-
     fn poll_due(&mut self, now: Instant) -> Option<HostEventOutcome> {
         let deadline = self.host.next_deadline()?;
         if now < deadline {
@@ -276,15 +272,6 @@ fn codex_project_application_id(project_id: Option<&str>, root: &Path) -> String
 }
 
 impl CodexSurfaces {
-    fn next_deadline(&self) -> Option<Instant> {
-        self.project_menu_host
-            .as_ref()
-            .and_then(EmbeddedUiSurface::deadline)
-            .into_iter()
-            .chain(self.chats.iter().filter_map(|chat| chat.host.deadline()))
-            .min()
-    }
-
     fn new(shell: &SdlShell) -> Result<Self, String> {
         let project_menu = shell
             .surfaces()
@@ -1422,9 +1409,9 @@ fn main() -> Result<(), String> {
     let mut hover_repaint: Option<(SurfaceRole, Instant)> = None;
     let mut controller = ControllerInput::new();
     let mut controller_schedule = nickel_ui::ControllerPollSchedule::new(Instant::now());
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
     let mut focused_overlays = HashSet::new();
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
     let mut overlay_focus_loss: Option<(SurfaceId, SurfaceRole, Instant)> = None;
     let mut diagnostic_loop_started = Instant::now();
     let mut diagnostic_loop_iterations = 0_u64;
@@ -1450,10 +1437,6 @@ fn main() -> Result<(), String> {
             .deadline()
             .min(system_subscription.deadline())
             .min(controller_schedule.deadline());
-        let next_deadline = codex
-            .next_deadline()
-            .map(|deadline| deadline.min(next_deadline))
-            .unwrap_or(next_deadline);
         let next_deadline = state
             .next_host_deadline()
             .map(|deadline| deadline.min(next_deadline))
@@ -1465,7 +1448,7 @@ fn main() -> Result<(), String> {
             .next_output_retirement_deadline()
             .map(|deadline| deadline.min(next_deadline))
             .unwrap_or(next_deadline);
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
         let next_deadline = overlay_focus_loss
             .map(|(_, _, deadline)| deadline.min(next_deadline))
             .unwrap_or(next_deadline);
@@ -1609,7 +1592,7 @@ fn main() -> Result<(), String> {
                 surface: _surface,
                 focused: false,
             }) => {
-                #[cfg(not(target_os = "linux"))]
+                #[cfg(target_os = "macos")]
                 if let Some(role @ (SurfaceRole::Launcher | SurfaceRole::ControlCenter)) =
                     shell.surface(_surface).map(|entry| entry.role())
                     && focused_overlays.remove(&_surface)
@@ -1629,7 +1612,7 @@ fn main() -> Result<(), String> {
                     state.focus_launcher_search();
                     shell.start_text_input(surface);
                 }
-                #[cfg(not(target_os = "linux"))]
+                #[cfg(target_os = "macos")]
                 if shell.surface(surface).is_some_and(|entry| {
                     matches!(
                         entry.role(),
@@ -1638,7 +1621,7 @@ fn main() -> Result<(), String> {
                 }) {
                     focused_overlays.insert(surface);
                 }
-                #[cfg(not(target_os = "linux"))]
+                #[cfg(target_os = "macos")]
                 if overlay_focus_loss.is_some_and(|(pending, _, _)| pending == surface) {
                     overlay_focus_loss = None;
                 }
@@ -1755,7 +1738,7 @@ fn main() -> Result<(), String> {
         {
             render_role(&mut shell, &mut state, role)?;
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
         if overlay_focus_loss.is_some_and(|(_, _, deadline)| Instant::now() >= deadline)
             && let Some((_, role, _)) = overlay_focus_loss.take()
             && state.hide_overlay(role)
