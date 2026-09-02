@@ -199,6 +199,7 @@ struct DiscoveredDevice {
 pub(crate) enum RendererRetainedReason {
     ActiveSurfaces,
     PrimaryForCrossGpu,
+    PendingDependentRecovery,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -276,6 +277,7 @@ pub struct UdevData {
     discovered_devices: HashMap<DrmNode, DiscoveredDevice>,
     devices: HashMap<DrmNode, DeviceData>,
     renderer_lifecycle: RendererLifecycleLedger<DrmNode>,
+    pending_primary_dependents: HashSet<DrmNode>,
     disabled_outputs: HashMap<String, DisabledOutput>,
     layout: OutputLayout,
     bootstrap_render_until: Instant,
@@ -399,6 +401,7 @@ impl UdevData {
                             *node == self.primary_gpu,
                             active_surfaces,
                             secondary_surfaces > 0,
+                            !self.pending_primary_dependents.is_empty(),
                         ),
                     }
                 })
@@ -411,11 +414,14 @@ fn renderer_retained_reason(
     is_primary: bool,
     active_surfaces: usize,
     secondary_active: bool,
+    pending_dependent_recovery: bool,
 ) -> Option<RendererRetainedReason> {
     if active_surfaces > 0 {
         Some(RendererRetainedReason::ActiveSurfaces)
     } else if is_primary && secondary_active {
         Some(RendererRetainedReason::PrimaryForCrossGpu)
+    } else if is_primary && pending_dependent_recovery {
+        Some(RendererRetainedReason::PendingDependentRecovery)
     } else {
         None
     }
@@ -454,6 +460,17 @@ fn dependent_renderers_after_primary_removal<K: Copy + Eq>(
     live_nodes
         .into_iter()
         .filter(|candidate| *candidate != primary_gpu)
+        .collect()
+}
+
+fn pending_recovery_devices<K: Copy + Eq + Hash, V>(
+    pending: &HashSet<K>,
+    discovered: &HashMap<K, V>,
+) -> Vec<K> {
+    pending
+        .iter()
+        .filter(|node| discovered.contains_key(node))
+        .copied()
         .collect()
 }
 
@@ -501,6 +518,7 @@ pub fn init_udev(
         discovered_devices: HashMap::new(),
         devices: HashMap::new(),
         renderer_lifecycle: RendererLifecycleLedger::default(),
+        pending_primary_dependents: HashSet::new(),
         disabled_outputs: HashMap::new(),
         layout: OutputLayout::default(),
         bootstrap_render_until: Instant::now() + BOOTSTRAP_RENDER_TIMEOUT,
@@ -798,6 +816,12 @@ impl NickelSession {
             .expect("DRM device was just discovered")
             .is_evdi;
         if native.devices.contains_key(&node) {
+            let retry_pending =
+                node == native.primary_gpu && !native.pending_primary_dependents.is_empty();
+            if retry_pending {
+                self.recover_primary_dependents(handle);
+                self.retire_inactive_renderers();
+            }
             return Ok(());
         }
         if is_evdi
@@ -815,8 +839,47 @@ impl NickelSession {
         if let Some(primary_gpu) = primary_to_scan {
             self.scan_connectors(primary_gpu);
         }
+        let is_primary = self
+            .native
+            .as_ref()
+            .is_some_and(|native| node == native.primary_gpu);
+        if is_primary {
+            self.recover_primary_dependents(handle);
+        }
         self.retire_inactive_renderers();
         Ok(())
+    }
+
+    fn recover_primary_dependents(
+        &mut self,
+        handle: &smithay::reexports::calloop::LoopHandle<'static, Self>,
+    ) {
+        let pending = self
+            .native
+            .as_ref()
+            .map(|native| {
+                pending_recovery_devices(
+                    &native.pending_primary_dependents,
+                    &native.discovered_devices,
+                )
+                .into_iter()
+                .map(|node| (node, native.discovered_devices[&node].path.clone()))
+                .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for (node, path) in pending {
+            match self.add_drm_device_with_handle(handle, node, &path) {
+                Ok(()) => {
+                    if let Some(native) = self.native.as_mut() {
+                        native.pending_primary_dependents.remove(&node);
+                    }
+                    tracing::info!(%node, "recovered DRM device after primary returned");
+                }
+                Err(error) => {
+                    tracing::warn!(%node, %error, "failed to recover DRM device after primary returned");
+                }
+            }
+        }
     }
 
     fn activate_drm_device(
@@ -947,6 +1010,7 @@ impl NickelSession {
                     **node == native.primary_gpu,
                     device.surfaces.len(),
                     secondary_active,
+                    !native.pending_primary_dependents.is_empty(),
                 )
                 .is_none()
             })
@@ -1370,6 +1434,13 @@ impl NickelSession {
                 )
             })
             .unwrap_or_default();
+        if !dependent_nodes.is_empty()
+            && let Some(native) = self.native.as_mut()
+        {
+            native
+                .pending_primary_dependents
+                .extend(dependent_nodes.iter().copied());
+        }
         for dependent in dependent_nodes {
             tracing::warn!(
                 primary = %node,

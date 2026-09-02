@@ -3,8 +3,8 @@ use super::{
     RendererRetainedReason,
     dependent_renderers_after_primary_removal, device_activation_priority,
     mark_disabled_outputs_absent, normalize_capture_rows, parse_kde_cursor_settings,
-    primary_dependency_to_activate, published_disabled_outputs, render_primary_available,
-    renderer_retained_reason, switcher_visible_range,
+    pending_recovery_devices, primary_dependency_to_activate, published_disabled_outputs,
+    render_primary_available, renderer_retained_reason, switcher_visible_range,
 };
 use std::collections::HashMap;
 
@@ -148,6 +148,31 @@ fn primary_removal_retires_every_dependent_device_and_notifier_generation() {
 }
 
 #[test]
+fn primary_return_consumes_preserved_secondary_and_evdi_recovery_without_hotplug() {
+    let primary = 1_u8;
+    let mut lifecycle = RendererLifecycleLedger::<u8>::default();
+    let mut pending = std::collections::HashSet::from([2_u8, 3_u8]);
+    let discovered = HashMap::from([(primary, "primary"), (2, "secondary"), (3, "evdi")]);
+
+    lifecycle.activate(primary);
+    assert_eq!(
+        renderer_retained_reason(true, 0, false, !pending.is_empty()),
+        Some(RendererRetainedReason::PendingDependentRecovery)
+    );
+    let recovery = pending_recovery_devices(&pending, &discovered);
+    assert_eq!(recovery.len(), 2);
+    for node in recovery {
+        lifecycle.activate(node);
+        pending.remove(&node);
+    }
+
+    assert!(pending.is_empty());
+    assert_eq!(lifecycle.live_generations.len(), 3);
+    assert!(lifecycle.generation(2).is_some());
+    assert!(lifecycle.generation(3).is_some());
+}
+
+#[test]
 fn unplugged_ordinary_and_deferred_evdi_outputs_are_absent_from_snapshots() {
     let mut outputs = HashMap::from([
         (
@@ -185,12 +210,12 @@ fn disable_disconnect_reenable_and_failed_reenable_preserve_lifecycle_contract()
     let mut lifecycle = RendererLifecycleLedger::<&str>::default();
     let active = lifecycle.activate("evdi");
     assert_eq!(
-        renderer_retained_reason(false, 1, false),
+        renderer_retained_reason(false, 1, false, false),
         Some(RendererRetainedReason::ActiveSurfaces)
     );
 
     // Disable/disconnect retires the only resource and its notifier generation.
-    assert_eq!(renderer_retained_reason(false, 0, false), None);
+    assert_eq!(renderer_retained_reason(false, 0, false, false), None);
     assert!(lifecycle.retire("evdi"));
     assert_eq!(lifecycle.generation("evdi"), None);
 
@@ -212,15 +237,15 @@ fn disable_disconnect_reenable_and_failed_reenable_preserve_lifecycle_contract()
 #[test]
 fn renderer_retention_requires_active_output_or_cross_gpu_primary_dependency() {
     assert_eq!(
-        renderer_retained_reason(false, 1, false),
+        renderer_retained_reason(false, 1, false, false),
         Some(RendererRetainedReason::ActiveSurfaces)
     );
     assert_eq!(
-        renderer_retained_reason(true, 0, true),
+        renderer_retained_reason(true, 0, true, false),
         Some(RendererRetainedReason::PrimaryForCrossGpu)
     );
-    assert_eq!(renderer_retained_reason(false, 0, true), None);
-    assert_eq!(renderer_retained_reason(true, 0, false), None);
+    assert_eq!(renderer_retained_reason(false, 0, true, false), None);
+    assert_eq!(renderer_retained_reason(true, 0, false, false), None);
 }
 
 #[test]
