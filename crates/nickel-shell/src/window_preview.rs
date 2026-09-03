@@ -19,6 +19,9 @@ pub const PREVIEW_HEIGHT: f32 = 214.0;
 const GAP: f32 = 10.0;
 const PADDING: f32 = 12.0;
 const CLOSE_SIZE: f32 = 28.0;
+const CARD_PADDING: f32 = 8.0;
+const CARD_GAP: f32 = 2.0;
+const THUMBNAIL_HEIGHT: f32 = 116.0;
 pub const MENU_WIDTH: f32 = 220.0;
 const MENU_ROW_HEIGHT: f32 = 40.0;
 const MENU_ROW_GAP: f32 = 4.0;
@@ -342,6 +345,17 @@ pub fn preview_dimensions(window_count: usize) -> (u32, u32) {
     )
 }
 
+pub fn native_thumbnail_bounds(index: usize) -> (i32, i32, i32, i32) {
+    let left = PADDING + index as f32 * (CARD_WIDTH + GAP) + CARD_PADDING;
+    let top = PADDING + CARD_PADDING + CLOSE_SIZE + CARD_GAP;
+    (
+        left.round() as i32,
+        top.round() as i32,
+        (left + CARD_WIDTH - CARD_PADDING * 2.0).round() as i32,
+        (top + THUMBNAIL_HEIGHT).round() as i32,
+    )
+}
+
 pub fn build_preview_frame(
     group: &WindowGroup,
     previews: &HashMap<WindowId, Arc<image::RgbaImage>>,
@@ -395,8 +409,8 @@ fn preview_view(
                 || {
                     AnyView::new(
                         Container::new()
-                            .width(CARD_WIDTH - 16.0)
-                            .height(116.0)
+                            .width(CARD_WIDTH - CARD_PADDING * 2.0)
+                            .height(THUMBNAIL_HEIGHT)
                             .background(palette.background)
                             .radius(6.0),
                     )
@@ -404,16 +418,16 @@ fn preview_view(
                 |image| {
                     AnyView::new(
                         Image::new(preview_image_id(window), image)
-                            .width(CARD_WIDTH - 16.0)
-                            .height(116.0),
+                            .width(CARD_WIDTH - CARD_PADDING * 2.0)
+                            .height(THUMBNAIL_HEIGHT),
                     )
                 },
             );
             let card = Container::new()
                 .width(CARD_WIDTH)
                 .height(PREVIEW_HEIGHT - PADDING * 2.0)
-                .padding(Insets::all(8.0))
-                .gap(2.0)
+                .padding(Insets::all(CARD_PADDING))
+                .gap(CARD_GAP)
                 .background(if hovered == Some(window) {
                     palette.surface_hover
                 } else {
@@ -528,6 +542,12 @@ mod tests {
     use crate::model::OpenWindow;
     use nickel_core::theme::Appearance;
     use nickel_ui::{ActionKind, SemanticAction};
+
+    #[test]
+    fn native_thumbnails_follow_card_geometry() {
+        assert_eq!(native_thumbnail_bounds(0), (20, 50, 280, 166));
+        assert_eq!(native_thumbnail_bounds(1), (306, 50, 566, 166));
+    }
 
     fn center(rect: Rect) -> Point {
         Point {

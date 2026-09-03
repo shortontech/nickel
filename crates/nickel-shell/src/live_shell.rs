@@ -281,6 +281,49 @@ impl PanelApplication {
             effects: Vec::new(),
         }
     }
+
+    pub fn populated_fixture(mut launcher: Launcher, palette: ThemePalette) -> Self {
+        launcher.set_codex_available(true);
+        let mut application = Self::fixture(launcher, palette);
+        application.windows = vec![
+            OpenWindow {
+                id: crate::model::WindowId(101),
+                application_id: Some(crate::model::ApplicationId::new("fixture.browser")),
+                active: true,
+                title: "Fixture Browser".into(),
+            },
+            OpenWindow {
+                id: crate::model::WindowId(202),
+                application_id: Some(crate::model::ApplicationId::new("fixture.editor")),
+                active: false,
+                title: "Fixture Editor".into(),
+            },
+        ];
+        application.task_icons = [
+            image::Rgba([40, 140, 240, 255]),
+            image::Rgba([220, 90, 120, 255]),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, color)| {
+            Some((
+                0x6000 + index as u16,
+                Arc::new(image::RgbaImage::from_pixel(32, 32, color)),
+            ))
+        })
+        .collect();
+        application.tray = vec![TrayItem {
+            id: "fixture-tray".into(),
+            title: "Fixture notification icon".into(),
+            icon: image::RgbaImage::from_pixel(18, 18, image::Rgba([80, 210, 140, 255])),
+        }];
+        application.tray_icons = application
+            .tray
+            .iter()
+            .map(|item| Arc::new(item.icon.clone()))
+            .collect();
+        application
+    }
 }
 
 fn panel_clock_text() -> (String, String) {
@@ -437,6 +480,7 @@ pub struct LiveShell {
     tray_feed: TrayFeed,
     notification_feed: NotificationFeed,
     windows: Vec<OpenWindow>,
+    window_icons: HashMap<crate::model::WindowId, Arc<image::RgbaImage>>,
     task_switcher: TaskSwitcher<crate::model::WindowId>,
     task_switcher_group: Option<WindowGroup>,
     workspaces: Vec<platform::WorkspaceSummary>,
@@ -719,6 +763,7 @@ impl LiveShell {
             tray_feed,
             notification_feed,
             windows,
+            window_icons: HashMap::new(),
             task_switcher: TaskSwitcher::default(),
             task_switcher_group: None,
             workspaces,
@@ -825,11 +870,22 @@ impl LiveShell {
         if update_feed_status(&mut self.window_feed_status, windows.status(), "windows") {
             changed = true;
         }
-        if let FeedState::Ready(windows) = windows
-            && windows != self.windows
-        {
-            self.windows = windows;
-            changed = true;
+        if let FeedState::Ready(windows) = windows {
+            if windows != self.windows {
+                self.windows = windows;
+                changed = true;
+            }
+            let previous_icon_count = self.window_icons.len();
+            self.window_icons
+                .retain(|window, _| self.windows.iter().any(|item| item.id == *window));
+            for window in &self.windows {
+                if !self.window_icons.contains_key(&window.id)
+                    && let Some(icon) = self.window_feed.icon(window.id)
+                {
+                    self.window_icons.insert(window.id, Arc::new(icon));
+                }
+            }
+            changed |= self.window_icons.len() != previous_icon_count;
         }
         let workspaces = self.window_feed.workspaces();
         if update_feed_status(
@@ -1317,7 +1373,7 @@ impl LiveShell {
         outcome.changed
     }
 
-    pub fn panel_click(&mut self, x: f32, width: u32) -> bool {
+    pub fn panel_click(&mut self, x: f32, width: u32, secondary: bool) -> bool {
         self.sync_panel_host();
         let outcome = self.panel_host.step(HostBatch {
             surface_size: Some((width, 56)),
@@ -1329,7 +1385,18 @@ impl LiveShell {
         });
         self.panel_change_token = outcome.change_token;
         self.panel_deadline = outcome.next_deadline;
-        self.apply_panel_effects()
+        let effects = std::mem::take(&mut self.panel_host.application_mut().effects);
+        let changed = !effects.is_empty();
+        for action in effects {
+            if secondary {
+                if let PanelAction::Tray(id) = action {
+                    self.tray_feed.context_menu(&id);
+                }
+            } else {
+                self.apply_panel_action(action);
+            }
+        }
+        changed
     }
 
     pub fn panel_controller(&mut self, action: ControllerAction, width: u32) -> bool {
@@ -2781,6 +2848,13 @@ impl LiveShell {
                     .or_else(|| {
                         crate::icons::nickel_application(&group.application_name)
                             .map(|(id, image)| (id, Arc::new(image)))
+                    })
+                    .or_else(|| {
+                        group.windows.first().and_then(|window| {
+                            self.window_icons.get(&window.id).cloned().map(|icon| {
+                                self.launcher_icons.resolve_window_icon(window.id, icon)
+                            })
+                        })
                     })
             })
             .collect();

@@ -477,6 +477,32 @@ impl LauncherIconCache {
         image.map(|image| (id, image))
     }
 
+    pub(crate) fn resolve_window_icon(
+        &mut self,
+        window: crate::model::WindowId,
+        image: Arc<RgbaImage>,
+    ) -> (u16, Arc<RgbaImage>) {
+        let key = format!("window:{}", window.0);
+        if let Some(cached) = self.icons.get(&key)
+            && cached
+                .image
+                .as_ref()
+                .is_some_and(|cached_image| cached_image.as_raw() == image.as_raw())
+        {
+            return (cached.id, Arc::clone(cached.image.as_ref().unwrap()));
+        }
+        let id = self.next_id;
+        self.next_id = self.next_id.checked_add(1).unwrap_or(0x4000);
+        self.insert(
+            key,
+            CachedIcon {
+                id,
+                image: Some(Arc::clone(&image)),
+            },
+        );
+        (id, image)
+    }
+
     fn structural(
         &mut self,
         name: &str,

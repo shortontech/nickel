@@ -16,13 +16,14 @@ use windows::{
     Win32::{
         Foundation::{
             COLORREF, CloseHandle, GlobalFree, HANDLE, HWND, LPARAM, LRESULT, LocalFree, POINT,
-            RECT, WPARAM,
+            RECT, SIZE, WPARAM,
         },
         Graphics::Dwm::{
             DWM_THUMBNAIL_PROPERTIES, DWM_TNP_OPACITY, DWM_TNP_RECTDESTINATION,
             DWM_TNP_SOURCECLIENTAREAONLY, DWM_TNP_VISIBLE, DWM_WINDOW_CORNER_PREFERENCE,
-            DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmRegisterThumbnail,
-            DwmSetWindowAttribute, DwmUnregisterThumbnail, DwmUpdateThumbnailProperties,
+            DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmQueryThumbnailSourceSize,
+            DwmRegisterThumbnail, DwmSetWindowAttribute, DwmUnregisterThumbnail,
+            DwmUpdateThumbnailProperties,
         },
         Graphics::Gdi::{
             BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleBitmap,
@@ -85,7 +86,7 @@ use windows::{
                 WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSCOMMAND,
                 WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN,
                 WS_CLIPSIBLINGS, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-                WS_EX_TOOLWINDOW, WindowFromPoint,
+                WS_EX_TOOLWINDOW, WS_POPUP, WindowFromPoint,
             },
         },
     },
@@ -1037,6 +1038,8 @@ static PANEL_WINDOW_HANDLE: std::sync::atomic::AtomicIsize = std::sync::atomic::
 static SHELL_HOOK_MESSAGE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 static TRAY_NOTIFY_WINDOW_HANDLE: std::sync::atomic::AtomicIsize =
     std::sync::atomic::AtomicIsize::new(0);
+static SHELL_TRAY_WINDOW_HANDLE: std::sync::atomic::AtomicIsize =
+    std::sync::atomic::AtomicIsize::new(0);
 static PREVIOUS_FOREGROUND_WINDOW: std::sync::atomic::AtomicIsize =
     std::sync::atomic::AtomicIsize::new(0);
 static LAUNCHER_FOREGROUND_WINDOW: std::sync::atomic::AtomicIsize =
@@ -1075,23 +1078,16 @@ struct NativeTrayIcon {
 }
 
 #[repr(C)]
-struct TrayNotifyData {
-    signature: i32,
-    message: u32,
-    icon: TrayNotifyIconData,
-}
-
-#[repr(C)]
 struct TrayNotifyIconData {
-    cb_size: i32,
+    cb_size: u32,
     window: u32,
     id: u32,
     flags: u32,
     callback_message: u32,
     icon: u32,
     tip: [u16; 128],
-    state: i32,
-    state_mask: i32,
+    state: u32,
+    state_mask: u32,
     info: [u16; 256],
     version: u32,
     info_title: [u16; 64],
@@ -2084,7 +2080,7 @@ pub fn update_panel_fullscreen_state() {
             "failed to update panel borderless-fullscreen Z-order"
         );
     } else if previous != fullscreen {
-        tracing::debug!(
+        tracing::info!(
             fullscreen,
             panel = panel.0 as usize,
             "updated panel borderless-fullscreen state"
@@ -2188,19 +2184,48 @@ fn install_tray_host(hwnd: HWND) {
     }
 }
 
-fn install_tray_notify_window(parent: HWND) {
+fn install_tray_notify_window(_panel: HWND) {
     use std::sync::atomic::Ordering;
 
     if TRAY_NOTIFY_WINDOW_HANDLE.load(Ordering::Relaxed) != 0 {
         return;
     }
-    // SAFETY: The class procedure is static for the process lifetime. The child is an invisible
-    // protocol endpoint owned by Nickel's live panel window.
+    // SAFETY: The class procedures are static for the process lifetime. Shell_NotifyIcon first
+    // discovers a top-level Shell_TrayWnd, then sends its protocol message to TrayNotifyWnd.
     unsafe {
         let Ok(module) = GetModuleHandleW(None) else {
             eprintln!("failed to resolve Nickel's module for the notification-area host");
             return;
         };
+        let shell_class = WNDCLASSW {
+            hInstance: windows::Win32::Foundation::HINSTANCE(module.0),
+            lpszClassName: w!("Shell_TrayWnd"),
+            lpfnWndProc: Some(tray_window_proc),
+            ..Default::default()
+        };
+        if RegisterClassW(&raw const shell_class) == 0 {
+            eprintln!("failed to register Nickel's Shell_TrayWnd class");
+            return;
+        }
+        let Ok(shell_window) = CreateWindowExW(
+            WINDOW_EX_STYLE::default(),
+            shell_class.lpszClassName,
+            w!(""),
+            WS_POPUP,
+            0,
+            0,
+            1,
+            1,
+            None,
+            None,
+            Some(shell_class.hInstance),
+            None,
+        ) else {
+            eprintln!("failed to create Nickel's Shell_TrayWnd protocol host");
+            return;
+        };
+        SHELL_TRAY_WINDOW_HANDLE.store(shell_window.0 as isize, Ordering::Relaxed);
+
         let class = WNDCLASSW {
             hInstance: windows::Win32::Foundation::HINSTANCE(module.0),
             lpszClassName: w!("TrayNotifyWnd"),
@@ -2220,7 +2245,7 @@ fn install_tray_notify_window(parent: HWND) {
             0,
             1,
             1,
-            Some(parent),
+            Some(shell_window),
             None,
             Some(class.hInstance),
             None,
@@ -2265,14 +2290,25 @@ unsafe extern "system" fn tray_window_proc(
         // SAFETY: WM_COPYDATA guarantees the COPYDATASTRUCT and its buffer remain valid for this
         // synchronous call. Bounds and protocol signature are validated before interpretation.
         let copy = unsafe { &*(lparam.0 as *const COPYDATASTRUCT) };
+        const TRAY_HEADER_SIZE: usize = size_of::<i32>() + size_of::<u32>();
+        let minimum_icon_size = std::mem::offset_of!(TrayNotifyIconData, icon) + size_of::<u32>();
         if copy.dwData == 1
-            && copy.cbData as usize >= size_of::<TrayNotifyData>()
+            && copy.cbData as usize >= TRAY_HEADER_SIZE + minimum_icon_size
             && !copy.lpData.is_null()
         {
-            let data = unsafe { &*(copy.lpData as *const TrayNotifyData) };
-            if data.signature == 0x3475_3423_u32 as i32
-                && update_tray_icon(data.message, &data.icon)
-            {
+            let bytes = copy.lpData.cast::<u8>();
+            let signature = unsafe { bytes.cast::<i32>().read_unaligned() };
+            let operation = unsafe { bytes.add(size_of::<i32>()).cast::<u32>().read_unaligned() };
+            let mut icon: TrayNotifyIconData = unsafe { std::mem::zeroed() };
+            let supplied = (copy.cbData as usize - TRAY_HEADER_SIZE).min(size_of_val(&icon));
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    bytes.add(TRAY_HEADER_SIZE),
+                    (&raw mut icon).cast::<u8>(),
+                    supplied,
+                );
+            }
+            if signature == 0x3475_3423_u32 as i32 && update_tray_icon(operation, &icon) {
                 return LRESULT(1);
             }
         }
@@ -2499,8 +2535,8 @@ fn tray_guid(icon: &TrayNotifyIconData) -> Option<windows::core::GUID> {
 
 fn tray_icon_hidden(icon: &TrayNotifyIconData) -> bool {
     icon.flags & NIF_STATE.0 != 0
-        && icon.state_mask as u32 & NIS_HIDDEN.0 != 0
-        && icon.state as u32 & NIS_HIDDEN.0 != 0
+        && icon.state_mask & NIS_HIDDEN.0 != 0
+        && icon.state & NIS_HIDDEN.0 != 0
 }
 
 fn tray_icon_matches(
@@ -2757,23 +2793,17 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
                 return false;
             }
             let hwnd = HWND(preview as *mut c_void);
-            let mut work_area = RECT::default();
+            let panel = PANEL_WINDOW_HANDLE.load(Ordering::Relaxed);
+            let Some(work_area) = monitor_work_area(HWND(panel as *mut c_void)) else {
+                return false;
+            };
             unsafe {
-                if SystemParametersInfoW(
-                    SPI_GETWORKAREA,
-                    0,
-                    Some((&mut work_area as *mut RECT).cast()),
-                    Default::default(),
-                )
-                .is_err()
-                {
-                    return false;
-                }
                 let top = (work_area.bottom - height).max(work_area.top);
+                let left = clamp_preview_x(x, width, work_area);
                 if SetWindowPos(
                     hwnd,
                     Some(HWND_TOPMOST),
-                    x,
+                    left,
                     top,
                     width,
                     height,
@@ -2961,7 +2991,7 @@ fn show_dwm_previews(windows: &[WindowId]) -> bool {
     use std::sync::atomic::Ordering;
 
     clear_dwm_thumbnails();
-    let destination = CONTEXT_MENU_WINDOW_HANDLE.load(Ordering::Relaxed);
+    let destination = PREVIEW_WINDOW_HANDLE.load(Ordering::Relaxed);
     if destination == 0 {
         return false;
     }
@@ -2972,19 +3002,22 @@ fn show_dwm_previews(windows: &[WindowId]) -> bool {
         let Ok(thumbnail) = (unsafe { DwmRegisterThumbnail(destination, source) }) else {
             continue;
         };
-        const PREVIEW_CARD_WIDTH: i32 = 260;
-        let left = 10 + index as i32 * PREVIEW_CARD_WIDTH;
+        let (left, top, right, bottom) = crate::window_preview::native_thumbnail_bounds(index);
+        let bounds = RECT {
+            left,
+            top,
+            right,
+            bottom,
+        };
+        let destination_rect = unsafe { DwmQueryThumbnailSourceSize(thumbnail) }
+            .map(|source_size| contain_rect(bounds, source_size))
+            .unwrap_or(bounds);
         let properties = DWM_THUMBNAIL_PROPERTIES {
             dwFlags: DWM_TNP_RECTDESTINATION
                 | DWM_TNP_OPACITY
                 | DWM_TNP_VISIBLE
                 | DWM_TNP_SOURCECLIENTAREAONLY,
-            rcDestination: RECT {
-                left,
-                top: 44,
-                right: left + 240,
-                bottom: 179,
-            },
+            rcDestination: destination_rect,
             opacity: 255,
             fVisible: BOOL(1),
             fSourceClientAreaOnly: BOOL(1),
@@ -3003,6 +3036,53 @@ fn show_dwm_previews(windows: &[WindowId]) -> bool {
         *thumbnails = registered;
     }
     success
+}
+
+fn contain_rect(bounds: RECT, source: SIZE) -> RECT {
+    let width = i64::from((bounds.right - bounds.left).max(0));
+    let height = i64::from((bounds.bottom - bounds.top).max(0));
+    let source_width = i64::from(source.cx.max(0));
+    let source_height = i64::from(source.cy.max(0));
+    if width == 0 || height == 0 || source_width == 0 || source_height == 0 {
+        return bounds;
+    }
+    let (fitted_width, fitted_height) = if source_width * height > width * source_height {
+        (width, (source_height * width / source_width).max(1))
+    } else {
+        ((source_width * height / source_height).max(1), height)
+    };
+    let left = bounds.left + ((width - fitted_width) / 2) as i32;
+    let top = bounds.top + ((height - fitted_height) / 2) as i32;
+    RECT {
+        left,
+        top,
+        right: left + fitted_width as i32,
+        bottom: top + fitted_height as i32,
+    }
+}
+
+fn clamp_preview_x(requested: i32, width: i32, work_area: RECT) -> i32 {
+    requested.clamp(
+        work_area.left,
+        (work_area.right - width).max(work_area.left),
+    )
+}
+
+fn monitor_work_area(window: HWND) -> Option<RECT> {
+    if window.0.is_null() {
+        return None;
+    }
+    let monitor = unsafe { MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST) };
+    if monitor.is_invalid() {
+        return None;
+    }
+    let mut info = MONITORINFO {
+        cbSize: size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    unsafe { GetMonitorInfoW(monitor, &mut info) }
+        .as_bool()
+        .then_some(info.rcWork)
 }
 
 fn clear_dwm_thumbnails() {
@@ -3114,7 +3194,9 @@ unsafe extern "system" fn collect_window(hwnd: HWND, state: LPARAM) -> BOOL {
     if !is_bar_eligible_window(hwnd, &class) {
         return BOOL(1);
     }
-    let application_id = Some(
+    let application_id = Some(if is_nickel_host_terminal(&title) {
+        ApplicationId::new("org.nickel.ShellTerminal")
+    } else {
         executable_path(hwnd)
             .map(|path| {
                 ApplicationId::new(format!(
@@ -3124,8 +3206,8 @@ unsafe extern "system" fn collect_window(hwnd: HWND, state: LPARAM) -> BOOL {
             })
             .unwrap_or_else(|| {
                 ApplicationId::new(format!("windows-class:{}", class.to_ascii_lowercase()))
-            }),
-    );
+            })
+    });
     // SAFETY: state was constructed from a live Vec<OpenWindow> immediately before EnumWindows.
     let windows = unsafe { &mut *(state.0 as *mut Vec<OpenWindow>) };
     // Chrome and other multi-process applications can report a descendant HWND as foreground.
@@ -3144,6 +3226,18 @@ unsafe extern "system" fn collect_window(hwnd: HWND, state: LPARAM) -> BOOL {
         title,
     });
     BOOL(1)
+}
+
+fn is_nickel_host_terminal(title: &str) -> bool {
+    static EXECUTABLE_TITLE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    EXECUTABLE_TITLE
+        .get_or_init(|| {
+            env::current_exe()
+                .ok()
+                .map(|path| path.to_string_lossy().into_owned())
+        })
+        .as_deref()
+        .is_some_and(|executable| title.eq_ignore_ascii_case(executable))
 }
 
 fn park_iconic_window(hwnd: HWND) {
@@ -3363,6 +3457,7 @@ fn render_icon_sized(icon: HICON, width: u32, height: u32) -> Option<image::Rgba
             for (source, target) in bgra.chunks_exact(4).zip(rgba.chunks_exact_mut(4)) {
                 target.copy_from_slice(&[source[2], source[1], source[0], source[3]]);
             }
+            restore_legacy_icon_alpha(&mut rgba);
         }
         SelectObject(memory, previous);
         let _ = DeleteObject(HGDIOBJ(bitmap.0));
@@ -3371,6 +3466,16 @@ fn render_icon_sized(icon: HICON, width: u32, height: u32) -> Option<image::Rgba
         drawn
             .then(|| image::RgbaImage::from_raw(width, height, rgba))
             .flatten()
+    }
+}
+
+fn restore_legacy_icon_alpha(rgba: &mut [u8]) {
+    if rgba.chunks_exact(4).all(|pixel| pixel[3] == 0) {
+        for pixel in rgba.chunks_exact_mut(4) {
+            if pixel[..3].iter().any(|channel| *channel != 0) {
+                pixel[3] = 255;
+            }
+        }
     }
 }
 
@@ -3387,9 +3492,71 @@ mod tests {
     use windows::Win32::Foundation::RECT;
 
     use super::{
-        application_icon, executable_icon, is_shell_infrastructure, native_hotkey_requests,
-        parse_windows_command, rectangle_covers, should_restore_on_activation,
+        TrayNotifyIconData, application_icon, clamp_preview_x, contain_rect, executable_icon,
+        is_shell_infrastructure, native_hotkey_requests, parse_windows_command, rectangle_covers,
+        restore_legacy_icon_alpha, should_restore_on_activation,
     };
+
+    #[test]
+    fn native_tray_wire_layout_uses_packed_32_bit_handles() {
+        assert_eq!(std::mem::offset_of!(TrayNotifyIconData, icon), 20);
+        assert_eq!(std::mem::size_of::<TrayNotifyIconData>(), 956);
+    }
+
+    #[test]
+    fn legacy_icon_color_pixels_gain_opaque_alpha() {
+        let mut rgba = [20, 30, 40, 0, 0, 0, 0, 0];
+        restore_legacy_icon_alpha(&mut rgba);
+        assert_eq!(rgba, [20, 30, 40, 255, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn taskbar_preview_is_clamped_to_work_area_edges() {
+        let work_area = RECT {
+            left: 100,
+            top: 0,
+            right: 1100,
+            bottom: 700,
+        };
+        assert_eq!(clamp_preview_x(-500, 300, work_area), 100);
+        assert_eq!(clamp_preview_x(1000, 300, work_area), 800);
+        assert_eq!(clamp_preview_x(400, 300, work_area), 400);
+        assert_eq!(clamp_preview_x(400, 1200, work_area), 100);
+    }
+
+    #[test]
+    fn dwm_thumbnail_is_contained_and_centered_without_distortion() {
+        let bounds = RECT {
+            left: 20,
+            top: 50,
+            right: 280,
+            bottom: 166,
+        };
+        assert_eq!(
+            contain_rect(
+                bounds,
+                windows::Win32::Foundation::SIZE { cx: 1920, cy: 1080 }
+            ),
+            RECT {
+                left: 47,
+                top: 50,
+                right: 253,
+                bottom: 166,
+            }
+        );
+        assert_eq!(
+            contain_rect(
+                bounds,
+                windows::Win32::Foundation::SIZE { cx: 1080, cy: 1920 }
+            ),
+            RECT {
+                left: 117,
+                top: 50,
+                right: 182,
+                bottom: 166,
+            }
+        );
+    }
 
     #[test]
     fn shell_executable_icon_has_visible_pixels() {

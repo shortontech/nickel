@@ -1096,7 +1096,7 @@ fn handle_shell_input(
                     .surface(surface)
                     .map(|entry| entry.window().size().0)
                     .unwrap_or_default();
-                if state.panel_click(x, width) {
+                if state.panel_click(x, width, button == PointerButton::Secondary) {
                     sync_visibility(shell, state);
                     state.sync_transient_overlays();
                     focus_visible_overlay(shell, state);
@@ -1472,6 +1472,7 @@ fn main() -> Result<(), String> {
     wait_for_shell_readiness()?;
     let mut state = LiveShell::new()?;
     let mut codex = CodexSurfaces::new(&shell)?;
+    codex.ensure_project_menu(&shell)?;
     let hotkey_feed = platform::launcher_hotkey_receiver();
     tracing::info!(
         ownership = ?hotkey_feed.ownership,
@@ -1938,9 +1939,10 @@ fn main() -> Result<(), String> {
             }
             if let Some(host) = codex.project_menu_host.as_mut() {
                 let snapshot = &host.application_mut().state;
-                let codex_available =
-                    snapshot.status == ConnectionStatus::Ready && snapshot.account.authenticated;
-                let availability_changed = state.set_codex_available(codex_available);
+                // The panel entry represents the installed integration, not only a healthy,
+                // authenticated connection. Keep it reachable so its UI can explain and recover
+                // from disconnected, incompatible, or signed-out states.
+                let availability_changed = state.set_codex_available(true);
                 let projects = match snapshot.status {
                     ConnectionStatus::Loading => DashboardSection::Loading,
                     ConnectionStatus::Ready if snapshot.thread_snapshot_available => {

@@ -82,6 +82,22 @@ fn registers_every_shell_surface_fixture() {
                         && node.label.as_deref() == Some("Dismiss")
                 }));
             }
+            if entry.metadata.id == "shell.panel" && variant.id == "status-items" {
+                for label in [
+                    "Codex projects",
+                    "Fixture notification icon",
+                    "Fixture Browser",
+                    "Fixture Editor",
+                ] {
+                    assert!(
+                        session
+                            .accessibility_nodes()
+                            .iter()
+                            .any(|node| node.label.as_deref() == Some(label)),
+                        "populated panel fixture omitted {label}"
+                    );
+                }
+            }
             if entry.metadata.id == "shell.screenshot" {
                 let has_activate = session
                     .semantic_nodes()

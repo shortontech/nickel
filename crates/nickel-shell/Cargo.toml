@@ -89,6 +89,10 @@ name = "nickel-test-notification"
 path = "src/bin/nickel-test-notification.rs"
 
 [[bin]]
+name = "nickel-test-tray"
+path = "src/bin/nickel-test-tray.rs"
+
+[[bin]]
 name = "nickel-launcher-verify"
 path = "src/bin/nickel-launcher-verify.rs"
 required-features = ["workbench-fixtures"]

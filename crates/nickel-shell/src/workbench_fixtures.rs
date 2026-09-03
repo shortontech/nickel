@@ -50,6 +50,12 @@ const PANEL_VARIANTS: &[FixtureVariant] = &[
     variant("wide", "Wide", 1200, 56),
     variant("narrow", "Narrow", 640, 56),
     variant("fullscreen", "Fullscreen", 960, 56),
+    variant(
+        "status-items",
+        "Tasks, Codex, and notification area",
+        1200,
+        56,
+    ),
 ];
 const NOTIFICATION_VARIANTS: &[FixtureVariant] = &[
     variant("no-actions", "No actions", 420, 180),
@@ -408,6 +414,13 @@ impl Fixture for PanelFixture {
     }
     fn create() -> Self::App {
         PanelApplication::fixture(Launcher::default(), palette())
+    }
+    fn create_variant(variant: &FixtureVariant) -> Self::App {
+        if variant.id == "status-items" {
+            PanelApplication::populated_fixture(Launcher::default(), fixture_palette(variant.theme))
+        } else {
+            PanelApplication::fixture(Launcher::default(), fixture_palette(variant.theme))
+        }
     }
     fn surface_size() -> (u32, u32) {
         (1200, 56)
