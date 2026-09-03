@@ -38,6 +38,28 @@ pub const PANEL_HEIGHT: u32 = 56;
 const RUNTIME_SAMPLE_CAPACITY: usize = 64;
 const OUTPUT_RETIREMENT_SETTLE: Duration = Duration::from_millis(500);
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PanelEdge {
+    Top,
+    #[default]
+    Bottom,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ShellOptions {
+    pub create_desktop_surfaces: bool,
+    pub panel_edge: PanelEdge,
+}
+
+impl Default for ShellOptions {
+    fn default() -> Self {
+        Self {
+            create_desktop_surfaces: true,
+            panel_edge: PanelEdge::Bottom,
+        }
+    }
+}
+
 #[derive(Default)]
 struct OutputRetirementTracker {
     missing_since: HashMap<String, Instant>,
@@ -250,10 +272,15 @@ pub struct WinitShell {
     pending_input_started: Option<Instant>,
     clipboard: Option<std::cell::RefCell<arboard::Clipboard>>,
     started: Instant,
+    options: ShellOptions,
 }
 
 impl WinitShell {
     pub fn new(started: Instant) -> Result<Self, String> {
+        Self::new_with_options(started, ShellOptions::default())
+    }
+
+    pub fn new_with_options(started: Instant, options: ShellOptions) -> Result<Self, String> {
         let events = EventLoop::<ShellUserEvent>::with_user_event()
             .build()
             .map_err(|error| error.to_string())?;
@@ -278,6 +305,7 @@ impl WinitShell {
             pending_input_started: None,
             clipboard: arboard::Clipboard::new().ok().map(std::cell::RefCell::new),
             started,
+            options,
         })
     }
 
@@ -295,7 +323,8 @@ impl WinitShell {
             let output_name = output_names.get(display_index).ok_or_else(|| {
                 "winit output identity count changed during shell startup".to_string()
             })?;
-            if crate::platform::renders_desktop_background() {
+            if self.options.create_desktop_surfaces && crate::platform::renders_desktop_background()
+            {
                 self.create_surface(SurfaceRole::Desktop, display_index, geometry, output_name)?;
             }
             self.create_surface(SurfaceRole::Panel, display_index, geometry, output_name)?;
@@ -368,7 +397,8 @@ impl WinitShell {
                 }
                 for role in [SurfaceRole::Desktop, SurfaceRole::Panel, SurfaceRole::Lock] {
                     if role == SurfaceRole::Desktop
-                        && !crate::platform::renders_desktop_background()
+                        && (!self.options.create_desktop_surfaces
+                            || !crate::platform::renders_desktop_background())
                     {
                         continue;
                     }
@@ -379,7 +409,8 @@ impl WinitShell {
                     }) {
                         surface.display_index = display_index;
                         surface.display_connected = true;
-                        let (_, x, y, width, height, _) = surface_geometry(role, geometry);
+                        let (_, x, y, width, height, _) =
+                            surface_geometry(role, geometry, self.options.panel_edge);
                         surface
                             .window
                             .set_outer_position(LogicalPosition::new(x, y));
@@ -409,7 +440,8 @@ impl WinitShell {
             surface.display_index = 0;
             surface.output_name.clone_from(primary_name);
             surface.display_connected = true;
-            let (_, x, y, width, height, _) = surface_geometry(surface.role, primary);
+            let (_, x, y, width, height, _) =
+                surface_geometry(surface.role, primary, self.options.panel_edge);
             surface
                 .window
                 .set_outer_position(LogicalPosition::new(x, y));
@@ -441,7 +473,8 @@ impl WinitShell {
             let Some(display) = displays.get(display_index).copied() else {
                 continue;
             };
-            let (_, x, y, width, height, _) = surface_geometry(surface.role, display);
+            let (_, x, y, width, height, _) =
+                surface_geometry(surface.role, display, self.options.panel_edge);
             surface
                 .window
                 .set_outer_position(LogicalPosition::new(x, y));
@@ -898,7 +931,8 @@ impl WinitShell {
         geometry: DisplayGeometry,
         output_name: &str,
     ) -> Result<(), String> {
-        let (base_title, x, y, width, height, hidden) = surface_geometry(role, geometry);
+        let (base_title, x, y, width, height, hidden) =
+            surface_geometry(role, geometry, self.options.panel_edge);
         let title = shell_surface_title(role, base_title, output_name);
         let application_id = match role {
             SurfaceRole::Desktop => SessionShellRole::Desktop.application_id(),
@@ -1031,6 +1065,7 @@ fn shell_surface_title(role: SurfaceRole, title: &str, output_name: &str) -> Str
 fn surface_geometry(
     role: SurfaceRole,
     geometry: DisplayGeometry,
+    panel_edge: PanelEdge,
 ) -> (&'static str, i32, i32, u32, u32, bool) {
     match role {
         SurfaceRole::Desktop => (
@@ -1044,7 +1079,12 @@ fn surface_geometry(
         SurfaceRole::Panel => (
             PANEL_TITLE,
             geometry.x,
-            geometry.y + geometry.height.saturating_sub(PANEL_HEIGHT) as i32,
+            match panel_edge {
+                PanelEdge::Top => geometry.y,
+                PanelEdge::Bottom => {
+                    geometry.y + geometry.height.saturating_sub(PANEL_HEIGHT) as i32
+                }
+            },
             geometry.width,
             PANEL_HEIGHT,
             false,
@@ -1185,7 +1225,7 @@ pub(crate) fn parse_proc_status_rss(status: &str) -> Option<usize> {
 mod tests {
     use super::{
         DESKTOP_TITLE, DisplayGeometry, LAUNCHER_TITLE, OUTPUT_RETIREMENT_SETTLE,
-        OutputRetirementTracker, PANEL_TITLE, SurfaceRole, durable_presenter_peak,
+        OutputRetirementTracker, PANEL_TITLE, PanelEdge, SurfaceRole, durable_presenter_peak,
         output_role_is_retired, parse_proc_status_rss, require_displays, shell_surface_title,
         surface_geometry, surface_is_borderless,
     };
@@ -1263,12 +1303,16 @@ mod tests {
             scale: 1.5,
         };
         assert_eq!(
-            surface_geometry(SurfaceRole::Desktop, display),
+            surface_geometry(SurfaceRole::Desktop, display, PanelEdge::Bottom),
             ("Nickel Desktop", 40, 20, 1920, 1006, false)
         );
         assert_eq!(
-            surface_geometry(SurfaceRole::Panel, display),
+            surface_geometry(SurfaceRole::Panel, display, PanelEdge::Bottom),
             ("Nickel Panel", 40, 970, 1920, 56, false)
+        );
+        assert_eq!(
+            surface_geometry(SurfaceRole::Panel, display, PanelEdge::Top),
+            ("Nickel Panel", 40, 20, 1920, 56, false)
         );
     }
 

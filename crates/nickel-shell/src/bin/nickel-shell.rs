@@ -79,8 +79,102 @@ mod winit_shell;
 
 use live_shell::LiveShell;
 use winit_shell::{
-    ShellEvent, ShellUserEvent, SurfaceId, SurfaceRole, WinitShell, WinitWindowCompat,
+    PanelEdge, ShellEvent, ShellOptions, ShellUserEvent, SurfaceId, SurfaceRole, WinitShell,
+    WinitWindowCompat,
 };
+
+const NO_DESKTOP_WINDOWS_FLAG: &str = "--no-desktop-windows";
+const PANEL_TOP_FLAG: &str = "--panel-top";
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct CommandLineOptions {
+    no_desktop_windows: bool,
+    panel_top: bool,
+}
+
+impl CommandLineOptions {
+    fn parse(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Self, String> {
+        let mut options = Self::default();
+        for argument in arguments {
+            let argument = argument
+                .into_string()
+                .map_err(|_| "Nickel shell arguments must be valid UTF-8".to_string())?;
+            match argument.as_str() {
+                NO_DESKTOP_WINDOWS_FLAG => options.no_desktop_windows = true,
+                PANEL_TOP_FLAG => options.panel_top = true,
+                _ => {
+                    return Err(format!(
+                        "unknown Nickel shell argument {argument:?}; supported acceptance flags: \
+                         {NO_DESKTOP_WINDOWS_FLAG}, {PANEL_TOP_FLAG}"
+                    ));
+                }
+            }
+        }
+        Ok(options)
+    }
+
+    fn shell_options(self) -> ShellOptions {
+        ShellOptions {
+            create_desktop_surfaces: !self.no_desktop_windows,
+            panel_edge: if self.panel_top {
+                PanelEdge::Top
+            } else {
+                PanelEdge::Bottom
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+mod command_line_tests {
+    use super::{CommandLineOptions, NO_DESKTOP_WINDOWS_FLAG, PANEL_TOP_FLAG};
+    use crate::winit_shell::{PanelEdge, ShellOptions};
+    use std::ffi::OsString;
+
+    fn parse(arguments: &[&str]) -> Result<CommandLineOptions, String> {
+        CommandLineOptions::parse(arguments.iter().map(OsString::from))
+    }
+
+    #[test]
+    fn production_defaults_create_desktops_and_place_panel_at_bottom() {
+        assert_eq!(parse(&[]).unwrap().shell_options(), ShellOptions::default());
+    }
+
+    #[test]
+    fn acceptance_flags_are_independent_and_composable() {
+        assert_eq!(
+            parse(&[NO_DESKTOP_WINDOWS_FLAG]).unwrap().shell_options(),
+            ShellOptions {
+                create_desktop_surfaces: false,
+                panel_edge: PanelEdge::Bottom,
+            }
+        );
+        assert_eq!(
+            parse(&[PANEL_TOP_FLAG]).unwrap().shell_options(),
+            ShellOptions {
+                create_desktop_surfaces: true,
+                panel_edge: PanelEdge::Top,
+            }
+        );
+        assert_eq!(
+            parse(&[NO_DESKTOP_WINDOWS_FLAG, PANEL_TOP_FLAG])
+                .unwrap()
+                .shell_options(),
+            ShellOptions {
+                create_desktop_surfaces: false,
+                panel_edge: PanelEdge::Top,
+            }
+        );
+    }
+
+    #[test]
+    fn unknown_arguments_fail_closed() {
+        let error = parse(&["--desktop-ish"]).unwrap_err();
+        assert!(error.contains("unknown Nickel shell argument"));
+        assert!(error.contains(NO_DESKTOP_WINDOWS_FLAG));
+        assert!(error.contains(PANEL_TOP_FLAG));
+    }
+}
 
 fn p95_u64(samples: &[u64]) -> Option<u64> {
     let mut samples = samples.to_vec();
@@ -1319,6 +1413,7 @@ fn shell_event_ends_process(event: &ShellEvent) -> bool {
 }
 
 fn main() -> Result<(), String> {
+    let command_line = CommandLineOptions::parse(std::env::args_os().skip(1))?;
     nickel_logging::init("nickel-shell").map_err(|error| error.to_string())?;
     // The supervisor publishes its expected child PID and releases this
     // barrier before the shell attempts registration. Creating any Wayland
@@ -1336,7 +1431,7 @@ fn main() -> Result<(), String> {
         format!("Nickel shell could not authenticate with the session protocol: {error}")
     })?;
     let started = Instant::now();
-    let mut shell = WinitShell::new(started)?;
+    let mut shell = WinitShell::new_with_options(started, command_line.shell_options())?;
     wait_for_initial_display(&mut shell)?;
     shell.create_shell_surfaces()?;
     #[cfg(target_os = "linux")]

@@ -101,6 +101,17 @@ Launch the desktop shell:
 cargo run -p nickel-shell
 ```
 
+For a Windows cross-build smoke test under Proton, the shell has two optional acceptance flags:
+
+```bash
+proton run target/x86_64-pc-windows-gnu/debug/nickel.exe \
+  --no-desktop-windows --panel-top
+```
+
+`--no-desktop-windows` skips creating wallpaper/desktop windows while retaining the panel and
+other shell surfaces. `--panel-top` places each panel at the top of its display. These flags are
+independent, may be combined, and do not change normal shell defaults.
+
 macOS window activation, minimize, and close use Accessibility APIs. Grant the terminal running
 Nickel permission in System Settings > Privacy & Security > Accessibility.
 
