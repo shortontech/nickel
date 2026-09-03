@@ -64,7 +64,7 @@ fn stale_async_artwork_cannot_replace_current_generation() {
 }
 
 #[test]
-fn nickel_fallback_artwork_is_present_before_async_provider_results() {
+fn slow_system_provider_keeps_nickel_fallback_visible_before_async_results() {
     let entries = vec![
         FileEntry {
             name: "Documents".into(),
@@ -81,10 +81,16 @@ fn nickel_fallback_artwork_is_present_before_async_provider_results() {
             modified: None,
         },
     ];
-    let app = FileApp::with_browser(DirectoryBrowser::fixture(entries), String::new());
+    let mut app = FileApp::with_browser(DirectoryBrowser::fixture(entries), String::new());
+    app.refresh_icons_for_theme(
+        FileIconPreference::System,
+        Some("deliberately-unavailable-theme"),
+        ThemeMode::Dark,
+    );
 
     assert_eq!(app.icons.len(), 2);
     assert!(app.tab_icon.is_some());
+    assert!(app.icon_rx.is_some());
 }
 
 #[test]
