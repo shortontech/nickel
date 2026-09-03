@@ -690,6 +690,47 @@ fn disabled_command_has_no_executable_semantic_target() {
 }
 
 #[test]
+fn open_in_new_tab_is_enabled_only_for_browsable_containers() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("Documents")).unwrap();
+    std::fs::write(root.path().join("report.txt"), b"report").unwrap();
+    let mut app = FileApp::new(root.path().to_path_buf());
+    app.update_message(FileMessage::ToggleCommandSurface);
+    app.selected = Some(1);
+    app.selected_entries = HashSet::from([1]);
+    let palette = ThemePalette::from_appearance(
+        ShellSettings::load_default().resolve_appearance(nickel_platform::appearance()),
+    );
+    let file_frame = nickel_ui::UiFrame::layout(
+        app.build_view(960.0, 640.0, palette, false),
+        Rect::new(0.0, 0.0, 960.0, 640.0),
+    );
+    assert!(
+        file_frame
+            .semantic_targets_for_message(&FileMessage::ContextOpenNewTab)
+            .is_empty()
+    );
+    app.update_message(FileMessage::ContextOpenNewTab);
+    assert_eq!(app.tabs.len(), 1);
+
+    app.update_message(FileMessage::ToggleCommandSurface);
+    app.selected = Some(0);
+    app.selected_entries = HashSet::from([0]);
+    let directory_frame = nickel_ui::UiFrame::layout(
+        app.build_view(960.0, 640.0, palette, false),
+        Rect::new(0.0, 0.0, 960.0, 640.0),
+    );
+    assert_eq!(
+        directory_frame
+            .semantic_targets_for_message(&FileMessage::ContextOpenNewTab)
+            .len(),
+        1
+    );
+    app.update_message(FileMessage::ContextOpenNewTab);
+    assert_eq!(app.tabs.len(), 2);
+}
+
+#[test]
 fn command_surface_exposes_open_and_complete_tab_management() {
     let mut app = FileApp::fixture();
     app.selected = Some(0);
@@ -1129,7 +1170,7 @@ fn context_menu_is_one_semantic_controller_and_accessibility_surface() {
     let menu_items = host.query(&nickel_ui::SemanticSelector::Role(
         nickel_ui::SemanticRole::MenuItem,
     ));
-    assert_eq!(menu_items.len(), 2);
+    assert_eq!(menu_items.len(), 1);
     assert!(menu_items.iter().all(|item| {
         item.actions.contains(&ActionKind::Activate)
             && host

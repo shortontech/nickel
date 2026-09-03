@@ -381,7 +381,7 @@ fn command_surface(app: &FileApp, palette: ThemePalette) -> AnyView<FileMessage>
         (
             command_label("file-command-open-new-tab"),
             "activate background tab",
-            app.selected.is_some() && !app.navigation_pending(),
+            app.selected_is_container() && !app.navigation_pending(),
             FileMessage::ContextOpenNewTab,
         ),
         (

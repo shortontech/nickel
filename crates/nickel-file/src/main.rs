@@ -583,6 +583,11 @@ pub(crate) struct FileTab {
 }
 
 impl FileApp {
+    pub(crate) fn selected_is_container(&self) -> bool {
+        self.selected
+            .and_then(|index| self.browser.entries().get(index))
+            .is_some_and(|entry| entry.is_directory)
+    }
     pub(crate) fn is_resizing_sidebar(&self) -> bool {
         self.resizing_sidebar
     }
@@ -1383,12 +1388,10 @@ impl FileApp {
                     .selected
                     .and_then(|index| self.browser.entries().get(index))
                     .cloned();
-                if let Some(entry) = entry {
-                    if entry.is_directory || entry.path.is_dir() {
-                        self.new_tab_at(entry.path);
-                    } else if let Err(error) = open_path(&entry.path) {
-                        self.status = format!("Could not open {}: {error}", entry.display_name());
-                    }
+                if let Some(entry) = entry
+                    && (entry.is_directory || entry.path.is_dir())
+                {
+                    self.new_tab_at(entry.path);
                 }
             }
             FileMessage::ContextRefresh => {
@@ -1581,23 +1584,26 @@ impl Application for FileApp {
             .iter()
             .enumerate()
             .filter(|(index, _)| visible_entries.contains(index))
-            .map(|(index, _)| {
-                FrameOverlay::Menu(configure(
-                    OverlayMenu::new(
-                        format!("file-entry-{index}-context"),
-                        invocation_anchor(UiId::new(format!("file-entry-{index}"))),
-                    )
-                    .item(OverlayMenuItem::action(
-                        "open",
-                        "Open",
-                        FileMessage::ContextOpen,
-                    ))
-                    .item(OverlayMenuItem::action(
+            .map(|(index, entry)| {
+                let menu = OverlayMenu::new(
+                    format!("file-entry-{index}-context"),
+                    invocation_anchor(UiId::new(format!("file-entry-{index}"))),
+                )
+                .item(OverlayMenuItem::action(
+                    "open",
+                    self.localizer.text("file-command-open"),
+                    FileMessage::ContextOpen,
+                ));
+                let menu = if entry.is_directory {
+                    menu.item(OverlayMenuItem::action(
                         "open-new-tab",
-                        "Open in New Tab",
+                        self.localizer.text("file-command-open-new-tab"),
                         FileMessage::ContextOpenNewTab,
-                    )),
-                ))
+                    ))
+                } else {
+                    menu
+                };
+                FrameOverlay::Menu(configure(menu))
             })
             .collect::<Vec<_>>();
         overlays.push(FrameOverlay::Menu(configure(
@@ -1607,12 +1613,12 @@ impl Application for FileApp {
             )
             .item(OverlayMenuItem::action(
                 "refresh",
-                "Refresh",
+                self.localizer.text("file-command-refresh"),
                 FileMessage::ContextRefresh,
             ))
             .item(OverlayMenuItem::action(
                 "select-all",
-                "Select All",
+                self.localizer.text("file-command-select-all"),
                 FileMessage::ContextSelectAll,
             )),
         )));
