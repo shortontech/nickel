@@ -83,7 +83,7 @@ pub const PLATFORM_CONTRACTS: &[PlatformContract] = &[
     fixture(
         PlatformFamily::Windows,
         AdapterCapability::ImageFileDialog,
-        "SDL native file dialog",
+        "unsupported until a native adapter is implemented",
         "platform_contract::tests::matrix_is_complete_and_truthful",
     ),
     fixture(
@@ -113,7 +113,7 @@ pub const PLATFORM_CONTRACTS: &[PlatformContract] = &[
     fixture(
         PlatformFamily::MacOs,
         AdapterCapability::ImageFileDialog,
-        "SDL native file dialog",
+        "unsupported until a native adapter is implemented",
         "platform_contract::tests::matrix_is_complete_and_truthful",
     ),
     fixture(

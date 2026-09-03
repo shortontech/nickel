@@ -15,36 +15,25 @@ pub enum FileDialogOutcome {
     Failed(String),
 }
 
-/// Opens the platform-native image chooser. Linux uses the XDG portal
-/// directly; other platforms use SDL's native dialog adapter.
-#[cfg(not(target_os = "linux"))]
+/// Opens the platform-native image chooser.
+///
+/// Linux uses the XDG portal directly. Windows and macOS report that the
+/// capability is unavailable until their native adapters are implemented.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 pub fn choose_image_file(
-    callback: Box<dyn Fn(FileDialogOutcome) + Send + 'static>,
+    _callback: Box<dyn Fn(FileDialogOutcome) + Send + 'static>,
 ) -> Result<(), String> {
-    use sdl3::dialog::{DialogError, DialogFileFilter, show_open_file_dialog};
+    Err(format!(
+        "the native image file chooser is not implemented for {}",
+        std::env::consts::OS
+    ))
+}
 
-    let filters = [DialogFileFilter {
-        name: "Images",
-        pattern: "png;jpg;jpeg;webp;bmp",
-    }];
-    show_open_file_dialog(
-        &filters,
-        None::<&std::path::Path>,
-        false,
-        None,
-        Box::new(move |result, _| {
-            callback(match result {
-                Ok(paths) => paths
-                    .into_iter()
-                    .next()
-                    .map(FileDialogOutcome::Selected)
-                    .unwrap_or(FileDialogOutcome::Cancelled),
-                Err(DialogError::Canceled) => FileDialogOutcome::Cancelled,
-                Err(error) => FileDialogOutcome::Failed(error.to_string()),
-            });
-        }),
-    )
-    .map_err(|error| error.to_string())
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+pub fn choose_image_file(
+    _callback: Box<dyn Fn(FileDialogOutcome) + Send + 'static>,
+) -> Result<(), String> {
+    Err("the native image file chooser is unsupported on this platform".into())
 }
 
 #[cfg(target_os = "linux")]

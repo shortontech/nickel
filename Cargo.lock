@@ -2743,7 +2743,6 @@ dependencies = [
  "image",
  "nickel-core",
  "resvg",
- "sdl3",
  "tempfile",
  "tracing",
  "windows",
