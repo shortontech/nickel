@@ -4,7 +4,41 @@ use crate::{
     layout::{collapse_breadcrumbs, entries_in_selection},
 };
 use nickel_ui::{ActionKind, Rect, UiHost};
-use nickel_ui_testkit::{FocusDirection, Scenario, ScenarioBudget, Selector};
+use nickel_ui_testkit::{Fixture, FocusDirection, Scenario, ScenarioBudget, Selector};
+
+const MINIMUM_SELECTION_TEXT_CONTRAST: f32 = 4.5;
+
+fn relative_luminance(color: u32) -> f32 {
+    let channel = |shift: u32| {
+        let value = ((color >> shift) & 0xff_u32) as f32 / 255.0;
+        if value <= 0.04045 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
+}
+
+fn bounds_overlap(left: Rect, right: Rect) -> bool {
+    left.origin.x < right.origin.x + right.size.width
+        && left.origin.x + left.size.width > right.origin.x
+        && left.origin.y < right.origin.y + right.size.height
+        && left.origin.y + left.size.height > right.origin.y
+}
+
+fn contrast_ratio(first: u32, second: u32) -> f32 {
+    let (lighter, darker) = {
+        let first = relative_luminance(first);
+        let second = relative_luminance(second);
+        if first > second {
+            (first, second)
+        } else {
+            (second, first)
+        }
+    };
+    (lighter + 0.05) / (darker + 0.05)
+}
 
 fn settle_navigation(app: &mut FileApp) {
     for _ in 0..1_000 {
@@ -872,6 +906,80 @@ fn component_owned_fixture_registers_the_production_file_app() {
             .iter()
             .any(|node| node.id.as_str().ends_with("/file-entry-0"))
     );
+}
+
+#[test]
+fn every_file_fixture_passes_geometry_accessibility_and_selection_contrast_gates() {
+    for variant in FILE_FIXTURE_VARIANTS {
+        let app = FileWorkbenchFixture::create_variant(variant);
+        let appearance = app.fixture_appearance.expect("fixtures declare appearance");
+        let palette = ThemePalette::from_appearance(appearance);
+        assert!(
+            contrast_ratio(palette.text, palette.accent_soft) >= MINIMUM_SELECTION_TEXT_CONTRAST,
+            "{} selection text contrast is {:.2}, below the declared {:.1}:1 threshold",
+            variant.id,
+            contrast_ratio(palette.text, palette.accent_soft),
+            MINIMUM_SELECTION_TEXT_CONTRAST,
+        );
+
+        let mut host = UiHost::new(app, variant.viewport.width, variant.viewport.height);
+        host.set_scale_factor(variant.scale.factor);
+        let inspection = host.inspect();
+        assert!(
+            inspection.diagnostics.is_empty(),
+            "{} has layout diagnostics: {:?}",
+            variant.id,
+            inspection.diagnostics,
+        );
+        assert!(
+            inspection.overlay_failures.is_empty(),
+            "{} has overlay failures: {:?}",
+            variant.id,
+            inspection.overlay_failures,
+        );
+
+        let nodes = host.semantic_nodes();
+        for node in &nodes {
+            assert!(
+                node.bounds.origin.x.is_finite()
+                    && node.bounds.origin.y.is_finite()
+                    && node.bounds.size.width.is_finite()
+                    && node.bounds.size.height.is_finite(),
+                "{} contains non-finite geometry for {:?}: {:?}",
+                variant.id,
+                node.id,
+                node.bounds,
+            );
+            assert!(
+                node.actions.is_empty()
+                    || node
+                        .name
+                        .as_deref()
+                        .is_some_and(|name| !name.trim().is_empty()),
+                "{} has an actionable node without an accessible name: {:?}",
+                variant.id,
+                node.id,
+            );
+        }
+
+        let entries = nodes
+            .iter()
+            .filter(|node| node.id.as_str().contains("/file-entry-"))
+            .collect::<Vec<_>>();
+        for (index, left) in entries.iter().enumerate() {
+            for right in entries.iter().skip(index + 1) {
+                assert!(
+                    !bounds_overlap(left.bounds, right.bounds),
+                    "{} has overlapping file hit regions: {:?} {:?} and {:?} {:?}",
+                    variant.id,
+                    left.id,
+                    left.bounds,
+                    right.id,
+                    right.bounds,
+                );
+            }
+        }
+    }
 }
 
 #[test]
