@@ -256,7 +256,7 @@ fn compact_grid_contains_multiline_labels_inside_their_rows() {
     let entries = (0..5)
         .map(|index| {
             let name = if index == 0 {
-                "A deliberately long file name that wraps across\nmultiple lines.txt".to_owned()
+                "A deliberately long file name that wraps across multiple lines.txt".to_owned()
             } else {
                 format!("file-{index}.txt")
             };

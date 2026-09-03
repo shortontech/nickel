@@ -522,15 +522,18 @@ impl<Message> FileGridItem<Message> {
                 })
                 .message(message)
                 .child(
-                    Column::new().gap(5.0).child(image.height(62.0)).child(
-                        Text::new(label)
-                            .height(36.0)
-                            .scale(1.2)
-                            .wrap(true)
-                            .max_lines(2)
-                            .ellipsis(true)
-                            .align(TextAlign::Center),
-                    ),
+                    Column::new()
+                        .fill_width()
+                        .gap(5.0)
+                        .child(image.height(62.0))
+                        .child(
+                            Text::new(label)
+                                .height(36.0)
+                                .wrap(true)
+                                .max_lines(2)
+                                .align(TextAlign::Center)
+                                .fill_width(),
+                        ),
                 ),
         )
     }
