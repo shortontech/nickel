@@ -288,6 +288,22 @@ const FILE_FIXTURE_VARIANTS: &[nickel_ui_testkit::FixtureVariant] = &[
         Light
     ),
     file_fixture_variant!(
+        "minimum-grid-dark",
+        "Minimum Grid Dark",
+        "minimum",
+        560,
+        360,
+        Dark
+    ),
+    file_fixture_variant!(
+        "minimum-details-light",
+        "Minimum Details Light",
+        "minimum",
+        560,
+        360,
+        Light
+    ),
+    file_fixture_variant!(
         "long-unicode",
         "Long and Unicode Names",
         "wide",

@@ -1099,6 +1099,22 @@ fn every_file_fixture_passes_geometry_accessibility_and_selection_contrast_gates
                 variant.id,
                 node.id,
             );
+            if !node.actions.is_empty() {
+                assert!(
+                    node.bounds.size.width > 0.0
+                        && node.bounds.size.height > 0.0
+                        && node.bounds.origin.x >= 0.0
+                        && node.bounds.origin.y >= 0.0
+                        && node.bounds.origin.x + node.bounds.size.width
+                            <= variant.viewport.width as f32
+                        && node.bounds.origin.y + node.bounds.size.height
+                            <= variant.viewport.height as f32,
+                    "{} clips actionable control {:?} at {:?}",
+                    variant.id,
+                    node.id,
+                    node.bounds,
+                );
+            }
         }
 
         let entries = nodes
