@@ -6,7 +6,7 @@ use crate::{
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
     reexports::wayland_server::{
-        Client,
+        Client, Resource,
         protocol::{wl_buffer, wl_surface::WlSurface},
     },
     wayland::{
@@ -33,12 +33,18 @@ enum BufferTransition {
     Unchanged,
 }
 
-#[cfg(test)]
-fn mapped_after_transition(mapped: bool, transition: BufferTransition) -> bool {
-    match transition {
-        BufferTransition::Attached => true,
-        BufferTransition::Removed => false,
-        BufferTransition::Unchanged => mapped,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MappingWork {
+    Map,
+    Unmap,
+    None,
+}
+
+fn mapping_work(mapped: bool, transition: BufferTransition) -> MappingWork {
+    match (mapped, transition) {
+        (false, BufferTransition::Attached) => MappingWork::Map,
+        (true, BufferTransition::Removed) => MappingWork::Unmap,
+        _ => MappingWork::None,
     }
 }
 
@@ -80,14 +86,15 @@ impl CompositorHandler for NickelSession {
                 root = parent;
             }
             if root == *surface {
-                match transition {
-                    BufferTransition::Attached => {
+                let mapped = self.mapped_xdg_toplevels.contains(&root.id());
+                match mapping_work(mapped, transition) {
+                    MappingWork::Map => {
                         self.map_xdg_toplevel(&root);
                     }
-                    BufferTransition::Removed => {
+                    MappingWork::Unmap => {
                         self.unmap_xdg_toplevel(&root);
                     }
-                    BufferTransition::Unchanged => {}
+                    MappingWork::None => {}
                 }
             }
             let committed_window = self
@@ -127,7 +134,7 @@ impl ShmHandler for NickelSession {
 
 #[cfg(test)]
 mod tests {
-    use super::{BufferTransition, commit_is_render_visible, mapped_after_transition};
+    use super::{BufferTransition, MappingWork, commit_is_render_visible, mapping_work};
 
     #[test]
     fn commit_visibility_matches_subsurface_synchronization() {
@@ -142,15 +149,37 @@ mod tests {
 
     #[test]
     fn xdg_buffer_lifecycle_maps_unmaps_and_remaps() {
-        let mapped = mapped_after_transition(false, BufferTransition::Unchanged);
-        assert!(!mapped, "the initial bufferless configure stays unmapped");
-        let mapped = mapped_after_transition(mapped, BufferTransition::Attached);
-        assert!(mapped, "the first real buffer maps the toplevel");
-        let mapped = mapped_after_transition(mapped, BufferTransition::Unchanged);
-        assert!(mapped, "metadata-only commits preserve mapping");
-        let mapped = mapped_after_transition(mapped, BufferTransition::Removed);
-        assert!(!mapped, "an explicit null buffer unmaps the toplevel");
-        let mapped = mapped_after_transition(mapped, BufferTransition::Attached);
-        assert!(mapped, "a later real buffer remaps the same protocol role");
+        assert_eq!(
+            mapping_work(false, BufferTransition::Unchanged),
+            MappingWork::None,
+            "the initial bufferless configure stays unmapped"
+        );
+        assert_eq!(
+            mapping_work(false, BufferTransition::Attached),
+            MappingWork::Map,
+            "the first real buffer runs mapping work"
+        );
+        for _ in 0..32 {
+            assert_eq!(
+                mapping_work(true, BufferTransition::Attached),
+                MappingWork::None,
+                "ordinary attached-buffer frames must not repeat mapping, metadata, focus, or relayout work"
+            );
+        }
+        assert_eq!(
+            mapping_work(true, BufferTransition::Unchanged),
+            MappingWork::None,
+            "metadata-only commits preserve mapping"
+        );
+        assert_eq!(
+            mapping_work(true, BufferTransition::Removed),
+            MappingWork::Unmap,
+            "an explicit null buffer runs unmapping work"
+        );
+        assert_eq!(
+            mapping_work(false, BufferTransition::Attached),
+            MappingWork::Map,
+            "a later real buffer remaps the same protocol role"
+        );
     }
 }
