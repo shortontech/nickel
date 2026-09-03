@@ -1,6 +1,6 @@
 //! winit conversions. Application policy does not belong here.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use winit::{
     event::{
@@ -22,13 +22,16 @@ use crate::{
 
 /// Stateful conversion for winit window events.
 ///
-/// Callers assign stable portable device IDs at their native boundary because
-/// winit intentionally keeps its platform device representation opaque.
+/// Callers can use [`DeviceRegistry`] to assign stable portable device IDs at their native
+/// boundary because winit intentionally keeps its platform device representation opaque.
 #[derive(Clone, Debug)]
 pub struct Adapter {
     next_order: u64,
     modifiers: ModifierState,
     pointer_positions: BTreeMap<DeviceId, Point>,
+    pointer_inside: HashSet<DeviceId>,
+    focused: bool,
+    ime_active: bool,
     scale_factor: f64,
 }
 
@@ -38,8 +41,41 @@ impl Default for Adapter {
             next_order: 0,
             modifiers: ModifierState::default(),
             pointer_positions: BTreeMap::new(),
+            pointer_inside: HashSet::new(),
+            focused: false,
+            ime_active: false,
             scale_factor: 1.0,
         }
+    }
+}
+
+/// Stable Nickel identities for winit's intentionally opaque native device IDs.
+///
+/// A runtime should retain one registry for the lifetime of its event loop. Removing a native
+/// device ends that identity's lifetime; if winit later reports the same opaque value again it is
+/// assigned a fresh Nickel identity.
+#[derive(Debug, Default)]
+pub struct DeviceRegistry {
+    next_id: u64,
+    devices: HashMap<winit::event::DeviceId, DeviceId>,
+}
+
+impl DeviceRegistry {
+    pub fn get_or_insert(&mut self, native: winit::event::DeviceId) -> DeviceId {
+        if let Some(device) = self.devices.get(&native) {
+            return *device;
+        }
+        self.next_id = self
+            .next_id
+            .checked_add(1)
+            .expect("winit device ID space exhausted");
+        let device = DeviceId(self.next_id);
+        self.devices.insert(native, device);
+        device
+    }
+
+    pub fn remove(&mut self, native: winit::event::DeviceId) -> Option<DeviceId> {
+        self.devices.remove(&native)
     }
 }
 
@@ -49,8 +85,23 @@ impl Adapter {
     }
 
     pub fn normalize(&mut self, device: DeviceId, event: &WindowEvent) -> Vec<InputEvent> {
+        self.normalize_at_scale(device, self.scale_factor, event)
+    }
+
+    /// Normalize an event using the receiving surface's scale.
+    ///
+    /// Passing scale with the event prevents one surface's scale-factor notification from
+    /// affecting input delivered to another surface. `set_scale_factor` and `normalize` remain
+    /// available for single-surface consumers.
+    pub fn normalize_at_scale(
+        &mut self,
+        device: DeviceId,
+        scale_factor: f64,
+        event: &WindowEvent,
+    ) -> Vec<InputEvent> {
         self.next_order += 1;
         let order = EventOrder(self.next_order);
+        let scale_factor = valid_scale(scale_factor);
         match event {
             WindowEvent::KeyboardInput { event, .. } => {
                 let mut key = key_event(device, order, event, self.modifiers.clone());
@@ -59,16 +110,10 @@ impl Adapter {
                     key.modifiers = self.modifiers.clone();
                 }
                 let mut normalized = vec![InputEvent::Key(key)];
-                if event.state == ElementState::Pressed
-                    && !event.repeat
-                    && let Some(text) = &event.text
-                    && !text.is_empty()
+                if let Some(text) =
+                    key_text_event(device, order, event.state, event.text.as_deref())
                 {
-                    normalized.push(InputEvent::Text(TextEvent::Commit {
-                        device,
-                        order,
-                        text: text.to_string(),
-                    }));
+                    normalized.push(text);
                 }
                 normalized
             }
@@ -77,6 +122,7 @@ impl Adapter {
                 Vec::new()
             }
             WindowEvent::Ime(Ime::Preedit(text, selection)) => {
+                self.ime_active = !text.is_empty();
                 vec![InputEvent::Text(TextEvent::Preedit {
                     device,
                     order,
@@ -84,13 +130,25 @@ impl Adapter {
                     selection: *selection,
                 })]
             }
-            WindowEvent::Ime(Ime::Commit(text)) => vec![InputEvent::Text(TextEvent::Commit {
-                device,
-                order,
-                text: text.clone(),
-            })],
+            WindowEvent::Ime(Ime::Commit(text)) => {
+                self.ime_active = false;
+                vec![InputEvent::Text(TextEvent::Commit {
+                    device,
+                    order,
+                    text: text.clone(),
+                })]
+            }
+            WindowEvent::Ime(Ime::Disabled) if self.ime_active => {
+                self.ime_active = false;
+                vec![InputEvent::Text(TextEvent::Preedit {
+                    device,
+                    order,
+                    text: String::new(),
+                    selection: None,
+                })]
+            }
             WindowEvent::CursorMoved { position, .. } => {
-                let position = self.logical_point(position.x, position.y);
+                let position = logical_point(position.x, position.y, scale_factor);
                 let delta = self
                     .pointer_positions
                     .insert(device, position)
@@ -105,16 +163,18 @@ impl Adapter {
                     delta,
                 })]
             }
-            WindowEvent::CursorEntered { .. } => vec![InputEvent::Pointer(PointerEvent::Enter {
-                device,
-                order,
-                position: self
-                    .pointer_positions
-                    .get(&device)
-                    .copied()
-                    .unwrap_or(Point { x: 0.0, y: 0.0 }),
-            })],
-            WindowEvent::CursorLeft { .. } => {
+            WindowEvent::CursorEntered { .. } if self.pointer_inside.insert(device) => {
+                vec![InputEvent::Pointer(PointerEvent::Enter {
+                    device,
+                    order,
+                    position: self
+                        .pointer_positions
+                        .get(&device)
+                        .copied()
+                        .unwrap_or(Point { x: 0.0, y: 0.0 }),
+                })]
+            }
+            WindowEvent::CursorLeft { .. } if self.pointer_inside.remove(&device) => {
                 vec![InputEvent::Pointer(PointerEvent::Leave { device, order })]
             }
             WindowEvent::MouseInput { state, button, .. } => {
@@ -131,12 +191,12 @@ impl Adapter {
                     device,
                     order,
                     *delta,
-                    self.scale_factor,
+                    scale_factor,
                     self.pointer_positions.get(&device).copied(),
                 )]
             }
             WindowEvent::Touch(touch) => {
-                let position = self.logical_point(touch.location.x, touch.location.y);
+                let position = logical_point(touch.location.x, touch.location.y, scale_factor);
                 let contact = TouchId(touch.id);
                 let event = match touch.phase {
                     TouchPhase::Started => TouchEvent::Started {
@@ -165,11 +225,27 @@ impl Adapter {
                 };
                 vec![InputEvent::Touch(event)]
             }
-            WindowEvent::Focused(true) => vec![InputEvent::FocusGained { order }],
-            WindowEvent::Focused(false) | WindowEvent::Destroyed => {
+            WindowEvent::Focused(true) if !self.focused => {
+                self.focused = true;
+                vec![InputEvent::FocusGained { order }]
+            }
+            WindowEvent::Focused(false) | WindowEvent::Destroyed if self.focused => {
+                self.focused = false;
                 self.modifiers = ModifierState::default();
                 self.pointer_positions.clear();
-                vec![InputEvent::FocusLost { order }]
+                self.pointer_inside.clear();
+                let mut normalized = Vec::with_capacity(usize::from(self.ime_active) + 1);
+                if self.ime_active {
+                    self.ime_active = false;
+                    normalized.push(InputEvent::Text(TextEvent::Preedit {
+                        device,
+                        order,
+                        text: String::new(),
+                        selection: None,
+                    }));
+                }
+                normalized.push(InputEvent::FocusLost { order });
+                normalized
             }
             _ => Vec::new(),
         }
@@ -178,19 +254,39 @@ impl Adapter {
     pub fn device_removed(&mut self, device: DeviceId) -> InputEvent {
         self.next_order += 1;
         self.pointer_positions.remove(&device);
+        self.pointer_inside.remove(&device);
         self.modifiers = ModifierState::default();
         InputEvent::DeviceRemoved {
             device,
             order: EventOrder(self.next_order),
         }
     }
+}
 
-    fn logical_point(&self, x: f64, y: f64) -> Point {
-        Point {
-            x: x / self.scale_factor,
-            y: y / self.scale_factor,
-        }
+fn logical_point(x: f64, y: f64, scale_factor: f64) -> Point {
+    Point {
+        x: x / scale_factor,
+        y: y / scale_factor,
     }
+}
+
+fn key_text_event(
+    device: DeviceId,
+    order: EventOrder,
+    state: ElementState,
+    text: Option<&str>,
+) -> Option<InputEvent> {
+    (state == ElementState::Pressed)
+        .then_some(text)
+        .flatten()
+        .filter(|text| !text.is_empty())
+        .map(|text| {
+            InputEvent::Text(TextEvent::Commit {
+                device,
+                order,
+                text: text.to_owned(),
+            })
+        })
 }
 
 fn valid_scale(scale_factor: f64) -> f64 {
@@ -516,6 +612,284 @@ mod tests {
             normalized.unsided().collect::<Vec<_>>(),
             [AggregateModifier::Control, AggregateModifier::Alt]
         );
+    }
+
+    #[test]
+    fn generated_text_follows_pressed_keys_including_repeats_but_not_releases() {
+        let device = DeviceId(3);
+        let order = EventOrder(8);
+        let expected = InputEvent::Text(TextEvent::Commit {
+            device,
+            order,
+            text: "世界".into(),
+        });
+
+        assert_eq!(
+            key_text_event(device, order, ElementState::Pressed, Some("世界")),
+            Some(expected)
+        );
+        assert_eq!(
+            key_text_event(device, order, ElementState::Released, Some("世界")),
+            None
+        );
+        assert_eq!(
+            key_text_event(device, order, ElementState::Pressed, Some("")),
+            None
+        );
+    }
+
+    #[test]
+    fn opaque_native_device_identity_is_stable_for_its_lifetime() {
+        let native = winit::event::DeviceId::dummy();
+        let mut registry = DeviceRegistry::default();
+        let first = registry.get_or_insert(native);
+
+        assert_eq!(registry.get_or_insert(native), first);
+        assert_eq!(registry.remove(native), Some(first));
+        assert_ne!(registry.get_or_insert(native), first);
+    }
+
+    #[test]
+    fn interleaved_surface_scales_do_not_leak() {
+        use winit::dpi::PhysicalPosition;
+
+        let mut adapter = Adapter::default();
+        let first_device = DeviceId(1);
+        let second_device = DeviceId(2);
+        let move_to = |device_id, x, y| WindowEvent::CursorMoved {
+            device_id,
+            position: PhysicalPosition::new(x, y),
+        };
+        let native = winit::event::DeviceId::dummy();
+
+        let first = adapter.normalize_at_scale(first_device, 2.0, &move_to(native, 40.0, 60.0));
+        let second = adapter.normalize_at_scale(second_device, 1.0, &move_to(native, 40.0, 60.0));
+        let first_again =
+            adapter.normalize_at_scale(first_device, 2.0, &move_to(native, 44.0, 64.0));
+
+        assert!(matches!(
+            first.as_slice(),
+            [InputEvent::Pointer(PointerEvent::Motion {
+                position: Point { x: 20.0, y: 30.0 },
+                delta: None,
+                ..
+            })]
+        ));
+        assert!(matches!(
+            second.as_slice(),
+            [InputEvent::Pointer(PointerEvent::Motion {
+                position: Point { x: 40.0, y: 60.0 },
+                delta: None,
+                ..
+            })]
+        ));
+        assert!(matches!(
+            first_again.as_slice(),
+            [InputEvent::Pointer(PointerEvent::Motion {
+                position: Point { x: 22.0, y: 32.0 },
+                delta: Some(Vector { x: 2.0, y: 2.0 }),
+                ..
+            })]
+        ));
+    }
+
+    #[test]
+    fn ime_cancels_before_focus_loss_and_boundaries_emit_once() {
+        let mut adapter = Adapter::default();
+        let device = DeviceId(5);
+
+        assert_eq!(
+            adapter.normalize(device, &WindowEvent::Focused(true)),
+            vec![InputEvent::FocusGained {
+                order: EventOrder(1)
+            }]
+        );
+        assert!(
+            adapter
+                .normalize(device, &WindowEvent::Focused(true))
+                .is_empty()
+        );
+        adapter.normalize(
+            device,
+            &WindowEvent::Ime(Ime::Preedit("に".into(), Some((0, 3)))),
+        );
+        assert_eq!(
+            adapter.normalize(device, &WindowEvent::Focused(false)),
+            vec![
+                InputEvent::Text(TextEvent::Preedit {
+                    device,
+                    order: EventOrder(4),
+                    text: String::new(),
+                    selection: None,
+                }),
+                InputEvent::FocusLost {
+                    order: EventOrder(4)
+                },
+            ]
+        );
+        assert!(
+            adapter
+                .normalize(device, &WindowEvent::Focused(false))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn pointer_boundaries_emit_once_and_keep_last_position() {
+        use winit::dpi::PhysicalPosition;
+
+        let mut adapter = Adapter::default();
+        let device = DeviceId(6);
+        let native = winit::event::DeviceId::dummy();
+        adapter.normalize_at_scale(
+            device,
+            2.0,
+            &WindowEvent::CursorMoved {
+                device_id: native,
+                position: PhysicalPosition::new(24.0, 30.0),
+            },
+        );
+        let entered = adapter.normalize(device, &WindowEvent::CursorEntered { device_id: native });
+        assert!(matches!(
+            entered.as_slice(),
+            [InputEvent::Pointer(PointerEvent::Enter {
+                position: Point { x: 12.0, y: 15.0 },
+                ..
+            })]
+        ));
+        assert!(
+            adapter
+                .normalize(device, &WindowEvent::CursorEntered { device_id: native })
+                .is_empty()
+        );
+
+        let button = adapter.normalize(
+            device,
+            &WindowEvent::MouseInput {
+                device_id: native,
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+            },
+        );
+        assert!(matches!(
+            button.as_slice(),
+            [InputEvent::Pointer(PointerEvent::Button {
+                position: Some(Point { x: 12.0, y: 15.0 }),
+                ..
+            })]
+        ));
+
+        assert_eq!(
+            adapter.normalize(device, &WindowEvent::CursorLeft { device_id: native }),
+            vec![InputEvent::Pointer(PointerEvent::Leave {
+                device,
+                order: EventOrder(5),
+            })]
+        );
+        assert!(
+            adapter
+                .normalize(device, &WindowEvent::CursorLeft { device_id: native })
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn wheel_preserves_lines_and_scales_physical_pixels() {
+        use winit::dpi::PhysicalPosition;
+
+        let device = DeviceId(7);
+        let position = Some(Point { x: 5.0, y: 8.0 });
+        assert_eq!(
+            wheel_event(
+                device,
+                EventOrder(1),
+                MouseScrollDelta::LineDelta(2.0, -3.0),
+                2.0,
+                position,
+            ),
+            InputEvent::Pointer(PointerEvent::Axis {
+                device,
+                order: EventOrder(1),
+                delta: Vector { x: 2.0, y: -3.0 },
+                discrete: Some((2, -3)),
+                position,
+            })
+        );
+        assert_eq!(
+            wheel_event(
+                device,
+                EventOrder(2),
+                MouseScrollDelta::PixelDelta(PhysicalPosition::new(12.0, -18.0)),
+                2.0,
+                position,
+            ),
+            InputEvent::Pointer(PointerEvent::Axis {
+                device,
+                order: EventOrder(2),
+                delta: Vector { x: 6.0, y: -9.0 },
+                discrete: None,
+                position,
+            })
+        );
+    }
+
+    #[test]
+    fn touch_contacts_keep_identity_through_end_and_cancellation() {
+        use winit::{dpi::PhysicalPosition, event::Touch};
+
+        let mut adapter = Adapter::default();
+        let device = DeviceId(8);
+        let native = winit::event::DeviceId::dummy();
+        let touch = |phase, id, x, y| {
+            WindowEvent::Touch(Touch {
+                device_id: native,
+                phase,
+                location: PhysicalPosition::new(x, y),
+                force: None,
+                id,
+            })
+        };
+
+        let events = [
+            touch(TouchPhase::Started, 10, 20.0, 30.0),
+            touch(TouchPhase::Started, 11, 40.0, 50.0),
+            touch(TouchPhase::Moved, 10, 24.0, 34.0),
+            touch(TouchPhase::Ended, 10, 24.0, 34.0),
+            touch(TouchPhase::Cancelled, 11, 40.0, 50.0),
+        ]
+        .iter()
+        .flat_map(|event| adapter.normalize_at_scale(device, 2.0, event))
+        .collect::<Vec<_>>();
+
+        assert!(matches!(
+            events.as_slice(),
+            [
+                InputEvent::Touch(TouchEvent::Started {
+                    contact: TouchId(10),
+                    position: Point { x: 10.0, y: 15.0 },
+                    ..
+                }),
+                InputEvent::Touch(TouchEvent::Started {
+                    contact: TouchId(11),
+                    position: Point { x: 20.0, y: 25.0 },
+                    ..
+                }),
+                InputEvent::Touch(TouchEvent::Moved {
+                    contact: TouchId(10),
+                    position: Point { x: 12.0, y: 17.0 },
+                    ..
+                }),
+                InputEvent::Touch(TouchEvent::Ended {
+                    contact: TouchId(10),
+                    position: Point { x: 12.0, y: 17.0 },
+                    ..
+                }),
+                InputEvent::Touch(TouchEvent::Cancelled {
+                    contact: TouchId(11),
+                    ..
+                }),
+            ]
+        ));
     }
 
     #[test]
