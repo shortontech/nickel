@@ -1,5 +1,6 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, VecDeque, hash_map::DefaultHasher},
+    hash::{Hash, Hasher},
     path::{Path, PathBuf},
     sync::{Arc, OnceLock},
 };
@@ -285,7 +286,10 @@ impl IconProvider for SystemIconProvider {
     }
 
     fn revision(&self) -> u64 {
-        nickel_platform::path_icon_theme_revision(self.theme.as_deref())
+        let mut revision = DefaultHasher::new();
+        nickel_platform::path_icon_theme_revision(self.theme.as_deref()).hash(&mut revision);
+        self.theme.hash(&mut revision);
+        revision.finish()
     }
 
     fn resolve(

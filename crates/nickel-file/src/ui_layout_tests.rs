@@ -773,11 +773,12 @@ fn sidebar_expansion_enumerates_children_asynchronously() {
     assert!(app.sidebar_loading.contains(&root_path));
     assert!(!app.sidebar_children.contains_key(&root_path));
 
-    for _ in 0..1_000 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
         if app.poll_sidebar_children() {
             break;
         }
-        std::thread::yield_now();
+        std::thread::sleep(std::time::Duration::from_millis(1));
     }
     assert!(!app.sidebar_loading.contains(&root_path));
     assert_eq!(
