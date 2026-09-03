@@ -119,49 +119,140 @@ pub struct FileFixtureProvider;
 
 pub struct FileWorkbenchFixture;
 
+macro_rules! file_fixture_variant {
+    ($id:literal, $title:literal, $viewport:literal, $width:literal, $height:literal, $theme:ident) => {
+        nickel_ui_testkit::FixtureVariant {
+            id: $id,
+            title: $title,
+            viewport: nickel_ui_testkit::ViewportPreset {
+                id: $viewport,
+                width: $width,
+                height: $height,
+            },
+            theme: nickel_ui_testkit::FixtureTheme::$theme,
+            locale: nickel_ui_testkit::DEFAULT_LOCALE,
+            scale: nickel_ui_testkit::DEFAULT_SCALE,
+            controller_family: nickel_ui::ControllerFamily::Generic,
+            accessibility: nickel_ui_testkit::DEFAULT_ACCESSIBILITY,
+        }
+    };
+}
+
 const FILE_FIXTURE_VARIANTS: &[nickel_ui_testkit::FixtureVariant] = &[
-    nickel_ui_testkit::FixtureVariant {
-        id: "wide",
-        title: "Wide",
-        viewport: nickel_ui_testkit::ViewportPreset {
-            id: "wide",
-            width: 960,
-            height: 640,
-        },
-        theme: nickel_ui_testkit::FixtureTheme::Dark,
-        locale: nickel_ui_testkit::DEFAULT_LOCALE,
-        scale: nickel_ui_testkit::DEFAULT_SCALE,
-        controller_family: nickel_ui::ControllerFamily::Generic,
-        accessibility: nickel_ui_testkit::DEFAULT_ACCESSIBILITY,
-    },
-    nickel_ui_testkit::FixtureVariant {
-        id: "details-light",
-        title: "Details Light",
-        viewport: nickel_ui_testkit::ViewportPreset {
-            id: "wide",
-            width: 1100,
-            height: 700,
-        },
-        theme: nickel_ui_testkit::FixtureTheme::Light,
-        locale: nickel_ui_testkit::DEFAULT_LOCALE,
-        scale: nickel_ui_testkit::DEFAULT_SCALE,
-        controller_family: nickel_ui::ControllerFamily::Generic,
-        accessibility: nickel_ui_testkit::DEFAULT_ACCESSIBILITY,
-    },
-    nickel_ui_testkit::FixtureVariant {
-        id: "narrow",
-        title: "Narrow",
-        viewport: nickel_ui_testkit::ViewportPreset {
-            id: "narrow",
-            width: 660,
-            height: 640,
-        },
-        theme: nickel_ui_testkit::FixtureTheme::Dark,
-        locale: nickel_ui_testkit::DEFAULT_LOCALE,
-        scale: nickel_ui_testkit::DEFAULT_SCALE,
-        controller_family: nickel_ui::ControllerFamily::Generic,
-        accessibility: nickel_ui_testkit::DEFAULT_ACCESSIBILITY,
-    },
+    file_fixture_variant!("wide-grid-dark", "Wide Grid Dark", "wide", 1100, 700, Dark),
+    file_fixture_variant!(
+        "wide-grid-light",
+        "Wide Grid Light",
+        "wide",
+        1100,
+        700,
+        Light
+    ),
+    file_fixture_variant!(
+        "wide-details-dark",
+        "Wide Details Dark",
+        "wide",
+        1100,
+        700,
+        Dark
+    ),
+    file_fixture_variant!(
+        "wide-details-light",
+        "Wide Details Light",
+        "wide",
+        1100,
+        700,
+        Light
+    ),
+    file_fixture_variant!(
+        "medium-grid-dark",
+        "Medium Grid Dark",
+        "medium",
+        820,
+        620,
+        Dark
+    ),
+    file_fixture_variant!(
+        "medium-grid-light",
+        "Medium Grid Light",
+        "medium",
+        820,
+        620,
+        Light
+    ),
+    file_fixture_variant!(
+        "medium-details-dark",
+        "Medium Details Dark",
+        "medium",
+        820,
+        620,
+        Dark
+    ),
+    file_fixture_variant!(
+        "medium-details-light",
+        "Medium Details Light",
+        "medium",
+        820,
+        620,
+        Light
+    ),
+    file_fixture_variant!(
+        "narrow-grid-dark",
+        "Narrow Grid Dark",
+        "narrow",
+        660,
+        640,
+        Dark
+    ),
+    file_fixture_variant!(
+        "narrow-grid-light",
+        "Narrow Grid Light",
+        "narrow",
+        660,
+        640,
+        Light
+    ),
+    file_fixture_variant!(
+        "narrow-details-dark",
+        "Narrow Details Dark",
+        "narrow",
+        660,
+        640,
+        Dark
+    ),
+    file_fixture_variant!(
+        "narrow-details-light",
+        "Narrow Details Light",
+        "narrow",
+        660,
+        640,
+        Light
+    ),
+    file_fixture_variant!(
+        "long-unicode",
+        "Long and Unicode Names",
+        "wide",
+        1100,
+        700,
+        Dark
+    ),
+    file_fixture_variant!(
+        "hidden-selection",
+        "Hidden Multi-selection",
+        "wide",
+        1100,
+        700,
+        Light
+    ),
+    file_fixture_variant!("empty", "Empty Folder", "medium", 820, 620, Dark),
+    file_fixture_variant!(
+        "unavailable",
+        "Unavailable Location",
+        "medium",
+        820,
+        620,
+        Light
+    ),
     nickel_ui_testkit::FixtureVariant {
         id: "narrow-200",
         title: "Narrow 200%",
@@ -206,9 +297,76 @@ impl nickel_ui_testkit::Fixture for FileWorkbenchFixture {
         FileApp::fixture()
     }
     fn create_variant(variant: &nickel_ui_testkit::FixtureVariant) -> Self::App {
-        let mut app = FileApp::fixture();
-        if variant.id == "details-light" {
+        let mut app = match variant.id {
+            "long-unicode" => FileApp::with_browser(
+                DirectoryBrowser::fixture(vec![
+                    FileEntry {
+                        name: "Quarterly planning notes with a deliberately long wrapped name.md"
+                            .into(),
+                        path: PathBuf::from(
+                            "/fixture/Quarterly planning notes with a deliberately long wrapped name.md",
+                        ),
+                        is_directory: false,
+                        size: Some(8_192),
+                        modified: None,
+                    },
+                    FileEntry {
+                        name: "写真と音楽 🎵".into(),
+                        path: PathBuf::from("/fixture/写真と音楽 🎵"),
+                        is_directory: true,
+                        size: None,
+                        modified: None,
+                    },
+                    FileEntry {
+                        name: "مرحبا.txt".into(),
+                        path: PathBuf::from("/fixture/مرحبا.txt"),
+                        is_directory: false,
+                        size: Some(512),
+                        modified: None,
+                    },
+                ]),
+                String::new(),
+            ),
+            "hidden-selection" => {
+                let mut app = FileApp::with_browser(
+                    DirectoryBrowser::fixture(vec![
+                        FileEntry {
+                            name: ".nickel-cache".into(),
+                            path: PathBuf::from("/fixture/.nickel-cache"),
+                            is_directory: true,
+                            size: None,
+                            modified: None,
+                        },
+                        FileEntry {
+                            name: "report.txt".into(),
+                            path: PathBuf::from("/fixture/report.txt"),
+                            is_directory: false,
+                            size: Some(128),
+                            modified: None,
+                        },
+                        FileEntry {
+                            name: "notes.md".into(),
+                            path: PathBuf::from("/fixture/notes.md"),
+                            is_directory: false,
+                            size: Some(512),
+                            modified: None,
+                        },
+                    ]),
+                    String::new(),
+                );
+                app.selected = Some(1);
+                app.selection_anchor = Some(0);
+                app.selected_entries = HashSet::from([0, 1]);
+                app
+            }
+            "empty" => FileApp::with_browser(DirectoryBrowser::fixture(Vec::new()), String::new()),
+            _ => FileApp::fixture(),
+        };
+        if variant.id.contains("details") {
             app.view_mode = FileViewMode::Details;
+        }
+        if variant.id == "unavailable" {
+            app.status = "Location unavailable — reconnect the volume and refresh.".into();
         }
         app.fixture_appearance = Some(Appearance {
             mode: match variant.theme {
