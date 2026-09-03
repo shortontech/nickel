@@ -63,6 +63,14 @@ fn production_launch_publishes_initial_directory_asynchronously() {
     assert!(app.browser.entries().is_empty());
     assert_eq!(app.status, "Opening location…");
     assert!(app.navigation_rx.is_some());
+    let loading = UiHost::new(FileApp::launch(directory.path().to_path_buf()), 720, 480);
+    assert!(
+        loading
+            .accessibility_nodes()
+            .iter()
+            .any(|node| node.label.as_deref() == Some("Opening location…")),
+        "startup must present loading rather than claiming the folder is empty"
+    );
 
     settle_navigation(&mut app);
     assert_eq!(app.browser.entries().len(), 1);
@@ -2014,6 +2022,42 @@ fn semantic_scenarios_cover_empty_and_failure_states() {
             .is_some_and(|name| name.starts_with(&status))
     }));
     failed.assert_accessibility().unwrap();
+}
+
+#[test]
+fn required_state_fixtures_render_their_in_place_status_without_stale_entries() {
+    for (id, expected) in [
+        ("loading", "Loading network location…"),
+        (
+            "unreadable",
+            "Could not read location — check its permissions and refresh.",
+        ),
+        (
+            "unavailable",
+            "Location unavailable — reconnect the volume and refresh.",
+        ),
+        (
+            "disconnected",
+            "Network location disconnected — reconnect and refresh.",
+        ),
+    ] {
+        let variant = FILE_FIXTURE_VARIANTS
+            .iter()
+            .find(|variant| variant.id == id)
+            .unwrap();
+        let app = FileWorkbenchFixture::create_variant(variant);
+        assert!(
+            app.browser.entries().is_empty(),
+            "{id} retained stale fixture entries"
+        );
+        let host = UiHost::new(app, variant.viewport.width, variant.viewport.height);
+        assert!(
+            host.accessibility_nodes()
+                .iter()
+                .any(|node| node.label.as_deref() == Some(expected)),
+            "{id} did not expose its required in-place state"
+        );
+    }
 }
 
 #[test]

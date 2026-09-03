@@ -505,7 +505,9 @@ impl nickel_ui_testkit::Fixture for FileWorkbenchFixture {
                 app.selected_entries = HashSet::from([0, 1]);
                 app
             }
-            "empty" => FileApp::with_browser(DirectoryBrowser::fixture(Vec::new()), String::new()),
+            "empty" | "unavailable" | "unreadable" | "loading" | "disconnected" => {
+                FileApp::with_browser(DirectoryBrowser::fixture(Vec::new()), String::new())
+            }
             _ => FileApp::fixture(),
         };
         if variant.id.contains("details") {

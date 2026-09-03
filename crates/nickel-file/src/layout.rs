@@ -83,13 +83,24 @@ pub(crate) fn build_view(
             )
         })
         .collect::<Vec<_>>();
+    let empty_message = if app.navigation_pending() {
+        if app.status.is_empty() {
+            "Loading location…".to_owned()
+        } else {
+            app.status.clone()
+        }
+    } else if app.status.is_empty() {
+        "This folder is empty.".to_owned()
+    } else {
+        app.status.clone()
+    };
     let files = if app.browser.entries().is_empty() {
         ui! {
             <Container id={"file-content"} grow={1.0} padding={Insets::all(28.0)}
                 on_press={FileMessage::SelectionSurface} context_message={FileMessage::ContextBackground}
                 focus_border={palette.accent} controller_focus_border={palette.complement}
                 accessibility_label={"Files"}>
-                <Text color={palette.muted}>{"This folder is empty."}</Text>
+                <Text color={palette.muted} wrap={true} max_lines={3}>{empty_message}</Text>
             </Container>
         }
     } else {
