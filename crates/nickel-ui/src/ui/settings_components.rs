@@ -2234,6 +2234,10 @@ mod tests {
                 .semantic_targets_for_message(&Message::Select(1))
                 .is_empty()
         );
+        assert!(tree.semantic_nodes().iter().any(|node| {
+            node.name.as_deref() == Some("Animations")
+                && node.value == Some(crate::SemanticValueSnapshot::Text("Normal".to_owned()))
+        }));
     }
 
     #[test]

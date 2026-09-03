@@ -5226,6 +5226,7 @@ fn layout_element<Message: Clone>(
                 input_value: Some(value),
                 ..
             } => Some(SemanticValueSnapshot::Text(value.clone())),
+            Kind::Dropdown { selected, .. } => Some(SemanticValueSnapshot::Text(selected.clone())),
             _ => None,
         },
         children: Vec::new(),

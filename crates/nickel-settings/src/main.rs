@@ -1243,8 +1243,8 @@ mod tests {
     use nickel_ui::Application;
 
     use super::{
-        BluetoothDevice, ControllerAction, NetworkAdapter, Rect, SIDEBAR_WIDTH, SettingsApp,
-        SettingsHostAdapter, SettingsMessage, SettingsPage, ThemePreference, UiHost,
+        BluetoothDevice, ControllerAction, FileIconPreference, NetworkAdapter, Rect, SIDEBAR_WIDTH,
+        SettingsApp, SettingsHostAdapter, SettingsMessage, SettingsPage, ThemePreference, UiHost,
         WallpaperSettings, attach_rect_centered, constrain_center, snap_rect,
     };
 
@@ -1491,6 +1491,26 @@ mod tests {
                 "missing Appearance control for {message:?}"
             );
         }
+    }
+
+    #[test]
+    fn unavailable_named_file_icon_theme_remains_visible_and_accessible() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Appearance);
+        app.shell_settings.file_icon_provider = FileIconPreference::System;
+        app.shell_settings.file_icon_theme = Some("missing-nickel-test-theme".to_owned());
+        let host = UiHost::new(app, 850, 900);
+
+        assert!(host.semantic_nodes().iter().any(|node| {
+            node.name.as_deref() == Some("File artwork")
+                && node.value
+                    == Some(nickel_ui::SemanticValueSnapshot::Text(
+                        "System — missing-nickel-test-theme (unavailable)".to_owned(),
+                    ))
+        }));
+        assert_eq!(
+            host.application().shell_settings.file_icon_theme.as_deref(),
+            Some("missing-nickel-test-theme")
+        );
     }
 
     #[test]
