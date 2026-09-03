@@ -12,7 +12,7 @@ use crate::{
     host::FileHostAdapter,
     icons, layout,
     layout::{rect_between, visible_file_range},
-    platform::{home_directory, location_groups, open_path},
+    platform::{LocationGroup, home_directory, location_groups, open_path},
 };
 use nickel_core::{
     shell_settings::{FileIconPreference, ShellSettings},
@@ -141,6 +141,7 @@ pub struct FileApp {
     pub(crate) next_icon_id: u16,
     pub(crate) sidebar_width: f32,
     pub(crate) expanded_folders: HashSet<PathBuf>,
+    pub(crate) location_groups: Vec<LocationGroup>,
     pub(crate) sidebar_children: HashMap<PathBuf, Vec<(String, PathBuf)>>,
     sidebar_loading: HashSet<PathBuf>,
     sidebar_sender: mpsc::Sender<SidebarResult>,
@@ -752,6 +753,7 @@ impl FileApp {
     fn with_browser(browser: DirectoryBrowser, status: String) -> Self {
         let settings = ShellSettings::load_default();
         let (sidebar_sender, sidebar_receiver) = mpsc::channel();
+        let resolved_location_groups = location_groups();
         let icon_appearance = settings
             .resolve_appearance(nickel_platform::appearance())
             .mode;
@@ -786,6 +788,7 @@ impl FileApp {
             next_icon_id: 1,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             expanded_folders: HashSet::new(),
+            location_groups: resolved_location_groups,
             sidebar_children: HashMap::new(),
             sidebar_loading: HashSet::new(),
             sidebar_sender,
@@ -1279,10 +1282,11 @@ impl FileApp {
             .iter()
             .map(|(path, _, _)| path.clone())
             .collect::<HashSet<_>>();
-        for (path, is_directory) in location_groups()
-            .into_iter()
-            .flat_map(|group| group.entries)
-            .map(|(_, path)| (path, true))
+        for (path, is_directory) in self
+            .location_groups
+            .iter()
+            .flat_map(|group| group.entries.iter())
+            .map(|(_, path)| (path.clone(), true))
         {
             if known_paths.insert(path.clone()) {
                 let request = icons::ArtworkRequest {

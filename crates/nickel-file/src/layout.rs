@@ -15,7 +15,6 @@ use crate::{
     EntrySortKey, SortDirection,
     app::{FileApp, NARROW_WORKSPACE_BREAKPOINT, SIDEBAR_RESIZE_WIDTH, TOOLBAR_HEIGHT},
     components, icons,
-    platform::{location_groups, places},
 };
 
 pub(crate) fn build_view(
@@ -28,8 +27,15 @@ pub(crate) fn build_view(
     let narrow = _width < NARROW_WORKSPACE_BREAKPOINT;
     let content_height = (height - TOOLBAR_HEIGHT - 30.0).max(0.0);
     let breadcrumb_width = (_width - if narrow { 390.0 } else { 320.0 }).max(90.0);
-    let breadcrumbs =
-        collapse_breadcrumbs(breadcrumb_paths(app.browser.current()), breadcrumb_width);
+    let known_places = app
+        .location_groups
+        .iter()
+        .flat_map(|group| group.entries.iter().cloned())
+        .collect::<Vec<_>>();
+    let breadcrumbs = collapse_breadcrumbs(
+        breadcrumb_paths(app.browser.current(), &known_places),
+        breadcrumb_width,
+    );
     let tab_strip = components::tab_strip(app, palette, light_mode);
     let breadcrumb_row = ui! {
         <Row gap={7.0}>
@@ -126,8 +132,9 @@ pub(crate) fn build_view(
             <Column>{tab_strip}{navigation}</Column>
         </Container>
     };
-    let location_groups = location_groups()
-        .into_iter()
+    let location_groups = app
+        .location_groups
+        .iter()
         .map(|group| {
             let rows = sidebar_folder_elements(
                 &group.entries,
@@ -566,11 +573,15 @@ pub(crate) fn visible_file_range(app: &FileApp, width: f32, height: f32) -> std:
     (window.range.start * columns)..(window.range.end * columns).min(count)
 }
 
-pub(crate) fn breadcrumb_paths(current: &Path) -> Vec<(String, PathBuf)> {
-    let anchor = places()
-        .into_iter()
+pub(crate) fn breadcrumb_paths(
+    current: &Path,
+    places: &[(String, PathBuf)],
+) -> Vec<(String, PathBuf)> {
+    let anchor = places
+        .iter()
         .filter(|(_, path)| current.starts_with(path))
-        .max_by_key(|(_, path)| path.components().count());
+        .max_by_key(|(_, path)| path.components().count())
+        .cloned();
     let Some((anchor_label, anchor_path)) = anchor else {
         return vec![(current.display().to_string(), current.to_path_buf())];
     };
