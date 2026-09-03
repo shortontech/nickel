@@ -32,7 +32,9 @@ use windows::Win32::Foundation::{LPARAM, WPARAM};
 #[cfg(target_os = "windows")]
 use windows::Win32::System::Threading::GetCurrentThreadId;
 #[cfg(target_os = "windows")]
-use windows::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_APP};
+use windows::Win32::UI::WindowsAndMessaging::{
+    MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, PostThreadMessageW, QS_ALLINPUT, WM_APP,
+};
 
 pub const DESKTOP_TITLE: &str = "Nickel Desktop";
 pub const PANEL_TITLE: &str = "Nickel Panel";
@@ -44,6 +46,14 @@ pub const WINDOW_CONTEXT_MENU_TITLE: &str = "Nickel Window Menu";
 pub const CODEX_PROJECT_MENU_TITLE: &str = "Nickel Codex Projects";
 pub const LOCK_TITLE: &str = "Nickel Lock";
 pub const SCREENSHOT_TITLE: &str = "Nickel Screenshot";
+
+#[cfg(any(test, target_os = "windows"))]
+fn windows_wait_timeout_millis(timeout: Duration) -> u32 {
+    const MAX_FINITE_WAIT_MS: u128 = u32::MAX as u128 - 1;
+    let nanos = timeout.as_nanos();
+    let rounded_up = nanos.saturating_add(999_999) / 1_000_000;
+    rounded_up.min(MAX_FINITE_WAIT_MS) as u32
+}
 pub const PANEL_HEIGHT: u32 = 56;
 const RUNTIME_SAMPLE_CAPACITY: usize = 64;
 const OUTPUT_RETIREMENT_SETTLE: Duration = Duration::from_millis(500);
@@ -908,6 +918,25 @@ impl WinitShell {
         if let Some(event) = self.pending_events.pop_front() {
             return Some(event);
         }
+        #[cfg(target_os = "windows")]
+        {
+            // Winit's pump timeout returns immediately under Wine and some Windows
+            // compatibility environments. Wait on the owning thread's message queue
+            // directly so native input and Nickel's PostThreadMessageW wake remain
+            // interruptible, then let winit translate everything without blocking.
+            // SAFETY: this thread owns the event loop and therefore its message queue;
+            // there are no object handles, and all flag values are Win32 constants.
+            unsafe {
+                MsgWaitForMultipleObjectsEx(
+                    None,
+                    windows_wait_timeout_millis(timeout),
+                    QS_ALLINPUT,
+                    MWMO_INPUTAVAILABLE,
+                )
+            };
+            self.pump_events(Some(Duration::ZERO));
+        }
+        #[cfg(not(target_os = "windows"))]
         self.pump_events(Some(timeout));
         self.drain_external_events();
         self.pending_events.pop_front()
@@ -1592,5 +1621,30 @@ mod tests {
             assert_eq!(tracker.missing_since.len(), 0);
             now += Duration::from_millis(1);
         }
+    }
+
+    #[test]
+    fn windows_message_wait_rounds_sub_millisecond_deadlines_up() {
+        assert_eq!(super::windows_wait_timeout_millis(Duration::ZERO), 0);
+        assert_eq!(
+            super::windows_wait_timeout_millis(Duration::from_nanos(1)),
+            1
+        );
+        assert_eq!(
+            super::windows_wait_timeout_millis(Duration::from_millis(15)),
+            15
+        );
+        assert_eq!(
+            super::windows_wait_timeout_millis(Duration::from_millis(15) + Duration::from_nanos(1)),
+            16
+        );
+    }
+
+    #[test]
+    fn windows_message_wait_keeps_infinite_sentinel_reserved() {
+        assert_eq!(
+            super::windows_wait_timeout_millis(Duration::from_secs(u64::MAX)),
+            u32::MAX - 1
+        );
     }
 }
