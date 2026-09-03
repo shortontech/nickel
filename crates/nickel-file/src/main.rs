@@ -321,6 +321,14 @@ const FILE_FIXTURE_VARIANTS: &[nickel_ui_testkit::FixtureVariant] = &[
         700,
         Light
     ),
+    file_fixture_variant!(
+        "command-surface",
+        "Searchable Command Surface",
+        "wide",
+        1100,
+        700,
+        Dark
+    ),
     file_fixture_variant!("empty", "Empty Folder", "medium", 820, 620, Dark),
     file_fixture_variant!(
         "unreadable",
@@ -492,6 +500,9 @@ impl nickel_ui_testkit::Fixture for FileWorkbenchFixture {
         };
         if variant.id.contains("details") {
             app.view_mode = FileViewMode::Details;
+        }
+        if variant.id == "command-surface" {
+            app.command_surface_open = true;
         }
         if variant.id == "unavailable" {
             app.status = "Location unavailable — reconnect the volume and refresh.".into();
@@ -1763,6 +1774,11 @@ impl Application for FileApp {
     }
 
     fn frame_overlays(&self, context: ViewContext) -> Vec<FrameOverlay<Self::Message>> {
+        let file_surface_is_mounted = !(self.command_surface_open
+            || context.viewport.size.width < NARROW_WORKSPACE_BREAKPOINT && self.places_open);
+        if !file_surface_is_mounted {
+            return Vec::new();
+        }
         let appearance =
             ShellSettings::load_default().resolve_appearance(nickel_platform::appearance());
         let palette = ThemePalette::from_appearance(appearance);

@@ -6,13 +6,12 @@ use std::{
 use nickel_core::theme::ThemePalette;
 use nickel_ui::{
     AnyView, Collection, CollectionPresentation, CollectionState, Insets, LinearGradient,
-    NavigationScope, Point, Rect, SemanticNodeSnapshot, SemanticRole, SidebarFolder, TextField,
+    NavigationScope, Point, Rect, SemanticNodeSnapshot, SemanticRole, SidebarFolder,
     VerticalScroll, VirtualWindow, ui,
 };
 
 use super::{FileMessage, FileViewMode};
 use crate::{
-    EntrySortKey,
     app::{FileApp, NARROW_WORKSPACE_BREAKPOINT, SIDEBAR_RESIZE_WIDTH, TOOLBAR_HEIGHT},
     components, icons,
 };
@@ -202,7 +201,7 @@ pub(crate) fn build_view(
     let content = if app.command_surface_open {
         ui! {
             <Container id={"file-layout"} height={content_height} shrink={0.0} accessibility_label={"Commands"}>
-                {command_surface(app, palette)}
+                {components::command_surface(app, palette)}
             </Container>
         }
     } else if narrow {
@@ -241,178 +240,6 @@ pub(crate) fn build_view(
         <Column height={height} background={palette.background}>{toolbar}{content}{footer}</Column>
     };
     AnyView::new(root)
-}
-
-fn command_query_message(query: String) -> FileMessage {
-    FileMessage::CommandQueryChanged(query)
-}
-
-fn command_surface(app: &FileApp, palette: ThemePalette) -> AnyView<FileMessage> {
-    let query = app.command_query.trim().to_ascii_lowercase();
-    let command_label = |id| app.localizer.text(id);
-    let commands = [
-        (
-            command_label("file-command-open"),
-            "activate enter",
-            app.selected.is_some() && !app.navigation_pending(),
-            FileMessage::ContextOpen,
-        ),
-        (
-            command_label("file-command-open-new-tab"),
-            "activate background tab",
-            app.selected_is_container() && !app.navigation_pending(),
-            FileMessage::ContextOpenNewTab,
-        ),
-        (
-            command_label("file-command-back"),
-            "previous navigation",
-            app.browser.can_go_back() && !app.navigation_pending(),
-            FileMessage::Back,
-        ),
-        (
-            command_label("file-command-forward"),
-            "next navigation",
-            app.browser.can_go_forward() && !app.navigation_pending(),
-            FileMessage::Forward,
-        ),
-        (
-            command_label("file-command-up"),
-            "parent folder",
-            app.browser.can_go_up() && !app.navigation_pending(),
-            FileMessage::Up,
-        ),
-        (
-            command_label("file-command-refresh"),
-            "reload f5",
-            !app.navigation_pending(),
-            FileMessage::Refresh,
-        ),
-        (
-            command_label("file-command-new-tab"),
-            "create tab ctrl t",
-            true,
-            FileMessage::NewTab,
-        ),
-        (
-            command_label("file-command-close-tab"),
-            "dismiss tab ctrl w",
-            true,
-            FileMessage::CloseTab(app.active_tab),
-        ),
-        (
-            command_label("file-command-grid-view"),
-            "icons thumbnails",
-            true,
-            FileMessage::SetViewMode(FileViewMode::Grid),
-        ),
-        (
-            command_label("file-command-details-view"),
-            "list columns",
-            true,
-            FileMessage::SetViewMode(FileViewMode::Details),
-        ),
-        (
-            command_label("file-command-increase-tile-size"),
-            "grid zoom larger ctrl plus",
-            app.view_mode == FileViewMode::Grid && app.tile_width < crate::app::MAX_TILE_WIDTH,
-            FileMessage::AdjustTileWidth(1),
-        ),
-        (
-            command_label("file-command-decrease-tile-size"),
-            "grid zoom smaller ctrl minus",
-            app.view_mode == FileViewMode::Grid && app.tile_width > crate::app::MIN_TILE_WIDTH,
-            FileMessage::AdjustTileWidth(-1),
-        ),
-        (
-            command_label("file-command-select-all"),
-            "selection ctrl a",
-            !app.browser.entries().is_empty(),
-            FileMessage::ContextSelectAll,
-        ),
-        (
-            command_label("file-command-sort-name"),
-            "order filename",
-            true,
-            FileMessage::SortBy(EntrySortKey::Name),
-        ),
-        (
-            command_label("file-command-sort-type"),
-            "order extension",
-            true,
-            FileMessage::SortBy(EntrySortKey::Type),
-        ),
-        (
-            command_label("file-command-sort-modified"),
-            "order date time",
-            true,
-            FileMessage::SortBy(EntrySortKey::Modified),
-        ),
-        (
-            command_label("file-command-sort-size"),
-            "order bytes",
-            true,
-            FileMessage::SortBy(EntrySortKey::Size),
-        ),
-        (
-            if app.browser.show_hidden() {
-                command_label("file-command-hide-hidden")
-            } else {
-                command_label("file-command-show-hidden")
-            },
-            "dotfiles visibility",
-            !app.navigation_pending(),
-            FileMessage::ToggleHiddenFiles,
-        ),
-    ];
-    let rows = commands
-        .into_iter()
-        .filter(|(label, aliases, _, _)| {
-            query.is_empty()
-                || label.to_ascii_lowercase().contains(&query)
-                || aliases.contains(&query)
-        })
-        .enumerate()
-        .map(|(index, (label, aliases, enabled, message))| {
-            let accessibility_label = label.clone();
-            AnyView::new(ui! {
-                <Container id={format!("file-command-{index}")} height={42.0}
-                    on_press={message} enabled={enabled} background={palette.surface}
-                    hover_background={palette.surface_hover} pressed_background={palette.accent_soft}
-                    focus_border={palette.accent} controller_focus_border={palette.complement}
-                    padding={Insets { top: 9.0, right: 12.0, bottom: 7.0, left: 12.0 }}
-                    semantic_role={SemanticRole::Button} accessibility_label={accessibility_label}>
-                    <Row gap={12.0}>
-                        <Text width={180.0} color={if enabled { palette.text } else { palette.muted }}>{label}</Text>
-                        <Text color={palette.muted} scale={0.9}>{aliases}</Text>
-                    </Row>
-                </Container>
-            })
-        })
-        .collect::<Vec<_>>();
-    let results = if rows.is_empty() {
-        AnyView::new(ui! {
-            <Container padding={Insets::all(16.0)}><Text color={palette.muted}>{"No matching commands."}</Text></Container>
-        })
-    } else {
-        AnyView::new(ui! { <Column gap={2.0} children={rows} /> })
-    };
-    AnyView::new(ui! {
-        <Container id={"file-command-surface"} grow={1.0} background={palette.background}
-            padding={Insets { top: 24.0, right: 32.0, bottom: 24.0, left: 32.0 }}>
-            <Column gap={10.0}>
-                <Text color={palette.text} scale={1.35}>{"Commands"}</Text>
-                <Container height={40.0} background={palette.surface} border={(palette.accent, 1.0)}
-                    padding={Insets { top: 9.0, right: 12.0, bottom: 7.0, left: 12.0 }}>
-                    {TextField::on_change_with_placeholder(
-                        &app.command_query,
-                        "Type a command…",
-                        command_query_message,
-                    ).id("file-command-query").color(palette.text)}
-                </Container>
-                {results}
-            </Column>
-        </Container>
-    })
 }
 
 pub(crate) fn visible_file_range(app: &FileApp, width: f32, height: f32) -> std::ops::Range<usize> {

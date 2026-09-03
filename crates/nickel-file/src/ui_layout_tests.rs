@@ -1324,6 +1324,27 @@ fn every_file_fixture_passes_geometry_accessibility_and_selection_contrast_gates
 }
 
 #[test]
+fn replacement_surfaces_do_not_declare_hidden_file_context_anchors() {
+    let mut command = FileApp::fixture();
+    command.command_surface_open = true;
+    assert!(
+        UiHost::new(command, 1_100, 700)
+            .inspect()
+            .overlay_failures
+            .is_empty()
+    );
+
+    let mut places = FileApp::fixture();
+    places.places_open = true;
+    assert!(
+        UiHost::new(places, 660, 640)
+            .inspect()
+            .overlay_failures
+            .is_empty()
+    );
+}
+
+#[test]
 fn every_file_fixture_asset_matches_its_admitted_source_master() {
     let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     for asset in FILE_FIXTURE_ASSETS {
