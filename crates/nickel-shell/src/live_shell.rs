@@ -1117,30 +1117,80 @@ impl LiveShell {
         });
     }
 
-    pub fn poll_host_deadlines(&mut self, now: Instant) -> bool {
-        if self.control_deadline.is_none_or(|deadline| now < deadline) {
-            return false;
-        }
-        let changed = self.step_control_host(HostBatch {
-            events: vec![HostEvent::Poll],
-            ..HostBatch::default()
-        });
-        self.apply_control_effects();
-        changed
-    }
+    pub fn poll_host_deadlines(&mut self, now: Instant) -> Vec<SurfaceRole> {
+        let mut changed = Vec::new();
 
-    pub fn poll_panel_deadline(&mut self, now: Instant) -> bool {
-        if self.panel_deadline.is_none_or(|deadline| now < deadline) {
-            return false;
+        if self
+            .desktop_deadline
+            .is_some_and(|deadline| now >= deadline)
+        {
+            let outcome = self.desktop_host.step(HostBatch {
+                now: Some(now),
+                events: vec![HostEvent::Poll],
+                ..HostBatch::default()
+            });
+            self.desktop_change_token = outcome.change_token;
+            self.desktop_deadline = outcome.next_deadline;
+            if outcome.changed {
+                changed.push(SurfaceRole::Desktop);
+            }
         }
-        let outcome = self.panel_host.step(HostBatch {
-            now: Some(now),
-            events: vec![HostEvent::Poll],
-            ..HostBatch::default()
-        });
-        self.panel_change_token = outcome.change_token;
-        self.panel_deadline = outcome.next_deadline;
-        outcome.changed
+        if self.panel_deadline.is_some_and(|deadline| now >= deadline) {
+            let outcome = self.panel_host.step(HostBatch {
+                now: Some(now),
+                events: vec![HostEvent::Poll],
+                ..HostBatch::default()
+            });
+            self.panel_change_token = outcome.change_token;
+            self.panel_deadline = outcome.next_deadline;
+            if outcome.changed {
+                changed.push(SurfaceRole::Panel);
+            }
+        }
+        if self.lock_deadline.is_some_and(|deadline| now >= deadline) {
+            let outcome = self.lock_host.step(HostBatch {
+                now: Some(now),
+                events: vec![HostEvent::Poll],
+                ..HostBatch::default()
+            });
+            self.lock_change_token = outcome.change_token;
+            self.lock_deadline = outcome.next_deadline;
+            if outcome.changed {
+                changed.push(SurfaceRole::Lock);
+            }
+        }
+        if self
+            .control_deadline
+            .is_some_and(|deadline| now >= deadline)
+        {
+            let control_changed = self.step_control_host(HostBatch {
+                now: Some(now),
+                events: vec![HostEvent::Poll],
+                ..HostBatch::default()
+            });
+            self.apply_control_effects();
+            if control_changed {
+                changed.push(SurfaceRole::ControlCenter);
+            }
+        }
+        if self
+            .preview_frame
+            .as_ref()
+            .and_then(WindowPreviewFrame::next_deadline)
+            .is_some_and(|deadline| now >= deadline)
+            && let Some(frame) = self.preview_frame.as_mut()
+            && frame
+                .step(HostBatch {
+                    now: Some(now),
+                    events: vec![HostEvent::Poll],
+                    ..HostBatch::default()
+                })
+                .changed
+        {
+            changed.push(SurfaceRole::WindowPreview);
+        }
+
+        changed
     }
 
     pub fn notification_click(&mut self, x: f32, y: f32, width: u32, height: u32) -> bool {
@@ -4121,9 +4171,35 @@ mod tests {
         let now = Instant::now();
         shell.panel_deadline = Some(now);
 
-        assert!(shell.poll_panel_deadline(now));
+        assert!(shell.poll_host_deadlines(now).contains(&SurfaceRole::Panel));
         assert_ne!(shell.panel_host.application().clock, "stale");
         assert!(shell.panel_deadline.is_some_and(|deadline| deadline > now));
+    }
+
+    #[test]
+    fn every_advertised_host_deadline_is_consumed_when_due() {
+        let mut shell = LiveShell::new().unwrap();
+        let _ = shell.scene(SurfaceRole::Desktop, 1280, 720);
+        let _ = shell.scene(SurfaceRole::Panel, 1280, 56);
+        let _ = shell.scene(SurfaceRole::Lock, 1280, 720);
+        let _ = shell.scene(SurfaceRole::ControlCenter, 420, 640);
+        let now = Instant::now();
+        shell.desktop_deadline = Some(now);
+        shell.panel_deadline = Some(now);
+        shell.lock_deadline = Some(now);
+        shell.control_deadline = Some(now);
+
+        let _ = shell.poll_host_deadlines(now);
+
+        assert!(shell.desktop_deadline.is_none_or(|deadline| deadline > now));
+        assert!(shell.panel_deadline.is_none_or(|deadline| deadline > now));
+        assert!(shell.lock_deadline.is_none_or(|deadline| deadline > now));
+        assert!(shell.control_deadline.is_none_or(|deadline| deadline > now));
+        assert!(
+            shell
+                .next_host_deadline()
+                .is_none_or(|deadline| deadline > now)
+        );
     }
 
     #[test]

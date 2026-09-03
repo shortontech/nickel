@@ -1844,13 +1844,10 @@ fn main() -> Result<(), String> {
             focus_visible_overlay(&mut shell, &state);
             render_role(&mut shell, &mut state, SurfaceRole::Screenshot)?;
         }
-        if state.poll_host_deadlines(Instant::now())
-            && state.surface_visible(SurfaceRole::ControlCenter)
-        {
-            render_role(&mut shell, &mut state, SurfaceRole::ControlCenter)?;
-        }
-        if state.poll_panel_deadline(Instant::now()) {
-            render_role(&mut shell, &mut state, SurfaceRole::Panel)?;
+        for role in state.poll_host_deadlines(Instant::now()) {
+            if state.surface_visible(role) {
+                render_role(&mut shell, &mut state, role)?;
+            }
         }
         if state.poll_screenshot_pointer(Instant::now())
             && state.surface_visible(SurfaceRole::Screenshot)
