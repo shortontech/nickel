@@ -342,7 +342,7 @@ pub fn set_audio_volume(_volume_percent: u8) -> bool {
     false
 }
 
-pub fn capture_pointer(_window: &sdl3::video::Window) -> bool {
+pub fn capture_pointer(_window: &impl raw_window_handle::HasWindowHandle) -> bool {
     false
 }
 

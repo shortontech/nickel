@@ -15,14 +15,21 @@ pub enum ShellTestRequest {
     },
 }
 
-pub fn surface_size(window: &sdl3::video::Window) -> (u32, u32) {
+/// Returns the native client-area size when the platform can query it.
+///
+/// `fallback` is supplied by the window runtime so this boundary remains
+/// independent of whichever crate owns the event loop and native window.
+pub fn surface_size(
+    _window: &impl raw_window_handle::HasWindowHandle,
+    fallback: (u32, u32),
+) -> (u32, u32) {
     #[cfg(target_os = "windows")]
     {
-        return windows::surface_size(window);
+        return windows::surface_size(_window, fallback);
     }
     #[cfg(not(target_os = "windows"))]
     {
-        window.size_in_pixels()
+        fallback
     }
 }
 

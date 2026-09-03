@@ -49,13 +49,13 @@ pub fn set_audio_volume(_volume_percent: u8) -> bool {
     false
 }
 
-pub fn capture_pointer(_window: &sdl3::video::Window) -> bool {
+pub fn capture_pointer(_window: &impl raw_window_handle::HasWindowHandle) -> bool {
     false
 }
 
 pub fn release_pointer() {}
 
-pub fn configure_volume_osd_window(_window: &sdl3::video::Window) -> bool {
+pub fn configure_volume_osd_window(_window: &impl raw_window_handle::HasWindowHandle) -> bool {
     true
 }
 
