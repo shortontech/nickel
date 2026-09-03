@@ -1015,6 +1015,50 @@ fn failed_location_state_belongs_to_its_tab_and_recovers_in_place() {
 }
 
 #[test]
+fn closing_active_tab_selects_nearest_survivor_without_mutating_it() {
+    let root = tempfile::tempdir().unwrap();
+    let middle = root.path().join("middle");
+    let right = root.path().join("right");
+    std::fs::create_dir(&middle).unwrap();
+    std::fs::create_dir(&right).unwrap();
+    std::fs::write(middle.join("middle.txt"), b"middle").unwrap();
+    std::fs::write(right.join("right.txt"), b"right").unwrap();
+    let mut app = FileApp::new(root.path().to_path_buf());
+
+    app.new_tab_at(middle);
+    settle_navigation(&mut app);
+    app.selected = Some(0);
+    app.selected_entries = HashSet::from([0]);
+    app.file_scroll_offset = 23.0;
+    app.view_mode = FileViewMode::Details;
+    app.sort_key = EntrySortKey::Size;
+
+    app.new_tab_at(right.clone());
+    settle_navigation(&mut app);
+    app.selected = Some(0);
+    app.selected_entries = HashSet::from([0]);
+    app.file_scroll_offset = 41.0;
+    app.view_mode = FileViewMode::Grid;
+    app.sort_key = EntrySortKey::Modified;
+
+    app.switch_tab(1);
+    app.close_tab(1);
+
+    assert_eq!(app.tabs.len(), 2);
+    assert_eq!(app.active_tab, 1);
+    assert_eq!(app.browser.current(), right);
+    assert_eq!(app.selected_entries, HashSet::from([0]));
+    assert_eq!(app.file_scroll_offset, 41.0);
+    assert_eq!(app.view_mode, FileViewMode::Grid);
+    assert_eq!(app.sort_key, EntrySortKey::Modified);
+
+    app.close_tab(1);
+    assert_eq!(app.tabs.len(), 1);
+    assert_eq!(app.active_tab, 0);
+    assert_eq!(app.browser.current(), root.path());
+}
+
+#[test]
 fn refresh_keeps_usable_contents_until_async_enumeration_publishes() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("existing.txt"), b"existing").unwrap();
