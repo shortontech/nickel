@@ -5,7 +5,7 @@ use nickel_ui::{AnyView, Component, ComponentBuilderExt, Insets, SemanticRole, u
 
 use crate::{
     DirectoryBrowser, FileEntry,
-    app::{FileApp, FileMessage},
+    app::{DetailsColumnWidths, FileApp, FileMessage},
 };
 
 pub(crate) fn status_text(app: &FileApp) -> String {
@@ -169,6 +169,7 @@ pub(crate) fn details_row(
     icon: Option<(u16, Arc<image::RgbaImage>)>,
     palette: ThemePalette,
     light_mode: bool,
+    widths: DetailsColumnWidths,
 ) -> impl Component<FileMessage> + use<> {
     let (icon_id, icon_image) = icon.unwrap_or_else(empty_artwork);
     let kind = if entry.is_directory {
@@ -196,9 +197,12 @@ pub(crate) fn details_row(
                 <Container id={format!("details-name-{index}")} grow={1.0} min_width={120.0} height={44.0}>
                     <Text color={palette.text} wrap={true} max_lines={2} ellipsis={true} line_height={18.0}>{entry.display_name()}</Text>
                 </Container>
-                <Text width={100.0} color={palette.muted}>{kind}</Text>
-                <Text width={140.0} color={palette.muted}>{modified}</Text>
-                <Text width={80.0} color={palette.muted}>{size}</Text>
+                <Text id={format!("details-type-{index}")} width={widths.type_width} color={palette.muted}>{kind}</Text>
+                <Container width={5.0} />
+                <Text id={format!("details-modified-{index}")} width={widths.modified_width} color={palette.muted}>{modified}</Text>
+                <Container width={5.0} />
+                <Text id={format!("details-size-{index}")} width={widths.size_width} color={palette.muted}>{size}</Text>
+                <Container width={5.0} />
             </Row>
         </Container>
     }

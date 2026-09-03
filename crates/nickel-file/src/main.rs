@@ -33,6 +33,8 @@ const DEFAULT_TILE_WIDTH: f32 = 150.0;
 pub(crate) const NARROW_WORKSPACE_BREAKPOINT: f32 = 720.0;
 pub(crate) const MIN_TILE_WIDTH: f32 = 110.0;
 pub(crate) const MAX_TILE_WIDTH: f32 = 240.0;
+const MIN_DETAILS_COLUMN_WIDTH: f32 = 72.0;
+const MAX_DETAILS_COLUMN_WIDTH: f32 = 320.0;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum FileMessage {
@@ -49,6 +51,7 @@ pub enum FileMessage {
     SubmitAddress,
     ToggleHiddenFiles,
     ResizeSidebar,
+    ResizeDetailsColumn(DetailsColumn),
     TogglePlaces,
     NewTab,
     SwitchTab(usize),
@@ -71,6 +74,37 @@ pub enum FileMessage {
 pub enum FileViewMode {
     Grid,
     Details,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DetailsColumn {
+    Type,
+    Modified,
+    Size,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct DetailsColumnWidths {
+    pub(crate) type_width: f32,
+    pub(crate) modified_width: f32,
+    pub(crate) size_width: f32,
+}
+
+impl Default for DetailsColumnWidths {
+    fn default() -> Self {
+        Self {
+            type_width: 100.0,
+            modified_width: 140.0,
+            size_width: 80.0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DetailsColumnResize {
+    column: DetailsColumn,
+    pointer_start: f32,
+    width_start: f32,
 }
 
 pub struct FileApp {
@@ -96,6 +130,7 @@ pub struct FileApp {
     pub(crate) shift_down: bool,
     pub(crate) selection_drag: Option<Point>,
     pub(crate) resizing_sidebar: bool,
+    pub(crate) resizing_details_column: Option<DetailsColumnResize>,
     pub(crate) places_open: bool,
     pub(crate) command_surface_open: bool,
     pub(crate) command_query: String,
@@ -107,6 +142,7 @@ pub struct FileApp {
     pub(crate) view_mode: FileViewMode,
     pub(crate) sort_key: EntrySortKey,
     pub(crate) sort_direction: SortDirection,
+    pub(crate) details_column_widths: DetailsColumnWidths,
     pub(crate) tab_icon: Option<(u16, Arc<image::RgbaImage>)>,
     pub(crate) tabs: Vec<Option<FileTab>>,
     pub(crate) active_tab: usize,
@@ -451,6 +487,7 @@ pub(crate) struct FileTab {
     pub(crate) view_mode: FileViewMode,
     pub(crate) sort_key: EntrySortKey,
     pub(crate) sort_direction: SortDirection,
+    pub(crate) details_column_widths: DetailsColumnWidths,
     pub(crate) address_editing: bool,
     pub(crate) address_text: String,
     pub(crate) tab_icon: Option<(u16, Arc<image::RgbaImage>)>,
@@ -459,6 +496,36 @@ pub(crate) struct FileTab {
 impl FileApp {
     pub(crate) fn is_resizing_sidebar(&self) -> bool {
         self.resizing_sidebar
+    }
+
+    pub(crate) fn is_resizing_details_column(&self) -> bool {
+        self.resizing_details_column.is_some()
+    }
+
+    pub(crate) fn resize_details_column_to(&mut self, pointer_x: f32) {
+        let Some(resize) = self.resizing_details_column else {
+            return;
+        };
+        let width = (resize.width_start + pointer_x - resize.pointer_start)
+            .clamp(MIN_DETAILS_COLUMN_WIDTH, MAX_DETAILS_COLUMN_WIDTH);
+        match resize.column {
+            DetailsColumn::Type => self.details_column_widths.type_width = width,
+            DetailsColumn::Modified => self.details_column_widths.modified_width = width,
+            DetailsColumn::Size => self.details_column_widths.size_width = width,
+        }
+    }
+
+    fn begin_details_column_resize(&mut self, column: DetailsColumn) {
+        let width_start = match column {
+            DetailsColumn::Type => self.details_column_widths.type_width,
+            DetailsColumn::Modified => self.details_column_widths.modified_width,
+            DetailsColumn::Size => self.details_column_widths.size_width,
+        };
+        self.resizing_details_column = Some(DetailsColumnResize {
+            column,
+            pointer_start: self.cursor.x,
+            width_start,
+        });
     }
 
     pub fn new(path: PathBuf) -> Self {
@@ -504,6 +571,7 @@ impl FileApp {
             shift_down: false,
             selection_drag: None,
             resizing_sidebar: false,
+            resizing_details_column: None,
             places_open: false,
             command_surface_open: false,
             command_query: String::new(),
@@ -515,6 +583,7 @@ impl FileApp {
             view_mode: FileViewMode::Grid,
             sort_key: EntrySortKey::Name,
             sort_direction: SortDirection::Ascending,
+            details_column_widths: DetailsColumnWidths::default(),
             tab_icon: None,
             tabs: vec![None],
             active_tab: 0,
@@ -589,6 +658,10 @@ impl FileApp {
         std::mem::swap(&mut self.view_mode, &mut target.view_mode);
         std::mem::swap(&mut self.sort_key, &mut target.sort_key);
         std::mem::swap(&mut self.sort_direction, &mut target.sort_direction);
+        std::mem::swap(
+            &mut self.details_column_widths,
+            &mut target.details_column_widths,
+        );
         std::mem::swap(&mut self.address_editing, &mut target.address_editing);
         std::mem::swap(&mut self.address_text, &mut target.address_text);
         std::mem::swap(&mut self.tab_icon, &mut target.tab_icon);
@@ -620,6 +693,7 @@ impl FileApp {
             view_mode: FileViewMode::Grid,
             sort_key: EntrySortKey::Name,
             sort_direction: SortDirection::Ascending,
+            details_column_widths: DetailsColumnWidths::default(),
             address_editing: false,
             address_text: String::new(),
             tab_icon: None,
@@ -1080,6 +1154,9 @@ impl FileApp {
             }
             FileMessage::ResizeSidebar => {
                 self.resizing_sidebar = true;
+            }
+            FileMessage::ResizeDetailsColumn(column) => {
+                self.begin_details_column_resize(column);
             }
             FileMessage::TogglePlaces => self.places_open = !self.places_open,
             FileMessage::NewTab => self.new_tab(),

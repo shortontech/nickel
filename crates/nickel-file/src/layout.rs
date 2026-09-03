@@ -196,7 +196,15 @@ pub(crate) fn build_view(
                     CollectionState::Ready(tile_rows),
                     |(_, entry, _, _)| entry.path.to_string_lossy().into_owned(),
                     move |(index, entry, selected, icon)| {
-                        components::details_row(index, &entry, selected, icon, palette, light_mode)
+                        components::details_row(
+                            index,
+                            &entry,
+                            selected,
+                            icon,
+                            palette,
+                            light_mode,
+                            app.details_column_widths,
+                        )
                     },
                 )
                 .expect("directory entries have unique paths")
@@ -252,15 +260,21 @@ pub(crate) fn build_view(
                                     accessibility_label={"Sort by name"}>
                                     <Text color={palette.muted}>{name_sort}</Text>
                                 </Container>
-                                <Container width={100.0} on_press={FileMessage::SortBy(EntrySortKey::Type)}
+                                <Container width={app.details_column_widths.type_width} on_press={FileMessage::SortBy(EntrySortKey::Type)}
                                     focus_border={palette.accent} controller_focus_border={palette.complement}
                                     accessibility_label={"Sort by type"}><Text color={palette.muted}>{type_sort}</Text></Container>
-                                <Container width={140.0} on_press={FileMessage::SortBy(EntrySortKey::Modified)}
+                                <Container id={"resize-details-type"} width={5.0} on_press={FileMessage::ResizeDetailsColumn(crate::app::DetailsColumn::Type)}
+                                    background={palette.surface_hover} focus_border={palette.accent} accessibility_label={"Resize type column"} />
+                                <Container width={app.details_column_widths.modified_width} on_press={FileMessage::SortBy(EntrySortKey::Modified)}
                                     focus_border={palette.accent} controller_focus_border={palette.complement}
                                     accessibility_label={"Sort by modified time"}><Text color={palette.muted}>{modified_sort}</Text></Container>
-                                <Container width={80.0} on_press={FileMessage::SortBy(EntrySortKey::Size)}
+                                <Container id={"resize-details-modified"} width={5.0} on_press={FileMessage::ResizeDetailsColumn(crate::app::DetailsColumn::Modified)}
+                                    background={palette.surface_hover} focus_border={palette.accent} accessibility_label={"Resize modified column"} />
+                                <Container width={app.details_column_widths.size_width} on_press={FileMessage::SortBy(EntrySortKey::Size)}
                                     focus_border={palette.accent} controller_focus_border={palette.complement}
                                     accessibility_label={"Sort by size"}><Text color={palette.muted}>{size_sort}</Text></Container>
+                                <Container id={"resize-details-size"} width={5.0} on_press={FileMessage::ResizeDetailsColumn(crate::app::DetailsColumn::Size)}
+                                    background={palette.surface_hover} focus_border={palette.accent} accessibility_label={"Resize size column"} />
                             </Row>
                         </Container>
                     }

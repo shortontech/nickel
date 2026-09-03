@@ -117,6 +117,40 @@ fn provider_changes_preserve_independent_tab_view_state() {
 }
 
 #[test]
+fn details_column_widths_resize_within_bounds_and_belong_to_their_tab() {
+    let directory = tempfile::tempdir().unwrap();
+    let child = directory.path().join("child");
+    std::fs::create_dir(&child).unwrap();
+    std::fs::write(directory.path().join("root.txt"), b"root").unwrap();
+    std::fs::write(child.join("child.txt"), b"child").unwrap();
+    let mut app = FileApp::new(directory.path().to_path_buf());
+    app.view_mode = FileViewMode::Details;
+    app.cursor.x = 200.0;
+    app.update(FileMessage::ResizeDetailsColumn(DetailsColumn::Type));
+    app.resize_details_column_to(900.0);
+    assert_eq!(
+        app.details_column_widths.type_width,
+        MAX_DETAILS_COLUMN_WIDTH
+    );
+    app.resizing_details_column = None;
+
+    app.cursor.x = 200.0;
+    app.update(FileMessage::ResizeDetailsColumn(DetailsColumn::Size));
+    app.resize_details_column_to(-900.0);
+    assert_eq!(
+        app.details_column_widths.size_width,
+        MIN_DETAILS_COLUMN_WIDTH
+    );
+    app.resizing_details_column = None;
+    let root_widths = app.details_column_widths;
+
+    app.new_tab_at(child);
+    assert_eq!(app.details_column_widths, DetailsColumnWidths::default());
+    app.switch_tab(0);
+    assert_eq!(app.details_column_widths, root_widths);
+}
+
+#[test]
 fn status_area_reports_selection_and_total_without_hiding_errors() {
     let mut app = FileApp::fixture();
     assert_eq!(file_status_text(&app), "3 items");

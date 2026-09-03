@@ -122,6 +122,7 @@ impl HostAdapter<FileApp> for FileHostAdapter {
                 };
                 let selection_drag = host.application().selection_drag;
                 let resizing = host.application().is_resizing_sidebar();
+                let resizing_details = host.application().is_resizing_details_column();
                 let selected_entries = selection_drag.map(|start| {
                     let selection = rect_between(start, cursor);
                     entries_in_selection(
@@ -140,7 +141,10 @@ impl HostAdapter<FileApp> for FileHostAdapter {
                     app.sidebar_width = cursor.x.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
                     app.ensure_selection_visible();
                 }
-                changed = selection_drag.is_some() || resizing;
+                if resizing_details {
+                    app.resize_details_column_to(cursor.x);
+                }
+                changed = selection_drag.is_some() || resizing || resizing_details;
             }
             InputEvent::Pointer(PointerEvent::Button {
                 button: PointerButton::Secondary,
@@ -161,6 +165,7 @@ impl HostAdapter<FileApp> for FileHostAdapter {
             }) => {
                 let app = host.application_mut();
                 app.resizing_sidebar = false;
+                app.resizing_details_column = None;
                 app.selection_drag = None;
                 changed = true;
             }
@@ -179,6 +184,7 @@ impl HostAdapter<FileApp> for FileHostAdapter {
                 app.control_down = false;
                 app.shift_down = false;
                 app.resizing_sidebar = false;
+                app.resizing_details_column = None;
                 app.selection_drag = None;
             }
             InputEvent::FocusGained { .. } => {
