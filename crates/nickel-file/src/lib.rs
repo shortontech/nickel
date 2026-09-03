@@ -12,6 +12,7 @@ extern crate self as nickel_file;
 #[path = "main.rs"]
 #[allow(dead_code)]
 pub(crate) mod app;
+pub(crate) mod components;
 pub(crate) mod host;
 pub mod icons;
 pub(crate) mod layout;

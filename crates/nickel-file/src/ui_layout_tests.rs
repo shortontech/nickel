@@ -1,5 +1,8 @@
 use super::*;
-use crate::layout::{collapse_breadcrumbs, entries_in_selection, file_status_text};
+use crate::{
+    components::status_text as file_status_text,
+    layout::{collapse_breadcrumbs, entries_in_selection},
+};
 use nickel_ui::{ActionKind, Rect, UiHost};
 use nickel_ui_testkit::{FocusDirection, Scenario, ScenarioBudget, Selector};
 
