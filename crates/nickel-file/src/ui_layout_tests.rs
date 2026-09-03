@@ -1345,6 +1345,47 @@ fn replacement_surfaces_do_not_declare_hidden_file_context_anchors() {
 }
 
 #[test]
+fn minimum_command_surface_keeps_search_fixed_and_all_results_scrollable() {
+    let mut app = FileApp::fixture();
+    app.command_surface_open = true;
+    let palette = ThemePalette::from_appearance(
+        ShellSettings::load_default().resolve_appearance(nickel_platform::appearance()),
+    );
+    let frame = nickel_ui::UiFrame::layout(
+        app.build_view(560.0, 360.0, palette, true),
+        Rect::new(0.0, 0.0, 560.0, 360.0),
+    );
+    let extent = frame
+        .scroll_extent(&FileMessage::CommandScroll(0.0))
+        .expect("minimum command surface must own a result scroller");
+    assert!(extent.can_scroll());
+    assert!(
+        frame
+            .resolved_layout()
+            .nodes()
+            .iter()
+            .find(|node| node.id.as_str().ends_with("/file-command-query"))
+            .is_some_and(|node| node.allocated.size.height > 0.0),
+        "the command query must not shrink behind its results"
+    );
+
+    app.update_message(FileMessage::CommandScroll(
+        (extent.content.height - extent.viewport.height).max(0.0),
+    ));
+    let scrolled = nickel_ui::UiFrame::layout(
+        app.build_view(560.0, 360.0, palette, true),
+        Rect::new(0.0, 0.0, 560.0, 360.0),
+    );
+    assert!(
+        scrolled
+            .semantic_nodes()
+            .iter()
+            .any(|node| node.name.as_deref() == Some("Hide hidden files")),
+        "the final command must mount at the end of the controlled scroll range"
+    );
+}
+
+#[test]
 fn every_file_fixture_asset_matches_its_admitted_source_master() {
     let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     for asset in FILE_FIXTURE_ASSETS {

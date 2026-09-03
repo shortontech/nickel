@@ -49,6 +49,7 @@ pub enum FileMessage {
     ContextSelectAll,
     ToggleCommandSurface,
     CommandQueryChanged(String),
+    CommandScroll(f32),
     ToggleAddressEditing,
     AddressChanged(String),
     SubmitAddress,
@@ -156,6 +157,7 @@ pub struct FileApp {
     pub(crate) places_open: bool,
     pub(crate) command_surface_open: bool,
     pub(crate) command_query: String,
+    pub(crate) command_scroll_offset: f32,
     pub(crate) pending_focus: Option<UiId>,
     pub(crate) address_editing: bool,
     pub(crate) address_text: String,
@@ -329,6 +331,14 @@ const FILE_FIXTURE_VARIANTS: &[nickel_ui_testkit::FixtureVariant] = &[
         700,
         Dark
     ),
+    file_fixture_variant!(
+        "minimum-command-surface",
+        "Minimum Searchable Command Surface",
+        "minimum",
+        560,
+        360,
+        Light
+    ),
     file_fixture_variant!("empty", "Empty Folder", "medium", 820, 620, Dark),
     file_fixture_variant!(
         "unreadable",
@@ -501,7 +511,7 @@ impl nickel_ui_testkit::Fixture for FileWorkbenchFixture {
         if variant.id.contains("details") {
             app.view_mode = FileViewMode::Details;
         }
-        if variant.id == "command-surface" {
+        if variant.id.ends_with("command-surface") {
             app.command_surface_open = true;
         }
         if variant.id == "unavailable" {
@@ -842,6 +852,7 @@ impl FileApp {
             places_open: false,
             command_surface_open: false,
             command_query: String::new(),
+            command_scroll_offset: 0.0,
             pending_focus: None,
             address_editing: false,
             address_text: String::new(),
@@ -1592,7 +1603,9 @@ impl FileApp {
         if self.command_surface_open
             && !matches!(
                 message,
-                FileMessage::ToggleCommandSurface | FileMessage::CommandQueryChanged(_)
+                FileMessage::ToggleCommandSurface
+                    | FileMessage::CommandQueryChanged(_)
+                    | FileMessage::CommandScroll(_)
             )
         {
             self.command_surface_open = false;
@@ -1636,12 +1649,17 @@ impl FileApp {
             FileMessage::ToggleCommandSurface => {
                 self.command_surface_open = !self.command_surface_open;
                 self.command_query.clear();
+                self.command_scroll_offset = 0.0;
                 if self.command_surface_open {
                     self.places_open = false;
                     self.pending_focus = Some(UiId::from("file-command-query"));
                 }
             }
-            FileMessage::CommandQueryChanged(query) => self.command_query = query,
+            FileMessage::CommandQueryChanged(query) => {
+                self.command_query = query;
+                self.command_scroll_offset = 0.0;
+            }
+            FileMessage::CommandScroll(offset) => self.command_scroll_offset = offset.max(0.0),
             FileMessage::ToggleAddressEditing => {
                 self.address_editing = !self.address_editing;
                 if self.address_editing {

@@ -201,7 +201,7 @@ pub(crate) fn build_view(
     let content = if app.command_surface_open {
         ui! {
             <Container id={"file-layout"} height={content_height} shrink={0.0} accessibility_label={"Commands"}>
-                {components::command_surface(app, palette)}
+                {components::command_surface(app, content_height, palette)}
             </Container>
         }
     } else if narrow {

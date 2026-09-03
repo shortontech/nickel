@@ -2,7 +2,8 @@ use std::{path::PathBuf, sync::Arc};
 
 use nickel_core::theme::ThemePalette;
 use nickel_ui::{
-    AnyView, Component, ComponentBuilderExt, ImageFit, Insets, SemanticRole, TextField, ui,
+    AnyView, Collection, CollectionPresentation, CollectionState, Component, ComponentBuilderExt,
+    ImageFit, Insets, NavigationScope, SemanticRole, TextField, VerticalScroll, ui,
 };
 
 use crate::{
@@ -169,7 +170,11 @@ pub(crate) fn details_header(
     })
 }
 
-pub(crate) fn command_surface(app: &FileApp, palette: ThemePalette) -> AnyView<FileMessage> {
+pub(crate) fn command_surface(
+    app: &FileApp,
+    available_height: f32,
+    palette: ThemePalette,
+) -> AnyView<FileMessage> {
     let query = app.command_query.trim().to_ascii_lowercase();
     let command_label = |id| app.localizer.text(id);
     let commands = [
@@ -295,35 +300,65 @@ pub(crate) fn command_surface(app: &FileApp, palette: ThemePalette) -> AnyView<F
         })
         .enumerate()
         .map(|(index, (label, aliases, enabled, message))| {
-            let accessibility_label = label.clone();
-            AnyView::new(ui! {
-                <Container id={format!("file-command-{index}")} height={42.0}
-                    on_press={message} enabled={enabled} background={palette.surface}
-                    hover_background={palette.surface_hover} pressed_background={palette.accent_soft}
-                    focus_border={palette.accent} controller_focus_border={palette.complement}
-                    padding={Insets { top: 9.0, right: 12.0, bottom: 7.0, left: 12.0 }}
-                    semantic_role={SemanticRole::Button} accessibility_label={accessibility_label}>
-                    <Row gap={12.0}>
-                        <Text width={180.0} color={if enabled { palette.text } else { palette.muted }}>{label}</Text>
-                        <Text color={palette.muted} scale={0.9}>{aliases}</Text>
-                    </Row>
-                </Container>
-            })
+            (index, label, aliases, enabled, message)
         })
         .collect::<Vec<_>>();
+    let results_height = (available_height - 132.0).max(1.0);
     let results = if rows.is_empty() {
         AnyView::new(ui! {
             <Container padding={Insets::all(16.0)}><Text color={palette.muted}>{"No matching commands."}</Text></Container>
         })
     } else {
-        AnyView::new(ui! { <Column gap={2.0} children={rows} /> })
+        AnyView::new(
+            Collection::try_new(
+                CollectionState::Ready(rows),
+                |(index, _, _, _, _)| index.to_string(),
+                move |(index, label, aliases, enabled, message)| {
+                    let accessibility_label = label.clone();
+                    AnyView::new(ui! {
+                        <Container id={format!("file-command-{index}")} height={42.0}
+                            on_press={message} enabled={enabled} background={palette.surface}
+                            hover_background={palette.surface_hover} pressed_background={palette.accent_soft}
+                            focus_border={palette.accent} controller_focus_border={palette.complement}
+                            padding={Insets { top: 9.0, right: 12.0, bottom: 7.0, left: 12.0 }}
+                            semantic_role={SemanticRole::Button} accessibility_label={accessibility_label}>
+                            <Row gap={12.0}>
+                                <Text width={180.0} color={if enabled { palette.text } else { palette.muted }}>{label}</Text>
+                                <Text color={palette.muted} scale={0.9}>{aliases}</Text>
+                            </Row>
+                        </Container>
+                    })
+                },
+            )
+            .expect("command identifiers are unique")
+            .id("file-command-collection")
+            .gap(2.0)
+            .navigation_scope(NavigationScope::group())
+            .presentation(CollectionPresentation::VirtualList {
+                item_height: 42.0,
+                offset: app.command_scroll_offset,
+                viewport_height: results_height,
+                overscan: 0.0,
+            }),
+        )
     };
+    let results = VerticalScroll::new(
+        FileMessage::CommandScroll(app.command_scroll_offset),
+        app.command_scroll_offset,
+    )
+    .on_scroll(FileMessage::CommandScroll)
+    .controlled(true)
+    .height(results_height)
+    .id("file-command-results")
+    .child(results);
     AnyView::new(ui! {
         <Container id={"file-command-surface"} grow={1.0} background={palette.background}
             padding={Insets { top: 24.0, right: 32.0, bottom: 24.0, left: 32.0 }}>
             <Column gap={10.0}>
-                <Text color={palette.text} scale={1.35}>{"Commands"}</Text>
-                <Container height={40.0} background={palette.surface} border={(palette.accent, 1.0)}
+                <Container height={22.0} shrink={0.0}>
+                    <Text color={palette.text} scale={1.35}>{"Commands"}</Text>
+                </Container>
+                <Container height={40.0} shrink={0.0} background={palette.surface} border={(palette.accent, 1.0)}
                     padding={Insets { top: 9.0, right: 12.0, bottom: 7.0, left: 12.0 }}>
                     {TextField::on_change_with_placeholder(
                         &app.command_query,
