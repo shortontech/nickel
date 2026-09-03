@@ -66,10 +66,16 @@ compositor reported each instance as a mapped, shown window and captured its fin
 
 The Windows GNU build was linked as an x86-64 PE executable and run through Steam Proton
 Experimental inside that same nested compositor. It opened `C:\users\steamuser`, reached its event
-loop, browsed 15 entries, and rendered the Windows System-provider path end to end. This is useful
-cross-platform runtime evidence, but Proton's Wine shell is not evidence of native Windows Explorer
-icon fidelity.
+loop, browsed 15 entries, and rendered both the Windows System-provider path and the explicitly
+selected Nickel provider end to end. This is useful cross-platform runtime evidence, but Proton's
+Wine shell is not evidence of native Windows Explorer icon fidelity.
 
-Remaining native-environment gates are therefore a Windows run covering real Windows System icons
-and Nickel artwork, plus a clean Linux installation without desktop icon packages. Specs 0123 and
-0124 remain active until those gates exist.
+A mount-isolated Linux acceptance process replaced `/usr/share/icons`,
+`/usr/local/share/icons`, `$HOME/.icons`, and `$HOME/.local/share/icons` with empty filesystems; an
+independent inspection reported zero entries in every root. Nickel File still opened and displayed
+complete Nickel artwork for ordinary and special folders. This exercises the clean-installation
+condition without uninstalling packages from the development host.
+
+The remaining native-environment gate is a real Windows run covering Explorer-backed System icons,
+Nickel artwork, and ordinary pointer and keyboard browsing. Specs 0123 and 0124 remain active until
+that gate exists.
