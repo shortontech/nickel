@@ -49,7 +49,7 @@ pub enum SortDirection {
     Descending,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct DirectoryBrowser {
     current: PathBuf,
     history: Vec<PathBuf>,

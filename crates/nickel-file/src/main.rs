@@ -35,6 +35,7 @@ pub(crate) const MIN_TILE_WIDTH: f32 = 110.0;
 pub(crate) const MAX_TILE_WIDTH: f32 = 240.0;
 const MIN_DETAILS_COLUMN_WIDTH: f32 = 72.0;
 const MAX_DETAILS_COLUMN_WIDTH: f32 = 320.0;
+type NavigationResult = (u64, Result<Option<DirectoryBrowser>, String>);
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum FileMessage {
@@ -122,6 +123,10 @@ pub struct FileApp {
         Option<Receiver<(u64, PathBuf, icons::ArtworkCacheKey, icons::ResolvedArtwork)>>,
     pub(crate) icon_poll_delay: std::time::Duration,
     pub(crate) icon_generation: u64,
+    navigation_rx: Option<Receiver<NavigationResult>>,
+    navigation_generation: u64,
+    navigation_poll_delay: Duration,
+    navigation_closes_address: bool,
     pub(crate) icon_preference: FileIconPreference,
     pub(crate) next_icon_id: u16,
     pub(crate) sidebar_width: f32,
@@ -491,6 +496,10 @@ pub(crate) struct FileTab {
     pub(crate) address_editing: bool,
     pub(crate) address_text: String,
     pub(crate) tab_icon: Option<(u16, Arc<image::RgbaImage>)>,
+    navigation_rx: Option<Receiver<NavigationResult>>,
+    navigation_generation: u64,
+    navigation_poll_delay: Duration,
+    navigation_closes_address: bool,
 }
 
 impl FileApp {
@@ -500,6 +509,10 @@ impl FileApp {
 
     pub(crate) fn is_resizing_details_column(&self) -> bool {
         self.resizing_details_column.is_some()
+    }
+
+    pub(crate) fn navigation_pending(&self) -> bool {
+        self.navigation_rx.is_some()
     }
 
     pub(crate) fn resize_details_column_to(&mut self, pointer_x: f32) {
@@ -563,6 +576,10 @@ impl FileApp {
             icon_rx: None,
             icon_poll_delay: std::time::Duration::from_millis(16),
             icon_generation: 0,
+            navigation_rx: None,
+            navigation_generation: 0,
+            navigation_poll_delay: Duration::from_millis(16),
+            navigation_closes_address: false,
             icon_preference: ShellSettings::load_default().file_icon_provider,
             next_icon_id: 1,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
@@ -665,6 +682,19 @@ impl FileApp {
         std::mem::swap(&mut self.address_editing, &mut target.address_editing);
         std::mem::swap(&mut self.address_text, &mut target.address_text);
         std::mem::swap(&mut self.tab_icon, &mut target.tab_icon);
+        std::mem::swap(&mut self.navigation_rx, &mut target.navigation_rx);
+        std::mem::swap(
+            &mut self.navigation_generation,
+            &mut target.navigation_generation,
+        );
+        std::mem::swap(
+            &mut self.navigation_poll_delay,
+            &mut target.navigation_poll_delay,
+        );
+        std::mem::swap(
+            &mut self.navigation_closes_address,
+            &mut target.navigation_closes_address,
+        );
         self.tabs[self.active_tab] = Some(target);
         self.active_tab = index;
         self.refresh_icons();
@@ -697,6 +727,10 @@ impl FileApp {
             address_editing: false,
             address_text: String::new(),
             tab_icon: None,
+            navigation_rx: None,
+            navigation_generation: 0,
+            navigation_poll_delay: Duration::from_millis(16),
+            navigation_closes_address: false,
         }));
         self.switch_tab(self.tabs.len() - 1);
     }
@@ -759,41 +793,89 @@ impl FileApp {
     }
 
     fn navigate_to(&mut self, path: PathBuf) {
-        if let Err(error) = self
-            .browser
-            .set_show_hidden(nickel_platform::show_hidden_files())
-        {
-            self.status = format!("Could not update hidden-file visibility: {error}");
-        }
-        match self.browser.enter(path) {
-            Ok(()) => self.navigation_changed(),
-            Err(error) => {
-                self.status = format!("Could not open folder: {error}");
-            }
-        }
+        let label = path.display().to_string();
+        self.start_navigation(format!("Opening {label}"), false, move |browser| {
+            browser.enter(path).map(|()| true)
+        });
     }
 
     pub(crate) fn go_back(&mut self) {
-        match self.browser.back() {
-            Ok(true) => self.navigation_changed(),
-            Ok(false) => {}
-            Err(error) => self.status = format!("Could not go back: {error}"),
+        if self.browser.can_go_back() {
+            self.start_navigation("Going back".into(), false, DirectoryBrowser::back);
         }
     }
 
     fn go_forward(&mut self) {
-        match self.browser.forward() {
-            Ok(true) => self.navigation_changed(),
-            Ok(false) => {}
-            Err(error) => self.status = format!("Could not go forward: {error}"),
+        if self.browser.can_go_forward() {
+            self.start_navigation("Going forward".into(), false, DirectoryBrowser::forward);
         }
     }
 
     fn go_up(&mut self) {
-        match self.browser.up() {
-            Ok(true) => self.navigation_changed(),
-            Ok(false) => {}
-            Err(error) => self.status = format!("Could not open parent: {error}"),
+        if self.browser.can_go_up() {
+            self.start_navigation("Opening parent".into(), false, DirectoryBrowser::up);
+        }
+    }
+
+    fn start_navigation(
+        &mut self,
+        progress: String,
+        closes_address: bool,
+        operation: impl FnOnce(&mut DirectoryBrowser) -> std::io::Result<bool> + Send + 'static,
+    ) {
+        self.navigation_generation = self.navigation_generation.wrapping_add(1);
+        let generation = self.navigation_generation;
+        let mut browser = self.browser.clone();
+        let (sender, receiver) = mpsc::channel();
+        self.navigation_rx = Some(receiver);
+        self.navigation_poll_delay = Duration::from_millis(16);
+        self.navigation_closes_address = closes_address;
+        self.status = format!("{progress}…");
+        let _ = std::thread::Builder::new()
+            .name("nickel-file-navigation".into())
+            .spawn(move || {
+                let result = operation(&mut browser)
+                    .map(|changed| changed.then_some(browser))
+                    .map_err(|error| format!("Could not open location: {error}"));
+                let _ = sender.send((generation, result));
+            });
+    }
+
+    fn poll_navigation(&mut self) -> bool {
+        let result = match self.navigation_rx.as_ref() {
+            Some(receiver) => receiver.try_recv(),
+            None => return false,
+        };
+        match result {
+            Ok((generation, result)) if generation == self.navigation_generation => {
+                self.navigation_rx = None;
+                match result {
+                    Ok(Some(browser)) => {
+                        self.browser = browser;
+                        if self.navigation_closes_address {
+                            self.address_editing = false;
+                            self.address_text.clear();
+                        }
+                        self.navigation_changed();
+                    }
+                    Ok(None) => self.status.clear(),
+                    Err(error) => self.status = error,
+                }
+                true
+            }
+            Ok(_) => true,
+            Err(TryRecvError::Empty) => {
+                self.navigation_poll_delay = self
+                    .navigation_poll_delay
+                    .saturating_mul(2)
+                    .min(Duration::from_millis(250));
+                false
+            }
+            Err(TryRecvError::Disconnected) => {
+                self.navigation_rx = None;
+                self.status = "Could not open location: navigation worker stopped".into();
+                true
+            }
         }
     }
 
@@ -852,16 +934,10 @@ impl FileApp {
             self.status = "Enter a location.".into();
             return;
         }
-        match self.browser.enter(&target) {
-            Ok(()) => {
-                self.address_editing = false;
-                self.address_text.clear();
-                self.navigation_changed();
-            }
-            Err(error) => {
-                self.status = format!("Could not open {}: {error}", target.display());
-            }
-        }
+        let label = target.display().to_string();
+        self.start_navigation(format!("Opening {label}"), true, move |browser| {
+            browser.enter(target).map(|()| true)
+        });
     }
 
     pub(crate) fn refresh_icons(&mut self) {
@@ -1346,11 +1422,19 @@ impl Application for FileApp {
     fn poll(&mut self) -> bool {
         let before = self.next_icon_id;
         self.poll_icons();
-        before != self.next_icon_id
+        self.poll_navigation() || before != self.next_icon_id
     }
 
     fn poll_interval(&self) -> Option<std::time::Duration> {
-        self.icon_rx.as_ref().map(|_| self.icon_poll_delay)
+        [
+            self.icon_rx.as_ref().map(|_| self.icon_poll_delay),
+            self.navigation_rx
+                .as_ref()
+                .map(|_| self.navigation_poll_delay),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     fn title(&self) -> &str {

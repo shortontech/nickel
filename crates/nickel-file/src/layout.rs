@@ -85,17 +85,17 @@ pub(crate) fn build_view(
                         </Button>
                     }
                 } else { ui! { <></> } }}
-                <Button on_press={FileMessage::Back} enabled={app.browser.can_go_back()} width={34.0} height={34.0}
+                <Button on_press={FileMessage::Back} enabled={app.browser.can_go_back() && !app.navigation_pending()} width={34.0} height={34.0}
                     focus_border={palette.accent} controller_focus_border={palette.complement}
                     color={if app.browser.can_go_back() { palette.text } else { palette.muted }} accessibility_label={"Back"}>
                     {"←"}
                 </Button>
-                <Button on_press={FileMessage::Forward} enabled={app.browser.can_go_forward()} width={34.0} height={34.0}
+                <Button on_press={FileMessage::Forward} enabled={app.browser.can_go_forward() && !app.navigation_pending()} width={34.0} height={34.0}
                     focus_border={palette.accent} controller_focus_border={palette.complement}
                     color={if app.browser.can_go_forward() { palette.text } else { palette.muted }} accessibility_label={"Forward"}>
                     {"→"}
                 </Button>
-                <Button on_press={FileMessage::Up} enabled={app.browser.can_go_up()} width={34.0} height={34.0} color={palette.text}
+                <Button on_press={FileMessage::Up} enabled={app.browser.can_go_up() && !app.navigation_pending()} width={34.0} height={34.0} color={palette.text}
                     focus_border={palette.accent} controller_focus_border={palette.complement} accessibility_label={"Up one folder"}>{"↑"}</Button>
                 {location_control}
                 <Button on_press={FileMessage::ToggleAddressEditing} width={34.0} height={34.0}
@@ -104,7 +104,7 @@ pub(crate) fn build_view(
                     accessibility_label={if app.address_editing { "Cancel location editing" } else { "Edit location" }}>
                     {if app.address_editing { "×" } else { "✎" }}
                 </Button>
-                <Button on_press={FileMessage::Refresh} width={34.0} height={34.0} color={palette.text}
+                <Button on_press={FileMessage::Refresh} enabled={!app.navigation_pending()} width={34.0} height={34.0} color={palette.text}
                     focus_border={palette.accent} controller_focus_border={palette.complement} accessibility_label={"Refresh"}>{"↻"}</Button>
                 <Button on_press={FileMessage::SetViewMode(FileViewMode::Grid)} width={34.0} height={34.0}
                     color={if app.view_mode == FileViewMode::Grid { palette.accent } else { palette.text }}
@@ -360,34 +360,39 @@ fn command_surface(app: &FileApp, palette: ThemePalette) -> AnyView<FileMessage>
         (
             "Open",
             "activate enter",
-            app.selected.is_some(),
+            app.selected.is_some() && !app.navigation_pending(),
             FileMessage::ContextOpen,
         ),
         (
             "Open in new tab",
             "activate background tab",
-            app.selected.is_some(),
+            app.selected.is_some() && !app.navigation_pending(),
             FileMessage::ContextOpenNewTab,
         ),
         (
             "Back",
             "previous navigation",
-            app.browser.can_go_back(),
+            app.browser.can_go_back() && !app.navigation_pending(),
             FileMessage::Back,
         ),
         (
             "Forward",
             "next navigation",
-            app.browser.can_go_forward(),
+            app.browser.can_go_forward() && !app.navigation_pending(),
             FileMessage::Forward,
         ),
         (
             "Up",
             "parent folder",
-            app.browser.can_go_up(),
+            app.browser.can_go_up() && !app.navigation_pending(),
             FileMessage::Up,
         ),
-        ("Refresh", "reload f5", true, FileMessage::Refresh),
+        (
+            "Refresh",
+            "reload f5",
+            !app.navigation_pending(),
+            FileMessage::Refresh,
+        ),
         ("New tab", "create tab ctrl t", true, FileMessage::NewTab),
         (
             "Close tab",

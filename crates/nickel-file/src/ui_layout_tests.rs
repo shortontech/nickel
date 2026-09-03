@@ -6,6 +6,16 @@ use crate::{
 use nickel_ui::{ActionKind, Rect, UiHost};
 use nickel_ui_testkit::{FocusDirection, Scenario, ScenarioBudget, Selector};
 
+fn settle_navigation(app: &mut FileApp) {
+    for _ in 0..1_000 {
+        if app.poll_navigation() {
+            return;
+        }
+        std::thread::yield_now();
+    }
+    panic!("navigation worker did not settle");
+}
+
 #[test]
 fn idle_file_host_declares_no_poll_deadline() {
     let mut app = FileApp::new(home_directory());
@@ -244,6 +254,7 @@ fn editable_location_preserves_history_on_error_and_commits_once_on_success() {
         directory.path().join("missing").display().to_string(),
     ));
     app.update_message(FileMessage::SubmitAddress);
+    settle_navigation(&mut app);
     assert_eq!(app.browser.current(), directory.path());
     assert!(!app.browser.can_go_back());
     assert!(app.address_editing);
@@ -251,6 +262,7 @@ fn editable_location_preserves_history_on_error_and_commits_once_on_success() {
 
     app.update_message(FileMessage::AddressChanged(child.display().to_string()));
     app.update_message(FileMessage::SubmitAddress);
+    settle_navigation(&mut app);
     assert_eq!(app.browser.current(), child);
     assert!(app.browser.can_go_back());
     assert!(!app.address_editing);
@@ -543,6 +555,11 @@ fn navigation_from_idle_publishes_fallback_before_optional_provider_work() {
     assert_eq!(Application::poll_interval(&app), None);
     app.navigate_to(child.clone());
 
+    assert_eq!(app.browser.current(), directory.path());
+    assert!(app.navigation_pending());
+    assert!(app.status.starts_with("Opening "));
+    settle_navigation(&mut app);
+
     assert_eq!(app.browser.current(), child);
     assert!(app.icons.get(&child.join("new-file.txt")).is_some());
     assert!(app.tab_icon.is_some());
@@ -550,6 +567,29 @@ fn navigation_from_idle_publishes_fallback_before_optional_provider_work() {
         Application::poll_interval(&app).is_some(),
         app.icon_preference == FileIconPreference::System
     );
+}
+
+#[test]
+fn pending_navigation_belongs_to_the_requesting_tab() {
+    let directory = tempfile::tempdir().unwrap();
+    let destination = directory.path().join("destination");
+    let other = directory.path().join("other");
+    std::fs::create_dir(&destination).unwrap();
+    std::fs::create_dir(&other).unwrap();
+    let mut app = FileApp::new(directory.path().to_path_buf());
+
+    app.navigate_to(destination.clone());
+    assert!(app.navigation_pending());
+    app.new_tab_at(other.clone());
+    assert_eq!(app.browser.current(), other);
+    assert!(!app.navigation_pending());
+
+    app.switch_tab(0);
+    assert!(app.navigation_pending());
+    settle_navigation(&mut app);
+    assert_eq!(app.browser.current(), destination);
+    app.switch_tab(1);
+    assert_eq!(app.browser.current(), other);
 }
 
 #[test]
