@@ -883,9 +883,16 @@ impl FileApp {
 
     fn new_tab_at(&mut self, path: PathBuf) {
         let show_hidden = nickel_platform::show_hidden_files();
-        let Ok(browser) = DirectoryBrowser::open_with_hidden(path, show_hidden) else {
-            return;
-        };
+        let browser = DirectoryBrowser::loading(path.clone(), show_hidden);
+        let (sender, receiver) = mpsc::channel();
+        let _ = std::thread::Builder::new()
+            .name("nickel-file-new-tab".into())
+            .spawn(move || {
+                let result = DirectoryBrowser::open_with_hidden(&path, show_hidden)
+                    .map(Some)
+                    .map_err(|error| format!("Could not open new tab: {error}"));
+                let _ = sender.send((1, result));
+            });
         let tab_id = self.next_tab_id;
         self.next_tab_id = self.next_tab_id.saturating_add(1);
         self.tabs.push(Some(FileTab {
@@ -894,7 +901,7 @@ impl FileApp {
             selected_entries: HashSet::new(),
             selection_anchor: None,
             tab_id,
-            status: String::new(),
+            status: "Opening location…".into(),
             last_click: None,
             file_scroll_offset: 0.0,
             tile_width: DEFAULT_TILE_WIDTH,
@@ -905,11 +912,11 @@ impl FileApp {
             address_editing: false,
             address_text: String::new(),
             tab_icon: None,
-            navigation_rx: None,
-            navigation_generation: 0,
+            navigation_rx: Some(receiver),
+            navigation_generation: 1,
             navigation_poll_delay: Duration::from_millis(16),
             navigation_closes_address: false,
-            navigation_invalidates_icons: false,
+            navigation_invalidates_icons: true,
         }));
         self.switch_tab(self.tabs.len() - 1);
     }

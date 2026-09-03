@@ -69,6 +69,17 @@ impl DirectoryBrowser {
             show_hidden: true,
         }
     }
+
+    #[doc(hidden)]
+    pub fn loading(path: impl Into<PathBuf>, show_hidden: bool) -> Self {
+        Self {
+            current: path.into(),
+            history: Vec::new(),
+            forward_history: Vec::new(),
+            entries: Vec::new(),
+            show_hidden,
+        }
+    }
     pub fn open(path: impl Into<PathBuf>) -> io::Result<Self> {
         Self::open_with_hidden(path, true)
     }

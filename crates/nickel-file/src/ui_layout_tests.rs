@@ -42,7 +42,8 @@ fn contrast_ratio(first: u32, second: u32) -> f32 {
 }
 
 fn settle_navigation(app: &mut FileApp) {
-    for _ in 0..1_000 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
         if app.poll_navigation() {
             return;
         }
@@ -946,14 +947,39 @@ fn pending_navigation_belongs_to_the_requesting_tab() {
     assert!(app.navigation_pending());
     app.new_tab_at(other.clone());
     assert_eq!(app.browser.current(), other);
-    assert!(!app.navigation_pending());
+    assert!(app.navigation_pending());
 
     app.switch_tab(0);
     assert!(app.navigation_pending());
     settle_navigation(&mut app);
     assert_eq!(app.browser.current(), destination);
     app.switch_tab(1);
+    assert!(app.navigation_pending());
+    settle_navigation(&mut app);
     assert_eq!(app.browser.current(), other);
+    assert!(!app.browser.can_go_back());
+}
+
+#[test]
+fn new_tab_publishes_immediately_and_reports_open_failure_in_place() {
+    let directory = tempfile::tempdir().unwrap();
+    let missing = directory.path().join("missing");
+    let mut app = FileApp::new(directory.path().to_path_buf());
+
+    app.new_tab_at(missing.clone());
+
+    assert_eq!(app.tabs.len(), 2);
+    assert_eq!(app.browser.current(), missing);
+    assert!(app.browser.entries().is_empty());
+    assert!(app.navigation_pending());
+    assert_eq!(app.status, "Opening location…");
+
+    settle_navigation(&mut app);
+    assert_eq!(app.tabs.len(), 2);
+    assert_eq!(app.browser.current(), missing);
+    assert!(app.browser.entries().is_empty());
+    assert!(!app.browser.can_go_back());
+    assert!(app.status.contains("Could not open new tab"));
 }
 
 #[test]
