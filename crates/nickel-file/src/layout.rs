@@ -324,19 +324,7 @@ pub(crate) fn build_view(
             </Column>
         }
     };
-    let footer_text = if app.status.is_empty() {
-        format!(
-            "{} item{}",
-            app.browser.entries().len(),
-            if app.browser.entries().len() == 1 {
-                ""
-            } else {
-                "s"
-            }
-        )
-    } else {
-        app.status.clone()
-    };
+    let footer_text = file_status_text(app);
     let footer = ui! {
         <Container id={"file-footer"} height={30.0} shrink={0.0} background={palette.surface} padding={Insets {
             top: 7.0, right: 14.0, bottom: 5.0, left: 14.0,
@@ -393,6 +381,20 @@ pub(crate) fn build_view(
         <Column height={height} background={palette.background}>{toolbar}{content}{footer}</Column>
     };
     AnyView::new(root)
+}
+
+pub(crate) fn file_status_text(app: &FileApp) -> String {
+    if !app.status.is_empty() {
+        return app.status.clone();
+    }
+    let total = app.browser.entries().len();
+    let total_label = format!("{total} item{}", if total == 1 { "" } else { "s" });
+    let selected = app.selected_entries.len();
+    if selected == 0 {
+        total_label
+    } else {
+        format!("{selected} selected · {total_label}",)
+    }
 }
 
 fn command_query_message(query: String) -> FileMessage {

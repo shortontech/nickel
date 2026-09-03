@@ -1,5 +1,5 @@
 use super::*;
-use crate::layout::entries_in_selection;
+use crate::layout::{entries_in_selection, file_status_text};
 use nickel_ui::{ActionKind, Rect, UiHost};
 use nickel_ui_testkit::{FocusDirection, Scenario, ScenarioBudget, Selector};
 
@@ -46,6 +46,18 @@ fn nickel_fallback_artwork_is_present_before_async_provider_results() {
 
     assert_eq!(app.icons.len(), 2);
     assert!(app.tab_icon.is_some());
+}
+
+#[test]
+fn status_area_reports_selection_and_total_without_hiding_errors() {
+    let mut app = FileApp::fixture();
+    assert_eq!(file_status_text(&app), "3 items");
+
+    app.selected_entries = HashSet::from([0, 2]);
+    assert_eq!(file_status_text(&app), "2 selected · 3 items");
+
+    app.status = "Could not refresh: unavailable".into();
+    assert_eq!(file_status_text(&app), app.status);
 }
 
 #[test]
