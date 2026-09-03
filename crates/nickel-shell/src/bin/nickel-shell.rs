@@ -1554,6 +1554,22 @@ fn main() -> Result<(), String> {
             }
             controller_schedule.mark_polled(now, controller.connected());
         }
+        let codex_poll_now = Instant::now();
+        let mut due_codex_redraw = Vec::new();
+        for chat in &mut codex.chats {
+            if chat
+                .host
+                .poll_due(codex_poll_now)
+                .is_some_and(|outcome| outcome.changed)
+            {
+                due_codex_redraw.push(chat.id);
+            }
+        }
+        for surface in due_codex_redraw {
+            codex
+                .present(&mut shell, surface)
+                .map_err(|error| format!("{error:?}"))?;
+        }
         let next_deadline = fast_subscription
             .deadline()
             .min(system_subscription.deadline())
@@ -1944,15 +1960,6 @@ fn main() -> Result<(), String> {
                 if availability_changed {
                     sync_visibility(&mut shell, &state);
                     render_all(&mut shell, &mut state)?;
-                }
-            }
-            for chat in &mut codex.chats {
-                if chat
-                    .host
-                    .poll_due(poll_now)
-                    .is_some_and(|outcome| outcome.changed)
-                {
-                    codex_redraw.push(chat.id);
                 }
             }
             codex.release_failed_resumes();
