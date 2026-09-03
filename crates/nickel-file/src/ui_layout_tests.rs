@@ -53,6 +53,38 @@ fn settle_navigation(app: &mut FileApp) {
 }
 
 #[test]
+fn production_launch_publishes_initial_directory_asynchronously() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("ready.txt"), b"ready").unwrap();
+
+    let mut app = FileApp::launch(directory.path().to_path_buf());
+
+    assert_eq!(app.browser.current(), directory.path());
+    assert!(app.browser.entries().is_empty());
+    assert_eq!(app.status, "Opening location…");
+    assert!(app.navigation_rx.is_some());
+
+    settle_navigation(&mut app);
+    assert_eq!(app.browser.entries().len(), 1);
+    assert_eq!(app.browser.entries()[0].display_name(), "ready.txt");
+    assert!(app.status.is_empty());
+}
+
+#[test]
+fn failed_production_launch_remains_recoverable_in_the_requested_tab() {
+    let directory = tempfile::tempdir().unwrap();
+    let missing = directory.path().join("missing");
+
+    let mut app = FileApp::launch(missing.clone());
+    settle_navigation(&mut app);
+
+    assert_eq!(app.browser.current(), missing);
+    assert!(app.browser.entries().is_empty());
+    assert!(app.status.contains("Could not open initial location"));
+    assert!(app.navigation_rx.is_none());
+}
+
+#[test]
 fn idle_file_host_declares_no_poll_deadline() {
     let mut app = FileApp::new(home_directory());
     app.icon_rx = None;

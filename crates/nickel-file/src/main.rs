@@ -751,6 +751,33 @@ impl FileApp {
         Self::with_browser(browser, status)
     }
 
+    /// Creates the production application without enumerating the initial location on the UI
+    /// thread. Deterministic callers that need an already-populated model can continue to use
+    /// [`Self::new`].
+    pub fn launch(path: PathBuf) -> Self {
+        let show_hidden = nickel_platform::show_hidden_files();
+        let browser = DirectoryBrowser::loading(path.clone(), show_hidden);
+        let mut app = Self::with_browser(browser, "Opening location…".into());
+        let (sender, receiver) = mpsc::channel();
+        app.navigation_generation = 1;
+        app.navigation_rx = Some(receiver);
+        app.navigation_invalidates_icons = true;
+        let _ = std::thread::Builder::new()
+            .name("nickel-file-initial-location".into())
+            .spawn(move || {
+                let result = DirectoryBrowser::open_with_hidden(&path, show_hidden)
+                    .map(Some)
+                    .map_err(|error| {
+                        format!(
+                            "Could not open initial location {}: {error}",
+                            path.display()
+                        )
+                    });
+                let _ = sender.send((1, result));
+            });
+        app
+    }
+
     fn with_browser(browser: DirectoryBrowser, status: String) -> Self {
         let settings = ShellSettings::load_default();
         let (sidebar_sender, sidebar_receiver) = mpsc::channel();
@@ -1878,7 +1905,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .nth(1)
         .map(PathBuf::from)
         .unwrap_or_else(home_directory);
-    nickel_ui::run_with_adapter(FileApp::new(path), FileHostAdapter::default())
+    nickel_ui::run_with_adapter(FileApp::launch(path), FileHostAdapter::default())
 }
 
 #[cfg(test)]
