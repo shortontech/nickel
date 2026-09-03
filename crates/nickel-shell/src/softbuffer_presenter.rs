@@ -3,7 +3,7 @@
 use std::{cell::RefCell, num::NonZeroU32};
 
 use nickel_ui::backend::PaintCommand;
-use nickel_ui::{DamageRegion, PresenterCacheDiagnostics, SdlComponentRenderer};
+use nickel_ui::{DamageRegion, PresenterCacheDiagnostics, SoftwareRenderer};
 use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle,
     RawWindowHandle, WindowHandle,
@@ -72,7 +72,7 @@ impl PresentationGeometry {
 /// how many windows it exposes. Per-window presenters contain no renderer.
 pub struct SharedGraphics {
     context: softbuffer::Context<DisplayHandleSource>,
-    renderer: RefCell<SdlComponentRenderer>,
+    renderer: RefCell<SoftwareRenderer>,
 }
 
 impl SharedGraphics {
@@ -88,7 +88,7 @@ impl SharedGraphics {
         tracing::info!("shared-memory shell renderer initialized");
         Ok(Self {
             context,
-            renderer: RefCell::new(SdlComponentRenderer::new_pixel_buffer(1, 1, 1.0)),
+            renderer: RefCell::new(SoftwareRenderer::new_pixel_buffer(1, 1, 1.0)),
         })
     }
 

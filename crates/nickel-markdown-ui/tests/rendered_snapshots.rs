@@ -5,7 +5,7 @@ use std::{fs, path::Path};
 use image::{ImageBuffer, Rgba};
 use nickel_core::theme::{Appearance, ThemeMode};
 use nickel_markdown_ui::{ViewerModel, ViewerPalette, load_document, viewer_view_with_palette};
-use nickel_ui::{Rect, SdlComponentRenderer, UiFrame};
+use nickel_ui::{Rect, SoftwareRenderer, UiFrame};
 use tempfile::tempdir;
 
 fn render_snapshot(
@@ -18,7 +18,7 @@ fn render_snapshot(
 ) {
     let bounds = Rect::new(0.0, 0.0, width as f32 / scale, height as f32 / scale);
     let tree = UiFrame::layout(viewer_view_with_palette(model, None, palette), bounds);
-    let mut renderer = SdlComponentRenderer::new(width, height, scale);
+    let mut renderer = SoftwareRenderer::new(width, height, scale);
     renderer.render(tree.commands());
     let pixels = renderer.pixels();
     assert_eq!(pixels.len(), (width * height) as usize);

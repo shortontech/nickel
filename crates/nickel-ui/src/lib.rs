@@ -22,7 +22,7 @@ pub use document_selection::{
 };
 pub use gpu::{
     AggregatePresenterCacheDiagnostics, DamageRegion, Pixel, PresenterCacheDiagnostics,
-    PresenterCacheMode, SdlCanvasPresenter, SdlComponentRenderer,
+    SoftwareRenderer,
 };
 pub use input::{FocusedInputDispatcher, InputCommand, InputContext};
 pub use layout::{

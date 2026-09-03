@@ -49,8 +49,8 @@ mod tests {
         ThreadId, TurnId,
     };
     use nickel_ui::{
-        Application, DocumentSelection, Rect, SdlComponentRenderer, SelectionEndpoint,
-        SemanticRole, Shortcut, UiEvent, UiFrame, UiStateStore,
+        Application, DocumentSelection, Rect, SelectionEndpoint, SemanticRole, Shortcut,
+        SoftwareRenderer, UiEvent, UiFrame, UiStateStore,
     };
     use nickel_ui_testkit::{ActivationVia, Scenario, Selector};
 
@@ -606,7 +606,7 @@ mod tests {
             view::shell_project_menu_view(&state),
             Rect::new(0.0, 0.0, 360.0, 420.0),
         );
-        let mut renderer = SdlComponentRenderer::new(360, 420, 1.0);
+        let mut renderer = SoftwareRenderer::new(360, 420, 1.0);
         renderer.render(tree.commands());
         let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/nickel-codex-snapshots/project-menu.png");
@@ -775,7 +775,7 @@ mod tests {
         for scale in [1.0, 2.0] {
             let tree = UiFrame::layout(view::chat_view(&state), Rect::new(0.0, 0.0, 800.0, 600.0));
             let mut renderer =
-                SdlComponentRenderer::new((800.0 * scale) as u32, (600.0 * scale) as u32, scale);
+                SoftwareRenderer::new((800.0 * scale) as u32, (600.0 * scale) as u32, scale);
             assert!(!renderer.render(tree.commands()).is_empty());
             assert!(renderer.pixels().iter().any(|pixel| pixel.a > 0));
             if scale == 1.0 {
@@ -1262,7 +1262,7 @@ mod tests {
         assert!(copied.ends_with("Codex\nhistory message 1999"));
         assert!(!has_accessible_text(&tree, "history message 0"));
 
-        let mut unselected_renderer = SdlComponentRenderer::new(1120, 760, 1.0);
+        let mut unselected_renderer = SoftwareRenderer::new(1120, 760, 1.0);
         unselected_renderer.render(tree.commands());
         let unselected_pixels = unselected_renderer.pixels().to_vec();
 
@@ -1271,7 +1271,7 @@ mod tests {
             Rect::new(0.0, 0.0, 1120.0, 760.0),
             &mut ui_state,
         );
-        let mut selected_renderer = SdlComponentRenderer::new(1120, 760, 1.0);
+        let mut selected_renderer = SoftwareRenderer::new(1120, 760, 1.0);
         selected_renderer.render(selected.commands());
         assert_ne!(selected_renderer.pixels(), unselected_pixels.as_slice());
     }

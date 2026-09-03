@@ -19,8 +19,8 @@ use crate::{
     DamageRegion, EffectiveHitRoute, FocusedInputDispatcher, FrameRequest,
     FrameResourceDiagnostics, InputCommand, InputContext, InputModality, InputSource,
     InteractionIntent, Invalidation, LayoutDiagnostic, OverlayId, OverlayMenu, PointerIcon, Rect,
-    SdlComponentRenderer, SemanticAction, SemanticActionError, SemanticNodeSnapshot,
-    SemanticQueryError, SemanticSelector, UiEvent, UiFrame, UiId, UiStateStore, View,
+    SemanticAction, SemanticActionError, SemanticNodeSnapshot, SemanticQueryError,
+    SemanticSelector, SoftwareRenderer, UiEvent, UiFrame, UiId, UiStateStore, View,
 };
 
 #[derive(Debug, Default)]
@@ -932,7 +932,7 @@ impl<A: Application> UiHost<A> {
         self.tree.commands()
     }
 
-    pub fn render_software(&self, renderer: &mut SdlComponentRenderer) -> DamageRegion {
+    pub fn render_software(&self, renderer: &mut SoftwareRenderer) -> DamageRegion {
         renderer.render(self.tree.commands())
     }
 
@@ -1632,7 +1632,7 @@ struct ApplicationRuntime<A: Application, H: HostAdapter<A>> {
     display: OwnedDisplayHandle,
     window: Option<Arc<Window>>,
     surface: Option<softbuffer::Surface<OwnedDisplayHandle, Arc<Window>>>,
-    renderer: Option<SdlComponentRenderer>,
+    renderer: Option<SoftwareRenderer>,
     input: nickel_input::winit::Adapter,
     clipboard: Option<arboard::Clipboard>,
     controller: ControllerInput,
@@ -1907,7 +1907,7 @@ impl<A: Application, H: HostAdapter<A>> ApplicationHandler for ApplicationRuntim
             }
         };
         let size = window.inner_size();
-        self.renderer = Some(SdlComponentRenderer::new_pixel_buffer(
+        self.renderer = Some(SoftwareRenderer::new_pixel_buffer(
             size.width,
             size.height,
             self.scale,

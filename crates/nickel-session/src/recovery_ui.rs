@@ -1,6 +1,6 @@
 use nickel_ui::{
-    ActionKind, Application, Border, Button, Column, Insets, Point, Row, SdlComponentRenderer,
-    Shortcut, Text, UiEvent, UiHost, ViewContext,
+    ActionKind, Application, Border, Button, Column, Insets, Point, Row, Shortcut,
+    SoftwareRenderer, Text, UiEvent, UiHost, ViewContext,
 };
 
 use crate::shell_layout::Geometry;
@@ -209,7 +209,7 @@ impl RecoveryUi {
     }
 
     pub fn render_pixels(&self) -> Vec<u8> {
-        let mut renderer = SdlComponentRenderer::new_pixel_buffer(WIDTH, HEIGHT, 1.0);
+        let mut renderer = SoftwareRenderer::new_pixel_buffer(WIDTH, HEIGHT, 1.0);
         self.host.render_software(&mut renderer);
         renderer
             .pixels()

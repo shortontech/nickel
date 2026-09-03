@@ -1579,7 +1579,7 @@ impl<Message> Component<Message> for ColorSwatch<Message> {
 mod tests {
     use super::*;
     use crate::{
-        DiagnosticKind, PaintCommand, Point, Rect, ResolvedNode, SdlComponentRenderer, UiEvent,
+        DiagnosticKind, PaintCommand, Point, Rect, ResolvedNode, SoftwareRenderer, UiEvent,
         UiFrame, UiStateStore,
     };
 
@@ -1943,7 +1943,7 @@ mod tests {
                 "{width}@{scale}: {:#?}",
                 tree.diagnostics()
             );
-            let mut renderer = SdlComponentRenderer::new_pixel_buffer(
+            let mut renderer = SoftwareRenderer::new_pixel_buffer(
                 (width * scale) as u32,
                 (1000.0 * scale) as u32,
                 scale,
@@ -2512,7 +2512,7 @@ mod tests {
                 "{width}x{height}: {:#?}",
                 tree.diagnostics()
             );
-            let mut renderer = SdlComponentRenderer::new_pixel_buffer(
+            let mut renderer = SoftwareRenderer::new_pixel_buffer(
                 (width * scale) as u32,
                 (height * scale) as u32,
                 scale,

@@ -2562,7 +2562,7 @@ fn diagnostic_overlay_rasterizes_at_low_and_high_dpi_without_geometry_changes() 
     for scale in [1.0, 2.0] {
         let mut tree = build();
         tree.enable_diagnostic_overlay_with_damage(None, &[Rect::new(12.0, 8.0, 80.0, 32.0)]);
-        let mut renderer = crate::gpu::SdlComponentRenderer::new(
+        let mut renderer = crate::gpu::SoftwareRenderer::new(
             (240.0 * scale) as u32,
             (120.0 * scale) as u32,
             scale,

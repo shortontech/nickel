@@ -2871,8 +2871,7 @@ mod semantic_control_tests {
             for scale in [1.0_f32, 1.25, 2.0] {
                 let width = (bounds.size.width * scale) as u32;
                 let height = (bounds.size.height * scale) as u32;
-                let mut renderer =
-                    crate::SdlComponentRenderer::new_pixel_buffer(width, height, scale);
+                let mut renderer = crate::SoftwareRenderer::new_pixel_buffer(width, height, scale);
                 assert!(!renderer.render(tree.commands()).is_empty());
                 assert!(renderer.pixels().iter().any(|pixel| pixel.a > 0));
                 let image = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_fn(

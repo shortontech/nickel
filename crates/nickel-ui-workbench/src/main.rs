@@ -15,8 +15,8 @@ use nickel_ui::{
     ActionKind, AnyView, Application, Button, ButtonLabel, Collection, CollectionPresentation,
     CollectionState, Column, ComponentBuilderExt, Container, Dropdown, Grid, Image, ImageFit,
     Insets, Menu, MenuBar, MenuItem, RadioButton, ReadingDirection, ResponsiveNavigation,
-    ResponsiveNavigationDestination, Row, SdlComponentRenderer, SemanticRole, SemanticTheme,
-    Slider, Surface, SurfaceRole, Switch, Text, TextField, UiHost, VerticalScroll, ViewContext,
+    ResponsiveNavigationDestination, Row, SemanticRole, SemanticTheme, Slider, SoftwareRenderer,
+    Surface, SurfaceRole, Switch, Text, TextField, UiHost, VerticalScroll, ViewContext,
 };
 use nickel_ui_testkit::{
     AccessibilityPreset, ActivationVia, ErasedFixtureSession, Fixture, FixtureAsset,
@@ -3625,7 +3625,7 @@ fn benchmark(id: &str) -> Result<(), Box<dyn Error>> {
 
         let (width, height) = session.surface_size();
         let scale = session.variant().scale.factor;
-        let mut persistent_renderer = SdlComponentRenderer::new_pixel_buffer(width, height, scale);
+        let mut persistent_renderer = SoftwareRenderer::new_pixel_buffer(width, height, scale);
         session.render_persistent(&mut persistent_renderer);
         let started = Instant::now();
         let allocations_before = allocation_operations();
@@ -4351,7 +4351,7 @@ mod tests {
 
         for dishonest in [
             admitted.replacen(
-                "one SwashCache per SdlComponentRenderer owner",
+                "one SwashCache per SoftwareRenderer owner",
                 "dependency-owned",
                 1,
             ),

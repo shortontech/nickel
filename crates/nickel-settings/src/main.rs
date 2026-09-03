@@ -1573,7 +1573,7 @@ mod tests {
             );
             let physical_width = (width * scale) as u32;
             let physical_height = (height * scale) as u32;
-            let mut renderer = nickel_ui::SdlComponentRenderer::new_pixel_buffer(
+            let mut renderer = nickel_ui::SoftwareRenderer::new_pixel_buffer(
                 physical_width,
                 physical_height,
                 scale,

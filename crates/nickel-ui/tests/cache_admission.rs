@@ -1,8 +1,8 @@
 use std::time::Instant;
 
 use nickel_ui::{
-    Button, Column, Component, Container, Rect, SdlComponentRenderer, SemanticRole,
-    SemanticSelector, Text, UiFrame,
+    Button, Column, Component, Container, Rect, SemanticRole, SemanticSelector, SoftwareRenderer,
+    Text, UiFrame,
 };
 
 fn p95(mut samples: Vec<f64>) -> f64 {
@@ -47,7 +47,7 @@ fn theme_scale_and_locale_churn_stays_within_frame_and_raster_bounds() {
     const LABELS: [&str; 3] = ["Settings", "الإعدادات", "設定"];
     const SCALES: [f32; 3] = [1.0, 1.5, 2.0];
     const THEMES: [u32; 2] = [0x10131a, 0xf4f7ff];
-    let mut renderer = SdlComponentRenderer::new_pixel_buffer(640, 360, 1.0);
+    let mut renderer = SoftwareRenderer::new_pixel_buffer(640, 360, 1.0);
     for generation in 0..180 {
         let label = LABELS[generation % LABELS.len()];
         let scale = SCALES[generation % SCALES.len()];
@@ -97,7 +97,7 @@ fn semantic_role_name_index_matches_linear_semantics_accessibility_and_raster() 
     assert_eq!(accessibility.rect, target.bounds);
     assert_eq!(accessibility.label.as_deref(), target.name.as_deref());
 
-    let mut renderer = SdlComponentRenderer::new_pixel_buffer(800, 1200, 1.0);
+    let mut renderer = SoftwareRenderer::new_pixel_buffer(800, 1200, 1.0);
     renderer.render(frame.commands());
     let before_query = renderer.pixels().to_vec();
     assert_eq!(frame.query(&selector), linear);

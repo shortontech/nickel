@@ -1107,8 +1107,8 @@ mod tests {
     use super::*;
     #[cfg(feature = "view")]
     use nickel_ui::{
-        ActionKind, Point, Rect, SdlComponentRenderer, SemanticAction, SemanticRole, UiEvent,
-        UiFrame, UiStateStore,
+        ActionKind, Point, Rect, SemanticAction, SemanticRole, SoftwareRenderer, UiEvent, UiFrame,
+        UiStateStore,
     };
 
     #[cfg(feature = "view")]
@@ -1349,7 +1349,7 @@ mod tests {
         state.set_selection_owner(Some(region_id.clone()));
         *state.document_selection_mut(region_id) = selection_document.select_all();
         let tree = build(&mut state);
-        let mut renderer = SdlComponentRenderer::new_pixel_buffer(640, 480, 1.0);
+        let mut renderer = SoftwareRenderer::new_pixel_buffer(640, 480, 1.0);
         renderer.render(tree.commands());
         assert!(
             renderer
@@ -1557,7 +1557,7 @@ mod tests {
                     "missing {expected:?} at {width}x{height}@{scale}: {text:?}"
                 );
             }
-            let mut renderer = SdlComponentRenderer::new(width, height, scale);
+            let mut renderer = SoftwareRenderer::new(width, height, scale);
             renderer.render(tree.commands());
             let visible = renderer.pixels().iter().filter(|pixel| pixel.a > 0).count();
             assert!(

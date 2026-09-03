@@ -9,10 +9,9 @@ use std::{
 use nickel_input::{DeviceId, EventOrder, InputEvent, TouchEvent, TouchId};
 use nickel_ui::{
     AccessibilityNode, ActionKind, Application, Completion, ControllerAction, ControllerFamily,
-    HostBatch, HostEvent, HostEventOutcome, HostInspection, InputModality, Point,
-    SdlComponentRenderer, SemanticAction, SemanticNodeSnapshot, SemanticQueryError, SemanticRole,
-    SemanticSelector as ProductionSelector, SemanticValueInput, SemanticValueSnapshot, UiEvent,
-    UiHost, UiId,
+    HostBatch, HostEvent, HostEventOutcome, HostInspection, InputModality, Point, SemanticAction,
+    SemanticNodeSnapshot, SemanticQueryError, SemanticRole, SemanticSelector as ProductionSelector,
+    SemanticValueInput, SemanticValueSnapshot, SoftwareRenderer, UiEvent, UiHost, UiId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -29,7 +28,7 @@ pub fn render_host<A: Application>(
     height: u32,
     scale: f32,
 ) -> HeadlessRaster {
-    let mut renderer = SdlComponentRenderer::new_pixel_buffer(width, height, scale);
+    let mut renderer = SoftwareRenderer::new_pixel_buffer(width, height, scale);
     host.render_software(&mut renderer);
     let rgba = renderer
         .pixels()
@@ -250,7 +249,7 @@ pub trait ErasedFixtureSession {
     /// Render into a caller-owned persistent presenter. The caller controls
     /// renderer construction and can therefore measure a true warm frame
     /// without charging allocation of a returned raster to the frame.
-    fn render_persistent(&self, renderer: &mut SdlComponentRenderer);
+    fn render_persistent(&self, renderer: &mut SoftwareRenderer);
     fn activate(&mut self, via: ActivationVia) -> Result<(), FixtureSessionError>;
     fn trace_document(&self) -> TraceDocument;
     fn replay(&mut self, document: &TraceDocument) -> Result<(), ScenarioError>;
@@ -321,7 +320,7 @@ impl<F: Fixture> ErasedFixtureSession for TypedFixtureSession<F> {
         )
     }
 
-    fn render_persistent(&self, renderer: &mut SdlComponentRenderer) {
+    fn render_persistent(&self, renderer: &mut SoftwareRenderer) {
         self.scenario.host().render_software(renderer);
     }
 

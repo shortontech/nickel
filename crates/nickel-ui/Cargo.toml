@@ -16,7 +16,6 @@ nickel-input = { path = "../nickel-input", features = ["gilrs", "winit"] }
 nickel-i18n = { path = "../nickel-i18n" }
 nickel-render-assets = { path = "../nickel-render-assets" }
 ui-declarative-macros = "0.1.0"
-sdl3.workspace = true
 softbuffer.workspace = true
 winit.workspace = true
 arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }
