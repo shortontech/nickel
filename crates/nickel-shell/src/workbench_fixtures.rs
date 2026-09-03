@@ -11,16 +11,16 @@ use nickel_ui_testkit::{
 use nickel_codex_ui::ChatApplication;
 
 use crate::{
+    control_view::ControlCenterApp,
     launcher::{Launcher, LauncherInput},
+    launcher_view::{LauncherApplication, LauncherIconCache, LauncherViewState},
+    live_shell::{DesktopApplication, LockApplication, PanelApplication},
     model::{WindowGroup, WindowId},
     notification::{NotificationAction, NotificationRequest, NotificationStore},
+    notification_view::NotificationApp,
     platform::{AudioStatus, BluetoothStatus, NetworkStatus, WorkspaceSummary},
-    sdl_control_view::ControlCenterApp,
-    sdl_launcher_view::{LauncherApplication, LauncherIconCache, LauncherViewState},
-    sdl_live_shell::{DesktopApplication, LockApplication, PanelApplication},
-    sdl_notification_view::NotificationApp,
-    sdl_screenshot::ScreenshotApp,
-    sdl_window_preview::WindowPreviewApp,
+    screenshot::ScreenshotApp,
+    window_preview::WindowPreviewApp,
 };
 
 pub struct ShellFixtureProvider;

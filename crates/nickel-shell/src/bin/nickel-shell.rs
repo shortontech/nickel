@@ -48,38 +48,38 @@ mod launcher;
 #[path = "../lock_auth.rs"]
 mod lock_auth;
 use launcher::{DashboardProject, DashboardSection, ProjectActivity, normalize_dashboard_projects};
+#[path = "../control_view.rs"]
+mod control_view;
+#[path = "../launcher_view.rs"]
+mod launcher_view;
+#[path = "../live_shell.rs"]
+mod live_shell;
 #[path = "../model.rs"]
 #[allow(dead_code)]
 mod model;
 #[path = "../notification.rs"]
 mod notification;
+#[path = "../notification_view.rs"]
+mod notification_view;
 #[path = "../places.rs"]
 #[allow(dead_code)]
 mod places;
 #[path = "../platform/mod.rs"]
 #[allow(dead_code, unused_imports)]
 mod platform;
-#[path = "../sdl_control_view.rs"]
-mod sdl_control_view;
-#[path = "../sdl_launcher_view.rs"]
-mod sdl_launcher_view;
-#[path = "../sdl_live_shell.rs"]
-mod sdl_live_shell;
-#[path = "../sdl_notification_view.rs"]
-mod sdl_notification_view;
-#[path = "../sdl_screenshot.rs"]
-mod sdl_screenshot;
-#[path = "../sdl_window_preview.rs"]
-mod sdl_window_preview;
+#[path = "../screenshot.rs"]
+mod screenshot;
 #[path = "../softbuffer_presenter.rs"]
 mod softbuffer_presenter;
+#[path = "../window_preview.rs"]
+mod window_preview;
 #[path = "../winit_shell.rs"]
 #[allow(dead_code)]
 mod winit_shell;
 
-use sdl_live_shell::LiveShell;
+use live_shell::LiveShell;
 use winit_shell::{
-    ShellEvent, ShellUserEvent, SurfaceId, SurfaceRole, WinitShell as SdlShell, WinitWindowCompat,
+    ShellEvent, ShellUserEvent, SurfaceId, SurfaceRole, WinitShell, WinitWindowCompat,
 };
 
 fn p95_u64(samples: &[u64]) -> Option<u64> {
@@ -287,7 +287,7 @@ impl CodexSurfaces {
             .min()
     }
 
-    fn new(shell: &SdlShell) -> Result<Self, String> {
+    fn new(shell: &WinitShell) -> Result<Self, String> {
         let project_menu = shell
             .surfaces()
             .find(|surface| surface.role() == SurfaceRole::CodexProjectMenu)
@@ -301,7 +301,7 @@ impl CodexSurfaces {
         })
     }
 
-    fn ensure_project_menu(&mut self, shell: &SdlShell) -> Result<(), String> {
+    fn ensure_project_menu(&mut self, shell: &WinitShell) -> Result<(), String> {
         if self.project_menu_host.is_some() {
             return Ok(());
         }
@@ -319,7 +319,7 @@ impl CodexSurfaces {
         Ok(())
     }
 
-    fn present(&mut self, shell: &mut SdlShell, surface: SurfaceId) -> Result<(), HostFailure> {
+    fn present(&mut self, shell: &mut WinitShell, surface: SurfaceId) -> Result<(), HostFailure> {
         if surface == self.project_menu {
             self.ensure_project_menu(shell)
                 .map_err(|detail| HostFailure {
@@ -366,7 +366,7 @@ impl CodexSurfaces {
         }
     }
 
-    fn remove(&mut self, shell: &mut SdlShell, surface: SurfaceId) {
+    fn remove(&mut self, shell: &mut WinitShell, surface: SurfaceId) {
         if let Some(index) = self.chats.iter().position(|chat| chat.id == surface) {
             if let Some(thread) = self.chats.remove(index).thread_id {
                 self.writer_leases.release(&thread);
@@ -375,7 +375,7 @@ impl CodexSurfaces {
         }
     }
 
-    fn open_requests(&mut self, shell: &mut SdlShell) -> Result<bool, String> {
+    fn open_requests(&mut self, shell: &mut WinitShell) -> Result<bool, String> {
         let Some(project_menu_host) = self.project_menu_host.as_mut() else {
             return Ok(false);
         };
@@ -449,7 +449,7 @@ impl CodexSurfaces {
 
     fn open_project(
         &mut self,
-        shell: &mut SdlShell,
+        shell: &mut WinitShell,
         cwd: std::path::PathBuf,
         project_id: String,
         name: String,
@@ -502,7 +502,11 @@ impl CodexSurfaces {
         result
     }
 
-    fn open_project_by_id(&mut self, shell: &mut SdlShell, project_id: &str) -> Result<(), String> {
+    fn open_project_by_id(
+        &mut self,
+        shell: &mut WinitShell,
+        project_id: &str,
+    ) -> Result<(), String> {
         let (project, initial_thread) = {
             let state = &self
                 .project_menu_host
@@ -588,7 +592,7 @@ impl DomainSubscriptionSchedule {
     }
 }
 
-fn render_all(shell: &mut SdlShell, state: &mut LiveShell) -> Result<(), String> {
+fn render_all(shell: &mut WinitShell, state: &mut LiveShell) -> Result<(), String> {
     let surfaces = shell
         .surfaces()
         .map(|surface| {
@@ -614,7 +618,7 @@ fn render_all(shell: &mut SdlShell, state: &mut LiveShell) -> Result<(), String>
 }
 
 fn render_role(
-    shell: &mut SdlShell,
+    shell: &mut WinitShell,
     state: &mut LiveShell,
     wanted: SurfaceRole,
 ) -> Result<(), String> {
@@ -641,7 +645,7 @@ fn render_role(
 }
 
 fn prewarm_role(
-    shell: &mut SdlShell,
+    shell: &mut WinitShell,
     state: &mut LiveShell,
     wanted: SurfaceRole,
 ) -> Result<(), String> {
@@ -664,7 +668,7 @@ fn prewarm_role(
     Ok(())
 }
 
-fn sync_visibility(shell: &mut SdlShell, state: &LiveShell) {
+fn sync_visibility(shell: &mut WinitShell, state: &LiveShell) {
     let surfaces = shell
         .surfaces()
         .map(|surface| (surface.id(), surface.role()))
@@ -682,7 +686,7 @@ fn sync_visibility(shell: &mut SdlShell, state: &LiveShell) {
     }
 }
 
-fn focus_visible_overlay(shell: &mut SdlShell, state: &LiveShell) {
+fn focus_visible_overlay(shell: &mut WinitShell, state: &LiveShell) {
     for role in [
         SurfaceRole::Lock,
         SurfaceRole::Screenshot,
@@ -702,7 +706,7 @@ fn focus_visible_overlay(shell: &mut SdlShell, state: &LiveShell) {
 
 fn handle_codex_event(
     codex: &mut CodexSurfaces,
-    shell: &mut SdlShell,
+    shell: &mut WinitShell,
     state: &mut LiveShell,
     event: &ShellEvent,
 ) -> Result<bool, String> {
@@ -833,7 +837,7 @@ fn handle_codex_event(
 }
 
 fn handle_shell_input(
-    shell: &mut SdlShell,
+    shell: &mut WinitShell,
     state: &mut LiveShell,
     codex: &mut CodexSurfaces,
     surface: SurfaceId,
@@ -1095,7 +1099,7 @@ fn controller_target_role(
 }
 
 fn handle_controller_action(
-    shell: &mut SdlShell,
+    shell: &mut WinitShell,
     state: &mut LiveShell,
     codex: &mut CodexSurfaces,
     action: ControllerAction,
@@ -1295,7 +1299,7 @@ fn wait_for_initial_display_with(
     Ok(())
 }
 
-fn wait_for_initial_display(shell: &mut SdlShell) -> Result<(), String> {
+fn wait_for_initial_display(shell: &mut WinitShell) -> Result<(), String> {
     let mut logged = false;
     wait_for_initial_display_with(|| {
         if !shell.display_geometries()?.is_empty() {
@@ -1332,7 +1336,7 @@ fn main() -> Result<(), String> {
         format!("Nickel shell could not authenticate with the session protocol: {error}")
     })?;
     let started = Instant::now();
-    let mut shell = SdlShell::new(started)?;
+    let mut shell = WinitShell::new(started)?;
     wait_for_initial_display(&mut shell)?;
     shell.create_shell_surfaces()?;
     #[cfg(target_os = "linux")]

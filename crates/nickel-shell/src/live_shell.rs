@@ -26,21 +26,21 @@ use nickel_ui::{
 };
 
 use crate::{
+    control_view::{ControlAction, ControlCenterApp, ControlCenterHost},
     launcher::{DashboardAccount, DashboardProject, DashboardSection, Launcher},
+    launcher_view::{
+        LauncherAction, LauncherApplication, LauncherIconCache, LauncherShellEffect,
+        LauncherViewState, reduce_launcher_action,
+    },
     model::{Application, OpenWindow, TrayItem},
     notification::DesktopNotification,
+    notification_view::{NotificationApp, NotificationEffect, NotificationHost},
     platform::{
         self, AudioStatus, BluetoothStatus, FeedState, FeedStatus, NetworkStatus, NotificationFeed,
         NotificationSource, ShellCommand, TrayFeed, TraySource, WindowAction, WindowFeed,
     },
-    sdl_control_view::{ControlAction, ControlCenterApp, ControlCenterHost},
-    sdl_launcher_view::{
-        LauncherAction, LauncherApplication, LauncherIconCache, LauncherShellEffect,
-        LauncherViewState, reduce_launcher_action,
-    },
-    sdl_notification_view::{NotificationApp, NotificationEffect, NotificationHost},
-    sdl_screenshot::ScreenshotTool,
-    sdl_window_preview::{
+    screenshot::ScreenshotTool,
+    window_preview::{
         MENU_WIDTH, MenuAction, PreviewAction, WindowMenuApp, WindowPreviewFrame,
         build_preview_frame, menu_height, preview_dimensions,
     },
@@ -1892,7 +1892,7 @@ impl LiveShell {
                 true
             }
             platform::GlobalShortcut::ShowRun => {
-                tracing::warn!("Nickel Run is not implemented in the SDL shell yet");
+                tracing::warn!("Nickel Run is not implemented in the shell yet");
                 false
             }
             platform::GlobalShortcut::Screenshot(platform::ScreenshotAction::ActiveWindow) => {
@@ -3283,10 +3283,10 @@ mod tests {
         assert_eq!(samples.scheduled_wakeups, 70);
     }
     use crate::{
+        launcher_view::{LauncherAction, LauncherApplication},
         model::{ApplicationId, OpenWindow, TrayItem, WindowGroup, WindowId},
         notification::{NotificationAction, NotificationRequest, NotificationStore},
-        sdl_launcher_view::{LauncherAction, LauncherApplication},
-        sdl_window_preview::{MenuAction, build_preview_frame},
+        window_preview::{MenuAction, build_preview_frame},
         winit_shell::SurfaceRole,
     };
     use nickel_core::launcher_preferences::LauncherPreferences;
@@ -3370,8 +3370,8 @@ mod tests {
         let mut host = UiHost::new(
             LauncherApplication::new(
                 launcher.clone(),
-                crate::sdl_launcher_view::LauncherViewState::default(),
-                crate::sdl_launcher_view::LauncherIconCache::new(),
+                crate::launcher_view::LauncherViewState::default(),
+                crate::launcher_view::LauncherIconCache::new(),
                 palette,
             ),
             920,
@@ -3407,7 +3407,7 @@ mod tests {
         )]);
         shell.launcher_preferences_path = Some(preferences_path.clone());
 
-        shell.apply_launcher_action(crate::sdl_launcher_view::LauncherAction::TogglePin(
+        shell.apply_launcher_action(crate::launcher_view::LauncherAction::TogglePin(
             application_id.clone(),
         ));
         assert_eq!(shell.launcher_persistence_attempts, 1);
@@ -3427,7 +3427,7 @@ mod tests {
         ));
 
         shell.launcher_preferences_path = Some(directory.path().to_path_buf());
-        shell.apply_launcher_action(crate::sdl_launcher_view::LauncherAction::TogglePin(
+        shell.apply_launcher_action(crate::launcher_view::LauncherAction::TogglePin(
             application_id.clone(),
         ));
         assert_eq!(shell.launcher_persistence_attempts, 2);
@@ -3445,7 +3445,7 @@ mod tests {
         ));
 
         shell.launcher_preferences_path = Some(preferences_path.clone());
-        shell.apply_launcher_action(crate::sdl_launcher_view::LauncherAction::TogglePin(
+        shell.apply_launcher_action(crate::launcher_view::LauncherAction::TogglePin(
             application_id.clone(),
         ));
         assert_eq!(shell.launcher_persistence_attempts, 3);
@@ -3466,8 +3466,8 @@ mod tests {
     ) -> Scenario<LauncherApplication> {
         let mut application = LauncherApplication::new(
             launcher.clone(),
-            crate::sdl_launcher_view::LauncherViewState::default(),
-            crate::sdl_launcher_view::LauncherIconCache::new(),
+            crate::launcher_view::LauncherViewState::default(),
+            crate::launcher_view::LauncherIconCache::new(),
             palette,
         );
         application.sync(launcher, palette, status);
@@ -3756,7 +3756,7 @@ mod tests {
                 },
                 false,
             ),
-            Some(crate::sdl_window_preview::PreviewAction::Close(WindowId(9)))
+            Some(crate::window_preview::PreviewAction::Close(WindowId(9)))
         );
 
         shell.window_menu = Some(WindowId(9));

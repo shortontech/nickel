@@ -609,8 +609,8 @@ mod tests {
 
     #[test]
     fn transient_selection_has_no_parallel_index_or_hit_test_authority() {
-        let live_shell = include_str!("sdl_live_shell.rs");
-        let preview = include_str!("sdl_window_preview.rs");
+        let live_shell = include_str!("live_shell.rs");
+        let preview = include_str!("window_preview.rs");
         for removed in [
             ["preview", "_selected"].concat(),
             ["window_menu", "_selected"].concat(),

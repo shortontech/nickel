@@ -25,11 +25,20 @@ pub mod desktop {
 }
 
 #[cfg(feature = "workbench-fixtures")]
+#[allow(dead_code)]
+mod control_view;
+#[cfg(feature = "workbench-fixtures")]
 #[allow(clippy::needless_borrow, dead_code)]
 mod icons;
 #[cfg(feature = "workbench-fixtures")]
 #[allow(clippy::manual_is_multiple_of, dead_code)]
 mod launcher;
+#[cfg(feature = "workbench-fixtures")]
+#[allow(dead_code)]
+mod launcher_view;
+#[cfg(feature = "workbench-fixtures")]
+#[allow(dead_code)]
+mod live_shell;
 #[cfg(all(feature = "workbench-fixtures", target_os = "linux"))]
 #[allow(dead_code)]
 mod lock_auth;
@@ -40,31 +49,22 @@ mod model;
 mod notification;
 #[cfg(feature = "workbench-fixtures")]
 #[allow(dead_code)]
+mod notification_view;
+#[cfg(feature = "workbench-fixtures")]
+#[allow(dead_code)]
 mod places;
 #[cfg(feature = "workbench-fixtures")]
 #[allow(dead_code, unused_imports)]
 mod platform;
 #[cfg(feature = "workbench-fixtures")]
 #[allow(dead_code)]
-mod sdl_control_view;
-#[cfg(feature = "workbench-fixtures")]
-#[allow(dead_code)]
-mod sdl_launcher_view;
-#[cfg(feature = "workbench-fixtures")]
-#[allow(dead_code)]
-mod sdl_live_shell;
-#[cfg(feature = "workbench-fixtures")]
-#[allow(dead_code)]
-mod sdl_notification_view;
-#[cfg(feature = "workbench-fixtures")]
-#[allow(dead_code)]
-mod sdl_screenshot;
-#[cfg(feature = "workbench-fixtures")]
-#[allow(dead_code)]
-mod sdl_window_preview;
+mod screenshot;
 #[cfg(feature = "workbench-fixtures")]
 #[allow(dead_code)]
 mod softbuffer_presenter;
+#[cfg(feature = "workbench-fixtures")]
+#[allow(dead_code)]
+mod window_preview;
 #[cfg(feature = "workbench-fixtures")]
 #[allow(dead_code)]
 mod winit_shell;

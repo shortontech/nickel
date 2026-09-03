@@ -1,4 +1,4 @@
-//! SDL-independent launcher scene and hit testing.
+//! Runtime-independent launcher scene and hit testing.
 //!
 //! `LiveShell` owns input and mutates [`Launcher`]. This module turns that state
 //! into component paint commands and stable semantic actions.
