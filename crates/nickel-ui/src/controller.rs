@@ -497,7 +497,7 @@ mod tests {
             normalizer.handle(
                 ControllerEvent::Connected {
                     id: duplicate,
-                    identity: identity("sdl", Some("physical-pad")),
+                    identity: identity("duplicate-backend", Some("physical-pad")),
                 },
                 1,
             ),

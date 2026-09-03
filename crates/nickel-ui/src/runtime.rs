@@ -2974,7 +2974,7 @@ mod tests {
             ..HostBatch::default()
         };
 
-        // These are deliberately transport-only paths. Standalone SDL,
+        // These are deliberately transport-only paths. Standalone windows,
         // embedded shell surfaces, and headless scenarios all surrender the
         // normalized batch to the same host transition authority.
         let outcome = match path {

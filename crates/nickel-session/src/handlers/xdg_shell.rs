@@ -102,7 +102,7 @@ impl XdgShellHandler for NickelSession {
             self.workspaces.add_window(id);
         }
         self.surface_windows.insert(surface.wl_surface().id(), id);
-        // The authenticated shell creates role-sized SDL surfaces before the
+        // The authenticated shell creates role-sized surfaces before the
         // app ID arrives. Giving those provisional surfaces an ordinary app
         // configure makes a hidden transient recreate as a full application
         // window and temporarily steals pointer hit testing from the panel.
@@ -394,9 +394,9 @@ impl NickelSession {
     ) {
         use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode;
         // Nickel's authenticated shell surfaces are already borderless UI.
-        // Advertising server decorations makes SDL exclude a synthetic
-        // titlebar strip from xdg-window-geometry, leaving visible controls in
-        // that strip outside the compositor's pointer hit region.
+        // Advertising server decorations makes the windowing client exclude a
+        // synthetic titlebar strip from xdg-window-geometry, leaving visible
+        // controls in that strip outside the compositor's pointer hit region.
         let shell_client = toplevel
             .wl_surface()
             .client()
@@ -600,7 +600,7 @@ impl NickelSession {
             }
             if shell_role.is_some() {
                 self.workspaces.remove_window(&id);
-                // A hidden SDL role may recreate its wl_surface when shown.
+                // A hidden shell role may recreate its wl_surface when shown.
                 // Registration happens before its trusted app ID arrives and
                 // temporarily marks that new registry entry active. Preserve
                 // the application that still owns keyboard focus without
@@ -720,7 +720,7 @@ impl NickelSession {
         {
             self.focus_shell_role(role);
         }
-        // The SDL shell and its dynamic Codex windows share one Wayland
+        // The shell and its dynamic Codex windows share one Wayland
         // client. New toplevels from that client are deliberately not focused
         // until their role is known, so shell chrome cannot steal keyboard
         // focus while starting. Once metadata identifies an ordinary Codex

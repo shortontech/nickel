@@ -3774,10 +3774,10 @@ impl NickelSession {
         window.override_z_index(100);
         self.lock_windows.retain(IsAlive::alive);
         if !self.lock_windows.contains(&window) {
-            // SDL recreates native Wayland surfaces when a hidden window is
-            // shown. The replacement may register before the old surface's
-            // unmap reaches Smithay, so mapped-state alone cannot identify the
-            // stale identity. There is exactly one lock surface per output;
+            // A windowing runtime may recreate native Wayland surfaces when a
+            // hidden window is shown. The replacement may register before the
+            // old surface's unmap reaches Smithay, so mapped-state alone cannot
+            // identify the stale identity. There is exactly one lock surface per output;
             // once that capacity is full, a newly registered identity replaces
             // the oldest one and is the surface that receives configuration.
             let output_count = self.space.outputs().count().max(1);
@@ -6182,7 +6182,7 @@ mod protocol_tests {
     }
 
     #[test]
-    fn descriptive_sdl_output_names_resolve_to_authoritative_connector_names() {
+    fn descriptive_output_names_resolve_to_authoritative_connector_names() {
         let outputs = vec!["DVI-I-1".into(), "DP-3".into()];
 
         assert_eq!(

@@ -1,8 +1,9 @@
 //! CPU-side text and image assets for Nickel render backends.
 //!
-//! This crate deliberately has no windowing or GPU dependency. SDL renderers can
-//! upload [`RgbaAsset::pixels`] with a pitch of [`RgbaAsset::pitch`], while the
-//! software renderer can blend the same bytes directly.
+//! This crate deliberately has no windowing or GPU dependency. Software
+//! presenters can upload [`RgbaAsset::pixels`] with a pitch of
+//! [`RgbaAsset::pitch`], while the software renderer can blend the same bytes
+//! directly.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -82,7 +83,7 @@ impl RgbaAsset {
         self.pixels.height()
     }
 
-    /// Row pitch accepted by `SDL_UpdateTexture`.
+    /// Packed RGBA row pitch accepted by software presenters.
     pub fn pitch(&self) -> usize {
         self.width() as usize * 4
     }

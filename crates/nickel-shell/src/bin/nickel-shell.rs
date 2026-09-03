@@ -2288,7 +2288,7 @@ mod tests {
     }
 
     #[test]
-    fn visible_launcher_owns_controller_input_without_sdl_focus() {
+    fn visible_launcher_owns_controller_input_without_window_focus() {
         assert_eq!(
             super::controller_target_role(true, Some(super::SurfaceRole::Panel)),
             Some(super::SurfaceRole::Launcher)

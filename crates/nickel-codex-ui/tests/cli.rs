@@ -16,7 +16,7 @@ nickel-codex-ui --replay SCENARIO [--cwd PATH] [--thread THREAD_ID]\n"
 }
 
 #[test]
-fn invalid_replay_fails_before_sdl_startup() {
+fn invalid_replay_fails_before_runtime_startup() {
     let output = Command::new(env!("CARGO_BIN_EXE_nickel-codex-ui"))
         .args(["--replay", "/definitely/missing/nickel-scenario.json"])
         .output()
