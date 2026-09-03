@@ -36,7 +36,7 @@ pub enum AnimationLevel {
     Normal,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ShellSettings {
     pub bar_on_all_displays: bool,
     pub all_windows_on_every_bar: bool,
@@ -48,6 +48,10 @@ pub struct ShellSettings {
     pub reduce_transparency: bool,
     pub animations: AnimationLevel,
     pub file_icon_provider: FileIconPreference,
+    /// An explicitly selected Linux icon-theme name. Retained even when the
+    /// theme is temporarily unavailable so the platform adapter can recover
+    /// automatically when it returns.
+    pub file_icon_theme: Option<String>,
     pub idle_dim_seconds: Option<u32>,
     pub idle_lock_seconds: Option<u32>,
     pub idle_suspend_seconds: Option<u32>,
@@ -66,6 +70,7 @@ impl Default for ShellSettings {
             reduce_transparency: false,
             animations: AnimationLevel::Normal,
             file_icon_provider: FileIconPreference::default(),
+            file_icon_theme: None,
             idle_dim_seconds: Some(300),
             idle_lock_seconds: Some(900),
             idle_suspend_seconds: None,
@@ -78,7 +83,7 @@ impl ShellSettings {
         settings_path().and_then(Self::load).unwrap_or_default()
     }
 
-    pub fn save_default(self) -> io::Result<()> {
+    pub fn save_default(&self) -> io::Result<()> {
         self.save(settings_path()?)
     }
 
@@ -124,6 +129,12 @@ impl ShellSettings {
                         _ => FileIconPreference::Nickel,
                     }
                 }
+                "file_icon_theme" => {
+                    settings.file_icon_theme = match value.trim() {
+                        "" | "system" => None,
+                        theme => Some(theme.to_owned()),
+                    }
+                }
                 "idle_dim_seconds" => settings.idle_dim_seconds = parse_timeout(value),
                 "idle_lock_seconds" => settings.idle_lock_seconds = parse_timeout(value),
                 "idle_suspend_seconds" => settings.idle_suspend_seconds = parse_timeout(value),
@@ -136,7 +147,7 @@ impl ShellSettings {
         Ok(settings)
     }
 
-    pub fn save(self, path: impl AsRef<Path>) -> io::Result<()> {
+    pub fn save(&self, path: impl AsRef<Path>) -> io::Result<()> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -144,7 +155,7 @@ impl ShellSettings {
         fs::write(
             path,
             format!(
-                "bar_on_all_displays={}\nall_windows_on_every_bar={}\ndesktop_count={}\nactive_desktop={}\ntheme={}\naccent_hue={}\naccent_intensity={}\nreduce_transparency={}\nanimations={}\nfile_icon_provider={}\nidle_dim_seconds={}\nidle_lock_seconds={}\nidle_suspend_seconds={}\n",
+                "bar_on_all_displays={}\nall_windows_on_every_bar={}\ndesktop_count={}\nactive_desktop={}\ntheme={}\naccent_hue={}\naccent_intensity={}\nreduce_transparency={}\nanimations={}\nfile_icon_provider={}\nfile_icon_theme={}\nidle_dim_seconds={}\nidle_lock_seconds={}\nidle_suspend_seconds={}\n",
                 self.bar_on_all_displays,
                 self.all_windows_on_every_bar,
                 self.desktop_count,
@@ -170,6 +181,7 @@ impl ShellSettings {
                     FileIconPreference::Nickel => "nickel",
                     FileIconPreference::System => "system",
                 },
+                self.file_icon_theme.as_deref().unwrap_or("system"),
                 format_timeout(self.idle_dim_seconds),
                 format_timeout(self.idle_lock_seconds),
                 format_timeout(self.idle_suspend_seconds),
@@ -177,7 +189,7 @@ impl ShellSettings {
         )
     }
 
-    pub fn resolve_appearance(self, system: Appearance) -> Appearance {
+    pub fn resolve_appearance(&self, system: Appearance) -> Appearance {
         Appearance {
             mode: match self.theme {
                 ThemePreference::System => system.mode,
@@ -192,11 +204,11 @@ impl ShellSettings {
         }
     }
 
-    pub fn displayed_hue(self, system: Appearance) -> u16 {
+    pub fn displayed_hue(&self, system: Appearance) -> u16 {
         self.accent_hue.unwrap_or_else(|| accent_hue(system.accent))
     }
 
-    pub fn displayed_intensity(self, system: Appearance) -> u8 {
+    pub fn displayed_intensity(&self, system: Appearance) -> u8 {
         self.accent_intensity.unwrap_or(system.intensity)
     }
 }
@@ -265,6 +277,7 @@ mod tests {
                 FileIconPreference::Nickel
             }
         );
+        assert_eq!(settings.file_icon_theme, None);
         assert_eq!(settings.idle_dim_seconds, Some(300));
         assert_eq!(settings.idle_lock_seconds, Some(900));
         assert_eq!(settings.idle_suspend_seconds, None);
@@ -287,6 +300,7 @@ mod tests {
             reduce_transparency: true,
             animations: AnimationLevel::Off,
             file_icon_provider: FileIconPreference::System,
+            file_icon_theme: Some("Papirus-Dark".to_owned()),
             idle_dim_seconds: Some(90),
             idle_lock_seconds: Some(240),
             idle_suspend_seconds: Some(1_800),
