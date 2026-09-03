@@ -1017,7 +1017,7 @@ impl FileApp {
         }
     }
 
-    fn go_forward(&mut self) {
+    pub(crate) fn go_forward(&mut self) {
         if self.browser.can_go_forward() {
             self.start_navigation(
                 "Going forward".into(),
@@ -1028,7 +1028,7 @@ impl FileApp {
         }
     }
 
-    fn go_up(&mut self) {
+    pub(crate) fn go_up(&mut self) {
         if self.browser.can_go_up() {
             self.start_navigation(
                 "Opening parent".into(),

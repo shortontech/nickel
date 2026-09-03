@@ -33,6 +33,25 @@ pub(crate) struct FileHostAdapter {
     sync_requested: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NavigationShortcut {
+    Back,
+    Forward,
+    Up,
+}
+
+fn navigation_shortcut(key: KeyCode, alt_down: bool) -> Option<NavigationShortcut> {
+    if !alt_down {
+        return None;
+    }
+    match key {
+        KeyCode::ArrowLeft => Some(NavigationShortcut::Back),
+        KeyCode::ArrowRight => Some(NavigationShortcut::Forward),
+        KeyCode::ArrowUp => Some(NavigationShortcut::Up),
+        _ => None,
+    }
+}
+
 impl Default for FileHostAdapter {
     fn default() -> Self {
         Self {
@@ -70,12 +89,24 @@ impl HostAdapter<FileApp> for FileHostAdapter {
                 let app = host.application_mut();
                 app.control_down = key.modifiers.aggregate(AggregateModifier::Control);
                 app.shift_down = key.modifiers.aggregate(AggregateModifier::Shift);
+                let alt_down = key.modifiers.aggregate(AggregateModifier::Alt);
                 if key.edge != KeyEdge::Pressed || key.repeat {
                     return Ok(AdapterOutcome::default());
                 }
                 let PhysicalKey::Code(key) = key.physical else {
                     return Ok(AdapterOutcome::default());
                 };
+                if let Some(shortcut) = navigation_shortcut(key, alt_down) {
+                    match shortcut {
+                        NavigationShortcut::Back => app.go_back(),
+                        NavigationShortcut::Forward => app.go_forward(),
+                        NavigationShortcut::Up => app.go_up(),
+                    }
+                    return Ok(AdapterOutcome {
+                        changed: true,
+                        ..AdapterOutcome::default()
+                    });
+                }
                 match key {
                     KeyCode::KeyP if app.control_down => {
                         app.update(FileMessage::ToggleCommandSurface);
@@ -284,5 +315,29 @@ impl HostAdapter<FileApp> for FileHostAdapter {
                 ..AdapterOutcome::default()
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{NavigationShortcut, navigation_shortcut};
+    use nickel_input::KeyCode;
+
+    #[test]
+    fn conventional_alt_navigation_shortcuts_precede_item_direction() {
+        assert_eq!(
+            navigation_shortcut(KeyCode::ArrowLeft, true),
+            Some(NavigationShortcut::Back)
+        );
+        assert_eq!(
+            navigation_shortcut(KeyCode::ArrowRight, true),
+            Some(NavigationShortcut::Forward)
+        );
+        assert_eq!(
+            navigation_shortcut(KeyCode::ArrowUp, true),
+            Some(NavigationShortcut::Up)
+        );
+        assert_eq!(navigation_shortcut(KeyCode::ArrowLeft, false), None);
+        assert_eq!(navigation_shortcut(KeyCode::ArrowDown, true), None);
     }
 }
