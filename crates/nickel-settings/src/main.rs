@@ -32,7 +32,7 @@ use zbus::{
 };
 
 use nickel_core::{
-    shell_settings::{AnimationLevel, ShellSettings, ThemePreference},
+    shell_settings::{AnimationLevel, FileIconPreference, ShellSettings, ThemePreference},
     theme::{Appearance, ThemeMode, ThemePalette, accent_from_hue},
     wallpaper_settings::{WallpaperPosition, WallpaperSettings},
 };
@@ -310,6 +310,8 @@ enum SettingsMessage {
     SetReduceTransparency(bool),
     ToggleAnimationSelect,
     SetAnimationLevel(AnimationLevel),
+    ToggleFileIconProviderSelect,
+    SetFileIconProvider(FileIconPreference),
     AppearanceScroll,
     BarPrimaryDisplay,
     BarAllDisplays,
@@ -493,6 +495,14 @@ impl SettingsApp {
             }
             SettingsMessage::ToggleAnimationSelect => {
                 self.animation_select_expanded = !self.animation_select_expanded;
+            }
+            SettingsMessage::ToggleFileIconProviderSelect => {
+                self.file_icon_provider_select_expanded = !self.file_icon_provider_select_expanded;
+            }
+            SettingsMessage::SetFileIconProvider(provider) => {
+                self.shell_settings.file_icon_provider = provider;
+                self.file_icon_provider_select_expanded = false;
+                self.persist_appearance();
             }
             SettingsMessage::BarPrimaryDisplay => {
                 self.shell_settings.bar_on_all_displays = false;
@@ -733,6 +743,7 @@ impl SettingsApp {
         self.shell_settings.accent_intensity = defaults.accent_intensity;
         self.shell_settings.reduce_transparency = defaults.reduce_transparency;
         self.shell_settings.animations = defaults.animations;
+        self.shell_settings.file_icon_provider = defaults.file_icon_provider;
         self.wallpaper_settings = WallpaperSettings::default();
         self.wallpaper_preview = None;
         self.wallpaper_dimensions = None;

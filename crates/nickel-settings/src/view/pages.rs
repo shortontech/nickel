@@ -645,6 +645,29 @@ impl SettingsApp {
             self.animation_select_expanded,
         )
         .id("appearance-animations");
+        let file_icon_provider = self.shell_settings.file_icon_provider;
+        let file_icon_provider_row = SelectField::new(
+            theme,
+            "File artwork",
+            "Choose Nickel artwork or icons supplied by the operating system.",
+            SettingsMessage::ToggleFileIconProviderSelect,
+            match file_icon_provider {
+                FileIconPreference::Nickel => "Nickel",
+                FileIconPreference::System => "System",
+            },
+            [
+                (
+                    "Nickel".to_owned(),
+                    SettingsMessage::SetFileIconProvider(FileIconPreference::Nickel),
+                ),
+                (
+                    "System".to_owned(),
+                    SettingsMessage::SetFileIconProvider(FileIconPreference::System),
+                ),
+            ],
+            self.file_icon_provider_select_expanded,
+        )
+        .id("appearance-file-artwork");
         let interface_card = SettingsCard::titled(
             theme,
             self.localizer.text("settings-interface-settings"),
@@ -680,7 +703,8 @@ impl SettingsApp {
             .id("appearance-intensity"),
         )
         .child(transparency_row)
-        .child(animation_row);
+        .child(animation_row)
+        .child(file_icon_provider_row);
         let reset = Button::semantic(
             theme,
             SettingsMessage::AppearanceReset,

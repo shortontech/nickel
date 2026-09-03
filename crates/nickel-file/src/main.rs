@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     path::PathBuf,
     sync::{
         Arc,
@@ -10,12 +10,12 @@ use std::{
 
 use crate::{
     host::FileHostAdapter,
-    layout,
+    icons, layout,
     layout::{rect_between, visible_file_range},
     platform::{home_directory, open_path},
 };
 use nickel_core::{
-    shell_settings::ShellSettings,
+    shell_settings::{FileIconPreference, ShellSettings},
     theme::{ThemeMode, ThemePalette},
 };
 use nickel_file::{DirectoryBrowser, FileEntry};
@@ -67,9 +67,11 @@ pub struct FileApp {
     pub(crate) next_tab_id: u64,
     pub(crate) status: String,
     pub(crate) last_click: Option<(usize, Instant)>,
-    pub(crate) icons: HashMap<PathBuf, (u16, Arc<image::RgbaImage>)>,
-    pub(crate) icon_rx: Option<Receiver<(PathBuf, Option<image::RgbaImage>)>>,
+    pub(crate) icons: icons::ArtworkCache,
+    pub(crate) icon_rx: Option<Receiver<(u64, PathBuf, icons::ResolvedArtwork)>>,
     pub(crate) icon_poll_delay: std::time::Duration,
+    pub(crate) icon_generation: u64,
+    pub(crate) icon_preference: FileIconPreference,
     pub(crate) next_icon_id: u16,
     pub(crate) sidebar_width: f32,
     pub(crate) expanded_folders: HashSet<PathBuf>,
@@ -220,9 +222,11 @@ impl FileApp {
             next_tab_id: 1,
             status,
             last_click: None,
-            icons: HashMap::new(),
+            icons: icons::ArtworkCache::default(),
             icon_rx: None,
             icon_poll_delay: std::time::Duration::from_millis(16),
+            icon_generation: 0,
+            icon_preference: ShellSettings::load_default().file_icon_provider,
             next_icon_id: 1,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             expanded_folders: HashSet::new(),
@@ -421,19 +425,31 @@ impl FileApp {
         self.refresh_tab_icon();
     }
 
-    fn refresh_icons(&mut self) {
+    pub(crate) fn refresh_icons(&mut self) {
+        let preference = ShellSettings::load_default().file_icon_provider;
+        let appearance = ShellSettings::load_default()
+            .resolve_appearance(nickel_platform::appearance())
+            .mode;
+        if preference != self.icon_preference {
+            self.icon_preference = preference;
+            self.icons.clear();
+            self.tab_icon = None;
+        }
+        self.icon_generation = self.icon_generation.wrapping_add(1);
+        let generation = self.icon_generation;
         let entries = self
             .browser
             .entries()
             .iter()
-            .map(|entry| entry.path.clone())
+            .map(|entry| (entry.path.clone(), entry.is_directory))
             .collect::<Vec<_>>();
-        self.icons.retain(|path, _| entries.contains(path));
+        self.icons
+            .retain(|path| entries.iter().any(|(entry, _)| entry == path));
         let mut paths = entries
             .into_iter()
-            .filter(|path| !self.icons.contains_key(path))
+            .filter(|(path, _)| !self.icons.contains_key(path))
             .collect::<Vec<_>>();
-        paths.push(self.browser.current().to_path_buf());
+        paths.push((self.browser.current().to_path_buf(), true));
         #[cfg(debug_assertions)]
         if std::env::var_os("NICKEL_FILE_PROFILE_ICONS").is_some() {
             eprintln!(
@@ -448,16 +464,27 @@ impl FileApp {
         let _ = std::thread::Builder::new()
             .name("nickel-file-icons".into())
             .spawn(move || {
-                for path in paths {
+                for (path, is_directory) in paths {
                     #[cfg(debug_assertions)]
                     let profile_started = Instant::now();
-                    let image = nickel_platform::path_icon(&path);
+                    let artwork = icons::resolve_artwork(
+                        preference,
+                        &icons::ArtworkRequest {
+                            path: &path,
+                            kind: icons::semantic_kind(&path, is_directory),
+                            logical_size: 96,
+                            scale_milli: 1_000,
+                            appearance: if appearance == ThemeMode::Light {
+                                icons::ArtworkAppearance::Light
+                            } else {
+                                icons::ArtworkAppearance::Dark
+                            },
+                        },
+                    );
                     #[cfg(debug_assertions)]
                     if std::env::var_os("NICKEL_FILE_PROFILE_ICONS").is_some() {
-                        let dimensions = image
-                            .as_ref()
-                            .map(|image| format!("{}x{}", image.width(), image.height()))
-                            .unwrap_or_else(|| "none".to_owned());
+                        let dimensions =
+                            format!("{}x{}", artwork.pixels.width(), artwork.pixels.height());
                         eprintln!(
                             "nickel-file icon-profile: fetched path={} result={} time={:.2?}",
                             path.display(),
@@ -465,7 +492,7 @@ impl FileApp {
                             profile_started.elapsed()
                         );
                     }
-                    if tx.send((path, image)).is_err() {
+                    if tx.send((generation, path, artwork)).is_err() {
                         break;
                     }
                 }
@@ -479,22 +506,22 @@ impl FileApp {
                 None => return,
             };
             match result {
-                Ok((path, Some(image))) => {
+                Ok((generation, path, artwork)) if generation == self.icon_generation => {
                     self.icon_poll_delay = std::time::Duration::from_millis(16);
                     let id = self.next_icon_id;
                     self.next_icon_id = self.next_icon_id.checked_add(1).unwrap_or(1);
                     if path == self.browser.current() {
-                        self.tab_icon = Some((id, Arc::new(image)));
+                        self.tab_icon = Some((id, artwork.pixels));
                     } else if self
                         .browser
                         .entries()
                         .iter()
                         .any(|entry| entry.path == path)
                     {
-                        self.icons.insert(path, (id, Arc::new(image)));
+                        self.icons.insert(path, (id, artwork.pixels));
                     }
                 }
-                Ok((_, None)) => {}
+                Ok(_) => {}
                 Err(TryRecvError::Empty) => {
                     self.icon_poll_delay = self
                         .icon_poll_delay

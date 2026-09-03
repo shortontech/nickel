@@ -171,6 +171,10 @@ impl HostAdapter<FileApp> for FileHostAdapter {
                 app.resizing_sidebar = false;
                 app.selection_drag = None;
             }
+            InputEvent::FocusGained { .. } => {
+                host.application_mut().refresh_icons();
+                changed = true;
+            }
             _ => {}
         }
         self.sync_requested |= changed;

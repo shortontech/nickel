@@ -12,6 +12,22 @@ pub enum ThemePreference {
     Dark,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FileIconPreference {
+    Nickel,
+    System,
+}
+
+impl Default for FileIconPreference {
+    fn default() -> Self {
+        if cfg!(target_os = "windows") {
+            Self::System
+        } else {
+            Self::Nickel
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum AnimationLevel {
     Off,
@@ -31,6 +47,7 @@ pub struct ShellSettings {
     pub accent_intensity: Option<u8>,
     pub reduce_transparency: bool,
     pub animations: AnimationLevel,
+    pub file_icon_provider: FileIconPreference,
     pub idle_dim_seconds: Option<u32>,
     pub idle_lock_seconds: Option<u32>,
     pub idle_suspend_seconds: Option<u32>,
@@ -48,6 +65,7 @@ impl Default for ShellSettings {
             accent_intensity: None,
             reduce_transparency: false,
             animations: AnimationLevel::Normal,
+            file_icon_provider: FileIconPreference::default(),
             idle_dim_seconds: Some(300),
             idle_lock_seconds: Some(900),
             idle_suspend_seconds: None,
@@ -100,6 +118,12 @@ impl ShellSettings {
                         _ => AnimationLevel::Normal,
                     }
                 }
+                "file_icon_provider" => {
+                    settings.file_icon_provider = match value.trim() {
+                        "system" => FileIconPreference::System,
+                        _ => FileIconPreference::Nickel,
+                    }
+                }
                 "idle_dim_seconds" => settings.idle_dim_seconds = parse_timeout(value),
                 "idle_lock_seconds" => settings.idle_lock_seconds = parse_timeout(value),
                 "idle_suspend_seconds" => settings.idle_suspend_seconds = parse_timeout(value),
@@ -120,7 +144,7 @@ impl ShellSettings {
         fs::write(
             path,
             format!(
-                "bar_on_all_displays={}\nall_windows_on_every_bar={}\ndesktop_count={}\nactive_desktop={}\ntheme={}\naccent_hue={}\naccent_intensity={}\nreduce_transparency={}\nanimations={}\nidle_dim_seconds={}\nidle_lock_seconds={}\nidle_suspend_seconds={}\n",
+                "bar_on_all_displays={}\nall_windows_on_every_bar={}\ndesktop_count={}\nactive_desktop={}\ntheme={}\naccent_hue={}\naccent_intensity={}\nreduce_transparency={}\nanimations={}\nfile_icon_provider={}\nidle_dim_seconds={}\nidle_lock_seconds={}\nidle_suspend_seconds={}\n",
                 self.bar_on_all_displays,
                 self.all_windows_on_every_bar,
                 self.desktop_count,
@@ -141,6 +165,10 @@ impl ShellSettings {
                     AnimationLevel::Off => "off",
                     AnimationLevel::Reduced => "reduced",
                     AnimationLevel::Normal => "normal",
+                },
+                match self.file_icon_provider {
+                    FileIconPreference::Nickel => "nickel",
+                    FileIconPreference::System => "system",
                 },
                 format_timeout(self.idle_dim_seconds),
                 format_timeout(self.idle_lock_seconds),
@@ -215,7 +243,7 @@ fn settings_path() -> io::Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AnimationLevel, ShellSettings, ThemePreference};
+    use super::{AnimationLevel, FileIconPreference, ShellSettings, ThemePreference};
 
     #[test]
     fn defaults_to_two_display_friendly_bar_and_four_desktops() {
@@ -229,6 +257,14 @@ mod tests {
         assert_eq!(settings.accent_intensity, None);
         assert!(!settings.reduce_transparency);
         assert_eq!(settings.animations, AnimationLevel::Normal);
+        assert_eq!(
+            settings.file_icon_provider,
+            if cfg!(target_os = "windows") {
+                FileIconPreference::System
+            } else {
+                FileIconPreference::Nickel
+            }
+        );
         assert_eq!(settings.idle_dim_seconds, Some(300));
         assert_eq!(settings.idle_lock_seconds, Some(900));
         assert_eq!(settings.idle_suspend_seconds, None);
@@ -250,6 +286,7 @@ mod tests {
             accent_intensity: Some(63),
             reduce_transparency: true,
             animations: AnimationLevel::Off,
+            file_icon_provider: FileIconPreference::System,
             idle_dim_seconds: Some(90),
             idle_lock_seconds: Some(240),
             idle_suspend_seconds: Some(1_800),

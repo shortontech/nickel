@@ -1,9 +1,9 @@
 # Nickel File icon-family concepts
 
-These six source images are retained design concepts for a future repository-owned Nickel File icon
-family. They are not runtime assets and are intentionally outside `assets/icons` until the file
-browser work resumes and the family has been resized, recolored, reviewed at actual display sizes,
-and admitted to the authoritative asset manifest.
+These six source images are the retained masters for Nickel File's repository-owned fallback icon
+family. Nickel File derives runtime artwork from them by trimming transparent generation-canvas
+space, applying one shared optical inset, and scaling with aspect ratio preserved. Keeping the
+masters here makes the derivation repeatable without replacing or independently hand-editing them.
 
 ## Provenance
 
