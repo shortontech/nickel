@@ -1,7 +1,7 @@
 # nickel-ui
 
 `nickel-ui` is a native Rust UX layer with React-style declarative authoring, typed messages,
-intrinsic responsive layout, stable interaction state, and an included SDL presenter. It has no
+intrinsic responsive layout, stable interaction state, and an included software presenter. It has no
 dependency on the Nickel desktop shell or any other Nickel product crate.
 
 ~~~rust
@@ -37,8 +37,8 @@ rendering paths. Its complete API reference is the rustdoc for the component typ
 `ComponentBuilderExt`; `examples/builder.rs` is a focused optional example. The default learning
 path and application runtime do not require it.
 
-An executable implements `Application` and calls `run(app)`. The runtime owns SDL initialization,
-the native window, event and redraw loops, presentation, and the per-window `UiStateStore`; the
+An executable implements `Application` and calls `run(app)`. The runtime owns winit initialization,
+the native window, event and redraw loops, software presentation, and the per-window `UiStateStore`; the
 application owns only domain state, typed messages, `update`, and `view`. See
 `examples/standalone.rs` for the complete counter application.
 

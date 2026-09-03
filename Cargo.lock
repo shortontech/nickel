@@ -4346,29 +4346,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sdl3"
-version = "0.18.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "25bd22eb1bbc9137e914022b4994ed35591eea0884e9e3e98e6d9895cad6e1d2"
-dependencies = [
- "bitflags 2.13.1",
- "libc",
- "objc2 0.6.4",
- "raw-window-handle",
- "sdl3-sys",
-]
-
-[[package]]
-name = "sdl3-sys"
-version = "0.6.8+SDL-3.4.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b97e3d18c4994224aec3fb2d3d189f5fc88af0958fb8ed7b569272fde558f033"
-dependencies = [
- "pkg-config",
- "vcpkg",
-]
-
-[[package]]
 name = "security-framework"
 version = "3.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

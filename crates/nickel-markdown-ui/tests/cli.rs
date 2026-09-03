@@ -61,7 +61,6 @@ fn valid_and_missing_documents_keep_viewer_alive_without_sidecar_files() {
     for path in [markdown, temporary.path().join("missing.md")] {
         let mut child = Command::new(executable)
             .arg(path)
-            .env("SDL_VIDEODRIVER", "dummy")
             .current_dir(temporary.path())
             .spawn()
             .unwrap();

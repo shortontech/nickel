@@ -2356,7 +2356,7 @@ impl LiveShell {
             match effect {
                 LockEffect::Authenticate(password) => {
                     let username = std::env::var("USER").unwrap_or_default();
-                    let authenticated = {
+                    let authenticated: Result<bool, String> = {
                         #[cfg(target_os = "linux")]
                         {
                             crate::lock_auth::authenticate(&username, &password)

@@ -2978,7 +2978,9 @@ impl WindowFeed {
         // live vector for the duration of the synchronous EnumWindows call.
         unsafe {
             let state = LPARAM((&mut windows as *mut Vec<OpenWindow>) as isize);
-            EnumWindows(Some(collect_window), state).ok()?;
+            if EnumWindows(Some(collect_window), state).is_err() {
+                return FeedState::Failed;
+            }
         }
         FeedState::Ready(windows)
     }

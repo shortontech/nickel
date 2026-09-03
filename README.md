@@ -101,12 +101,6 @@ Launch the desktop shell:
 cargo run -p nickel-shell
 ```
 
-On macOS, install SDL3 first:
-
-```bash
-brew install sdl3
-```
-
 macOS window activation, minimize, and close use Accessibility APIs. Grant the terminal running
 Nickel permission in System Settings > Privacy & Security > Accessibility.
 
@@ -284,7 +278,7 @@ The Windows shell compatibility checklist lives in
 
 ```text
 crates/
-|-- nickel-ui/         Declarative UX layer, layout, state, and SDL presentation
+|-- nickel-ui/         Declarative UX layer, layout, state, and software presentation
 |-- nickel-codex/      Typed Codex CLI selection, app-server RPC, and diagnostics
 |-- nickel-codex-fixture/ Offline protocol fixtures, replay validation, and failure injection
 |-- nickel-codex-ui/   Standalone declarative Codex chat application

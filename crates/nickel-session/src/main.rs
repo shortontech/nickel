@@ -534,9 +534,8 @@ fn shell_command(program: &OsString, arguments: &[OsString]) -> Command {
     command
         .args(arguments)
         // XWayland intentionally exports DISPLAY for ordinary applications.
-        // The shell itself must still connect as a native Wayland client on
-        // every supervisor start and restart.
-        .env("SDL_VIDEODRIVER", "wayland")
+        // Winit selects Wayland whenever WAYLAND_DISPLAY is present, even when
+        // DISPLAY is also available, so no private backend override is needed.
         .process_group(0);
     command
 }
@@ -718,11 +717,13 @@ mod tests {
     }
 
     #[test]
-    fn supervised_shell_is_pinned_to_the_wayland_video_driver() {
+    fn supervised_shell_inherits_standard_display_selection() {
         let command = shell_command(&OsString::from("nickel"), &[]);
-        assert!(command.get_envs().any(|(name, value)| {
-            name == "SDL_VIDEODRIVER" && value.is_some_and(|value| value == "wayland")
-        }));
+        assert!(
+            !command
+                .get_envs()
+                .any(|(name, _)| name == "WAYLAND_DISPLAY" || name == "DISPLAY")
+        );
     }
 
     #[cfg(target_os = "linux")]
