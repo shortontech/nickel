@@ -52,6 +52,17 @@ fn navigation_shortcut(key: KeyCode, alt_down: bool) -> Option<NavigationShortcu
     }
 }
 
+fn adjacent_tab_index(active: usize, count: usize, reverse: bool) -> Option<usize> {
+    if count < 2 || active >= count {
+        return None;
+    }
+    Some(if reverse {
+        active.checked_sub(1).unwrap_or(count - 1)
+    } else {
+        (active + 1) % count
+    })
+}
+
 impl Default for FileHostAdapter {
     fn default() -> Self {
         Self {
@@ -102,6 +113,17 @@ impl HostAdapter<FileApp> for FileHostAdapter {
                         NavigationShortcut::Forward => app.go_forward(),
                         NavigationShortcut::Up => app.go_up(),
                     }
+                    return Ok(AdapterOutcome {
+                        changed: true,
+                        ..AdapterOutcome::default()
+                    });
+                }
+                if key == KeyCode::Tab
+                    && app.control_down
+                    && let Some(index) =
+                        adjacent_tab_index(app.active_tab, app.tabs.len(), app.shift_down)
+                {
+                    app.switch_tab(index);
                     return Ok(AdapterOutcome {
                         changed: true,
                         ..AdapterOutcome::default()
@@ -320,7 +342,7 @@ impl HostAdapter<FileApp> for FileHostAdapter {
 
 #[cfg(test)]
 mod tests {
-    use super::{NavigationShortcut, navigation_shortcut};
+    use super::{NavigationShortcut, adjacent_tab_index, navigation_shortcut};
     use nickel_input::KeyCode;
 
     #[test]
@@ -339,5 +361,15 @@ mod tests {
         );
         assert_eq!(navigation_shortcut(KeyCode::ArrowLeft, false), None);
         assert_eq!(navigation_shortcut(KeyCode::ArrowDown, true), None);
+    }
+
+    #[test]
+    fn conventional_tab_cycle_wraps_in_both_directions() {
+        assert_eq!(adjacent_tab_index(0, 3, false), Some(1));
+        assert_eq!(adjacent_tab_index(2, 3, false), Some(0));
+        assert_eq!(adjacent_tab_index(2, 3, true), Some(1));
+        assert_eq!(adjacent_tab_index(0, 3, true), Some(2));
+        assert_eq!(adjacent_tab_index(0, 1, false), None);
+        assert_eq!(adjacent_tab_index(2, 2, false), None);
     }
 }

@@ -845,7 +845,7 @@ impl FileApp {
         self.tabs.get(index).and_then(Option::as_ref)
     }
 
-    fn switch_tab(&mut self, index: usize) {
+    pub(crate) fn switch_tab(&mut self, index: usize) {
         if index == self.active_tab || index >= self.tabs.len() {
             return;
         }
