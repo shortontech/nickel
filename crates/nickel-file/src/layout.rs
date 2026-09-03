@@ -348,7 +348,7 @@ pub(crate) fn build_view(
                 } else {
                     ui! {
                         <Container id={"files-pane"} grow={1.0} min_width={0.0}
-                            navigation_scope={NavigationScope::pane(true).direction(app.reading_direction)} navigation_scope_highlight={palette.complement}>
+                            navigation_scope={NavigationScope::pane(true).direction(app.reading_direction)} navigation_scope_highlight={palette.surface_hover}>
                             {files}
                         </Container>
                     }
@@ -362,8 +362,8 @@ pub(crate) fn build_view(
                     navigation_scope={NavigationScope::pane(false).direction(app.reading_direction)} navigation_scope_highlight={palette.complement}>
                     <Row width={sidebar_pane_width} shrink={0.0}>{sidebar}{resize_handle}</Row>
                 </Container>
-                    <Container id={"files-pane"} grow={1.0} min_width={0.0}
-                    navigation_scope={NavigationScope::pane(true).direction(app.reading_direction)} navigation_scope_highlight={palette.complement}>{files}</Container></Row>
+                <Container id={"files-pane"} grow={1.0} min_width={0.0}
+                    navigation_scope={NavigationScope::pane(true).direction(app.reading_direction)} navigation_scope_highlight={palette.surface_hover}>{files}</Container></Row>
             </Container>
         }
     };
