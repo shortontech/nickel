@@ -4,6 +4,7 @@ use std::{
     ffi::OsString,
     fs, io,
     path::{Path, PathBuf},
+    time::SystemTime,
 };
 
 extern crate self as nickel_file;
@@ -24,12 +25,27 @@ pub struct FileEntry {
     pub path: PathBuf,
     pub is_directory: bool,
     pub size: Option<u64>,
+    pub modified: Option<SystemTime>,
 }
 
 impl FileEntry {
     pub fn display_name(&self) -> String {
         self.name.to_string_lossy().into_owned()
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EntrySortKey {
+    Name,
+    Type,
+    Modified,
+    Size,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SortDirection {
+    Ascending,
+    Descending,
 }
 
 #[derive(Debug)]
@@ -144,6 +160,43 @@ impl DirectoryBrowser {
         self.entries = read_entries_with_hidden(&self.current, self.show_hidden)?;
         Ok(())
     }
+
+    pub fn sort(&mut self, key: EntrySortKey, direction: SortDirection) {
+        self.entries.sort_by(|left, right| {
+            right.is_directory.cmp(&left.is_directory).then_with(|| {
+                let order = match key {
+                    EntrySortKey::Name => compare_names(&left.name, &right.name),
+                    EntrySortKey::Type => entry_type(left)
+                        .cmp(&entry_type(right))
+                        .then_with(|| compare_names(&left.name, &right.name)),
+                    EntrySortKey::Modified => left
+                        .modified
+                        .cmp(&right.modified)
+                        .then_with(|| compare_names(&left.name, &right.name)),
+                    EntrySortKey::Size => left
+                        .size
+                        .cmp(&right.size)
+                        .then_with(|| compare_names(&left.name, &right.name)),
+                };
+                match direction {
+                    SortDirection::Ascending => order,
+                    SortDirection::Descending => order.reverse(),
+                }
+            })
+        });
+    }
+}
+
+fn entry_type(entry: &FileEntry) -> String {
+    if entry.is_directory {
+        String::new()
+    } else {
+        entry
+            .path
+            .extension()
+            .map(|extension| extension.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default()
+    }
 }
 
 pub fn read_entries(path: &Path) -> io::Result<Vec<FileEntry>> {
@@ -165,6 +218,7 @@ fn read_entries_with_hidden(path: &Path, show_hidden: bool) -> io::Result<Vec<Fi
                 path: entry.path(),
                 is_directory,
                 size: (!is_directory && metadata.is_file()).then_some(metadata.len()),
+                modified: metadata.modified().ok(),
             })
         })
         .collect::<Vec<_>>();
@@ -240,7 +294,7 @@ fn compare_names(left: &OsString, right: &OsString) -> Ordering {
 mod tests {
     use std::fs;
 
-    use super::DirectoryBrowser;
+    use super::{DirectoryBrowser, EntrySortKey, FileEntry, SortDirection};
 
     fn temporary_directory(name: &str) -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -274,6 +328,41 @@ mod tests {
 
         assert_eq!(names, ["Gamma", "zeta", "Alpha.txt", "beta.txt"]);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn portable_sorting_keeps_directories_first_in_both_directions() {
+        let entry = |name: &str, directory: bool, size| FileEntry {
+            name: name.into(),
+            path: std::path::PathBuf::from("/fixture").join(name),
+            is_directory: directory,
+            size,
+            modified: None,
+        };
+        let mut browser = DirectoryBrowser::fixture(vec![
+            entry("small.txt", false, Some(2)),
+            entry("folder", true, None),
+            entry("large.bin", false, Some(90)),
+        ]);
+
+        browser.sort(EntrySortKey::Size, SortDirection::Ascending);
+        assert_eq!(
+            browser
+                .entries()
+                .iter()
+                .map(FileEntry::display_name)
+                .collect::<Vec<_>>(),
+            ["folder", "small.txt", "large.bin"]
+        );
+        browser.sort(EntrySortKey::Size, SortDirection::Descending);
+        assert_eq!(
+            browser
+                .entries()
+                .iter()
+                .map(FileEntry::display_name)
+                .collect::<Vec<_>>(),
+            ["folder", "large.bin", "small.txt"]
+        );
     }
 
     #[test]

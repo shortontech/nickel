@@ -34,17 +34,39 @@ fn grid_and_details_modes_are_owned_independently_by_each_tab() {
     let mut app = FileApp::new(directory.path().to_path_buf());
 
     app.update_message(FileMessage::SetViewMode(FileViewMode::Details));
+    app.update_message(FileMessage::SortBy(EntrySortKey::Type));
     app.update_message(FileMessage::Entry(0));
     app.new_tab_at(child);
     assert_eq!(app.view_mode, FileViewMode::Grid);
+    assert_eq!(app.sort_key, EntrySortKey::Name);
     app.update_message(FileMessage::Entry(0));
 
     app.switch_tab(0);
     assert_eq!(app.view_mode, FileViewMode::Details);
+    assert_eq!(app.sort_key, EntrySortKey::Type);
     assert_eq!(app.selected_entries, HashSet::from([0]));
     app.switch_tab(1);
     assert_eq!(app.view_mode, FileViewMode::Grid);
+    assert_eq!(app.sort_key, EntrySortKey::Name);
     assert_eq!(app.selected_entries, HashSet::from([0]));
+}
+
+#[test]
+fn sorting_preserves_selection_by_entry_identity() {
+    let mut app = FileApp::fixture();
+    app.update_message(FileMessage::Entry(2));
+    let selected_path = app.browser.entries()[2].path.clone();
+
+    app.update_message(FileMessage::SortBy(EntrySortKey::Type));
+    app.update_message(FileMessage::SortBy(EntrySortKey::Type));
+
+    assert_eq!(app.sort_direction, SortDirection::Descending);
+    assert_eq!(
+        app.selected
+            .and_then(|index| app.browser.entries().get(index))
+            .map(|entry| &entry.path),
+        Some(&selected_path)
+    );
 }
 
 #[test]
@@ -85,12 +107,14 @@ fn growing_details_name_column_contains_multiline_text_without_row_overlap() {
             path: PathBuf::from("/fixture").join(long_name),
             is_directory: false,
             size: Some(10),
+            modified: None,
         },
         FileEntry {
             name: "following.txt".into(),
             path: PathBuf::from("/fixture/following.txt"),
             is_directory: false,
             size: Some(20),
+            modified: None,
         },
     ];
     let mut app = FileApp::with_browser(DirectoryBrowser::fixture(entries), String::new());
@@ -388,6 +412,7 @@ fn directory_cardinality_does_not_change_shell_geometry_or_mounted_tile_bound() 
                     path: PathBuf::from(format!("/fixture/item-{index}.txt")),
                     is_directory: false,
                     size: Some(1),
+                    modified: None,
                 })
                 .collect(),
         )
@@ -458,6 +483,7 @@ fn far_offscreen_selection_can_be_revealed_before_its_tile_is_mounted() {
             path: PathBuf::from(format!("/fixture/item-{index:04}.txt")),
             is_directory: false,
             size: Some(1),
+            modified: None,
         })
         .collect();
     let mut app = FileApp::with_browser(DirectoryBrowser::fixture(entries), String::new());

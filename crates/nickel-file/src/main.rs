@@ -18,7 +18,7 @@ use nickel_core::{
     shell_settings::{FileIconPreference, ShellSettings},
     theme::{ThemeMode, ThemePalette},
 };
-use nickel_file::{DirectoryBrowser, FileEntry};
+use nickel_file::{DirectoryBrowser, EntrySortKey, FileEntry, SortDirection};
 use nickel_ui::{
     AnyView, Application, FrameOverlay, Insets, OverlayAnchor, OverlayMenu, OverlayMenuItem, Point,
     UiId, ViewContext,
@@ -55,6 +55,7 @@ pub enum FileMessage {
     Up,
     Refresh,
     SetViewMode(FileViewMode),
+    SortBy(EntrySortKey),
     Breadcrumb(PathBuf),
     ToggleFolder(PathBuf),
     OpenFolder(PathBuf),
@@ -98,6 +99,8 @@ pub struct FileApp {
     pub(crate) tile_width: f32,
     pub(crate) file_scroll_offset: f32,
     pub(crate) view_mode: FileViewMode,
+    pub(crate) sort_key: EntrySortKey,
+    pub(crate) sort_direction: SortDirection,
     pub(crate) tab_icon: Option<(u16, Arc<image::RgbaImage>)>,
     pub(crate) tabs: Vec<Option<FileTab>>,
     pub(crate) active_tab: usize,
@@ -201,6 +204,8 @@ pub(crate) struct FileTab {
     pub(crate) last_click: Option<(usize, Instant)>,
     pub(crate) file_scroll_offset: f32,
     pub(crate) view_mode: FileViewMode,
+    pub(crate) sort_key: EntrySortKey,
+    pub(crate) sort_direction: SortDirection,
     pub(crate) tab_icon: Option<(u16, Arc<image::RgbaImage>)>,
 }
 
@@ -259,6 +264,8 @@ impl FileApp {
             tile_width: DEFAULT_TILE_WIDTH,
             file_scroll_offset: 0.0,
             view_mode: FileViewMode::Grid,
+            sort_key: EntrySortKey::Name,
+            sort_direction: SortDirection::Ascending,
             tab_icon: None,
             tabs: vec![None],
             active_tab: 0,
@@ -283,6 +290,7 @@ impl FileApp {
             path: PathBuf::from("/fixture").join(name),
             is_directory,
             size,
+            modified: None,
         })
         .collect();
         Self::with_browser(DirectoryBrowser::fixture(entries), String::new())
@@ -312,6 +320,8 @@ impl FileApp {
         std::mem::swap(&mut self.last_click, &mut target.last_click);
         std::mem::swap(&mut self.file_scroll_offset, &mut target.file_scroll_offset);
         std::mem::swap(&mut self.view_mode, &mut target.view_mode);
+        std::mem::swap(&mut self.sort_key, &mut target.sort_key);
+        std::mem::swap(&mut self.sort_direction, &mut target.sort_direction);
         std::mem::swap(&mut self.tab_icon, &mut target.tab_icon);
         self.tabs[self.active_tab] = Some(target);
         self.active_tab = index;
@@ -339,6 +349,8 @@ impl FileApp {
             last_click: None,
             file_scroll_offset: 0.0,
             view_mode: FileViewMode::Grid,
+            sort_key: EntrySortKey::Name,
+            sort_direction: SortDirection::Ascending,
             tab_icon: None,
         }));
         self.switch_tab(self.tabs.len() - 1);
@@ -441,6 +453,7 @@ impl FileApp {
     }
 
     fn navigation_changed(&mut self) {
+        self.browser.sort(self.sort_key, self.sort_direction);
         self.selected = None;
         self.selected_entries.clear();
         self.selection_anchor = None;
@@ -448,6 +461,45 @@ impl FileApp {
         self.status.clear();
         self.refresh_icons();
         self.refresh_tab_icon();
+    }
+
+    fn sort_by(&mut self, key: EntrySortKey) {
+        let focused = self
+            .selected
+            .and_then(|index| self.browser.entries().get(index))
+            .map(|entry| entry.path.clone());
+        let selected = self
+            .selected_entries
+            .iter()
+            .filter_map(|index| self.browser.entries().get(*index))
+            .map(|entry| entry.path.clone())
+            .collect::<HashSet<_>>();
+        if self.sort_key == key {
+            self.sort_direction = match self.sort_direction {
+                SortDirection::Ascending => SortDirection::Descending,
+                SortDirection::Descending => SortDirection::Ascending,
+            };
+        } else {
+            self.sort_key = key;
+            self.sort_direction = SortDirection::Ascending;
+        }
+        self.browser.sort(self.sort_key, self.sort_direction);
+        self.selected_entries = self
+            .browser
+            .entries()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| selected.contains(&entry.path).then_some(index))
+            .collect();
+        self.selected = focused.and_then(|path| {
+            self.browser
+                .entries()
+                .iter()
+                .position(|entry| entry.path == path)
+        });
+        self.selection_anchor = self.selected;
+        self.set_scroll_offset(0.0);
+        self.ensure_selection_visible();
     }
 
     pub(crate) fn refresh_icons(&mut self) {
@@ -641,6 +693,7 @@ impl FileApp {
                 if let Err(error) = self.browser.refresh() {
                     self.status = format!("Could not refresh: {error}");
                 }
+                self.browser.sort(self.sort_key, self.sort_direction);
                 self.refresh_icons();
             }
             FileMessage::ContextSelectAll => {
@@ -661,6 +714,7 @@ impl FileApp {
                 let show = !self.browser.show_hidden();
                 match self.browser.set_show_hidden(show) {
                     Ok(()) => {
+                        self.browser.sort(self.sort_key, self.sort_direction);
                         self.selected = None;
                         self.selected_entries.clear();
                         self.selection_anchor = None;
@@ -685,6 +739,7 @@ impl FileApp {
                 {
                     self.status = format!("Could not refresh: {error}");
                 }
+                self.browser.sort(self.sort_key, self.sort_direction);
                 self.refresh_icons();
                 self.selected = None;
                 self.selected_entries.clear();
@@ -696,6 +751,7 @@ impl FileApp {
                 self.set_scroll_offset(0.0);
                 self.ensure_selection_visible();
             }
+            FileMessage::SortBy(key) => self.sort_by(key),
             FileMessage::CloseTab(index) => self.close_tab(index),
             FileMessage::SwitchTab(index) => self.switch_tab(index),
             FileMessage::ToggleFolder(path) => {

@@ -13,7 +13,7 @@ use nickel_ui::{
 
 use super::{FileMessage, FileViewMode};
 use crate::{
-    DirectoryBrowser, FileEntry,
+    DirectoryBrowser, EntrySortKey, FileEntry, SortDirection,
     app::{FileApp, NARROW_WORKSPACE_BREAKPOINT, SIDEBAR_RESIZE_WIDTH, TOOLBAR_HEIGHT},
     platform::places,
 };
@@ -243,7 +243,25 @@ pub(crate) fn build_view(
         .controlled(true)
         .height(viewport_height)
         .id("file-list")
-        .child(ui! {
+        .child({
+            let sort_label = |label: &str, key: EntrySortKey| {
+                if app.sort_key != key {
+                    label.to_owned()
+                } else {
+                    format!(
+                        "{label} {}",
+                        match app.sort_direction {
+                            SortDirection::Ascending => "↑",
+                            SortDirection::Descending => "↓",
+                        }
+                    )
+                }
+            };
+            let name_sort = sort_label("Name", EntrySortKey::Name);
+            let type_sort = sort_label("Type", EntrySortKey::Type);
+            let modified_sort = sort_label("Modified", EntrySortKey::Modified);
+            let size_sort = sort_label("Size", EntrySortKey::Size);
+            ui! {
             <Column>
                 {if app.view_mode == FileViewMode::Details {
                     ui! {
@@ -252,18 +270,27 @@ pub(crate) fn build_view(
                         }}>
                             <Row gap={12.0}>
                                 <Text width={32.0} color={palette.muted}>{""}</Text>
-                                <Container grow={1.0} min_width={120.0}>
-                                    <Text color={palette.muted}>{"Name"}</Text>
+                                <Container grow={1.0} min_width={120.0} on_press={FileMessage::SortBy(EntrySortKey::Name)}
+                                    focus_border={palette.accent} controller_focus_border={palette.complement}
+                                    accessibility_label={"Sort by name"}>
+                                    <Text color={palette.muted}>{name_sort}</Text>
                                 </Container>
-                                <Text width={120.0} color={palette.muted}>{"Type"}</Text>
-                                <Text width={90.0} color={palette.muted}>{"Size"}</Text>
+                                <Container width={100.0} on_press={FileMessage::SortBy(EntrySortKey::Type)}
+                                    focus_border={palette.accent} controller_focus_border={palette.complement}
+                                    accessibility_label={"Sort by type"}><Text color={palette.muted}>{type_sort}</Text></Container>
+                                <Container width={140.0} on_press={FileMessage::SortBy(EntrySortKey::Modified)}
+                                    focus_border={palette.accent} controller_focus_border={palette.complement}
+                                    accessibility_label={"Sort by modified time"}><Text color={palette.muted}>{modified_sort}</Text></Container>
+                                <Container width={80.0} on_press={FileMessage::SortBy(EntrySortKey::Size)}
+                                    focus_border={palette.accent} controller_focus_border={palette.complement}
+                                    accessibility_label={"Sort by size"}><Text color={palette.muted}>{size_sort}</Text></Container>
                             </Row>
                         </Container>
                     }
                 } else { ui! { <></> } }}
                 {collection}
             </Column>
-        });
+        }});
         ui! {
             <Column grow={1.0} padding={Insets {
                 top: 14.0, right: 16.0, bottom: 14.0, left: 16.0,
@@ -396,6 +423,30 @@ fn command_surface(app: &FileApp, palette: ThemePalette) -> AnyView<FileMessage>
             "selection ctrl a",
             !app.browser.entries().is_empty(),
             FileMessage::ContextSelectAll,
+        ),
+        (
+            "Sort by name",
+            "order filename",
+            true,
+            FileMessage::SortBy(EntrySortKey::Name),
+        ),
+        (
+            "Sort by type",
+            "order extension",
+            true,
+            FileMessage::SortBy(EntrySortKey::Type),
+        ),
+        (
+            "Sort by modified",
+            "order date time",
+            true,
+            FileMessage::SortBy(EntrySortKey::Modified),
+        ),
+        (
+            "Sort by size",
+            "order bytes",
+            true,
+            FileMessage::SortBy(EntrySortKey::Size),
         ),
         (
             if app.browser.show_hidden() {
@@ -718,6 +769,7 @@ pub(crate) fn file_details_row(
             .unwrap_or_else(|| "File".to_owned())
     };
     let size = entry.size.map(format_file_size).unwrap_or_default();
+    let modified = entry.modified.map(format_modified).unwrap_or_default();
     ui! {
         <Container id={format!("file-entry-{index}")} height={58.0}
             background={if selected { palette.accent_soft } else if light_mode { 0xffffff } else { palette.background }}
@@ -733,8 +785,9 @@ pub(crate) fn file_details_row(
                         {entry.display_name()}
                     </Text>
                 </Container>
-                <Text width={120.0} color={palette.muted}>{kind}</Text>
-                <Text width={90.0} color={palette.muted}>{size}</Text>
+                <Text width={100.0} color={palette.muted}>{kind}</Text>
+                <Text width={140.0} color={palette.muted}>{modified}</Text>
+                <Text width={80.0} color={palette.muted}>{size}</Text>
             </Row>
         </Container>
     }
@@ -750,6 +803,35 @@ fn format_file_size(bytes: u64) -> String {
     } else {
         format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
     }
+}
+
+fn format_modified(time: std::time::SystemTime) -> String {
+    let Ok(duration) = time.duration_since(std::time::UNIX_EPOCH) else {
+        return String::new();
+    };
+    let seconds = duration.as_secs();
+    let (year, month, day) = civil_date((seconds / 86_400) as i64);
+    let seconds_of_day = seconds % 86_400;
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}",
+        seconds_of_day / 3_600,
+        seconds_of_day % 3_600 / 60
+    )
+}
+
+fn civil_date(days_since_epoch: i64) -> (i64, i64, i64) {
+    let z = days_since_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    (year, month, day)
 }
 
 pub(crate) fn rect_between(start: Point, end: Point) -> Rect {
