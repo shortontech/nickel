@@ -80,6 +80,18 @@ impl HostAdapter<FileApp> for FileHostAdapter {
                     KeyCode::KeyP if app.control_down => {
                         app.update(FileMessage::ToggleCommandSurface);
                     }
+                    KeyCode::KeyT if app.control_down => app.update(FileMessage::NewTab),
+                    KeyCode::KeyW if app.control_down => {
+                        app.update(FileMessage::CloseTab(app.active_tab));
+                    }
+                    KeyCode::KeyL if app.control_down => {
+                        if !app.address_editing {
+                            app.update(FileMessage::ToggleAddressEditing);
+                        }
+                    }
+                    KeyCode::KeyH if app.control_down => {
+                        app.update(FileMessage::ToggleHiddenFiles);
+                    }
                     KeyCode::ArrowDown => app.select_relative(app.resolved_grid_columns() as isize),
                     KeyCode::ArrowUp => {
                         app.select_relative(-(app.resolved_grid_columns() as isize))
@@ -99,6 +111,7 @@ impl HostAdapter<FileApp> for FileHostAdapter {
                         }
                     }
                     KeyCode::Enter if app.address_editing => app.submit_address(),
+                    KeyCode::Enter => app.update(FileMessage::ContextOpen),
                     KeyCode::KeyA if app.control_down => {
                         app.selected_entries = (0..app.browser.entries().len()).collect();
                         app.selected = app

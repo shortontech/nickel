@@ -502,6 +502,36 @@ fn disabled_command_has_no_executable_semantic_target() {
 }
 
 #[test]
+fn command_surface_exposes_open_and_complete_tab_management() {
+    let mut app = FileApp::fixture();
+    app.selected = Some(0);
+    app.selected_entries = HashSet::from([0]);
+    app.update_message(FileMessage::ToggleCommandSurface);
+    let palette = ThemePalette::from_appearance(
+        ShellSettings::load_default().resolve_appearance(nickel_platform::appearance()),
+    );
+    let frame = nickel_ui::UiFrame::layout(
+        app.build_view(960.0, 640.0, palette, false),
+        Rect::new(0.0, 0.0, 960.0, 640.0),
+    );
+
+    for message in [
+        FileMessage::ContextOpen,
+        FileMessage::ContextOpenNewTab,
+        FileMessage::NewTab,
+        FileMessage::CloseTab(app.active_tab),
+    ] {
+        assert!(
+            frame
+                .semantic_targets_for_message(&message)
+                .iter()
+                .any(|target| target.id.as_str().contains("/file-command-")),
+            "missing command target for {message:?}"
+        );
+    }
+}
+
+#[test]
 fn navigation_from_idle_publishes_fallback_before_optional_provider_work() {
     let directory = tempfile::tempdir().unwrap();
     let child = directory.path().join("child");

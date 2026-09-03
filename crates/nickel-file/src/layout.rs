@@ -364,6 +364,12 @@ fn command_surface(app: &FileApp, palette: ThemePalette) -> AnyView<FileMessage>
             FileMessage::ContextOpen,
         ),
         (
+            "Open in new tab",
+            "activate background tab",
+            app.selected.is_some(),
+            FileMessage::ContextOpenNewTab,
+        ),
+        (
             "Back",
             "previous navigation",
             app.browser.can_go_back(),
@@ -383,6 +389,12 @@ fn command_surface(app: &FileApp, palette: ThemePalette) -> AnyView<FileMessage>
         ),
         ("Refresh", "reload f5", true, FileMessage::Refresh),
         ("New tab", "create tab ctrl t", true, FileMessage::NewTab),
+        (
+            "Close tab",
+            "dismiss tab ctrl w",
+            true,
+            FileMessage::CloseTab(app.active_tab),
+        ),
         (
             "Grid view",
             "icons thumbnails",
