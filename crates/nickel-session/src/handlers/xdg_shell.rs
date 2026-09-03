@@ -528,14 +528,19 @@ impl NickelSession {
                             .any(|shell| shell.as_ref() == focused.as_ref())
                     })
                 });
-        if self.mapped_xdg_toplevels.insert(surface_id.clone()) {
-            let location = self
-                .xdg_toplevel_locations
-                .get(&surface_id)
-                .copied()
-                .unwrap_or_default();
-            self.space.map_element(window.clone(), location, true);
+        if !self.mapped_xdg_toplevels.insert(surface_id.clone()) {
+            // Every rendered frame normally attaches a buffer. Mapping,
+            // metadata classification, focus, and shell relayout are
+            // transition work and must run only for the first buffer after an
+            // unmapped state.
+            return Some(window);
         }
+        let location = self
+            .xdg_toplevel_locations
+            .get(&surface_id)
+            .copied()
+            .unwrap_or_default();
+        self.space.map_element(window.clone(), location, true);
         if let Some(toplevel) = window.toplevel() {
             self.update_window_metadata(toplevel);
         }
