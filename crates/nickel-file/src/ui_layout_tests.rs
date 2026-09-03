@@ -25,6 +25,103 @@ fn pending_icon_work_uses_bounded_backoff() {
 }
 
 #[test]
+fn grid_and_details_modes_are_owned_independently_by_each_tab() {
+    let directory = tempfile::tempdir().unwrap();
+    let child = directory.path().join("child");
+    std::fs::create_dir(&child).unwrap();
+    std::fs::write(directory.path().join("report.txt"), b"report").unwrap();
+    std::fs::write(child.join("photo.png"), b"fixture").unwrap();
+    let mut app = FileApp::new(directory.path().to_path_buf());
+
+    app.update_message(FileMessage::SetViewMode(FileViewMode::Details));
+    app.update_message(FileMessage::Entry(0));
+    app.new_tab_at(child);
+    assert_eq!(app.view_mode, FileViewMode::Grid);
+    app.update_message(FileMessage::Entry(0));
+
+    app.switch_tab(0);
+    assert_eq!(app.view_mode, FileViewMode::Details);
+    assert_eq!(app.selected_entries, HashSet::from([0]));
+    app.switch_tab(1);
+    assert_eq!(app.view_mode, FileViewMode::Grid);
+    assert_eq!(app.selected_entries, HashSet::from([0]));
+}
+
+#[test]
+fn details_view_exposes_shared_columns_and_entry_targets() {
+    let mut app = FileApp::fixture();
+    app.view_mode = FileViewMode::Details;
+    let palette = ThemePalette::from_appearance(
+        ShellSettings::load_default().resolve_appearance(nickel_platform::appearance()),
+    );
+    let frame = nickel_ui::UiFrame::layout(
+        app.build_view(960.0, 640.0, palette, false),
+        Rect::new(0.0, 0.0, 960.0, 640.0),
+    );
+
+    assert!(
+        frame
+            .resolved_layout()
+            .nodes()
+            .iter()
+            .any(|node| node.id.as_str().ends_with("/details-header"))
+    );
+    assert_eq!(
+        frame
+            .semantic_nodes()
+            .iter()
+            .filter(|node| node.id.as_str().contains("/file-entry-"))
+            .count(),
+        3
+    );
+}
+
+#[test]
+fn growing_details_name_column_contains_multiline_text_without_row_overlap() {
+    let long_name = "A deliberately long file name that wraps across\nmultiple lines.txt";
+    let entries = vec![
+        FileEntry {
+            name: long_name.into(),
+            path: PathBuf::from("/fixture").join(long_name),
+            is_directory: false,
+            size: Some(10),
+        },
+        FileEntry {
+            name: "following.txt".into(),
+            path: PathBuf::from("/fixture/following.txt"),
+            is_directory: false,
+            size: Some(20),
+        },
+    ];
+    let mut app = FileApp::with_browser(DirectoryBrowser::fixture(entries), String::new());
+    app.view_mode = FileViewMode::Details;
+    let palette = ThemePalette::from_appearance(
+        ShellSettings::load_default().resolve_appearance(nickel_platform::appearance()),
+    );
+    let frame = nickel_ui::UiFrame::layout(
+        app.build_view(620.0, 420.0, palette, false),
+        Rect::new(0.0, 0.0, 620.0, 420.0),
+    );
+    let bounds = |suffix: &str| {
+        frame
+            .resolved_layout()
+            .nodes()
+            .iter()
+            .find(|node| node.id.as_str().ends_with(suffix))
+            .unwrap_or_else(|| panic!("missing {suffix}"))
+            .allocated
+    };
+    let first = bounds("/file-entry-0");
+    let name = bounds("/details-name-0");
+    let second = bounds("/file-entry-1");
+
+    assert!(name.size.width >= 120.0);
+    assert!(name.origin.y >= first.origin.y);
+    assert!(name.origin.y + name.size.height <= first.origin.y + first.size.height);
+    assert!(first.origin.y + first.size.height <= second.origin.y);
+}
+
+#[test]
 fn navigation_from_idle_starts_new_icon_publication_work() {
     let directory = tempfile::tempdir().unwrap();
     let child = directory.path().join("child");

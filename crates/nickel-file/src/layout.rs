@@ -11,7 +11,7 @@ use nickel_ui::{
     VerticalScroll, VirtualWindow, ui,
 };
 
-use super::FileMessage;
+use super::{FileMessage, FileViewMode};
 use crate::{
     DirectoryBrowser, FileEntry,
     app::{FileApp, SIDEBAR_RESIZE_WIDTH, TOOLBAR_HEIGHT},
@@ -110,6 +110,12 @@ pub(crate) fn build_view(
                 </Container>
                 <Button on_press={FileMessage::Refresh} width={34.0} height={34.0} color={palette.text}
                     focus_border={palette.accent} controller_focus_border={palette.complement} accessibility_label={"Refresh"}>{"↻"}</Button>
+                <Button on_press={FileMessage::SetViewMode(FileViewMode::Grid)} width={34.0} height={34.0}
+                    color={if app.view_mode == FileViewMode::Grid { palette.accent } else { palette.text }}
+                    focus_border={palette.accent} controller_focus_border={palette.complement} accessibility_label={"Grid view"}>{"▦"}</Button>
+                <Button on_press={FileMessage::SetViewMode(FileViewMode::Details)} width={34.0} height={34.0}
+                    color={if app.view_mode == FileViewMode::Details { palette.accent } else { palette.text }}
+                    focus_border={palette.accent} controller_focus_border={palette.complement} accessibility_label={"Details view"}>{"☷"}</Button>
             </Row>
         </Container>
     };
@@ -163,28 +169,52 @@ pub(crate) fn build_view(
     } else {
         let viewport_width = (_width - app.sidebar_width - SIDEBAR_RESIZE_WIDTH - 32.0).max(1.0);
         let viewport_height = (height - TOOLBAR_HEIGHT - 30.0 - 28.0 - 1.0).max(1.0);
-        let grid = Collection::try_new(
-            CollectionState::Ready(tile_rows),
-            |(_, entry, _, _)| entry.path.to_string_lossy().into_owned(),
-            move |(index, entry, selected, icon)| {
-                file_tile(
-                    index, &entry, selected, icon, palette, icon_size, light_mode,
+        let collection = match app.view_mode {
+            FileViewMode::Grid => AnyView::new(
+                Collection::try_new(
+                    CollectionState::Ready(tile_rows),
+                    |(_, entry, _, _)| entry.path.to_string_lossy().into_owned(),
+                    move |(index, entry, selected, icon)| {
+                        file_tile(
+                            index, &entry, selected, icon, palette, icon_size, light_mode,
+                        )
+                    },
                 )
-            },
-        )
-        .expect("directory entries have unique paths")
-        .id("file-grid")
-        .accessibility_label("Files")
-        .gap(10.0)
-        .navigation_scope(NavigationScope::group())
-        .presentation(CollectionPresentation::VirtualGrid {
-            minimum_item_width: app.tile_width,
-            row_height: 54.0 + icon_size,
-            offset: app.file_scroll_offset,
-            viewport_width,
-            viewport_height,
-            overscan: (54.0 + icon_size) * 2.0,
-        });
+                .expect("directory entries have unique paths")
+                .id("file-grid")
+                .accessibility_label("Files")
+                .gap(10.0)
+                .navigation_scope(NavigationScope::group())
+                .presentation(CollectionPresentation::VirtualGrid {
+                    minimum_item_width: app.tile_width,
+                    row_height: 54.0 + icon_size,
+                    offset: app.file_scroll_offset,
+                    viewport_width,
+                    viewport_height,
+                    overscan: (54.0 + icon_size) * 2.0,
+                }),
+            ),
+            FileViewMode::Details => AnyView::new(
+                Collection::try_new(
+                    CollectionState::Ready(tile_rows),
+                    |(_, entry, _, _)| entry.path.to_string_lossy().into_owned(),
+                    move |(index, entry, selected, icon)| {
+                        file_details_row(index, &entry, selected, icon, palette, light_mode)
+                    },
+                )
+                .expect("directory entries have unique paths")
+                .id("file-details")
+                .accessibility_label("Files")
+                .gap(1.0)
+                .navigation_scope(NavigationScope::group())
+                .presentation(CollectionPresentation::VirtualList {
+                    item_height: 58.0,
+                    offset: app.file_scroll_offset,
+                    viewport_height,
+                    overscan: 116.0,
+                }),
+            ),
+        };
         let scroll = VerticalScroll::new(
             FileMessage::FileScroll(app.file_scroll_offset),
             app.file_scroll_offset,
@@ -193,7 +223,27 @@ pub(crate) fn build_view(
         .controlled(true)
         .height(viewport_height)
         .id("file-list")
-        .child(grid);
+        .child(ui! {
+            <Column>
+                {if app.view_mode == FileViewMode::Details {
+                    ui! {
+                        <Container id={"details-header"} height={32.0} background={palette.surface} padding={Insets {
+                            top: 8.0, right: 10.0, bottom: 6.0, left: 10.0,
+                        }}>
+                            <Row gap={12.0}>
+                                <Text width={32.0} color={palette.muted}>{""}</Text>
+                                <Container grow={1.0} min_width={120.0}>
+                                    <Text color={palette.muted}>{"Name"}</Text>
+                                </Container>
+                                <Text width={120.0} color={palette.muted}>{"Type"}</Text>
+                                <Text width={90.0} color={palette.muted}>{"Size"}</Text>
+                            </Row>
+                        </Container>
+                    }
+                } else { ui! { <></> } }}
+                {collection}
+            </Column>
+        });
         ui! {
             <Column grow={1.0} padding={Insets {
                 top: 14.0, right: 16.0, bottom: 14.0, left: 16.0,
@@ -474,6 +524,70 @@ pub(crate) fn file_tile(
             accessibility_label={entry.display_name()} />
     }
 }
+
+pub(crate) fn file_details_row(
+    index: usize,
+    entry: &FileEntry,
+    selected: bool,
+    icon: Option<(u16, Arc<image::RgbaImage>)>,
+    palette: ThemePalette,
+    light_mode: bool,
+) -> impl Component<FileMessage> + use<> {
+    let (icon_id, icon_image) = icon.unwrap_or_else(|| {
+        (
+            0,
+            Arc::new(image::RgbaImage::from_pixel(
+                1,
+                1,
+                image::Rgba([0, 0, 0, 0]),
+            )),
+        )
+    });
+    let kind = if entry.is_directory {
+        "File folder".to_owned()
+    } else {
+        entry
+            .path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| format!("{} file", extension.to_ascii_uppercase()))
+            .unwrap_or_else(|| "File".to_owned())
+    };
+    let size = entry.size.map(format_file_size).unwrap_or_default();
+    ui! {
+        <Container id={format!("file-entry-{index}")} height={58.0}
+            background={if selected { palette.accent_soft } else if light_mode { 0xffffff } else { palette.background }}
+            hover_background={palette.surface_hover} pressed_background={palette.accent_soft}
+            padding={Insets { top: 7.0, right: 10.0, bottom: 7.0, left: 10.0 }}
+            on_press={FileMessage::Entry(index)} context_message={FileMessage::ContextEntry(index)}
+            semantic_role={SemanticRole::Button} accessibility_label={entry.display_name()}
+            focus_border={palette.accent} controller_focus_border={palette.complement}>
+            <Row gap={12.0}>
+                <Image asset_id={icon_id} image={icon_image} generation={u64::from(icon_id)} width={28.0} height={28.0} />
+                <Container id={format!("details-name-{index}")} grow={1.0} min_width={120.0} height={44.0}>
+                    <Text color={palette.text} wrap={true} max_lines={2} ellipsis={true} line_height={18.0}>
+                        {entry.display_name()}
+                    </Text>
+                </Container>
+                <Text width={120.0} color={palette.muted}>{kind}</Text>
+                <Text width={90.0} color={palette.muted}>{size}</Text>
+            </Row>
+        </Container>
+    }
+}
+
+fn format_file_size(bytes: u64) -> String {
+    if bytes < 1_024 {
+        format!("{bytes} B")
+    } else if bytes < 1_048_576 {
+        format!("{:.1} KB", bytes as f64 / 1_024.0)
+    } else if bytes < 1_073_741_824 {
+        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
+    } else {
+        format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
+    }
+}
+
 pub(crate) fn rect_between(start: Point, end: Point) -> Rect {
     Rect::new(
         start.x.min(end.x),

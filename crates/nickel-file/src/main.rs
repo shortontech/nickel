@@ -49,12 +49,19 @@ pub enum FileMessage {
     Forward,
     Up,
     Refresh,
+    SetViewMode(FileViewMode),
     Breadcrumb(PathBuf),
     ToggleFolder(PathBuf),
     OpenFolder(PathBuf),
     Entry(usize),
     SelectionSurface,
     FileScroll(f32),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FileViewMode {
+    Grid,
+    Details,
 }
 
 pub struct FileApp {
@@ -81,6 +88,7 @@ pub struct FileApp {
     pub(crate) resizing_sidebar: bool,
     pub(crate) tile_width: f32,
     pub(crate) file_scroll_offset: f32,
+    pub(crate) view_mode: FileViewMode,
     pub(crate) tab_icon: Option<(u16, Arc<image::RgbaImage>)>,
     pub(crate) tabs: Vec<Option<FileTab>>,
     pub(crate) active_tab: usize,
@@ -183,6 +191,7 @@ pub(crate) struct FileTab {
     pub(crate) status: String,
     pub(crate) last_click: Option<(usize, Instant)>,
     pub(crate) file_scroll_offset: f32,
+    pub(crate) view_mode: FileViewMode,
     pub(crate) tab_icon: Option<(u16, Arc<image::RgbaImage>)>,
 }
 
@@ -236,6 +245,7 @@ impl FileApp {
             resizing_sidebar: false,
             tile_width: DEFAULT_TILE_WIDTH,
             file_scroll_offset: 0.0,
+            view_mode: FileViewMode::Grid,
             tab_icon: None,
             tabs: vec![None],
             active_tab: 0,
@@ -288,6 +298,7 @@ impl FileApp {
         std::mem::swap(&mut self.status, &mut target.status);
         std::mem::swap(&mut self.last_click, &mut target.last_click);
         std::mem::swap(&mut self.file_scroll_offset, &mut target.file_scroll_offset);
+        std::mem::swap(&mut self.view_mode, &mut target.view_mode);
         std::mem::swap(&mut self.tab_icon, &mut target.tab_icon);
         self.tabs[self.active_tab] = Some(target);
         self.active_tab = index;
@@ -314,6 +325,7 @@ impl FileApp {
             status: String::new(),
             last_click: None,
             file_scroll_offset: 0.0,
+            view_mode: FileViewMode::Grid,
             tab_icon: None,
         }));
         self.switch_tab(self.tabs.len() - 1);
@@ -633,6 +645,11 @@ impl FileApp {
                 self.selected_entries.clear();
                 self.selection_anchor = None;
                 self.set_scroll_offset(0.0);
+            }
+            FileMessage::SetViewMode(mode) => {
+                self.view_mode = mode;
+                self.set_scroll_offset(0.0);
+                self.ensure_selection_visible();
             }
             FileMessage::CloseTab(index) => self.close_tab(index),
             FileMessage::SwitchTab(index) => self.switch_tab(index),

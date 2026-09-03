@@ -16,7 +16,7 @@ pub mod icons;
 pub(crate) mod layout;
 pub(crate) mod platform;
 
-pub use app::{FileApp, FileFixtureProvider, FileMessage, run};
+pub use app::{FileApp, FileFixtureProvider, FileMessage, FileViewMode, run};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FileEntry {
