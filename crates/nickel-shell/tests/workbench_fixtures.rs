@@ -97,6 +97,13 @@ fn registers_every_shell_surface_fixture() {
                         "populated panel fixture omitted {label}"
                     );
                 }
+                let semantic_nodes = session.semantic_nodes();
+                let tray = semantic_nodes
+                    .iter()
+                    .find(|node| node.name.as_deref() == Some("Fixture notification icon"))
+                    .expect("populated panel fixture tray target");
+                assert!(tray.actions.contains(&nickel_ui::ActionKind::Activate));
+                assert!(tray.actions.contains(&nickel_ui::ActionKind::ContextMenu));
             }
             if entry.metadata.id == "shell.screenshot" {
                 let has_activate = session

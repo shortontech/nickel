@@ -128,6 +128,7 @@ pub enum PanelAction {
     Task(usize),
     Codex,
     Tray(String),
+    TrayContext(String),
     Control,
 }
 
@@ -1375,28 +1376,22 @@ impl LiveShell {
 
     pub fn panel_click(&mut self, x: f32, width: u32, secondary: bool) -> bool {
         self.sync_panel_host();
-        let outcome = self.panel_host.step(HostBatch {
-            surface_size: Some((width, 56)),
-            events: vec![
+        let events = if secondary {
+            vec![HostEvent::Ui(UiEvent::PointerContext(Point { x, y: 28.0 }))]
+        } else {
+            vec![
                 HostEvent::Ui(UiEvent::PointerPressed(Point { x, y: 28.0 })),
                 HostEvent::Ui(UiEvent::PointerReleased(Point { x, y: 28.0 })),
-            ],
+            ]
+        };
+        let outcome = self.panel_host.step(HostBatch {
+            surface_size: Some((width, 56)),
+            events,
             ..HostBatch::default()
         });
         self.panel_change_token = outcome.change_token;
         self.panel_deadline = outcome.next_deadline;
-        let effects = std::mem::take(&mut self.panel_host.application_mut().effects);
-        let changed = !effects.is_empty();
-        for action in effects {
-            if secondary {
-                if let PanelAction::Tray(id) = action {
-                    self.tray_feed.context_menu(&id);
-                }
-            } else {
-                self.apply_panel_action(action);
-            }
-        }
-        changed
+        self.apply_panel_effects()
     }
 
     pub fn panel_controller(&mut self, action: ControllerAction, width: u32) -> bool {
@@ -1443,6 +1438,7 @@ impl LiveShell {
                 self.codex_project_menu_visible = !self.codex_project_menu_visible;
             }
             PanelAction::Tray(id) => self.tray_feed.activate(&id),
+            PanelAction::TrayContext(id) => self.tray_feed.context_menu(&id),
             PanelAction::Control => {
                 if self.launcher_visible {
                     self.set_launcher_visible(false);
@@ -1594,7 +1590,7 @@ impl LiveShell {
             PanelAction::Launcher => PanelHover::Launcher,
             PanelAction::Task(index) => PanelHover::Task(*index),
             PanelAction::Codex => PanelHover::Codex,
-            PanelAction::Tray(id) => self
+            PanelAction::Tray(id) | PanelAction::TrayContext(id) => self
                 .tray
                 .iter()
                 .rev()
@@ -3034,6 +3030,7 @@ impl PanelApplication {
                     .accessibility_label(&item.title)
                     .semantic_role(SemanticRole::Button)
                     .message(PanelAction::Tray(item.id.clone()))
+                    .context_message(PanelAction::TrayContext(item.id.clone()))
                     .width(PANEL_TRAY_WIDTH)
                     .height(height)
                     .padding(Insets {
