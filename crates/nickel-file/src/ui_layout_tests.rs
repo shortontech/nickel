@@ -3,7 +3,7 @@ use crate::{
     components::{format_modified, status_text as file_status_text},
     layout::{collapse_breadcrumbs, entries_in_selection},
 };
-use nickel_ui::{ActionKind, Rect, UiHost};
+use nickel_ui::{ActionKind, Rect, SemanticRole, UiHost};
 use nickel_ui_testkit::{Fixture, FocusDirection, Scenario, ScenarioBudget, Selector};
 use sha2::{Digest, Sha256};
 
@@ -1133,14 +1133,47 @@ fn synthetic_windows_and_linux_adapters_share_semantics_geometry_and_commands() 
         app.icon_rx = None;
         Scenario::new(app, 1100, 700)
     };
-    let windows = scenario(SyntheticPlatform::Windows);
-    let linux = scenario(SyntheticPlatform::Linux);
+    let mut windows = scenario(SyntheticPlatform::Windows);
+    let mut linux = scenario(SyntheticPlatform::Linux);
 
     assert_eq!(windows.semantic_nodes(), linux.semantic_nodes());
     assert_eq!(
         windows.host().accessibility_nodes(),
         linux.host().accessibility_nodes()
     );
+    assert_eq!(
+        nickel_ui_testkit::render_host(windows.host(), 1100, 700, 1.0),
+        nickel_ui_testkit::render_host(linux.host(), 1100, 700, 1.0)
+    );
+
+    let script = |scenario: &mut Scenario<FileApp>| {
+        scenario
+            .activate(&Selector::role_name(SemanticRole::Button, "report.txt"))?
+            .activate(&Selector::role_name(SemanticRole::Button, "Details view"))?
+            .activate(&Selector::role_name(SemanticRole::Button, "Sort by size"))?
+            .activate(&Selector::role_name(SemanticRole::Button, "Open commands"))?;
+        Ok::<_, nickel_ui_testkit::ScenarioError>(())
+    };
+    script(&mut windows).unwrap();
+    script(&mut linux).unwrap();
+
+    let state = |scenario: &Scenario<FileApp>| {
+        let app = scenario.host().application();
+        (
+            app.browser.current().to_path_buf(),
+            app.selected,
+            app.selected_entries.clone(),
+            app.view_mode,
+            app.sort_key,
+            app.sort_direction,
+            app.command_surface_open,
+            app.command_query.clone(),
+            app.tabs.len(),
+            app.active_tab,
+        )
+    };
+    assert_eq!(state(&windows), state(&linux));
+    assert_eq!(windows.semantic_nodes(), linux.semantic_nodes());
     assert_eq!(
         nickel_ui_testkit::render_host(windows.host(), 1100, 700, 1.0),
         nickel_ui_testkit::render_host(linux.host(), 1100, 700, 1.0)
