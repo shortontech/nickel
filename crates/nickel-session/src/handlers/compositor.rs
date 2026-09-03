@@ -4,7 +4,7 @@ use crate::{
     state::{ClientState, SurfaceBufferCommit},
 };
 use smithay::{
-    backend::renderer::utils::{on_commit_buffer_handler, with_renderer_surface_state},
+    backend::renderer::utils::on_commit_buffer_handler,
     reexports::wayland_server::{
         Client,
         protocol::{wl_buffer, wl_surface::WlSurface},
@@ -24,10 +24,6 @@ use super::xdg_shell;
 
 fn commit_is_render_visible(synchronized_subsurface: bool) -> bool {
     !synchronized_subsurface
-}
-
-fn surface_has_attached_buffer(surface: &WlSurface) -> bool {
-    with_renderer_surface_state(surface, |state| state.buffer().is_some()).unwrap_or(false)
 }
 
 impl CompositorHandler for NickelSession {
@@ -62,11 +58,7 @@ impl CompositorHandler for NickelSession {
                 .cloned();
             if let Some(window) = committed_window {
                 window.on_commit();
-                if surface_has_attached_buffer(&root) {
-                    self.relayout_committed_shell_window(&window);
-                } else {
-                    self.space.unmap_elem(&window);
-                }
+                self.relayout_committed_shell_window(&window);
             }
         };
 
