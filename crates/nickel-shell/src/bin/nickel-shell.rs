@@ -881,6 +881,10 @@ fn handle_codex_event(
         return Ok(true);
     }
     if matches!(event, ShellEvent::Shown(_)) {
+        if surface == codex.project_menu && !state.surface_visible(SurfaceRole::CodexProjectMenu) {
+            shell.hide(surface);
+            return Ok(true);
+        }
         codex
             .present(shell, surface)
             .map_err(|error| format!("{error:?}"))?;
@@ -905,6 +909,9 @@ fn handle_codex_event(
         event,
         ShellEvent::LogicalResize { .. } | ShellEvent::PixelResize { .. }
     ) {
+        if surface == codex.project_menu && !state.surface_visible(SurfaceRole::CodexProjectMenu) {
+            return Ok(true);
+        }
         let (width, height) = shell
             .surface(surface)
             .map(|entry| entry.window().size())
@@ -1517,8 +1524,10 @@ fn main() -> Result<(), String> {
     sync_visibility(&mut shell, &state);
     render_all(&mut shell, &mut state)?;
     let memory = shell.memory_diagnostics();
+    let presenter_roles = shell.presenter_roles();
     let images = state.image_cache_diagnostics();
     tracing::info!(
+        ?presenter_roles,
         presenters = memory.presenter_caches.presenters,
         cache_live_entries = memory.presenter_caches.live_entries,
         cache_live_bytes = memory.presenter_caches.live_bytes,
@@ -1595,6 +1604,11 @@ fn main() -> Result<(), String> {
         let (project_menu_changed, due_codex_redraw) = codex.poll_due(Instant::now());
         project_menu_changed_since_refresh |= project_menu_changed;
         for surface in due_codex_redraw {
+            if surface == codex.project_menu
+                && !state.surface_visible(SurfaceRole::CodexProjectMenu)
+            {
+                continue;
+            }
             codex
                 .present(&mut shell, surface)
                 .map_err(|error| format!("{error:?}"))?;
@@ -1842,6 +1856,9 @@ fn main() -> Result<(), String> {
                 let Some(role) = shell.surface(surface).map(|entry| entry.role()) else {
                     continue;
                 };
+                if !state.surface_visible(role) {
+                    continue;
+                }
                 let (logical_width, logical_height) = shell
                     .surface(surface)
                     .map(|entry| entry.window().size())
@@ -1872,7 +1889,9 @@ fn main() -> Result<(), String> {
                 };
                 let (logical_width, logical_height) = entry.window().size();
                 let role = entry.role();
-                shell.present(surface, &state.scene(role, logical_width, logical_height))?;
+                if state.surface_visible(role) {
+                    shell.present(surface, &state.scene(role, logical_width, logical_height))?;
+                }
             }
             Some(ShellEvent::Redraw(_)) => {}
             Some(event) => tracing::debug!(?event, "winit shell event"),
@@ -1993,6 +2012,11 @@ fn main() -> Result<(), String> {
             codex.release_failed_resumes();
             let codex_changed = !codex_redraw.is_empty();
             for surface in codex_redraw {
+                if surface == codex.project_menu
+                    && !state.surface_visible(SurfaceRole::CodexProjectMenu)
+                {
+                    continue;
+                }
                 codex
                     .present(&mut shell, surface)
                     .map_err(|error| format!("{error:?}"))?;

@@ -290,13 +290,12 @@ impl Application for ScreenshotApp {
             ScreenshotCompletion::Semantic { action } => self.perform_semantic_action(action),
             ScreenshotCompletion::Platform { effect, result } => {
                 match (effect, result) {
-                    (ScreenshotEffect::Copy, Ok(status)) => {
+                    (_, Ok(status)) => {
                         self.image = None;
                         self.selection = None;
                         self.confirmed = false;
                         self.status = status;
                     }
-                    (_, Ok(status)) => self.status = status,
                     (_, Err(failure)) => self.status = failure,
                 }
                 true
@@ -487,8 +486,7 @@ impl ScreenshotTool {
             events: vec![HostEvent::Ui(UiEvent::PointerPressed(Point { x, y }))],
             ..HostBatch::default()
         });
-        self.apply_effects();
-        outcome.changed
+        outcome.changed | self.apply_effects()
     }
 
     pub fn pointer_released(&mut self) -> bool {
@@ -505,8 +503,7 @@ impl ScreenshotTool {
             }))],
             ..HostBatch::default()
         });
-        self.apply_effects();
-        outcome.changed
+        outcome.changed | self.apply_effects()
     }
 
     pub fn escape(&mut self) -> bool {
@@ -514,8 +511,7 @@ impl ScreenshotTool {
             events: vec![HostEvent::Shortcut(nickel_ui::Shortcut::Escape)],
             ..HostBatch::default()
         });
-        self.apply_effects();
-        outcome.changed
+        outcome.changed | self.apply_effects()
     }
 
     pub fn controller_action(&mut self, action: nickel_ui::ControllerAction) -> bool {
@@ -523,8 +519,7 @@ impl ScreenshotTool {
             events: vec![HostEvent::Controller(action)],
             ..HostBatch::default()
         });
-        self.apply_effects();
-        outcome.changed
+        outcome.changed | self.apply_effects()
     }
 
     pub fn perform_semantic_action(
@@ -565,8 +560,7 @@ impl ScreenshotTool {
                 ..HostBatch::default()
             })
         };
-        self.apply_effects();
-        outcome.changed
+        outcome.changed | self.apply_effects()
     }
 
     pub fn scene(
@@ -618,12 +612,14 @@ impl ScreenshotTool {
             })
     }
 
-    fn apply_effects(&mut self) {
+    fn apply_effects(&mut self) -> bool {
         let (width, height) = self.host.application().viewport;
         let effects = std::mem::take(&mut self.host.application_mut().effects);
+        let mut changed = false;
         for effect in effects {
             if effect == ScreenshotEffect::Cancel {
                 self.hide();
+                changed = true;
                 continue;
             }
             let result = match effect {
@@ -632,14 +628,18 @@ impl ScreenshotTool {
                 ScreenshotEffect::TemporaryPath => self.temp(width, height),
                 ScreenshotEffect::Cancel => unreachable!(),
             };
-            let _ = self.host.step(HostBatch {
-                completions: vec![Completion::new(
-                    "screenshot-platform",
-                    ScreenshotCompletion::Platform { effect, result },
-                )],
-                ..HostBatch::default()
-            });
+            changed |= self
+                .host
+                .step(HostBatch {
+                    completions: vec![Completion::new(
+                        "screenshot-platform",
+                        ScreenshotCompletion::Platform { effect, result },
+                    )],
+                    ..HostBatch::default()
+                })
+                .changed;
         }
+        changed
     }
 
     fn temp(&self, width: u32, height: u32) -> Result<String, String> {
@@ -1032,6 +1032,34 @@ mod tests {
             host.application_mut().effects,
             [super::ScreenshotEffect::Cancel]
         );
+    }
+
+    #[test]
+    fn every_successful_capture_action_closes_the_screenshot_surface_model() {
+        for effect in [
+            super::ScreenshotEffect::Copy,
+            super::ScreenshotEffect::Save,
+            super::ScreenshotEffect::TemporaryPath,
+        ] {
+            let mut app = ScreenshotApp::new(800, 600);
+            app.image = Some(std::sync::Arc::new(RgbaImage::new(400, 200)));
+            app.selection = Some(nickel_ui::Rect::new(0.0, 0.0, 100.0, 100.0));
+            let mut host = nickel_ui::UiHost::new(app, 800, 600);
+            host.step(nickel_ui::HostBatch {
+                completions: vec![nickel_ui::Completion::new(
+                    "screenshot-platform",
+                    super::ScreenshotCompletion::Platform {
+                        effect,
+                        result: Ok("done".into()),
+                    },
+                )],
+                ..nickel_ui::HostBatch::default()
+            });
+
+            assert!(host.application().image.is_none());
+            assert!(host.application().selection.is_none());
+            assert!(!host.application().confirmed);
+        }
     }
 
     #[test]

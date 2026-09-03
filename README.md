@@ -138,7 +138,8 @@ cargo run -p nickel-markdown-ui -- README.md
 Run Nickel inside an existing Linux desktop:
 
 ```bash
-cargo run -p nickel-session -- --backend winit --command target/debug/nickel
+cargo run -p nickel-session --no-default-features --features backend-winit -- \
+  --backend winit --command target/debug/nickel
 ```
 
 Live compositor tests may add `--test-control` before `--command`. This explicitly enables the
@@ -205,7 +206,7 @@ it without the nested backend:
 
 ```bash
 cargo build -p nickel-shell
-cargo build -p nickel-session --no-default-features --features backend-udev
+cargo build -p nickel-session
 ```
 
 Run it from a text VT:
@@ -222,7 +223,7 @@ Set `NICKEL_DRM_DEVICE=/dev/dri/cardN` to select a specific GPU.
 Build the direct compositor, shell, and login launcher:
 
 ```bash
-cargo build --release -p nickel-session --no-default-features --features backend-udev
+cargo build --release -p nickel-session
 cargo build --release -p nickel-shell
 ```
 

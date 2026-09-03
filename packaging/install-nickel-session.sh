@@ -24,7 +24,7 @@ done
 
 if ! "$release/nickel-session" --available-backends | grep -qx udev; then
     echo "The release nickel-session lacks the native udev backend." >&2
-    echo "Rebuild it with: cargo build --release -p nickel-session --no-default-features --features backend-udev" >&2
+    echo "Rebuild it with: cargo build --release -p nickel-session" >&2
     exit 1
 fi
 

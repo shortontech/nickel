@@ -164,14 +164,25 @@ impl XdgShellHandler for NickelSession {
         self.forget_toplevel_geometry(&surface);
         let surface_id = surface.wl_surface().id();
         let window_id = self.surface_windows.get(&surface_id).copied();
-        let restore_focus = window_id.is_some_and(|id| {
-            self.windows.is_active(id) && !self.shell_owned_windows.contains(&id)
-        });
+        let destroyed_surface_had_focus = self
+            .seat
+            .get_keyboard()
+            .and_then(|keyboard| keyboard.current_focus())
+            .is_some_and(|focus| {
+                focus
+                    .wl_surface()
+                    .is_some_and(|focused| focused.id() == surface_id)
+            });
+        let restore_focus = destroyed_surface_had_focus
+            || window_id.is_some_and(|id| {
+                self.windows.is_active(id) && !self.shell_owned_windows.contains(&id)
+            });
         self.retire_surface_window_references(Some(&surface_id), window_id);
         if window_id.is_some() {
             self.restore_focus_after_window_removal(restore_focus);
         }
         self.notify_protocol_snapshot();
+        self.request_output_redraw();
     }
 
     fn app_id_changed(&mut self, surface: ToplevelSurface) {

@@ -57,7 +57,7 @@ rustc/cargo 1.94.1. Commands are run from the workspace root unless a row says o
 - `cargo check -p nickel-shell --bin nickel --target x86_64-pc-windows-gnu`: pass. This is native
   build evidence only; it is not Windows interaction acceptance. The Windows adapter now waits for
   its native keyboard hook result before reporting `Available`; startup failure is explicit.
-- `cargo build --release -p nickel-session --no-default-features --features backend-udev` and
+- `cargo build --release -p nickel-session` and
   `cargo build --release -p nickel-shell --bin nickel`: pass. These are native optimized build
   results, not installed-session interaction acceptance.
 - Host availability probe on 2026-08-30 found no `ID_INPUT_JOYSTICK=1` input device and no Wine,

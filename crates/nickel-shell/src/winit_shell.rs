@@ -721,6 +721,13 @@ impl WinitShell {
         }
     }
 
+    pub fn presenter_roles(&self) -> Vec<SurfaceRole> {
+        self.surfaces
+            .iter()
+            .filter_map(|surface| surface.presenter.as_ref().map(|_| surface.role))
+            .collect()
+    }
+
     pub fn runtime_diagnostics(&self) -> ShellRuntimeDiagnostics {
         ShellRuntimeDiagnostics {
             warm_present_us: self.warm_present_us.iter().copied().collect(),

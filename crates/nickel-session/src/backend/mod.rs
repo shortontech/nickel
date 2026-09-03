@@ -61,10 +61,10 @@ impl SessionArguments {
         args: impl IntoIterator<Item = OsString>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut args = args.into_iter().peekable();
-        let mut backend = if cfg!(feature = "backend-winit") {
-            BackendKind::Winit
-        } else {
+        let mut backend = if cfg!(feature = "backend-udev") {
             BackendKind::Udev
+        } else {
+            BackendKind::Winit
         };
         let mut test_control = false;
         let mut command = None;
@@ -123,6 +123,7 @@ mod tests {
 
     use super::{BackendKind, SessionArguments};
 
+    #[cfg(feature = "backend-winit")]
     #[test]
     fn selects_nested_backend_explicitly() {
         let arguments =
@@ -130,6 +131,13 @@ mod tests {
                 .expect("nested backend should be available in default tests");
         assert_eq!(arguments.backend, BackendKind::Winit);
         assert!(!arguments.test_control);
+    }
+
+    #[cfg(feature = "backend-udev")]
+    #[test]
+    fn defaults_to_native_backend_when_udev_is_available() {
+        let arguments = SessionArguments::parse([]).expect("default backend should be available");
+        assert_eq!(arguments.backend, BackendKind::Udev);
     }
 
     #[test]
@@ -145,6 +153,7 @@ mod tests {
         assert_eq!(arguments, [OsString::from("--example")]);
     }
 
+    #[cfg(feature = "backend-winit")]
     #[test]
     fn test_control_is_explicit_and_nested_only() {
         let arguments = SessionArguments::parse([

@@ -34,7 +34,7 @@ softbuffer.workspace = true
 tempfile.workspace = true
 
 [features]
-default = ["backend-winit"]
+default = ["backend-udev"]
 backend-winit = ["smithay/backend_winit", "dep:winit", "nickel-input/winit"]
 backend-udev = [
     "smithay/backend_drm",
