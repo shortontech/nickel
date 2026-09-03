@@ -44,12 +44,26 @@ pub struct ResolvedArtwork {
     pub pixels: Arc<RgbaImage>,
     pub source: ArtworkSource,
     pub provider_revision: u64,
+    pub fallback_reason: Option<ArtworkFallbackReason>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IconProviderError {
+    Malformed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ArtworkFallbackReason {
+    Missing,
+    Malformed,
+    Transparent,
 }
 
 pub trait IconProvider: Send + Sync {
     fn source(&self) -> ArtworkSource;
     fn revision(&self) -> u64;
-    fn resolve(&self, request: &ArtworkRequest<'_>) -> Option<RgbaImage>;
+    fn resolve(&self, request: &ArtworkRequest<'_>)
+    -> Result<Option<RgbaImage>, IconProviderError>;
 }
 
 pub(crate) struct ArtworkCache {
@@ -144,11 +158,14 @@ impl IconProvider for NickelIconProvider {
         1
     }
 
-    fn resolve(&self, request: &ArtworkRequest<'_>) -> Option<RgbaImage> {
-        Some(contain(
+    fn resolve(
+        &self,
+        request: &ArtworkRequest<'_>,
+    ) -> Result<Option<RgbaImage>, IconProviderError> {
+        Ok(Some(contain(
             nickel_runtime_master(request.kind),
             physical_size(request),
-        ))
+        )))
     }
 }
 
@@ -205,10 +222,12 @@ impl IconProvider for SystemIconProvider {
         1
     }
 
-    fn resolve(&self, request: &ArtworkRequest<'_>) -> Option<RgbaImage> {
-        nickel_platform::path_icon(request.path)
-            .filter(has_visible_pixels)
-            .map(|image| contain(&image, physical_size(request)))
+    fn resolve(
+        &self,
+        request: &ArtworkRequest<'_>,
+    ) -> Result<Option<RgbaImage>, IconProviderError> {
+        Ok(nickel_platform::path_icon(request.path)
+            .map(|image| contain(&image, physical_size(request))))
     }
 }
 
@@ -222,22 +241,38 @@ pub fn resolve_artwork(
         FileIconPreference::Nickel => &nickel,
         FileIconPreference::System => &system,
     };
-    let (pixels, provider): (RgbaImage, &dyn IconProvider) = preferred
-        .resolve(request)
-        .filter(has_visible_pixels)
-        .map(|pixels| (pixels, preferred))
-        .unwrap_or_else(|| {
-            (
-                nickel
-                    .resolve(request)
-                    .expect("embedded Nickel file artwork must decode"),
-                &nickel,
-            )
-        });
+    resolve_with_providers(preferred, &nickel, request)
+}
+
+fn resolve_with_providers(
+    preferred: &dyn IconProvider,
+    fallback: &dyn IconProvider,
+    request: &ArtworkRequest<'_>,
+) -> ResolvedArtwork {
+    let preferred_result = preferred.resolve(request);
+    let fallback_reason = match &preferred_result {
+        Ok(Some(pixels)) if has_visible_pixels(pixels) => None,
+        Ok(Some(_)) => Some(ArtworkFallbackReason::Transparent),
+        Ok(None) => Some(ArtworkFallbackReason::Missing),
+        Err(IconProviderError::Malformed) => Some(ArtworkFallbackReason::Malformed),
+    };
+    let (pixels, provider): (RgbaImage, &dyn IconProvider) = if fallback_reason.is_none() {
+        (preferred_result.unwrap().unwrap(), preferred)
+    } else {
+        (
+            fallback
+                .resolve(request)
+                .expect("fallback provider must resolve without error")
+                .filter(has_visible_pixels)
+                .expect("fallback provider must return visible artwork"),
+            fallback,
+        )
+    };
     ResolvedArtwork {
         pixels: Arc::new(pixels),
         source: provider.source(),
         provider_revision: provider.revision(),
+        fallback_reason,
     }
 }
 
@@ -320,6 +355,40 @@ fn has_visible_pixels(image: &RgbaImage) -> bool {
 mod tests {
     use super::*;
 
+    enum FakeResult {
+        Visible,
+        Missing,
+        Transparent,
+        Malformed,
+    }
+
+    struct FakeProvider {
+        source: ArtworkSource,
+        revision: u64,
+        result: FakeResult,
+    }
+
+    impl IconProvider for FakeProvider {
+        fn source(&self) -> ArtworkSource {
+            self.source
+        }
+
+        fn revision(&self) -> u64 {
+            self.revision
+        }
+
+        fn resolve(&self, _: &ArtworkRequest<'_>) -> Result<Option<RgbaImage>, IconProviderError> {
+            match self.result {
+                FakeResult::Visible => {
+                    Ok(Some(RgbaImage::from_pixel(8, 4, Rgba([20, 40, 60, 255]))))
+                }
+                FakeResult::Missing => Ok(None),
+                FakeResult::Transparent => Ok(Some(RgbaImage::new(8, 4))),
+                FakeResult::Malformed => Err(IconProviderError::Malformed),
+            }
+        }
+    }
+
     fn request(kind: SemanticIconKind) -> ArtworkRequest<'static> {
         ArtworkRequest {
             path: Path::new("/fixture/item"),
@@ -395,5 +464,68 @@ mod tests {
         assert_eq!(cache.len(), 1);
         assert!(cache.retained_bytes <= cache.byte_capacity);
         assert!(cache.contains_key(Path::new("item-2")));
+    }
+
+    #[test]
+    fn provider_contract_reports_success_and_revision() {
+        let provider = FakeProvider {
+            source: ArtworkSource::System,
+            revision: 41,
+            result: FakeResult::Visible,
+        };
+        let resolved = resolve_with_providers(
+            &provider,
+            &NickelIconProvider,
+            &request(SemanticIconKind::TextFile),
+        );
+
+        assert_eq!(resolved.source, ArtworkSource::System);
+        assert_eq!(resolved.provider_revision, 41);
+        assert_eq!(resolved.fallback_reason, None);
+        assert_eq!((resolved.pixels.width(), resolved.pixels.height()), (8, 4));
+    }
+
+    #[test]
+    fn provider_contract_distinguishes_fallback_causes() {
+        for (result, reason) in [
+            (FakeResult::Missing, ArtworkFallbackReason::Missing),
+            (FakeResult::Transparent, ArtworkFallbackReason::Transparent),
+            (FakeResult::Malformed, ArtworkFallbackReason::Malformed),
+        ] {
+            let provider = FakeProvider {
+                source: ArtworkSource::System,
+                revision: 7,
+                result,
+            };
+            let resolved = resolve_with_providers(
+                &provider,
+                &NickelIconProvider,
+                &request(SemanticIconKind::UnknownFile),
+            );
+            assert_eq!(resolved.source, ArtworkSource::Nickel);
+            assert_eq!(resolved.provider_revision, 1);
+            assert_eq!(resolved.fallback_reason, Some(reason));
+            assert!(has_visible_pixels(&resolved.pixels));
+        }
+    }
+
+    #[test]
+    fn changed_provider_revision_is_visible_to_cache_diagnostics() {
+        let resolve_revision = |revision| {
+            resolve_with_providers(
+                &FakeProvider {
+                    source: ArtworkSource::System,
+                    revision,
+                    result: FakeResult::Visible,
+                },
+                &NickelIconProvider,
+                &request(SemanticIconKind::ImageFile),
+            )
+        };
+
+        assert_ne!(
+            resolve_revision(8).provider_revision,
+            resolve_revision(9).provider_revision
+        );
     }
 }
