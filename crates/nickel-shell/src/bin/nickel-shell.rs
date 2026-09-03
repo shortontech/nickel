@@ -227,6 +227,26 @@ struct EmbeddedControllerTransition {
     dismiss_surface: bool,
 }
 
+fn poll_due_codex_hosts(
+    project_menu: Option<&mut EmbeddedUiSurface<ChatApplication>>,
+    chats: &mut [CodexChatSurface],
+    now: Instant,
+) -> (bool, Vec<SurfaceId>) {
+    let project_menu_changed = project_menu
+        .and_then(|host| host.poll_due(now))
+        .is_some_and(|outcome| outcome.changed);
+    let changed_chats = chats
+        .iter_mut()
+        .filter_map(|chat| {
+            chat.host
+                .poll_due(now)
+                .is_some_and(|outcome| outcome.changed)
+                .then_some(chat.id)
+        })
+        .collect();
+    (project_menu_changed, changed_chats)
+}
+
 impl<A: Application> EmbeddedUiSurface<A> {
     fn new(application: A, width: u32, height: u32, now: Instant) -> Self {
         Self {
@@ -379,6 +399,15 @@ impl CodexSurfaces {
             .into_iter()
             .chain(self.chats.iter().filter_map(|chat| chat.host.deadline()))
             .min()
+    }
+
+    fn poll_due(&mut self, now: Instant) -> (bool, Vec<SurfaceId>) {
+        let (project_menu_changed, mut redraw) =
+            poll_due_codex_hosts(self.project_menu_host.as_mut(), &mut self.chats, now);
+        if project_menu_changed {
+            redraw.insert(0, self.project_menu);
+        }
+        (project_menu_changed, redraw)
     }
 
     fn new(shell: &WinitShell) -> Result<Self, String> {
@@ -1538,6 +1567,7 @@ fn main() -> Result<(), String> {
     let mut diagnostic_loop_started = Instant::now();
     let mut diagnostic_loop_iterations = 0_u64;
     let mut diagnostic_overdue_after_poll = Vec::new();
+    let mut project_menu_changed_since_refresh = false;
     loop {
         diagnostic_loop_iterations = diagnostic_loop_iterations.saturating_add(1);
         let now = Instant::now();
@@ -1556,17 +1586,8 @@ fn main() -> Result<(), String> {
             }
             controller_schedule.mark_polled(now, controller.connected());
         }
-        let codex_poll_now = Instant::now();
-        let mut due_codex_redraw = Vec::new();
-        for chat in &mut codex.chats {
-            if chat
-                .host
-                .poll_due(codex_poll_now)
-                .is_some_and(|outcome| outcome.changed)
-            {
-                due_codex_redraw.push(chat.id);
-            }
-        }
+        let (project_menu_changed, due_codex_redraw) = codex.poll_due(Instant::now());
+        project_menu_changed_since_refresh |= project_menu_changed;
         for surface in due_codex_redraw {
             codex
                 .present(&mut shell, surface)
@@ -1893,13 +1914,8 @@ fn main() -> Result<(), String> {
         }
         if fast_subscription.is_due(Instant::now()) {
             let refresh_now = Instant::now();
-            let poll_now = Instant::now();
             let mut codex_redraw = Vec::new();
-            let project_menu_changed = codex
-                .project_menu_host
-                .as_mut()
-                .and_then(|host| host.poll_due(poll_now))
-                .is_some_and(|outcome| outcome.changed);
+            let project_menu_changed = std::mem::take(&mut project_menu_changed_since_refresh);
             if project_menu_changed {
                 codex_redraw.push(codex.project_menu);
                 if let Some(host) = codex.project_menu_host.as_mut() {
@@ -2234,6 +2250,21 @@ mod tests {
         assert_eq!(system.change_token, 0);
         assert_eq!(fast.deadline(), started + Duration::from_millis(10));
         assert_eq!(system.deadline(), started + Duration::from_millis(100));
+    }
+
+    #[test]
+    fn project_menu_deadline_is_polled_independently_of_fast_subscription() {
+        let mut project_menu = embedded_chat();
+        let due = project_menu.deadline().expect("chat host poll deadline");
+        let mut no_chats = Vec::new();
+
+        let _ = super::poll_due_codex_hosts(Some(&mut project_menu), &mut no_chats, due);
+
+        assert!(
+            project_menu
+                .deadline()
+                .is_some_and(|deadline| deadline > due)
+        );
     }
 
     #[test]
