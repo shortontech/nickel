@@ -14,7 +14,7 @@ path = "src/bin/nickel-file.rs"
 image.workspace = true
 nickel-ui = { path = "../nickel-ui" }
 nickel-core = { path = "../nickel-core" }
-nickel-input = { path = "../nickel-input", features = ["sdl"] }
+nickel-input = { path = "../nickel-input", features = ["winit"] }
 nickel-logging = { path = "../nickel-logging" }
 nickel-platform = { path = "../nickel-platform" }
 nickel-ui-testkit = { path = "../nickel-ui-testkit" }

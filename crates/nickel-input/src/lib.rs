@@ -12,8 +12,6 @@ pub mod controller;
 #[cfg(feature = "gilrs")]
 pub mod gilrs;
 pub mod global;
-#[cfg(feature = "sdl")]
-pub mod sdl;
 #[cfg(feature = "winit")]
 pub mod winit;
 

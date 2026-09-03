@@ -8,12 +8,10 @@ description = "Backend-neutral input vocabulary and shortcut recognition for Nic
 
 [features]
 default = []
-sdl = ["dep:sdl3"]
 winit = ["dep:winit"]
 gilrs = ["dep:gilrs"]
 
 [dependencies]
-sdl3 = { workspace = true, optional = true }
 winit = { workspace = true, optional = true }
 gilrs = { workspace = true, optional = true }
 

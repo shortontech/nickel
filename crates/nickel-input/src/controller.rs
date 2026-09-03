@@ -531,25 +531,50 @@ mod tests {
         assert!(normalizer.tick(1_000).is_empty());
     }
 
-    #[cfg(all(feature = "sdl", feature = "gilrs"))]
     #[test]
-    fn sdl_and_gilrs_standard_axes_and_buttons_normalize_equivalently() {
-        use gilrs::{Axis, Button};
-        use sdl3::gamepad::{Axis as SdlAxis, Button as SdlButton};
+    fn backend_neutral_standard_control_fixture_normalizes_buttons_and_axes() {
+        let id = ControllerId(7);
+        let mut normalizer = ControllerNormalizer::default();
+        normalizer.handle(
+            ControllerEvent::Connected {
+                id,
+                identity: identity(None),
+            },
+            0,
+        );
 
         assert_eq!(
-            crate::sdl::gamepad_button(SdlButton::South),
-            crate::gilrs::button_kind(Button::South)
+            normalizer.handle(
+                ControllerEvent::Button {
+                    id,
+                    button: ControllerButton::South,
+                    edge: KeyEdge::Pressed,
+                    repeat: false,
+                },
+                1,
+            ),
+            vec![ControllerSignal::Button {
+                id,
+                button: ControllerButton::South,
+                edge: KeyEdge::Pressed,
+                repeat: false,
+            }]
         );
         assert_eq!(
-            crate::sdl::gamepad_axis(SdlAxis::LeftY),
-            crate::gilrs::axis_kind(Axis::LeftStickY)
+            normalizer.handle(
+                ControllerEvent::Axis {
+                    id,
+                    axis: ControllerAxis::LeftY,
+                    value: 1.0,
+                },
+                2,
+            ),
+            vec![ControllerSignal::Direction {
+                id,
+                direction: AxisDirection::Up,
+                edge: KeyEdge::Pressed,
+                repeat: false,
+            }]
         );
-        let sdl_up = crate::sdl::gamepad_axis_value(SdlAxis::LeftY, i16::MIN);
-        let gilrs_up = 1.0_f32;
-        assert!((sdl_up - gilrs_up).abs() < f32::EPSILON);
-        let sdl_left = crate::sdl::gamepad_axis_value(SdlAxis::LeftX, i16::MIN);
-        let gilrs_left = -1.0_f32;
-        assert!((sdl_left - gilrs_left).abs() < f32::EPSILON);
     }
 }
