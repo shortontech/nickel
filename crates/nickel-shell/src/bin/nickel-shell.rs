@@ -1450,10 +1450,12 @@ fn main() -> Result<(), String> {
         .name("nickel-shortcut-events".into())
         .spawn(move || {
             while let Ok(shortcut) = hotkey_rx.recv() {
+                tracing::debug!(?shortcut, "forwarding global shortcut to winit shell");
                 if event_sender
                     .send_event(ShellUserEvent::GlobalShortcut(shortcut))
                     .is_err()
                 {
+                    tracing::warn!("winit shell stopped accepting global shortcuts");
                     break;
                 }
             }

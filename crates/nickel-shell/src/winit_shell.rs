@@ -6,6 +6,8 @@
 
 use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
+#[cfg(target_os = "windows")]
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::time::Instant;
 
@@ -15,7 +17,9 @@ use nickel_ui::backend::PaintCommand;
 use nickel_ui::{AggregatePresenterCacheDiagnostics, DamageRegion, HostChangeToken};
 use winit::dpi::{LogicalPosition, LogicalSize};
 use winit::event::{Event, WindowEvent};
-use winit::event_loop::{ControlFlow, EventLoop, EventLoopProxy};
+#[cfg(not(target_os = "windows"))]
+use winit::event_loop::EventLoopProxy;
+use winit::event_loop::{ControlFlow, EventLoop};
 use winit::platform::pump_events::EventLoopExtPumpEvents;
 #[cfg(target_os = "linux")]
 use winit::platform::wayland::WindowAttributesExtWayland;
@@ -23,6 +27,12 @@ use winit::window::{Window, WindowId};
 
 use crate::softbuffer_presenter::{PresentationGeometry, SharedGraphics, SoftbufferPresenter};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+#[cfg(target_os = "windows")]
+use windows::Win32::Foundation::{LPARAM, WPARAM};
+#[cfg(target_os = "windows")]
+use windows::Win32::System::Threading::GetCurrentThreadId;
+#[cfg(target_os = "windows")]
+use windows::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_APP};
 
 pub const DESKTOP_TITLE: &str = "Nickel Desktop";
 pub const PANEL_TITLE: &str = "Nickel Panel";
@@ -122,6 +132,54 @@ pub enum ShellUserEvent {
     GlobalShortcut(crate::platform::GlobalShortcut),
     #[cfg(target_os = "linux")]
     TestControl(crate::platform::ShellTestRequest),
+}
+
+/// Cross-thread sender for events consumed by the shell runtime.
+///
+/// Windows uses a Nickel-owned queue and a checked thread-message wake. Winit's
+/// Windows proxy queues the payload internally but discards the result of its
+/// `PostMessageW` wake, which can report success while leaving the payload
+/// stranded under compatibility runtimes. The queue keeps payload ownership
+/// and wake delivery in one transaction.
+#[derive(Clone)]
+pub struct ShellEventSender {
+    #[cfg(not(target_os = "windows"))]
+    proxy: EventLoopProxy<ShellUserEvent>,
+    #[cfg(target_os = "windows")]
+    queue: Arc<Mutex<VecDeque<ShellUserEvent>>>,
+    #[cfg(target_os = "windows")]
+    event_thread: u32,
+}
+
+impl ShellEventSender {
+    pub fn send_event(&self, event: ShellUserEvent) -> Result<(), ShellUserEvent> {
+        #[cfg(not(target_os = "windows"))]
+        {
+            self.proxy.send_event(event).map_err(|error| error.0)
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let Ok(mut queue) = self.queue.lock() else {
+                return Err(event);
+            };
+            queue.push_back(event);
+            // SAFETY: `event_thread` is captured while constructing the winit loop on
+            // its owning thread. Winit has already created that thread's message queue.
+            if unsafe {
+                PostThreadMessageW(
+                    self.event_thread,
+                    WM_APP + 0x4e,
+                    WPARAM::default(),
+                    LPARAM::default(),
+                )
+            }
+            .is_err()
+            {
+                return Err(queue.pop_back().expect("just queued shell event"));
+            }
+            Ok(())
+        }
+    }
 }
 
 pub trait WinitWindowCompat {
@@ -260,6 +318,10 @@ pub struct WinitShell {
     graphics: Option<SharedGraphics>,
     surface_indices: HashMap<WindowId, usize>,
     events: EventLoop<ShellUserEvent>,
+    #[cfg(target_os = "windows")]
+    external_events: Arc<Mutex<VecDeque<ShellUserEvent>>>,
+    #[cfg(target_os = "windows")]
+    event_thread: u32,
     pending_events: VecDeque<ShellEvent>,
     displays: Vec<(DisplayGeometry, String)>,
     input_adapters: HashMap<WindowId, nickel_input::winit::Adapter>,
@@ -284,6 +346,8 @@ impl WinitShell {
         let events = EventLoop::<ShellUserEvent>::with_user_event()
             .build()
             .map_err(|error| error.to_string())?;
+        #[cfg(target_os = "windows")]
+        let external_events = Arc::new(Mutex::new(VecDeque::new()));
         tracing::info!(
             elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0,
             "winit event loop initialized"
@@ -293,6 +357,11 @@ impl WinitShell {
             graphics: None,
             surface_indices: HashMap::new(),
             events,
+            #[cfg(target_os = "windows")]
+            external_events,
+            #[cfg(target_os = "windows")]
+            // SAFETY: querying the identifier of the current thread has no preconditions.
+            event_thread: unsafe { GetCurrentThreadId() },
             pending_events: VecDeque::new(),
             displays: Vec::new(),
             input_adapters: HashMap::new(),
@@ -309,8 +378,15 @@ impl WinitShell {
         })
     }
 
-    pub fn event_sender(&self) -> EventLoopProxy<ShellUserEvent> {
-        self.events.create_proxy()
+    pub fn event_sender(&self) -> ShellEventSender {
+        ShellEventSender {
+            #[cfg(not(target_os = "windows"))]
+            proxy: self.events.create_proxy(),
+            #[cfg(target_os = "windows")]
+            queue: Arc::clone(&self.external_events),
+            #[cfg(target_os = "windows")]
+            event_thread: self.event_thread,
+        }
     }
 
     pub fn create_shell_surfaces(&mut self) -> Result<(), String> {
@@ -817,7 +893,9 @@ impl WinitShell {
     }
 
     pub fn poll_events(&mut self) -> Vec<ShellEvent> {
+        self.drain_external_events();
         self.pump_events(Some(Duration::ZERO));
+        self.drain_external_events();
         self.pending_events.drain(..).collect()
     }
 
@@ -826,11 +904,42 @@ impl WinitShell {
     }
 
     pub fn wait_event_timeout(&mut self, timeout: Duration) -> Option<ShellEvent> {
+        self.drain_external_events();
         if let Some(event) = self.pending_events.pop_front() {
             return Some(event);
         }
         self.pump_events(Some(timeout));
+        self.drain_external_events();
         self.pending_events.pop_front()
+    }
+
+    fn drain_external_events(&mut self) {
+        #[cfg(target_os = "windows")]
+        {
+            let events = {
+                let mut queue = self
+                    .external_events
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                queue.drain(..).collect::<Vec<_>>()
+            };
+            for event in events {
+                self.push_user_event(event);
+            }
+        }
+    }
+
+    fn push_user_event(&mut self, event: ShellUserEvent) {
+        match event {
+            ShellUserEvent::GlobalShortcut(shortcut) => self
+                .pending_events
+                .push_back(ShellEvent::GlobalShortcut(shortcut)),
+            #[cfg(target_os = "linux")]
+            ShellUserEvent::TestControl(request) => {
+                self.pending_events
+                    .push_back(ShellEvent::TestControl(request));
+            }
+        }
     }
 
     fn pump_events(&mut self, timeout: Option<Duration>) {
