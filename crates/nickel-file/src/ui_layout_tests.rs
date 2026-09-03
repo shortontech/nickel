@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    components::status_text as file_status_text,
+    components::{format_modified, status_text as file_status_text},
     layout::{collapse_breadcrumbs, entries_in_selection},
 };
 use nickel_ui::{ActionKind, Rect, UiHost};
@@ -439,6 +439,60 @@ fn details_view_exposes_shared_columns_and_entry_targets() {
             .filter(|node| node.id.as_str().contains("/file-entry-"))
             .count(),
         3
+    );
+}
+
+#[test]
+fn details_view_omits_file_only_metadata_for_directories() {
+    let timestamp = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    let entries = vec![
+        FileEntry {
+            name: "Folder".into(),
+            path: PathBuf::from("/fixture/Folder"),
+            is_directory: true,
+            size: Some(4_096),
+            modified: Some(timestamp),
+        },
+        FileEntry {
+            name: "report.bin".into(),
+            path: PathBuf::from("/fixture/report.bin"),
+            is_directory: false,
+            size: Some(4_096),
+            modified: Some(timestamp),
+        },
+    ];
+    let mut app = FileApp::with_browser(DirectoryBrowser::fixture(entries), String::new());
+    app.view_mode = FileViewMode::Details;
+    let palette = ThemePalette::from_appearance(Appearance::default());
+    let frame = nickel_ui::UiFrame::layout(
+        app.build_view(960.0, 640.0, palette, false),
+        Rect::new(0.0, 0.0, 960.0, 640.0),
+    );
+    let rendered_text = frame
+        .commands()
+        .iter()
+        .filter_map(|command| match command {
+            nickel_ui::backend::PaintCommand::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        rendered_text
+            .iter()
+            .filter(|text| **text == "4.0 KB")
+            .count(),
+        1,
+        "only the regular file may render its size"
+    );
+    let modified = format_modified(timestamp);
+    assert_eq!(
+        rendered_text
+            .iter()
+            .filter(|text| **text == modified)
+            .count(),
+        1,
+        "only the regular file may render its modified time"
     );
 }
 

@@ -214,8 +214,14 @@ pub(crate) fn details_row(
             .map(|extension| format!("{} file", extension.to_ascii_uppercase()))
             .unwrap_or_else(|| "File".to_owned())
     };
-    let size = entry.size.map(format_file_size).unwrap_or_default();
-    let modified = entry.modified.map(format_modified).unwrap_or_default();
+    let (size, modified) = if entry.is_directory {
+        (String::new(), String::new())
+    } else {
+        (
+            entry.size.map(format_file_size).unwrap_or_default(),
+            entry.modified.map(format_modified).unwrap_or_default(),
+        )
+    };
     ui! {
         <Container id={format!("file-entry-{index}")} height={58.0}
             background={if selected { palette.accent_soft } else if light_mode { 0xffffff } else { palette.background }}
@@ -268,7 +274,7 @@ fn format_file_size(bytes: u64) -> String {
     }
 }
 
-fn format_modified(time: std::time::SystemTime) -> String {
+pub(crate) fn format_modified(time: std::time::SystemTime) -> String {
     let Ok(duration) = time.duration_since(std::time::UNIX_EPOCH) else {
         return String::new();
     };
