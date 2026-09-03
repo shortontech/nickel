@@ -6,8 +6,8 @@ use nickel_ui::{
 };
 
 use crate::{
-    DirectoryBrowser, FileEntry,
-    app::{DetailsColumnWidths, FileApp, FileMessage, FileViewMode},
+    DirectoryBrowser, EntrySortKey, FileEntry, SortDirection,
+    app::{DetailsColumn, DetailsColumnWidths, FileApp, FileMessage, FileViewMode},
 };
 
 pub(crate) fn navigation_toolbar(
@@ -104,6 +104,66 @@ pub(crate) fn navigation_toolbar(
 
 fn address_changed(address: String) -> FileMessage {
     FileMessage::AddressChanged(address)
+}
+
+pub(crate) fn details_header(
+    sort_key: EntrySortKey,
+    sort_direction: SortDirection,
+    widths: DetailsColumnWidths,
+    palette: ThemePalette,
+) -> AnyView<FileMessage> {
+    let sort_label = |label: &str, key: EntrySortKey| {
+        if sort_key != key {
+            label.to_owned()
+        } else {
+            format!(
+                "{label} {}",
+                match sort_direction {
+                    SortDirection::Ascending => "↑",
+                    SortDirection::Descending => "↓",
+                }
+            )
+        }
+    };
+    let name_sort = sort_label("Name", EntrySortKey::Name);
+    let type_sort = sort_label("Type", EntrySortKey::Type);
+    let modified_sort = sort_label("Modified", EntrySortKey::Modified);
+    let size_sort = sort_label("Size", EntrySortKey::Size);
+    AnyView::new(ui! {
+        <Container id={"details-header"} height={32.0} background={palette.surface} padding={Insets {
+            top: 8.0, right: 10.0, bottom: 6.0, left: 10.0,
+        }}>
+            <Row gap={12.0}>
+                <Text width={32.0} color={palette.muted}>{""}</Text>
+                <Container grow={1.0} min_width={120.0} on_press={FileMessage::SortBy(EntrySortKey::Name)}
+                    focus_border={palette.accent} controller_focus_border={palette.complement}
+                    semantic_role={SemanticRole::Button} accessibility_label={"Sort by name"}>
+                    <Text color={palette.muted}>{name_sort}</Text>
+                </Container>
+                <Container width={widths.type_width} on_press={FileMessage::SortBy(EntrySortKey::Type)}
+                    focus_border={palette.accent} controller_focus_border={palette.complement}
+                    semantic_role={SemanticRole::Button} accessibility_label={"Sort by type"}>
+                    <Text color={palette.muted}>{type_sort}</Text>
+                </Container>
+                <Container id={"resize-details-type"} width={5.0} on_press={FileMessage::ResizeDetailsColumn(DetailsColumn::Type)}
+                    background={palette.surface_hover} focus_border={palette.accent} accessibility_label={"Resize type column"} />
+                <Container width={widths.modified_width} on_press={FileMessage::SortBy(EntrySortKey::Modified)}
+                    focus_border={palette.accent} controller_focus_border={palette.complement}
+                    semantic_role={SemanticRole::Button} accessibility_label={"Sort by modified time"}>
+                    <Text color={palette.muted}>{modified_sort}</Text>
+                </Container>
+                <Container id={"resize-details-modified"} width={5.0} on_press={FileMessage::ResizeDetailsColumn(DetailsColumn::Modified)}
+                    background={palette.surface_hover} focus_border={palette.accent} accessibility_label={"Resize modified column"} />
+                <Container width={widths.size_width} on_press={FileMessage::SortBy(EntrySortKey::Size)}
+                    focus_border={palette.accent} controller_focus_border={palette.complement}
+                    semantic_role={SemanticRole::Button} accessibility_label={"Sort by size"}>
+                    <Text color={palette.muted}>{size_sort}</Text>
+                </Container>
+                <Container id={"resize-details-size"} width={5.0} on_press={FileMessage::ResizeDetailsColumn(DetailsColumn::Size)}
+                    background={palette.surface_hover} focus_border={palette.accent} accessibility_label={"Resize size column"} />
+            </Row>
+        </Container>
+    })
 }
 
 pub(crate) fn status_text(app: &FileApp) -> String {

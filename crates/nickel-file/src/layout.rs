@@ -12,7 +12,7 @@ use nickel_ui::{
 
 use super::{FileMessage, FileViewMode};
 use crate::{
-    EntrySortKey, SortDirection,
+    EntrySortKey,
     app::{FileApp, NARROW_WORKSPACE_BREAKPOINT, SIDEBAR_RESIZE_WIDTH, TOOLBAR_HEIGHT},
     components, icons,
 };
@@ -165,63 +165,20 @@ pub(crate) fn build_view(
         .height(viewport_height)
         .id("file-list")
         .child({
-            let sort_label = |label: &str, key: EntrySortKey| {
-                if app.sort_key != key {
-                    label.to_owned()
-                } else {
-                    format!(
-                        "{label} {}",
-                        match app.sort_direction {
-                            SortDirection::Ascending => "↑",
-                            SortDirection::Descending => "↓",
-                        }
-                    )
-                }
-            };
-            let name_sort = sort_label("Name", EntrySortKey::Name);
-            let type_sort = sort_label("Type", EntrySortKey::Type);
-            let modified_sort = sort_label("Modified", EntrySortKey::Modified);
-            let size_sort = sort_label("Size", EntrySortKey::Size);
             ui! {
-            <Column>
-                {if app.view_mode == FileViewMode::Details {
-                    ui! {
-                        <Container id={"details-header"} height={32.0} background={palette.surface} padding={Insets {
-                            top: 8.0, right: 10.0, bottom: 6.0, left: 10.0,
-                        }}>
-                            <Row gap={12.0}>
-                                <Text width={32.0} color={palette.muted}>{""}</Text>
-                                <Container grow={1.0} min_width={120.0} on_press={FileMessage::SortBy(EntrySortKey::Name)}
-                                    focus_border={palette.accent} controller_focus_border={palette.complement}
-                                    semantic_role={SemanticRole::Button}
-                                    accessibility_label={"Sort by name"}>
-                                    <Text color={palette.muted}>{name_sort}</Text>
-                                </Container>
-                                <Container width={app.details_column_widths.type_width} on_press={FileMessage::SortBy(EntrySortKey::Type)}
-                                    focus_border={palette.accent} controller_focus_border={palette.complement}
-                                    semantic_role={SemanticRole::Button}
-                                    accessibility_label={"Sort by type"}><Text color={palette.muted}>{type_sort}</Text></Container>
-                                <Container id={"resize-details-type"} width={5.0} on_press={FileMessage::ResizeDetailsColumn(crate::app::DetailsColumn::Type)}
-                                    background={palette.surface_hover} focus_border={palette.accent} accessibility_label={"Resize type column"} />
-                                <Container width={app.details_column_widths.modified_width} on_press={FileMessage::SortBy(EntrySortKey::Modified)}
-                                    focus_border={palette.accent} controller_focus_border={palette.complement}
-                                    semantic_role={SemanticRole::Button}
-                                    accessibility_label={"Sort by modified time"}><Text color={palette.muted}>{modified_sort}</Text></Container>
-                                <Container id={"resize-details-modified"} width={5.0} on_press={FileMessage::ResizeDetailsColumn(crate::app::DetailsColumn::Modified)}
-                                    background={palette.surface_hover} focus_border={palette.accent} accessibility_label={"Resize modified column"} />
-                                <Container width={app.details_column_widths.size_width} on_press={FileMessage::SortBy(EntrySortKey::Size)}
-                                    focus_border={palette.accent} controller_focus_border={palette.complement}
-                                    semantic_role={SemanticRole::Button}
-                                    accessibility_label={"Sort by size"}><Text color={palette.muted}>{size_sort}</Text></Container>
-                                <Container id={"resize-details-size"} width={5.0} on_press={FileMessage::ResizeDetailsColumn(crate::app::DetailsColumn::Size)}
-                                    background={palette.surface_hover} focus_border={palette.accent} accessibility_label={"Resize size column"} />
-                            </Row>
-                        </Container>
-                    }
-                } else { ui! { <></> } }}
-                {collection}
-            </Column>
-        }});
+                <Column>
+                    {if app.view_mode == FileViewMode::Details {
+                        components::details_header(
+                            app.sort_key,
+                            app.sort_direction,
+                            app.details_column_widths,
+                            palette,
+                        )
+                } else { AnyView::new(ui! { <></> }) }}
+                    {collection}
+                </Column>
+            }
+        });
         ui! {
             <Column grow={1.0} padding={Insets {
                 top: 14.0, right: 16.0, bottom: 14.0, left: 16.0,
