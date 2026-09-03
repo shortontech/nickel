@@ -2662,12 +2662,10 @@ version = "0.1.0"
 dependencies = [
  "ctrlc",
  "image",
- "nickel-input",
  "nickel-ui",
  "nickel-ui-testkit",
  "nokhwa",
  "ort",
- "sdl3",
  "serde",
  "serde_json",
  "sha2",
