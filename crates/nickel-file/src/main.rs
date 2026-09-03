@@ -128,6 +128,7 @@ pub struct FileApp {
     navigation_generation: u64,
     navigation_poll_delay: Duration,
     navigation_closes_address: bool,
+    navigation_invalidates_icons: bool,
     pub(crate) icon_preference: FileIconPreference,
     pub(crate) next_icon_id: u16,
     pub(crate) sidebar_width: f32,
@@ -541,6 +542,7 @@ pub(crate) struct FileTab {
     navigation_generation: u64,
     navigation_poll_delay: Duration,
     navigation_closes_address: bool,
+    navigation_invalidates_icons: bool,
 }
 
 impl FileApp {
@@ -621,6 +623,7 @@ impl FileApp {
             navigation_generation: 0,
             navigation_poll_delay: Duration::from_millis(16),
             navigation_closes_address: false,
+            navigation_invalidates_icons: false,
             icon_preference: ShellSettings::load_default().file_icon_provider,
             next_icon_id: 1,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
@@ -743,6 +746,10 @@ impl FileApp {
             &mut self.navigation_closes_address,
             &mut target.navigation_closes_address,
         );
+        std::mem::swap(
+            &mut self.navigation_invalidates_icons,
+            &mut target.navigation_invalidates_icons,
+        );
         self.tabs[self.active_tab] = Some(target);
         self.active_tab = index;
         self.refresh_icons();
@@ -779,6 +786,7 @@ impl FileApp {
             navigation_generation: 0,
             navigation_poll_delay: Duration::from_millis(16),
             navigation_closes_address: false,
+            navigation_invalidates_icons: false,
         }));
         self.switch_tab(self.tabs.len() - 1);
     }
@@ -899,6 +907,7 @@ impl FileApp {
         self.navigation_rx = Some(receiver);
         self.navigation_poll_delay = Duration::from_millis(16);
         self.navigation_closes_address = closes_address;
+        self.navigation_invalidates_icons = false;
         self.status = format!("{progress}…");
         let _ = std::thread::Builder::new()
             .name("nickel-file-navigation".into())
@@ -922,6 +931,7 @@ impl FileApp {
                     .map_err(|error| error.to_string())
             },
         );
+        self.navigation_invalidates_icons = true;
     }
 
     fn poll_navigation(&mut self) -> bool {
@@ -935,14 +945,25 @@ impl FileApp {
                 match result {
                     Ok(Some(browser)) => {
                         self.browser = browser;
+                        if self.navigation_invalidates_icons {
+                            self.icons.clear();
+                            self.tab_icon = None;
+                        }
+                        self.navigation_invalidates_icons = false;
                         if self.navigation_closes_address {
                             self.address_editing = false;
                             self.address_text.clear();
                         }
                         self.navigation_changed();
                     }
-                    Ok(None) => self.status.clear(),
-                    Err(error) => self.status = error,
+                    Ok(None) => {
+                        self.navigation_invalidates_icons = false;
+                        self.status.clear();
+                    }
+                    Err(error) => {
+                        self.navigation_invalidates_icons = false;
+                        self.status = error;
+                    }
                 }
                 true
             }
@@ -956,6 +977,7 @@ impl FileApp {
             }
             Err(TryRecvError::Disconnected) => {
                 self.navigation_rx = None;
+                self.navigation_invalidates_icons = false;
                 self.status = "Could not open location: navigation worker stopped".into();
                 true
             }

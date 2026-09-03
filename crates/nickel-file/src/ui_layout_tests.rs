@@ -664,6 +664,8 @@ fn refresh_keeps_usable_contents_until_async_enumeration_publishes() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("existing.txt"), b"existing").unwrap();
     let mut app = FileApp::new(directory.path().to_path_buf());
+    let existing_path = directory.path().join("existing.txt");
+    let artwork_id_before = app.icons.get(&existing_path).unwrap().0;
     std::fs::write(directory.path().join("new.txt"), b"new").unwrap();
 
     app.update_message(FileMessage::ContextRefresh);
@@ -681,6 +683,7 @@ fn refresh_keeps_usable_contents_until_async_enumeration_publishes() {
             .iter()
             .any(|entry| entry.name == std::ffi::OsStr::new("new.txt"))
     );
+    assert_ne!(app.icons.get(&existing_path).unwrap().0, artwork_id_before);
 }
 
 #[test]
