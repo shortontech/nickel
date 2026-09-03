@@ -16,7 +16,7 @@ use crate::{
 };
 use nickel_core::{
     shell_settings::{FileIconPreference, ShellSettings},
-    theme::{ThemeMode, ThemePalette},
+    theme::{Appearance, ThemeMode, ThemePalette},
 };
 use nickel_file::{DirectoryBrowser, EntrySortKey, FileEntry, SortDirection};
 use nickel_ui::{
@@ -112,6 +112,7 @@ pub struct FileApp {
     pub(crate) pending_ensure_visible: bool,
     pub(crate) resolved_grid_columns: usize,
     pub(crate) exit_requested: bool,
+    pub(crate) fixture_appearance: Option<Appearance>,
 }
 
 pub struct FileFixtureProvider;
@@ -134,12 +135,40 @@ const FILE_FIXTURE_VARIANTS: &[nickel_ui_testkit::FixtureVariant] = &[
         accessibility: nickel_ui_testkit::DEFAULT_ACCESSIBILITY,
     },
     nickel_ui_testkit::FixtureVariant {
+        id: "details-light",
+        title: "Details Light",
+        viewport: nickel_ui_testkit::ViewportPreset {
+            id: "wide",
+            width: 1100,
+            height: 700,
+        },
+        theme: nickel_ui_testkit::FixtureTheme::Light,
+        locale: nickel_ui_testkit::DEFAULT_LOCALE,
+        scale: nickel_ui_testkit::DEFAULT_SCALE,
+        controller_family: nickel_ui::ControllerFamily::Generic,
+        accessibility: nickel_ui_testkit::DEFAULT_ACCESSIBILITY,
+    },
+    nickel_ui_testkit::FixtureVariant {
+        id: "narrow",
+        title: "Narrow",
+        viewport: nickel_ui_testkit::ViewportPreset {
+            id: "narrow",
+            width: 660,
+            height: 640,
+        },
+        theme: nickel_ui_testkit::FixtureTheme::Dark,
+        locale: nickel_ui_testkit::DEFAULT_LOCALE,
+        scale: nickel_ui_testkit::DEFAULT_SCALE,
+        controller_family: nickel_ui::ControllerFamily::Generic,
+        accessibility: nickel_ui_testkit::DEFAULT_ACCESSIBILITY,
+    },
+    nickel_ui_testkit::FixtureVariant {
         id: "narrow-200",
         title: "Narrow 200%",
         viewport: nickel_ui_testkit::ViewportPreset {
             id: "narrow",
-            width: 540,
-            height: 420,
+            width: 960,
+            height: 720,
         },
         theme: nickel_ui_testkit::FixtureTheme::Dark,
         locale: nickel_ui_testkit::DEFAULT_LOCALE,
@@ -164,7 +193,7 @@ static FILE_FIXTURE_METADATA: nickel_ui_testkit::FixtureMetadata =
             line: line!(),
         },
         variants: FILE_FIXTURE_VARIANTS,
-        assets: &[],
+        assets: FILE_FIXTURE_ASSETS,
         simulated_effects: &[],
     };
 
@@ -176,8 +205,21 @@ impl nickel_ui_testkit::Fixture for FileWorkbenchFixture {
     fn create() -> Self::App {
         FileApp::fixture()
     }
-    fn create_variant(_: &nickel_ui_testkit::FixtureVariant) -> Self::App {
-        FileApp::fixture()
+    fn create_variant(variant: &nickel_ui_testkit::FixtureVariant) -> Self::App {
+        let mut app = FileApp::fixture();
+        if variant.id == "details-light" {
+            app.view_mode = FileViewMode::Details;
+        }
+        app.fixture_appearance = Some(Appearance {
+            mode: match variant.theme {
+                nickel_ui_testkit::FixtureTheme::Light => ThemeMode::Light,
+                nickel_ui_testkit::FixtureTheme::Dark
+                | nickel_ui_testkit::FixtureTheme::HighContrast => ThemeMode::Dark,
+            },
+            accent: [0, 164, 96],
+            intensity: 100,
+        });
+        app
     }
     fn surface_size() -> (u32, u32) {
         (960, 640)
@@ -189,6 +231,45 @@ impl nickel_ui_testkit::Fixture for FileWorkbenchFixture {
         ))
     }
 }
+
+const FILE_FIXTURE_ASSETS: &[nickel_ui_testkit::FixtureAsset] = &[
+    nickel_ui_testkit::FixtureAsset {
+        id: "nickel-file-folder",
+        path: "assets/concepts/nickel-file-icon-family/folder.png",
+        license: "Same license as Nickel",
+        sha256: "befa4351e2f22c200f07103d4b1c2f51de4303e0da9c3a7352fdbeec05066ec2",
+    },
+    nickel_ui_testkit::FixtureAsset {
+        id: "nickel-file-home-folder",
+        path: "assets/concepts/nickel-file-icon-family/home-folder.png",
+        license: "Same license as Nickel",
+        sha256: "2c492d54307371cc58255d3f2cc58e465e14a7959a11b0ca13f5cb1e5181e21c",
+    },
+    nickel_ui_testkit::FixtureAsset {
+        id: "nickel-file-pictures-folder",
+        path: "assets/concepts/nickel-file-icon-family/pictures-folder.png",
+        license: "Same license as Nickel",
+        sha256: "b4477db1170bae282f22c38099e3327fbdc0e680c8c652b62177e1b57684cc77",
+    },
+    nickel_ui_testkit::FixtureAsset {
+        id: "nickel-file-music-folder",
+        path: "assets/concepts/nickel-file-icon-family/music-folder.png",
+        license: "Same license as Nickel",
+        sha256: "667c2b11bcb2351e6e6476c1b761d4d04b268a02f1af604aff7c2229c10c24ee",
+    },
+    nickel_ui_testkit::FixtureAsset {
+        id: "nickel-file-image-file",
+        path: "assets/concepts/nickel-file-icon-family/image-file.png",
+        license: "Same license as Nickel",
+        sha256: "7ad8b1935c1bb774f41a9e47e0e75e29639310d613fef08f651185ec1c478056",
+    },
+    nickel_ui_testkit::FixtureAsset {
+        id: "nickel-file-text-file",
+        path: "assets/concepts/nickel-file-icon-family/text-file.png",
+        license: "Same license as Nickel",
+        sha256: "e6bd3410eb2b294b2f3fc600271f35d8ef6cbd9c2182add560bdc584ac539e92",
+    },
+];
 
 impl nickel_ui_testkit::FixtureProvider for FileFixtureProvider {
     fn register(
@@ -281,6 +362,7 @@ impl FileApp {
             pending_ensure_visible: false,
             resolved_grid_columns: 1,
             exit_requested: false,
+            fixture_appearance: None,
         };
         app.refresh_icons();
         app.refresh_tab_icon();
@@ -302,7 +384,25 @@ impl FileApp {
             modified: None,
         })
         .collect();
-        Self::with_browser(DirectoryBrowser::fixture(entries), String::new())
+        let mut app = Self::with_browser(DirectoryBrowser::fixture(entries), String::new());
+        app.icon_rx = None;
+        app.icons.clear();
+        for entry in app.browser.entries() {
+            let artwork = icons::resolve_artwork(
+                FileIconPreference::Nickel,
+                &icons::ArtworkRequest {
+                    path: &entry.path,
+                    kind: icons::semantic_kind(&entry.path, entry.is_directory),
+                    logical_size: 96,
+                    scale_milli: 1_000,
+                    appearance: icons::ArtworkAppearance::Dark,
+                },
+            );
+            let id = app.next_icon_id;
+            app.next_icon_id += 1;
+            app.icons.insert(entry.path.clone(), (id, artwork.pixels));
+        }
+        app
     }
 
     fn set_scroll_offset(&mut self, offset: f32) {
@@ -853,8 +953,9 @@ impl Application for FileApp {
     }
 
     fn view(&self, context: ViewContext) -> impl nickel_ui::View<Self::Message> {
-        let appearance =
-            ShellSettings::load_default().resolve_appearance(nickel_platform::appearance());
+        let appearance = self.fixture_appearance.unwrap_or_else(|| {
+            ShellSettings::load_default().resolve_appearance(nickel_platform::appearance())
+        });
         self.build_view(
             context.viewport.size.width,
             context.viewport.size.height,
