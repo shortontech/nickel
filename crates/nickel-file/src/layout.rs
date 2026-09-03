@@ -121,7 +121,7 @@ pub(crate) fn build_view(
     };
     let toolbar = ui! {
         <Container id={"toolbar-pane"} height={TOOLBAR_HEIGHT} shrink={0.0}
-            navigation_scope={NavigationScope::pane(false)} navigation_scope_highlight={palette.complement}
+            navigation_scope={NavigationScope::pane(false).direction(app.reading_direction)} navigation_scope_highlight={palette.complement}
             background={LinearGradient::vertical(palette.panel, palette.surface)}>
             <Column>{tab_strip}{navigation}</Column>
         </Container>
@@ -193,7 +193,8 @@ pub(crate) fn build_view(
                 .id("file-grid")
                 .accessibility_label("Files")
                 .gap(10.0)
-                .navigation_scope(NavigationScope::group())
+                .navigation_scope(NavigationScope::group().direction(app.reading_direction))
+                .direction(app.reading_direction)
                 .presentation(CollectionPresentation::VirtualGrid {
                     minimum_item_width: app.tile_width,
                     row_height: 54.0 + icon_size,
@@ -223,7 +224,8 @@ pub(crate) fn build_view(
                 .id("file-details")
                 .accessibility_label("Files")
                 .gap(1.0)
-                .navigation_scope(NavigationScope::group())
+                .navigation_scope(NavigationScope::group().direction(app.reading_direction))
+                .direction(app.reading_direction)
                 .presentation(CollectionPresentation::VirtualList {
                     item_height: 58.0,
                     offset: app.file_scroll_offset,
@@ -326,14 +328,14 @@ pub(crate) fn build_view(
                 {if app.places_open {
                     ui! {
                         <Container id={"narrow-places-surface"} grow={1.0}
-                            navigation_scope={NavigationScope::pane(true)} navigation_scope_highlight={palette.complement}>
+                            navigation_scope={NavigationScope::pane(true).direction(app.reading_direction)} navigation_scope_highlight={palette.complement}>
                             {sidebar}
                         </Container>
                     }
                 } else {
                     ui! {
                         <Container id={"files-pane"} grow={1.0} min_width={0.0}
-                            navigation_scope={NavigationScope::pane(true)} navigation_scope_highlight={palette.complement}>
+                            navigation_scope={NavigationScope::pane(true).direction(app.reading_direction)} navigation_scope_highlight={palette.complement}>
                             {files}
                         </Container>
                     }
@@ -344,11 +346,11 @@ pub(crate) fn build_view(
         ui! {
             <Container id={"file-layout"} height={content_height} shrink={0.0} accessibility_label={"Files"}>
                 <Row grow={1.0}><Container id={"sidebar-pane"} width={sidebar_pane_width} shrink={0.0}
-                    navigation_scope={NavigationScope::pane(false)} navigation_scope_highlight={palette.complement}>
+                    navigation_scope={NavigationScope::pane(false).direction(app.reading_direction)} navigation_scope_highlight={palette.complement}>
                     <Row width={sidebar_pane_width} shrink={0.0}>{sidebar}{resize_handle}</Row>
                 </Container>
                     <Container id={"files-pane"} grow={1.0} min_width={0.0}
-                    navigation_scope={NavigationScope::pane(true)} navigation_scope_highlight={palette.complement}>{files}</Container></Row>
+                    navigation_scope={NavigationScope::pane(true).direction(app.reading_direction)} navigation_scope_highlight={palette.complement}>{files}</Container></Row>
             </Container>
         }
     };

@@ -2645,6 +2645,7 @@ dependencies = [
  "ico",
  "image",
  "nickel-core",
+ "nickel-i18n",
  "nickel-input",
  "nickel-logging",
  "nickel-platform",

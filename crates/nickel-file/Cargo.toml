@@ -15,6 +15,7 @@ image.workspace = true
 nickel-ui = { path = "../nickel-ui" }
 nickel-core = { path = "../nickel-core" }
 nickel-input = { path = "../nickel-input", features = ["winit"] }
+nickel-i18n = { path = "../nickel-i18n" }
 nickel-logging = { path = "../nickel-logging" }
 nickel-platform = { path = "../nickel-platform" }
 nickel-ui-testkit = { path = "../nickel-ui-testkit" }

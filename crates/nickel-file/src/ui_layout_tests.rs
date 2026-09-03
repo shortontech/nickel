@@ -490,6 +490,40 @@ fn location_groups_omit_empty_sections_and_collapse_without_reordering() {
 }
 
 #[test]
+fn rtl_file_grid_mirrors_semantic_columns_without_changing_entry_identity() {
+    let mut app = FileApp::fixture();
+    app.reading_direction = nickel_ui::ReadingDirection::RightToLeft;
+    let palette = ThemePalette::from_appearance(
+        ShellSettings::load_default().resolve_appearance(nickel_platform::appearance()),
+    );
+    let frame = nickel_ui::UiFrame::layout(
+        app.build_view(960.0, 640.0, palette, false),
+        Rect::new(0.0, 0.0, 960.0, 640.0),
+    );
+    let nodes = frame.semantic_nodes();
+    let first_cell = nodes
+        .iter()
+        .find(|node| {
+            node.role == Some(nickel_ui::SemanticRole::GridCell)
+                && node
+                    .description
+                    .as_deref()
+                    .is_some_and(|description| description.contains("item 1 of 3"))
+        })
+        .expect("first grid cell retains collection semantics");
+
+    assert_eq!(
+        first_cell.description.as_deref(),
+        Some("row 1, column 3, item 1 of 3")
+    );
+    assert!(
+        !frame
+            .semantic_targets_for_message(&FileMessage::Entry(0))
+            .is_empty()
+    );
+}
+
+#[test]
 fn searchable_command_surface_filters_aliases_and_executes_enabled_actions() {
     let mut app = FileApp::fixture();
     app.update_message(FileMessage::ToggleCommandSurface);

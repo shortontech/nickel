@@ -3,7 +3,9 @@ use std::time::Instant;
 use nickel_input::{
     AggregateModifier, InputEvent, KeyCode, KeyEdge, PhysicalKey, PointerButton, PointerEvent,
 };
-use nickel_ui::{AdapterOutcome, Application, HostAdapter, HostServices, Point, UiHost};
+use nickel_ui::{
+    AdapterOutcome, Application, HostAdapter, HostServices, Point, ReadingDirection, UiHost,
+};
 use winit::{
     dpi::LogicalSize,
     window::{Icon, Window},
@@ -96,8 +98,20 @@ impl HostAdapter<FileApp> for FileHostAdapter {
                     KeyCode::ArrowUp => {
                         app.select_relative(-(app.resolved_grid_columns() as isize))
                     }
-                    KeyCode::ArrowRight => app.select_relative(1),
-                    KeyCode::ArrowLeft => app.select_relative(-1),
+                    KeyCode::ArrowRight => app.select_relative(
+                        if app.reading_direction == ReadingDirection::RightToLeft {
+                            -1
+                        } else {
+                            1
+                        },
+                    ),
+                    KeyCode::ArrowLeft => app.select_relative(
+                        if app.reading_direction == ReadingDirection::RightToLeft {
+                            1
+                        } else {
+                            -1
+                        },
+                    ),
                     KeyCode::Backspace => app.go_back(),
                     KeyCode::Escape => {
                         if app.command_surface_open {

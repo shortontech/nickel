@@ -21,7 +21,7 @@ use nickel_core::{
 use nickel_file::{DirectoryBrowser, EntrySortKey, FileEntry, SortDirection};
 use nickel_ui::{
     AnyView, Application, FrameOverlay, Insets, OverlayAnchor, OverlayMenu, OverlayMenuItem, Point,
-    UiId, ViewContext,
+    ReadingDirection, UiId, ViewContext,
 };
 
 const DEFAULT_SIDEBAR_WIDTH: f32 = 190.0;
@@ -157,6 +157,7 @@ pub struct FileApp {
     pub(crate) resolved_grid_columns: usize,
     pub(crate) exit_requested: bool,
     pub(crate) fixture_appearance: Option<Appearance>,
+    pub(crate) reading_direction: ReadingDirection,
 }
 
 pub struct FileFixtureProvider;
@@ -298,6 +299,23 @@ const FILE_FIXTURE_VARIANTS: &[nickel_ui_testkit::FixtureVariant] = &[
         Light
     ),
     nickel_ui_testkit::FixtureVariant {
+        id: "rtl-grid",
+        title: "RTL Grid",
+        viewport: nickel_ui_testkit::ViewportPreset {
+            id: "wide",
+            width: 1100,
+            height: 700,
+        },
+        theme: nickel_ui_testkit::FixtureTheme::Dark,
+        locale: nickel_ui_testkit::LocalePreset {
+            id: "ar",
+            direction: nickel_ui_testkit::FixtureDirection::RightToLeft,
+        },
+        scale: nickel_ui_testkit::DEFAULT_SCALE,
+        controller_family: nickel_ui::ControllerFamily::Generic,
+        accessibility: nickel_ui_testkit::DEFAULT_ACCESSIBILITY,
+    },
+    nickel_ui_testkit::FixtureVariant {
         id: "narrow-200",
         title: "Narrow 200%",
         viewport: nickel_ui_testkit::ViewportPreset {
@@ -421,6 +439,10 @@ impl nickel_ui_testkit::Fixture for FileWorkbenchFixture {
             accent: [0, 164, 96],
             intensity: 100,
         });
+        app.reading_direction = match variant.locale.direction {
+            nickel_ui_testkit::FixtureDirection::LeftToRight => ReadingDirection::LeftToRight,
+            nickel_ui_testkit::FixtureDirection::RightToLeft => ReadingDirection::RightToLeft,
+        };
         app
     }
     fn surface_size() -> (u32, u32) {
@@ -611,6 +633,11 @@ impl FileApp {
             resolved_grid_columns: 1,
             exit_requested: false,
             fixture_appearance: None,
+            reading_direction: if nickel_i18n::Localizer::system().is_right_to_left() {
+                ReadingDirection::RightToLeft
+            } else {
+                ReadingDirection::LeftToRight
+            },
         };
         app.refresh_icons();
         app
