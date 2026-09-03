@@ -374,8 +374,7 @@ fn preview_view(
     palette: ThemePalette,
 ) -> impl nickel_ui::View<PreviewAction> {
     let (width, height) = preview_dimensions(group.windows.len());
-    let mut windows = group.windows.iter().collect::<Vec<_>>();
-    windows.sort_by_key(|window| window.id.0);
+    let windows = group.windows.iter().collect::<Vec<_>>();
     let window_ids = windows.iter().map(|window| window.id).collect::<Vec<_>>();
     let cards = windows
         .into_iter()
@@ -420,6 +419,14 @@ fn preview_view(
                 } else {
                     palette.surface
                 })
+                .border(
+                    if hovered == Some(window) {
+                        palette.accent
+                    } else {
+                        palette.surface
+                    },
+                    if hovered == Some(window) { 3.0 } else { 1.0 },
+                )
                 .radius(10.0)
                 .child(
                     Row::new()
@@ -631,7 +638,7 @@ mod tests {
     }
 
     #[test]
-    fn preview_targets_do_not_move_when_stacking_order_changes() {
+    fn preview_targets_follow_task_switcher_order() {
         let palette = ThemePalette::from_appearance(Appearance::default());
         let original = group();
         let mut reordered = original.clone();
@@ -639,12 +646,14 @@ mod tests {
         let first = build_preview_frame(&original, &HashMap::new(), None, palette);
         let second = build_preview_frame(&reordered, &HashMap::new(), None, palette);
 
-        for window in [WindowId(4), WindowId(9)] {
-            assert_eq!(
-                first.semantic_bounds(PreviewAction::Close(window)),
-                second.semantic_bounds(PreviewAction::Close(window))
-            );
-        }
+        assert_eq!(
+            first.semantic_bounds(PreviewAction::Close(WindowId(4))),
+            second.semantic_bounds(PreviewAction::Close(WindowId(9)))
+        );
+        assert_eq!(
+            first.semantic_bounds(PreviewAction::Close(WindowId(9))),
+            second.semantic_bounds(PreviewAction::Close(WindowId(4)))
+        );
     }
 
     #[test]

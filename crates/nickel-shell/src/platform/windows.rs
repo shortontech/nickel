@@ -5,6 +5,7 @@ use std::{
     path::PathBuf,
     sync::{
         Mutex,
+        atomic::Ordering,
         mpsc::{self, Receiver, Sender},
     },
     thread,
@@ -70,18 +71,19 @@ use windows::{
                 GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
                 GetWindowThreadProcessId, HICON, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTLEFT,
                 HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_BOTTOM, HWND_BROADCAST, HWND_TOPMOST,
-                IsIconic, IsWindow, IsWindowVisible, IsZoomed, KBDLLHOOKSTRUCT, LWA_ALPHA, MSG,
-                MSLLHOOKSTRUCT, PostMessageW, RegisterClassW, RegisterShellHookWindow,
-                RegisterWindowMessageW, SM_CXSMICON, SM_CYSMICON, SPI_GETWORKAREA, SPI_SETWORKAREA,
-                SPIF_SENDCHANGE, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW,
-                SW_SHOWNOACTIVATE, SW_SHOWNORMAL, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED,
-                SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendNotifyMessageW,
-                SetForegroundWindow, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos,
-                SetWindowsHookExW, ShowWindow, SystemParametersInfoW, TPM_RETURNCMD,
-                TPM_RIGHTBUTTON, TrackPopupMenu, WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_EX_STYLE,
-                WINDOW_STYLE, WM_CLOSE, WM_CONTEXTMENU, WM_COPYDATA, WM_HOTKEY, WM_KEYDOWN,
-                WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP,
-                WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN,
+                IsIconic, IsWindow, IsWindowVisible, IsZoomed, KBDLLHOOKSTRUCT, KillTimer,
+                LWA_ALPHA, MSG, MSLLHOOKSTRUCT, PostMessageW, RegisterClassW,
+                RegisterShellHookWindow, RegisterWindowMessageW, SM_CXSMICON, SM_CYSMICON,
+                SPI_GETWORKAREA, SPI_SETWORKAREA, SPIF_SENDCHANGE, SW_HIDE, SW_MAXIMIZE,
+                SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, SW_SHOWNORMAL,
+                SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+                SWP_NOZORDER, SendNotifyMessageW, SetForegroundWindow, SetLayeredWindowAttributes,
+                SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowsHookExW, ShowWindow,
+                SystemParametersInfoW, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
+                WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE,
+                WM_CONTEXTMENU, WM_COPYDATA, WM_HOTKEY, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
+                WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSCOMMAND,
+                WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN,
                 WS_CLIPSIBLINGS, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
                 WS_EX_TOOLWINDOW, WindowFromPoint,
             },
@@ -940,6 +942,8 @@ fn run_super_key_hook(
                 }
                 _ => {}
             }
+        } else if message.message == WM_TIMER {
+            reconcile_modifier_release(message.wParam.0);
         }
     }
 }
@@ -1017,6 +1021,12 @@ static SHORTCUT_SENDER: std::sync::OnceLock<Sender<GlobalShortcut>> = std::sync:
 static HOTKEY_CONTROLLER: std::sync::OnceLock<Mutex<HotkeyController>> = std::sync::OnceLock::new();
 static RUN_HOTKEY_REGISTERED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+const SUPER_RELEASE_TIMER: usize = 0x4e04;
+const ALT_RELEASE_TIMER: usize = 0x4e05;
+static SUPER_RELEASE_TIMER_ID: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+static ALT_RELEASE_TIMER_ID: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 static INPUT_TRACE_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static PANEL_FULLSCREEN_ACTIVE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -1107,7 +1117,30 @@ unsafe extern "system" fn super_key_hook(code: i32, wparam: WPARAM, lparam: LPAR
     } else {
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
     };
-    let key = key_code_from_windows_vk(event.vkCode);
+    // Alt changes the layout-translated virtual key for the physical grave key on some layouts
+    // (for example to VK_HANJA). Preserve the physical shortcut using its stable scan code.
+    let key = key_code_from_windows_vk(event.vkCode)
+        .or_else(|| (event.scanCode == 0x29).then_some(KeyCode::Backquote));
+    if edge == KeyEdge::Released {
+        let release_timer = match key {
+            Some(KeyCode::SuperLeft | KeyCode::SuperRight) => {
+                Some((SUPER_RELEASE_TIMER, &SUPER_RELEASE_TIMER_ID))
+            }
+            Some(KeyCode::AltLeft | KeyCode::AltRight) => {
+                Some((ALT_RELEASE_TIMER, &ALT_RELEASE_TIMER_ID))
+            }
+            _ => None,
+        };
+        if let Some((requested_id, timer_id)) = release_timer {
+            // Taking focus for an overlay can emit an apparent modifier release while the key is
+            // physically held. Confirm the physical state asynchronously before ending a chord.
+            unsafe {
+                let actual_id = SetTimer(None, requested_id, 10, None);
+                timer_id.store(actual_id, Ordering::Release);
+            }
+            return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+        }
+    }
     if key == Some(KeyCode::KeyR)
         && RUN_HOTKEY_REGISTERED.load(std::sync::atomic::Ordering::Acquire)
     {
@@ -1149,6 +1182,42 @@ unsafe extern "system" fn super_key_hook(code: i32, wparam: WPARAM, lparam: LPAR
     } else {
         unsafe { CallNextHookEx(None, code, wparam, lparam) }
     }
+}
+
+fn reconcile_modifier_release(timer: usize) {
+    const VK_LWIN: i32 = 0x5b;
+    const VK_RWIN: i32 = 0x5c;
+    const VK_MENU: i32 = 0x12;
+
+    let super_timer = SUPER_RELEASE_TIMER_ID.load(Ordering::Acquire);
+    let alt_timer = ALT_RELEASE_TIMER_ID.load(Ordering::Acquire);
+    let released = unsafe {
+        if timer == super_timer && super_timer != 0 {
+            GetAsyncKeyState(VK_LWIN) >= 0 && GetAsyncKeyState(VK_RWIN) >= 0
+        } else if timer == alt_timer && alt_timer != 0 {
+            GetAsyncKeyState(VK_MENU) >= 0
+        } else {
+            return;
+        }
+    };
+    if !released {
+        return;
+    }
+    unsafe {
+        let _ = KillTimer(None, timer);
+    }
+    let key = if timer == super_timer {
+        SUPER_RELEASE_TIMER_ID.store(0, Ordering::Release);
+        KeyCode::SuperLeft
+    } else {
+        ALT_RELEASE_TIMER_ID.store(0, Ordering::Release);
+        KeyCode::AltLeft
+    };
+    let action = hotkey_controller()
+        .lock()
+        .ok()
+        .and_then(|mut controller| controller.handle(key, KeyEdge::Released).action);
+    send_hotkey_action(action);
 }
 
 fn key_code_from_windows_vk(vk: u32) -> Option<KeyCode> {

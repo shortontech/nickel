@@ -822,6 +822,10 @@ fn focus_visible_overlay(shell: &mut WinitShell, state: &LiveShell) {
         if role == SurfaceRole::Launcher {
             continue;
         }
+        #[cfg(target_os = "windows")]
+        if role == SurfaceRole::WindowPreview {
+            continue;
+        }
         if state.surface_visible(role) {
             shell.raise_role(role);
         }

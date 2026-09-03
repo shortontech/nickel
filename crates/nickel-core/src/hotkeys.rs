@@ -397,9 +397,7 @@ impl HotkeyController {
                 }
             }
             (KeyCode::Tab, KeyEdge::Pressed) if self.alt_held => {
-                let action = if self.tab_held {
-                    None
-                } else if self.shift_held {
+                let action = if self.shift_held {
                     Some(HotkeyAction::SwitchPrevious)
                 } else {
                     Some(HotkeyAction::SwitchNext)
@@ -419,9 +417,7 @@ impl HotkeyController {
                 }
             }
             (KeyCode::Backquote, KeyEdge::Pressed) if self.alt_held => {
-                let action = if self.grave_held {
-                    None
-                } else if self.shift_held {
+                let action = if self.shift_held {
                     Some(HotkeyAction::SwitchGroupPrevious)
                 } else {
                     Some(HotkeyAction::SwitchGroupNext)
@@ -685,6 +681,24 @@ mod tests {
                 action: Some(HotkeyAction::CommitSwitch),
                 suppress: false,
             }
+        );
+    }
+
+    #[test]
+    fn repeated_alt_tab_keydowns_advance() {
+        let mut controller = HotkeyController::default();
+        controller.handle(KeyCode::AltLeft, KeyEdge::Pressed);
+        assert_eq!(
+            controller.handle(KeyCode::Tab, KeyEdge::Pressed).action,
+            Some(HotkeyAction::SwitchNext)
+        );
+        assert_eq!(
+            controller.handle(KeyCode::Tab, KeyEdge::Pressed).action,
+            Some(HotkeyAction::SwitchNext)
+        );
+        assert_eq!(
+            controller.handle(KeyCode::Tab, KeyEdge::Pressed).action,
+            Some(HotkeyAction::SwitchNext)
         );
     }
 
