@@ -204,6 +204,14 @@ pub fn path_icon(path: &Path) -> Option<RgbaImage> {
 }
 
 pub fn path_icon_with_theme(path: &Path, theme: Option<&str>) -> Option<RgbaImage> {
+    path_icon_with_theme_at_size(path, theme, 96)
+}
+
+pub fn path_icon_with_theme_at_size(
+    path: &Path,
+    theme: Option<&str>,
+    physical_size: u32,
+) -> Option<RgbaImage> {
     let name = icon_name(path);
     let theme = theme.filter(|theme| !theme.trim().is_empty())?;
     let mut components = Path::new(theme).components();
@@ -216,11 +224,11 @@ pub fn path_icon_with_theme(path: &Path, theme: Option<&str>) -> Option<RgbaImag
         return None;
     }
     freedesktop_icons::lookup(name)
-        .with_size(96)
+        .with_size(physical_size.max(1) as u16)
         .with_theme(theme)
         .with_cache()
         .find()
-        .and_then(|path| load_icon(&path))
+        .and_then(|path| load_icon(&path, physical_size.max(1)))
 }
 
 pub fn installed_icon_themes() -> Vec<String> {
@@ -345,7 +353,7 @@ fn icon_name(path: &Path) -> &'static str {
     }
 }
 
-fn load_icon(path: &Path) -> Option<RgbaImage> {
+fn load_icon(path: &Path, physical_size: u32) -> Option<RgbaImage> {
     if path
         .extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"))
@@ -353,7 +361,8 @@ fn load_icon(path: &Path) -> Option<RgbaImage> {
         let data = fs::read(path).ok()?;
         let tree = resvg::usvg::Tree::from_data(&data, &Default::default()).ok()?;
         let size = tree.size();
-        let scale = (96.0 / size.width()).min(96.0 / size.height());
+        let target = physical_size as f32;
+        let scale = (target / size.width()).min(target / size.height());
         let width = (size.width() * scale).round().max(1.0) as u32;
         let height = (size.height() * scale).round().max(1.0) as u32;
         let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height)?;
@@ -373,7 +382,7 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        decode_file_uri, icon_name, installed_icon_themes_in, path_icon_theme_revision,
+        decode_file_uri, icon_name, installed_icon_themes_in, load_icon, path_icon_theme_revision,
         path_icon_with_theme, value_in_section,
     };
 
@@ -436,5 +445,18 @@ mod tests {
             path_icon_theme_revision(Some("missing-theme-a")),
             path_icon_theme_revision(Some("missing-theme-b"))
         );
+    }
+
+    #[test]
+    fn scalable_theme_artwork_rasterizes_at_the_requested_physical_size() {
+        let directory = tempfile::tempdir().unwrap();
+        let icon = directory.path().join("wide.svg");
+        std::fs::write(
+            &icon,
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100"><rect width="200" height="100" fill="red"/></svg>"#,
+        )
+        .unwrap();
+        let pixels = load_icon(&icon, 120).unwrap();
+        assert_eq!((pixels.width(), pixels.height()), (120, 60));
     }
 }

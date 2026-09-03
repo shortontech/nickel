@@ -56,7 +56,10 @@ mod macos;
 pub use windows::{appearance, apply_window_appearance, path_icon, show_hidden_files};
 
 #[cfg(target_os = "linux")]
-pub use linux::{installed_icon_themes, path_icon, path_icon_theme_revision, path_icon_with_theme};
+pub use linux::{
+    installed_icon_themes, path_icon, path_icon_theme_revision, path_icon_with_theme,
+    path_icon_with_theme_at_size,
+};
 
 #[cfg(not(target_os = "linux"))]
 pub fn installed_icon_themes() -> Vec<String> {
@@ -76,6 +79,15 @@ pub fn path_icon_with_theme(
     path_icon(path)
 }
 
+#[cfg(target_os = "windows")]
+pub fn path_icon_with_theme_at_size(
+    path: &std::path::Path,
+    theme: Option<&str>,
+    _physical_size: u32,
+) -> Option<image::RgbaImage> {
+    path_icon_with_theme(path, theme)
+}
+
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
 pub fn path_icon(_path: &std::path::Path) -> Option<image::RgbaImage> {
     None
@@ -87,6 +99,15 @@ pub fn path_icon_with_theme(
     _theme: Option<&str>,
 ) -> Option<image::RgbaImage> {
     None
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+pub fn path_icon_with_theme_at_size(
+    path: &std::path::Path,
+    theme: Option<&str>,
+    _physical_size: u32,
+) -> Option<image::RgbaImage> {
+    path_icon_with_theme(path, theme)
 }
 
 #[cfg(not(target_os = "windows"))]

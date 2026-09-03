@@ -286,10 +286,13 @@ impl IconProvider for SystemIconProvider {
         &self,
         request: &ArtworkRequest<'_>,
     ) -> Result<Option<RgbaImage>, IconProviderError> {
-        Ok(
-            nickel_platform::path_icon_with_theme(request.path, self.theme.as_deref())
-                .map(|image| contain(&image, physical_size(request))),
+        let physical_size = physical_size(request);
+        Ok(nickel_platform::path_icon_with_theme_at_size(
+            request.path,
+            self.theme.as_deref(),
+            physical_size,
         )
+        .map(|image| contain(&image, physical_size)))
     }
 }
 
