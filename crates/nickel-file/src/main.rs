@@ -365,7 +365,6 @@ impl FileApp {
             fixture_appearance: None,
         };
         app.refresh_icons();
-        app.refresh_tab_icon();
         app
     }
 
@@ -573,7 +572,6 @@ impl FileApp {
         self.set_scroll_offset(0.0);
         self.status.clear();
         self.refresh_icons();
-        self.refresh_tab_icon();
     }
 
     fn sort_by(&mut self, key: EntrySortKey) {
@@ -658,6 +656,37 @@ impl FileApp {
             .filter(|(path, _)| !self.icons.contains_key(path))
             .collect::<Vec<_>>();
         paths.push((self.browser.current().to_path_buf(), true));
+
+        // Nickel artwork is the guaranteed first frame. A selected system
+        // provider may replace it asynchronously, but native lookup must never
+        // leave an invisible entry or tab target while it is pending.
+        for (path, is_directory) in &paths {
+            let artwork = icons::resolve_artwork(
+                FileIconPreference::Nickel,
+                &icons::ArtworkRequest {
+                    path,
+                    kind: icons::semantic_kind(path, *is_directory),
+                    logical_size: 96,
+                    scale_milli: 1_000,
+                    appearance: if appearance == ThemeMode::Light {
+                        icons::ArtworkAppearance::Light
+                    } else {
+                        icons::ArtworkAppearance::Dark
+                    },
+                },
+            );
+            let id = self.next_icon_id;
+            self.next_icon_id = self.next_icon_id.checked_add(1).unwrap_or(1);
+            if path == self.browser.current() {
+                self.tab_icon = Some((id, artwork.pixels));
+            } else {
+                self.icons.insert(path.clone(), (id, artwork.pixels));
+            }
+        }
+        if preference == FileIconPreference::Nickel {
+            self.icon_rx = None;
+            return;
+        }
         #[cfg(debug_assertions)]
         if std::env::var_os("NICKEL_FILE_PROFILE_ICONS").is_some() {
             eprintln!(
@@ -743,10 +772,6 @@ impl FileApp {
                 }
             }
         }
-    }
-
-    fn refresh_tab_icon(&mut self) {
-        self.tab_icon = None;
     }
 
     pub(crate) fn select_relative(&mut self, delta: isize) {

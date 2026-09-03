@@ -25,6 +25,30 @@ fn pending_icon_work_uses_bounded_backoff() {
 }
 
 #[test]
+fn nickel_fallback_artwork_is_present_before_async_provider_results() {
+    let entries = vec![
+        FileEntry {
+            name: "Documents".into(),
+            path: PathBuf::from("/fixture/Documents"),
+            is_directory: true,
+            size: None,
+            modified: None,
+        },
+        FileEntry {
+            name: "notes.txt".into(),
+            path: PathBuf::from("/fixture/notes.txt"),
+            is_directory: false,
+            size: Some(12),
+            modified: None,
+        },
+    ];
+    let app = FileApp::with_browser(DirectoryBrowser::fixture(entries), String::new());
+
+    assert_eq!(app.icons.len(), 2);
+    assert!(app.tab_icon.is_some());
+}
+
+#[test]
 fn grid_and_details_modes_are_owned_independently_by_each_tab() {
     let directory = tempfile::tempdir().unwrap();
     let child = directory.path().join("child");
@@ -343,7 +367,7 @@ fn disabled_command_has_no_executable_semantic_target() {
 }
 
 #[test]
-fn navigation_from_idle_starts_new_icon_publication_work() {
+fn navigation_from_idle_publishes_fallback_before_optional_provider_work() {
     let directory = tempfile::tempdir().unwrap();
     let child = directory.path().join("child");
     std::fs::create_dir(&child).unwrap();
@@ -355,9 +379,11 @@ fn navigation_from_idle_starts_new_icon_publication_work() {
     app.navigate_to(child.clone());
 
     assert_eq!(app.browser.current(), child);
+    assert!(app.icons.contains_key(&child.join("new-file.txt")));
+    assert!(app.tab_icon.is_some());
     assert_eq!(
-        Application::poll_interval(&app),
-        Some(std::time::Duration::from_millis(16))
+        Application::poll_interval(&app).is_some(),
+        app.icon_preference == FileIconPreference::System
     );
 }
 
