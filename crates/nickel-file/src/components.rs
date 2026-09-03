@@ -1,12 +1,110 @@
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use nickel_core::theme::ThemePalette;
-use nickel_ui::{AnyView, Component, ComponentBuilderExt, ImageFit, Insets, SemanticRole, ui};
+use nickel_ui::{
+    AnyView, Component, ComponentBuilderExt, ImageFit, Insets, SemanticRole, TextField, ui,
+};
 
 use crate::{
     DirectoryBrowser, FileEntry,
-    app::{DetailsColumnWidths, FileApp, FileMessage},
+    app::{DetailsColumnWidths, FileApp, FileMessage, FileViewMode},
 };
+
+pub(crate) fn navigation_toolbar(
+    app: &FileApp,
+    breadcrumbs: &[(String, PathBuf)],
+    narrow: bool,
+    palette: ThemePalette,
+) -> AnyView<FileMessage> {
+    let breadcrumb_row = ui! {
+        <Row gap={7.0}>
+            {breadcrumbs.iter().enumerate().map(|(index, (label, path))| ui! {
+                <Row gap={7.0}>
+                    {if index > 0 {
+                        ui! { <Text width={10.0} color={palette.muted}>{"›"}</Text> }
+                    } else {
+                        ui! { <></> }
+                    }}
+                    <Container on_press={FileMessage::Breadcrumb(path.clone())}
+                        focus_border={palette.accent} controller_focus_border={palette.complement} padding={Insets {
+                        top: 4.0, right: 2.0, bottom: 3.0, left: 2.0,
+                    }} accessibility_label={format!("Open {label}")}>
+                        <Text scale={1.05} color={palette.text}>{label}</Text>
+                    </Container>
+                </Row>
+            })}
+        </Row>
+    };
+    let location_control = if app.address_editing {
+        AnyView::new(ui! {
+            <Container grow={1.0} background={palette.background} border={(palette.accent, 1.0)} padding={Insets {
+                top: 5.0, right: 12.0, bottom: 4.0, left: 10.0,
+            }}>
+                {TextField::on_change(&app.address_text, address_changed)
+                    .id("file-address-field")
+                    .accessibility_label("Location")
+                    .color(palette.text)}
+            </Container>
+        })
+    } else {
+        AnyView::new(ui! {
+            <Container grow={1.0} background={palette.background} padding={Insets {
+                top: 5.0, right: 12.0, bottom: 4.0, left: 10.0,
+            }}>
+                {breadcrumb_row}
+            </Container>
+        })
+    };
+    AnyView::new(ui! {
+        <Container id={"navigation-toolbar"} height={46.0} background={palette.surface} padding={Insets {
+            top: 6.0, right: 12.0, bottom: 6.0, left: 10.0,
+        }}>
+            <Row gap={4.0}>
+                {if narrow {
+                    ui! {
+                        <Button on_press={FileMessage::TogglePlaces} width={74.0} height={34.0}
+                            color={if app.places_open { palette.accent } else { palette.text }}
+                            focus_border={palette.accent} controller_focus_border={palette.complement}
+                            accessibility_label={if app.places_open { "Close places" } else { "Open places" }}>
+                            {if app.places_open { "Files" } else { "Places" }}
+                        </Button>
+                    }
+                } else { ui! { <></> } }}
+                <Button on_press={FileMessage::Back} enabled={app.browser.can_go_back() && !app.navigation_pending()} width={34.0} height={34.0}
+                    focus_border={palette.accent} controller_focus_border={palette.complement}
+                    color={if app.browser.can_go_back() { palette.text } else { palette.muted }} accessibility_label={"Back"}>{"←"}</Button>
+                <Button on_press={FileMessage::Forward} enabled={app.browser.can_go_forward() && !app.navigation_pending()} width={34.0} height={34.0}
+                    focus_border={palette.accent} controller_focus_border={palette.complement}
+                    color={if app.browser.can_go_forward() { palette.text } else { palette.muted }} accessibility_label={"Forward"}>{"→"}</Button>
+                <Button on_press={FileMessage::Up} enabled={app.browser.can_go_up() && !app.navigation_pending()} width={34.0} height={34.0} color={palette.text}
+                    focus_border={palette.accent} controller_focus_border={palette.complement} accessibility_label={"Up one folder"}>{"↑"}</Button>
+                {location_control}
+                <Button on_press={FileMessage::ToggleAddressEditing} width={34.0} height={34.0}
+                    color={if app.address_editing { palette.accent } else { palette.text }}
+                    focus_border={palette.accent} controller_focus_border={palette.complement}
+                    accessibility_label={if app.address_editing { "Cancel location editing" } else { "Edit location" }}>
+                    {if app.address_editing { "×" } else { "✎" }}
+                </Button>
+                <Button on_press={FileMessage::Refresh} enabled={!app.navigation_pending()} width={34.0} height={34.0} color={palette.text}
+                    focus_border={palette.accent} controller_focus_border={palette.complement} accessibility_label={"Refresh"}>{"↻"}</Button>
+                <Button on_press={FileMessage::SetViewMode(FileViewMode::Grid)} width={34.0} height={34.0}
+                    color={if app.view_mode == FileViewMode::Grid { palette.accent } else { palette.text }}
+                    focus_border={palette.accent} controller_focus_border={palette.complement} accessibility_label={"Grid view"}>{"▦"}</Button>
+                <Button on_press={FileMessage::SetViewMode(FileViewMode::Details)} width={34.0} height={34.0}
+                    color={if app.view_mode == FileViewMode::Details { palette.accent } else { palette.text }}
+                    focus_border={palette.accent} controller_focus_border={palette.complement} accessibility_label={"Details view"}>{"☷"}</Button>
+                <Button on_press={FileMessage::ToggleCommandSurface} width={42.0} height={34.0}
+                    color={if app.command_surface_open { palette.accent } else { palette.text }}
+                    focus_border={palette.accent} controller_focus_border={palette.complement}
+                    accessibility_label={"Open commands"}>{"⌘"}</Button>
+            </Row>
+        </Container>
+    })
+}
+
+fn address_changed(address: String) -> FileMessage {
+    FileMessage::AddressChanged(address)
+}
 
 pub(crate) fn status_text(app: &FileApp) -> String {
     if !app.status.is_empty() {

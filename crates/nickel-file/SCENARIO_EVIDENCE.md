@@ -34,9 +34,9 @@ Commands:
 ```text
 cargo test -p nickel-file
 cargo clippy -p nickel-file --all-targets --all-features -- -D warnings
-cargo run -p nickel-ui-workbench -- headless render-variant nickel-file wide-details-light /tmp/nickel-file-wide-details-light.png
-cargo run -p nickel-ui-workbench -- headless render-variant nickel-file minimum-details-light /tmp/nickel-file-minimum-details-light.png
-cargo run -p nickel-ui-workbench -- headless render-variant nickel-file narrow-grid-dark /tmp/nickel-file-narrow-grid-dark.png
+cargo run -p nickel-ui-workbench --features file-provider -- headless render-variant file.browser wide-details-light /tmp/nickel-file-wide-details-light.png
+cargo run -p nickel-ui-workbench --features file-provider -- headless render-variant file.browser minimum-details-light /tmp/nickel-file-minimum-details-light.png
+cargo run -p nickel-ui-workbench --features file-provider -- headless render-variant file.browser narrow-grid-dark /tmp/nickel-file-narrow-grid-dark.png
 ```
 
 Live nested compositor acceptance remains distinct from these deterministic host scenarios. The
