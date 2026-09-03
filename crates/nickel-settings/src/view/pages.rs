@@ -646,25 +646,46 @@ impl SettingsApp {
         )
         .id("appearance-animations");
         let file_icon_provider = self.shell_settings.file_icon_provider;
+        let configured_icon_theme = self.shell_settings.file_icon_theme.as_deref();
+        let installed_icon_themes = nickel_platform::installed_icon_themes();
+        let configured_theme_available = configured_icon_theme.is_none_or(|configured| {
+            installed_icon_themes
+                .iter()
+                .any(|theme| theme == configured)
+        });
+        let selected_file_artwork = match (file_icon_provider, configured_icon_theme) {
+            (FileIconPreference::Nickel, _) => "Nickel".to_owned(),
+            (FileIconPreference::System, None) => "System".to_owned(),
+            (FileIconPreference::System, Some(theme)) if configured_theme_available => {
+                format!("System — {theme}")
+            }
+            (FileIconPreference::System, Some(theme)) => {
+                format!("System — {theme} (unavailable)")
+            }
+        };
+        let mut file_artwork_options = vec![
+            (
+                "Nickel".to_owned(),
+                SettingsMessage::SetFileIconProvider(FileIconPreference::Nickel),
+            ),
+            (
+                "System".to_owned(),
+                SettingsMessage::SetFileIconProvider(FileIconPreference::System),
+            ),
+        ];
+        file_artwork_options.extend(installed_icon_themes.into_iter().map(|theme| {
+            (
+                format!("System — {theme}"),
+                SettingsMessage::SetFileIconTheme(theme),
+            )
+        }));
         let file_icon_provider_row = SelectField::new(
             theme,
             "File artwork",
             "Choose Nickel artwork or icons supplied by the operating system.",
             SettingsMessage::ToggleFileIconProviderSelect,
-            match file_icon_provider {
-                FileIconPreference::Nickel => "Nickel",
-                FileIconPreference::System => "System",
-            },
-            [
-                (
-                    "Nickel".to_owned(),
-                    SettingsMessage::SetFileIconProvider(FileIconPreference::Nickel),
-                ),
-                (
-                    "System".to_owned(),
-                    SettingsMessage::SetFileIconProvider(FileIconPreference::System),
-                ),
-            ],
+            selected_file_artwork,
+            file_artwork_options,
             self.file_icon_provider_select_expanded,
         )
         .id("appearance-file-artwork");

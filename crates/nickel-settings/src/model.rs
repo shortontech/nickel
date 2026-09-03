@@ -266,6 +266,8 @@ mod tests {
         app.shell_settings.accent_intensity = Some(20);
         app.shell_settings.reduce_transparency = true;
         app.shell_settings.animations = AnimationLevel::Off;
+        app.shell_settings.file_icon_provider = FileIconPreference::System;
+        app.shell_settings.file_icon_theme = Some("removed-theme".to_owned());
         app.wallpaper_settings.image = Some("wallpaper.png".into());
         app.reset_appearance_values();
         assert!(!app.shell_settings.bar_on_all_displays);
@@ -275,6 +277,11 @@ mod tests {
         assert_eq!(app.shell_settings.accent_intensity, None);
         assert!(!app.shell_settings.reduce_transparency);
         assert_eq!(app.shell_settings.animations, AnimationLevel::Normal);
+        assert_eq!(
+            app.shell_settings.file_icon_provider,
+            FileIconPreference::default()
+        );
+        assert_eq!(app.shell_settings.file_icon_theme, None);
         assert_eq!(app.wallpaper_settings, WallpaperSettings::default());
     }
 

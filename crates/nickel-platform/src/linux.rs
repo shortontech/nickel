@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     env, fs,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     thread,
 };
@@ -205,6 +205,15 @@ pub fn path_icon(path: &Path) -> Option<RgbaImage> {
 pub fn path_icon_with_theme(path: &Path, theme: Option<&str>) -> Option<RgbaImage> {
     let name = icon_name(path);
     let theme = theme.filter(|theme| !theme.trim().is_empty())?;
+    let mut components = Path::new(theme).components();
+    if !matches!(components.next(), Some(Component::Normal(_)))
+        || components.next().is_some()
+        || !icon_search_roots()
+            .into_iter()
+            .any(|root| root.join(theme).join("index.theme").is_file())
+    {
+        return None;
+    }
     freedesktop_icons::lookup(name)
         .with_size(96)
         .with_theme(theme)
@@ -342,7 +351,10 @@ fn load_icon(path: &Path) -> Option<RgbaImage> {
 mod tests {
     use std::path::Path;
 
-    use super::{decode_file_uri, icon_name, installed_icon_themes_in, value_in_section};
+    use super::{
+        decode_file_uri, icon_name, installed_icon_themes_in, path_icon_with_theme,
+        value_in_section,
+    };
 
     #[test]
     fn portal_file_uris_preserve_unix_paths_and_percent_escapes() {
@@ -390,5 +402,14 @@ mod tests {
             value_in_section(settings, "Icons", "Theme").as_deref(),
             Some("Papirus-Dark")
         );
+    }
+
+    #[test]
+    fn unavailable_or_non_local_theme_names_return_no_artwork() {
+        assert!(
+            path_icon_with_theme(Path::new("report.txt"), Some("missing-nickel-test-theme"))
+                .is_none()
+        );
+        assert!(path_icon_with_theme(Path::new("report.txt"), Some("../hicolor")).is_none());
     }
 }

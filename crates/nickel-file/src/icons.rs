@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, VecDeque},
+    hash::{DefaultHasher, Hash, Hasher},
     path::{Path, PathBuf},
     sync::{Arc, OnceLock},
 };
@@ -261,7 +262,17 @@ fn nickel_runtime_master(kind: SemanticIconKind) -> &'static RgbaImage {
 }
 
 #[derive(Default)]
-pub struct SystemIconProvider;
+pub struct SystemIconProvider {
+    theme: Option<String>,
+}
+
+impl SystemIconProvider {
+    fn new(theme: Option<&str>) -> Self {
+        Self {
+            theme: theme.map(str::to_owned),
+        }
+    }
+}
 
 impl IconProvider for SystemIconProvider {
     fn source(&self) -> ArtworkSource {
@@ -269,15 +280,19 @@ impl IconProvider for SystemIconProvider {
     }
 
     fn revision(&self) -> u64 {
-        1
+        let mut hasher = DefaultHasher::new();
+        self.theme.hash(&mut hasher);
+        hasher.finish()
     }
 
     fn resolve(
         &self,
         request: &ArtworkRequest<'_>,
     ) -> Result<Option<RgbaImage>, IconProviderError> {
-        Ok(nickel_platform::path_icon(request.path)
-            .map(|image| contain(&image, physical_size(request))))
+        Ok(
+            nickel_platform::path_icon_with_theme(request.path, self.theme.as_deref())
+                .map(|image| contain(&image, physical_size(request))),
+        )
     }
 }
 
@@ -285,8 +300,16 @@ pub fn resolve_artwork(
     preference: FileIconPreference,
     request: &ArtworkRequest<'_>,
 ) -> ResolvedArtwork {
+    resolve_artwork_with_theme(preference, None, request)
+}
+
+pub fn resolve_artwork_with_theme(
+    preference: FileIconPreference,
+    theme: Option<&str>,
+    request: &ArtworkRequest<'_>,
+) -> ResolvedArtwork {
     let nickel = NickelIconProvider;
-    let system = SystemIconProvider;
+    let system = SystemIconProvider::new(theme);
     let preferred: &dyn IconProvider = match preference {
         FileIconPreference::Nickel => &nickel,
         FileIconPreference::System => &system,
@@ -295,6 +318,14 @@ pub fn resolve_artwork(
 }
 
 pub fn cache_key(preference: FileIconPreference, request: &ArtworkRequest<'_>) -> ArtworkCacheKey {
+    cache_key_with_theme(preference, None, request)
+}
+
+pub fn cache_key_with_theme(
+    preference: FileIconPreference,
+    theme: Option<&str>,
+    request: &ArtworkRequest<'_>,
+) -> ArtworkCacheKey {
     match preference {
         FileIconPreference::Nickel => ArtworkCacheKey::new(
             ArtworkSource::Nickel,
@@ -303,7 +334,7 @@ pub fn cache_key(preference: FileIconPreference, request: &ArtworkRequest<'_>) -
         ),
         FileIconPreference::System => ArtworkCacheKey::new(
             ArtworkSource::System,
-            SystemIconProvider.revision(),
+            SystemIconProvider::new(theme).revision(),
             request,
         ),
     }
@@ -578,6 +609,22 @@ mod tests {
         cache.insert_resolved(key.clone(), (1, Arc::new(RgbaImage::new(4, 4))));
         assert!(cache.matches(&key));
         assert!(variants.iter().all(|variant| !cache.matches(variant)));
+    }
+
+    #[test]
+    fn named_system_theme_is_part_of_cache_identity() {
+        let path = PathBuf::from("/fixture/item.txt");
+        let request = ArtworkRequest {
+            path: &path,
+            kind: SemanticIconKind::TextFile,
+            logical_size: 96,
+            scale_milli: 1_000,
+            appearance: ArtworkAppearance::Dark,
+        };
+        assert_ne!(
+            cache_key_with_theme(FileIconPreference::System, Some("Papirus"), &request),
+            cache_key_with_theme(FileIconPreference::System, Some("Breeze"), &request)
+        );
     }
 
     #[test]

@@ -109,7 +109,12 @@ fn provider_changes_preserve_independent_tab_view_state() {
     app.file_scroll_offset = 17.0;
     app.sort_key = EntrySortKey::Modified;
 
-    app.refresh_icons_for(FileIconPreference::System, ThemeMode::Light);
+    app.refresh_icons_for_theme(
+        FileIconPreference::System,
+        Some("fixture-theme"),
+        ThemeMode::Light,
+    );
+    assert_eq!(app.icon_theme.as_deref(), Some("fixture-theme"));
     app.refresh_icons_for(FileIconPreference::Nickel, ThemeMode::Dark);
 
     assert_eq!(app.browser.current(), child);

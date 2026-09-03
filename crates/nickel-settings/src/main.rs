@@ -312,6 +312,7 @@ enum SettingsMessage {
     SetAnimationLevel(AnimationLevel),
     ToggleFileIconProviderSelect,
     SetFileIconProvider(FileIconPreference),
+    SetFileIconTheme(String),
     AppearanceScroll,
     BarPrimaryDisplay,
     BarAllDisplays,
@@ -501,6 +502,15 @@ impl SettingsApp {
             }
             SettingsMessage::SetFileIconProvider(provider) => {
                 self.shell_settings.file_icon_provider = provider;
+                if provider == FileIconPreference::System {
+                    self.shell_settings.file_icon_theme = None;
+                }
+                self.file_icon_provider_select_expanded = false;
+                self.persist_appearance();
+            }
+            SettingsMessage::SetFileIconTheme(theme) => {
+                self.shell_settings.file_icon_provider = FileIconPreference::System;
+                self.shell_settings.file_icon_theme = Some(theme);
                 self.file_icon_provider_select_expanded = false;
                 self.persist_appearance();
             }
@@ -744,6 +754,7 @@ impl SettingsApp {
         self.shell_settings.reduce_transparency = defaults.reduce_transparency;
         self.shell_settings.animations = defaults.animations;
         self.shell_settings.file_icon_provider = defaults.file_icon_provider;
+        self.shell_settings.file_icon_theme = defaults.file_icon_theme;
         self.wallpaper_settings = WallpaperSettings::default();
         self.wallpaper_preview = None;
         self.wallpaper_dimensions = None;

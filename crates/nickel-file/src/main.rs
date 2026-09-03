@@ -130,6 +130,7 @@ pub struct FileApp {
     navigation_closes_address: bool,
     navigation_invalidates_icons: bool,
     pub(crate) icon_preference: FileIconPreference,
+    pub(crate) icon_theme: Option<String>,
     pub(crate) next_icon_id: u16,
     pub(crate) sidebar_width: f32,
     pub(crate) expanded_folders: HashSet<PathBuf>,
@@ -625,6 +626,7 @@ impl FileApp {
             navigation_closes_address: false,
             navigation_invalidates_icons: false,
             icon_preference: ShellSettings::load_default().file_icon_provider,
+            icon_theme: ShellSettings::load_default().file_icon_theme,
             next_icon_id: 1,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             expanded_folders: HashSet::new(),
@@ -1054,11 +1056,12 @@ impl FileApp {
     }
 
     pub(crate) fn refresh_icons(&mut self) {
-        let preference = ShellSettings::load_default().file_icon_provider;
-        let appearance = ShellSettings::load_default()
+        let settings = ShellSettings::load_default();
+        let preference = settings.file_icon_provider;
+        let appearance = settings
             .resolve_appearance(nickel_platform::appearance())
             .mode;
-        self.refresh_icons_for(preference, appearance);
+        self.refresh_icons_for_theme(preference, settings.file_icon_theme.as_deref(), appearance);
     }
 
     pub(crate) fn refresh_icons_for(
@@ -1066,8 +1069,18 @@ impl FileApp {
         preference: FileIconPreference,
         appearance: ThemeMode,
     ) {
-        if preference != self.icon_preference {
+        self.refresh_icons_for_theme(preference, None, appearance);
+    }
+
+    fn refresh_icons_for_theme(
+        &mut self,
+        preference: FileIconPreference,
+        theme: Option<&str>,
+        appearance: ThemeMode,
+    ) {
+        if preference != self.icon_preference || self.icon_theme.as_deref() != theme {
             self.icon_preference = preference;
+            self.icon_theme = theme.map(str::to_owned);
             self.icons.clear();
             self.tab_icon = None;
         }
@@ -1093,7 +1106,7 @@ impl FileApp {
                 (
                     entry.path.clone(),
                     entry.is_directory,
-                    icons::cache_key(preference, &request),
+                    icons::cache_key_with_theme(preference, self.icon_theme.as_deref(), &request),
                 )
             })
             .collect::<Vec<_>>();
@@ -1111,7 +1124,8 @@ impl FileApp {
             scale_milli: 1_000,
             appearance: artwork_appearance,
         };
-        let current_key = icons::cache_key(preference, &current_request);
+        let current_key =
+            icons::cache_key_with_theme(preference, self.icon_theme.as_deref(), &current_request);
         paths.push((current, true, current_key));
 
         // Nickel artwork is the guaranteed first frame. A selected system
@@ -1150,6 +1164,7 @@ impl FileApp {
             );
         }
         let (tx, rx) = mpsc::channel();
+        let icon_theme = self.icon_theme.clone();
         self.icon_rx = Some(rx);
         self.icon_poll_delay = std::time::Duration::from_millis(16);
         let _ = std::thread::Builder::new()
@@ -1158,8 +1173,9 @@ impl FileApp {
                 for (path, is_directory, key) in paths {
                     #[cfg(debug_assertions)]
                     let profile_started = Instant::now();
-                    let artwork = icons::resolve_artwork(
+                    let artwork = icons::resolve_artwork_with_theme(
                         preference,
+                        icon_theme.as_deref(),
                         &icons::ArtworkRequest {
                             path: &path,
                             kind: icons::semantic_kind(&path, is_directory),
