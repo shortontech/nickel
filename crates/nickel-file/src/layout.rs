@@ -53,7 +53,9 @@ pub(crate) fn build_view(
         };
         tab.into_element()
     });
-    let breadcrumbs = breadcrumb_paths(app.browser.current());
+    let breadcrumb_width = (_width - if narrow { 390.0 } else { 320.0 }).max(90.0);
+    let breadcrumbs =
+        collapse_breadcrumbs(breadcrumb_paths(app.browser.current()), breadcrumb_width);
     let tab_strip = ui! {
         <Container id={"tab-strip"} height={32.0} background={palette.panel} padding={Insets {
             top: 5.0, right: 10.0, bottom: 0.0, left: 12.0,
@@ -642,6 +644,43 @@ pub(crate) fn breadcrumb_paths(current: &Path) -> Vec<(String, PathBuf)> {
         }
     }
     breadcrumbs
+}
+
+pub(crate) fn collapse_breadcrumbs(
+    breadcrumbs: Vec<(String, PathBuf)>,
+    available_width: f32,
+) -> Vec<(String, PathBuf)> {
+    let item_width = |label: &str| label.chars().count() as f32 * 8.0 + 11.0;
+    let full_width = breadcrumbs
+        .iter()
+        .map(|(label, _)| item_width(label))
+        .sum::<f32>()
+        + breadcrumbs.len().saturating_sub(1) as f32 * 17.0;
+    if breadcrumbs.len() <= 2 || full_width <= available_width {
+        return breadcrumbs;
+    }
+
+    let root = breadcrumbs[0].clone();
+    let mut first_suffix = breadcrumbs.len() - 1;
+    let mut used = item_width(&root.0)
+        + 17.0
+        + item_width("…")
+        + 17.0
+        + item_width(&breadcrumbs[first_suffix].0);
+    while first_suffix > 1 {
+        let candidate = item_width(&breadcrumbs[first_suffix - 1].0) + 17.0;
+        if used + candidate > available_width {
+            break;
+        }
+        first_suffix -= 1;
+        used += candidate;
+    }
+
+    let mut collapsed = Vec::with_capacity(breadcrumbs.len() - first_suffix + 2);
+    collapsed.push(root);
+    collapsed.push(("…".into(), breadcrumbs[first_suffix - 1].1.clone()));
+    collapsed.extend(breadcrumbs.into_iter().skip(first_suffix));
+    collapsed
 }
 
 pub(crate) fn sidebar_folder_elements(

@@ -1,5 +1,5 @@
 use super::*;
-use crate::layout::{entries_in_selection, file_status_text};
+use crate::layout::{collapse_breadcrumbs, entries_in_selection, file_status_text};
 use nickel_ui::{ActionKind, Rect, UiHost};
 use nickel_ui_testkit::{FocusDirection, Scenario, ScenarioBudget, Selector};
 
@@ -58,6 +58,27 @@ fn status_area_reports_selection_and_total_without_hiding_errors() {
 
     app.status = "Could not refresh: unavailable".into();
     assert_eq!(file_status_text(&app), app.status);
+}
+
+#[test]
+fn breadcrumbs_collapse_middle_ancestors_and_keep_actionable_endpoints() {
+    let crumbs = ["Home", "Projects", "Nickel", "assets", "concepts"]
+        .into_iter()
+        .scan(PathBuf::from("/"), |path, label| {
+            path.push(label);
+            Some((label.to_owned(), path.clone()))
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(collapse_breadcrumbs(crumbs.clone(), 1_000.0), crumbs);
+    let collapsed = collapse_breadcrumbs(crumbs, 190.0);
+    assert_eq!(collapsed.first().unwrap().0, "Home");
+    assert_eq!(collapsed[1].0, "…");
+    assert_eq!(
+        collapsed[1].1,
+        PathBuf::from("/Home/Projects/Nickel/assets")
+    );
+    assert_eq!(collapsed.last().unwrap().0, "concepts");
 }
 
 #[test]
