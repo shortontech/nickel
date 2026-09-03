@@ -5,7 +5,7 @@ GPU-rendered desktop, taskbar, application launcher, task switching, system cont
 and a file browser without requiring Windows Explorer as the desktop shell.
 
 The repository also contains a Linux compositor built with Smithay. It runs as a nested development
-session or directly through DRM and udev. Nickel also supports macOS as an SDL overlay shell with
+session or directly through DRM and udev. Nickel also supports macOS as a native overlay shell with
 Nickel Bar, launcher, native app icons, and visible-window control.
 
 ## Included Applications
