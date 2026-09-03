@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use nickel_core::theme::ThemePalette;
-use nickel_ui::{AnyView, Component, ComponentBuilderExt, Insets, SemanticRole, ui};
+use nickel_ui::{AnyView, Component, ComponentBuilderExt, ImageFit, Insets, SemanticRole, ui};
 
 use crate::{
     DirectoryBrowser, FileEntry,
@@ -156,7 +156,7 @@ pub(crate) fn tab(
                         focus_border={palette.accent} controller_focus_border={palette.complement}
                         accessibility_label={format!("Tab {label}")}><Row gap={6.0}>
                         {if let Some((id, image)) = icon {
-                            ui! { <Image asset_id={*id} image={image.clone()} generation={u64::from(*id)} width={16.0} height={16.0} /> }
+                            ui! { <Image asset_id={*id} image={image.clone()} generation={u64::from(*id)} fit={ImageFit::Contain} width={16.0} height={16.0} /> }
                         } else {
                             ui! { <Container width={16.0} /> }
                         }}
@@ -231,7 +231,7 @@ pub(crate) fn details_row(
             semantic_role={SemanticRole::Button} accessibility_label={entry.display_name()}
             focus_border={palette.accent} controller_focus_border={palette.complement}>
             <Row gap={12.0}>
-                <Image asset_id={icon_id} image={icon_image} generation={u64::from(icon_id)} width={28.0} height={28.0} />
+                <Image asset_id={icon_id} image={icon_image} generation={u64::from(icon_id)} fit={ImageFit::Contain} width={28.0} height={28.0} />
                 <Container id={format!("details-name-{index}")} grow={1.0} min_width={120.0} height={44.0}>
                     <Text color={palette.text} wrap={true} max_lines={2} ellipsis={true} line_height={18.0}>{entry.display_name()}</Text>
                 </Container>

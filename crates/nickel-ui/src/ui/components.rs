@@ -525,7 +525,7 @@ impl<Message> FileGridItem<Message> {
                     Column::new()
                         .fill_width()
                         .gap(5.0)
-                        .child(image.height(62.0))
+                        .child(image.height(62.0).fit(ImageFit::Contain))
                         .child(
                             Text::new(label)
                                 .height(36.0)
@@ -1765,6 +1765,7 @@ impl<Message> SidebarFolder<Message> {
             let label = open.children.pop();
             let mut row = Row::new().gap(7.0).child(
                 Image::new_with_generation(asset_id, image, generation)
+                    .fit(ImageFit::Contain)
                     .width(18.0)
                     .height(18.0),
             );

@@ -498,6 +498,46 @@ fn details_view_omits_file_only_metadata_for_directories() {
 }
 
 #[test]
+fn file_views_contain_non_square_provider_artwork_without_stretching() {
+    let mut app = FileApp::fixture();
+    let path = app.browser.entries()[0].path.clone();
+    let asset_id = 60_000;
+    app.icons.insert(
+        path,
+        (
+            asset_id,
+            Arc::new(image::RgbaImage::from_pixel(
+                80,
+                40,
+                image::Rgba([20, 80, 160, 255]),
+            )),
+        ),
+    );
+    let palette = ThemePalette::from_appearance(Appearance::default());
+    let image_bounds = |app: &FileApp| {
+        nickel_ui::UiFrame::layout(
+            app.build_view(960.0, 640.0, palette, false),
+            Rect::new(0.0, 0.0, 960.0, 640.0),
+        )
+        .commands()
+        .iter()
+        .find_map(|command| match command {
+            nickel_ui::backend::PaintCommand::Image { bounds, id, .. } if *id == asset_id => {
+                Some(*bounds)
+            }
+            _ => None,
+        })
+        .expect("injected provider artwork must be painted")
+    };
+
+    let grid = image_bounds(&app);
+    assert!((grid.size.width / grid.size.height - 2.0).abs() < 0.01);
+    app.view_mode = FileViewMode::Details;
+    let details = image_bounds(&app);
+    assert!((details.size.width / details.size.height - 2.0).abs() < 0.01);
+}
+
+#[test]
 fn growing_details_name_column_contains_multiline_text_without_row_overlap() {
     let long_name = "A deliberately long file name that wraps across\nmultiple lines.txt";
     let entries = vec![
