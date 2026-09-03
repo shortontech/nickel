@@ -157,6 +157,7 @@ pub struct FileApp {
     pub(crate) resolved_grid_columns: usize,
     pub(crate) exit_requested: bool,
     pub(crate) fixture_appearance: Option<Appearance>,
+    pub(crate) fixture_navigation_busy: bool,
     pub(crate) reading_direction: ReadingDirection,
 }
 
@@ -298,6 +299,15 @@ const FILE_FIXTURE_VARIANTS: &[nickel_ui_testkit::FixtureVariant] = &[
         620,
         Light
     ),
+    file_fixture_variant!("loading", "Loading Location", "medium", 820, 620, Dark),
+    file_fixture_variant!(
+        "disconnected",
+        "Disconnected Location",
+        "medium",
+        820,
+        620,
+        Light
+    ),
     nickel_ui_testkit::FixtureVariant {
         id: "rtl-grid",
         title: "RTL Grid",
@@ -430,6 +440,13 @@ impl nickel_ui_testkit::Fixture for FileWorkbenchFixture {
         if variant.id == "unavailable" {
             app.status = "Location unavailable — reconnect the volume and refresh.".into();
         }
+        if variant.id == "loading" {
+            app.status = "Loading network location…".into();
+            app.fixture_navigation_busy = true;
+        }
+        if variant.id == "disconnected" {
+            app.status = "Network location disconnected — reconnect and refresh.".into();
+        }
         app.fixture_appearance = Some(Appearance {
             mode: match variant.theme {
                 nickel_ui_testkit::FixtureTheme::Light => ThemeMode::Light,
@@ -536,7 +553,7 @@ impl FileApp {
     }
 
     pub(crate) fn navigation_pending(&self) -> bool {
-        self.navigation_rx.is_some()
+        self.navigation_rx.is_some() || self.fixture_navigation_busy
     }
 
     pub(crate) fn resize_details_column_to(&mut self, pointer_x: f32) {
@@ -633,6 +650,7 @@ impl FileApp {
             resolved_grid_columns: 1,
             exit_requested: false,
             fixture_appearance: None,
+            fixture_navigation_busy: false,
             reading_direction: if nickel_i18n::Localizer::system().is_right_to_left() {
                 ReadingDirection::RightToLeft
             } else {
