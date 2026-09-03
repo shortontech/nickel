@@ -33,7 +33,7 @@ use windows::Win32::Foundation::{LPARAM, WPARAM};
 use windows::Win32::System::Threading::GetCurrentThreadId;
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::{
-    MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, PostThreadMessageW, QS_ALLINPUT, WM_APP,
+    MsgWaitForMultipleObjectsEx, PostThreadMessageW, QS_ALLINPUT, WM_APP,
 };
 
 pub const DESKTOP_TITLE: &str = "Nickel Desktop";
@@ -920,10 +920,21 @@ impl WinitShell {
         }
         #[cfg(target_os = "windows")]
         {
+            // Drain anything winit can translate before arming the native wait.
+            // This also establishes the queue's "seen" state so the wait below
+            // responds to messages arriving after this point.
+            self.pump_events(Some(Duration::ZERO));
+            self.drain_external_events();
+            if let Some(event) = self.pending_events.pop_front() {
+                return Some(event);
+            }
             // Winit's pump timeout returns immediately under Wine and some Windows
             // compatibility environments. Wait on the owning thread's message queue
             // directly so native input and Nickel's PostThreadMessageW wake remain
             // interruptible, then let winit translate everything without blocking.
+            // Do not use MWMO_INPUTAVAILABLE: winit may leave a previously inspected
+            // message queued, and that flag would make the wait return forever for
+            // the old message instead of waiting for new queue activity.
             // SAFETY: this thread owns the event loop and therefore its message queue;
             // there are no object handles, and all flag values are Win32 constants.
             unsafe {
@@ -931,7 +942,7 @@ impl WinitShell {
                     None,
                     windows_wait_timeout_millis(timeout),
                     QS_ALLINPUT,
-                    MWMO_INPUTAVAILABLE,
+                    Default::default(),
                 )
             };
             self.pump_events(Some(Duration::ZERO));
