@@ -93,10 +93,13 @@ fn failed_production_launch_remains_recoverable_in_the_requested_tab() {
 }
 
 #[test]
-fn idle_file_host_declares_no_poll_deadline() {
+fn idle_file_host_checks_external_settings_periodically() {
     let mut app = FileApp::new(home_directory());
     app.icon_rx = None;
-    assert_eq!(Application::poll_interval(&app), None);
+    assert_eq!(
+        Application::poll_interval(&app),
+        Some(std::time::Duration::from_secs(1))
+    );
 }
 
 #[test]
@@ -1020,7 +1023,10 @@ fn navigation_from_idle_publishes_fallback_before_optional_provider_work() {
     let mut app = FileApp::new(directory.path().to_path_buf());
     app.icon_rx = None;
 
-    assert_eq!(Application::poll_interval(&app), None);
+    assert_eq!(
+        Application::poll_interval(&app),
+        Some(std::time::Duration::from_secs(1))
+    );
     app.navigate_to(child.clone());
 
     assert_eq!(app.browser.current(), directory.path());
@@ -1031,10 +1037,7 @@ fn navigation_from_idle_publishes_fallback_before_optional_provider_work() {
     assert_eq!(app.browser.current(), child);
     assert!(app.icons.get(&child.join("new-file.txt")).is_some());
     assert!(app.tab_icon.is_some());
-    assert_eq!(
-        Application::poll_interval(&app).is_some(),
-        app.icon_preference == FileIconPreference::System
-    );
+    assert!(Application::poll_interval(&app).is_some());
 }
 
 #[test]

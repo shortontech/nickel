@@ -36,6 +36,7 @@ pub(crate) const MIN_TILE_WIDTH: f32 = 110.0;
 pub(crate) const MAX_TILE_WIDTH: f32 = 240.0;
 const MIN_DETAILS_COLUMN_WIDTH: f32 = 72.0;
 const MAX_DETAILS_COLUMN_WIDTH: f32 = 320.0;
+const SETTINGS_SYNC_INTERVAL: Duration = Duration::from_secs(1);
 type NavigationResult = (u64, Result<Option<DirectoryBrowser>, String>);
 type SidebarResult = (PathBuf, Result<Vec<(String, PathBuf)>, String>);
 
@@ -1900,6 +1901,7 @@ impl Application for FileApp {
 
     fn poll_interval(&self) -> Option<std::time::Duration> {
         [
+            Some(SETTINGS_SYNC_INTERVAL),
             self.icon_rx.as_ref().map(|_| self.icon_poll_delay),
             self.navigation_rx
                 .as_ref()
