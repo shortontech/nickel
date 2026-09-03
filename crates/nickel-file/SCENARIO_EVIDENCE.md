@@ -70,13 +70,26 @@ loop, browsed 15 entries, and rendered both the Windows System-provider path and
 selected Nickel provider end to end. This is useful cross-platform runtime evidence, but Proton's
 Wine shell is not evidence of native Windows Explorer icon fidelity.
 
+Native Windows acceptance was subsequently completed on SteamMachine from commit `b6f8683` using
+the MSVC toolchain. All 76 `nickel-file` tests passed, as did focused shell-settings and Windows
+platform-adapter tests. Captures from the rebuilt application visibly distinguished the default
+System provider's Explorer-backed yellow and special-folder artwork (including OneDrive) from the
+explicit Nickel provider's repository-owned glossy blue artwork and distinct Pictures and Music
+variants. The run used an isolated `LOCALAPPDATA`, leaving persistent user settings unchanged.
+
+An acceptance-only input driver also exercised Ctrl+L path entry, pointer selection, Enter to browse
+into a child folder, and Backspace to return. The final content, breadcrumb, and status bar all
+showed the returned parent directory. A stale title after Backspace was recorded as a separate
+native title-refresh defect; it did not affect browsing state. The audit also observed a separate,
+reproducible long-text overflow defect for later UI work.
+
 A mount-isolated Linux acceptance process replaced `/usr/share/icons`,
 `/usr/local/share/icons`, `$HOME/.icons`, and `$HOME/.local/share/icons` with empty filesystems; an
 independent inspection reported zero entries in every root. Nickel File still opened and displayed
 complete Nickel artwork for ordinary and special folders. This exercises the clean-installation
 condition without uninstalling packages from the development host.
 
-For Specs 0123 and 0124, product acceptance treats the completed Proton run as sufficient Windows
+For Specs 0123 and 0124, the native Windows run supersedes Proton as the Windows acceptance
 evidence. Together with the native Linux, isolated clean-Linux, deterministic fixture, and automated
 scenario results above, the agreed verification matrix is complete and both specifications are
 archived.
