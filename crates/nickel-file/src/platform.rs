@@ -65,7 +65,59 @@ pub(crate) fn location_groups_from(sources: LocationSources) -> Vec<LocationGrou
     .collect()
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
+pub(crate) fn places() -> Vec<(String, PathBuf)> {
+    let home = home_directory();
+    let mut places = vec![("Home".to_owned(), home.clone())];
+    let config_home = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".config"));
+    let configured = std::fs::read_to_string(config_home.join("user-dirs.dirs")).ok();
+    places.extend(user_directories(&home, configured.as_deref()));
+    places
+}
+
+#[cfg(target_os = "linux")]
+fn user_directories(home: &Path, configured: Option<&str>) -> Vec<(String, PathBuf)> {
+    let defaults = [
+        ("Desktop", "XDG_DESKTOP_DIR", "Desktop"),
+        ("Documents", "XDG_DOCUMENTS_DIR", "Documents"),
+        ("Downloads", "XDG_DOWNLOAD_DIR", "Downloads"),
+        ("Pictures", "XDG_PICTURES_DIR", "Pictures"),
+        ("Music", "XDG_MUSIC_DIR", "Music"),
+        ("Videos", "XDG_VIDEOS_DIR", "Videos"),
+    ];
+    defaults
+        .into_iter()
+        .filter_map(|(label, key, fallback)| {
+            let configured_path = configured
+                .and_then(|contents| {
+                    contents.lines().find_map(|line| {
+                        line.split_once('=')
+                            .filter(|(candidate, _)| candidate.trim() == key)
+                    })
+                })
+                .and_then(|(_, value)| xdg_user_path(value.trim(), home));
+            let path = configured_path.unwrap_or_else(|| home.join(fallback));
+            (path != home && path.is_dir()).then(|| (label.to_owned(), path))
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn xdg_user_path(value: &str, home: &Path) -> Option<PathBuf> {
+    let value = value.strip_prefix('"')?.strip_suffix('"')?;
+    let suffix = value
+        .strip_prefix("$HOME")
+        .or_else(|| value.strip_prefix("${HOME}"))?;
+    if suffix.contains('$') {
+        return None;
+    }
+    let suffix = suffix.strip_prefix('/').unwrap_or(suffix);
+    Some(home.join(suffix.replace("\\\"", "\"").replace("\\\\", "\\")))
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 pub(crate) fn places() -> Vec<(String, PathBuf)> {
     let home = home_directory();
     let mut places = vec![("Home".to_owned(), home.clone())];
@@ -192,4 +244,32 @@ pub(crate) fn open_path(path: &Path) -> Result<(), String> {
 #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
 pub(crate) fn open_path(_path: &Path) -> Result<(), String> {
     Err("opening files is unsupported on this platform".into())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::user_directories;
+
+    #[test]
+    fn xdg_user_directories_honor_localized_disabled_and_default_paths() {
+        let home = tempfile::tempdir().unwrap();
+        for directory in ["Arbeitsfläche", "Documents", "Downloads"] {
+            std::fs::create_dir(home.path().join(directory)).unwrap();
+        }
+        let configured = concat!(
+            "XDG_DESKTOP_DIR=\"$HOME/Arbeitsfläche\"\n",
+            "XDG_DOCUMENTS_DIR=\"$HOME\"\n",
+            "XDG_DOWNLOAD_DIR=\"${HOME}/Downloads\"\n",
+            "XDG_PICTURES_DIR=\"$OTHER/Pictures\"\n",
+        );
+
+        let directories = user_directories(home.path(), Some(configured));
+        assert_eq!(
+            directories,
+            [
+                ("Desktop".to_owned(), home.path().join("Arbeitsfläche")),
+                ("Downloads".to_owned(), home.path().join("Downloads")),
+            ]
+        );
+    }
 }
