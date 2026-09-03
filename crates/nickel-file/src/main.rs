@@ -652,20 +652,26 @@ impl FileApp {
 
     fn poll_sidebar_children(&mut self) -> bool {
         let mut changed = false;
+        let mut artwork_changed = false;
         loop {
             match self.sidebar_receiver.try_recv() {
                 Ok((path, Ok(children))) => {
                     self.sidebar_loading.remove(&path);
                     self.sidebar_children.insert(path, children);
                     changed = true;
+                    artwork_changed = true;
                 }
                 Ok((path, Err(error))) => {
                     self.sidebar_loading.remove(&path);
                     self.status = format!("Could not expand {}: {error}", path.display());
                     changed = true;
                 }
-                Err(TryRecvError::Empty) => return changed,
-                Err(TryRecvError::Disconnected) => return changed,
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => {
+                    if artwork_changed {
+                        self.refresh_icons();
+                    }
+                    return changed;
+                }
             }
         }
     }
@@ -1252,6 +1258,25 @@ impl FileApp {
                 let key =
                     icons::cache_key_with_theme(preference, self.icon_theme.as_deref(), &request);
                 entries.push((path, is_directory, key));
+            }
+        }
+        for path in self
+            .sidebar_children
+            .values()
+            .flatten()
+            .map(|(_, path)| path.clone())
+        {
+            if known_paths.insert(path.clone()) {
+                let request = icons::ArtworkRequest {
+                    path: &path,
+                    kind: icons::semantic_kind(&path, true),
+                    logical_size: 96,
+                    scale_milli: self.artwork_scale_milli,
+                    appearance: artwork_appearance,
+                };
+                let key =
+                    icons::cache_key_with_theme(preference, self.icon_theme.as_deref(), &request);
+                entries.push((path, true, key));
             }
         }
         self.icons

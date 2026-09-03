@@ -639,7 +639,11 @@ fn sidebar_expansion_enumerates_children_asynchronously() {
     assert!(!app.sidebar_loading.contains(&root_path));
     assert_eq!(
         app.sidebar_children.get(&root_path),
-        Some(&vec![("Child".to_owned(), child)])
+        Some(&vec![("Child".to_owned(), child.clone())])
+    );
+    assert!(
+        app.icons.get(&child).is_some(),
+        "published sidebar children must receive immediate fallback artwork"
     );
 }
 
