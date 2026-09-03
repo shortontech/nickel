@@ -308,13 +308,19 @@ fn expand_element(mut element: ElementNode) -> Result<TokenStream2> {
             let label = required_value(&mut element.attributes, "label", tag.span())?;
             let asset_id = required_value(&mut element.attributes, "asset_id", tag.span())?;
             let image = required_value(&mut element.attributes, "image", tag.span())?;
+            let generation = take_attribute(&mut element.attributes, "generation")
+                .and_then(|attribute| attribute.value);
             if !element.children.is_empty() {
                 return Err(Error::new(
                     tag.span(),
                     "`FileGridItem` does not accept children",
                 ));
             }
-            quote! { ::nickel_ui::FileGridItem::new(#message, #label, #asset_id, #image) }
+            if let Some(generation) = generation {
+                quote! { ::nickel_ui::FileGridItem::new_with_generation(#message, #label, #asset_id, #image, #generation) }
+            } else {
+                quote! { ::nickel_ui::FileGridItem::new(#message, #label, #asset_id, #image) }
+            }
         }
         "Sidebar" => {
             let width = required_value(&mut element.attributes, "width", tag.span())?;
@@ -359,10 +365,16 @@ fn expand_element(mut element: ElementNode) -> Result<TokenStream2> {
         "Image" => {
             let asset_id = required_value(&mut element.attributes, "asset_id", tag.span())?;
             let image = required_value(&mut element.attributes, "image", tag.span())?;
+            let generation = take_attribute(&mut element.attributes, "generation")
+                .and_then(|attribute| attribute.value);
             if !element.children.is_empty() {
                 return Err(Error::new(tag.span(), "`Image` does not accept children"));
             }
-            quote! { ::nickel_ui::Image::new(#asset_id, #image) }
+            if let Some(generation) = generation {
+                quote! { ::nickel_ui::Image::new_with_generation(#asset_id, #image, #generation) }
+            } else {
+                quote! { ::nickel_ui::Image::new(#asset_id, #image) }
+            }
         }
         "Column" | "Row" | "Container" | "Grid" | "Fragment" | "MenuBar" => {
             quote! { ::nickel_ui::#tag::new() }

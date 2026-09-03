@@ -5,6 +5,85 @@ use cosmic_text::{
 use nickel_render_assets::ProcessFontSystem;
 use smallvec::{SmallVec, smallvec};
 
+#[cfg(debug_assertions)]
+mod image_profile {
+    use std::{
+        sync::{Mutex, OnceLock},
+        time::{Duration, Instant},
+    };
+
+    #[derive(Default)]
+    struct Totals {
+        fingerprints: u64,
+        fingerprint_bytes: u64,
+        fingerprint_time: Duration,
+        rasters: u64,
+        raster_pixels: u64,
+        raster_time: Duration,
+    }
+
+    struct State {
+        started: Instant,
+        totals: Totals,
+    }
+
+    fn state() -> Option<&'static Mutex<State>> {
+        static ENABLED: OnceLock<bool> = OnceLock::new();
+        static STATE: OnceLock<Mutex<State>> = OnceLock::new();
+        ENABLED
+            .get_or_init(|| std::env::var_os("NICKEL_FILE_PROFILE_ICONS").is_some())
+            .then(|| {
+                STATE.get_or_init(|| {
+                    Mutex::new(State {
+                        started: Instant::now(),
+                        totals: Totals::default(),
+                    })
+                })
+            })
+    }
+
+    fn report(state: &mut State) {
+        if state.started.elapsed() < Duration::from_secs(1) {
+            return;
+        }
+        eprintln!(
+            "nickel-file icon-profile: fingerprint calls={} bytes={} time={:.2?}; raster calls={} pixels={} time={:.2?}",
+            state.totals.fingerprints,
+            state.totals.fingerprint_bytes,
+            state.totals.fingerprint_time,
+            state.totals.rasters,
+            state.totals.raster_pixels,
+            state.totals.raster_time,
+        );
+        state.started = Instant::now();
+        state.totals = Totals::default();
+    }
+
+    pub(super) fn fingerprint(bytes: usize, elapsed: Duration) {
+        let Some(state) = state() else { return };
+        let mut state = state.lock().expect("icon profile lock");
+        state.totals.fingerprints += 1;
+        state.totals.fingerprint_bytes =
+            state.totals.fingerprint_bytes.saturating_add(bytes as u64);
+        state.totals.fingerprint_time += elapsed;
+        report(&mut state);
+    }
+
+    pub(super) fn raster(pixels: u64, elapsed: Duration) {
+        let Some(state) = state() else { return };
+        let mut state = state.lock().expect("icon profile lock");
+        state.totals.rasters += 1;
+        state.totals.raster_pixels = state.totals.raster_pixels.saturating_add(pixels);
+        state.totals.raster_time += elapsed;
+        report(&mut state);
+    }
+}
+
+#[cfg(debug_assertions)]
+pub(crate) fn record_image_fingerprint(bytes: usize, elapsed: std::time::Duration) {
+    image_profile::fingerprint(bytes, elapsed);
+}
+
 use crate::{Color, GradientAxis, PaintCommand, Rect, StyledTextSpan, TextAlign};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -401,6 +480,10 @@ impl SoftwareRenderer {
             .max(0.0)
             .min(rect.size.width / 2.0)
             .min(rect.size.height / 2.0);
+        if radius == 0.0 || corners == 0 {
+            self.fill_rect(bounds, pixel(color));
+            return;
+        }
         self.for_pixels(bounds, |renderer, x, y| {
             let left = x as f32 + 0.5 - rect.origin.x;
             let top = y as f32 + 0.5 - rect.origin.y;
@@ -424,6 +507,32 @@ impl SoftwareRenderer {
                 renderer.blend(x, y, pixel(color));
             }
         });
+    }
+
+    fn fill_rect(&mut self, rect: Rect, source: Pixel) {
+        let x_start = rect.origin.x.floor().max(0.0) as u32;
+        let y_start = rect.origin.y.floor().max(0.0) as u32;
+        let x_end = (rect.origin.x + rect.size.width)
+            .ceil()
+            .min(self.width as f32) as u32;
+        let y_end = (rect.origin.y + rect.size.height)
+            .ceil()
+            .min(self.height as f32) as u32;
+
+        if source.a == 255 {
+            for y in y_start..y_end {
+                let start = (y * self.width + x_start) as usize;
+                let end = (y * self.width + x_end) as usize;
+                self.pixels[start..end].fill(source);
+            }
+            return;
+        }
+
+        for y in y_start..y_end {
+            for x in x_start..x_end {
+                self.blend(x, y, source);
+            }
+        }
     }
 
     fn fill_gradient(&mut self, rect: Rect, gradient: crate::LinearGradient, clip: Rect) {
@@ -639,6 +748,11 @@ impl SoftwareRenderer {
         let Some(bounds) = intersection(rect, clip) else {
             return;
         };
+        #[cfg(debug_assertions)]
+        let profile_started = std::time::Instant::now();
+        #[cfg(debug_assertions)]
+        let profile_pixels = (bounds.size.width.ceil().max(0.0) as u64)
+            .saturating_mul(bounds.size.height.ceil().max(0.0) as u64);
         self.for_pixels(bounds, |renderer, x, y| {
             let source_x =
                 (((x as f32 + 0.5 - rect.origin.x) / rect.size.width) * image.width() as f32)
@@ -655,6 +769,8 @@ impl SoftwareRenderer {
                 Pixel::rgba(pixel[0], pixel[1], pixel[2], pixel[3]),
             );
         });
+        #[cfg(debug_assertions)]
+        image_profile::raster(profile_pixels, profile_started.elapsed());
     }
 
     fn for_pixels(&mut self, rect: Rect, mut draw: impl FnMut(&mut Self, u32, u32)) {
@@ -869,7 +985,27 @@ fn px(value: u32) -> u32 {
 mod tests {
     use nickel_core::resource_owner::{DependencyOwnerKind, dependency_owner_diagnostics};
 
-    use super::{PaintCommand, Rect, SoftwareRenderer, TextAlign, command_intersects_clip};
+    use super::{PaintCommand, Pixel, Rect, SoftwareRenderer, TextAlign, command_intersects_clip};
+
+    #[test]
+    fn rectangular_fill_fast_path_preserves_opaque_and_translucent_blending() {
+        let mut renderer = SoftwareRenderer::new_pixel_buffer(4, 3, 1.0);
+        renderer.render(&[
+            PaintCommand::Fill {
+                rect: Rect::new(0.0, 0.0, 4.0, 3.0),
+                color: 0x20_40_60,
+            },
+            PaintCommand::Fill {
+                rect: Rect::new(1.0, 1.0, 2.0, 1.0),
+                color: 0x80_ff_00_00,
+            },
+        ]);
+
+        assert_eq!(renderer.pixels()[0], Pixel::rgba(0x20, 0x40, 0x60, 255));
+        assert_eq!(renderer.pixels()[5], Pixel::rgba(0x8f, 0x1f, 0x2f, 255));
+        assert_eq!(renderer.pixels()[6], Pixel::rgba(0x8f, 0x1f, 0x2f, 255));
+        assert_eq!(renderer.pixels()[7], Pixel::rgba(0x20, 0x40, 0x60, 255));
+    }
 
     #[test]
     fn software_renderer_churn_respects_process_font_system_bound() {

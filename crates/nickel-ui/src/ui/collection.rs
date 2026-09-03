@@ -2,7 +2,7 @@ use std::{collections::HashMap, fmt};
 
 use super::{
     AnyView, Background, Color, Column, Component, ComponentBuilderExt, Container, Element, Grid,
-    NavigationScope, ReadingDirection, SemanticRole, Text, Track, UiId, VirtualColumn,
+    NavigationScope, ReadingDirection, SemanticRole, Spacer, Text, Track, UiId, VirtualColumn,
     VirtualWindow,
 };
 use crate::{InputModality, ViewContext};
@@ -30,6 +30,15 @@ pub enum CollectionPresentation {
     VirtualList {
         item_height: f32,
         offset: f32,
+        viewport_height: f32,
+        overscan: f32,
+    },
+    /// A fixed-row-height adaptive grid which constructs only visible complete rows.
+    VirtualGrid {
+        minimum_item_width: f32,
+        row_height: f32,
+        offset: f32,
+        viewport_width: f32,
         viewport_height: f32,
         overscan: f32,
     },
@@ -109,6 +118,7 @@ pub struct Collection<T, K, Message, Render, View> {
     render: Render,
     presentation: CollectionPresentation,
     id: UiId,
+    accessibility_label: Option<String>,
     gap: f32,
     item_focus_border: Option<Color>,
     item_controller_focus_border: Option<Color>,
@@ -174,6 +184,7 @@ where
             render,
             presentation: CollectionPresentation::List,
             id: UiId::from("collection"),
+            accessibility_label: None,
             gap: 0.0,
             item_focus_border: None,
             item_controller_focus_border: None,
@@ -196,6 +207,11 @@ where
 
     pub fn id(mut self, id: impl Into<UiId>) -> Self {
         self.id = id.into();
+        self
+    }
+
+    pub fn accessibility_label(mut self, label: impl Into<String>) -> Self {
+        self.accessibility_label = Some(label.into());
         self
     }
 
@@ -364,11 +380,13 @@ where
                 SemanticRole::ListItem
             }
             CollectionPresentation::UniformGrid { .. }
-            | CollectionPresentation::AdaptiveGrid { .. } => SemanticRole::GridCell,
+            | CollectionPresentation::AdaptiveGrid { .. }
+            | CollectionPresentation::VirtualGrid { .. } => SemanticRole::GridCell,
         };
         let total = self.keyed_items.len();
         let mut window = 0..total;
         let mut virtual_window = None;
+        let mut virtual_grid_columns = None;
         if let CollectionPresentation::VirtualList {
             item_height,
             offset,
@@ -408,11 +426,64 @@ where
             window = resolved.range.clone();
             virtual_window = Some(resolved);
         }
+        if let CollectionPresentation::VirtualGrid {
+            minimum_item_width,
+            row_height,
+            offset,
+            viewport_width,
+            viewport_height,
+            overscan,
+        } = self.presentation
+        {
+            let minimum = minimum_item_width.max(1.0);
+            let gap = self.gap.max(0.0);
+            let columns = (((viewport_width.max(0.0) + gap) / (minimum + gap)).floor() as usize)
+                .max(1)
+                .min(total.max(1));
+            let rows = total.div_ceil(columns);
+            let heights = vec![row_height.max(1.0); rows];
+            let mut resolved =
+                VirtualWindow::from_heights(&heights, gap, offset, viewport_height, overscan);
+            let reveal_index = self
+                .reveal
+                .as_ref()
+                .and_then(|key| {
+                    self.keyed_items
+                        .iter()
+                        .position(|(candidate, _)| candidate == key)
+                })
+                .or_else(|| {
+                    let target = self.reveal_target.as_ref()?;
+                    self.keyed_items
+                        .iter()
+                        .position(|(key, _)| target.as_str().ends_with(&format!("/{key}")))
+                });
+            if let Some(index) = reveal_index {
+                let row = index / columns;
+                if !resolved.range.contains(&row) {
+                    resolved = VirtualWindow::from_heights(
+                        &heights,
+                        gap,
+                        row as f32 * (row_height.max(1.0) + gap),
+                        viewport_height,
+                        overscan,
+                    );
+                }
+            }
+            window = (resolved.range.start * columns)..(resolved.range.end * columns).min(total);
+            virtual_window = Some(resolved);
+            virtual_grid_columns = Some(columns);
+        }
         let selected = &self.interactions.selected;
         let disabled = &self.interactions.disabled;
         let item_label = &self.item_label;
         let columns = match self.presentation {
             CollectionPresentation::UniformGrid { columns } => Some(columns.max(1)),
+            CollectionPresentation::VirtualGrid { .. } => virtual_grid_columns,
+            _ => None,
+        };
+        let virtual_row_height = match self.presentation {
+            CollectionPresentation::VirtualGrid { row_height, .. } => Some(row_height.max(1.0)),
             _ => None,
         };
         let direction = self.direction;
@@ -449,6 +520,9 @@ where
                         (false, false) => "unselected",
                     })
                     .child(AnyView::new((self.render)(item)));
+                if let Some(row_height) = virtual_row_height {
+                    item_container = item_container.height(row_height);
+                }
                 if let Some(color) = self.item_focus_border {
                     item_container = item_container.focus_border(color);
                 }
@@ -493,15 +567,35 @@ where
                 .into_element()
                 .id(self.id)
                 .semantic_role(SemanticRole::List),
+            CollectionPresentation::VirtualGrid { .. } => {
+                let window = virtual_window.expect("virtual grid constructs a window");
+                Column::new()
+                    .fill_width()
+                    .child(Spacer::vertical(window.leading))
+                    .child(
+                        Grid::fixed(virtual_grid_columns.expect("virtual grid resolves columns"))
+                            .gap(self.gap)
+                            .children(children),
+                    )
+                    .child(Spacer::vertical(window.trailing))
+                    .into_element()
+                    .id(self.id)
+                    .semantic_role(SemanticRole::Grid)
+            }
         };
         element.navigation_scope = self.navigation_scope;
         element.style.controller_scope_background = self.controller_scope_background;
+        if let Some(label) = self.accessibility_label {
+            element = element.accessibility_label(label);
+        }
         element
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::{cell::Cell, rc::Rc};
+
     use super::*;
     use crate::{
         ActionKind, Application, Rect, SemanticAction, UiEvent, UiFrame, UiHost, UiStateStore,
@@ -673,6 +767,52 @@ mod tests {
                 < 10,
             "virtualization must not build all items"
         );
+    }
+
+    #[test]
+    fn virtual_grid_constructs_complete_visible_rows_and_preserves_extent() {
+        let rendered = Rc::new(Cell::new(0));
+        let rendered_items = rendered.clone();
+        let collection = Collection::try_new(
+            CollectionState::Ready((0_u32..4096).collect()),
+            |item| *item,
+            move |item| {
+                rendered_items.set(rendered_items.get() + 1);
+                Text::new(format!("Item {item}"))
+            },
+        )
+        .unwrap()
+        .id("files")
+        .gap(10.0)
+        .presentation(CollectionPresentation::VirtualGrid {
+            minimum_item_width: 100.0,
+            row_height: 100.0,
+            offset: 2_200.0,
+            viewport_width: 430.0,
+            viewport_height: 250.0,
+            overscan: 100.0,
+        });
+        let tree = UiFrame::layout(
+            crate::VerticalScroll::new(Message::Activate(0), 2_200.0)
+                .controlled(true)
+                .child(collection),
+            Rect::new(0.0, 0.0, 430.0, 250.0),
+        );
+
+        assert!(rendered.get() <= 24, "rendered {} items", rendered.get());
+        assert_eq!(rendered.get() % 4, 0, "windows contain complete rows");
+        assert_eq!(
+            tree.semantic_nodes()
+                .iter()
+                .filter(|node| node.role == Some(SemanticRole::GridCell))
+                .count(),
+            rendered.get()
+        );
+        let extent = tree
+            .scroll_extent(&Message::Activate(0))
+            .expect("virtual grid retains a real scroll extent");
+        assert_eq!(extent.content.height, 112_630.0);
+        assert_eq!(extent.offset, 2_200.0);
     }
 
     #[test]

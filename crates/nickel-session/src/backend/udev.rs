@@ -80,6 +80,11 @@ use crate::{
 
 const FORMATS: &[Fourcc] = &[Fourcc::Abgr8888, Fourcc::Argb8888];
 const BOOTSTRAP_RENDER_TIMEOUT: Duration = Duration::from_secs(30);
+// EVDI presentation includes a synchronous GPU readback, CPU copy into a dumb
+// buffer, and an atomic commit. Unlike a normal DRM output it has no vblank
+// completion event to provide natural pacing, so an eager client could keep
+// the compositor event-loop thread in this path indefinitely.
+const EVDI_MIN_RENDER_INTERVAL: Duration = Duration::from_millis(16);
 const SWITCHER_MAX_CARDS: usize = 5;
 
 fn output_model(connector_name: &str) -> String {
@@ -533,6 +538,7 @@ struct DeviceData {
     owns_renderer: bool,
     is_evdi: bool,
     render_scheduled: bool,
+    last_render_started: Option<Instant>,
     surfaces: HashMap<crtc::Handle, SurfaceData>,
 }
 
@@ -1468,6 +1474,7 @@ impl NickelSession {
                     owns_renderer,
                     is_evdi: discovered.is_evdi,
                     render_scheduled: false,
+                    last_render_started: None,
                     surfaces: HashMap::new(),
                 },
             );
@@ -2064,6 +2071,11 @@ impl NickelSession {
         if device.render_scheduled {
             return;
         }
+        let delay = paced_render_delay(
+            device.is_evdi,
+            delay,
+            device.last_render_started.map(|started| started.elapsed()),
+        );
         device.render_scheduled = true;
         let generation = device.generation;
         let timer = Timer::from_duration(delay);
@@ -2083,6 +2095,7 @@ impl NickelSession {
                     .and_then(|native| native.devices.get_mut(&node))
                 {
                     device.render_scheduled = false;
+                    device.last_render_started = Some(Instant::now());
                 }
                 data.render_node(node);
                 TimeoutAction::Drop
@@ -2869,6 +2882,20 @@ impl NickelSession {
         // renders. Scheduling unconditionally at every vblank turns a static desktop into a
         // permanent full-refresh loop, which is especially destructive on llvmpipe.
     }
+}
+
+fn paced_render_delay(
+    is_evdi: bool,
+    requested: Duration,
+    since_last_render: Option<Duration>,
+) -> Duration {
+    if !is_evdi {
+        return requested;
+    }
+    let pacing = since_last_render
+        .map(|elapsed| EVDI_MIN_RENDER_INTERVAL.saturating_sub(elapsed))
+        .unwrap_or(Duration::ZERO);
+    requested.max(pacing)
 }
 
 fn is_evdi_device(path: &Path) -> bool {

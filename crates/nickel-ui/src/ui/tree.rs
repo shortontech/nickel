@@ -546,6 +546,7 @@ pub struct UiFrame<Message = String> {
     accessibility: Vec<AccessibilityNode>,
     semantic_role_name_index: HashMap<(SemanticRole, String), Vec<usize>>,
     semantic_parents: Vec<Option<usize>>,
+    navigation_depths: Vec<usize>,
     resolved: ResolvedLayout,
     diagnostics: Vec<LayoutDiagnostic>,
     diagnostic_keys: HashSet<(DiagnosticKind, UiId)>,
@@ -574,6 +575,7 @@ impl<Message> Default for UiFrame<Message> {
             accessibility: Vec::new(),
             semantic_role_name_index: HashMap::new(),
             semantic_parents: Vec::new(),
+            navigation_depths: Vec::new(),
             resolved: ResolvedLayout::default(),
             diagnostics: Vec::new(),
             diagnostic_keys: HashSet::new(),
@@ -3854,11 +3856,19 @@ impl<Message: Clone> UiFrame<Message> {
     }
 
     fn emit_accessibility_geometry(&mut self) {
-        let mut parents = vec![None; self.resolved.nodes.len()];
-        for node in &self.resolved.nodes {
+        self.semantic_parents = vec![None; self.resolved.nodes.len()];
+        for (index, node) in self.resolved.nodes.iter().enumerate() {
             for child in &node.children {
-                parents[*child] = Some(node.id.clone());
+                self.semantic_parents[*child] = Some(index);
             }
+        }
+        self.navigation_depths = vec![0; self.resolved.nodes.len()];
+        for index in 0..self.resolved.nodes.len() {
+            let parent_depth = self.semantic_parents[index]
+                .map(|parent| self.navigation_depths[parent])
+                .unwrap_or(0);
+            self.navigation_depths[index] =
+                parent_depth + usize::from(self.resolved.nodes[index].navigation_scope.is_some());
         }
         self.accessibility = self
             .resolved
@@ -3874,7 +3884,8 @@ impl<Message: Clone> UiFrame<Message> {
                 });
                 Some(AccessibilityNode {
                     id: node.id.clone(),
-                    parent: parents[index].clone(),
+                    parent: self.semantic_parents[index]
+                        .map(|parent| self.resolved.nodes[parent].id.clone()),
                     component: node.component,
                     rect,
                     interactive: node.interaction.interactive,
@@ -3897,11 +3908,7 @@ impl<Message: Clone> UiFrame<Message> {
             })
             .collect();
         self.semantic_role_name_index.clear();
-        self.semantic_parents = vec![None; self.resolved.nodes.len()];
         for (index, node) in self.resolved.nodes.iter().enumerate() {
-            for child in &node.children {
-                self.semantic_parents[*child] = Some(index);
-            }
             if let (Some(role), Some(name)) = (node.semantic_role, &node.accessibility_label) {
                 self.semantic_role_name_index
                     .entry((role, name.clone()))
@@ -3911,20 +3918,8 @@ impl<Message: Clone> UiFrame<Message> {
         }
     }
 
-    fn navigation_depth_for_index(&self, mut index: usize) -> usize {
-        let mut depth = usize::from(self.resolved.nodes[index].navigation_scope.is_some());
-        loop {
-            let parent = self
-                .resolved
-                .nodes
-                .iter()
-                .position(|node| node.children.contains(&index));
-            let Some(parent) = parent else {
-                return depth;
-            };
-            index = parent;
-            depth += usize::from(self.resolved.nodes[index].navigation_scope.is_some());
-        }
+    fn navigation_depth_for_index(&self, index: usize) -> usize {
+        self.navigation_depths.get(index).copied().unwrap_or(0)
     }
 
     fn reset_emission(&mut self) {

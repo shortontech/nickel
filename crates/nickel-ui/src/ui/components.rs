@@ -491,6 +491,26 @@ impl<Message> FileGridItem<Message> {
         icon_id: u16,
         icon: Arc<RgbaImage>,
     ) -> Self {
+        Self::from_image(message, label, Image::new(icon_id, icon))
+    }
+
+    /// Creates a file item whose icon pixels are identified by a source-owned
+    /// generation, avoiding a content fingerprint on every UI rebuild.
+    pub fn new_with_generation(
+        message: Message,
+        label: impl Into<String>,
+        icon_id: u16,
+        icon: Arc<RgbaImage>,
+        generation: u64,
+    ) -> Self {
+        Self::from_image(
+            message,
+            label,
+            Image::new_with_generation(icon_id, icon, generation),
+        )
+    }
+
+    fn from_image(message: Message, label: impl Into<String>, image: Image<Message>) -> Self {
         let label = label.into();
         Self(
             Container::new()
@@ -502,15 +522,12 @@ impl<Message> FileGridItem<Message> {
                 })
                 .message(message)
                 .child(
-                    Column::new()
-                        .gap(7.0)
-                        .child(Image::new(icon_id, icon).height(62.0))
-                        .child(
-                            Text::new(label)
-                                .height(27.0)
-                                .scale(1.2)
-                                .align(TextAlign::Center),
-                        ),
+                    Column::new().gap(7.0).child(image.height(62.0)).child(
+                        Text::new(label)
+                            .height(27.0)
+                            .scale(1.2)
+                            .align(TextAlign::Center),
+                    ),
                 ),
         )
     }
@@ -901,11 +918,23 @@ impl<Message> Component<Message> for CustomPaint<Message> {
 impl<Message> Image<Message> {
     pub fn new(id: u16, image: Arc<RgbaImage>) -> Self {
         use std::hash::{Hash, Hasher};
+        #[cfg(debug_assertions)]
+        let profile_started = std::time::Instant::now();
         let mut fingerprint = std::collections::hash_map::DefaultHasher::new();
         image.width().hash(&mut fingerprint);
         image.height().hash(&mut fingerprint);
         image.as_raw().hash(&mut fingerprint);
         let generation = fingerprint.finish();
+        #[cfg(debug_assertions)]
+        crate::gpu::record_image_fingerprint(image.as_raw().len(), profile_started.elapsed());
+        Self::new_with_generation(id, image, generation)
+    }
+
+    /// Creates an image with a source-owned content generation.
+    ///
+    /// The caller must change `generation` whenever the pixels associated with
+    /// `id` change. This avoids hashing the complete image on repeated builds.
+    pub fn new_with_generation(id: u16, image: Arc<RgbaImage>, generation: u64) -> Self {
         Self(Element {
             id: None,
             source: None,

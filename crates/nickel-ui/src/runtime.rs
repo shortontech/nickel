@@ -26,6 +26,7 @@ use crate::{
 #[derive(Debug, Default)]
 struct PresentScheduler {
     dirty: bool,
+    pending: bool,
 }
 
 impl PresentScheduler {
@@ -33,9 +34,62 @@ impl PresentScheduler {
         self.dirty = true;
     }
 
-    fn take_present(&mut self) -> bool {
+    fn request_present(&mut self) -> bool {
+        if !self.dirty || self.pending {
+            return false;
+        }
+        self.pending = true;
+        true
+    }
+
+    fn begin_present(&mut self) -> bool {
+        self.pending = false;
         std::mem::take(&mut self.dirty)
     }
+}
+
+fn queue_continuous_input(
+    pending: &mut Vec<nickel_input::InputEvent>,
+    event: nickel_input::InputEvent,
+) {
+    let nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Motion {
+        device,
+        order,
+        position,
+        delta,
+    }) = event
+    else {
+        pending.push(event);
+        return;
+    };
+    if let Some(nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Motion {
+        device: queued_device,
+        order: queued_order,
+        position: queued_position,
+        delta: queued_delta,
+    })) = pending.last_mut()
+        && *queued_device == device
+    {
+        *queued_order = order;
+        *queued_position = position;
+        *queued_delta = match (*queued_delta, delta) {
+            (Some(previous), Some(next)) => Some(nickel_input::Vector {
+                x: previous.x + next.x,
+                y: previous.y + next.y,
+            }),
+            (None, next) => next,
+            (previous, None) => previous,
+        };
+        return;
+    }
+    pending.push(nickel_input::InputEvent::Pointer(
+        nickel_input::PointerEvent::Motion {
+            device,
+            order,
+            position,
+            delta,
+        },
+    ));
 }
 
 fn wait_duration(
@@ -585,6 +639,18 @@ pub trait HostAdapter<A: Application> {
         &mut self,
         _host: &mut UiHost<A>,
         _event: &WindowEvent,
+        _services: HostServices<'_>,
+    ) -> Result<AdapterOutcome, Box<dyn Error>> {
+        Ok(AdapterOutcome::default())
+    }
+
+    /// Observes canonical normalized input at the same dispatch boundary as
+    /// [`UiHost`]. Continuous pointer input is therefore delivered only after
+    /// the runtime has coalesced it for the next presentation.
+    fn normalized_input(
+        &mut self,
+        _host: &mut UiHost<A>,
+        _input: &nickel_input::InputEvent,
         _services: HostServices<'_>,
     ) -> Result<AdapterOutcome, Box<dyn Error>> {
         Ok(AdapterOutcome::default())
@@ -1319,6 +1385,14 @@ impl<A: Application> UiHost<A> {
             }
         }
         combined.effects = self.application.take_effect_evidence();
+        self.next_application_deadline = match (
+            self.next_application_deadline,
+            self.application.poll_interval(),
+        ) {
+            (_, None) => None,
+            (Some(deadline), Some(_)) => Some(deadline),
+            (None, Some(interval)) => Some(now + interval),
+        };
         combined.pointer_icon = self.pointer_icon;
         combined.text_input_active = self.input_context().text_focused;
         combined.accessibility_generation = self.frame_generation;
@@ -1644,6 +1718,7 @@ struct ApplicationRuntime<A: Application, H: HostAdapter<A>> {
     scale: f32,
     stopped: bool,
     error: Option<Box<dyn Error>>,
+    pending_continuous_input: Vec<nickel_input::InputEvent>,
 }
 
 impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
@@ -1669,7 +1744,90 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
             scale: 1.0,
             stopped: false,
             error: None,
+            pending_continuous_input: Vec::new(),
         }
+    }
+
+    fn apply_input_outcome(&mut self, window: &Window, outcome: HostEventOutcome) {
+        window.set_ime_allowed(outcome.text_input_active);
+        if let Some(text) = outcome.clipboard_text
+            && let Some(clipboard) = &mut self.clipboard
+        {
+            let _ = clipboard.set_text(text);
+        }
+        if let Some(host) = &self.host {
+            let next_icon = host.inspect().pointer_icon;
+            if next_icon != self.pointer_icon {
+                window.set_cursor(match next_icon {
+                    PointerIcon::Default => CursorIcon::Default,
+                    PointerIcon::Hand => CursorIcon::Pointer,
+                    PointerIcon::Text => CursorIcon::Text,
+                });
+                self.pointer_icon = next_icon;
+            }
+        }
+        if outcome.changed {
+            self.next_caret_blink = Instant::now() + Duration::from_millis(500);
+            self.scheduler.invalidate();
+        }
+    }
+
+    fn dispatch_normalized_input(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window: &Window,
+        inputs: Vec<nickel_input::InputEvent>,
+        clipboard_text: Option<String>,
+    ) {
+        let mut events = Vec::with_capacity(inputs.len());
+        let mut adapter_changed = false;
+        let mut adapter_exit = false;
+        for input in inputs {
+            let adapted = self.host.as_mut().map(|host| {
+                self.adapter
+                    .normalized_input(host, &input, HostServices { window })
+            });
+            let consume = match adapted {
+                Some(Ok(outcome)) => {
+                    let consume = outcome.consume;
+                    adapter_changed |= outcome.changed;
+                    adapter_exit |= outcome.exit;
+                    consume
+                }
+                Some(Err(error)) => {
+                    self.fail(event_loop, error);
+                    return;
+                }
+                None => return,
+            };
+            if !consume {
+                events.push(HostEvent::Normalized {
+                    input,
+                    clipboard_text: clipboard_text.clone(),
+                });
+            }
+        }
+        if adapter_exit {
+            event_loop.exit();
+        }
+        if events.is_empty() && !adapter_changed {
+            return;
+        }
+        let Some(host) = &mut self.host else { return };
+        let outcome = host.step(HostBatch {
+            events,
+            application_changed: adapter_changed,
+            ..HostBatch::default()
+        });
+        self.apply_input_outcome(window, outcome);
+    }
+
+    fn flush_pending_continuous_input(&mut self, event_loop: &ActiveEventLoop, window: &Window) {
+        if self.pending_continuous_input.is_empty() {
+            return;
+        }
+        let inputs = std::mem::take(&mut self.pending_continuous_input);
+        self.dispatch_normalized_input(event_loop, window, inputs, None);
     }
 
     fn fail(&mut self, event_loop: &ActiveEventLoop, error: impl Into<Box<dyn Error>>) {
@@ -1813,7 +1971,7 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
             self.controller_schedule
                 .mark_polled(now, self.controller.connected());
         }
-        if self.scheduler.take_present() {
+        if self.scheduler.request_present() {
             window.request_redraw();
         }
         let deadline = wait_duration(
@@ -1916,7 +2074,9 @@ impl<A: Application, H: HostAdapter<A>> ApplicationHandler for ApplicationRuntim
         self.host = Some(host);
         self.window = Some(window.clone());
         self.scheduler.invalidate();
-        window.request_redraw();
+        if self.scheduler.request_present() {
+            window.request_redraw();
+        }
     }
 
     fn window_event(
@@ -1956,7 +2116,10 @@ impl<A: Application, H: HostAdapter<A>> ApplicationHandler for ApplicationRuntim
                 return;
             }
             WindowEvent::RedrawRequested => {
-                if let Err(error) = self.present() {
+                self.flush_pending_continuous_input(event_loop, &window);
+                if self.scheduler.begin_present()
+                    && let Err(error) = self.present()
+                {
                     self.fail(event_loop, error);
                 }
                 return;
@@ -1990,31 +2153,23 @@ impl<A: Application, H: HostAdapter<A>> ApplicationHandler for ApplicationRuntim
             _ => {}
         }
         for normalized in self.input.normalize(nickel_input::DeviceId(0), &event) {
+            if matches!(
+                normalized,
+                nickel_input::InputEvent::Pointer(
+                    nickel_input::PointerEvent::Axis { .. }
+                        | nickel_input::PointerEvent::Motion { .. }
+                )
+            ) {
+                queue_continuous_input(&mut self.pending_continuous_input, normalized);
+                self.scheduler.invalidate();
+                continue;
+            }
+            self.flush_pending_continuous_input(event_loop, &window);
             let clipboard_text = self
                 .clipboard
                 .as_mut()
                 .and_then(|clipboard| clipboard.get_text().ok());
-            let Some(host) = &mut self.host else { return };
-            let outcome = host.handle_input(&normalized, clipboard_text.as_deref());
-            window.set_ime_allowed(outcome.text_input_active);
-            if let Some(text) = outcome.clipboard_text
-                && let Some(clipboard) = &mut self.clipboard
-            {
-                let _ = clipboard.set_text(text);
-            }
-            let next_icon = host.inspect().pointer_icon;
-            if next_icon != self.pointer_icon {
-                window.set_cursor(match next_icon {
-                    PointerIcon::Default => CursorIcon::Default,
-                    PointerIcon::Hand => CursorIcon::Pointer,
-                    PointerIcon::Text => CursorIcon::Text,
-                });
-                self.pointer_icon = next_icon;
-            }
-            if outcome.changed {
-                self.next_caret_blink = Instant::now() + Duration::from_millis(500);
-                self.scheduler.invalidate();
-            }
+            self.dispatch_normalized_input(event_loop, &window, vec![normalized], clipboard_text);
         }
     }
 
@@ -2031,7 +2186,7 @@ mod tests {
     use nickel_input::{
         DeviceId, EventOrder, InputEvent, KeyCode, KeyEdge, KeyEvent, KeyLocation, LogicalKey,
         Modifier, ModifierState, NamedKey, PhysicalKey, Point, PointerButton, PointerEvent,
-        TextEvent, TouchEvent, TouchId,
+        TextEvent, TouchEvent, TouchId, Vector,
     };
     use std::time::{Duration, Instant};
 
@@ -2039,7 +2194,7 @@ mod tests {
         Application, Completion, CompletionFailure, CompletionFailureKind, ControllerPollSchedule,
         EffectEvidence, FrameOverlay, GlobalAction, HostBatch, HostEvent, HostFailure,
         HostFailureStage, MessageEvidence, PresentScheduler, Shortcut, UiHost, ViewContext,
-        wait_duration,
+        queue_continuous_input, wait_duration,
     };
     use crate::{
         ActionKind, Button, Container, ControllerAction, InputModality, Invalidation,
@@ -2220,12 +2375,46 @@ mod tests {
     #[test]
     fn idle_frames_do_not_present_and_present_requests_coalesce() {
         let mut scheduler = PresentScheduler::default();
-        assert!(!scheduler.take_present());
+        assert!(!scheduler.request_present());
         scheduler.invalidate();
         scheduler.invalidate();
         scheduler.invalidate();
-        assert!(scheduler.take_present());
-        assert!(!scheduler.take_present());
+        assert!(scheduler.request_present());
+        assert!(!scheduler.request_present());
+        scheduler.invalidate();
+        assert!(!scheduler.request_present());
+        assert!(scheduler.begin_present());
+        assert!(!scheduler.begin_present());
+    }
+
+    #[test]
+    fn continuous_pointer_motion_keeps_latest_position_and_total_delta() {
+        let mut pending = Vec::new();
+        for (order, position, delta) in [
+            (1, Point { x: 10.0, y: 20.0 }, Vector { x: 1.0, y: 2.0 }),
+            (2, Point { x: 14.0, y: 26.0 }, Vector { x: 4.0, y: 6.0 }),
+        ] {
+            queue_continuous_input(
+                &mut pending,
+                InputEvent::Pointer(PointerEvent::Motion {
+                    device: DeviceId(7),
+                    order: EventOrder(order),
+                    position,
+                    delta: Some(delta),
+                }),
+            );
+        }
+
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending[0],
+            InputEvent::Pointer(PointerEvent::Motion {
+                device: DeviceId(7),
+                order: EventOrder(2),
+                position: Point { x: 14.0, y: 26.0 },
+                delta: Some(Vector { x: 5.0, y: 8.0 }),
+            })
+        );
     }
 
     #[test]
@@ -2329,6 +2518,37 @@ mod tests {
             Some(polled_at + Duration::from_millis(40))
         );
         assert_eq!(host.next_deadline(), outcome.next_deadline);
+    }
+
+    #[test]
+    fn application_work_started_by_message_arms_a_new_poll_deadline() {
+        struct DeferredApplication {
+            pending: bool,
+        }
+        impl Application for DeferredApplication {
+            type Message = ();
+            fn update(&mut self, (): Self::Message) {
+                self.pending = true;
+            }
+            fn view(&self, _context: ViewContext) -> impl crate::View<Self::Message> {
+                Button::new((), "Start work")
+            }
+            fn poll_interval(&self) -> Option<Duration> {
+                self.pending.then_some(Duration::from_millis(16))
+            }
+        }
+
+        let origin = Instant::now();
+        let mut host = UiHost::new_at(DeferredApplication { pending: false }, 100, 40, origin);
+        assert_eq!(host.next_deadline(), None);
+        let button = host
+            .semantic_nodes()
+            .into_iter()
+            .find(|node| node.name.as_deref() == Some("Start work"))
+            .expect("button is a semantic target");
+        host.perform_semantic_action(button.id, SemanticAction::Invoke(ActionKind::Activate));
+
+        assert!(host.next_deadline().is_some());
     }
 
     #[test]

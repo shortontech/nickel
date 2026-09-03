@@ -1,0 +1,619 @@
+use super::*;
+use crate::layout::entries_in_selection;
+use nickel_ui::{ActionKind, Rect, UiHost};
+use nickel_ui_testkit::{FocusDirection, Scenario, ScenarioBudget, Selector};
+
+#[test]
+fn idle_file_host_declares_no_poll_deadline() {
+    let mut app = FileApp::new(home_directory());
+    app.icon_rx = None;
+    assert_eq!(Application::poll_interval(&app), None);
+}
+
+#[test]
+fn pending_icon_work_uses_bounded_backoff() {
+    let mut app = FileApp::new(home_directory());
+    let (_sender, receiver) = std::sync::mpsc::channel();
+    app.icon_rx = Some(receiver);
+    app.icon_poll_delay = std::time::Duration::from_millis(16);
+    app.poll_icons();
+    assert_eq!(app.icon_poll_delay, std::time::Duration::from_millis(32));
+    for _ in 0..8 {
+        app.poll_icons();
+    }
+    assert_eq!(app.icon_poll_delay, std::time::Duration::from_millis(250));
+}
+
+#[test]
+fn navigation_from_idle_starts_new_icon_publication_work() {
+    let directory = tempfile::tempdir().unwrap();
+    let child = directory.path().join("child");
+    std::fs::create_dir(&child).unwrap();
+    std::fs::write(child.join("new-file.txt"), b"x").unwrap();
+    let mut app = FileApp::new(directory.path().to_path_buf());
+    app.icon_rx = None;
+
+    assert_eq!(Application::poll_interval(&app), None);
+    app.navigate_to(child.clone());
+
+    assert_eq!(app.browser.current(), child);
+    assert_eq!(
+        Application::poll_interval(&app),
+        Some(std::time::Duration::from_millis(16))
+    );
+}
+
+#[test]
+fn component_owned_fixture_registers_the_production_file_app() {
+    use nickel_ui_testkit::FixtureProvider;
+    let mut registry = nickel_ui_testkit::FixtureRegistry::new();
+    FileFixtureProvider.register(&mut registry).unwrap();
+    let entries = registry.finish();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].metadata.id, "file.browser");
+    let session = entries[0].open();
+    assert!(
+        session
+            .semantic_nodes()
+            .iter()
+            .any(|node| node.id.as_str().ends_with("/file-entry-0"))
+    );
+}
+
+#[test]
+fn every_advertised_controller_action_has_a_bounded_production_path() {
+    use nickel_ui_testkit::{FixtureProvider, ReachabilityModality, ReachabilityPolicy};
+
+    let mut registry = nickel_ui_testkit::FixtureRegistry::new();
+    FileFixtureProvider.register(&mut registry).unwrap();
+    let session = registry.finish().remove(0).open();
+    let report = session.reachability_report(&ReachabilityPolicy {
+        modalities: [ReachabilityModality::Controller].into_iter().collect(),
+        ..ReachabilityPolicy::default()
+    });
+
+    assert!(report.issues.is_empty(), "{:#?}", report.issues);
+    assert!(
+        report.paths.iter().all(|path| path.reached),
+        "unreached controller paths: {:#?}",
+        report
+            .paths
+            .iter()
+            .filter(|path| !path.reached)
+            .collect::<Vec<_>>()
+    );
+}
+
+fn pixel(raster: &nickel_ui_testkit::HeadlessRaster, x: u32, y: u32) -> [u8; 4] {
+    let offset = ((y * raster.width + x) * 4) as usize;
+    raster.rgba[offset..offset + 4].try_into().unwrap()
+}
+
+fn changed_pixels_in(
+    before: &nickel_ui_testkit::HeadlessRaster,
+    after: &nickel_ui_testkit::HeadlessRaster,
+    rect: Rect,
+) -> usize {
+    let x0 = rect.origin.x.max(0.0) as u32;
+    let y0 = rect.origin.y.max(0.0) as u32;
+    let x1 = (rect.origin.x + rect.size.width).min(before.width as f32) as u32;
+    let y1 = (rect.origin.y + rect.size.height).min(before.height as f32) as u32;
+    (y0..y1)
+        .flat_map(|y| (x0..x1).map(move |x| (x, y)))
+        .filter(|(x, y)| pixel(before, *x, *y) != pixel(after, *x, *y))
+        .count()
+}
+
+#[test]
+fn file_grid_resolves_responsively_without_application_column_arithmetic() {
+    let directory = tempfile::tempdir().unwrap();
+    for index in 0..18 {
+        std::fs::write(directory.path().join(format!("item-{index}.txt")), b"x").unwrap();
+    }
+    let app = FileApp::new(directory.path().to_path_buf());
+    let palette = ThemePalette::from_appearance(
+        ShellSettings::load_default().resolve_appearance(nickel_platform::appearance()),
+    );
+    let narrow = nickel_ui::UiFrame::layout(
+        app.build_view(560.0, 420.0, palette, false),
+        Rect::new(0.0, 0.0, 560.0, 420.0),
+    );
+    let wide = nickel_ui::UiFrame::layout(
+        app.build_view(1280.0, 720.0, palette, false),
+        Rect::new(0.0, 0.0, 1280.0, 720.0),
+    );
+
+    assert!(
+        narrow.resolved_grid_columns().unwrap() < wide.resolved_grid_columns().unwrap(),
+        "auto-fit should add columns as the resolved content pane widens"
+    );
+    assert!(
+        narrow
+            .scroll_extent(&FileMessage::FileScroll(0.0))
+            .is_some_and(|extent| extent.can_scroll()),
+        "all files should be measured and remain reachable through scrolling"
+    );
+}
+
+#[test]
+fn sidebar_divider_and_file_pane_share_one_fixed_boundary() {
+    let directory = tempfile::tempdir().unwrap();
+    for index in 0..256 {
+        std::fs::write(directory.path().join(format!("item-{index}.txt")), b"x").unwrap();
+    }
+    let app = FileApp::new(directory.path().to_path_buf());
+    let expected_boundary = app.sidebar_width + SIDEBAR_RESIZE_WIDTH;
+    let palette = ThemePalette::from_appearance(
+        ShellSettings::load_default().resolve_appearance(nickel_platform::appearance()),
+    );
+
+    for (width, height) in [(560, 420), (1280, 720)] {
+        let frame = nickel_ui::UiFrame::layout(
+            app.build_view(width as f32, height as f32, palette, false),
+            Rect::new(0.0, 0.0, width as f32, height as f32),
+        );
+        let nodes = frame.resolved_layout().nodes();
+        let bounds = |suffix: &str| {
+            nodes
+                .iter()
+                .find(|node| node.id.as_str().ends_with(suffix))
+                .unwrap_or_else(|| panic!("missing semantic node ending in {suffix}"))
+                .allocated
+        };
+        let sidebar = bounds("/sidebar-pane");
+        let divider = bounds("/sidebar-resize");
+        let files = bounds("/files-pane");
+
+        assert_eq!(sidebar.size.width, expected_boundary);
+        assert_eq!(divider.origin.x, app.sidebar_width);
+        assert_eq!(divider.size.width, SIDEBAR_RESIZE_WIDTH);
+        assert_eq!(files.origin.x, expected_boundary);
+        assert_eq!(files.size.width, width as f32 - expected_boundary);
+    }
+}
+
+#[test]
+fn directory_cardinality_does_not_change_shell_geometry_or_mounted_tile_bound() {
+    let browser = |count| {
+        DirectoryBrowser::fixture(
+            (0..count)
+                .map(|index| FileEntry {
+                    name: format!("item-{index}.txt").into(),
+                    path: PathBuf::from(format!("/fixture/item-{index}.txt")),
+                    is_directory: false,
+                    size: Some(1),
+                })
+                .collect(),
+        )
+    };
+    let palette = ThemePalette::from_appearance(
+        ShellSettings::load_default().resolve_appearance(nickel_platform::appearance()),
+    );
+    let resolve = |count| {
+        let app = FileApp::with_browser(browser(count), String::new());
+        nickel_ui::UiFrame::layout(
+            app.build_view(860.0, 620.0, palette, false),
+            Rect::new(0.0, 0.0, 860.0, 620.0),
+        )
+    };
+    let small = resolve(8);
+    let large = resolve(4_096);
+    let bounds = |frame: &nickel_ui::UiFrame<FileMessage>, suffix: &str| {
+        frame
+            .resolved_layout()
+            .nodes()
+            .iter()
+            .find(|node| node.id.as_str().ends_with(suffix))
+            .unwrap_or_else(|| panic!("missing node ending in {suffix}"))
+            .allocated
+    };
+
+    for suffix in [
+        "/toolbar-pane",
+        "/sidebar-pane",
+        "/sidebar-resize",
+        "/files-pane",
+        "/file-list",
+    ] {
+        assert_eq!(bounds(&small, suffix), bounds(&large, suffix), "{suffix}");
+    }
+    let mounted = large
+        .semantic_nodes()
+        .iter()
+        .filter(|node| node.id.as_str().contains("/file-entry-"))
+        .count();
+    assert!(
+        mounted <= 40,
+        "virtual grid mounted {mounted} of 4096 tiles"
+    );
+    let viewport = bounds(&large, "/file-list");
+    for tile in large
+        .semantic_nodes()
+        .iter()
+        .filter(|node| node.id.as_str().contains("/file-entry-"))
+    {
+        assert!(
+            tile.bounds.origin.x >= viewport.origin.x
+                && tile.bounds.origin.x + tile.bounds.size.width
+                    <= viewport.origin.x + viewport.size.width,
+            "tile {:?} escaped the horizontal scroll clip: {:?} outside {:?}",
+            tile.id,
+            tile.bounds,
+            viewport
+        );
+    }
+}
+
+#[test]
+fn far_offscreen_selection_can_be_revealed_before_its_tile_is_mounted() {
+    let entries = (0..4_096)
+        .map(|index| FileEntry {
+            name: format!("item-{index:04}.txt").into(),
+            path: PathBuf::from(format!("/fixture/item-{index:04}.txt")),
+            is_directory: false,
+            size: Some(1),
+        })
+        .collect();
+    let mut app = FileApp::with_browser(DirectoryBrowser::fixture(entries), String::new());
+    let selected = 4_000;
+    let columns = 4;
+    let row_height = 54.0 + (app.tile_width * 0.42).clamp(42.0, 96.0);
+    let viewport_height = 483.0;
+    let row_top = (selected / columns) as f32 * (row_height + 10.0);
+    app.file_scroll_offset = row_top + row_height - viewport_height;
+    let palette = ThemePalette::from_appearance(
+        ShellSettings::load_default().resolve_appearance(nickel_platform::appearance()),
+    );
+    let frame = nickel_ui::UiFrame::layout(
+        app.build_view(860.0, 620.0, palette, false),
+        Rect::new(0.0, 0.0, 860.0, 620.0),
+    );
+
+    assert!(
+        frame
+            .semantic_nodes()
+            .iter()
+            .any(|node| node.id.as_str().ends_with("/file-entry-4000")),
+        "the target row must be mounted after its model-owned offset is applied"
+    );
+}
+
+#[test]
+fn drag_selection_uses_semantic_grid_membership_and_fails_closed() {
+    let directory = tempfile::tempdir().unwrap();
+    for name in ["alpha.txt", "beta.txt"] {
+        std::fs::write(directory.path().join(name), b"x").unwrap();
+    }
+    let mut host = UiHost::new(FileApp::new(directory.path().to_path_buf()), 860, 620);
+    host.poll();
+    let mut nodes = host.semantic_nodes();
+    let all = Rect::new(0.0, 0.0, 860.0, 620.0);
+
+    assert_eq!(entries_in_selection(&nodes, all, 2), HashSet::from([0, 1]));
+
+    for node in nodes
+        .iter_mut()
+        .filter(|node| node.id.as_str().contains("/file-entry-"))
+    {
+        node.id = UiId::new("opaque-entry");
+    }
+    assert!(entries_in_selection(&nodes, all, 2).is_empty());
+}
+
+#[test]
+fn context_menu_is_one_semantic_controller_and_accessibility_surface() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("report.txt"), b"x").unwrap();
+    let mut host = UiHost::new(FileApp::new(directory.path().to_path_buf()), 860, 620);
+    let entry = host
+        .semantic_nodes()
+        .into_iter()
+        .find(|node| node.id.as_str().ends_with("/file-entry-0"))
+        .expect("entry must retain its explicit local identity")
+        .id;
+
+    assert!(
+        host.inspect().overlay_failures.is_empty(),
+        "{:?}",
+        host.inspect().overlay_failures
+    );
+    assert!(
+        host.resolve_effective_target(&entry, ActionKind::ContextMenu)
+            .is_ok()
+    );
+    host.handle_event(nickel_ui::UiEvent::AccessibilityContextMenu(entry.clone()));
+
+    let menu_items = host.query(&nickel_ui::SemanticSelector::Role(
+        nickel_ui::SemanticRole::MenuItem,
+    ));
+    assert_eq!(menu_items.len(), 2);
+    assert!(menu_items.iter().all(|item| {
+        item.actions.contains(&ActionKind::Activate)
+            && host
+                .accessibility_nodes()
+                .iter()
+                .any(|node| node.id == item.id)
+    }));
+
+    host.handle_event(nickel_ui::UiEvent::ControllerDown);
+    assert!(host.inspect().controller_target.is_some());
+    host.handle_event(nickel_ui::UiEvent::ControllerBack);
+    assert!(host.inspect().open_overlay.is_none());
+}
+
+#[test]
+fn controller_context_uses_target_geometry_not_stale_pointer_position() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("report.txt"), b"x").unwrap();
+    let mut host = UiHost::new(FileApp::new(directory.path().to_path_buf()), 860, 620);
+    host.handle_event(nickel_ui::UiEvent::FocusGained);
+    host.handle_event(nickel_ui::UiEvent::ControllerDown);
+    assert_eq!(
+        host.inspect().modality,
+        nickel_ui::InputModality::Controller
+    );
+    let background = host
+        .semantic_nodes()
+        .into_iter()
+        .find(|node| node.id.as_str().ends_with("/file-content"))
+        .unwrap()
+        .id;
+    host.perform_semantic_action(
+        background,
+        nickel_ui::SemanticAction::Invoke(ActionKind::ContextMenu),
+    );
+
+    let menu = host
+        .query(&nickel_ui::SemanticSelector::Role(
+            nickel_ui::SemanticRole::Menu,
+        ))
+        .pop()
+        .unwrap();
+    assert!(menu.bounds.origin.x > 100.0 && menu.bounds.origin.y > 100.0);
+    let items = host.query(&nickel_ui::SemanticSelector::Role(
+        nickel_ui::SemanticRole::MenuItem,
+    ));
+    let selected = items
+        .iter()
+        .find(|item| item.controller_selected)
+        .expect("controller menu must visibly select its first action");
+    let unselected = items
+        .iter()
+        .find(|item| !item.controller_selected)
+        .expect("menu fixture has a second unselected action");
+    let raster = nickel_ui_testkit::render_host(&host, 860, 620, 1.0);
+    let first_id = selected.id.clone();
+    let second_id = unselected.id.clone();
+    let first_point = (
+        selected.bounds.origin.x as u32 + 8,
+        selected.bounds.origin.y as u32 + 8,
+    );
+    let second_point = (
+        unselected.bounds.origin.x as u32 + 8,
+        unselected.bounds.origin.y as u32 + 8,
+    );
+    let first_selected_color = pixel(&raster, first_point.0, first_point.1);
+    let unselected_color = pixel(&raster, second_point.0, second_point.1);
+    assert_ne!(
+        first_selected_color, unselected_color,
+        "controller-selected menu row must have a distinct raster fill"
+    );
+
+    host.handle_event(nickel_ui::UiEvent::ControllerDown);
+    assert_eq!(
+        host.inspect().controller_target,
+        Some(second_id.clone()),
+        "items after navigation: {:?}",
+        host.query(&nickel_ui::SemanticSelector::Role(
+            nickel_ui::SemanticRole::MenuItem
+        ))
+    );
+    assert_ne!(host.inspect().controller_target, Some(first_id.clone()));
+    let moved_items = host.query(&nickel_ui::SemanticSelector::Role(
+        nickel_ui::SemanticRole::MenuItem,
+    ));
+    assert!(
+        moved_items
+            .iter()
+            .any(|item| item.id == first_id && !item.focused && !item.controller_selected)
+    );
+    assert!(
+        moved_items
+            .iter()
+            .any(|item| item.id == second_id && item.focused && item.controller_selected)
+    );
+    let moved = nickel_ui_testkit::render_host(&host, 860, 620, 1.0);
+    assert!(
+        changed_pixels_in(&raster, &moved, selected.bounds) > 0,
+        "the former menu target must visibly lose its selected treatment"
+    );
+    assert!(
+        changed_pixels_in(&raster, &moved, unselected.bounds) > 0,
+        "the new controller target must visibly gain selected treatment"
+    );
+}
+
+#[test]
+fn ordinary_controller_target_has_a_distinct_visible_focus_ring() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("report.txt"), b"x").unwrap();
+    let mut host = UiHost::new(FileApp::new(directory.path().to_path_buf()), 860, 620);
+    host.handle_event(nickel_ui::UiEvent::FocusGained);
+    let before = nickel_ui_testkit::render_host(&host, 860, 620, 1.0);
+    let selected = (0..8)
+        .find_map(|_| {
+            host.handle_event(nickel_ui::UiEvent::ControllerDown);
+            let target = host.inspect().controller_target?;
+            if let Some(node) = host
+                .semantic_nodes()
+                .into_iter()
+                .find(|node| node.id == target)
+                .filter(|node| {
+                    node.enabled
+                        && node.actions.iter().any(|action| {
+                            matches!(
+                                action,
+                                nickel_ui::ActionKind::Activate
+                                    | nickel_ui::ActionKind::ContextMenu
+                            )
+                        })
+                })
+            {
+                return Some(node);
+            }
+            host.handle_event(nickel_ui::UiEvent::ControllerActivate);
+            None
+        })
+        .expect("controller must enter a pane and select an ordinary semantic target");
+    let after = nickel_ui_testkit::render_host(&host, 860, 620, 1.0);
+    assert!(
+        changed_pixels_in(&before, &after, selected.bounds) > 0,
+        "controller focus must visibly change pixels inside {selected:?}"
+    );
+}
+
+fn entry_selector(scenario: &Scenario<FileApp>, suffix: &str) -> Selector {
+    Selector::id(
+        scenario
+            .semantic_nodes()
+            .into_iter()
+            .find(|node| node.id.as_str().ends_with(suffix))
+            .unwrap_or_else(|| panic!("missing semantic File target {suffix}"))
+            .id,
+    )
+}
+
+#[test]
+fn semantic_scenario_covers_context_routes_dismiss_scroll_and_resize() {
+    let directory = tempfile::tempdir().unwrap();
+    for index in 0..30 {
+        std::fs::write(directory.path().join(format!("item-{index:02}.txt")), b"x").unwrap();
+    }
+    let mut scenario = Scenario::with_budget(
+        FileApp::new(directory.path().to_path_buf()),
+        960,
+        640,
+        ScenarioBudget {
+            operations: 160,
+            frames: 160,
+            trace_steps: 160,
+        },
+    );
+    let entry = entry_selector(&scenario, "/file-entry-0");
+
+    scenario
+        .accessibility_action(&entry, ActionKind::ContextMenu)
+        .unwrap();
+    assert!(scenario.host().inspect().open_overlay.is_some());
+    scenario
+        .controller(nickel_ui::ControllerAction::Cancel)
+        .unwrap();
+    assert!(scenario.host().inspect().open_overlay.is_none());
+
+    for _ in 0..64 {
+        if scenario.host().inspect().keyboard_focus.as_ref()
+            == match &entry {
+                Selector::Id(id) => Some(id),
+                _ => None,
+            }
+        {
+            break;
+        }
+        scenario.keyboard_focus(FocusDirection::Next).unwrap();
+    }
+    scenario.keyboard_context_focused().unwrap();
+    assert!(scenario.host().inspect().open_overlay.is_some());
+    scenario
+        .controller(nickel_ui::ControllerAction::Cancel)
+        .unwrap();
+
+    scenario
+        .controller(nickel_ui::ControllerAction::ContextMenu)
+        .unwrap();
+    assert!(scenario.host().inspect().open_overlay.is_some());
+    scenario
+        .controller(nickel_ui::ControllerAction::Cancel)
+        .unwrap();
+
+    let content = entry_selector(&scenario, "/file-content");
+    scenario.pointer_scroll(&content, 0.0, 240.0).unwrap();
+    scenario.resize(540, 420, 1.0).unwrap();
+    scenario
+        .assert_accessibility()
+        .unwrap()
+        .assert_no_diagnostics()
+        .unwrap();
+    let narrow_width = scenario
+        .semantic_nodes()
+        .into_iter()
+        .find(|node| node.id.as_str().ends_with("/file-content"))
+        .unwrap()
+        .bounds
+        .size
+        .width;
+    scenario.resize(1280, 720, 2.0).unwrap();
+    let wide_width = scenario
+        .semantic_nodes()
+        .into_iter()
+        .find(|node| node.id.as_str().ends_with("/file-content"))
+        .unwrap()
+        .bounds
+        .size
+        .width;
+    assert!(wide_width > narrow_width);
+    let operations = scenario.operation_trace();
+    assert!(operations.iter().any(|step| matches!(
+        step.operation,
+        nickel_ui_testkit::ScenarioOperation::KeyboardContext
+    )));
+    assert!(operations.iter().any(|step| matches!(
+        step.operation,
+        nickel_ui_testkit::ScenarioOperation::Controller { .. }
+    )));
+    assert!(operations.iter().any(|step| matches!(
+        step.operation,
+        nickel_ui_testkit::ScenarioOperation::Accessibility { .. }
+    )));
+}
+
+#[test]
+fn semantic_scenarios_cover_empty_and_failure_states() {
+    let empty = tempfile::tempdir().unwrap();
+    let empty_scenario = Scenario::new(FileApp::new(empty.path().to_path_buf()), 720, 480);
+    assert!(
+        empty_scenario
+            .host()
+            .accessibility_nodes()
+            .iter()
+            .any(|node| { node.label.as_deref() == Some("This folder is empty.") })
+    );
+    empty_scenario.assert_accessibility().unwrap();
+
+    let missing = empty.path().join("does-not-exist");
+    let failed = Scenario::new(FileApp::new(missing.clone()), 720, 480);
+    let status = format!("Could not open {}:", missing.display());
+    assert!(failed.host().accessibility_nodes().iter().any(|node| {
+        node.label
+            .as_deref()
+            .is_some_and(|name| name.starts_with(&status))
+    }));
+    failed.assert_accessibility().unwrap();
+}
+
+#[test]
+fn scenario_resource_lifecycle_releases_build_scratch_and_suspend_state() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("report.txt"), b"x").unwrap();
+    let mut scenario = Scenario::new(FileApp::new(directory.path().to_path_buf()), 860, 620);
+    let before = scenario.host().inspect().resources;
+    assert_eq!(before.retained_build_scratch_bytes, 0);
+    assert!(before.node_count > 0 && before.accessibility_node_count > 0);
+    scenario.window_focus(false).unwrap();
+    scenario.platform_capability("controller", false).unwrap();
+    scenario.suspend().unwrap();
+    let after = scenario.host().inspect();
+    assert!(after.keyboard_focus.is_none());
+    assert!(after.controller_target.is_none());
+    assert!(after.pointer_capture.is_none());
+    assert_eq!(after.resources.retained_build_scratch_bytes, 0);
+}

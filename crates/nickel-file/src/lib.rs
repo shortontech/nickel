@@ -10,7 +10,10 @@ extern crate self as nickel_file;
 
 #[path = "main.rs"]
 #[allow(dead_code)]
-mod app;
+pub(crate) mod app;
+pub(crate) mod host;
+pub(crate) mod layout;
+pub(crate) mod platform;
 
 pub use app::{FileApp, FileFixtureProvider, FileMessage, run};
 

@@ -27,6 +27,14 @@ members = [
 default-members = ["crates/nickel-shell"]
 resolver = "3"
 
+[profile.dev]
+debug = "line-tables-only"
+incremental = false
+
+[profile.test]
+debug = "line-tables-only"
+incremental = false
+
 [patch.crates-io]
 ui-declarative-macros = { path = "crates/ui-declarative-macros" }
 

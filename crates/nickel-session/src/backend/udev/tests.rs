@@ -4,12 +4,38 @@ use super::{
     consume_pending_dependent, copy_capture_damage, copy_mapped_damage_to_strided,
     copy_mapped_region_to_strided, damage_bounding_box, dependent_renderers_after_primary_removal,
     device_activation_priority, draw_memory_render_buffer, drm_render_strategy, mapped_damage_rows,
-    mark_disabled_outputs_absent, normalize_capture_rows, parse_kde_cursor_settings,
-    pending_recovery_devices, primary_dependency_to_activate, published_disabled_outputs,
-    render_primary_available, renderer_retained_reason, switcher_visible_range, union_rectangles,
+    mark_disabled_outputs_absent, normalize_capture_rows, paced_render_delay,
+    parse_kde_cursor_settings, pending_recovery_devices, primary_dependency_to_activate,
+    published_disabled_outputs, render_primary_available, renderer_retained_reason,
+    switcher_visible_range, union_rectangles,
 };
 use smithay::utils::{Buffer, Physical, Rectangle, Size};
 use std::collections::HashMap;
+use std::time::Duration;
+
+#[test]
+fn evdi_rendering_is_paced_while_hardware_outputs_remain_eager() {
+    assert_eq!(
+        paced_render_delay(true, Duration::ZERO, Some(Duration::from_millis(3))),
+        Duration::from_millis(13)
+    );
+    assert_eq!(
+        paced_render_delay(
+            true,
+            Duration::from_millis(20),
+            Some(Duration::from_millis(3))
+        ),
+        Duration::from_millis(20)
+    );
+    assert_eq!(
+        paced_render_delay(true, Duration::ZERO, Some(Duration::from_millis(20))),
+        Duration::ZERO
+    );
+    assert_eq!(
+        paced_render_delay(false, Duration::ZERO, Some(Duration::ZERO)),
+        Duration::ZERO
+    );
+}
 
 #[test]
 fn render_strategy_keeps_evdi_copyout_and_explicit_fallback_distinct() {
