@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
 };
 
@@ -135,6 +135,7 @@ pub(crate) fn build_view(
                 app.browser.current(),
                 None,
                 &app.icons,
+                &app.sidebar_children,
                 palette,
             );
             components::location_group(
@@ -627,6 +628,7 @@ pub(crate) fn sidebar_folder_elements(
     current: &Path,
     hovered_message: Option<&FileMessage>,
     icons: &icons::ArtworkCache,
+    children_by_path: &HashMap<PathBuf, Vec<(String, PathBuf)>>,
     palette: ThemePalette,
 ) -> Vec<AnyView<FileMessage>> {
     #[allow(clippy::too_many_arguments)]
@@ -639,6 +641,7 @@ pub(crate) fn sidebar_folder_elements(
         current: &Path,
         hovered_message: Option<&FileMessage>,
         icons: &icons::ArtworkCache,
+        children_by_path: &HashMap<PathBuf, Vec<(String, PathBuf)>>,
         palette: ThemePalette,
     ) {
         let is_expanded = expanded.contains(&path);
@@ -675,35 +678,20 @@ pub(crate) fn sidebar_folder_elements(
         if !is_expanded || depth >= 6 {
             return;
         }
-        let Ok(entries) = std::fs::read_dir(&path) else {
+        let Some(children) = children_by_path.get(&path) else {
             return;
         };
-        let mut children = entries
-            .filter_map(Result::ok)
-            .filter_map(|entry| {
-                entry
-                    .file_type()
-                    .ok()
-                    .filter(|kind| kind.is_dir())
-                    .map(|_| {
-                        (
-                            entry.file_name().to_string_lossy().into_owned(),
-                            entry.path(),
-                        )
-                    })
-            })
-            .collect::<Vec<_>>();
-        children.sort_by(|left, right| left.0.to_lowercase().cmp(&right.0.to_lowercase()));
         for (label, child) in children {
             append_folder(
                 rows,
-                label,
-                child,
+                label.clone(),
+                child.clone(),
                 depth + 1,
                 expanded,
                 current,
                 hovered_message,
                 icons,
+                children_by_path,
                 palette,
             );
         }
@@ -720,6 +708,7 @@ pub(crate) fn sidebar_folder_elements(
             current,
             hovered_message,
             icons,
+            children_by_path,
             palette,
         );
     }

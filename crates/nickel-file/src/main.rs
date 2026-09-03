@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{
         Arc,
@@ -37,6 +37,7 @@ pub(crate) const MAX_TILE_WIDTH: f32 = 240.0;
 const MIN_DETAILS_COLUMN_WIDTH: f32 = 72.0;
 const MAX_DETAILS_COLUMN_WIDTH: f32 = 320.0;
 type NavigationResult = (u64, Result<Option<DirectoryBrowser>, String>);
+type SidebarResult = (PathBuf, Result<Vec<(String, PathBuf)>, String>);
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum FileMessage {
@@ -140,6 +141,10 @@ pub struct FileApp {
     pub(crate) next_icon_id: u16,
     pub(crate) sidebar_width: f32,
     pub(crate) expanded_folders: HashSet<PathBuf>,
+    pub(crate) sidebar_children: HashMap<PathBuf, Vec<(String, PathBuf)>>,
+    sidebar_loading: HashSet<PathBuf>,
+    sidebar_sender: mpsc::Sender<SidebarResult>,
+    sidebar_receiver: Receiver<SidebarResult>,
     pub(crate) collapsed_location_groups: HashSet<String>,
     pub(crate) control_down: bool,
     pub(crate) shift_down: bool,
@@ -606,6 +611,65 @@ impl FileApp {
         self.navigation_rx.is_some() || self.fixture_navigation_busy
     }
 
+    fn toggle_sidebar_folder(&mut self, path: PathBuf) {
+        if self.expanded_folders.remove(&path) {
+            return;
+        }
+        self.expanded_folders.insert(path.clone());
+        if self.sidebar_children.contains_key(&path) || !self.sidebar_loading.insert(path.clone()) {
+            return;
+        }
+        let sender = self.sidebar_sender.clone();
+        let _ = std::thread::Builder::new()
+            .name("nickel-file-sidebar".into())
+            .spawn(move || {
+                let result = std::fs::read_dir(&path)
+                    .map_err(|error| error.to_string())
+                    .map(|entries| {
+                        let mut children = entries
+                            .filter_map(Result::ok)
+                            .filter_map(|entry| {
+                                entry
+                                    .file_type()
+                                    .ok()
+                                    .filter(|kind| kind.is_dir())
+                                    .map(|_| {
+                                        (
+                                            entry.file_name().to_string_lossy().into_owned(),
+                                            entry.path(),
+                                        )
+                                    })
+                            })
+                            .collect::<Vec<_>>();
+                        children.sort_by(|left, right| {
+                            left.0.to_lowercase().cmp(&right.0.to_lowercase())
+                        });
+                        children
+                    });
+                let _ = sender.send((path, result));
+            });
+    }
+
+    fn poll_sidebar_children(&mut self) -> bool {
+        let mut changed = false;
+        loop {
+            match self.sidebar_receiver.try_recv() {
+                Ok((path, Ok(children))) => {
+                    self.sidebar_loading.remove(&path);
+                    self.sidebar_children.insert(path, children);
+                    changed = true;
+                }
+                Ok((path, Err(error))) => {
+                    self.sidebar_loading.remove(&path);
+                    self.status = format!("Could not expand {}: {error}", path.display());
+                    changed = true;
+                }
+                Err(TryRecvError::Empty) => return changed,
+                Err(TryRecvError::Disconnected) => return changed,
+            }
+        }
+    }
+
     pub(crate) fn resize_details_column_to(&mut self, pointer_x: f32) {
         let Some(resize) = self.resizing_details_column else {
             return;
@@ -654,6 +718,7 @@ impl FileApp {
 
     fn with_browser(browser: DirectoryBrowser, status: String) -> Self {
         let settings = ShellSettings::load_default();
+        let (sidebar_sender, sidebar_receiver) = mpsc::channel();
         let icon_appearance = settings
             .resolve_appearance(nickel_platform::appearance())
             .mode;
@@ -688,6 +753,10 @@ impl FileApp {
             next_icon_id: 1,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             expanded_folders: HashSet::new(),
+            sidebar_children: HashMap::new(),
+            sidebar_loading: HashSet::new(),
+            sidebar_sender,
+            sidebar_receiver,
             collapsed_location_groups: HashSet::new(),
             control_down: false,
             shift_down: false,
@@ -1480,9 +1549,7 @@ impl FileApp {
             FileMessage::CloseTab(index) => self.close_tab(index),
             FileMessage::SwitchTab(index) => self.switch_tab(index),
             FileMessage::ToggleFolder(path) => {
-                if !self.expanded_folders.remove(&path) {
-                    self.expanded_folders.insert(path);
-                }
+                self.toggle_sidebar_folder(path);
             }
             FileMessage::OpenFolder(path) | FileMessage::Breadcrumb(path) => {
                 self.places_open = false;
@@ -1644,7 +1711,10 @@ impl Application for FileApp {
         let settings_changed = self.sync_icon_settings();
         let before = self.next_icon_id;
         self.poll_icons();
-        settings_changed || self.poll_navigation() || before != self.next_icon_id
+        settings_changed
+            || self.poll_navigation()
+            || self.poll_sidebar_children()
+            || before != self.next_icon_id
     }
 
     fn poll_interval(&self) -> Option<std::time::Duration> {
@@ -1653,6 +1723,7 @@ impl Application for FileApp {
             self.navigation_rx
                 .as_ref()
                 .map(|_| self.navigation_poll_delay),
+            (!self.sidebar_loading.is_empty()).then_some(Duration::from_millis(16)),
         ]
         .into_iter()
         .flatten()

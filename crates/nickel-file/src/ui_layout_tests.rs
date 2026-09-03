@@ -617,6 +617,33 @@ fn location_groups_omit_empty_sections_and_collapse_without_reordering() {
 }
 
 #[test]
+fn sidebar_expansion_enumerates_children_asynchronously() {
+    let root = tempfile::tempdir().unwrap();
+    let child = root.path().join("Child");
+    std::fs::create_dir(&child).unwrap();
+    let mut app = FileApp::new(root.path().to_path_buf());
+    let root_path = root.path().to_path_buf();
+
+    app.update_message(FileMessage::ToggleFolder(root_path.clone()));
+
+    assert!(app.expanded_folders.contains(&root_path));
+    assert!(app.sidebar_loading.contains(&root_path));
+    assert!(!app.sidebar_children.contains_key(&root_path));
+
+    for _ in 0..1_000 {
+        if app.poll_sidebar_children() {
+            break;
+        }
+        std::thread::yield_now();
+    }
+    assert!(!app.sidebar_loading.contains(&root_path));
+    assert_eq!(
+        app.sidebar_children.get(&root_path),
+        Some(&vec![("Child".to_owned(), child)])
+    );
+}
+
+#[test]
 fn synthetic_location_sources_use_shared_group_order_and_one_target_identity() {
     let shared = PathBuf::from("/fixture/shared");
     let groups = crate::platform::location_groups_from(crate::platform::LocationSources {
