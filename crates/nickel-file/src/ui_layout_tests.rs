@@ -172,6 +172,8 @@ fn provider_changes_preserve_independent_tab_view_state() {
     app.sort_key = EntrySortKey::Size;
     app.sort_direction = SortDirection::Descending;
     app.new_tab_at(child.clone());
+    settle_navigation(&mut app);
+    let inactive_icon_before = app.inactive_tab(0).unwrap().tab_icon.as_ref().unwrap().0;
     app.selected = Some(0);
     app.selected_entries = HashSet::from([0]);
     app.selection_anchor = Some(0);
@@ -191,7 +193,10 @@ fn provider_changes_preserve_independent_tab_view_state() {
     assert_eq!(app.file_scroll_offset, 17.0);
     assert_eq!(app.view_mode, FileViewMode::Grid);
     assert_eq!(app.sort_key, EntrySortKey::Modified);
+    assert!(app.tab_icon.is_some());
     let root = app.inactive_tab(0).unwrap();
+    assert!(root.tab_icon.is_some());
+    assert_ne!(root.tab_icon.as_ref().unwrap().0, inactive_icon_before);
     assert_eq!(root.browser.current(), directory.path());
     assert_eq!(root.selected_entries, HashSet::from([1]));
     assert_eq!(root.file_scroll_offset, 31.0);

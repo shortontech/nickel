@@ -627,6 +627,17 @@ impl FileApp {
         self.navigation_rx.is_some() || self.fixture_navigation_busy
     }
 
+    fn assign_tab_icon(&mut self, path: &std::path::Path, icon: (u16, Arc<image::RgbaImage>)) {
+        if self.browser.current() == path {
+            self.tab_icon = Some(icon.clone());
+        }
+        for tab in self.tabs.iter_mut().flatten() {
+            if tab.browser.current() == path {
+                tab.tab_icon = Some(icon.clone());
+            }
+        }
+    }
+
     fn toggle_sidebar_folder(&mut self, path: PathBuf) {
         if self.expanded_folders.remove(&path) {
             return;
@@ -1234,6 +1245,9 @@ impl FileApp {
             self.icon_appearance = appearance;
             self.icons.clear();
             self.tab_icon = None;
+            for tab in self.tabs.iter_mut().flatten() {
+                tab.tab_icon = None;
+            }
         }
         self.icon_generation = self.icon_generation.wrapping_add(1);
         let generation = self.icon_generation;
@@ -1302,6 +1316,25 @@ impl FileApp {
                 entries.push((path, true, key));
             }
         }
+        for path in self
+            .tabs
+            .iter()
+            .flatten()
+            .map(|tab| tab.browser.current().to_path_buf())
+        {
+            if known_paths.insert(path.clone()) {
+                let request = icons::ArtworkRequest {
+                    path: &path,
+                    kind: icons::semantic_kind(&path, true),
+                    logical_size: 96,
+                    scale_milli: self.artwork_scale_milli,
+                    appearance: artwork_appearance,
+                };
+                let key =
+                    icons::cache_key_with_theme(preference, self.icon_theme.as_deref(), &request);
+                entries.push((path, true, key));
+            }
+        }
         self.icons
             .retain(|path| entries.iter().any(|(entry, _, _)| entry == path));
         let mut paths = entries
@@ -1336,9 +1369,7 @@ impl FileApp {
             );
             let id = self.next_icon_id;
             self.next_icon_id = self.next_icon_id.checked_add(1).unwrap_or(1);
-            if path == self.browser.current() {
-                self.tab_icon = Some((id, artwork.pixels.clone()));
-            }
+            self.assign_tab_icon(path, (id, artwork.pixels.clone()));
             self.icons
                 .insert_resolved(key.clone(), (id, artwork.pixels));
         }
@@ -1428,9 +1459,7 @@ impl FileApp {
                     self.icon_poll_delay = std::time::Duration::from_millis(16);
                     let id = self.next_icon_id;
                     self.next_icon_id = self.next_icon_id.checked_add(1).unwrap_or(1);
-                    if path == self.browser.current() {
-                        self.tab_icon = Some((id, artwork.pixels.clone()));
-                    }
+                    self.assign_tab_icon(&path, (id, artwork.pixels.clone()));
                     self.icons.insert_resolved(key, (id, artwork.pixels));
                 }
                 Ok(_) => {}
