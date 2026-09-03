@@ -2649,10 +2649,10 @@ dependencies = [
  "nickel-platform",
  "nickel-ui",
  "nickel-ui-testkit",
- "sdl3",
  "tempfile",
  "tracing",
  "windows",
+ "winit 0.30.13",
  "winresource",
 ]
 
@@ -2815,9 +2815,9 @@ dependencies = [
  "nickel-ui",
  "nickel-ui-testkit",
  "resvg",
- "sdl3",
  "tracing",
  "windows",
+ "winit 0.30.13",
  "winresource",
  "zbus",
 ]
@@ -2879,6 +2879,7 @@ dependencies = [
 name = "nickel-ui"
 version = "0.1.0"
 dependencies = [
+ "arboard",
  "cosmic-text",
  "gilrs",
  "image",
@@ -2890,10 +2891,12 @@ dependencies = [
  "sdl3",
  "sha2",
  "smallvec",
+ "softbuffer",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
  "ui-declarative-macros",
  "unicode-segmentation",
+ "winit 0.30.13",
 ]
 
 [[package]]

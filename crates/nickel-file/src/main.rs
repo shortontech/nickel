@@ -14,7 +14,8 @@ use nickel_core::{
 };
 use nickel_file::{DirectoryBrowser, FileEntry};
 use nickel_input::{
-    AggregateModifier, InputEvent, KeyCode, KeyEdge, PhysicalKey, PointerButton, PointerEvent,
+    AggregateModifier, DeviceId, InputEvent, KeyCode, KeyEdge, PhysicalKey, PointerButton,
+    PointerEvent,
 };
 use nickel_ui::{
     AdapterOutcome, AnyView, Application, Component, ComponentBuilderExt, FrameOverlay,
@@ -22,7 +23,11 @@ use nickel_ui::{
     OverlayMenuItem, Point, Rect, SemanticNodeSnapshot, SemanticRole, UiHost, UiId, ViewContext,
     ui,
 };
-use sdl3::{event::Event, pixels::PixelFormat, surface::Surface, video::Window};
+use winit::{
+    dpi::LogicalSize,
+    event::WindowEvent,
+    window::{Icon, Window},
+};
 
 const DEFAULT_SIDEBAR_WIDTH: f32 = 190.0;
 const MIN_SIDEBAR_WIDTH: f32 = 150.0;
@@ -33,22 +38,16 @@ const DEFAULT_TILE_WIDTH: f32 = 150.0;
 const MIN_TILE_WIDTH: f32 = 110.0;
 const MAX_TILE_WIDTH: f32 = 240.0;
 
-fn set_nickel_file_icon(window: &mut Window) {
+fn set_nickel_file_icon(window: &Window) {
     let Ok(image) =
         image::load_from_memory(include_bytes!("../../../assets/icons/nickel-file.png"))
     else {
         return;
     };
-    let mut image = image.into_rgba8();
+    let image = image.into_rgba8();
     let (width, height) = image.dimensions();
-    if let Ok(surface) = Surface::from_data(
-        image.as_mut(),
-        width,
-        height,
-        width * 4,
-        PixelFormat::ABGR8888,
-    ) {
-        window.set_icon(&surface);
+    if let Ok(icon) = Icon::from_rgba(image.into_raw(), width, height) {
+        window.set_window_icon(Some(icon));
     }
 }
 
@@ -958,14 +957,14 @@ impl Application for FileApp {
 }
 
 struct FileHostAdapter {
-    input: nickel_input::sdl::Adapter,
+    input: nickel_input::winit::Adapter,
     sync_requested: bool,
 }
 
 impl Default for FileHostAdapter {
     fn default() -> Self {
         Self {
-            input: nickel_input::sdl::Adapter::default(),
+            input: nickel_input::winit::Adapter::default(),
             sync_requested: true,
         }
     }
@@ -979,9 +978,11 @@ impl HostAdapter<FileApp> for FileHostAdapter {
     fn started(
         &mut self,
         _host: &mut UiHost<FileApp>,
-        mut services: HostServices<'_>,
+        services: HostServices<'_>,
     ) -> Result<AdapterOutcome, Box<dyn std::error::Error>> {
-        services.window().set_minimum_size(560, 360)?;
+        services
+            .window()
+            .set_min_inner_size(Some(LogicalSize::new(560, 360)));
         set_nickel_file_icon(services.window());
         Ok(AdapterOutcome::default())
     }
@@ -989,120 +990,121 @@ impl HostAdapter<FileApp> for FileHostAdapter {
     fn event(
         &mut self,
         host: &mut UiHost<FileApp>,
-        event: &Event,
+        event: &WindowEvent,
         _services: HostServices<'_>,
     ) -> Result<AdapterOutcome, Box<dyn std::error::Error>> {
-        let Some(event) = self.input.normalize(event) else {
-            return Ok(AdapterOutcome::default());
-        };
         let mut changed = false;
-        match event {
-            InputEvent::Key(key) => {
-                let app = host.application_mut();
-                app.control_down = key.modifiers.aggregate(AggregateModifier::Control);
-                app.shift_down = key.modifiers.aggregate(AggregateModifier::Shift);
-                if key.edge != KeyEdge::Pressed || key.repeat {
-                    return Ok(AdapterOutcome::default());
-                }
-                let PhysicalKey::Code(key) = key.physical else {
-                    return Ok(AdapterOutcome::default());
-                };
-                match key {
-                    KeyCode::ArrowDown => app.select_relative(app.resolved_grid_columns() as isize),
-                    KeyCode::ArrowUp => {
-                        app.select_relative(-(app.resolved_grid_columns() as isize))
+        for event in self.input.normalize(DeviceId(0), event) {
+            match event {
+                InputEvent::Key(key) => {
+                    let app = host.application_mut();
+                    app.control_down = key.modifiers.aggregate(AggregateModifier::Control);
+                    app.shift_down = key.modifiers.aggregate(AggregateModifier::Shift);
+                    if key.edge != KeyEdge::Pressed || key.repeat {
+                        return Ok(AdapterOutcome::default());
                     }
-                    KeyCode::ArrowRight => app.select_relative(1),
-                    KeyCode::ArrowLeft => app.select_relative(-1),
-                    KeyCode::Backspace => app.go_back(),
-                    KeyCode::Escape => {
-                        app.selected = None;
-                        app.selected_entries.clear();
-                        app.selection_anchor = None;
-                    }
-                    KeyCode::KeyA if app.control_down => {
-                        app.selected_entries = (0..app.browser.entries().len()).collect();
-                        app.selected = app
-                            .selected
-                            .or_else(|| (!app.browser.entries().is_empty()).then_some(0));
-                        app.selection_anchor = app.selected;
-                    }
-                    KeyCode::F5 => {
-                        if let Err(error) = app.browser.refresh() {
-                            app.status = format!("Could not refresh: {error}");
+                    let PhysicalKey::Code(key) = key.physical else {
+                        return Ok(AdapterOutcome::default());
+                    };
+                    match key {
+                        KeyCode::ArrowDown => {
+                            app.select_relative(app.resolved_grid_columns() as isize)
                         }
+                        KeyCode::ArrowUp => {
+                            app.select_relative(-(app.resolved_grid_columns() as isize))
+                        }
+                        KeyCode::ArrowRight => app.select_relative(1),
+                        KeyCode::ArrowLeft => app.select_relative(-1),
+                        KeyCode::Backspace => app.go_back(),
+                        KeyCode::Escape => {
+                            app.selected = None;
+                            app.selected_entries.clear();
+                            app.selection_anchor = None;
+                        }
+                        KeyCode::KeyA if app.control_down => {
+                            app.selected_entries = (0..app.browser.entries().len()).collect();
+                            app.selected = app
+                                .selected
+                                .or_else(|| (!app.browser.entries().is_empty()).then_some(0));
+                            app.selection_anchor = app.selected;
+                        }
+                        KeyCode::F5 => {
+                            if let Err(error) = app.browser.refresh() {
+                                app.status = format!("Could not refresh: {error}");
+                            }
+                        }
+                        _ => {}
                     }
-                    _ => {}
-                }
-                changed = true;
-            }
-            InputEvent::Pointer(PointerEvent::Motion { position, .. }) => {
-                let cursor = Point {
-                    x: position.x as f32,
-                    y: position.y as f32,
-                };
-                let selection_drag = host.application().selection_drag;
-                let resizing = host.application().is_resizing_sidebar();
-                let selected_entries = selection_drag.map(|start| {
-                    let selection = rect_between(start, cursor);
-                    entries_in_selection(
-                        &host.semantic_nodes(),
-                        selection,
-                        host.application().browser.entries().len(),
-                    )
-                });
-                let app = host.application_mut();
-                app.cursor = cursor;
-                if let Some(entries) = selected_entries {
-                    app.selected_entries = entries;
-                    app.selected = app.selected_entries.iter().copied().min();
-                }
-                if resizing {
-                    app.sidebar_width = cursor.x.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
-                    app.ensure_selection_visible();
-                }
-                changed = selection_drag.is_some() || resizing;
-            }
-            InputEvent::Pointer(PointerEvent::Button {
-                button: PointerButton::Secondary,
-                edge: KeyEdge::Pressed,
-                position: Some(position),
-                ..
-            }) => {
-                host.application_mut().cursor = Point {
-                    x: position.x as f32,
-                    y: position.y as f32,
-                };
-                changed = true;
-            }
-            InputEvent::Pointer(PointerEvent::Button {
-                button: PointerButton::Primary,
-                edge: KeyEdge::Released,
-                ..
-            }) => {
-                let app = host.application_mut();
-                app.resizing_sidebar = false;
-                app.selection_drag = None;
-                changed = true;
-            }
-            InputEvent::Pointer(PointerEvent::Axis { delta, .. }) => {
-                let y = delta.y as f32;
-                let app = host.application_mut();
-                if app.control_down {
-                    app.tile_width =
-                        (app.tile_width + y.signum() * 12.0).clamp(MIN_TILE_WIDTH, MAX_TILE_WIDTH);
-                    app.ensure_selection_visible();
                     changed = true;
                 }
+                InputEvent::Pointer(PointerEvent::Motion { position, .. }) => {
+                    let cursor = Point {
+                        x: position.x as f32,
+                        y: position.y as f32,
+                    };
+                    let selection_drag = host.application().selection_drag;
+                    let resizing = host.application().is_resizing_sidebar();
+                    let selected_entries = selection_drag.map(|start| {
+                        let selection = rect_between(start, cursor);
+                        entries_in_selection(
+                            &host.semantic_nodes(),
+                            selection,
+                            host.application().browser.entries().len(),
+                        )
+                    });
+                    let app = host.application_mut();
+                    app.cursor = cursor;
+                    if let Some(entries) = selected_entries {
+                        app.selected_entries = entries;
+                        app.selected = app.selected_entries.iter().copied().min();
+                    }
+                    if resizing {
+                        app.sidebar_width = cursor.x.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
+                        app.ensure_selection_visible();
+                    }
+                    changed = selection_drag.is_some() || resizing;
+                }
+                InputEvent::Pointer(PointerEvent::Button {
+                    button: PointerButton::Secondary,
+                    edge: KeyEdge::Pressed,
+                    position: Some(position),
+                    ..
+                }) => {
+                    host.application_mut().cursor = Point {
+                        x: position.x as f32,
+                        y: position.y as f32,
+                    };
+                    changed = true;
+                }
+                InputEvent::Pointer(PointerEvent::Button {
+                    button: PointerButton::Primary,
+                    edge: KeyEdge::Released,
+                    ..
+                }) => {
+                    let app = host.application_mut();
+                    app.resizing_sidebar = false;
+                    app.selection_drag = None;
+                    changed = true;
+                }
+                InputEvent::Pointer(PointerEvent::Axis { delta, .. }) => {
+                    let y = delta.y as f32;
+                    let app = host.application_mut();
+                    if app.control_down {
+                        app.tile_width = (app.tile_width + y.signum() * 12.0)
+                            .clamp(MIN_TILE_WIDTH, MAX_TILE_WIDTH);
+                        app.ensure_selection_visible();
+                        changed = true;
+                    }
+                }
+                InputEvent::FocusLost { .. } | InputEvent::DeviceRemoved { .. } => {
+                    let app = host.application_mut();
+                    app.control_down = false;
+                    app.shift_down = false;
+                    app.resizing_sidebar = false;
+                    app.selection_drag = None;
+                }
+                _ => {}
             }
-            InputEvent::FocusLost { .. } | InputEvent::DeviceRemoved { .. } => {
-                let app = host.application_mut();
-                app.control_down = false;
-                app.shift_down = false;
-                app.resizing_sidebar = false;
-                app.selection_drag = None;
-            }
-            _ => {}
         }
         self.sync_requested |= changed;
         Ok(AdapterOutcome {
@@ -1115,7 +1117,7 @@ impl HostAdapter<FileApp> for FileHostAdapter {
     fn poll(
         &mut self,
         host: &mut UiHost<FileApp>,
-        mut services: HostServices<'_>,
+        services: HostServices<'_>,
     ) -> Result<AdapterOutcome, Box<dyn std::error::Error>> {
         self.sync_requested = false;
         host.application_mut().resolved_grid_columns =
@@ -1133,7 +1135,7 @@ impl HostAdapter<FileApp> for FileHostAdapter {
             "Nickel File — {}",
             host.application().browser.current().display()
         );
-        let _ = services.window().set_title(&title);
+        services.window().set_title(&title);
         Ok(if host.application().exit_requested {
             AdapterOutcome::exit()
         } else {
@@ -1530,7 +1532,6 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .nth(1)
         .map(PathBuf::from)
         .unwrap_or_else(home_directory);
-    sdl3::hint::set("SDL_APP_ID", "nickel-file");
     nickel_ui::run_with_adapter(FileApp::new(path), FileHostAdapter::default())
 }
 

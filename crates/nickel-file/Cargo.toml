@@ -19,7 +19,7 @@ nickel-logging = { path = "../nickel-logging" }
 nickel-platform = { path = "../nickel-platform" }
 nickel-ui-testkit = { path = "../nickel-ui-testkit" }
 tracing.workspace = true
-sdl3.workspace = true
+winit.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

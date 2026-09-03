@@ -37,7 +37,7 @@ use nickel_core::{
     wallpaper_settings::{WallpaperPosition, WallpaperSettings},
 };
 use nickel_i18n::Localizer;
-use nickel_input::{InputEvent, KeyEdge, LogicalKey, NamedKey};
+use nickel_input::{DeviceId, InputEvent, KeyEdge, LogicalKey, NamedKey};
 use nickel_ui::{
     ActionLegend, ActionLegendEntry, AdapterOutcome, AnyView, Application, Button,
     ButtonPresentation, ChoiceCard, ChoiceCardGroup, ColorSwatch, DragGesture, DragPhase,
@@ -48,7 +48,7 @@ use nickel_ui::{
     SettingsSearchEntry, SettingsSearchField, SettingsStatus, SettingsStatusKind, SliderField,
     Surface, SurfaceRole, Switch, TextAlign, UiHost, UiId, ViewContext, search_settings, ui,
 };
-use sdl3::event::Event;
+use winit::{dpi::LogicalSize, event::WindowEvent};
 
 #[cfg(test)]
 use nickel_ui::{ControllerAction, Rect as UiRect, UiFrame};
@@ -1087,14 +1087,14 @@ impl Application for SettingsApp {
 }
 
 struct SettingsHostAdapter {
-    input: nickel_input::sdl::Adapter,
+    input: nickel_input::winit::Adapter,
     sync_requested: bool,
 }
 
 impl Default for SettingsHostAdapter {
     fn default() -> Self {
         Self {
-            input: nickel_input::sdl::Adapter::default(),
+            input: nickel_input::winit::Adapter::default(),
             sync_requested: true,
         }
     }
@@ -1128,16 +1128,18 @@ impl HostAdapter<SettingsApp> for SettingsHostAdapter {
     fn started(
         &mut self,
         host: &mut UiHost<SettingsApp>,
-        mut services: HostServices<'_>,
+        services: HostServices<'_>,
     ) -> Result<AdapterOutcome, Box<dyn std::error::Error>> {
-        services.window().set_minimum_size(850, 580)?;
+        services
+            .window()
+            .set_min_inner_size(Some(LogicalSize::new(850, 580)));
         let app = host.application_mut();
         app.load_outputs();
         app.load_bluetooth();
         app.load_linux_network();
         #[cfg(target_os = "windows")]
         {
-            app.load_windows_outputs(services.video());
+            app.load_windows_outputs(services.window());
             app.load_windows_network();
             app.load_windows_wifi();
         }
@@ -1147,22 +1149,21 @@ impl HostAdapter<SettingsApp> for SettingsHostAdapter {
     fn event(
         &mut self,
         host: &mut UiHost<SettingsApp>,
-        event: &Event,
+        event: &WindowEvent,
         _services: HostServices<'_>,
     ) -> Result<AdapterOutcome, Box<dyn std::error::Error>> {
-        let Some(input) = self.input.normalize(event) else {
-            return Ok(AdapterOutcome::default());
-        };
         self.sync_requested = true;
-        match input {
-            InputEvent::Key(ref key)
-                if key.edge == KeyEdge::Pressed
-                    && key.logical == LogicalKey::Named(NamedKey::Escape)
-                    && host.inspect().keyboard_focus.is_none() =>
-            {
-                return Ok(AdapterOutcome::exit());
+        for input in self.input.normalize(DeviceId(0), event) {
+            match input {
+                InputEvent::Key(ref key)
+                    if key.edge == KeyEdge::Pressed
+                        && key.logical == LogicalKey::Named(NamedKey::Escape)
+                        && host.inspect().keyboard_focus.is_none() =>
+                {
+                    return Ok(AdapterOutcome::exit());
+                }
+                _ => {}
             }
-            _ => {}
         }
         Ok(AdapterOutcome::default())
     }
@@ -1205,7 +1206,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     let _log_path = nickel_logging::init("nickel-settings").ok();
-    sdl3::hint::set("SDL_APP_ID", "nickel-settings");
     nickel_ui::run_with_adapter(
         SettingsApp::with_initial_page(initial_page),
         SettingsHostAdapter::default(),

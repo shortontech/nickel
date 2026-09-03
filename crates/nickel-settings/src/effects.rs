@@ -186,44 +186,31 @@ impl SettingsApp {
     }
 
     #[cfg(target_os = "windows")]
-    pub(crate) fn load_windows_outputs(&mut self, video: &sdl3::VideoSubsystem) {
-        let monitors = video.displays().unwrap_or_default();
+    pub(crate) fn load_windows_outputs(&mut self, window: &winit::window::Window) {
+        let monitors = window.available_monitors().collect::<Vec<_>>();
         if monitors.is_empty() {
             self.status = self.localizer.text("settings-status-no-displays");
             return;
         }
-        let primary = video
-            .get_primary_display()
-            .ok()
-            .map(|display| display.to_ll());
+        let primary = window.primary_monitor();
         let minimum_x = monitors
             .iter()
-            .filter_map(|monitor| monitor.get_bounds().ok().map(|bounds| bounds.x()))
+            .map(|monitor| monitor.position().x)
             .min()
             .unwrap_or(0);
         let minimum_y = monitors
             .iter()
-            .filter_map(|monitor| monitor.get_bounds().ok().map(|bounds| bounds.y()))
+            .map(|monitor| monitor.position().y)
             .min()
             .unwrap_or(0);
         let maximum_x = monitors
             .iter()
-            .filter_map(|monitor| {
-                monitor
-                    .get_bounds()
-                    .ok()
-                    .map(|bounds| bounds.x() + bounds.width() as i32)
-            })
+            .map(|monitor| monitor.position().x + monitor.size().width as i32)
             .max()
             .unwrap_or(1);
         let maximum_y = monitors
             .iter()
-            .filter_map(|monitor| {
-                monitor
-                    .get_bounds()
-                    .ok()
-                    .map(|bounds| bounds.y() + bounds.height() as i32)
-            })
+            .map(|monitor| monitor.position().y + monitor.size().height as i32)
             .max()
             .unwrap_or(1);
         let desktop_width = (maximum_x - minimum_x).max(1);
@@ -240,12 +227,11 @@ impl SettingsApp {
             .into_iter()
             .enumerate()
             .map(|(index, monitor)| {
-                let bounds = monitor
-                    .get_bounds()
-                    .unwrap_or_else(|_| sdl3::rect::Rect::new(0, 0, 1, 1));
+                let position = monitor.position();
+                let size = monitor.size();
                 let raw_name = monitor
-                    .get_name()
-                    .unwrap_or_else(|_| format!("Display {}", index + 1));
+                    .name()
+                    .unwrap_or_else(|| format!("Display {}", index + 1));
                 let connector = raw_name
                     .strip_prefix(r"\\.\")
                     .unwrap_or(&raw_name)
@@ -257,20 +243,21 @@ impl SettingsApp {
                 DisplayCard {
                     connector: connector.clone(),
                     name: name.clone(),
-                    detail: format!("{}  {} X {}", connector, bounds.width(), bounds.height()),
-                    logical_width: bounds.width() as i32,
-                    logical_height: bounds.height() as i32,
+                    detail: format!("{}  {} X {}", connector, size.width, size.height),
+                    logical_width: size.width as i32,
+                    logical_height: size.height as i32,
                     rect: Rect {
                         x: origin_x
-                            + (f64::from(bounds.x() - minimum_x) * self.pixels_per_logical).round()
+                            + (f64::from(position.x - minimum_x) * self.pixels_per_logical).round()
                                 as i32,
                         y: origin_y
-                            + (f64::from(bounds.y() - minimum_y) * self.pixels_per_logical).round()
+                            + (f64::from(position.y - minimum_y) * self.pixels_per_logical).round()
                                 as i32,
-                        w: (f64::from(bounds.width()) * self.pixels_per_logical).round() as i32,
-                        h: (f64::from(bounds.height()) * self.pixels_per_logical).round() as i32,
+                        w: (f64::from(size.width) * self.pixels_per_logical).round() as i32,
+                        h: (f64::from(size.height) * self.pixels_per_logical).round() as i32,
                     },
-                    primary: primary == Some(monitor.to_ll()),
+                    primary: primary.as_ref() == Some(&monitor),
+                    enabled: true,
                 }
             })
             .collect();

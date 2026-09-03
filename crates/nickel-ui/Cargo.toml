@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Declarative native Rust UI with intrinsic layout and SDL presentation"
+description = "Declarative native Rust UI with intrinsic layout and native presentation"
 readme = "README.md"
 
 [dependencies]
@@ -12,11 +12,14 @@ nickel-core = { path = "../nickel-core" }
 cosmic-text.workspace = true
 gilrs.workspace = true
 image.workspace = true
-nickel-input = { path = "../nickel-input", features = ["gilrs", "sdl"] }
+nickel-input = { path = "../nickel-input", features = ["gilrs", "winit"] }
 nickel-i18n = { path = "../nickel-i18n" }
 nickel-render-assets = { path = "../nickel-render-assets" }
 ui-declarative-macros = "0.1.0"
 sdl3.workspace = true
+softbuffer.workspace = true
+winit.workspace = true
+arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }
 smallvec.workspace = true
 unicode-segmentation.workspace = true
 tracing.workspace = true

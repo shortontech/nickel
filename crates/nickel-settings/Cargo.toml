@@ -9,14 +9,14 @@ rust-version.workspace = true
 nickel-ui = { path = "../nickel-ui" }
 nickel-core = { path = "../nickel-core" }
 nickel-i18n = { path = "../nickel-i18n" }
-nickel-input = { path = "../nickel-input", features = ["sdl"] }
+nickel-input = { path = "../nickel-input", features = ["winit"] }
 nickel-logging = { path = "../nickel-logging" }
 nickel-platform = { path = "../nickel-platform" }
 nickel-session-protocol = { path = "../nickel-session-protocol" }
 image.workspace = true
 resvg.workspace = true
 tracing.workspace = true
-sdl3.workspace = true
+winit.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus.workspace = true

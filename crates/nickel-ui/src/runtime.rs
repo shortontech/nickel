@@ -1,14 +1,17 @@
 use std::{
     any::Any,
     error::Error,
+    num::NonZeroU32,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
-use sdl3::{
-    VideoSubsystem,
-    event::{Event, WindowEvent},
-    mouse::{Cursor as MouseCursor, SystemCursor},
-    video::Window,
+use winit::{
+    application::ApplicationHandler,
+    dpi::LogicalSize,
+    event::WindowEvent,
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoop, OwnedDisplayHandle},
+    window::{CursorIcon, Window, WindowAttributes, WindowId},
 };
 
 use crate::{
@@ -16,9 +19,8 @@ use crate::{
     DamageRegion, EffectiveHitRoute, FocusedInputDispatcher, FrameRequest,
     FrameResourceDiagnostics, InputCommand, InputContext, InputModality, InputSource,
     InteractionIntent, Invalidation, LayoutDiagnostic, OverlayId, OverlayMenu, PointerIcon, Rect,
-    SdlCanvasPresenter, SdlComponentRenderer, SemanticAction, SemanticActionError,
-    SemanticNodeSnapshot, SemanticQueryError, SemanticSelector, UiEvent, UiFrame, UiId,
-    UiStateStore, View,
+    SdlComponentRenderer, SemanticAction, SemanticActionError, SemanticNodeSnapshot,
+    SemanticQueryError, SemanticSelector, UiEvent, UiFrame, UiId, UiStateStore, View,
 };
 
 #[derive(Debug, Default)]
@@ -549,20 +551,11 @@ impl AdapterOutcome {
 /// Rendering, normalized input, clipboard routing, and controller navigation
 /// remain owned by [`UiHost`].
 pub struct HostServices<'a> {
-    video: &'a VideoSubsystem,
-    window: &'a mut Window,
+    window: &'a Window,
 }
 
 impl<'a> HostServices<'a> {
-    pub fn video(&self) -> &'a VideoSubsystem {
-        self.video
-    }
-
-    pub fn window(&mut self) -> &mut Window {
-        self.window
-    }
-
-    pub fn window_ref(&self) -> &Window {
+    pub fn window(&self) -> &'a Window {
         self.window
     }
 }
@@ -591,7 +584,7 @@ pub trait HostAdapter<A: Application> {
     fn event(
         &mut self,
         _host: &mut UiHost<A>,
-        _event: &Event,
+        _event: &WindowEvent,
         _services: HostServices<'_>,
     ) -> Result<AdapterOutcome, Box<dyn Error>> {
         Ok(AdapterOutcome::default())
@@ -1619,255 +1612,418 @@ pub fn run<A: Application>(application: A) -> Result<(), Box<dyn Error>> {
 
 pub fn run_with_adapter<A: Application>(
     application: A,
-    mut adapter: impl HostAdapter<A>,
+    adapter: impl HostAdapter<A>,
 ) -> Result<(), Box<dyn Error>> {
-    let sdl = sdl3::init()?;
-    let video = sdl.video()?;
-    let clipboard = video.clipboard();
-    let mut events = sdl.event_pump()?;
-    let (width, height) = application.initial_size();
-    let title = application.title().to_owned();
-    let window = video
-        .window(&title, width, height)
-        .position_centered()
-        .resizable()
-        .high_pixel_density()
-        .build()?;
-    let mut presenter = SdlCanvasPresenter::new(window)?;
-    let text_input = video.text_input();
-    text_input.start(presenter.window());
-    let default_cursor = MouseCursor::from_system(SystemCursor::Arrow).ok();
-    let hand_cursor = MouseCursor::from_system(SystemCursor::Hand).ok();
-    let text_cursor = MouseCursor::from_system(SystemCursor::IBeam).ok();
-    let mut pointer_icon = PointerIcon::Default;
-    let mut running = true;
-    let (logical_width, logical_height) = presenter.window().size();
-    let pixel_width = presenter.window().size_in_pixels().0;
-    let mut scale = pixel_width as f32 / logical_width.max(1) as f32;
-    let mut host = UiHost::new(application, logical_width, logical_height);
-    let started = adapter.started(
-        &mut host,
-        HostServices {
-            video: &video,
-            window: presenter.window_mut(),
-        },
-    )?;
-    if started.changed {
-        host.rebuild();
+    let event_loop = EventLoop::new()?;
+    let display = event_loop.owned_display_handle();
+    let mut runtime = ApplicationRuntime::new(application, adapter, display);
+    event_loop.run_app(&mut runtime)?;
+    if let Some(error) = runtime.error {
+        Err(error)
+    } else {
+        Ok(())
     }
-    if started.exit {
-        adapter.stopped(
-            &mut host,
-            HostServices {
-                video: &video,
-                window: presenter.window_mut(),
-            },
-        )?;
-        host.shutdown();
-        return Ok(());
-    }
-    presenter.present_accelerated(host.commands(), scale)?;
-    let mut scheduler = PresentScheduler::default();
-    let mut input_adapter = nickel_input::sdl::Adapter::default();
-    let mut controller = ControllerInput::new();
-    let mut next_caret_blink = Instant::now() + Duration::from_millis(500);
-    let mut next_adapter_poll = adapter
-        .poll_interval()
-        .map(|interval| Instant::now() + interval);
-    let mut controller_schedule = ControllerPollSchedule::new(Instant::now());
+}
 
-    while running {
+struct ApplicationRuntime<A: Application, H: HostAdapter<A>> {
+    host: Option<UiHost<A>>,
+    application: Option<A>,
+    adapter: H,
+    display: OwnedDisplayHandle,
+    window: Option<Arc<Window>>,
+    surface: Option<softbuffer::Surface<OwnedDisplayHandle, Arc<Window>>>,
+    renderer: Option<SdlComponentRenderer>,
+    input: nickel_input::winit::Adapter,
+    clipboard: Option<arboard::Clipboard>,
+    controller: ControllerInput,
+    controller_schedule: ControllerPollSchedule,
+    next_caret_blink: Instant,
+    next_adapter_poll: Option<Instant>,
+    scheduler: PresentScheduler,
+    pointer_icon: PointerIcon,
+    scale: f32,
+    stopped: bool,
+    error: Option<Box<dyn Error>>,
+}
+
+impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
+    fn new(application: A, adapter: H, display: OwnedDisplayHandle) -> Self {
         let now = Instant::now();
-        let caret_tick = now >= next_caret_blink;
-        if caret_tick {
-            next_caret_blink = Instant::now() + Duration::from_millis(500);
-            if host.handle_event(UiEvent::CaretBlink).changed {
-                scheduler.invalidate();
+        let next_adapter_poll = adapter.poll_interval().map(|interval| now + interval);
+        Self {
+            host: None,
+            application: Some(application),
+            adapter,
+            display,
+            window: None,
+            surface: None,
+            renderer: None,
+            input: nickel_input::winit::Adapter::default(),
+            clipboard: arboard::Clipboard::new().ok(),
+            controller: ControllerInput::new(),
+            controller_schedule: ControllerPollSchedule::new(now),
+            next_caret_blink: now + Duration::from_millis(500),
+            next_adapter_poll,
+            scheduler: PresentScheduler::default(),
+            pointer_icon: PointerIcon::Default,
+            scale: 1.0,
+            stopped: false,
+            error: None,
+        }
+    }
+
+    fn fail(&mut self, event_loop: &ActiveEventLoop, error: impl Into<Box<dyn Error>>) {
+        self.error = Some(error.into());
+        event_loop.exit();
+    }
+
+    fn apply_adapter_outcome(&mut self, event_loop: &ActiveEventLoop, outcome: AdapterOutcome) {
+        if outcome.changed
+            && let Some(host) = &mut self.host
+        {
+            host.rebuild();
+            self.scheduler.invalidate();
+        }
+        if outcome.exit {
+            event_loop.exit();
+        }
+    }
+
+    fn present(&mut self) -> Result<(), Box<dyn Error>> {
+        let (Some(host), Some(surface), Some(renderer), Some(window)) = (
+            self.host.as_ref(),
+            self.surface.as_mut(),
+            self.renderer.as_mut(),
+            self.window.as_ref(),
+        ) else {
+            return Ok(());
+        };
+        let size = window.inner_size();
+        let width = NonZeroU32::new(size.width.max(1)).expect("clamped non-zero width");
+        let height = NonZeroU32::new(size.height.max(1)).expect("clamped non-zero height");
+        surface.resize(width, height)?;
+        renderer.resize(width.get(), height.get(), self.scale);
+        if renderer.render(host.commands()).is_empty() {
+            return Ok(());
+        }
+        let mut buffer = surface.buffer_mut()?;
+        for (target, pixel) in buffer.iter_mut().zip(renderer.pixels()) {
+            *target = u32::from(pixel.r) << 16 | u32::from(pixel.g) << 8 | u32::from(pixel.b);
+        }
+        buffer.present()?;
+        Ok(())
+    }
+
+    fn tick(&mut self, event_loop: &ActiveEventLoop) {
+        let now = Instant::now();
+        let Some(window) = self.window.clone() else {
+            return;
+        };
+        if now >= self.next_caret_blink {
+            self.next_caret_blink = now + Duration::from_millis(500);
+            if self
+                .host
+                .as_mut()
+                .is_some_and(|host| host.handle_event(UiEvent::CaretBlink).changed)
+            {
+                self.scheduler.invalidate();
             }
         }
-        if host.next_deadline().is_some_and(|deadline| now >= deadline)
-            && host
-                .step(HostBatch {
+        if self
+            .host
+            .as_ref()
+            .and_then(UiHost::next_deadline)
+            .is_some_and(|deadline| now >= deadline)
+            && self.host.as_mut().is_some_and(|host| {
+                host.step(HostBatch {
                     now: Some(now),
                     events: vec![HostEvent::Poll],
                     ..HostBatch::default()
                 })
                 .changed
+            })
         {
-            scheduler.invalidate();
+            self.scheduler.invalidate();
         }
-        let adapter_due = next_adapter_poll.is_some_and(|deadline| now >= deadline)
-            || adapter
+        let adapter_due = self
+            .next_adapter_poll
+            .is_some_and(|deadline| now >= deadline)
+            || self
+                .adapter
                 .next_deadline(now)
                 .is_some_and(|deadline| now >= deadline);
         if adapter_due {
-            let adapter_poll = adapter.poll(
-                &mut host,
-                HostServices {
-                    video: &video,
-                    window: presenter.window_mut(),
-                },
-            )?;
-            if adapter_poll.changed {
-                host.rebuild();
-                scheduler.invalidate();
+            let outcome = self
+                .host
+                .as_mut()
+                .map(|host| self.adapter.poll(host, HostServices { window: &window }));
+            match outcome {
+                Some(Ok(outcome)) => self.apply_adapter_outcome(event_loop, outcome),
+                Some(Err(error)) => {
+                    self.fail(event_loop, error);
+                    return;
+                }
+                None => {}
             }
-            if adapter_poll.exit {
-                running = false;
-                continue;
-            }
-            next_adapter_poll = adapter.poll_interval().map(|interval| now + interval);
+            self.next_adapter_poll = self.adapter.poll_interval().map(|interval| now + interval);
         }
-        if controller_schedule.is_due(now) {
-            let actions = controller.poll(now, host.inspect().window_focused);
-            if let Some(family) = controller.active_family()
-                && host.set_controller_family(family)
+        if self.controller_schedule.is_due(now) {
+            let focused = self
+                .host
+                .as_ref()
+                .is_some_and(|host| host.inspect().window_focused);
+            let actions = self.controller.poll(now, focused);
+            if let Some(family) = self.controller.active_family()
+                && self
+                    .host
+                    .as_mut()
+                    .is_some_and(|host| host.set_controller_family(family))
             {
-                scheduler.invalidate();
+                self.scheduler.invalidate();
             }
             for action in actions {
+                let Some(host) = self.host.as_mut() else {
+                    break;
+                };
                 let outcome = host.handle_controller_action(action);
                 if outcome.changed {
-                    scheduler.invalidate();
+                    self.scheduler.invalidate();
                 }
                 for action in outcome.global_actions {
-                    let adapted = adapter.global_action(
-                        &mut host,
-                        action,
-                        HostServices {
-                            video: &video,
-                            window: presenter.window_mut(),
-                        },
-                    )?;
-                    if adapted.changed {
-                        host.rebuild();
-                        scheduler.invalidate();
-                    }
-                    if adapted.exit {
-                        running = false;
-                        break;
+                    match self
+                        .adapter
+                        .global_action(host, action, HostServices { window: &window })
+                    {
+                        Ok(outcome) => {
+                            if outcome.changed {
+                                host.rebuild();
+                                self.scheduler.invalidate();
+                            }
+                            if outcome.exit {
+                                event_loop.exit();
+                            }
+                        }
+                        Err(error) => {
+                            self.fail(event_loop, error);
+                            return;
+                        }
                     }
                 }
             }
-            controller_schedule.mark_polled(now, controller.connected());
+            self.controller_schedule
+                .mark_polled(now, self.controller.connected());
         }
-        if scheduler.take_present() {
-            let (logical_width, _) = presenter.window().size();
-            let pixel_width = presenter.window().size_in_pixels().0;
-            scale = pixel_width as f32 / logical_width.max(1) as f32;
-            presenter.present_accelerated(host.commands(), scale)?;
+        if self.scheduler.take_present() {
+            window.request_redraw();
         }
-
-        let now = Instant::now();
-        let wait = wait_duration(
+        let deadline = wait_duration(
             now,
             [
-                Some(next_caret_blink),
-                host.next_deadline(),
-                next_adapter_poll,
-                adapter.next_deadline(now),
-                Some(controller_schedule.deadline()),
+                Some(self.next_caret_blink),
+                self.host.as_ref().and_then(UiHost::next_deadline),
+                self.next_adapter_poll,
+                self.adapter.next_deadline(now),
+                Some(self.controller_schedule.deadline()),
             ],
+        )
+        .map(|wait| now + wait);
+        event_loop.set_control_flow(deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
+    }
+
+    fn stop(&mut self) {
+        if self.stopped {
+            return;
+        }
+        self.stopped = true;
+        if let (Some(host), Some(window)) = (self.host.as_mut(), self.window.as_ref()) {
+            if let Err(error) = self.adapter.stopped(host, HostServices { window }) {
+                self.error.get_or_insert(error);
+            }
+            host.shutdown();
+        }
+        self.surface = None;
+        self.window = None;
+    }
+}
+
+impl<A: Application, H: HostAdapter<A>> ApplicationHandler for ApplicationRuntime<A, H> {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.window.is_some() {
+            return;
+        }
+        let application = self
+            .application
+            .as_ref()
+            .expect("application before first resume");
+        let (width, height) = application.initial_size();
+        let attributes = WindowAttributes::default()
+            .with_title(application.title())
+            .with_inner_size(LogicalSize::new(width, height))
+            .with_resizable(true);
+        let window = match event_loop.create_window(attributes) {
+            Ok(window) => Arc::new(window),
+            Err(error) => {
+                self.fail(event_loop, error);
+                return;
+            }
+        };
+        self.scale = window.scale_factor() as f32;
+        self.input.set_scale_factor(window.scale_factor());
+        let logical = window.inner_size().to_logical::<u32>(window.scale_factor());
+        let mut host = UiHost::new(
+            self.application.take().expect("application available"),
+            logical.width,
+            logical.height,
         );
-        let event = match wait {
-            Some(wait) => events.wait_event_timeout(wait),
-            None => Some(events.wait_event()),
-        };
-        let Some(event) = event else {
-            continue;
-        };
-        let mut pending = vec![event];
-        pending.extend(events.poll_iter());
-        for event in pending {
-            let adapted = adapter.event(
-                &mut host,
-                &event,
-                HostServices {
-                    video: &video,
-                    window: presenter.window_mut(),
-                },
-            )?;
-            if adapted.changed {
-                host.rebuild();
-                scheduler.invalidate();
-            }
-            if adapted.exit {
-                running = false;
-                break;
-            }
-            if adapted.consume {
-                continue;
-            }
-            match &event {
-                Event::Quit { .. }
-                | Event::Window {
-                    win_event: WindowEvent::CloseRequested,
-                    ..
-                } => {
-                    running = false;
-                    continue;
+        match self
+            .adapter
+            .started(&mut host, HostServices { window: &window })
+        {
+            Ok(outcome) => {
+                if outcome.changed {
+                    host.rebuild();
                 }
-                Event::Window {
-                    win_event: WindowEvent::Resized(_, _) | WindowEvent::PixelSizeChanged(_, _),
-                    ..
-                } => {
-                    let (width, height) = presenter.window().size();
-                    host.resize(width, height);
-                    scheduler.invalidate();
-                    continue;
+                if outcome.exit {
+                    event_loop.exit();
                 }
-                Event::Window {
-                    win_event: WindowEvent::Hidden | WindowEvent::Minimized,
-                    ..
-                } => {
+            }
+            Err(error) => {
+                self.fail(event_loop, error);
+                return;
+            }
+        }
+        let context = match softbuffer::Context::new(self.display.clone()) {
+            Ok(context) => context,
+            Err(error) => {
+                self.fail(event_loop, error);
+                return;
+            }
+        };
+        let surface = match softbuffer::Surface::new(&context, window.clone()) {
+            Ok(surface) => surface,
+            Err(error) => {
+                self.fail(event_loop, error);
+                return;
+            }
+        };
+        let size = window.inner_size();
+        self.renderer = Some(SdlComponentRenderer::new_pixel_buffer(
+            size.width,
+            size.height,
+            self.scale,
+        ));
+        self.surface = Some(surface);
+        self.host = Some(host);
+        self.window = Some(window.clone());
+        self.scheduler.invalidate();
+        window.request_redraw();
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        let Some(window) = self.window.clone() else {
+            return;
+        };
+        if window.id() != window_id {
+            return;
+        }
+        let adapted = self.host.as_mut().map(|host| {
+            self.adapter
+                .event(host, &event, HostServices { window: &window })
+        });
+        let consume = match adapted {
+            Some(Ok(outcome)) => {
+                let consume = outcome.consume;
+                self.apply_adapter_outcome(event_loop, outcome);
+                consume
+            }
+            Some(Err(error)) => {
+                self.fail(event_loop, error);
+                return;
+            }
+            None => return,
+        };
+        if consume {
+            return;
+        }
+        match &event {
+            WindowEvent::CloseRequested => {
+                event_loop.exit();
+                return;
+            }
+            WindowEvent::RedrawRequested => {
+                if let Err(error) = self.present() {
+                    self.fail(event_loop, error);
+                }
+                return;
+            }
+            WindowEvent::Resized(size) => {
+                let logical = size.to_logical::<u32>(window.scale_factor());
+                if let Some(host) = &mut self.host {
+                    host.resize(logical.width, logical.height);
+                }
+                self.scheduler.invalidate();
+            }
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                self.scale = *scale_factor as f32;
+                self.input.set_scale_factor(*scale_factor);
+                let logical = window.inner_size().to_logical::<u32>(*scale_factor);
+                if let Some(host) = &mut self.host {
+                    host.resize(logical.width, logical.height);
+                }
+                self.scheduler.invalidate();
+            }
+            WindowEvent::Occluded(true) => {
+                if let Some(host) = &mut self.host {
                     host.handle_event(UiEvent::Suspended);
-                    presenter.suspend().map_err(std::io::Error::other)?;
-                    continue;
                 }
-                Event::Window {
-                    win_event: WindowEvent::Shown | WindowEvent::Restored | WindowEvent::Exposed,
-                    ..
-                } => {
-                    scheduler.invalidate();
-                    continue;
+                if let Some(renderer) = &mut self.renderer {
+                    renderer.suspend();
                 }
-                _ => {}
+                return;
             }
-            let Some(normalized) = input_adapter.normalize(&event) else {
-                continue;
-            };
-            let clipboard_text = clipboard.clipboard_text().ok();
+            WindowEvent::Occluded(false) => self.scheduler.invalidate(),
+            _ => {}
+        }
+        for normalized in self.input.normalize(nickel_input::DeviceId(0), &event) {
+            let clipboard_text = self
+                .clipboard
+                .as_mut()
+                .and_then(|clipboard| clipboard.get_text().ok());
+            let Some(host) = &mut self.host else { return };
             let outcome = host.handle_input(&normalized, clipboard_text.as_deref());
-            if let Some(text) = outcome.clipboard_text {
-                let _ = clipboard.set_clipboard_text(&text);
+            window.set_ime_allowed(outcome.text_input_active);
+            if let Some(text) = outcome.clipboard_text
+                && let Some(clipboard) = &mut self.clipboard
+            {
+                let _ = clipboard.set_text(text);
             }
             let next_icon = host.inspect().pointer_icon;
-            if next_icon != pointer_icon {
-                if let Some(cursor) = match next_icon {
-                    PointerIcon::Default => default_cursor.as_ref(),
-                    PointerIcon::Hand => hand_cursor.as_ref(),
-                    PointerIcon::Text => text_cursor.as_ref(),
-                } {
-                    cursor.set();
-                }
-                pointer_icon = next_icon;
+            if next_icon != self.pointer_icon {
+                window.set_cursor(match next_icon {
+                    PointerIcon::Default => CursorIcon::Default,
+                    PointerIcon::Hand => CursorIcon::Pointer,
+                    PointerIcon::Text => CursorIcon::Text,
+                });
+                self.pointer_icon = next_icon;
             }
             if outcome.changed {
-                next_caret_blink = Instant::now() + Duration::from_millis(500);
-                scheduler.invalidate();
+                self.next_caret_blink = Instant::now() + Duration::from_millis(500);
+                self.scheduler.invalidate();
             }
         }
     }
-    text_input.stop(presenter.window());
-    adapter.stopped(
-        &mut host,
-        HostServices {
-            video: &video,
-            window: presenter.window_mut(),
-        },
-    )?;
-    host.shutdown();
-    Ok(())
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.tick(event_loop);
+    }
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.stop();
+    }
 }
 
 #[cfg(test)]
