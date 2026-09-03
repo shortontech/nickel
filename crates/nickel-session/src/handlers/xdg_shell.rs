@@ -121,48 +121,25 @@ impl XdgShellHandler for NickelSession {
                 state.size = Some((geometry.width, geometry.height).into());
             });
         }
-        let wl_surface = surface.wl_surface().clone();
         let window = Window::new_wayland_window(surface);
         let location = geometry
             .map(|geometry| (geometry.x, geometry.y))
             .unwrap_or((cascade, cascade));
-        self.space.map_element(window.clone(), location, true);
-        let current_focus_is_shell =
-            self.seat
-                .get_keyboard()
-                .unwrap()
-                .current_focus()
-                .map(|focus| {
-                    focus.wl_surface().is_some_and(|focused| {
-                        self.shell_windows()
-                            .filter_map(Window::wl_surface)
-                            .any(|shell| shell.as_ref() == focused.as_ref())
-                    })
-                });
-        if !is_shell_client
-            && self.launcher_window.is_some()
-            && new_toplevel_may_focus(current_focus_is_shell)
-        {
-            self.windows.raise(id);
-            self.space.elements().for_each(|candidate| {
-                candidate.set_activated(candidate == &window);
-            });
-            self.seat.get_keyboard().unwrap().set_focus(
-                self,
-                Some(KeyboardFocusTarget::Wayland(wl_surface)),
-                smithay::utils::SERIAL_COUNTER.next_serial(),
-            );
-            self.workspaces.focused(&id);
-        }
-        for panel in self.panel_windows.clone() {
-            self.space.raise_element(&panel, false);
-        }
+        self.xdg_toplevel_locations
+            .insert(surface_id.clone(), location.into());
+        self.xdg_toplevel_windows.insert(surface_id, window);
         self.notify_protocol_snapshot();
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         self.forget_toplevel_geometry(&surface);
         let surface_id = surface.wl_surface().id();
+        if let Some(window) = self.xdg_toplevel_windows.get(&surface_id).cloned() {
+            self.space.unmap_elem(&window);
+        }
+        self.mapped_xdg_toplevels.remove(&surface_id);
+        self.xdg_toplevel_windows.remove(&surface_id);
+        self.xdg_toplevel_locations.remove(&surface_id);
         let window_id = self.surface_windows.get(&surface_id).copied();
         let destroyed_surface_had_focus = self
             .seat
@@ -532,6 +509,83 @@ pub fn handle_commit(popups: &mut PopupManager, space: &Space<Window>, surface: 
 }
 
 impl NickelSession {
+    pub(crate) fn xdg_toplevel_window(&self, surface: &WlSurface) -> Option<Window> {
+        self.xdg_toplevel_windows.get(&surface.id()).cloned()
+    }
+
+    pub(crate) fn map_xdg_toplevel(&mut self, surface: &WlSurface) -> Option<Window> {
+        let surface_id = surface.id();
+        let window = self.xdg_toplevel_windows.get(&surface_id)?.clone();
+        let current_focus_is_shell =
+            self.seat
+                .get_keyboard()
+                .unwrap()
+                .current_focus()
+                .map(|focus| {
+                    focus.wl_surface().is_some_and(|focused| {
+                        self.shell_windows()
+                            .filter_map(Window::wl_surface)
+                            .any(|shell| shell.as_ref() == focused.as_ref())
+                    })
+                });
+        if self.mapped_xdg_toplevels.insert(surface_id.clone()) {
+            let location = self
+                .xdg_toplevel_locations
+                .get(&surface_id)
+                .copied()
+                .unwrap_or_default();
+            self.space.map_element(window.clone(), location, true);
+        }
+        if let Some(toplevel) = window.toplevel() {
+            self.update_window_metadata(toplevel);
+        }
+        let registry_id = self.surface_windows.get(&surface_id).copied();
+        if let Some(id) = registry_id.filter(|id| {
+            !self.shell_owned_windows.contains(id) && new_toplevel_may_focus(current_focus_is_shell)
+        }) {
+            self.windows.raise(id);
+            self.workspaces.focused(&id);
+            self.space.elements().for_each(|candidate| {
+                candidate.set_activated(candidate == &window);
+            });
+            self.seat.get_keyboard().unwrap().set_focus(
+                self,
+                Some(KeyboardFocusTarget::Wayland(surface.clone())),
+                smithay::utils::SERIAL_COUNTER.next_serial(),
+            );
+        }
+        self.raise_panels();
+        Some(window)
+    }
+
+    pub(crate) fn unmap_xdg_toplevel(&mut self, surface: &WlSurface) -> Option<Window> {
+        let surface_id = surface.id();
+        let window = self.xdg_toplevel_windows.get(&surface_id)?.clone();
+        if !self.mapped_xdg_toplevels.remove(&surface_id) {
+            return Some(window);
+        }
+        if let Some(location) = self.space.element_location(&window) {
+            self.xdg_toplevel_locations
+                .insert(surface_id.clone(), location);
+        }
+        let had_focus = self
+            .seat
+            .get_keyboard()
+            .and_then(|keyboard| keyboard.current_focus())
+            .is_some_and(|focus| {
+                focus
+                    .wl_surface()
+                    .is_some_and(|focused| focused.id() == surface_id)
+            });
+        self.space.unmap_elem(&window);
+        let registry_id = self.surface_windows.get(&surface_id).copied();
+        window.set_activated(false);
+        self.restore_focus_after_window_removal(
+            had_focus || registry_id.is_some_and(|id| self.windows.is_active(id)),
+        );
+        Some(window)
+    }
+
     fn update_window_metadata(&mut self, surface: &ToplevelSurface) {
         let (title, app_id) = with_states(surface.wl_surface(), |states| {
             let attributes = states
@@ -643,72 +697,50 @@ impl NickelSession {
             }
         }
         if let Some(role) = shell_role {
-            let window = self
-                .space
-                .elements()
-                .find(|window| window.wl_surface().as_deref() == Some(surface.wl_surface()))
-                .cloned();
+            let window = self.xdg_toplevel_window(surface.wl_surface());
             if let Some(window) = window {
                 self.record_shell_role_registration(&window, role);
             }
         }
+        if !self
+            .mapped_xdg_toplevels
+            .contains(&surface.wl_surface().id())
+        {
+            return;
+        }
         self.notify_protocol_snapshot();
         if is_launcher {
-            let launcher = self
-                .space
-                .elements()
-                .find(|window| window.wl_surface().as_deref() == Some(surface.wl_surface()))
-                .cloned();
+            let launcher = self.xdg_toplevel_window(surface.wl_surface());
             if let Some(launcher) = launcher {
                 self.register_launcher(launcher);
             }
         }
         if is_desktop {
-            let desktop = self
-                .space
-                .elements()
-                .find(|window| window.wl_surface().as_deref() == Some(surface.wl_surface()))
-                .cloned();
+            let desktop = self.xdg_toplevel_window(surface.wl_surface());
             if let Some(desktop) = desktop {
                 self.register_desktop(desktop);
             }
         }
         if is_panel {
-            let panel = self
-                .space
-                .elements()
-                .find(|window| window.wl_surface().as_deref() == Some(surface.wl_surface()))
-                .cloned();
+            let panel = self.xdg_toplevel_window(surface.wl_surface());
             if let Some(panel) = panel {
                 self.register_panel(panel);
             }
         }
         if is_context_menu {
-            let menu = self
-                .space
-                .elements()
-                .find(|window| window.wl_surface().as_deref() == Some(surface.wl_surface()))
-                .cloned();
+            let menu = self.xdg_toplevel_window(surface.wl_surface());
             if let Some(menu) = menu {
                 self.register_context_menu(menu);
             }
         }
         if is_preview {
-            let preview = self
-                .space
-                .elements()
-                .find(|window| window.wl_surface().as_deref() == Some(surface.wl_surface()))
-                .cloned();
+            let preview = self.xdg_toplevel_window(surface.wl_surface());
             if let Some(preview) = preview {
                 self.register_preview(preview);
             }
         }
         if is_utility {
-            let utility = self
-                .space
-                .elements()
-                .find(|window| window.wl_surface().as_deref() == Some(surface.wl_surface()))
-                .cloned();
+            let utility = self.xdg_toplevel_window(surface.wl_surface());
             if let Some(utility) = utility {
                 if is_notification {
                     utility.override_z_index(45);
@@ -717,11 +749,7 @@ impl NickelSession {
             }
         }
         if is_lock {
-            let lock = self
-                .space
-                .elements()
-                .find(|window| window.wl_surface().as_deref() == Some(surface.wl_surface()))
-                .cloned();
+            let lock = self.xdg_toplevel_window(surface.wl_surface());
             if let Some(lock) = lock {
                 self.register_lock(lock);
             }

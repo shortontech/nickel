@@ -442,8 +442,8 @@ impl WinitShell {
         if displays.is_empty() {
             for surface in &mut self.surfaces {
                 surface.display_connected = false;
-                surface.window.set_visible(false);
                 surface.presenter = None;
+                surface.window.set_visible(false);
             }
             self.rebuild_surface_indices();
             tracing::info!("winit shell is dormant while no displays are available");
@@ -464,8 +464,8 @@ impl WinitShell {
                 ) && !output_names.iter().any(|name| name == &surface.output_name)
                 {
                     surface.display_connected = false;
-                    surface.window.set_visible(false);
                     surface.presenter = None;
+                    surface.window.set_visible(false);
                 }
             }
             self.rebuild_surface_indices();
@@ -858,11 +858,13 @@ impl WinitShell {
 
     pub fn hide(&mut self, id: SurfaceId) -> bool {
         let hidden = self.surface_mut(id).is_some_and(|surface| {
-            surface.window.set_visible(false);
             // Repeated reconciliation must
             // still release a lightweight presentation surface populated while
             // the native window was already hidden (for example by prewarm).
+            // Drop native presentation borrows before winit tears down the
+            // Wayland surface so the null-buffer unmap can complete.
             surface.presenter = None;
+            surface.window.set_visible(false);
             true
         });
         if hidden {

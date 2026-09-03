@@ -397,6 +397,10 @@ pub struct NickelSession {
     pub seat: Seat<Self>,
     pub windows: WindowRegistry,
     pub surface_windows: HashMap<ObjectId, WindowId>,
+    /// Live XDG protocol roles outlive their mapped compositor representation.
+    pub(crate) xdg_toplevel_windows: HashMap<ObjectId, Window>,
+    pub(crate) mapped_xdg_toplevels: HashSet<ObjectId>,
+    pub(crate) xdg_toplevel_locations: HashMap<ObjectId, Point<i32, Logical>>,
     pub(crate) shell_owned_windows: HashSet<WindowId>,
     pub x11_windows: HashMap<u32, WindowId>,
     pub launcher_window: Option<Window>,
@@ -595,6 +599,24 @@ struct PreviewCacheCounters {
 }
 
 impl NickelSession {
+    /// Map a compositor-managed window only while its Wayland client has a
+    /// buffer attached. X11 windows and non-XDG surfaces are unaffected.
+    pub(crate) fn map_buffered_window(
+        &mut self,
+        window: Window,
+        location: impl Into<Point<i32, Logical>>,
+        activate: bool,
+    ) -> bool {
+        if let Some(surface) = window.wl_surface()
+            && self.xdg_toplevel_windows.contains_key(&surface.id())
+            && !self.mapped_xdg_toplevels.contains(&surface.id())
+        {
+            return false;
+        }
+        self.space.map_element(window, location, activate);
+        true
+    }
+
     fn update_preview_peak_bytes(&mut self) {
         self.preview_counters.peak_bytes = self
             .preview_counters
@@ -1330,6 +1352,9 @@ impl NickelSession {
             seat,
             windows: WindowRegistry::default(),
             surface_windows: HashMap::new(),
+            xdg_toplevel_windows: HashMap::new(),
+            mapped_xdg_toplevels: HashSet::new(),
+            xdg_toplevel_locations: HashMap::new(),
             shell_owned_windows: HashSet::new(),
             x11_windows: HashMap::new(),
             launcher_window: None,
@@ -2027,10 +2052,18 @@ impl NickelSession {
     }
 
     fn window_exists(&self, id: ProtocolWindowId) -> bool {
-        self.windows
-            .snapshot()
-            .iter()
-            .any(|window| window.id.0 == id.0 && !self.shell_owned_windows.contains(&window.id))
+        self.windows.snapshot().iter().any(|window| {
+            window.id.0 == id.0
+                && !self.shell_owned_windows.contains(&window.id)
+                && self.registry_window_is_mapped(window.id)
+        })
+    }
+
+    fn registry_window_is_mapped(&self, id: WindowId) -> bool {
+        self.x11_windows.values().any(|candidate| *candidate == id)
+            || self.surface_windows.iter().any(|(surface, candidate)| {
+                *candidate == id && self.mapped_xdg_toplevels.contains(surface)
+            })
     }
 
     fn protocol_windows(&mut self) -> Vec<WindowSnapshot> {
@@ -2048,6 +2081,7 @@ impl NickelSession {
             .snapshot()
             .into_iter()
             .filter(|window| !shell_ids.contains(&window.id))
+            .filter(|window| self.registry_window_is_mapped(window.id))
             .filter(|window| self.workspaces.is_visible(&window.id))
             .take(nickel_session_protocol::MAX_WINDOWS)
             .map(|window| {
@@ -2962,7 +2996,7 @@ impl NickelSession {
                 continue;
             }
             if let Some((window, location)) = self.workspace_hidden_windows.remove(&id) {
-                self.space.map_element(window, location, true);
+                self.map_buffered_window(window, location, true);
             }
         }
         if let Some(focus) = transition.focus {
@@ -3176,7 +3210,9 @@ impl NickelSession {
             }
             let geometry = self.launcher_geometry(&window);
             let location = Self::shell_surface_location(&window, geometry);
-            self.space.map_element(window.clone(), location, true);
+            if !self.map_buffered_window(window.clone(), location, true) {
+                return;
+            }
             let surface = window.toplevel().unwrap().wl_surface().clone();
             let _request = self.launcher_focus.request(surface.id());
             self.seat.get_keyboard().unwrap().set_focus(
@@ -3362,6 +3398,9 @@ impl NickelSession {
             self.maximized_restore.remove(surface_id);
             self.fullscreen_restore.remove(surface_id);
             self.surface_windows.remove(surface_id);
+            self.mapped_xdg_toplevels.remove(surface_id);
+            self.xdg_toplevel_windows.remove(surface_id);
+            self.xdg_toplevel_locations.remove(surface_id);
             retire_shell_surface(&mut self.registered_shell_role_slots, surface_id);
             self.idle_inhibitors
                 .retain(|surface, _| surface.id() != *surface_id);
@@ -3703,7 +3742,7 @@ impl NickelSession {
             };
             let _ = surface.configure(Rectangle::new(location, size));
         }
-        self.space.map_element(window, location, activate);
+        self.map_buffered_window(window, location, activate);
     }
 
     pub fn shell_windows(&self) -> impl Iterator<Item = &Window> {
@@ -3752,7 +3791,7 @@ impl NickelSession {
             Self::configure_window(window, target);
         }
         let location = Self::shell_surface_location(window, target);
-        self.space.map_element(window.clone(), location, true);
+        self.map_buffered_window(window.clone(), location, true);
     }
 
     pub(crate) fn relayout_committed_shell_window(&mut self, window: &Window) {
@@ -3836,7 +3875,7 @@ impl NickelSession {
                 },
             );
             if self.locked {
-                self.space.map_element(lock.clone(), geometry.loc, true);
+                self.map_buffered_window(lock.clone(), geometry.loc, true);
                 self.space.raise_element(&lock, true);
             } else {
                 self.space.unmap_elem(&lock);
@@ -4024,7 +4063,9 @@ impl NickelSession {
         // Passive previews must not deactivate the current application merely
         // because their shell surface became mapped. Explicit keyboard/menu
         // focus remains authoritative through the `focus` argument.
-        self.space.map_element(window.clone(), (x, y), focus);
+        if !self.map_buffered_window(window.clone(), (x, y), focus) {
+            return;
+        }
         if focus {
             self.seat.get_keyboard().unwrap().set_focus(
                 self,
@@ -4115,7 +4156,7 @@ impl NickelSession {
             if let Some(surface) = window.x11_surface() {
                 let _ = surface.set_mapped(true);
             }
-            self.space.map_element(window, location, true);
+            self.map_buffered_window(window, location, true);
         }
         let Some(window) = self.window_for_registry_id(id) else {
             return;
@@ -4203,7 +4244,8 @@ impl NickelSession {
             .iter()
             .find(|workspace| workspace.id == self.workspaces.active())
             .and_then(|workspace| workspace.last_focused)
-            .filter(|candidate| !self.minimized_windows.contains_key(candidate));
+            .filter(|candidate| !self.minimized_windows.contains_key(candidate))
+            .filter(|candidate| self.registry_window_is_mapped(*candidate));
         if let Some(replacement) = replacement {
             self.activate_window(replacement);
         } else {
@@ -4299,7 +4341,7 @@ impl NickelSession {
                 self.apply_maximized_x11_geometry(&window, surface, true);
             } else if let Some(restore) = self.x11_maximized_restore.remove(&surface.window_id()) {
                 let _ = surface.configure(restore);
-                self.space.map_element(window, restore.loc, true);
+                self.map_buffered_window(window, restore.loc, true);
             }
             return;
         }
@@ -4384,7 +4426,7 @@ impl NickelSession {
             };
             Self::configure_window(&desktop, geometry);
             let location = Self::shell_surface_location(&desktop, geometry);
-            self.space.map_element(desktop, location, false);
+            self.map_buffered_window(desktop, location, false);
         }
         for panel in self.panel_windows.clone() {
             let Some(output_name) = self.shell_surface_output_name(&panel) else {
@@ -4407,7 +4449,7 @@ impl NickelSession {
             let geometry = shell_layout::panel(output);
             Self::configure_window(&panel, geometry);
             let location = Self::shell_surface_location(&panel, geometry);
-            self.space.map_element(panel.clone(), location, false);
+            self.map_buffered_window(panel.clone(), location, false);
             self.space.raise_element(&panel, false);
         }
         if self.launcher_visibility.is_visible()
@@ -4415,7 +4457,7 @@ impl NickelSession {
         {
             let geometry = self.launcher_geometry(&launcher);
             let location = Self::shell_surface_location(&launcher, geometry);
-            self.space.map_element(launcher, location, true);
+            self.map_buffered_window(launcher, location, true);
             self.raise_panels();
         }
         let screenshot_utilities = {
@@ -4521,7 +4563,7 @@ impl NickelSession {
             state.size = Some(Size::from((restore.width, restore.height)));
         });
         if let Some(window) = self.window_for_surface(surface.wl_surface()) {
-            self.space.map_element(window, (restore.x, restore.y), true);
+            self.map_buffered_window(window, (restore.x, restore.y), true);
         }
         self.raise_panels();
         surface.send_pending_configure();
@@ -4554,7 +4596,7 @@ impl NickelSession {
             state.size = Some(Size::from((output.width, output.height)));
         });
         window.override_z_index(45);
-        self.space.map_element(window, (output.x, output.y), true);
+        self.map_buffered_window(window, (output.x, output.y), true);
         surface.send_pending_configure();
     }
 
@@ -4570,7 +4612,7 @@ impl NickelSession {
         });
         if let Some(window) = self.window_for_surface(surface.wl_surface()) {
             window.override_z_index(30);
-            self.space.map_element(window, (restore.x, restore.y), true);
+            self.map_buffered_window(window, (restore.x, restore.y), true);
         }
         self.raise_panels();
         surface.send_pending_configure();
@@ -4597,7 +4639,7 @@ impl NickelSession {
         let _ = surface.set_fullscreen(true);
         let _ = surface.configure(geometry);
         window.override_z_index(45);
-        self.space.map_element(window, geometry.loc, true);
+        self.map_buffered_window(window, geometry.loc, true);
         self.request_output_redraw();
         self.notify_protocol_snapshot();
     }
@@ -4616,7 +4658,7 @@ impl NickelSession {
         };
         if let Some(window) = window {
             window.override_z_index(30);
-            self.space.map_element(window, restore.loc, true);
+            self.map_buffered_window(window, restore.loc, true);
         }
         self.raise_panels();
         self.request_output_redraw();
@@ -4719,7 +4761,7 @@ impl NickelSession {
             (geometry.width, geometry.height).into(),
         );
         let _ = surface.configure(geometry);
-        self.space.map_element(window.clone(), geometry.loc, true);
+        self.map_buffered_window(window.clone(), geometry.loc, true);
     }
 
     pub(crate) fn restore_maximized_window_for_drag(
@@ -4769,7 +4811,7 @@ impl NickelSession {
             );
             let _ = surface.set_maximized(false);
             let _ = surface.configure(rectangle);
-            self.space.map_element(window.clone(), rectangle.loc, true);
+            self.map_buffered_window(window.clone(), rectangle.loc, true);
             self.notify_protocol_snapshot();
             return Some(rectangle.loc);
         }
@@ -4862,7 +4904,7 @@ impl NickelSession {
             .cloned()
     }
 
-    fn raise_panels(&mut self) {
+    pub(crate) fn raise_panels(&mut self) {
         for panel in self.panel_windows.clone() {
             self.space.raise_element(&panel, false);
         }
