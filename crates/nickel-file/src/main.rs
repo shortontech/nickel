@@ -294,6 +294,14 @@ const FILE_FIXTURE_VARIANTS: &[nickel_ui_testkit::FixtureVariant] = &[
     ),
     file_fixture_variant!("empty", "Empty Folder", "medium", 820, 620, Dark),
     file_fixture_variant!(
+        "unreadable",
+        "Unreadable Location",
+        "medium",
+        820,
+        620,
+        Dark
+    ),
+    file_fixture_variant!(
         "unavailable",
         "Unavailable Location",
         "medium",
@@ -458,6 +466,9 @@ impl nickel_ui_testkit::Fixture for FileWorkbenchFixture {
         }
         if variant.id == "unavailable" {
             app.status = "Location unavailable — reconnect the volume and refresh.".into();
+        }
+        if variant.id == "unreadable" {
+            app.status = "Could not read location — check its permissions and refresh.".into();
         }
         if variant.id == "loading" {
             app.status = "Loading network location…".into();

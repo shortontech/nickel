@@ -168,10 +168,10 @@ fn details_column_widths_resize_within_bounds_and_belong_to_their_tab() {
 #[test]
 fn status_area_reports_selection_and_total_without_hiding_errors() {
     let mut app = FileApp::fixture();
-    assert_eq!(file_status_text(&app), "3 items");
+    assert_eq!(file_status_text(&app), "3 items · fixture");
 
     app.selected_entries = HashSet::from([0, 2]);
-    assert_eq!(file_status_text(&app), "2 selected · 3 items");
+    assert_eq!(file_status_text(&app), "2 selected · 3 items · fixture");
 
     app.status = "Could not refresh: unavailable".into();
     assert_eq!(file_status_text(&app), app.status);

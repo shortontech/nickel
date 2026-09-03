@@ -14,11 +14,19 @@ pub(crate) fn status_text(app: &FileApp) -> String {
     }
     let total = app.browser.entries().len();
     let total_label = format!("{total} item{}", if total == 1 { "" } else { "s" });
+    let location = app
+        .browser
+        .current()
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| app.browser.current().display().to_string());
     let selected = app.selected_entries.len();
     if selected == 0 {
-        total_label
+        format!("{total_label} · {location}")
     } else {
-        format!("{selected} selected · {total_label}")
+        format!("{selected} selected · {total_label} · {location}")
     }
 }
 
