@@ -44,6 +44,9 @@ pub enum FileMessage {
     ContextSelectAll,
     ToggleCommandSurface,
     CommandQueryChanged(String),
+    ToggleAddressEditing,
+    AddressChanged(String),
+    SubmitAddress,
     ToggleHiddenFiles,
     ResizeSidebar,
     TogglePlaces,
@@ -96,6 +99,8 @@ pub struct FileApp {
     pub(crate) command_surface_open: bool,
     pub(crate) command_query: String,
     pub(crate) pending_focus: Option<UiId>,
+    pub(crate) address_editing: bool,
+    pub(crate) address_text: String,
     pub(crate) tile_width: f32,
     pub(crate) file_scroll_offset: f32,
     pub(crate) view_mode: FileViewMode,
@@ -206,6 +211,8 @@ pub(crate) struct FileTab {
     pub(crate) view_mode: FileViewMode,
     pub(crate) sort_key: EntrySortKey,
     pub(crate) sort_direction: SortDirection,
+    pub(crate) address_editing: bool,
+    pub(crate) address_text: String,
     pub(crate) tab_icon: Option<(u16, Arc<image::RgbaImage>)>,
 }
 
@@ -261,6 +268,8 @@ impl FileApp {
             command_surface_open: false,
             command_query: String::new(),
             pending_focus: None,
+            address_editing: false,
+            address_text: String::new(),
             tile_width: DEFAULT_TILE_WIDTH,
             file_scroll_offset: 0.0,
             view_mode: FileViewMode::Grid,
@@ -322,6 +331,8 @@ impl FileApp {
         std::mem::swap(&mut self.view_mode, &mut target.view_mode);
         std::mem::swap(&mut self.sort_key, &mut target.sort_key);
         std::mem::swap(&mut self.sort_direction, &mut target.sort_direction);
+        std::mem::swap(&mut self.address_editing, &mut target.address_editing);
+        std::mem::swap(&mut self.address_text, &mut target.address_text);
         std::mem::swap(&mut self.tab_icon, &mut target.tab_icon);
         self.tabs[self.active_tab] = Some(target);
         self.active_tab = index;
@@ -351,6 +362,8 @@ impl FileApp {
             view_mode: FileViewMode::Grid,
             sort_key: EntrySortKey::Name,
             sort_direction: SortDirection::Ascending,
+            address_editing: false,
+            address_text: String::new(),
             tab_icon: None,
         }));
         self.switch_tab(self.tabs.len() - 1);
@@ -500,6 +513,24 @@ impl FileApp {
         self.selection_anchor = self.selected;
         self.set_scroll_offset(0.0);
         self.ensure_selection_visible();
+    }
+
+    pub(crate) fn submit_address(&mut self) {
+        let target = PathBuf::from(self.address_text.trim());
+        if target.as_os_str().is_empty() {
+            self.status = "Enter a location.".into();
+            return;
+        }
+        match self.browser.enter(&target) {
+            Ok(()) => {
+                self.address_editing = false;
+                self.address_text.clear();
+                self.navigation_changed();
+            }
+            Err(error) => {
+                self.status = format!("Could not open {}: {error}", target.display());
+            }
+        }
     }
 
     pub(crate) fn refresh_icons(&mut self) {
@@ -710,6 +741,17 @@ impl FileApp {
                 }
             }
             FileMessage::CommandQueryChanged(query) => self.command_query = query,
+            FileMessage::ToggleAddressEditing => {
+                self.address_editing = !self.address_editing;
+                if self.address_editing {
+                    self.address_text = self.browser.current().display().to_string();
+                    self.pending_focus = Some(UiId::from("file-address-field"));
+                } else {
+                    self.address_text.clear();
+                }
+            }
+            FileMessage::AddressChanged(address) => self.address_text = address,
+            FileMessage::SubmitAddress => self.submit_address(),
             FileMessage::ToggleHiddenFiles => {
                 let show = !self.browser.show_hidden();
                 match self.browser.set_show_hidden(show) {

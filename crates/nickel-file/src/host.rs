@@ -90,12 +90,15 @@ impl HostAdapter<FileApp> for FileHostAdapter {
                     KeyCode::Escape => {
                         if app.command_surface_open {
                             app.update(FileMessage::ToggleCommandSurface);
+                        } else if app.address_editing {
+                            app.update(FileMessage::ToggleAddressEditing);
                         } else {
                             app.selected = None;
                             app.selected_entries.clear();
                             app.selection_anchor = None;
                         }
                     }
+                    KeyCode::Enter if app.address_editing => app.submit_address(),
                     KeyCode::KeyA if app.control_down => {
                         app.selected_entries = (0..app.browser.entries().len()).collect();
                         app.selected = app

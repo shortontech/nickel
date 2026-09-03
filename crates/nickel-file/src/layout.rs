@@ -87,6 +87,26 @@ pub(crate) fn build_view(
             })}
         </Row>
     };
+    let location_control = if app.address_editing {
+        AnyView::new(ui! {
+            <Container grow={1.0} background={palette.background} border={(palette.accent, 1.0)} padding={Insets {
+                top: 5.0, right: 12.0, bottom: 4.0, left: 10.0,
+            }}>
+                {TextField::on_change(&app.address_text, address_changed)
+                    .id("file-address-field")
+                    .accessibility_label("Location")
+                    .color(palette.text)}
+            </Container>
+        })
+    } else {
+        AnyView::new(ui! {
+            <Container grow={1.0} background={palette.background} padding={Insets {
+                top: 5.0, right: 12.0, bottom: 4.0, left: 10.0,
+            }}>
+                {breadcrumb_row}
+            </Container>
+        })
+    };
     let navigation = ui! {
         <Container id={"navigation-toolbar"} height={46.0} background={palette.surface} padding={Insets {
             top: 6.0, right: 12.0, bottom: 6.0, left: 10.0,
@@ -114,11 +134,13 @@ pub(crate) fn build_view(
                 </Button>
                 <Button on_press={FileMessage::Up} enabled={app.browser.can_go_up()} width={34.0} height={34.0} color={palette.text}
                     focus_border={palette.accent} controller_focus_border={palette.complement} accessibility_label={"Up one folder"}>{"↑"}</Button>
-                <Container grow={1.0} background={palette.background} padding={Insets {
-                    top: 5.0, right: 12.0, bottom: 4.0, left: 10.0,
-                }}>
-                    {breadcrumb_row}
-                </Container>
+                {location_control}
+                <Button on_press={FileMessage::ToggleAddressEditing} width={34.0} height={34.0}
+                    color={if app.address_editing { palette.accent } else { palette.text }}
+                    focus_border={palette.accent} controller_focus_border={palette.complement}
+                    accessibility_label={if app.address_editing { "Cancel location editing" } else { "Edit location" }}>
+                    {if app.address_editing { "×" } else { "✎" }}
+                </Button>
                 <Button on_press={FileMessage::Refresh} width={34.0} height={34.0} color={palette.text}
                     focus_border={palette.accent} controller_focus_border={palette.complement} accessibility_label={"Refresh"}>{"↻"}</Button>
                 <Button on_press={FileMessage::SetViewMode(FileViewMode::Grid)} width={34.0} height={34.0}
@@ -375,6 +397,10 @@ pub(crate) fn build_view(
 
 fn command_query_message(query: String) -> FileMessage {
     FileMessage::CommandQueryChanged(query)
+}
+
+fn address_changed(address: String) -> FileMessage {
+    FileMessage::AddressChanged(address)
 }
 
 fn command_surface(app: &FileApp, palette: ThemePalette) -> AnyView<FileMessage> {

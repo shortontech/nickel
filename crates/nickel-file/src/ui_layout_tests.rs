@@ -70,6 +70,52 @@ fn sorting_preserves_selection_by_entry_identity() {
 }
 
 #[test]
+fn editable_location_preserves_history_on_error_and_commits_once_on_success() {
+    let directory = tempfile::tempdir().unwrap();
+    let child = directory.path().join("child");
+    std::fs::create_dir(&child).unwrap();
+    let mut app = FileApp::new(directory.path().to_path_buf());
+
+    app.update_message(FileMessage::ToggleAddressEditing);
+    assert_eq!(
+        Application::take_focus_request(&mut app),
+        Some(UiId::from("file-address-field"))
+    );
+    app.update_message(FileMessage::AddressChanged(
+        directory.path().join("missing").display().to_string(),
+    ));
+    app.update_message(FileMessage::SubmitAddress);
+    assert_eq!(app.browser.current(), directory.path());
+    assert!(!app.browser.can_go_back());
+    assert!(app.address_editing);
+    assert!(app.status.contains("Could not open"));
+
+    app.update_message(FileMessage::AddressChanged(child.display().to_string()));
+    app.update_message(FileMessage::SubmitAddress);
+    assert_eq!(app.browser.current(), child);
+    assert!(app.browser.can_go_back());
+    assert!(!app.address_editing);
+    assert!(app.address_text.is_empty());
+}
+
+#[test]
+fn location_editor_draft_and_visibility_belong_to_their_tab() {
+    let directory = tempfile::tempdir().unwrap();
+    let child = directory.path().join("child");
+    std::fs::create_dir(&child).unwrap();
+    let mut app = FileApp::new(directory.path().to_path_buf());
+    app.update_message(FileMessage::ToggleAddressEditing);
+    app.update_message(FileMessage::AddressChanged("unfinished location".into()));
+
+    app.new_tab_at(child);
+    assert!(!app.address_editing);
+    assert!(app.address_text.is_empty());
+    app.switch_tab(0);
+    assert!(app.address_editing);
+    assert_eq!(app.address_text, "unfinished location");
+}
+
+#[test]
 fn details_view_exposes_shared_columns_and_entry_targets() {
     let mut app = FileApp::fixture();
     app.view_mode = FileViewMode::Details;
