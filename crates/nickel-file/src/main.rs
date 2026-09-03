@@ -84,7 +84,8 @@ pub struct FileApp {
     pub(crate) status: String,
     pub(crate) last_click: Option<(usize, Instant)>,
     pub(crate) icons: icons::ArtworkCache,
-    pub(crate) icon_rx: Option<Receiver<(u64, PathBuf, icons::ResolvedArtwork)>>,
+    pub(crate) icon_rx:
+        Option<Receiver<(u64, PathBuf, icons::ArtworkCacheKey, icons::ResolvedArtwork)>>,
     pub(crate) icon_poll_delay: std::time::Duration,
     pub(crate) icon_generation: u64,
     pub(crate) icon_preference: FileIconPreference,
@@ -801,24 +802,51 @@ impl FileApp {
         }
         self.icon_generation = self.icon_generation.wrapping_add(1);
         let generation = self.icon_generation;
+        let artwork_appearance = if appearance == ThemeMode::Light {
+            icons::ArtworkAppearance::Light
+        } else {
+            icons::ArtworkAppearance::Dark
+        };
         let entries = self
             .browser
             .entries()
             .iter()
-            .map(|entry| (entry.path.clone(), entry.is_directory))
+            .map(|entry| {
+                let request = icons::ArtworkRequest {
+                    path: &entry.path,
+                    kind: icons::semantic_kind(&entry.path, entry.is_directory),
+                    logical_size: 96,
+                    scale_milli: 1_000,
+                    appearance: artwork_appearance,
+                };
+                (
+                    entry.path.clone(),
+                    entry.is_directory,
+                    icons::cache_key(preference, &request),
+                )
+            })
             .collect::<Vec<_>>();
         self.icons
-            .retain(|path| entries.iter().any(|(entry, _)| entry == path));
+            .retain(|path| entries.iter().any(|(entry, _, _)| entry == path));
         let mut paths = entries
             .into_iter()
-            .filter(|(path, _)| !self.icons.contains_key(path))
+            .filter(|(_, _, key)| !self.icons.matches(key))
             .collect::<Vec<_>>();
-        paths.push((self.browser.current().to_path_buf(), true));
+        let current = self.browser.current().to_path_buf();
+        let current_request = icons::ArtworkRequest {
+            path: &current,
+            kind: icons::semantic_kind(&current, true),
+            logical_size: 96,
+            scale_milli: 1_000,
+            appearance: artwork_appearance,
+        };
+        let current_key = icons::cache_key(preference, &current_request);
+        paths.push((current, true, current_key));
 
         // Nickel artwork is the guaranteed first frame. A selected system
         // provider may replace it asynchronously, but native lookup must never
         // leave an invisible entry or tab target while it is pending.
-        for (path, is_directory) in &paths {
+        for (path, is_directory, key) in &paths {
             let artwork = icons::resolve_artwork(
                 FileIconPreference::Nickel,
                 &icons::ArtworkRequest {
@@ -826,11 +854,7 @@ impl FileApp {
                     kind: icons::semantic_kind(path, *is_directory),
                     logical_size: 96,
                     scale_milli: 1_000,
-                    appearance: if appearance == ThemeMode::Light {
-                        icons::ArtworkAppearance::Light
-                    } else {
-                        icons::ArtworkAppearance::Dark
-                    },
+                    appearance: artwork_appearance,
                 },
             );
             let id = self.next_icon_id;
@@ -838,7 +862,8 @@ impl FileApp {
             if path == self.browser.current() {
                 self.tab_icon = Some((id, artwork.pixels));
             } else {
-                self.icons.insert(path.clone(), (id, artwork.pixels));
+                self.icons
+                    .insert_resolved(key.clone(), (id, artwork.pixels));
             }
         }
         if preference == FileIconPreference::Nickel {
@@ -859,7 +884,7 @@ impl FileApp {
         let _ = std::thread::Builder::new()
             .name("nickel-file-icons".into())
             .spawn(move || {
-                for (path, is_directory) in paths {
+                for (path, is_directory, key) in paths {
                     #[cfg(debug_assertions)]
                     let profile_started = Instant::now();
                     let artwork = icons::resolve_artwork(
@@ -869,11 +894,7 @@ impl FileApp {
                             kind: icons::semantic_kind(&path, is_directory),
                             logical_size: 96,
                             scale_milli: 1_000,
-                            appearance: if appearance == ThemeMode::Light {
-                                icons::ArtworkAppearance::Light
-                            } else {
-                                icons::ArtworkAppearance::Dark
-                            },
+                            appearance: artwork_appearance,
                         },
                     );
                     #[cfg(debug_assertions)]
@@ -887,7 +908,7 @@ impl FileApp {
                             profile_started.elapsed()
                         );
                     }
-                    if tx.send((generation, path, artwork)).is_err() {
+                    if tx.send((generation, path, key, artwork)).is_err() {
                         break;
                     }
                 }
@@ -901,7 +922,7 @@ impl FileApp {
                 None => return,
             };
             match result {
-                Ok((generation, path, artwork)) if generation == self.icon_generation => {
+                Ok((generation, path, key, artwork)) if generation == self.icon_generation => {
                     self.icon_poll_delay = std::time::Duration::from_millis(16);
                     let id = self.next_icon_id;
                     self.next_icon_id = self.next_icon_id.checked_add(1).unwrap_or(1);
@@ -913,7 +934,7 @@ impl FileApp {
                         .iter()
                         .any(|entry| entry.path == path)
                     {
-                        self.icons.insert(path, (id, artwork.pixels));
+                        self.icons.insert_resolved(key, (id, artwork.pixels));
                     }
                 }
                 Ok(_) => {}

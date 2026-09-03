@@ -39,6 +39,35 @@ pub enum ArtworkSource {
     System,
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ArtworkCacheKey {
+    pub provider: ArtworkSource,
+    pub provider_revision: u64,
+    pub entry: PathBuf,
+    pub kind: SemanticIconKind,
+    pub logical_size: u16,
+    pub scale_milli: u16,
+    pub appearance: ArtworkAppearance,
+}
+
+impl ArtworkCacheKey {
+    pub fn new(
+        provider: ArtworkSource,
+        provider_revision: u64,
+        request: &ArtworkRequest<'_>,
+    ) -> Self {
+        Self {
+            provider,
+            provider_revision,
+            entry: request.path.to_path_buf(),
+            kind: request.kind,
+            logical_size: request.logical_size,
+            scale_milli: request.scale_milli,
+            appearance: request.appearance,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct ResolvedArtwork {
     pub pixels: Arc<RgbaImage>,
@@ -68,6 +97,7 @@ pub trait IconProvider: Send + Sync {
 
 pub(crate) struct ArtworkCache {
     entries: HashMap<PathBuf, (u16, Arc<RgbaImage>)>,
+    keys: HashMap<PathBuf, ArtworkCacheKey>,
     order: VecDeque<PathBuf>,
     retained_bytes: usize,
     byte_capacity: usize,
@@ -83,6 +113,7 @@ impl ArtworkCache {
     fn with_capacity(byte_capacity: usize) -> Self {
         Self {
             entries: HashMap::new(),
+            keys: HashMap::new(),
             order: VecDeque::new(),
             retained_bytes: 0,
             byte_capacity,
@@ -93,8 +124,8 @@ impl ArtworkCache {
         self.entries.get(path)
     }
 
-    pub(crate) fn contains_key(&self, path: &Path) -> bool {
-        self.entries.contains_key(path)
+    pub(crate) fn matches(&self, key: &ArtworkCacheKey) -> bool {
+        self.keys.get(&key.entry) == Some(key)
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -103,6 +134,7 @@ impl ArtworkCache {
 
     pub(crate) fn clear(&mut self) {
         self.entries.clear();
+        self.keys.clear();
         self.order.clear();
         self.retained_bytes = 0;
     }
@@ -120,6 +152,19 @@ impl ArtworkCache {
     }
 
     pub(crate) fn insert(&mut self, path: PathBuf, value: (u16, Arc<RgbaImage>)) {
+        self.insert_keyed(path, value, None);
+    }
+
+    pub(crate) fn insert_resolved(&mut self, key: ArtworkCacheKey, value: (u16, Arc<RgbaImage>)) {
+        self.insert_keyed(key.entry.clone(), value, Some(key));
+    }
+
+    fn insert_keyed(
+        &mut self,
+        path: PathBuf,
+        value: (u16, Arc<RgbaImage>),
+        key: Option<ArtworkCacheKey>,
+    ) {
         self.remove(&path);
         let bytes = value.1.as_raw().len();
         if bytes > self.byte_capacity {
@@ -132,9 +177,13 @@ impl ArtworkCache {
             if let Some((_, image)) = self.entries.remove(&oldest) {
                 self.retained_bytes = self.retained_bytes.saturating_sub(image.as_raw().len());
             }
+            self.keys.remove(&oldest);
         }
         self.retained_bytes = self.retained_bytes.saturating_add(bytes);
         self.order.push_back(path.clone());
+        if let Some(key) = key {
+            self.keys.insert(path.clone(), key);
+        }
         self.entries.insert(path, value);
     }
 
@@ -142,6 +191,7 @@ impl ArtworkCache {
         if let Some((_, image)) = self.entries.remove(path) {
             self.retained_bytes = self.retained_bytes.saturating_sub(image.as_raw().len());
         }
+        self.keys.remove(path);
         self.order.retain(|candidate| candidate != path);
     }
 }
@@ -242,6 +292,21 @@ pub fn resolve_artwork(
         FileIconPreference::System => &system,
     };
     resolve_with_providers(preferred, &nickel, request)
+}
+
+pub fn cache_key(preference: FileIconPreference, request: &ArtworkRequest<'_>) -> ArtworkCacheKey {
+    match preference {
+        FileIconPreference::Nickel => ArtworkCacheKey::new(
+            ArtworkSource::Nickel,
+            NickelIconProvider.revision(),
+            request,
+        ),
+        FileIconPreference::System => ArtworkCacheKey::new(
+            ArtworkSource::System,
+            SystemIconProvider.revision(),
+            request,
+        ),
+    }
 }
 
 fn resolve_with_providers(
@@ -463,7 +528,56 @@ mod tests {
         }
         assert_eq!(cache.len(), 1);
         assert!(cache.retained_bytes <= cache.byte_capacity);
-        assert!(cache.contains_key(Path::new("item-2")));
+        assert!(cache.entries.contains_key(Path::new("item-2")));
+    }
+
+    #[test]
+    fn cache_identity_covers_provider_revision_entry_kind_size_scale_and_appearance() {
+        let path = PathBuf::from("/fixture/item.txt");
+        let request = ArtworkRequest {
+            path: &path,
+            kind: SemanticIconKind::TextFile,
+            logical_size: 48,
+            scale_milli: 1_250,
+            appearance: ArtworkAppearance::Dark,
+        };
+        let key = ArtworkCacheKey::new(ArtworkSource::System, 3, &request);
+        let variants = [
+            ArtworkCacheKey {
+                provider: ArtworkSource::Nickel,
+                ..key.clone()
+            },
+            ArtworkCacheKey {
+                provider_revision: 4,
+                ..key.clone()
+            },
+            ArtworkCacheKey {
+                entry: PathBuf::from("/fixture/other.txt"),
+                ..key.clone()
+            },
+            ArtworkCacheKey {
+                kind: SemanticIconKind::ImageFile,
+                ..key.clone()
+            },
+            ArtworkCacheKey {
+                logical_size: 64,
+                ..key.clone()
+            },
+            ArtworkCacheKey {
+                scale_milli: 2_000,
+                ..key.clone()
+            },
+            ArtworkCacheKey {
+                appearance: ArtworkAppearance::Light,
+                ..key.clone()
+            },
+        ];
+        assert!(variants.iter().all(|variant| variant != &key));
+
+        let mut cache = ArtworkCache::with_capacity(1_024);
+        cache.insert_resolved(key.clone(), (1, Arc::new(RgbaImage::new(4, 4))));
+        assert!(cache.matches(&key));
+        assert!(variants.iter().all(|variant| !cache.matches(variant)));
     }
 
     #[test]

@@ -28,6 +28,32 @@ fn pending_icon_work_uses_bounded_backoff() {
 }
 
 #[test]
+fn stale_async_artwork_cannot_replace_current_generation() {
+    let mut app = FileApp::fixture();
+    let path = app.browser.entries()[0].path.clone();
+    let request = icons::ArtworkRequest {
+        path: &path,
+        kind: icons::SemanticIconKind::Folder,
+        logical_size: 96,
+        scale_milli: 1_000,
+        appearance: icons::ArtworkAppearance::Dark,
+    };
+    let key = icons::cache_key(FileIconPreference::System, &request);
+    let artwork = icons::resolve_artwork(FileIconPreference::Nickel, &request);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    sender
+        .send((app.icon_generation, path.clone(), key, artwork))
+        .unwrap();
+    app.icon_generation = app.icon_generation.wrapping_add(1);
+    app.icons.clear();
+    app.icon_rx = Some(receiver);
+
+    app.poll_icons();
+
+    assert!(app.icons.get(&path).is_none());
+}
+
+#[test]
 fn nickel_fallback_artwork_is_present_before_async_provider_results() {
     let entries = vec![
         FileEntry {
@@ -415,7 +441,7 @@ fn navigation_from_idle_publishes_fallback_before_optional_provider_work() {
     app.navigate_to(child.clone());
 
     assert_eq!(app.browser.current(), child);
-    assert!(app.icons.contains_key(&child.join("new-file.txt")));
+    assert!(app.icons.get(&child.join("new-file.txt")).is_some());
     assert!(app.tab_icon.is_some());
     assert_eq!(
         Application::poll_interval(&app).is_some(),
