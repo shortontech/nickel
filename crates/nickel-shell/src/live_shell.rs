@@ -6,6 +6,7 @@ use std::{
 
 #[cfg(not(target_os = "macos"))]
 use jiff::Zoned;
+use nickel_core::task_switcher::{SwitchWindow, TaskSwitchEffect, TaskSwitcher};
 use nickel_core::{
     launcher_preferences::LauncherPreferences,
     shell_settings::ShellSettings,
@@ -32,7 +33,7 @@ use crate::{
         LauncherAction, LauncherApplication, LauncherIconCache, LauncherShellEffect,
         LauncherViewState, reduce_launcher_action,
     },
-    model::{Application, OpenWindow, TrayItem},
+    model::{Application, OpenWindow, TrayItem, WindowGroup},
     notification::DesktopNotification,
     notification_view::{NotificationApp, NotificationEffect, NotificationHost},
     platform::{
@@ -436,6 +437,8 @@ pub struct LiveShell {
     tray_feed: TrayFeed,
     notification_feed: NotificationFeed,
     windows: Vec<OpenWindow>,
+    task_switcher: TaskSwitcher<crate::model::WindowId>,
+    task_switcher_group: Option<WindowGroup>,
     workspaces: Vec<platform::WorkspaceSummary>,
     window_feed_status: FeedStatus,
     workspace_feed_status: FeedStatus,
@@ -716,6 +719,8 @@ impl LiveShell {
             tray_feed,
             notification_feed,
             windows,
+            task_switcher: TaskSwitcher::default(),
+            task_switcher_group: None,
             workspaces,
             window_feed_status: FeedStatus::Loading,
             workspace_feed_status: FeedStatus::Loading,
@@ -1009,7 +1014,9 @@ impl LiveShell {
             SurfaceRole::Launcher => self.launcher_visible,
             SurfaceRole::ControlCenter => self.control_visible,
             SurfaceRole::Notification => self.notification.is_some(),
-            SurfaceRole::WindowPreview => self.preview_group.is_some(),
+            SurfaceRole::WindowPreview => {
+                self.preview_group.is_some() || self.task_switcher_group.is_some()
+            }
             SurfaceRole::WindowContextMenu => self.window_menu.is_some(),
             SurfaceRole::CodexProjectMenu => self.codex_project_menu_visible,
             SurfaceRole::Lock => self.locked,
@@ -1212,7 +1219,6 @@ impl LiveShell {
         {
             changed.push(SurfaceRole::WindowPreview);
         }
-
         changed
     }
 
@@ -1874,7 +1880,22 @@ impl LiveShell {
     }
 
     pub fn sync_transient_overlays(&mut self) {
-        if let Some(index) = self.preview_group {
+        if let Some(group) = &self.task_switcher_group {
+            let windows = group
+                .windows
+                .iter()
+                .map(|window| window.id)
+                .collect::<Vec<_>>();
+            let (width, height) = preview_dimensions(windows.len());
+            let _ = send_session_command(
+                "show-task-switcher",
+                ShellCommand::ShowTaskSwitcher {
+                    width: width as i32,
+                    height: height as i32,
+                    windows,
+                },
+            );
+        } else if let Some(index) = self.preview_group {
             let groups = self.launcher.group_windows(&self.windows);
             if let Some(group) = groups.get(index) {
                 let windows = group
@@ -1983,6 +2004,20 @@ impl LiveShell {
                 self.apply_launcher_signal(false);
                 true
             }
+            platform::GlobalShortcut::SwitchNext => {
+                self.apply_task_switch_action(nickel_core::hotkeys::HotkeyAction::SwitchNext)
+            }
+            platform::GlobalShortcut::SwitchPrevious => {
+                self.apply_task_switch_action(nickel_core::hotkeys::HotkeyAction::SwitchPrevious)
+            }
+            platform::GlobalShortcut::SwitchGroupNext => {
+                self.apply_task_switch_action(nickel_core::hotkeys::HotkeyAction::SwitchGroupNext)
+            }
+            platform::GlobalShortcut::SwitchGroupPrevious => self
+                .apply_task_switch_action(nickel_core::hotkeys::HotkeyAction::SwitchGroupPrevious),
+            platform::GlobalShortcut::CommitSwitch => {
+                self.apply_task_switch_action(nickel_core::hotkeys::HotkeyAction::CommitSwitch)
+            }
             platform::GlobalShortcut::LockState { locked } => {
                 self.locked = locked;
                 let application = self.lock_host.application_mut();
@@ -2040,6 +2075,72 @@ impl LiveShell {
             }
             _ => false,
         }
+    }
+
+    fn apply_task_switch_action(&mut self, action: nickel_core::hotkeys::HotkeyAction) -> bool {
+        let windows = self
+            .windows
+            .iter()
+            .map(|window| SwitchWindow {
+                id: window.id,
+                application_id: window
+                    .application_id
+                    .as_ref()
+                    .map(|id| id.as_str().to_owned())
+                    .unwrap_or_else(|| window.title.clone()),
+                active: window.active,
+            })
+            .collect::<Vec<_>>();
+        let effects = self.task_switcher.apply(action, &windows);
+        let changed = !effects.is_empty();
+        for effect in effects {
+            match effect {
+                TaskSwitchEffect::ActivateWindow(window) => {
+                    let _ = send_session_command(
+                        "task-switcher-activate",
+                        ShellCommand::WindowAction {
+                            window,
+                            action: WindowAction::Activate,
+                        },
+                    );
+                }
+                TaskSwitchEffect::HideFlip { .. } => {
+                    self.task_switcher_group = None;
+                    self.preview_frame = None;
+                    self.preview_images.clear();
+                }
+                TaskSwitchEffect::ShowFlip { .. }
+                | TaskSwitchEffect::RequestPreviews(_)
+                | TaskSwitchEffect::SelectPreview(_) => {}
+            }
+        }
+        if self.task_switcher.session().is_some() {
+            self.rebuild_task_switcher_preview();
+        }
+        changed
+    }
+
+    fn rebuild_task_switcher_preview(&mut self) {
+        let visible = self.task_switcher.visible_range(5);
+        let ids = self.task_switcher.candidates()[visible].to_vec();
+        let windows = ids
+            .iter()
+            .filter_map(|id| self.windows.iter().find(|window| window.id == *id).cloned())
+            .collect::<Vec<_>>();
+        self.preview_images.clear();
+        for window in &windows {
+            if let Some(preview) = self.window_feed.preview(window.id) {
+                self.preview_images
+                    .insert(window.id, Arc::new(preview.image));
+            }
+        }
+        self.preview_hovered = self.task_switcher.selected().copied();
+        self.task_switcher_group = Some(WindowGroup {
+            application_id: None,
+            application_name: "Open windows".into(),
+            windows,
+        });
+        self.preview_frame = None;
     }
 
     /// Requests a launcher toggle initiated by shell-owned input such as a controller.
@@ -2550,11 +2651,13 @@ impl LiveShell {
     }
 
     fn window_preview_scene(&mut self) -> Vec<PaintCommand> {
-        let group = self.preview_group.and_then(|index| {
-            self.launcher
-                .group_windows(&self.windows)
-                .get(index)
-                .cloned()
+        let group = self.task_switcher_group.clone().or_else(|| {
+            self.preview_group.and_then(|index| {
+                self.launcher
+                    .group_windows(&self.windows)
+                    .get(index)
+                    .cloned()
+            })
         });
         let Some(group) = group else {
             self.preview_frame = None;

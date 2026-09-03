@@ -1033,6 +1033,8 @@ static LAUNCHER_FOREGROUND_WINDOW: std::sync::atomic::AtomicIsize =
     std::sync::atomic::AtomicIsize::new(0);
 static LAUNCHER_WINDOW_HANDLE: std::sync::atomic::AtomicIsize =
     std::sync::atomic::AtomicIsize::new(0);
+static PREVIEW_WINDOW_HANDLE: std::sync::atomic::AtomicIsize =
+    std::sync::atomic::AtomicIsize::new(0);
 static CONTEXT_MENU_WINDOW_HANDLE: std::sync::atomic::AtomicIsize =
     std::sync::atomic::AtomicIsize::new(0);
 static DWM_THUMBNAILS: Mutex<Vec<isize>> = Mutex::new(Vec::new());
@@ -1264,8 +1266,11 @@ fn send_hotkey_action(action: Option<HotkeyAction>) {
         ) => return,
         None => return,
     };
+    tracing::debug!(?shortcut, "dispatching Windows global shortcut");
     if let Some(sender) = SHORTCUT_SENDER.get() {
-        let _ = sender.send(shortcut);
+        if sender.send(shortcut).is_err() {
+            tracing::warn!("Windows global shortcut receiver disconnected");
+        }
     }
 }
 
@@ -1761,6 +1766,33 @@ pub fn configure_launcher_window(window: &impl raw_window_handle::HasWindowHandl
     };
     LAUNCHER_WINDOW_HANDLE.store(hwnd.0 as isize, Ordering::Relaxed);
     true
+}
+
+pub fn configure_preview_window(window: &impl raw_window_handle::HasWindowHandle) -> bool {
+    use std::sync::atomic::Ordering;
+
+    let Some(hwnd) = window_hwnd(window) else {
+        return false;
+    };
+    PREVIEW_WINDOW_HANDLE.store(hwnd.0 as isize, Ordering::Relaxed);
+    unsafe {
+        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+        SetWindowLongPtrW(
+            hwnd,
+            GWL_EXSTYLE,
+            (style | WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0) as isize,
+        );
+        SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        )
+        .is_ok()
+    }
 }
 
 pub fn configure_context_menu_window(window: &impl raw_window_handle::HasWindowHandle) -> bool {
@@ -2651,8 +2683,79 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
             height,
             windows,
         } => {
-            if !show_context_window(x, width, height) {
+            let preview = PREVIEW_WINDOW_HANDLE.load(Ordering::Relaxed);
+            if preview == 0 {
                 return false;
+            }
+            let hwnd = HWND(preview as *mut c_void);
+            let mut work_area = RECT::default();
+            unsafe {
+                if SystemParametersInfoW(
+                    SPI_GETWORKAREA,
+                    0,
+                    Some((&mut work_area as *mut RECT).cast()),
+                    Default::default(),
+                )
+                .is_err()
+                {
+                    return false;
+                }
+                let top = (work_area.bottom - height).max(work_area.top);
+                if SetWindowPos(
+                    hwnd,
+                    Some(HWND_TOPMOST),
+                    x,
+                    top,
+                    width,
+                    height,
+                    SWP_NOACTIVATE,
+                )
+                .is_err()
+                {
+                    return false;
+                }
+                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            }
+            return show_dwm_previews(&windows);
+        }
+        ShellCommand::ShowTaskSwitcher {
+            width,
+            height,
+            windows,
+        } => {
+            let preview = PREVIEW_WINDOW_HANDLE.load(Ordering::Relaxed);
+            if preview == 0 {
+                return false;
+            }
+            let hwnd = HWND(preview as *mut c_void);
+            let mut work_area = RECT::default();
+            unsafe {
+                if SystemParametersInfoW(
+                    SPI_GETWORKAREA,
+                    0,
+                    Some((&mut work_area as *mut RECT).cast()),
+                    Default::default(),
+                )
+                .is_err()
+                {
+                    return false;
+                }
+                let x = work_area.left + ((work_area.right - work_area.left - width) / 2).max(0);
+                let y = work_area.top + ((work_area.bottom - work_area.top - height) / 2).max(0);
+                if SetWindowPos(
+                    hwnd,
+                    Some(HWND_TOPMOST),
+                    x,
+                    y,
+                    width,
+                    height,
+                    SWP_NOACTIVATE,
+                )
+                .is_err()
+                {
+                    return false;
+                }
+                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             }
             return show_dwm_previews(&windows);
         }

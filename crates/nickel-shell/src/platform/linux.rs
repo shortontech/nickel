@@ -1221,6 +1221,23 @@ fn shell_command_payload(command: ShellCommand) -> SessionCommand {
                 .map(|window| SessionWindowId(window.0))
                 .collect(),
         },
+        ShellCommand::ShowTaskSwitcher {
+            width,
+            height,
+            windows,
+        } => SessionCommand::ShowOverlay {
+            role: SessionShellRole::Preview,
+            geometry: SessionGeometry {
+                x: 0,
+                y: 0,
+                width,
+                height,
+            },
+            windows: windows
+                .into_iter()
+                .map(|window| SessionWindowId(window.0))
+                .collect(),
+        },
         ShellCommand::FocusControlCenter => SessionCommand::FocusShellRole {
             role: SessionShellRole::ControlCenter,
         },

@@ -816,6 +816,7 @@ fn focus_visible_overlay(shell: &mut WinitShell, state: &LiveShell) {
         SurfaceRole::Launcher,
         SurfaceRole::ControlCenter,
         SurfaceRole::CodexProjectMenu,
+        SurfaceRole::WindowPreview,
     ] {
         #[cfg(target_os = "linux")]
         if role == SurfaceRole::Launcher {
@@ -1560,9 +1561,9 @@ fn main() -> Result<(), String> {
     let mut hover_repaint: Option<(SurfaceRole, Instant)> = None;
     let mut controller = ControllerInput::new();
     let mut controller_schedule = nickel_ui::ControllerPollSchedule::new(Instant::now());
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
     let mut focused_overlays = HashSet::new();
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
     let mut overlay_focus_loss: Option<(SurfaceId, SurfaceRole, Instant)> = None;
     let mut diagnostic_loop_started = Instant::now();
     let mut diagnostic_loop_iterations = 0_u64;
@@ -1612,7 +1613,7 @@ fn main() -> Result<(), String> {
             .next_output_retirement_deadline()
             .map(|deadline| deadline.min(next_deadline))
             .unwrap_or(next_deadline);
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
         let next_deadline = overlay_focus_loss
             .map(|(_, _, deadline)| deadline.min(next_deadline))
             .unwrap_or(next_deadline);
@@ -1707,14 +1708,17 @@ fn main() -> Result<(), String> {
                 }
             },
             Some(ShellEvent::GlobalShortcut(shortcut)) => {
+                tracing::debug!(?shortcut, "handling global shortcut");
                 shell.begin_input_observation(Instant::now());
                 if state.global_shortcut(shortcut) {
                     sync_visibility(&mut shell, &state);
+                    state.sync_transient_overlays();
                     focus_visible_overlay(&mut shell, &state);
                     render_role(&mut shell, &mut state, SurfaceRole::Desktop)?;
                     render_role(&mut shell, &mut state, SurfaceRole::Panel)?;
                     render_role(&mut shell, &mut state, SurfaceRole::Launcher)?;
                     render_role(&mut shell, &mut state, SurfaceRole::ControlCenter)?;
+                    render_role(&mut shell, &mut state, SurfaceRole::WindowPreview)?;
                     render_role(&mut shell, &mut state, SurfaceRole::Lock)?;
                     render_role(&mut shell, &mut state, SurfaceRole::Screenshot)?;
                 }
@@ -1758,7 +1762,7 @@ fn main() -> Result<(), String> {
                 surface: _surface,
                 focused: false,
             }) => {
-                #[cfg(not(target_os = "linux"))]
+                #[cfg(target_os = "macos")]
                 if let Some(role @ (SurfaceRole::Launcher | SurfaceRole::ControlCenter)) =
                     shell.surface(_surface).map(|entry| entry.role())
                     && focused_overlays.remove(&_surface)
@@ -1778,7 +1782,7 @@ fn main() -> Result<(), String> {
                     state.focus_launcher_search();
                     shell.start_text_input(surface);
                 }
-                #[cfg(not(target_os = "linux"))]
+                #[cfg(target_os = "macos")]
                 if shell.surface(surface).is_some_and(|entry| {
                     matches!(
                         entry.role(),
@@ -1787,7 +1791,7 @@ fn main() -> Result<(), String> {
                 }) {
                     focused_overlays.insert(surface);
                 }
-                #[cfg(not(target_os = "linux"))]
+                #[cfg(target_os = "macos")]
                 if overlay_focus_loss.is_some_and(|(pending, _, _)| pending == surface) {
                     overlay_focus_loss = None;
                 }
@@ -1905,7 +1909,7 @@ fn main() -> Result<(), String> {
         {
             render_role(&mut shell, &mut state, role)?;
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
         if overlay_focus_loss.is_some_and(|(_, _, deadline)| Instant::now() >= deadline)
             && let Some((_, role, _)) = overlay_focus_loss.take()
             && state.hide_overlay(role)

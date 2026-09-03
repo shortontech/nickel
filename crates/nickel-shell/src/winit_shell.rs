@@ -1075,6 +1075,39 @@ impl WinitShell {
             .events
             .create_window(attributes)
             .map_err(|error| error.to_string())?;
+        #[cfg(target_os = "windows")]
+        match role {
+            SurfaceRole::Desktop => {
+                if !crate::platform::configure_desktop_window(
+                    &window,
+                    (geometry.x, geometry.y),
+                    (geometry.width, geometry.height),
+                ) {
+                    tracing::warn!(?role, "failed to configure Windows shell window");
+                }
+            }
+            SurfaceRole::Panel => {
+                if !crate::platform::configure_panel_window(&window) {
+                    tracing::warn!(?role, "failed to configure Windows shell window");
+                }
+            }
+            SurfaceRole::Launcher => {
+                if !crate::platform::configure_launcher_window(&window) {
+                    tracing::warn!(?role, "failed to configure Windows shell window");
+                }
+            }
+            SurfaceRole::WindowPreview => {
+                if !crate::platform::configure_preview_window(&window) {
+                    tracing::warn!(?role, "failed to configure Windows shell window");
+                }
+            }
+            SurfaceRole::WindowContextMenu => {
+                if !crate::platform::configure_context_menu_window(&window) {
+                    tracing::warn!(?role, "failed to configure Windows shell window");
+                }
+            }
+            _ => {}
+        }
         if role == SurfaceRole::Screenshot {
             window.set_min_inner_size(Some(LogicalSize::new(720, 480)));
             #[cfg(target_os = "windows")]
@@ -1224,9 +1257,9 @@ fn surface_geometry(
         ),
         SurfaceRole::WindowPreview => (
             WINDOW_PREVIEW_TITLE,
-            geometry.x,
-            geometry.y,
-            300.min(geometry.width),
+            geometry.x + geometry.width.saturating_sub(1160.min(geometry.width)) as i32 / 2,
+            geometry.y + geometry.height.saturating_sub(220.min(geometry.height)) as i32 / 2,
+            1160.min(geometry.width),
             220.min(geometry.height),
             true,
         ),
