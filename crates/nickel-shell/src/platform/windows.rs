@@ -70,19 +70,18 @@ use windows::{
                 GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
                 GetWindowThreadProcessId, HICON, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTLEFT,
                 HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_BOTTOM, HWND_BROADCAST, HWND_TOPMOST,
-                IsIconic, IsWindow, IsWindowVisible, IsZoomed, KBDLLHOOKSTRUCT, KillTimer,
-                LWA_ALPHA, MSG, MSLLHOOKSTRUCT, PostMessageW, RegisterClassW,
-                RegisterShellHookWindow, RegisterWindowMessageW, SM_CXSMICON, SM_CYSMICON,
-                SPI_GETWORKAREA, SPI_SETWORKAREA, SPIF_SENDCHANGE, SW_HIDE, SW_MAXIMIZE,
-                SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, SW_SHOWNORMAL,
-                SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-                SWP_NOZORDER, SendNotifyMessageW, SetForegroundWindow, SetLayeredWindowAttributes,
-                SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowsHookExW, ShowWindow,
-                SystemParametersInfoW, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
-                WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE,
-                WM_CONTEXTMENU, WM_COPYDATA, WM_HOTKEY, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
-                WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSCOMMAND,
-                WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN,
+                IsIconic, IsWindow, IsWindowVisible, IsZoomed, KBDLLHOOKSTRUCT, LWA_ALPHA, MSG,
+                MSLLHOOKSTRUCT, PostMessageW, RegisterClassW, RegisterShellHookWindow,
+                RegisterWindowMessageW, SM_CXSMICON, SM_CYSMICON, SPI_GETWORKAREA, SPI_SETWORKAREA,
+                SPIF_SENDCHANGE, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW,
+                SW_SHOWNOACTIVATE, SW_SHOWNORMAL, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED,
+                SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendNotifyMessageW,
+                SetForegroundWindow, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos,
+                SetWindowsHookExW, ShowWindow, SystemParametersInfoW, TPM_RETURNCMD,
+                TPM_RIGHTBUTTON, TrackPopupMenu, WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_EX_STYLE,
+                WINDOW_STYLE, WM_CLOSE, WM_CONTEXTMENU, WM_COPYDATA, WM_HOTKEY, WM_KEYDOWN,
+                WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP,
+                WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN,
                 WS_CLIPSIBLINGS, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
                 WS_EX_TOOLWINDOW, WindowFromPoint,
             },
@@ -886,58 +885,20 @@ fn run_super_key_hook(
     sender: Sender<GlobalShortcut>,
     startup: mpsc::SyncSender<nickel_input::global::ShortcutCapability>,
 ) {
-    const VK_LWIN: u32 = 0x5b;
-    const VK_RWIN: u32 = 0x5c;
-    const VK_R: u32 = 0x52;
-    const LEFT_SUPER_HOTKEY: i32 = 0x4e01;
-    const RIGHT_SUPER_HOTKEY: i32 = 0x4e02;
-    const RUN_HOTKEY: i32 = 0x4e03;
-    const SUPER_RELEASE_TIMER: usize = 0x4e04;
-
     SHORTCUT_SENDER.set(sender).ok();
+    let run = native_hotkey_requests()[0];
     let modifiers = MOD_WIN | MOD_NOREPEAT;
-    let left_registered =
-        unsafe { RegisterHotKey(None, LEFT_SUPER_HOTKEY, modifiers, VK_LWIN) }.is_ok();
-    let right_registered =
-        unsafe { RegisterHotKey(None, RIGHT_SUPER_HOTKEY, modifiers, VK_RWIN) }.is_ok();
-    let run_registered = unsafe { RegisterHotKey(None, RUN_HOTKEY, modifiers, VK_R) }.is_ok();
+    let run_registered =
+        unsafe { RegisterHotKey(None, run.id, modifiers, run.virtual_key) }.is_ok();
     let mut registrations = RegistrationTable::default();
-    let left_registration = native_registration(
-        &mut registrations,
-        left_registered,
-        KeyCode::SuperLeft,
-        [AggregateModifier::Super],
-        RegisteredHotkey::BareSuper,
-    );
-    let right_registration = native_registration(
-        &mut registrations,
-        right_registered,
-        KeyCode::SuperRight,
-        [AggregateModifier::Super],
-        RegisteredHotkey::BareSuper,
-    );
     let run_registration = native_registration(
         &mut registrations,
         run_registered,
-        KeyCode::KeyR,
+        run.key,
         [AggregateModifier::Super],
-        RegisteredHotkey::ShowRun,
+        run.action,
     );
-    let registration_bits = u8::from(left_registered) | (u8::from(right_registered) << 1);
-    BARE_SUPER_REGISTRATION_BITS.store(registration_bits, std::sync::atomic::Ordering::Release);
     RUN_HOTKEY_REGISTERED.store(run_registered, std::sync::atomic::Ordering::Release);
-    if registration_bits == 0 {
-        tracing::warn!(
-            "bare Super hotkey registration unavailable; using passive hook observation"
-        );
-    } else {
-        tracing::info!(
-            left_registered,
-            right_registered,
-            run_registered,
-            "registered bare Super through RegisterHotKey"
-        );
-    }
     if !run_registered {
         tracing::warn!("Super+R registration unavailable; using low-level hook fallback");
     }
@@ -970,29 +931,7 @@ fn run_super_key_hook(
     while unsafe { GetMessageW(&mut message, None, 0, 0).as_bool() } {
         if message.message == WM_HOTKEY {
             match message.wParam.0 as i32 {
-                LEFT_SUPER_HOTKEY => {
-                    deliver_registered_hotkey(
-                        &mut registrations,
-                        left_registration,
-                        GlobalShortcutEdge::Activated,
-                    );
-                    // SAFETY: This thread owns the message loop and uses a process-local timer ID.
-                    unsafe {
-                        SetTimer(None, SUPER_RELEASE_TIMER, 10, None);
-                    }
-                }
-                RIGHT_SUPER_HOTKEY => {
-                    deliver_registered_hotkey(
-                        &mut registrations,
-                        right_registration,
-                        GlobalShortcutEdge::Activated,
-                    );
-                    // SAFETY: This thread owns the message loop and uses a process-local timer ID.
-                    unsafe {
-                        SetTimer(None, SUPER_RELEASE_TIMER, 10, None);
-                    }
-                }
-                RUN_HOTKEY => {
+                id if id == run.id => {
                     deliver_registered_hotkey(
                         &mut registrations,
                         run_registration,
@@ -1001,25 +940,30 @@ fn run_super_key_hook(
                 }
                 _ => {}
             }
-        } else if message.message == WM_TIMER
-            && message.wParam.0 == SUPER_RELEASE_TIMER
-            && unsafe {
-                GetAsyncKeyState(VK_LWIN as i32) >= 0 && GetAsyncKeyState(VK_RWIN as i32) >= 0
-            }
-        {
-            // SAFETY: This removes only the timer created above on this message thread.
-            unsafe {
-                let _ = KillTimer(None, SUPER_RELEASE_TIMER);
-            }
-            reconcile_registered_super_release();
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RegisteredHotkey {
-    BareSuper,
     ShowRun,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct NativeHotkeyRequest {
+    id: i32,
+    virtual_key: u32,
+    key: KeyCode,
+    action: RegisteredHotkey,
+}
+
+fn native_hotkey_requests() -> [NativeHotkeyRequest; 1] {
+    [NativeHotkeyRequest {
+        id: 0x4e03,
+        virtual_key: 0x52,
+        key: KeyCode::KeyR,
+        action: RegisteredHotkey::ShowRun,
+    }]
 }
 
 fn native_registration(
@@ -1060,7 +1004,6 @@ fn deliver_registered_hotkey(
         return;
     };
     match event.action {
-        RegisteredHotkey::BareSuper => register_bare_super_press(),
         RegisteredHotkey::ShowRun => {
             tracing::debug!("Super+R hotkey received");
             if let Some(sender) = SHORTCUT_SENDER.get() {
@@ -1074,8 +1017,6 @@ static SHORTCUT_SENDER: std::sync::OnceLock<Sender<GlobalShortcut>> = std::sync:
 static HOTKEY_CONTROLLER: std::sync::OnceLock<Mutex<HotkeyController>> = std::sync::OnceLock::new();
 static RUN_HOTKEY_REGISTERED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
-static BARE_SUPER_REGISTRATION_BITS: std::sync::atomic::AtomicU8 =
-    std::sync::atomic::AtomicU8::new(0);
 static INPUT_TRACE_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static PANEL_FULLSCREEN_ACTIVE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -1148,8 +1089,6 @@ struct TrayNotifyIconData {
 }
 
 unsafe extern "system" fn super_key_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    const VK_LWIN: u32 = 0x5b;
-    const VK_RWIN: u32 = 0x5c;
     const VK_R: u32 = 0x52;
     const VK_MENU: u32 = 0x12;
 
@@ -1189,7 +1128,7 @@ unsafe extern "system" fn super_key_hook(code: i32, wparam: WPARAM, lparam: LPAR
     {
         controller.handle(KeyCode::AltLeft, KeyEdge::Pressed);
     }
-    let (mut outcome, snapshot) = hotkey_controller()
+    let (outcome, snapshot) = hotkey_controller()
         .lock()
         .map(|mut controller| {
             let outcome = match key {
@@ -1199,19 +1138,6 @@ unsafe extern "system" fn super_key_hook(code: i32, wparam: WPARAM, lparam: LPAR
             (outcome, controller.snapshot())
         })
         .unwrap_or_default();
-    let bare_super_registered = match event.vkCode {
-        VK_LWIN => BARE_SUPER_REGISTRATION_BITS.load(std::sync::atomic::Ordering::Acquire) & 1 != 0,
-        VK_RWIN => BARE_SUPER_REGISTRATION_BITS.load(std::sync::atomic::Ordering::Acquire) & 2 != 0,
-        _ => false,
-    };
-    if bare_super_registered
-        && matches!(key, Some(KeyCode::SuperLeft | KeyCode::SuperRight))
-        && edge == KeyEdge::Pressed
-    {
-        // RegisterHotKey is the sole dispatcher for bare Super. The hook still tracks physical
-        // edges for Super+pointer gestures, but must not race the registered hotkey.
-        outcome.action = None;
-    }
     if key != Some(KeyCode::KeyR) {
         trace_input("key", key, Some(edge), outcome, snapshot);
     }
@@ -1244,22 +1170,6 @@ fn key_code_from_windows_vk(vk: u32) -> Option<KeyCode> {
         0x2c => KeyCode::PrintScreen,
         _ => return None,
     })
-}
-
-fn register_bare_super_press() {
-    tracing::debug!("bare Super hotkey received");
-    if let Ok(mut controller) = hotkey_controller().lock() {
-        controller.registered_super_pressed();
-    }
-}
-
-fn reconcile_registered_super_release() {
-    let action = hotkey_controller().lock().ok().and_then(|mut controller| {
-        controller
-            .handle(KeyCode::SuperLeft, KeyEdge::Released)
-            .action
-    });
-    send_hotkey_action(action);
 }
 
 fn hotkey_controller() -> &'static Mutex<HotkeyController> {
@@ -3305,8 +3215,8 @@ mod tests {
     use windows::Win32::Foundation::RECT;
 
     use super::{
-        application_icon, executable_icon, is_shell_infrastructure, parse_windows_command,
-        rectangle_covers, should_restore_on_activation,
+        application_icon, executable_icon, is_shell_infrastructure, native_hotkey_requests,
+        parse_windows_command, rectangle_covers, should_restore_on_activation,
     };
 
     #[test]
@@ -3404,5 +3314,14 @@ mod tests {
                 "Nickel Shell"
             ]
         );
+    }
+
+    #[test]
+    fn register_hotkey_is_reserved_for_chords_not_bare_super() {
+        let requests = native_hotkey_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].virtual_key, 0x52);
+        assert_ne!(requests[0].virtual_key, 0x5b);
+        assert_ne!(requests[0].virtual_key, 0x5c);
     }
 }

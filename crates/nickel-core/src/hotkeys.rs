@@ -522,11 +522,6 @@ impl HotkeyController {
     pub fn launcher_visibility_applied(&mut self, visible: bool) {
         self.launcher_visible = visible;
     }
-
-    pub fn registered_super_pressed(&mut self) {
-        self.super_held = true;
-        self.super_chorded = false;
-    }
 }
 
 #[cfg(test)]
@@ -599,49 +594,30 @@ mod tests {
 
     #[test]
     fn super_release_toggles_launcher_once() {
-        let mut controller = HotkeyController::default();
-        assert_eq!(
-            controller.handle(KeyCode::SuperLeft, KeyEdge::Pressed),
-            HotkeyOutcome::default()
-        );
-        let released = controller.handle(KeyCode::SuperLeft, KeyEdge::Released);
-        assert_eq!(
-            released,
-            HotkeyOutcome {
-                action: Some(HotkeyAction::ToggleLauncher),
-                suppress: false,
-            }
-        );
-        controller.launcher_visibility_applied(true);
-        controller.handle(KeyCode::SuperLeft, KeyEdge::Pressed);
-        assert_eq!(
-            controller.handle(KeyCode::SuperLeft, KeyEdge::Released),
-            HotkeyOutcome {
-                action: Some(HotkeyAction::ToggleLauncher),
-                suppress: false,
-            }
-        );
-    }
-
-    #[test]
-    fn registered_bare_super_toggles_only_when_released() {
-        let mut controller = HotkeyController::default();
-        controller.registered_super_pressed();
-        assert!(controller.snapshot().super_held);
-        assert_eq!(
-            controller
-                .handle(KeyCode::SuperLeft, KeyEdge::Released)
-                .action,
-            Some(HotkeyAction::ToggleLauncher)
-        );
-        controller.launcher_visibility_applied(true);
-        controller.registered_super_pressed();
-        assert_eq!(
-            controller
-                .handle(KeyCode::SuperLeft, KeyEdge::Released)
-                .action,
-            Some(HotkeyAction::ToggleLauncher)
-        );
+        for key in [KeyCode::SuperLeft, KeyCode::SuperRight] {
+            let mut controller = HotkeyController::default();
+            assert_eq!(
+                controller.handle(key, KeyEdge::Pressed),
+                HotkeyOutcome::default()
+            );
+            let released = controller.handle(key, KeyEdge::Released);
+            assert_eq!(
+                released,
+                HotkeyOutcome {
+                    action: Some(HotkeyAction::ToggleLauncher),
+                    suppress: false,
+                }
+            );
+            controller.launcher_visibility_applied(true);
+            controller.handle(key, KeyEdge::Pressed);
+            assert_eq!(
+                controller.handle(key, KeyEdge::Released),
+                HotkeyOutcome {
+                    action: Some(HotkeyAction::ToggleLauncher),
+                    suppress: false,
+                }
+            );
+        }
     }
 
     #[test]
