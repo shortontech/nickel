@@ -427,6 +427,18 @@ fn command_surface(app: &FileApp, palette: ThemePalette) -> AnyView<FileMessage>
             FileMessage::SetViewMode(FileViewMode::Details),
         ),
         (
+            "Increase tile size",
+            "grid zoom larger ctrl plus",
+            app.view_mode == FileViewMode::Grid && app.tile_width < crate::app::MAX_TILE_WIDTH,
+            FileMessage::AdjustTileWidth(1),
+        ),
+        (
+            "Decrease tile size",
+            "grid zoom smaller ctrl minus",
+            app.view_mode == FileViewMode::Grid && app.tile_width > crate::app::MIN_TILE_WIDTH,
+            FileMessage::AdjustTileWidth(-1),
+        ),
+        (
             "Select all",
             "selection ctrl a",
             !app.browser.entries().is_empty(),

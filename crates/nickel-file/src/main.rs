@@ -63,6 +63,7 @@ pub enum FileMessage {
     Up,
     Refresh,
     SetViewMode(FileViewMode),
+    AdjustTileWidth(i8),
     SortBy(EntrySortKey),
     Breadcrumb(PathBuf),
     ToggleFolder(PathBuf),
@@ -562,6 +563,7 @@ pub(crate) struct FileTab {
     pub(crate) status: String,
     pub(crate) last_click: Option<(usize, Instant)>,
     pub(crate) file_scroll_offset: f32,
+    pub(crate) tile_width: f32,
     pub(crate) view_mode: FileViewMode,
     pub(crate) sort_key: EntrySortKey,
     pub(crate) sort_direction: SortDirection,
@@ -764,6 +766,7 @@ impl FileApp {
         std::mem::swap(&mut self.status, &mut target.status);
         std::mem::swap(&mut self.last_click, &mut target.last_click);
         std::mem::swap(&mut self.file_scroll_offset, &mut target.file_scroll_offset);
+        std::mem::swap(&mut self.tile_width, &mut target.tile_width);
         std::mem::swap(&mut self.view_mode, &mut target.view_mode);
         std::mem::swap(&mut self.sort_key, &mut target.sort_key);
         std::mem::swap(&mut self.sort_direction, &mut target.sort_direction);
@@ -816,6 +819,7 @@ impl FileApp {
             status: String::new(),
             last_click: None,
             file_scroll_offset: 0.0,
+            tile_width: DEFAULT_TILE_WIDTH,
             view_mode: FileViewMode::Grid,
             sort_key: EntrySortKey::Name,
             sort_direction: SortDirection::Ascending,
@@ -1448,6 +1452,11 @@ impl FileApp {
             FileMessage::SetViewMode(mode) => {
                 self.view_mode = mode;
                 self.set_scroll_offset(0.0);
+                self.ensure_selection_visible();
+            }
+            FileMessage::AdjustTileWidth(direction) => {
+                self.tile_width = (self.tile_width + f32::from(direction.signum()) * 12.0)
+                    .clamp(MIN_TILE_WIDTH, MAX_TILE_WIDTH);
                 self.ensure_selection_visible();
             }
             FileMessage::SortBy(key) => self.sort_by(key),

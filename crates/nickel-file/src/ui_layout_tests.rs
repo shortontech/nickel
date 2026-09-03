@@ -189,6 +189,26 @@ fn details_column_widths_resize_within_bounds_and_belong_to_their_tab() {
 }
 
 #[test]
+fn tile_width_commands_are_bounded_and_owned_by_each_tab() {
+    let directory = tempfile::tempdir().unwrap();
+    let child = directory.path().join("child");
+    std::fs::create_dir(&child).unwrap();
+    let mut app = FileApp::new(directory.path().to_path_buf());
+    app.update(FileMessage::AdjustTileWidth(1));
+    let root_width = app.tile_width;
+    assert!(root_width > DEFAULT_TILE_WIDTH);
+
+    app.new_tab_at(child);
+    assert_eq!(app.tile_width, DEFAULT_TILE_WIDTH);
+    for _ in 0..20 {
+        app.update(FileMessage::AdjustTileWidth(-1));
+    }
+    assert_eq!(app.tile_width, MIN_TILE_WIDTH);
+    app.switch_tab(0);
+    assert_eq!(app.tile_width, root_width);
+}
+
+#[test]
 fn status_area_reports_selection_and_total_without_hiding_errors() {
     let mut app = FileApp::fixture();
     assert_eq!(file_status_text(&app), "3 items · fixture");

@@ -12,9 +12,7 @@ use winit::{
 };
 
 use crate::{
-    app::{
-        FileApp, FileMessage, MAX_SIDEBAR_WIDTH, MAX_TILE_WIDTH, MIN_SIDEBAR_WIDTH, MIN_TILE_WIDTH,
-    },
+    app::{FileApp, FileMessage, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH},
     layout::{entries_in_selection, rect_between},
 };
 
@@ -93,6 +91,12 @@ impl HostAdapter<FileApp> for FileHostAdapter {
                     }
                     KeyCode::KeyH if app.control_down => {
                         app.update(FileMessage::ToggleHiddenFiles);
+                    }
+                    KeyCode::Equal if app.control_down => {
+                        app.update(FileMessage::AdjustTileWidth(1));
+                    }
+                    KeyCode::Minus if app.control_down => {
+                        app.update(FileMessage::AdjustTileWidth(-1));
                     }
                     KeyCode::ArrowDown => app.select_relative(app.resolved_grid_columns() as isize),
                     KeyCode::ArrowUp => {
@@ -198,9 +202,7 @@ impl HostAdapter<FileApp> for FileHostAdapter {
                 let y = delta.y as f32;
                 let app = host.application_mut();
                 if app.control_down {
-                    app.tile_width =
-                        (app.tile_width + y.signum() * 12.0).clamp(MIN_TILE_WIDTH, MAX_TILE_WIDTH);
-                    app.ensure_selection_visible();
+                    app.update(FileMessage::AdjustTileWidth(y.signum() as i8));
                     changed = true;
                 }
             }
