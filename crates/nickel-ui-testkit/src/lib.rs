@@ -267,12 +267,9 @@ impl<F: Fixture> TypedFixtureSession<F> {
     }
 
     fn new_variant(variant: &FixtureVariant) -> Self {
+        let (width, height) = logical_fixture_size(variant);
         Self {
-            scenario: Scenario::new(
-                F::create_variant(variant),
-                variant.viewport.width,
-                variant.viewport.height,
-            ),
+            scenario: Scenario::new(F::create_variant(variant), width, height),
             variant: *variant,
         }
     }
@@ -292,11 +289,8 @@ impl<F: Fixture> ErasedFixtureSession for TypedFixtureSession<F> {
     }
 
     fn reset(&mut self) {
-        self.scenario = Scenario::new(
-            F::create_variant(&self.variant),
-            self.variant.viewport.width,
-            self.variant.viewport.height,
-        );
+        let (width, height) = logical_fixture_size(&self.variant);
+        self.scenario = Scenario::new(F::create_variant(&self.variant), width, height);
     }
 
     fn inspect(&self) -> HostInspection {
@@ -358,6 +352,14 @@ impl<F: Fixture> ErasedFixtureSession for TypedFixtureSession<F> {
             policy,
         )
     }
+}
+
+fn logical_fixture_size(variant: &FixtureVariant) -> (u32, u32) {
+    let scale = variant.scale.factor.max(0.25);
+    (
+        (variant.viewport.width as f32 / scale).round().max(1.0) as u32,
+        (variant.viewport.height as f32 / scale).round().max(1.0) as u32,
+    )
 }
 
 pub type FixtureFactory = fn() -> Box<dyn ErasedFixtureSession>;
@@ -4096,6 +4098,23 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn scaled_fixture_surfaces_resolve_in_logical_pixels() {
+        let variant = FixtureVariant {
+            viewport: ViewportPreset {
+                id: "physical",
+                width: 1025,
+                height: 775,
+            },
+            scale: ScalePreset {
+                id: "1.25x",
+                factor: 1.25,
+            },
+            ..DEFAULT_VARIANT
+        };
+        assert_eq!(logical_fixture_size(&variant), (820, 620));
+    }
 
     #[derive(Clone, Debug, PartialEq)]
     enum Message {

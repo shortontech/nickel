@@ -328,6 +328,23 @@ const FILE_FIXTURE_VARIANTS: &[nickel_ui_testkit::FixtureVariant] = &[
         accessibility: nickel_ui_testkit::DEFAULT_ACCESSIBILITY,
     },
     nickel_ui_testkit::FixtureVariant {
+        id: "medium-details-125",
+        title: "Medium Details 125%",
+        viewport: nickel_ui_testkit::ViewportPreset {
+            id: "medium",
+            width: 1025,
+            height: 775,
+        },
+        theme: nickel_ui_testkit::FixtureTheme::Light,
+        locale: nickel_ui_testkit::DEFAULT_LOCALE,
+        scale: nickel_ui_testkit::ScalePreset {
+            id: "1.25x",
+            factor: 1.25,
+        },
+        controller_family: nickel_ui::ControllerFamily::Generic,
+        accessibility: nickel_ui_testkit::DEFAULT_ACCESSIBILITY,
+    },
+    nickel_ui_testkit::FixtureVariant {
         id: "narrow-200",
         title: "Narrow 200%",
         viewport: nickel_ui_testkit::ViewportPreset {
