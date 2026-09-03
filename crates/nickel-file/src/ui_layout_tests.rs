@@ -555,6 +555,35 @@ fn location_groups_omit_empty_sections_and_collapse_without_reordering() {
 }
 
 #[test]
+fn synthetic_location_sources_use_shared_group_order_and_one_target_identity() {
+    let shared = PathBuf::from("/fixture/shared");
+    let groups = crate::platform::location_groups_from(crate::platform::LocationSources {
+        nickel_home: vec![("Home".into(), PathBuf::from("/fixture/home"))],
+        user_pins: vec![("Pinned".into(), shared.clone())],
+        user_locations: vec![("Cloud".into(), shared.clone())],
+        computer_and_volumes: vec![("Drive".into(), PathBuf::from("/fixture/drive"))],
+        network: vec![("Server".into(), PathBuf::from("/fixture/server"))],
+    });
+
+    assert_eq!(
+        groups.iter().map(|group| group.id).collect::<Vec<_>>(),
+        ["nickel-home", "user-pins", "computer-volumes", "network"]
+    );
+    assert_eq!(
+        groups.iter().map(|group| group.title).collect::<Vec<_>>(),
+        ["Nickel Home", "Pins", "Computer & volumes", "Network"]
+    );
+    assert_eq!(
+        groups
+            .iter()
+            .flat_map(|group| &group.entries)
+            .filter(|(_, path)| path == &shared)
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn rtl_file_grid_mirrors_semantic_columns_without_changing_entry_identity() {
     let mut app = FileApp::fixture();
     app.reading_direction = nickel_ui::ReadingDirection::RightToLeft;

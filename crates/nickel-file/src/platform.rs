@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 pub(crate) struct LocationGroup {
     pub(crate) id: &'static str,
@@ -6,23 +9,58 @@ pub(crate) struct LocationGroup {
     pub(crate) entries: Vec<(String, PathBuf)>,
 }
 
+#[derive(Default)]
+pub(crate) struct LocationSources {
+    pub(crate) nickel_home: Vec<(String, PathBuf)>,
+    pub(crate) user_pins: Vec<(String, PathBuf)>,
+    pub(crate) user_locations: Vec<(String, PathBuf)>,
+    pub(crate) computer_and_volumes: Vec<(String, PathBuf)>,
+    pub(crate) network: Vec<(String, PathBuf)>,
+}
+
 pub(crate) fn location_groups() -> Vec<LocationGroup> {
     let mut locations = places().into_iter();
-    let home = locations.next().into_iter().collect::<Vec<_>>();
-    let user_locations = locations.collect::<Vec<_>>();
+    location_groups_from(LocationSources {
+        nickel_home: locations.next().into_iter().collect(),
+        user_locations: locations.collect(),
+        ..LocationSources::default()
+    })
+}
+
+pub(crate) fn location_groups_from(sources: LocationSources) -> Vec<LocationGroup> {
+    let mut seen = HashSet::new();
     [
         LocationGroup {
             id: "nickel-home",
             title: "Nickel Home",
-            entries: home,
+            entries: sources.nickel_home,
+        },
+        LocationGroup {
+            id: "user-pins",
+            title: "Pins",
+            entries: sources.user_pins,
         },
         LocationGroup {
             id: "user-locations",
-            title: "Locations",
-            entries: user_locations,
+            title: "Cloud & locations",
+            entries: sources.user_locations,
+        },
+        LocationGroup {
+            id: "computer-volumes",
+            title: "Computer & volumes",
+            entries: sources.computer_and_volumes,
+        },
+        LocationGroup {
+            id: "network",
+            title: "Network",
+            entries: sources.network,
         },
     ]
     .into_iter()
+    .map(|mut group| {
+        group.entries.retain(|(_, path)| seen.insert(path.clone()));
+        group
+    })
     .filter(|group| !group.entries.is_empty())
     .collect()
 }
