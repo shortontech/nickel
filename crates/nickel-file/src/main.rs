@@ -42,6 +42,9 @@ pub enum FileMessage {
     ContextOpenNewTab,
     ContextRefresh,
     ContextSelectAll,
+    ToggleCommandSurface,
+    CommandQueryChanged(String),
+    ToggleHiddenFiles,
     ResizeSidebar,
     TogglePlaces,
     NewTab,
@@ -89,6 +92,9 @@ pub struct FileApp {
     pub(crate) selection_drag: Option<Point>,
     pub(crate) resizing_sidebar: bool,
     pub(crate) places_open: bool,
+    pub(crate) command_surface_open: bool,
+    pub(crate) command_query: String,
+    pub(crate) pending_focus: Option<UiId>,
     pub(crate) tile_width: f32,
     pub(crate) file_scroll_offset: f32,
     pub(crate) view_mode: FileViewMode,
@@ -247,6 +253,9 @@ impl FileApp {
             selection_drag: None,
             resizing_sidebar: false,
             places_open: false,
+            command_surface_open: false,
+            command_query: String::new(),
+            pending_focus: None,
             tile_width: DEFAULT_TILE_WIDTH,
             file_scroll_offset: 0.0,
             view_mode: FileViewMode::Grid,
@@ -590,6 +599,15 @@ impl FileApp {
     }
 
     fn update_message(&mut self, message: FileMessage) {
+        if self.command_surface_open
+            && !matches!(
+                message,
+                FileMessage::ToggleCommandSurface | FileMessage::CommandQueryChanged(_)
+            )
+        {
+            self.command_surface_open = false;
+            self.command_query.clear();
+        }
         match message {
             FileMessage::ContextEntry(index) => {
                 if !self.selected_entries.contains(&index) {
@@ -629,6 +647,28 @@ impl FileApp {
                 self.selected_entries = (0..self.browser.entries().len()).collect();
                 self.selected = (!self.browser.entries().is_empty()).then_some(0);
                 self.selection_anchor = self.selected;
+            }
+            FileMessage::ToggleCommandSurface => {
+                self.command_surface_open = !self.command_surface_open;
+                self.command_query.clear();
+                if self.command_surface_open {
+                    self.places_open = false;
+                    self.pending_focus = Some(UiId::from("file-command-query"));
+                }
+            }
+            FileMessage::CommandQueryChanged(query) => self.command_query = query,
+            FileMessage::ToggleHiddenFiles => {
+                let show = !self.browser.show_hidden();
+                match self.browser.set_show_hidden(show) {
+                    Ok(()) => {
+                        self.selected = None;
+                        self.selected_entries.clear();
+                        self.selection_anchor = None;
+                        self.set_scroll_offset(0.0);
+                        self.refresh_icons();
+                    }
+                    Err(error) => self.status = format!("Could not change hidden files: {error}"),
+                }
             }
             FileMessage::ResizeSidebar => {
                 self.resizing_sidebar = true;
@@ -723,6 +763,10 @@ impl Application for FileApp {
             ThemePalette::from_appearance(appearance),
             appearance.mode == ThemeMode::Light,
         )
+    }
+
+    fn take_focus_request(&mut self) -> Option<UiId> {
+        self.pending_focus.take()
     }
 
     fn frame_overlays(&self, context: ViewContext) -> Vec<FrameOverlay<Self::Message>> {

@@ -88,6 +88,10 @@ impl DirectoryBrowser {
         self.current.parent().is_some()
     }
 
+    pub fn show_hidden(&self) -> bool {
+        self.show_hidden
+    }
+
     pub fn enter(&mut self, path: impl Into<PathBuf>) -> io::Result<()> {
         let next = path.into();
         let entries = read_entries_with_hidden(&next, self.show_hidden)?;

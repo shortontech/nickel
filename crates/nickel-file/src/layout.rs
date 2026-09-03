@@ -8,7 +8,7 @@ use nickel_core::theme::ThemePalette;
 use nickel_ui::{
     AnyView, Collection, CollectionPresentation, CollectionState, Component, ComponentBuilderExt,
     Insets, LinearGradient, NavigationScope, Point, Rect, SemanticNodeSnapshot, SemanticRole,
-    VerticalScroll, VirtualWindow, ui,
+    TextField, VerticalScroll, VirtualWindow, ui,
 };
 
 use super::{FileMessage, FileViewMode};
@@ -102,17 +102,17 @@ pub(crate) fn build_view(
                         </Button>
                     }
                 } else { ui! { <></> } }}
-                <Button on_press={FileMessage::Back} width={34.0} height={34.0}
+                <Button on_press={FileMessage::Back} enabled={app.browser.can_go_back()} width={34.0} height={34.0}
                     focus_border={palette.accent} controller_focus_border={palette.complement}
                     color={if app.browser.can_go_back() { palette.text } else { palette.muted }} accessibility_label={"Back"}>
                     {"←"}
                 </Button>
-                <Button on_press={FileMessage::Forward} width={34.0} height={34.0}
+                <Button on_press={FileMessage::Forward} enabled={app.browser.can_go_forward()} width={34.0} height={34.0}
                     focus_border={palette.accent} controller_focus_border={palette.complement}
                     color={if app.browser.can_go_forward() { palette.text } else { palette.muted }} accessibility_label={"Forward"}>
                     {"→"}
                 </Button>
-                <Button on_press={FileMessage::Up} width={34.0} height={34.0} color={palette.text}
+                <Button on_press={FileMessage::Up} enabled={app.browser.can_go_up()} width={34.0} height={34.0} color={palette.text}
                     focus_border={palette.accent} controller_focus_border={palette.complement} accessibility_label={"Up one folder"}>{"↑"}</Button>
                 <Container grow={1.0} background={palette.background} padding={Insets {
                     top: 5.0, right: 12.0, bottom: 4.0, left: 10.0,
@@ -127,6 +127,10 @@ pub(crate) fn build_view(
                 <Button on_press={FileMessage::SetViewMode(FileViewMode::Details)} width={34.0} height={34.0}
                     color={if app.view_mode == FileViewMode::Details { palette.accent } else { palette.text }}
                     focus_border={palette.accent} controller_focus_border={palette.complement} accessibility_label={"Details view"}>{"☷"}</Button>
+                <Button on_press={FileMessage::ToggleCommandSurface} width={42.0} height={34.0}
+                    color={if app.command_surface_open { palette.accent } else { palette.text }}
+                    focus_border={palette.accent} controller_focus_border={palette.complement}
+                    accessibility_label={"Open commands"}>{"⌘"}</Button>
             </Row>
         </Container>
     };
@@ -298,7 +302,13 @@ pub(crate) fn build_view(
             controller_focus_border={palette.complement} accessibility_label={"Resize sidebar"} />
     };
     let sidebar_pane_width = app.sidebar_width + SIDEBAR_RESIZE_WIDTH;
-    let content = if narrow {
+    let content = if app.command_surface_open {
+        ui! {
+            <Container id={"file-layout"} height={content_height} shrink={0.0} accessibility_label={"Commands"}>
+                {command_surface(app, palette)}
+            </Container>
+        }
+    } else if narrow {
         ui! {
             <Container id={"file-layout"} height={content_height} shrink={0.0} accessibility_label={"Files"}>
                 {if app.places_open {
@@ -334,6 +344,118 @@ pub(crate) fn build_view(
         <Column height={height} background={palette.background}>{toolbar}{content}{footer}</Column>
     };
     AnyView::new(root)
+}
+
+fn command_query_message(query: String) -> FileMessage {
+    FileMessage::CommandQueryChanged(query)
+}
+
+fn command_surface(app: &FileApp, palette: ThemePalette) -> AnyView<FileMessage> {
+    let query = app.command_query.trim().to_ascii_lowercase();
+    let commands = [
+        (
+            "Open",
+            "activate enter",
+            app.selected.is_some(),
+            FileMessage::ContextOpen,
+        ),
+        (
+            "Back",
+            "previous navigation",
+            app.browser.can_go_back(),
+            FileMessage::Back,
+        ),
+        (
+            "Forward",
+            "next navigation",
+            app.browser.can_go_forward(),
+            FileMessage::Forward,
+        ),
+        (
+            "Up",
+            "parent folder",
+            app.browser.can_go_up(),
+            FileMessage::Up,
+        ),
+        ("Refresh", "reload f5", true, FileMessage::Refresh),
+        ("New tab", "create tab ctrl t", true, FileMessage::NewTab),
+        (
+            "Grid view",
+            "icons thumbnails",
+            true,
+            FileMessage::SetViewMode(FileViewMode::Grid),
+        ),
+        (
+            "Details view",
+            "list columns",
+            true,
+            FileMessage::SetViewMode(FileViewMode::Details),
+        ),
+        (
+            "Select all",
+            "selection ctrl a",
+            !app.browser.entries().is_empty(),
+            FileMessage::ContextSelectAll,
+        ),
+        (
+            if app.browser.show_hidden() {
+                "Hide hidden files"
+            } else {
+                "Show hidden files"
+            },
+            "dotfiles visibility",
+            true,
+            FileMessage::ToggleHiddenFiles,
+        ),
+    ];
+    let rows = commands
+        .into_iter()
+        .filter(|(label, aliases, _, _)| {
+            query.is_empty()
+                || label.to_ascii_lowercase().contains(&query)
+                || aliases.contains(&query)
+        })
+        .enumerate()
+        .map(|(index, (label, aliases, enabled, message))| {
+            AnyView::new(ui! {
+                <Container id={format!("file-command-{index}")} height={42.0}
+                    on_press={message} enabled={enabled} background={palette.surface}
+                    hover_background={palette.surface_hover} pressed_background={palette.accent_soft}
+                    focus_border={palette.accent} controller_focus_border={palette.complement}
+                    padding={Insets { top: 9.0, right: 12.0, bottom: 7.0, left: 12.0 }}
+                    semantic_role={SemanticRole::Button} accessibility_label={label}>
+                    <Row gap={12.0}>
+                        <Text width={180.0} color={if enabled { palette.text } else { palette.muted }}>{label}</Text>
+                        <Text color={palette.muted} scale={0.9}>{aliases}</Text>
+                    </Row>
+                </Container>
+            })
+        })
+        .collect::<Vec<_>>();
+    let results = if rows.is_empty() {
+        AnyView::new(ui! {
+            <Container padding={Insets::all(16.0)}><Text color={palette.muted}>{"No matching commands."}</Text></Container>
+        })
+    } else {
+        AnyView::new(ui! { <Column gap={2.0} children={rows} /> })
+    };
+    AnyView::new(ui! {
+        <Container id={"file-command-surface"} grow={1.0} background={palette.background}
+            padding={Insets { top: 24.0, right: 32.0, bottom: 24.0, left: 32.0 }}>
+            <Column gap={10.0}>
+                <Text color={palette.text} scale={1.35}>{"Commands"}</Text>
+                <Container height={40.0} background={palette.surface} border={(palette.accent, 1.0)}
+                    padding={Insets { top: 9.0, right: 12.0, bottom: 7.0, left: 12.0 }}>
+                    {TextField::on_change_with_placeholder(
+                        &app.command_query,
+                        "Type a command…",
+                        command_query_message,
+                    ).id("file-command-query").color(palette.text)}
+                </Container>
+                {results}
+            </Column>
+        </Container>
+    })
 }
 
 pub(crate) fn visible_file_range(app: &FileApp, width: f32, height: f32) -> std::ops::Range<usize> {

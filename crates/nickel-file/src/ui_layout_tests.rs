@@ -174,6 +174,63 @@ fn narrow_places_surface_replaces_squeezed_sidebar_without_losing_view_state() {
 }
 
 #[test]
+fn searchable_command_surface_filters_aliases_and_executes_enabled_actions() {
+    let mut app = FileApp::fixture();
+    app.update_message(FileMessage::ToggleCommandSurface);
+    assert_eq!(
+        Application::take_focus_request(&mut app),
+        Some(UiId::from("file-command-query"))
+    );
+    app.update_message(FileMessage::CommandQueryChanged("columns".into()));
+    let palette = ThemePalette::from_appearance(
+        ShellSettings::load_default().resolve_appearance(nickel_platform::appearance()),
+    );
+    let frame = nickel_ui::UiFrame::layout(
+        app.build_view(960.0, 640.0, palette, false),
+        Rect::new(0.0, 0.0, 960.0, 640.0),
+    );
+
+    assert_eq!(
+        frame
+            .semantic_targets_for_message(&FileMessage::SetViewMode(FileViewMode::Details))
+            .iter()
+            .filter(|target| target.id.as_str().contains("/file-command-"))
+            .count(),
+        1
+    );
+    assert!(
+        frame
+            .semantic_targets_for_message(&FileMessage::SetViewMode(FileViewMode::Grid))
+            .iter()
+            .all(|target| !target.id.as_str().contains("/file-command-"))
+    );
+
+    app.update_message(FileMessage::SetViewMode(FileViewMode::Details));
+    assert!(!app.command_surface_open);
+    assert!(app.command_query.is_empty());
+    assert_eq!(app.view_mode, FileViewMode::Details);
+}
+
+#[test]
+fn disabled_command_has_no_executable_semantic_target() {
+    let mut app = FileApp::fixture();
+    app.update_message(FileMessage::ToggleCommandSurface);
+    let palette = ThemePalette::from_appearance(
+        ShellSettings::load_default().resolve_appearance(nickel_platform::appearance()),
+    );
+    let frame = nickel_ui::UiFrame::layout(
+        app.build_view(960.0, 640.0, palette, false),
+        Rect::new(0.0, 0.0, 960.0, 640.0),
+    );
+
+    let targets = frame.semantic_targets_for_message(&FileMessage::Back);
+    assert!(
+        targets.is_empty(),
+        "Back is visible but must remain non-executable without history: {targets:#?}"
+    );
+}
+
+#[test]
 fn navigation_from_idle_starts_new_icon_publication_work() {
     let directory = tempfile::tempdir().unwrap();
     let child = directory.path().join("child");

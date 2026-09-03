@@ -1952,6 +1952,12 @@ impl<Message> Button<Message> {
         self
     }
 
+    /// Keeps a button visible while removing its activation route when unavailable.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.0 = self.0.enabled(enabled);
+        self
+    }
+
     /// Allows a button label to wrap while keeping the ordinary one-line
     /// button height as its minimum.
     pub fn max_lines(mut self, lines: usize) -> Self {

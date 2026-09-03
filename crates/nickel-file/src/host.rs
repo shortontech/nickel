@@ -3,7 +3,7 @@ use std::time::Instant;
 use nickel_input::{
     AggregateModifier, InputEvent, KeyCode, KeyEdge, PhysicalKey, PointerButton, PointerEvent,
 };
-use nickel_ui::{AdapterOutcome, HostAdapter, HostServices, Point, UiHost};
+use nickel_ui::{AdapterOutcome, Application, HostAdapter, HostServices, Point, UiHost};
 use winit::{
     dpi::LogicalSize,
     window::{Icon, Window},
@@ -77,6 +77,9 @@ impl HostAdapter<FileApp> for FileHostAdapter {
                     return Ok(AdapterOutcome::default());
                 };
                 match key {
+                    KeyCode::KeyP if app.control_down => {
+                        app.update(FileMessage::ToggleCommandSurface);
+                    }
                     KeyCode::ArrowDown => app.select_relative(app.resolved_grid_columns() as isize),
                     KeyCode::ArrowUp => {
                         app.select_relative(-(app.resolved_grid_columns() as isize))
@@ -85,9 +88,13 @@ impl HostAdapter<FileApp> for FileHostAdapter {
                     KeyCode::ArrowLeft => app.select_relative(-1),
                     KeyCode::Backspace => app.go_back(),
                     KeyCode::Escape => {
-                        app.selected = None;
-                        app.selected_entries.clear();
-                        app.selection_anchor = None;
+                        if app.command_surface_open {
+                            app.update(FileMessage::ToggleCommandSurface);
+                        } else {
+                            app.selected = None;
+                            app.selected_entries.clear();
+                            app.selection_anchor = None;
+                        }
                     }
                     KeyCode::KeyA if app.control_down => {
                         app.selected_entries = (0..app.browser.entries().len()).collect();
