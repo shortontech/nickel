@@ -620,12 +620,13 @@ fn rtl_file_grid_mirrors_semantic_columns_without_changing_entry_identity() {
 #[test]
 fn searchable_command_surface_filters_aliases_and_executes_enabled_actions() {
     let mut app = FileApp::fixture();
+    app.localizer = nickel_i18n::Localizer::for_locale(Some("es"));
     app.update_message(FileMessage::ToggleCommandSurface);
     assert_eq!(
         Application::take_focus_request(&mut app),
         Some(UiId::from("file-command-query"))
     );
-    app.update_message(FileMessage::CommandQueryChanged("columns".into()));
+    app.update_message(FileMessage::CommandQueryChanged("detalles".into()));
     let palette = ThemePalette::from_appearance(
         ShellSettings::load_default().resolve_appearance(nickel_platform::appearance()),
     );
@@ -647,6 +648,20 @@ fn searchable_command_surface_filters_aliases_and_executes_enabled_actions() {
             .semantic_targets_for_message(&FileMessage::SetViewMode(FileViewMode::Grid))
             .iter()
             .all(|target| !target.id.as_str().contains("/file-command-"))
+    );
+
+    app.update_message(FileMessage::CommandQueryChanged("columns".into()));
+    let alias_frame = nickel_ui::UiFrame::layout(
+        app.build_view(960.0, 640.0, palette, false),
+        Rect::new(0.0, 0.0, 960.0, 640.0),
+    );
+    assert_eq!(
+        alias_frame
+            .semantic_targets_for_message(&FileMessage::SetViewMode(FileViewMode::Details))
+            .iter()
+            .filter(|target| target.id.as_str().contains("/file-command-"))
+            .count(),
+        1
     );
 
     app.update_message(FileMessage::SetViewMode(FileViewMode::Details));

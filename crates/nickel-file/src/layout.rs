@@ -370,109 +370,115 @@ fn address_changed(address: String) -> FileMessage {
 
 fn command_surface(app: &FileApp, palette: ThemePalette) -> AnyView<FileMessage> {
     let query = app.command_query.trim().to_ascii_lowercase();
+    let command_label = |id| app.localizer.text(id);
     let commands = [
         (
-            "Open",
+            command_label("file-command-open"),
             "activate enter",
             app.selected.is_some() && !app.navigation_pending(),
             FileMessage::ContextOpen,
         ),
         (
-            "Open in new tab",
+            command_label("file-command-open-new-tab"),
             "activate background tab",
             app.selected.is_some() && !app.navigation_pending(),
             FileMessage::ContextOpenNewTab,
         ),
         (
-            "Back",
+            command_label("file-command-back"),
             "previous navigation",
             app.browser.can_go_back() && !app.navigation_pending(),
             FileMessage::Back,
         ),
         (
-            "Forward",
+            command_label("file-command-forward"),
             "next navigation",
             app.browser.can_go_forward() && !app.navigation_pending(),
             FileMessage::Forward,
         ),
         (
-            "Up",
+            command_label("file-command-up"),
             "parent folder",
             app.browser.can_go_up() && !app.navigation_pending(),
             FileMessage::Up,
         ),
         (
-            "Refresh",
+            command_label("file-command-refresh"),
             "reload f5",
             !app.navigation_pending(),
             FileMessage::Refresh,
         ),
-        ("New tab", "create tab ctrl t", true, FileMessage::NewTab),
         (
-            "Close tab",
+            command_label("file-command-new-tab"),
+            "create tab ctrl t",
+            true,
+            FileMessage::NewTab,
+        ),
+        (
+            command_label("file-command-close-tab"),
             "dismiss tab ctrl w",
             true,
             FileMessage::CloseTab(app.active_tab),
         ),
         (
-            "Grid view",
+            command_label("file-command-grid-view"),
             "icons thumbnails",
             true,
             FileMessage::SetViewMode(FileViewMode::Grid),
         ),
         (
-            "Details view",
+            command_label("file-command-details-view"),
             "list columns",
             true,
             FileMessage::SetViewMode(FileViewMode::Details),
         ),
         (
-            "Increase tile size",
+            command_label("file-command-increase-tile-size"),
             "grid zoom larger ctrl plus",
             app.view_mode == FileViewMode::Grid && app.tile_width < crate::app::MAX_TILE_WIDTH,
             FileMessage::AdjustTileWidth(1),
         ),
         (
-            "Decrease tile size",
+            command_label("file-command-decrease-tile-size"),
             "grid zoom smaller ctrl minus",
             app.view_mode == FileViewMode::Grid && app.tile_width > crate::app::MIN_TILE_WIDTH,
             FileMessage::AdjustTileWidth(-1),
         ),
         (
-            "Select all",
+            command_label("file-command-select-all"),
             "selection ctrl a",
             !app.browser.entries().is_empty(),
             FileMessage::ContextSelectAll,
         ),
         (
-            "Sort by name",
+            command_label("file-command-sort-name"),
             "order filename",
             true,
             FileMessage::SortBy(EntrySortKey::Name),
         ),
         (
-            "Sort by type",
+            command_label("file-command-sort-type"),
             "order extension",
             true,
             FileMessage::SortBy(EntrySortKey::Type),
         ),
         (
-            "Sort by modified",
+            command_label("file-command-sort-modified"),
             "order date time",
             true,
             FileMessage::SortBy(EntrySortKey::Modified),
         ),
         (
-            "Sort by size",
+            command_label("file-command-sort-size"),
             "order bytes",
             true,
             FileMessage::SortBy(EntrySortKey::Size),
         ),
         (
             if app.browser.show_hidden() {
-                "Hide hidden files"
+                command_label("file-command-hide-hidden")
             } else {
-                "Show hidden files"
+                command_label("file-command-show-hidden")
             },
             "dotfiles visibility",
             !app.navigation_pending(),
@@ -488,13 +494,14 @@ fn command_surface(app: &FileApp, palette: ThemePalette) -> AnyView<FileMessage>
         })
         .enumerate()
         .map(|(index, (label, aliases, enabled, message))| {
+            let accessibility_label = label.clone();
             AnyView::new(ui! {
                 <Container id={format!("file-command-{index}")} height={42.0}
                     on_press={message} enabled={enabled} background={palette.surface}
                     hover_background={palette.surface_hover} pressed_background={palette.accent_soft}
                     focus_border={palette.accent} controller_focus_border={palette.complement}
                     padding={Insets { top: 9.0, right: 12.0, bottom: 7.0, left: 12.0 }}
-                    semantic_role={SemanticRole::Button} accessibility_label={label}>
+                    semantic_role={SemanticRole::Button} accessibility_label={accessibility_label}>
                     <Row gap={12.0}>
                         <Text width={180.0} color={if enabled { palette.text } else { palette.muted }}>{label}</Text>
                         <Text color={palette.muted} scale={0.9}>{aliases}</Text>

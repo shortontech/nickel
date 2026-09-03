@@ -19,6 +19,7 @@ use nickel_core::{
     theme::{Appearance, ThemeMode, ThemePalette},
 };
 use nickel_file::{DirectoryBrowser, EntrySortKey, FileEntry, SortDirection};
+use nickel_i18n::Localizer;
 use nickel_ui::{
     AnyView, Application, FrameOverlay, Insets, OverlayAnchor, OverlayMenu, OverlayMenuItem, Point,
     ReadingDirection, UiId, ViewContext,
@@ -111,6 +112,7 @@ pub(crate) struct DetailsColumnResize {
 }
 
 pub struct FileApp {
+    pub(crate) localizer: Localizer,
     pub(crate) browser: DirectoryBrowser,
     pub(crate) cursor: Point,
     pub(crate) selected: Option<usize>,
@@ -490,6 +492,7 @@ impl nickel_ui_testkit::Fixture for FileWorkbenchFixture {
             accent: [0, 164, 96],
             intensity: 100,
         });
+        app.localizer = Localizer::for_locale(Some(variant.locale.id));
         app.reading_direction = match variant.locale.direction {
             nickel_ui_testkit::FixtureDirection::LeftToRight => ReadingDirection::LeftToRight,
             nickel_ui_testkit::FixtureDirection::RightToLeft => ReadingDirection::RightToLeft,
@@ -644,6 +647,7 @@ impl FileApp {
             .resolve_appearance(nickel_platform::appearance())
             .mode;
         let mut app = Self {
+            localizer: Localizer::system(),
             browser,
             cursor: Point { x: 0.0, y: 0.0 },
             selected: None,
