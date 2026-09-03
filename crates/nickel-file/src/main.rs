@@ -795,6 +795,14 @@ impl FileApp {
         let appearance = ShellSettings::load_default()
             .resolve_appearance(nickel_platform::appearance())
             .mode;
+        self.refresh_icons_for(preference, appearance);
+    }
+
+    pub(crate) fn refresh_icons_for(
+        &mut self,
+        preference: FileIconPreference,
+        appearance: ThemeMode,
+    ) {
         if preference != self.icon_preference {
             self.icon_preference = preference;
             self.icons.clear();

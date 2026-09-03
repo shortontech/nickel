@@ -78,6 +78,45 @@ fn nickel_fallback_artwork_is_present_before_async_provider_results() {
 }
 
 #[test]
+fn provider_changes_preserve_independent_tab_view_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let child = directory.path().join("child");
+    std::fs::create_dir(&child).unwrap();
+    std::fs::write(directory.path().join("root.txt"), b"root").unwrap();
+    std::fs::write(child.join("child.txt"), b"child").unwrap();
+    let mut app = FileApp::new(directory.path().to_path_buf());
+    app.selected = Some(1);
+    app.selected_entries = HashSet::from([1]);
+    app.selection_anchor = Some(1);
+    app.file_scroll_offset = 31.0;
+    app.view_mode = FileViewMode::Details;
+    app.sort_key = EntrySortKey::Size;
+    app.sort_direction = SortDirection::Descending;
+    app.new_tab_at(child.clone());
+    app.selected = Some(0);
+    app.selected_entries = HashSet::from([0]);
+    app.selection_anchor = Some(0);
+    app.file_scroll_offset = 17.0;
+    app.sort_key = EntrySortKey::Modified;
+
+    app.refresh_icons_for(FileIconPreference::System, ThemeMode::Light);
+    app.refresh_icons_for(FileIconPreference::Nickel, ThemeMode::Dark);
+
+    assert_eq!(app.browser.current(), child);
+    assert_eq!(app.selected_entries, HashSet::from([0]));
+    assert_eq!(app.file_scroll_offset, 17.0);
+    assert_eq!(app.view_mode, FileViewMode::Grid);
+    assert_eq!(app.sort_key, EntrySortKey::Modified);
+    let root = app.inactive_tab(0).unwrap();
+    assert_eq!(root.browser.current(), directory.path());
+    assert_eq!(root.selected_entries, HashSet::from([1]));
+    assert_eq!(root.file_scroll_offset, 31.0);
+    assert_eq!(root.view_mode, FileViewMode::Details);
+    assert_eq!(root.sort_key, EntrySortKey::Size);
+    assert_eq!(root.sort_direction, SortDirection::Descending);
+}
+
+#[test]
 fn status_area_reports_selection_and_total_without_hiding_errors() {
     let mut app = FileApp::fixture();
     assert_eq!(file_status_text(&app), "3 items");
