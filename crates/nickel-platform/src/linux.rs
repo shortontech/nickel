@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
-    fs,
-    path::Path,
+    env, fs,
+    path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     thread,
 };
@@ -198,17 +198,93 @@ fn request_open_uri(uri: &str) -> Result<(), String> {
 }
 
 pub fn path_icon(path: &Path) -> Option<RgbaImage> {
+    let theme = system_icon_theme();
+    path_icon_with_theme(path, Some(&theme))
+}
+
+pub fn path_icon_with_theme(path: &Path, theme: Option<&str>) -> Option<RgbaImage> {
     let name = icon_name(path);
-    ["breeze", "breeze-dark", "hicolor", "Adwaita"]
-        .into_iter()
-        .find_map(|theme| {
-            freedesktop_icons::lookup(name)
-                .with_size(96)
-                .with_theme(theme)
-                .with_cache()
-                .find()
-        })
+    let theme = theme.filter(|theme| !theme.trim().is_empty())?;
+    freedesktop_icons::lookup(name)
+        .with_size(96)
+        .with_theme(theme)
+        .with_cache()
+        .find()
         .and_then(|path| load_icon(&path))
+}
+
+pub fn installed_icon_themes() -> Vec<String> {
+    installed_icon_themes_in(icon_search_roots())
+}
+
+fn installed_icon_themes_in(roots: impl IntoIterator<Item = PathBuf>) -> Vec<String> {
+    let mut themes = roots
+        .into_iter()
+        .filter_map(|root| fs::read_dir(root).ok())
+        .flatten()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().join("index.theme").is_file())
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .collect::<Vec<_>>();
+    themes.sort_by_key(|theme| theme.to_ascii_lowercase());
+    themes.dedup();
+    themes
+}
+
+fn icon_search_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(home) = env::var_os("HOME").map(PathBuf::from) {
+        roots.push(home.join(".icons"));
+        roots.push(
+            env::var_os("XDG_DATA_HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.join(".local/share"))
+                .join("icons"),
+        );
+    }
+    roots.extend(
+        env::var_os("XDG_DATA_DIRS")
+            .and_then(|value| value.into_string().ok())
+            .unwrap_or_else(|| "/usr/local/share:/usr/share".to_owned())
+            .split(':')
+            .filter(|root| !root.is_empty())
+            .map(|root| PathBuf::from(root).join("icons")),
+    );
+    roots
+}
+
+fn system_icon_theme() -> String {
+    if let Ok(theme) = env::var("NICKEL_ICON_THEME")
+        && !theme.trim().is_empty()
+    {
+        return theme;
+    }
+    let config_home = env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")));
+    config_home
+        .and_then(|directory| fs::read_to_string(directory.join("kdeglobals")).ok())
+        .and_then(|contents| value_in_section(&contents, "Icons", "Theme"))
+        .unwrap_or_else(|| "hicolor".to_owned())
+}
+
+fn value_in_section(contents: &str, section: &str, key: &str) -> Option<String> {
+    let mut in_section = false;
+    for line in contents.lines().map(str::trim) {
+        if line.starts_with('[') && line.ends_with(']') {
+            in_section = &line[1..line.len() - 1] == section;
+        } else if in_section
+            && let Some(value) = line
+                .strip_prefix(key)
+                .and_then(|line| line.strip_prefix('='))
+        {
+            let value = value.trim();
+            if !value.is_empty() {
+                return Some(value.to_owned());
+            }
+        }
+    }
+    None
 }
 
 fn icon_name(path: &Path) -> &'static str {
@@ -266,7 +342,7 @@ fn load_icon(path: &Path) -> Option<RgbaImage> {
 mod tests {
     use std::path::Path;
 
-    use super::{decode_file_uri, icon_name};
+    use super::{decode_file_uri, icon_name, installed_icon_themes_in, value_in_section};
 
     #[test]
     fn portal_file_uris_preserve_unix_paths_and_percent_escapes() {
@@ -289,5 +365,30 @@ mod tests {
         assert_eq!(icon_name(Path::new("report.pdf")), "application-pdf");
         assert_eq!(icon_name(Path::new("archive.tar")), "package-x-generic");
         assert_eq!(icon_name(Path::new("README")), "text-x-generic");
+    }
+
+    #[test]
+    fn installed_theme_discovery_requires_an_index_and_is_stable() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        std::fs::create_dir(first.path().join("not-a-theme")).unwrap();
+        for (root, theme) in [(first.path(), "Zulu"), (second.path(), "alpha")] {
+            let directory = root.join(theme);
+            std::fs::create_dir(&directory).unwrap();
+            std::fs::write(directory.join("index.theme"), "[Icon Theme]\n").unwrap();
+        }
+        assert_eq!(
+            installed_icon_themes_in([first.path().into(), second.path().into()]),
+            ["alpha", "Zulu"]
+        );
+    }
+
+    #[test]
+    fn kde_theme_parser_ignores_values_outside_icons_section() {
+        let settings = "[General]\nTheme=Wrong\n[Icons]\nTheme=Papirus-Dark\n";
+        assert_eq!(
+            value_in_section(settings, "Icons", "Theme").as_deref(),
+            Some("Papirus-Dark")
+        );
     }
 }

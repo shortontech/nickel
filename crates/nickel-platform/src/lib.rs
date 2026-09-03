@@ -56,10 +56,31 @@ mod macos;
 pub use windows::{appearance, apply_window_appearance, path_icon, show_hidden_files};
 
 #[cfg(target_os = "linux")]
-pub use linux::path_icon;
+pub use linux::{installed_icon_themes, path_icon, path_icon_with_theme};
+
+#[cfg(not(target_os = "linux"))]
+pub fn installed_icon_themes() -> Vec<String> {
+    Vec::new()
+}
+
+#[cfg(target_os = "windows")]
+pub fn path_icon_with_theme(
+    path: &std::path::Path,
+    _theme: Option<&str>,
+) -> Option<image::RgbaImage> {
+    path_icon(path)
+}
 
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
 pub fn path_icon(_path: &std::path::Path) -> Option<image::RgbaImage> {
+    None
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+pub fn path_icon_with_theme(
+    _path: &std::path::Path,
+    _theme: Option<&str>,
+) -> Option<image::RgbaImage> {
     None
 }
 
