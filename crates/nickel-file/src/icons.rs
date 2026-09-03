@@ -502,12 +502,12 @@ mod tests {
     #[test]
     fn platform_defaults_follow_product_policy() {
         assert_eq!(
-            FileIconPreference::default(),
-            if cfg!(target_os = "windows") {
-                FileIconPreference::System
-            } else {
-                FileIconPreference::Nickel
-            }
+            FileIconPreference::default_for_os("windows"),
+            FileIconPreference::System
+        );
+        assert_eq!(
+            FileIconPreference::default_for_os("linux"),
+            FileIconPreference::Nickel
         );
     }
 

@@ -18,13 +18,19 @@ pub enum FileIconPreference {
     System,
 }
 
-impl Default for FileIconPreference {
-    fn default() -> Self {
-        if cfg!(target_os = "windows") {
+impl FileIconPreference {
+    pub fn default_for_os(os: &str) -> Self {
+        if os == "windows" {
             Self::System
         } else {
             Self::Nickel
         }
+    }
+}
+
+impl Default for FileIconPreference {
+    fn default() -> Self {
+        Self::default_for_os(std::env::consts::OS)
     }
 }
 
@@ -281,6 +287,22 @@ mod tests {
         assert_eq!(settings.idle_dim_seconds, Some(300));
         assert_eq!(settings.idle_lock_seconds, Some(900));
         assert_eq!(settings.idle_suspend_seconds, None);
+    }
+
+    #[test]
+    fn file_icon_defaults_are_independent_of_the_build_host() {
+        assert_eq!(
+            FileIconPreference::default_for_os("windows"),
+            FileIconPreference::System
+        );
+        assert_eq!(
+            FileIconPreference::default_for_os("linux"),
+            FileIconPreference::Nickel
+        );
+        assert_eq!(
+            FileIconPreference::default_for_os("macos"),
+            FileIconPreference::Nickel
+        );
     }
 
     #[test]
