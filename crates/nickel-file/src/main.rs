@@ -794,34 +794,55 @@ impl FileApp {
 
     fn navigate_to(&mut self, path: PathBuf) {
         let label = path.display().to_string();
-        self.start_navigation(format!("Opening {label}"), false, move |browser| {
-            browser.enter(path).map(|()| true)
-        });
+        self.start_navigation(
+            format!("Opening {label}"),
+            "Could not open location",
+            false,
+            move |browser| {
+                browser
+                    .enter(path)
+                    .map(|()| true)
+                    .map_err(|error| error.to_string())
+            },
+        );
     }
 
     pub(crate) fn go_back(&mut self) {
         if self.browser.can_go_back() {
-            self.start_navigation("Going back".into(), false, DirectoryBrowser::back);
+            self.start_navigation("Going back".into(), "Could not go back", false, |browser| {
+                browser.back().map_err(|error| error.to_string())
+            });
         }
     }
 
     fn go_forward(&mut self) {
         if self.browser.can_go_forward() {
-            self.start_navigation("Going forward".into(), false, DirectoryBrowser::forward);
+            self.start_navigation(
+                "Going forward".into(),
+                "Could not go forward",
+                false,
+                |browser| browser.forward().map_err(|error| error.to_string()),
+            );
         }
     }
 
     fn go_up(&mut self) {
         if self.browser.can_go_up() {
-            self.start_navigation("Opening parent".into(), false, DirectoryBrowser::up);
+            self.start_navigation(
+                "Opening parent".into(),
+                "Could not open parent",
+                false,
+                |browser| browser.up().map_err(|error| error.to_string()),
+            );
         }
     }
 
     fn start_navigation(
         &mut self,
         progress: String,
+        error_context: &'static str,
         closes_address: bool,
-        operation: impl FnOnce(&mut DirectoryBrowser) -> std::io::Result<bool> + Send + 'static,
+        operation: impl FnOnce(&mut DirectoryBrowser) -> Result<bool, String> + Send + 'static,
     ) {
         self.navigation_generation = self.navigation_generation.wrapping_add(1);
         let generation = self.navigation_generation;
@@ -836,9 +857,23 @@ impl FileApp {
             .spawn(move || {
                 let result = operation(&mut browser)
                     .map(|changed| changed.then_some(browser))
-                    .map_err(|error| format!("Could not open location: {error}"));
+                    .map_err(|error| format!("{error_context}: {error}"));
                 let _ = sender.send((generation, result));
             });
+    }
+
+    fn refresh_directory(&mut self, show_hidden: bool) {
+        self.start_navigation(
+            "Refreshing".into(),
+            "Could not refresh",
+            false,
+            move |browser| {
+                browser
+                    .set_show_hidden(show_hidden)
+                    .map(|()| true)
+                    .map_err(|error| error.to_string())
+            },
+        );
     }
 
     fn poll_navigation(&mut self) -> bool {
@@ -935,9 +970,17 @@ impl FileApp {
             return;
         }
         let label = target.display().to_string();
-        self.start_navigation(format!("Opening {label}"), true, move |browser| {
-            browser.enter(target).map(|()| true)
-        });
+        self.start_navigation(
+            format!("Opening {label}"),
+            "Could not open location",
+            true,
+            move |browser| {
+                browser
+                    .enter(target)
+                    .map(|()| true)
+                    .map_err(|error| error.to_string())
+            },
+        );
     }
 
     pub(crate) fn refresh_icons(&mut self) {
@@ -1183,11 +1226,7 @@ impl FileApp {
                 }
             }
             FileMessage::ContextRefresh => {
-                if let Err(error) = self.browser.refresh() {
-                    self.status = format!("Could not refresh: {error}");
-                }
-                self.browser.sort(self.sort_key, self.sort_direction);
-                self.refresh_icons();
+                self.refresh_directory(self.browser.show_hidden());
             }
             FileMessage::ContextSelectAll => {
                 self.selected_entries = (0..self.browser.entries().len()).collect();
@@ -1216,17 +1255,21 @@ impl FileApp {
             FileMessage::SubmitAddress => self.submit_address(),
             FileMessage::ToggleHiddenFiles => {
                 let show = !self.browser.show_hidden();
-                match self.browser.set_show_hidden(show) {
-                    Ok(()) => {
-                        self.browser.sort(self.sort_key, self.sort_direction);
-                        self.selected = None;
-                        self.selected_entries.clear();
-                        self.selection_anchor = None;
-                        self.set_scroll_offset(0.0);
-                        self.refresh_icons();
-                    }
-                    Err(error) => self.status = format!("Could not change hidden files: {error}"),
-                }
+                self.start_navigation(
+                    if show {
+                        "Showing hidden files".into()
+                    } else {
+                        "Hiding hidden files".into()
+                    },
+                    "Could not change hidden files",
+                    false,
+                    move |browser| {
+                        browser
+                            .set_show_hidden(show)
+                            .map(|()| true)
+                            .map_err(|error| error.to_string())
+                    },
+                );
             }
             FileMessage::ResizeSidebar => {
                 self.resizing_sidebar = true;
@@ -1240,18 +1283,7 @@ impl FileApp {
             FileMessage::Forward => self.go_forward(),
             FileMessage::Up => self.go_up(),
             FileMessage::Refresh => {
-                if let Err(error) = self
-                    .browser
-                    .set_show_hidden(nickel_platform::show_hidden_files())
-                {
-                    self.status = format!("Could not refresh: {error}");
-                }
-                self.browser.sort(self.sort_key, self.sort_direction);
-                self.refresh_icons();
-                self.selected = None;
-                self.selected_entries.clear();
-                self.selection_anchor = None;
-                self.set_scroll_offset(0.0);
+                self.refresh_directory(nickel_platform::show_hidden_files());
             }
             FileMessage::SetViewMode(mode) => {
                 self.view_mode = mode;

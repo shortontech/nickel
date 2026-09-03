@@ -593,6 +593,51 @@ fn pending_navigation_belongs_to_the_requesting_tab() {
 }
 
 #[test]
+fn refresh_keeps_usable_contents_until_async_enumeration_publishes() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("existing.txt"), b"existing").unwrap();
+    let mut app = FileApp::new(directory.path().to_path_buf());
+    std::fs::write(directory.path().join("new.txt"), b"new").unwrap();
+
+    app.update_message(FileMessage::ContextRefresh);
+    assert!(app.navigation_pending());
+    assert!(
+        app.browser
+            .entries()
+            .iter()
+            .all(|entry| entry.name != std::ffi::OsStr::new("new.txt"))
+    );
+    settle_navigation(&mut app);
+    assert!(
+        app.browser
+            .entries()
+            .iter()
+            .any(|entry| entry.name == std::ffi::OsStr::new("new.txt"))
+    );
+}
+
+#[test]
+fn hidden_file_enumeration_is_published_asynchronously() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("visible.txt"), b"visible").unwrap();
+    std::fs::write(directory.path().join(".hidden.txt"), b"hidden").unwrap();
+    let browser = DirectoryBrowser::open_with_hidden(directory.path(), false).unwrap();
+    let mut app = FileApp::with_browser(browser, String::new());
+
+    app.update_message(FileMessage::ToggleHiddenFiles);
+    assert!(app.navigation_pending());
+    assert!(!app.browser.show_hidden());
+    settle_navigation(&mut app);
+    assert!(app.browser.show_hidden());
+    assert!(
+        app.browser
+            .entries()
+            .iter()
+            .any(|entry| entry.name == std::ffi::OsStr::new(".hidden.txt"))
+    );
+}
+
+#[test]
 fn component_owned_fixture_registers_the_production_file_app() {
     use nickel_ui_testkit::FixtureProvider;
     let mut registry = nickel_ui_testkit::FixtureRegistry::new();

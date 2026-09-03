@@ -120,9 +120,7 @@ impl HostAdapter<FileApp> for FileHostAdapter {
                         app.selection_anchor = app.selected;
                     }
                     KeyCode::F5 => {
-                        if let Err(error) = app.browser.refresh() {
-                            app.status = format!("Could not refresh: {error}");
-                        }
+                        app.update(FileMessage::Refresh);
                     }
                     _ => {}
                 }

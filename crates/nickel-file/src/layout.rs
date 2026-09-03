@@ -449,7 +449,7 @@ fn command_surface(app: &FileApp, palette: ThemePalette) -> AnyView<FileMessage>
                 "Show hidden files"
             },
             "dotfiles visibility",
-            true,
+            !app.navigation_pending(),
             FileMessage::ToggleHiddenFiles,
         ),
     ];
