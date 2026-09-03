@@ -76,6 +76,7 @@ independent inspection reported zero entries in every root. Nickel File still op
 complete Nickel artwork for ordinary and special folders. This exercises the clean-installation
 condition without uninstalling packages from the development host.
 
-The remaining native-environment gate is a real Windows run covering Explorer-backed System icons,
-Nickel artwork, and ordinary pointer and keyboard browsing. Specs 0123 and 0124 remain active until
-that gate exists.
+For Specs 0123 and 0124, product acceptance treats the completed Proton run as sufficient Windows
+evidence. Together with the native Linux, isolated clean-Linux, deterministic fixture, and automated
+scenario results above, the agreed verification matrix is complete and both specifications are
+archived.
