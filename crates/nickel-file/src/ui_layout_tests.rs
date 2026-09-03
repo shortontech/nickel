@@ -1200,7 +1200,9 @@ fn every_file_fixture_passes_geometry_accessibility_and_selection_contrast_gates
             MINIMUM_SELECTION_TEXT_CONTRAST,
         );
 
-        let mut host = UiHost::new(app, variant.viewport.width, variant.viewport.height);
+        let logical_width = (variant.viewport.width as f32 / variant.scale.factor).round() as u32;
+        let logical_height = (variant.viewport.height as f32 / variant.scale.factor).round() as u32;
+        let mut host = UiHost::new(app, logical_width, logical_height);
         host.set_scale_factor(variant.scale.factor);
         let inspection = host.inspect();
         assert!(
@@ -1244,10 +1246,8 @@ fn every_file_fixture_passes_geometry_accessibility_and_selection_contrast_gates
                         && node.bounds.size.height > 0.0
                         && node.bounds.origin.x >= 0.0
                         && node.bounds.origin.y >= 0.0
-                        && node.bounds.origin.x + node.bounds.size.width
-                            <= variant.viewport.width as f32
-                        && node.bounds.origin.y + node.bounds.size.height
-                            <= variant.viewport.height as f32,
+                        && node.bounds.origin.x + node.bounds.size.width <= logical_width as f32
+                        && node.bounds.origin.y + node.bounds.size.height <= logical_height as f32,
                     "{} clips actionable control {:?} at {:?}",
                     variant.id,
                     node.id,
@@ -1273,6 +1273,21 @@ fn every_file_fixture_passes_geometry_accessibility_and_selection_contrast_gates
                 );
             }
         }
+        let raster = nickel_ui_testkit::render_host(
+            &host,
+            variant.viewport.width,
+            variant.viewport.height,
+            variant.scale.factor,
+        );
+        assert_eq!(
+            (raster.width, raster.height),
+            (variant.viewport.width, variant.viewport.height)
+        );
+        assert!(
+            raster.rgba.chunks_exact(4).any(|pixel| pixel[3] != 0),
+            "{} rendered no visible pixels",
+            variant.id,
+        );
     }
 }
 
