@@ -730,6 +730,34 @@ fn component_owned_fixture_registers_the_production_file_app() {
 }
 
 #[test]
+fn synthetic_windows_and_linux_adapters_share_semantics_geometry_and_commands() {
+    #[derive(Clone, Copy)]
+    enum SyntheticPlatform {
+        Windows,
+        Linux,
+    }
+
+    let scenario = |_platform: SyntheticPlatform| {
+        let mut app = FileApp::fixture();
+        app.refresh_icons_for(FileIconPreference::Nickel, ThemeMode::Dark);
+        app.icon_rx = None;
+        Scenario::new(app, 1100, 700)
+    };
+    let windows = scenario(SyntheticPlatform::Windows);
+    let linux = scenario(SyntheticPlatform::Linux);
+
+    assert_eq!(windows.semantic_nodes(), linux.semantic_nodes());
+    assert_eq!(
+        windows.host().accessibility_nodes(),
+        linux.host().accessibility_nodes()
+    );
+    assert_eq!(
+        nickel_ui_testkit::render_host(windows.host(), 1100, 700, 1.0),
+        nickel_ui_testkit::render_host(linux.host(), 1100, 700, 1.0)
+    );
+}
+
+#[test]
 fn every_advertised_controller_action_has_a_bounded_production_path() {
     use nickel_ui_testkit::{FixtureProvider, ReachabilityModality, ReachabilityPolicy};
 
