@@ -1359,3 +1359,34 @@ fn scenario_resource_lifecycle_releases_build_scratch_and_suspend_state() {
     assert!(after.pointer_capture.is_none());
     assert_eq!(after.resources.retained_build_scratch_bytes, 0);
 }
+
+#[test]
+fn focused_selection_is_visually_distinct_and_survives_window_focus_loss() {
+    let mut scenario = Scenario::new(FileApp::fixture(), 820, 620);
+    let entry = entry_selector(&scenario, "/file-entry-0");
+    scenario.pointer_activate(&entry).unwrap();
+    for _ in 0..64 {
+        if scenario.host().inspect().keyboard_focus.as_ref()
+            == match &entry {
+                Selector::Id(id) => Some(id),
+                _ => None,
+            }
+        {
+            break;
+        }
+        scenario.keyboard_focus(FocusDirection::Next).unwrap();
+    }
+    assert_eq!(
+        scenario.host().application().selected_entries,
+        HashSet::from([0])
+    );
+    let focused = nickel_ui_testkit::render_host(scenario.host(), 820, 620, 1.0);
+
+    scenario.window_focus(false).unwrap();
+    assert_eq!(
+        scenario.host().application().selected_entries,
+        HashSet::from([0])
+    );
+    let unfocused = nickel_ui_testkit::render_host(scenario.host(), 820, 620, 1.0);
+    assert_ne!(focused, unfocused);
+}
