@@ -61,13 +61,13 @@ mod sdl_notification_view;
 mod sdl_screenshot;
 #[cfg(feature = "workbench-fixtures")]
 #[allow(dead_code)]
-mod sdl_shell;
-#[cfg(feature = "workbench-fixtures")]
-#[allow(dead_code)]
 mod sdl_window_preview;
 #[cfg(feature = "workbench-fixtures")]
 #[allow(dead_code)]
 mod softbuffer_presenter;
+#[cfg(feature = "workbench-fixtures")]
+#[allow(dead_code)]
+mod winit_shell;
 
 #[cfg(feature = "workbench-fixtures")]
 mod workbench_fixtures;

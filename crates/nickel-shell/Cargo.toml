@@ -19,15 +19,15 @@ nickel-core = { path = "../nickel-core" }
 nickel-codex = { path = "../nickel-codex" }
 nickel-codex-ui = { path = "../nickel-codex-ui" }
 nickel-i18n = { path = "../nickel-i18n" }
-nickel-input = { path = "../nickel-input", features = ["sdl"] }
+nickel-input = { path = "../nickel-input", features = ["winit"] }
 nickel-logging = { path = "../nickel-logging" }
 nickel-session-protocol = { path = "../nickel-session-protocol" }
 nucleo-matcher.workspace = true
 resvg.workspace = true
 raw-window-handle.workspace = true
-sdl3.workspace = true
 softbuffer.workspace = true
 tracing.workspace = true
+winit.workspace = true
 zeroize.workspace = true
 nickel-ui-testkit = { path = "../nickel-ui-testkit", optional = true }
 
@@ -38,6 +38,9 @@ freedesktop-icons.workspace = true
 shlex.workspace = true
 zbus.workspace = true
 libloading.workspace = true
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+arboard = "3.6.1"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 nickel-platform = { path = "../nickel-platform" }
@@ -79,7 +82,7 @@ toml.workspace = true
 
 [[bin]]
 name = "nickel"
-path = "src/bin/nickel-sdl-shell.rs"
+path = "src/bin/nickel-shell.rs"
 
 [[bin]]
 name = "nickel-test-notification"

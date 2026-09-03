@@ -1,4 +1,4 @@
-//! SDL3 window and event ownership for the Nickel shell.
+//! Winit window and event ownership for the Nickel shell.
 //!
 //! Rendering is deliberately outside this module. A renderer receives stable
 //! [`SurfaceId`] values and can attach either a software surface or an
@@ -13,22 +13,19 @@ use nickel_input::InputEvent;
 use nickel_session_protocol::ShellRole as SessionShellRole;
 use nickel_ui::backend::PaintCommand;
 use nickel_ui::{AggregatePresenterCacheDiagnostics, DamageRegion, HostChangeToken};
-use sdl3::event::{Event, WindowEvent};
-use sdl3::video::{Window, WindowPos};
+use winit::dpi::{LogicalPosition, LogicalSize};
+use winit::event::{Event, WindowEvent};
+use winit::event_loop::{ControlFlow, EventLoop, EventLoopProxy};
+use winit::platform::pump_events::EventLoopExtPumpEvents;
+#[cfg(target_os = "linux")]
+use winit::platform::wayland::WindowAttributesExtWayland;
+use winit::window::{Window, WindowId};
 
 use crate::softbuffer_presenter::{PresentationGeometry, SharedGraphics, SoftbufferPresenter};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 pub const DESKTOP_TITLE: &str = "Nickel Desktop";
 pub const PANEL_TITLE: &str = "Nickel Panel";
-const DEFAULT_SDL_APP_ID: &str = "io.nickel.shell";
-
-fn restore_sdl_app_id(previous: Option<String>) {
-    sdl3::hint::set(
-        "SDL_APP_ID",
-        previous.as_deref().unwrap_or(DEFAULT_SDL_APP_ID),
-    );
-}
 pub const LAUNCHER_TITLE: &str = "Nickel Launcher";
 pub const CONTROL_CENTER_TITLE: &str = "Nickel Control Center";
 pub const NOTIFICATION_TITLE: &str = "Nickel Notification";
@@ -96,7 +93,30 @@ fn durable_presenter_peak(
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct SurfaceId(u32);
+pub struct SurfaceId(WindowId);
+
+#[derive(Debug)]
+pub enum ShellUserEvent {
+    GlobalShortcut(crate::platform::GlobalShortcut),
+    #[cfg(target_os = "linux")]
+    TestControl(crate::platform::ShellTestRequest),
+}
+
+pub trait WinitWindowCompat {
+    fn size(&self) -> (u32, u32);
+    fn has_input_focus(&self) -> bool;
+}
+
+impl WinitWindowCompat for Window {
+    fn size(&self) -> (u32, u32) {
+        let size = self.inner_size().to_logical::<u32>(self.scale_factor());
+        (size.width, size.height)
+    }
+
+    fn has_input_focus(&self) -> bool {
+        self.has_focus()
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ShellMemoryDiagnostics {
@@ -210,86 +230,59 @@ impl ShellSurface {
     pub fn window(&self) -> &Window {
         &self.window
     }
-
-    pub fn window_mut(&mut self) -> &mut Window {
-        &mut self.window
-    }
 }
 
-pub struct SdlShell {
-    // Presenters borrow native window handles and must drop before SDL's video subsystem.
+pub struct WinitShell {
+    // Presenters borrow native window handles and must drop before the event loop.
     surfaces: Vec<ShellSurface>,
     graphics: Option<SharedGraphics>,
-    surface_indices: HashMap<u32, usize>,
-    events: sdl3::EventPump,
+    surface_indices: HashMap<WindowId, usize>,
+    events: EventLoop<ShellUserEvent>,
     pending_events: VecDeque<ShellEvent>,
-    input_adapter: nickel_input::sdl::Adapter,
+    displays: Vec<(DisplayGeometry, String)>,
+    input_adapters: HashMap<WindowId, nickel_input::winit::Adapter>,
+    devices: nickel_input::winit::DeviceRegistry,
     warm_present_us: VecDeque<u64>,
     input_to_present_us: VecDeque<u64>,
     warm_present_allocations: VecDeque<u64>,
     presenter_cache_peak_bytes: Cell<usize>,
     output_retirements: OutputRetirementTracker,
     pending_input_started: Option<Instant>,
-    video: sdl3::VideoSubsystem,
-    _sdl: sdl3::Sdl,
+    clipboard: Option<std::cell::RefCell<arboard::Clipboard>>,
     started: Instant,
 }
 
-impl SdlShell {
+impl WinitShell {
     pub fn new(started: Instant) -> Result<Self, String> {
-        configure_input_hints();
-        let sdl = sdl3::init().map_err(|error| error.to_string())?;
-        let video = sdl.video().map_err(|error| error.to_string())?;
-        // SDL disables the screen saver by default and creates one Wayland
-        // idle inhibitor per shell surface. Nickel owns idle policy itself,
-        // so its shell must never globally inhibit the compositor.
-        video.enable_screen_saver();
-        sdl.event()
-            .map_err(|error| error.to_string())?
-            .register_custom_event::<crate::platform::GlobalShortcut>()
+        let events = EventLoop::<ShellUserEvent>::with_user_event()
+            .build()
             .map_err(|error| error.to_string())?;
-        #[cfg(target_os = "linux")]
-        sdl.event()
-            .map_err(|error| error.to_string())?
-            .register_custom_event::<crate::platform::ShellTestRequest>()
-            .map_err(|error| error.to_string())?;
-        let events = sdl.event_pump().map_err(|error| error.to_string())?;
         tracing::info!(
             elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0,
-            driver = video.current_video_driver(),
-            "SDL video initialized"
+            "winit event loop initialized"
         );
-        #[cfg(target_os = "linux")]
-        if video.current_video_driver() != "wayland" {
-            tracing::warn!(
-                driver = video.current_video_driver(),
-                "Nickel session expected the SDL Wayland video driver"
-            );
-        }
         Ok(Self {
             surfaces: Vec::new(),
             graphics: None,
             surface_indices: HashMap::new(),
             events,
             pending_events: VecDeque::new(),
-            input_adapter: nickel_input::sdl::Adapter::default(),
+            displays: Vec::new(),
+            input_adapters: HashMap::new(),
+            devices: nickel_input::winit::DeviceRegistry::default(),
             warm_present_us: VecDeque::with_capacity(RUNTIME_SAMPLE_CAPACITY),
             input_to_present_us: VecDeque::with_capacity(RUNTIME_SAMPLE_CAPACITY),
             warm_present_allocations: VecDeque::with_capacity(RUNTIME_SAMPLE_CAPACITY),
             presenter_cache_peak_bytes: Cell::new(0),
             output_retirements: OutputRetirementTracker::default(),
             pending_input_started: None,
-            video,
-            _sdl: sdl,
+            clipboard: arboard::Clipboard::new().ok().map(std::cell::RefCell::new),
             started,
         })
     }
 
-    pub fn event_sender(&self) -> sdl3::event::EventSender {
-        self._sdl
-            .event()
-            .expect("SDL event subsystem remains initialized")
-            .event_sender()
+    pub fn event_sender(&self) -> EventLoopProxy<ShellUserEvent> {
+        self.events.create_proxy()
     }
 
     pub fn create_shell_surfaces(&mut self) -> Result<(), String> {
@@ -300,7 +293,7 @@ impl SdlShell {
         let output_names = self.display_names()?;
         for (display_index, geometry) in displays.iter().copied().enumerate() {
             let output_name = output_names.get(display_index).ok_or_else(|| {
-                "SDL output identity count changed during shell startup".to_string()
+                "winit output identity count changed during shell startup".to_string()
             })?;
             if crate::platform::renders_desktop_background() {
                 self.create_surface(SurfaceRole::Desktop, display_index, geometry, output_name)?;
@@ -309,9 +302,9 @@ impl SdlShell {
             self.create_surface(SurfaceRole::Lock, display_index, geometry, output_name)?;
         }
         let primary = displays[0];
-        let primary_name = output_names
-            .first()
-            .ok_or_else(|| "SDL reported no output identity for the primary display".to_string())?;
+        let primary_name = output_names.first().ok_or_else(|| {
+            "winit reported no output identity for the primary display".to_string()
+        })?;
         self.create_surface(SurfaceRole::Launcher, 0, primary, primary_name)?;
         self.create_surface(SurfaceRole::ControlCenter, 0, primary, primary_name)?;
         self.create_surface(SurfaceRole::Notification, 0, primary, primary_name)?;
@@ -322,7 +315,7 @@ impl SdlShell {
         tracing::info!(
             elapsed_ms = self.started.elapsed().as_secs_f64() * 1_000.0,
             surface_count = self.surfaces.len(),
-            "SDL shell windows created"
+            "winit shell windows created"
         );
         Ok(())
     }
@@ -334,11 +327,11 @@ impl SdlShell {
         if displays.is_empty() {
             for surface in &mut self.surfaces {
                 surface.display_connected = false;
-                let _ = surface.window_mut().hide();
+                surface.window.set_visible(false);
                 surface.presenter = None;
             }
             self.rebuild_surface_indices();
-            tracing::info!("SDL shell is dormant while no displays are available");
+            tracing::info!("winit shell is dormant while no displays are available");
             return Ok(());
         }
         let panels_match_outputs = output_names.iter().all(|output_name| {
@@ -356,14 +349,14 @@ impl SdlShell {
                 ) && !output_names.iter().any(|name| name == &surface.output_name)
                 {
                     surface.display_connected = false;
-                    let _ = surface.window_mut().hide();
+                    surface.window.set_visible(false);
                     surface.presenter = None;
                 }
             }
             self.rebuild_surface_indices();
             for (display_index, geometry) in displays.iter().copied().enumerate() {
                 let output_name = output_names.get(display_index).ok_or_else(|| {
-                    "SDL output identity count changed during shell sync".to_string()
+                    "winit output identity count changed during shell sync".to_string()
                 })?;
                 let has_panel = self.surfaces.iter().any(|surface| {
                     surface.display_connected
@@ -388,13 +381,12 @@ impl SdlShell {
                         surface.display_connected = true;
                         let (_, x, y, width, height, _) = surface_geometry(role, geometry);
                         surface
-                            .window_mut()
-                            .set_position(WindowPos::Positioned(x), WindowPos::Positioned(y));
-                        surface
-                            .window_mut()
-                            .set_size(width, height)
-                            .map_err(|error| error.to_string())?;
-                        let _ = surface.window_mut().show();
+                            .window
+                            .set_outer_position(LogicalPosition::new(x, y));
+                        let _ = surface
+                            .window
+                            .request_inner_size(LogicalSize::new(width, height));
+                        surface.window.set_visible(true);
                     } else {
                         self.create_surface(role, display_index, geometry, output_name)?;
                     }
@@ -419,12 +411,11 @@ impl SdlShell {
             surface.display_connected = true;
             let (_, x, y, width, height, _) = surface_geometry(surface.role, primary);
             surface
-                .window_mut()
-                .set_position(WindowPos::Positioned(x), WindowPos::Positioned(y));
-            surface
-                .window_mut()
-                .set_size(width, height)
-                .map_err(|error| error.to_string())?;
+                .window
+                .set_outer_position(LogicalPosition::new(x, y));
+            let _ = surface
+                .window
+                .request_inner_size(LogicalSize::new(width, height));
         }
         self.rebuild_surface_indices();
 
@@ -452,12 +443,11 @@ impl SdlShell {
             };
             let (_, x, y, width, height, _) = surface_geometry(surface.role, display);
             surface
-                .window_mut()
-                .set_position(WindowPos::Positioned(x), WindowPos::Positioned(y));
-            surface
-                .window_mut()
-                .set_size(width, height)
-                .map_err(|error| error.to_string())?;
+                .window
+                .set_outer_position(LogicalPosition::new(x, y));
+            let _ = surface
+                .window
+                .request_inner_size(LogicalSize::new(width, height));
         }
         Ok(())
     }
@@ -544,16 +534,21 @@ impl SdlShell {
         application_id: &str,
     ) -> Result<SurfaceId, String> {
         let geometry = require_displays(self.display_geometries()?)?[0];
-        let previous_app_id = sdl3::hint::get("SDL_APP_ID");
-        sdl3::hint::set("SDL_APP_ID", application_id);
-        let mut builder =
-            self.video
-                .window(title, 1120.min(geometry.width), 760.min(geometry.height));
-        builder.position_centered().resizable().high_pixel_density();
-        let window = builder.build().map_err(|error| error.to_string());
-        restore_sdl_app_id(previous_app_id);
-        let window = window?;
-        self.video.text_input().start(&window);
+        let attributes = Window::default_attributes()
+            .with_title(title)
+            .with_inner_size(LogicalSize::new(
+                1120.min(geometry.width),
+                760.min(geometry.height),
+            ))
+            .with_resizable(true);
+        #[cfg(target_os = "linux")]
+        let attributes = attributes.with_name(application_id, application_id);
+        #[allow(deprecated)]
+        let window = self
+            .events
+            .create_window(attributes)
+            .map_err(|error| error.to_string())?;
+        window.set_ime_allowed(true);
         let id = SurfaceId(window.id());
         let index = self.surfaces.len();
         self.surface_indices.insert(id.0, index);
@@ -626,11 +621,13 @@ impl SdlShell {
     }
 
     pub fn clipboard_text(&self) -> Option<String> {
-        self.video.clipboard().clipboard_text().ok()
+        self.clipboard.as_ref()?.borrow_mut().get_text().ok()
     }
 
     pub fn set_clipboard_text(&self, text: &str) {
-        let _ = self.video.clipboard().set_clipboard_text(text);
+        if let Some(clipboard) = &self.clipboard {
+            let _ = clipboard.borrow_mut().set_text(text);
+        }
     }
 
     pub fn present(
@@ -641,14 +638,14 @@ impl SdlShell {
         let index = *self
             .surface_indices
             .get(&id.0)
-            .ok_or_else(|| "unknown SDL shell surface".to_owned())?;
+            .ok_or_else(|| "unknown winit shell surface".to_owned())?;
         if self.graphics.is_none() {
             let display = self.surfaces[index]
                 .window()
                 .display_handle()
                 .map_err(|error| error.to_string())?;
-            // SAFETY: `SdlShell` drops all surfaces and shared graphics before
-            // its SDL video subsystem, which owns this display connection.
+            // SAFETY: `WinitShell` drops all surfaces and shared graphics before
+            // its winit event loop, which owns this display connection.
             self.graphics = Some(unsafe { SharedGraphics::new(display) }?);
         }
         let graphics = self.graphics.as_ref().expect("shared renderer initialized");
@@ -665,13 +662,13 @@ impl SdlShell {
         }
         let started = Instant::now();
         let allocations_before = crate::allocation_counter::allocation_operations();
-        let (pixel_width, pixel_height) = entry.window.size_in_pixels();
-        let (logical_width, logical_height) = entry.window.size();
+        let physical = entry.window.inner_size();
+        let logical = physical.to_logical::<u32>(entry.window.scale_factor());
         let geometry = PresentationGeometry {
-            pixel_width,
-            pixel_height,
-            logical_width,
-            logical_height,
+            pixel_width: physical.width,
+            pixel_height: physical.height,
+            logical_width: logical.width,
+            logical_height: logical.height,
         };
         let damage = entry
             .presenter
@@ -711,7 +708,7 @@ impl SdlShell {
         let index = *self
             .surface_indices
             .get(&id.0)
-            .ok_or_else(|| "unknown SDL shell surface".to_owned())?;
+            .ok_or_else(|| "unknown winit shell surface".to_owned())?;
         if self.surfaces[index].last_host_change_token == Some(token) {
             return Ok(None);
         }
@@ -721,27 +718,38 @@ impl SdlShell {
     }
 
     pub fn show(&mut self, id: SurfaceId) -> bool {
-        self.surface_mut(id).is_some_and(|surface| {
+        let shown = self.surface_mut(id).is_some_and(|surface| {
             surface.last_host_change_token = None;
-            surface.window_mut().show()
-        })
+            surface.window.set_visible(true);
+            surface.window.request_redraw();
+            true
+        });
+        if shown {
+            self.pending_events.push_back(ShellEvent::Shown(id));
+        }
+        shown
     }
 
     pub fn hide(&mut self, id: SurfaceId) -> bool {
-        self.surface_mut(id).is_some_and(|surface| {
-            let hidden = surface.window_mut().hide();
-            // SDL reports whether native visibility changed, not whether the
-            // surface is hidden after the call. Repeated reconciliation must
+        let hidden = self.surface_mut(id).is_some_and(|surface| {
+            surface.window.set_visible(false);
+            // Repeated reconciliation must
             // still release a lightweight presentation surface populated while
             // the native window was already hidden (for example by prewarm).
             surface.presenter = None;
-            hidden
-        })
+            true
+        });
+        if hidden {
+            self.pending_events.push_back(ShellEvent::Hidden(id));
+        }
+        hidden
     }
 
     pub fn raise(&mut self, id: SurfaceId) -> bool {
-        self.surface_mut(id)
-            .is_some_and(|surface| surface.window_mut().raise())
+        self.surface_mut(id).is_some_and(|surface| {
+            surface.window.focus_window();
+            true
+        })
     }
 
     pub fn raise_role(&mut self, role: SurfaceRole) -> bool {
@@ -754,7 +762,8 @@ impl SdlShell {
         let mut raised = false;
         for id in ids {
             if let Some(surface) = self.surface_mut(id) {
-                raised |= surface.window_mut().raise();
+                surface.window.focus_window();
+                raised = true;
             }
         }
         raised
@@ -762,99 +771,124 @@ impl SdlShell {
 
     pub fn start_text_input(&self, id: SurfaceId) -> bool {
         self.surface(id).is_some_and(|surface| {
-            self.video.text_input().start(surface.window());
+            surface.window().set_ime_allowed(true);
             true
         })
     }
 
     pub fn stop_text_input(&self, id: SurfaceId) -> bool {
         self.surface(id).is_some_and(|surface| {
-            self.video.text_input().stop(surface.window());
+            surface.window().set_ime_allowed(false);
             true
         })
     }
 
     pub fn poll_events(&mut self) -> Vec<ShellEvent> {
-        let mut translated = self.pending_events.drain(..).collect::<Vec<_>>();
-        let raw = self.events.poll_iter().collect::<Vec<_>>();
-        for event in raw {
-            if let Some(event) = self.translate_event(event) {
-                translated.push(event);
-            }
-            translated.extend(self.pending_events.drain(..));
-        }
-        translated
+        self.pump_events(Some(Duration::ZERO));
+        self.pending_events.drain(..).collect()
     }
 
     pub fn wait_event(&mut self) -> Option<ShellEvent> {
-        loop {
-            if let Some(event) = self.pending_events.pop_front() {
-                return Some(event);
-            }
-            let event = self.events.wait_event();
-            if let Some(event) = self.translate_event(event) {
-                return Some(event);
-            }
-        }
+        self.wait_event_timeout(Duration::from_secs(24 * 60 * 60))
     }
 
     pub fn wait_event_timeout(&mut self, timeout: Duration) -> Option<ShellEvent> {
         if let Some(event) = self.pending_events.pop_front() {
             return Some(event);
         }
-        let deadline = Instant::now() + timeout;
-        let mut discarded = 0_u64;
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            let event = self.events.wait_event_timeout(remaining)?;
-            let event_summary = (discarded == 9_999).then(|| format!("{event:?}"));
-            if let Some(event) = self.translate_event(event) {
-                return Some(event);
-            }
-            discarded = discarded.saturating_add(1);
-            if discarded == 10_000 {
-                tracing::info!(
-                    discarded,
-                    last_event = %event_summary.as_deref().unwrap_or("unavailable"),
-                    ?timeout,
-                    "diagnostic: SDL event pump discarded events while waiting"
-                );
-            }
-            if Instant::now() >= deadline {
-                if let Some(event) = self.pending_events.pop_front() {
-                    return Some(event);
+        self.pump_events(Some(timeout));
+        self.pending_events.pop_front()
+    }
+
+    fn pump_events(&mut self, timeout: Option<Duration>) {
+        let indices = &self.surface_indices;
+        let surfaces = &self.surfaces;
+        let adapters = &mut self.input_adapters;
+        let devices = &mut self.devices;
+        let pending = &mut self.pending_events;
+        let displays = &mut self.displays;
+        self.events.set_control_flow(ControlFlow::Wait);
+        #[allow(deprecated)]
+        self.events
+            .pump_events(timeout, |event, active| match event {
+                Event::Resumed | Event::AboutToWait => {
+                    *displays = active
+                        .available_monitors()
+                        .enumerate()
+                        .map(|(index, display)| {
+                            let position = display.position();
+                            let size = display.size();
+                            (
+                                DisplayGeometry {
+                                    x: position.x,
+                                    y: position.y,
+                                    width: size.width.max(1),
+                                    height: size.height.max(1),
+                                    scale: display.scale_factor().max(1.0) as f32,
+                                },
+                                display.name().unwrap_or_else(|| format!("display-{index}")),
+                            )
+                        })
+                        .collect();
                 }
-                return None;
-            }
-        }
+                Event::UserEvent(ShellUserEvent::GlobalShortcut(shortcut)) => {
+                    pending.push_back(ShellEvent::GlobalShortcut(shortcut));
+                }
+                #[cfg(target_os = "linux")]
+                Event::UserEvent(ShellUserEvent::TestControl(request)) => {
+                    pending.push_back(ShellEvent::TestControl(request));
+                }
+                Event::WindowEvent { window_id, event } => {
+                    let Some(&index) = indices.get(&window_id) else {
+                        return;
+                    };
+                    let surface = SurfaceId(window_id);
+                    let scale = surfaces[index].window.scale_factor();
+                    let native_device = window_event_device(&event);
+                    // Winit omits a device on lifecycle and IME events. Its documented dummy
+                    // identity is appropriate for this event-loop-local synthetic stream.
+                    let native_device = native_device.unwrap_or_else(winit::event::DeviceId::dummy);
+                    let device = devices.get_or_insert(native_device);
+                    let adapter = adapters.entry(window_id).or_default();
+                    for input in adapter.normalize_at_scale(device, scale, &event) {
+                        pending.push_back(ShellEvent::Input {
+                            surface,
+                            event: input,
+                        });
+                    }
+                    if let Some(event) = translate_window_event(surface, scale as f32, &event) {
+                        pending.push_back(event);
+                    }
+                }
+                Event::DeviceEvent {
+                    device_id,
+                    event: winit::event::DeviceEvent::Removed,
+                } => {
+                    if let Some(device) = devices.remove(device_id) {
+                        for (&window_id, adapter) in adapters.iter_mut() {
+                            if indices.contains_key(&window_id) {
+                                pending.push_back(ShellEvent::Input {
+                                    surface: SurfaceId(window_id),
+                                    event: adapter.device_removed(device),
+                                });
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            });
     }
 
     pub fn display_geometries(&self) -> Result<Vec<DisplayGeometry>, String> {
-        self.video
-            .displays()
-            .map_err(|error| error.to_string())?
-            .into_iter()
-            .map(|display| {
-                let bounds = display.get_bounds().map_err(|error| error.to_string())?;
-                let mode = display.get_mode().map_err(|error| error.to_string())?;
-                Ok(DisplayGeometry {
-                    x: bounds.x,
-                    y: bounds.y,
-                    width: u32::try_from(bounds.w).unwrap_or_default().max(1),
-                    height: u32::try_from(bounds.h).unwrap_or_default().max(1),
-                    scale: mode.pixel_density.max(1.0),
-                })
-            })
-            .collect()
+        Ok(self
+            .displays
+            .iter()
+            .map(|(geometry, _)| *geometry)
+            .collect())
     }
 
     fn display_names(&self) -> Result<Vec<String>, String> {
-        self.video
-            .displays()
-            .map_err(|error| error.to_string())?
-            .into_iter()
-            .map(|display| display.get_name().map_err(|error| error.to_string()))
-            .collect()
+        Ok(self.displays.iter().map(|(_, name)| name.clone()).collect())
     }
 
     fn create_surface(
@@ -879,46 +913,40 @@ impl SdlShell {
             SurfaceRole::Screenshot => SessionShellRole::Screenshot.application_id(),
             SurfaceRole::CodexChat => unreachable!("chat surfaces are dynamic"),
         };
-        let previous_app_id = sdl3::hint::get("SDL_APP_ID");
-        sdl3::hint::set("SDL_APP_ID", application_id);
-        let mut builder = self.video.window(&title, width, height);
-        builder.position(x, y).high_pixel_density();
-        if surface_is_borderless(role) {
-            builder.borderless();
-        }
-        if matches!(
-            role,
-            SurfaceRole::WindowPreview | SurfaceRole::WindowContextMenu | SurfaceRole::Screenshot
-        ) {
-            builder.resizable();
-        }
-        // A hidden Wayland toplevel receives no initial configure, so SDL waits
-        // for its timeout before returning from window creation. Map Linux
-        // shell surfaces once, then `sync_visibility` immediately applies the
-        // production visibility state after every role has registered.
-        if hidden && cfg!(not(target_os = "linux")) {
-            builder.hidden();
-        }
-        let window = builder.build().map_err(|error| error.to_string());
-        restore_sdl_app_id(previous_app_id);
-        let mut window = window?;
+        let attributes = Window::default_attributes()
+            .with_title(title)
+            .with_position(LogicalPosition::new(x, y))
+            .with_inner_size(LogicalSize::new(width, height))
+            .with_decorations(!surface_is_borderless(role))
+            .with_resizable(matches!(
+                role,
+                SurfaceRole::WindowPreview
+                    | SurfaceRole::WindowContextMenu
+                    | SurfaceRole::Screenshot
+            ))
+            .with_visible(!hidden || cfg!(target_os = "linux"));
+        #[cfg(target_os = "linux")]
+        let attributes = attributes.with_name(application_id, application_id);
+        #[allow(deprecated)]
+        let window = self
+            .events
+            .create_window(attributes)
+            .map_err(|error| error.to_string())?;
         if role == SurfaceRole::Screenshot {
-            window
-                .set_minimum_size(720, 480)
-                .map_err(|error| error.to_string())?;
+            window.set_min_inner_size(Some(LogicalSize::new(720, 480)));
             #[cfg(target_os = "windows")]
             if !crate::platform::configure_screenshot_window(&window) {
                 tracing::warn!("failed to configure Nickel screenshot utility window");
             }
         }
         if role == SurfaceRole::CodexProjectMenu {
-            self.video.text_input().start(&window);
+            window.set_ime_allowed(true);
         }
         if role == SurfaceRole::Launcher {
-            self.video.text_input().start(&window);
+            window.set_ime_allowed(true);
         }
         if role == SurfaceRole::Lock {
-            self.video.text_input().start(&window);
+            window.set_ime_allowed(true);
         }
         let id = SurfaceId(window.id());
         let index = self.surfaces.len();
@@ -937,100 +965,53 @@ impl SdlShell {
         });
         Ok(())
     }
+}
 
-    fn translate_event(&mut self, event: Event) -> Option<ShellEvent> {
-        if let Some(shortcut) = event.as_user_event_type::<crate::platform::GlobalShortcut>() {
-            return Some(ShellEvent::GlobalShortcut(shortcut));
-        }
-        #[cfg(target_os = "linux")]
-        if let Some(request) = event.as_user_event_type::<crate::platform::ShellTestRequest>() {
-            return Some(ShellEvent::TestControl(request));
-        }
-        let surface = event
-            .get_window_id()
-            .map(SurfaceId)
-            .filter(|id| self.surface_indices.contains_key(&id.0));
-        if matches!(
-            event,
-            Event::Window {
-                win_event: WindowEvent::FocusLost,
-                ..
-            }
-        ) {
-            let _ = self.input_adapter.normalize(&event);
-        } else if !matches!(event, Event::Window { .. })
-            && let Some(input) = self.input_adapter.normalize(&event)
-        {
-            let surface = surface?;
-            return Some(ShellEvent::Input {
-                surface,
-                event: input,
-            });
-        }
-        match event {
-            Event::Quit { .. } => Some(ShellEvent::Quit),
-            Event::Display { .. } => Some(ShellEvent::DisplayTopologyChanged),
-            Event::Window {
-                win_event,
-                window_id,
-                ..
-            } => self.translate_window_event(SurfaceId(window_id), win_event),
-            _ => None,
-        }
-    }
-
-    fn translate_window_event(&self, surface: SurfaceId, event: WindowEvent) -> Option<ShellEvent> {
-        if !self.surface_indices.contains_key(&surface.0) {
-            return None;
-        }
-        match event {
-            WindowEvent::Shown => Some(ShellEvent::Shown(surface)),
-            WindowEvent::Hidden => Some(ShellEvent::Hidden(surface)),
-            WindowEvent::CloseRequested => Some(ShellEvent::CloseRequested(surface)),
-            WindowEvent::FocusGained => Some(ShellEvent::FocusChanged {
-                surface,
-                focused: true,
-            }),
-            WindowEvent::FocusLost => Some(ShellEvent::FocusChanged {
-                surface,
-                focused: false,
-            }),
-            WindowEvent::MouseEnter => Some(ShellEvent::PointerEntered {
-                surface,
-                entered: true,
-            }),
-            WindowEvent::MouseLeave => Some(ShellEvent::PointerEntered {
-                surface,
-                entered: false,
-            }),
-            WindowEvent::Resized(width, height) => Some(ShellEvent::LogicalResize {
-                surface,
-                width: u32::try_from(width).unwrap_or_default(),
-                height: u32::try_from(height).unwrap_or_default(),
-            }),
-            WindowEvent::PixelSizeChanged(width, height) => Some(ShellEvent::PixelResize {
-                surface,
-                width: u32::try_from(width).unwrap_or_default(),
-                height: u32::try_from(height).unwrap_or_default(),
-                scale: self
-                    .surface(surface)
-                    .map(|surface| surface.window().display_scale())
-                    .unwrap_or(1.0),
-            }),
-            WindowEvent::Exposed => Some(ShellEvent::Redraw(surface)),
-            WindowEvent::DisplayChanged(_) => Some(ShellEvent::DisplayTopologyChanged),
-            _ => None,
-        }
+fn window_event_device(event: &WindowEvent) -> Option<winit::event::DeviceId> {
+    match event {
+        WindowEvent::KeyboardInput { device_id, .. }
+        | WindowEvent::CursorMoved { device_id, .. }
+        | WindowEvent::CursorEntered { device_id }
+        | WindowEvent::CursorLeft { device_id }
+        | WindowEvent::MouseWheel { device_id, .. }
+        | WindowEvent::MouseInput { device_id, .. }
+        | WindowEvent::TouchpadPressure { device_id, .. }
+        | WindowEvent::AxisMotion { device_id, .. } => Some(*device_id),
+        WindowEvent::Touch(touch) => Some(touch.device_id),
+        _ => None,
     }
 }
 
-fn configure_input_hints() {
-    sdl3::hint::set("SDL_VIDEO_ALLOW_SCREENSAVER", "1");
-    sdl3::hint::set("SDL_MOUSE_FOCUS_CLICKTHROUGH", "1");
-    // SDL translates a primary finger into the ordinary pointer path. Nickel
-    // therefore applies production hit testing and reducers identically for
-    // mouse and single-touch activation, without a second geometry model.
-    sdl3::hint::set("SDL_TOUCH_MOUSE_EVENTS", "1");
+fn translate_window_event(
+    surface: SurfaceId,
+    scale: f32,
+    event: &WindowEvent,
+) -> Option<ShellEvent> {
+    match event {
+        WindowEvent::CloseRequested => Some(ShellEvent::CloseRequested(surface)),
+        WindowEvent::Focused(focused) => Some(ShellEvent::FocusChanged {
+            surface,
+            focused: *focused,
+        }),
+        WindowEvent::CursorEntered { .. } => Some(ShellEvent::PointerEntered {
+            surface,
+            entered: true,
+        }),
+        WindowEvent::CursorLeft { .. } => Some(ShellEvent::PointerEntered {
+            surface,
+            entered: false,
+        }),
+        WindowEvent::Resized(size) => Some(ShellEvent::PixelResize {
+            surface,
+            width: size.width,
+            height: size.height,
+            scale,
+        }),
+        WindowEvent::ScaleFactorChanged { .. } => Some(ShellEvent::DisplayTopologyChanged),
+        WindowEvent::RedrawRequested => Some(ShellEvent::Redraw(surface)),
+        WindowEvent::Destroyed => Some(ShellEvent::Hidden(surface)),
+        _ => None,
+    }
 }
 
 fn shell_surface_title(role: SurfaceRole, title: &str, output_name: &str) -> String {
@@ -1138,7 +1119,7 @@ fn surface_geometry(
 
 fn require_displays(displays: Vec<DisplayGeometry>) -> Result<Vec<DisplayGeometry>, String> {
     if displays.is_empty() {
-        Err("SDL reported no displays; refusing to start a headless Nickel shell".into())
+        Err("winit reported no displays; refusing to start a headless Nickel shell".into())
     } else {
         Ok(displays)
     }
@@ -1173,7 +1154,7 @@ mod runtime_diagnostics_tests {
 }
 
 fn surface_is_borderless(role: SurfaceRole) -> bool {
-    // Linux shell roles are compositor-owned chrome. In particular, allowing SDL to decorate the
+    // Linux shell roles are compositor-owned chrome. In particular, allowing the runtime to decorate the
     // screenshot utility adds client-side shadow/titlebar extents to its Wayland geometry, so the
     // compositor can no longer translate renderer-owned local input targets correctly. Windows
     // intentionally keeps the screenshot utility as a conventional decorated tool window.
@@ -1213,43 +1194,6 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[test]
-    fn dummy_sdl_presenter_has_zero_warm_frame_allocations() {
-        let Some(_) = crate::allocation_counter::thread_allocation_operations() else {
-            // The reusable library target does not install the shell binary's
-            // counting allocator. This assertion runs in the binary test target.
-            return;
-        };
-        sdl3::hint::set("SDL_VIDEO_DRIVER", "dummy");
-        let sdl = sdl3::init().expect("SDL initialization");
-        let video = sdl.video().expect("dummy video subsystem");
-        let window = video
-            .window("Nickel warm present allocation", 320, 200)
-            .hidden()
-            .build()
-            .expect("dummy SDL window");
-        let mut presenter =
-            nickel_ui::SdlCanvasPresenter::new(window).expect("dummy accelerated presenter");
-        let frame = nickel_ui::UiFrame::<()>::layout(
-            nickel_ui::Container::new()
-                .width(320.0)
-                .height(200.0)
-                .background(0x111827),
-            nickel_ui::Rect::new(0.0, 0.0, 320.0, 200.0),
-        );
-        presenter
-            .present_accelerated(frame.commands(), 1.0)
-            .expect("cold dummy present");
-        for sample in 0..64 {
-            let before = crate::allocation_counter::thread_allocation_operations().unwrap();
-            presenter
-                .present_accelerated(frame.commands(), 1.0)
-                .expect("warm dummy present");
-            let after = crate::allocation_counter::thread_allocation_operations().unwrap();
-            assert_eq!(after - before, 0, "warm dummy present {sample}");
-        }
-    }
-
-    #[test]
     fn process_presenter_peak_survives_destroyed_presenters() {
         let live = AggregatePresenterCacheDiagnostics {
             presenters: 2,
@@ -1280,28 +1224,10 @@ mod tests {
     }
 
     #[test]
-    fn primary_touch_uses_the_production_pointer_path() {
-        super::configure_input_hints();
-        assert_eq!(
-            sdl3::hint::get("SDL_TOUCH_MOUSE_EVENTS").as_deref(),
-            Some("1")
-        );
-    }
-
-    #[test]
-    fn shell_does_not_disable_compositor_idle_policy() {
-        super::configure_input_hints();
-        assert_eq!(
-            sdl3::hint::get("SDL_VIDEO_ALLOW_SCREENSAVER").as_deref(),
-            Some("1")
-        );
-    }
-
-    #[test]
     fn rejects_a_headless_shell_startup() {
         assert_eq!(
             require_displays(Vec::new()).unwrap_err(),
-            "SDL reported no displays; refusing to start a headless Nickel shell"
+            "winit reported no displays; refusing to start a headless Nickel shell"
         );
     }
 

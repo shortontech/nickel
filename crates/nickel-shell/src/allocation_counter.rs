@@ -58,10 +58,3 @@ pub(crate) fn allocation_operations() -> Option<u64> {
         .load(Ordering::Relaxed)
         .then(|| ALLOCATION_OPERATIONS.load(Ordering::Relaxed))
 }
-
-#[cfg(test)]
-pub(crate) fn thread_allocation_operations() -> Option<u64> {
-    TRACKING_INSTALLED
-        .load(Ordering::Relaxed)
-        .then(|| THREAD_ALLOCATION_OPERATIONS.with(Cell::get))
-}

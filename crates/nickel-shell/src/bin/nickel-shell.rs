@@ -69,16 +69,18 @@ mod sdl_live_shell;
 mod sdl_notification_view;
 #[path = "../sdl_screenshot.rs"]
 mod sdl_screenshot;
-#[path = "../sdl_shell.rs"]
-#[allow(dead_code)]
-mod sdl_shell;
 #[path = "../sdl_window_preview.rs"]
 mod sdl_window_preview;
 #[path = "../softbuffer_presenter.rs"]
 mod softbuffer_presenter;
+#[path = "../winit_shell.rs"]
+#[allow(dead_code)]
+mod winit_shell;
 
 use sdl_live_shell::LiveShell;
-use sdl_shell::{SdlShell, ShellEvent, SurfaceId, SurfaceRole};
+use winit_shell::{
+    ShellEvent, ShellUserEvent, SurfaceId, SurfaceRole, WinitShell as SdlShell, WinitWindowCompat,
+};
 
 fn p95_u64(samples: &[u64]) -> Option<u64> {
     let mut samples = samples.to_vec();
@@ -1300,7 +1302,7 @@ fn wait_for_initial_display(shell: &mut SdlShell) -> Result<(), String> {
             return Ok(true);
         }
         if !logged {
-            tracing::info!("SDL shell is waiting for a display instead of restarting");
+            tracing::info!("winit shell is waiting for a display instead of restarting");
             logged = true;
         }
         let _ = shell.wait_event_timeout(Duration::from_secs(1));
@@ -1313,11 +1315,11 @@ fn shell_event_ends_process(event: &ShellEvent) -> bool {
 }
 
 fn main() -> Result<(), String> {
-    nickel_logging::init("nickel-sdl-shell").map_err(|error| error.to_string())?;
+    nickel_logging::init("nickel-shell").map_err(|error| error.to_string())?;
     // The supervisor publishes its expected child PID and releases this
     // barrier before the shell attempts registration. Creating any Wayland
     // surfaces before authentication is unsafe: Linux shell surfaces are
-    // initially visible so SDL can obtain their first configure, and an
+    // initially visible so winit can obtain their first configure, and an
     // unauthenticated surface is classified as an ordinary movable window.
     #[cfg(target_os = "linux")]
     wait_for_supervisor_readiness()?;
@@ -1349,7 +1351,10 @@ fn main() -> Result<(), String> {
         .name("nickel-shortcut-events".into())
         .spawn(move || {
             while let Ok(shortcut) = hotkey_rx.recv() {
-                if event_sender.push_custom_event(shortcut).is_err() {
+                if event_sender
+                    .send_event(ShellUserEvent::GlobalShortcut(shortcut))
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -1363,7 +1368,10 @@ fn main() -> Result<(), String> {
             .name("nickel-semantic-target-events".into())
             .spawn(move || {
                 while let Ok(request) = semantic_rx.recv() {
-                    if event_sender.push_custom_event(request).is_err() {
+                    if event_sender
+                        .send_event(ShellUserEvent::TestControl(request))
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -1397,13 +1405,13 @@ fn main() -> Result<(), String> {
 
     tracing::info!(
         elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0,
-        "SDL Nickel shell presented"
+        "winit Nickel shell presented"
     );
     let launcher_warm_started = Instant::now();
     prewarm_role(&mut shell, &mut state, SurfaceRole::Launcher)?;
     tracing::info!(
         elapsed_ms = launcher_warm_started.elapsed().as_secs_f64() * 1_000.0,
-        "SDL launcher presenter and frame prewarmed"
+        "winit launcher presenter and frame prewarmed"
     );
     if let Err(error) = codex.ensure_project_menu(&shell) {
         tracing::warn!(%error, "Codex integration is unavailable");
@@ -1480,7 +1488,7 @@ fn main() -> Result<(), String> {
                     fast_due = fast_subscription.is_due(Instant::now()),
                     system_due = system_subscription.is_due(Instant::now()),
                     host_deadline = ?state.next_host_deadline(),
-                    "diagnostic: SDL shell event loop is busy"
+                    "diagnostic: winit shell event loop is busy"
                 );
             }
             diagnostic_loop_started = Instant::now();
@@ -1601,7 +1609,7 @@ fn main() -> Result<(), String> {
                 shell.sync_display_geometry()?;
                 sync_visibility(&mut shell, &state);
             }
-            // SDL reports an initial focus loss while a newly shown Wayland
+            // Winit reports an initial focus loss while a newly shown Wayland
             // surface is waiting for the compositor's focus configure. Hiding
             // an overlay here races its first frame and leaves a brief blank
             // window. Explicit dismissal and Escape remain authoritative.
@@ -1701,7 +1709,7 @@ fn main() -> Result<(), String> {
                 ) = role
                 {
                     state.sync_transient_overlays();
-                    // Wayland recreates the wl_surface when SDL shows one of
+                    // Wayland recreates the wl_surface when winit shows one of
                     // these transient windows again. The earlier presenter
                     // contents do not belong to that new surface, and the
                     // one-shot initial Exposed handler has already run.
@@ -1717,7 +1725,7 @@ fn main() -> Result<(), String> {
                 shell.present(surface, &state.scene(role, logical_width, logical_height))?;
             }
             Some(ShellEvent::Redraw(_)) => {}
-            Some(event) => tracing::debug!(?event, "SDL shell event"),
+            Some(event) => tracing::debug!(?event, "winit shell event"),
             None => {}
         }
         if shell
@@ -2146,7 +2154,7 @@ mod tests {
 
     #[test]
     fn ordinary_controller_surfaces_do_not_translate_actions_to_keys() {
-        let source = include_str!("nickel-sdl-shell.rs");
+        let source = include_str!("nickel-shell.rs");
         let handler = source
             .split("fn handle_controller_action(")
             .nth(1)

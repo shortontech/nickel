@@ -40,11 +40,11 @@ use crate::{
     },
     sdl_notification_view::{NotificationApp, NotificationEffect, NotificationHost},
     sdl_screenshot::ScreenshotTool,
-    sdl_shell::SurfaceRole,
     sdl_window_preview::{
         MENU_WIDTH, MenuAction, PreviewAction, WindowMenuApp, WindowPreviewFrame,
         build_preview_frame, menu_height, preview_dimensions,
     },
+    winit_shell::SurfaceRole,
 };
 use nickel_input::KeyCode;
 use zeroize::{Zeroize, Zeroizing};
@@ -3286,8 +3286,8 @@ mod tests {
         model::{ApplicationId, OpenWindow, TrayItem, WindowGroup, WindowId},
         notification::{NotificationAction, NotificationRequest, NotificationStore},
         sdl_launcher_view::{LauncherAction, LauncherApplication},
-        sdl_shell::SurfaceRole,
         sdl_window_preview::{MenuAction, build_preview_frame},
+        winit_shell::SurfaceRole,
     };
     use nickel_core::launcher_preferences::LauncherPreferences;
     use nickel_core::theme::{Appearance, ThemeMode, ThemePalette};
