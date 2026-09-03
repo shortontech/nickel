@@ -16,7 +16,8 @@ use nickel_ui::{AggregatePresenterCacheDiagnostics, DamageRegion, HostChangeToke
 use sdl3::event::{Event, WindowEvent};
 use sdl3::video::{Window, WindowPos};
 
-use crate::sdl_gpu::{SdlGpuPresenter, SharedSdlGraphics};
+use crate::softbuffer_presenter::{PresentationGeometry, SharedGraphics, SoftbufferPresenter};
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 pub const DESKTOP_TITLE: &str = "Nickel Desktop";
 pub const PANEL_TITLE: &str = "Nickel Panel";
@@ -184,7 +185,7 @@ pub struct ShellSurface {
     output_name: String,
     display_connected: bool,
     initial_exposed: bool,
-    presenter: Option<SdlGpuPresenter>,
+    presenter: Option<SoftbufferPresenter>,
     last_host_change_token: Option<HostChangeToken>,
     window: Window,
 }
@@ -218,7 +219,7 @@ impl ShellSurface {
 pub struct SdlShell {
     // Presenters borrow native window handles and must drop before SDL's video subsystem.
     surfaces: Vec<ShellSurface>,
-    graphics: Option<SharedSdlGraphics>,
+    graphics: Option<SharedGraphics>,
     surface_indices: HashMap<u32, usize>,
     events: sdl3::EventPump,
     pending_events: VecDeque<ShellEvent>,
@@ -594,7 +595,7 @@ impl SdlShell {
         let mut presenter_caches = AggregatePresenterCacheDiagnostics::from_presenters(
             self.graphics
                 .as_ref()
-                .map(SharedSdlGraphics::cache_diagnostics),
+                .map(SharedGraphics::cache_diagnostics),
         );
         let process_peak =
             durable_presenter_peak(self.presenter_cache_peak_bytes.get(), &presenter_caches);
@@ -642,22 +643,41 @@ impl SdlShell {
             .get(&id.0)
             .ok_or_else(|| "unknown SDL shell surface".to_owned())?;
         if self.graphics.is_none() {
-            self.graphics = Some(SharedSdlGraphics::new(self.surfaces[index].window())?);
+            let display = self.surfaces[index]
+                .window()
+                .display_handle()
+                .map_err(|error| error.to_string())?;
+            // SAFETY: `SdlShell` drops all surfaces and shared graphics before
+            // its SDL video subsystem, which owns this display connection.
+            self.graphics = Some(unsafe { SharedGraphics::new(display) }?);
         }
         let graphics = self.graphics.as_ref().expect("shared renderer initialized");
         let entry = &mut self.surfaces[index];
         let warm = entry.presenter.is_some();
         if entry.presenter.is_none() {
-            entry.presenter = Some(SdlGpuPresenter::new(&entry.window, graphics)?);
+            let window = entry
+                .window
+                .window_handle()
+                .map_err(|error| error.to_string())?;
+            // SAFETY: `ShellSurface` declares its presenter before its window,
+            // so Rust drops the presenter while this native window is valid.
+            entry.presenter = Some(unsafe { SoftbufferPresenter::new(window, graphics) }?);
         }
         let started = Instant::now();
         let allocations_before = crate::allocation_counter::allocation_operations();
-        let window = &entry.window;
+        let (pixel_width, pixel_height) = entry.window.size_in_pixels();
+        let (logical_width, logical_height) = entry.window.size();
+        let geometry = PresentationGeometry {
+            pixel_width,
+            pixel_height,
+            logical_width,
+            logical_height,
+        };
         let damage = entry
             .presenter
             .as_mut()
             .expect("shell presenter initialized")
-            .present(window, graphics, commands)?;
+            .present(geometry, graphics, commands)?;
         let elapsed_us = started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
         if warm {
             push_bounded(&mut self.warm_present_us, elapsed_us);

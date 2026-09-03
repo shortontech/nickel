@@ -61,8 +61,6 @@ mod places;
 mod platform;
 #[path = "../sdl_control_view.rs"]
 mod sdl_control_view;
-#[path = "../sdl_gpu.rs"]
-mod sdl_gpu;
 #[path = "../sdl_launcher_view.rs"]
 mod sdl_launcher_view;
 #[path = "../sdl_live_shell.rs"]
@@ -76,6 +74,8 @@ mod sdl_screenshot;
 mod sdl_shell;
 #[path = "../sdl_window_preview.rs"]
 mod sdl_window_preview;
+#[path = "../softbuffer_presenter.rs"]
+mod softbuffer_presenter;
 
 use sdl_live_shell::LiveShell;
 use sdl_shell::{SdlShell, ShellEvent, SurfaceId, SurfaceRole};
