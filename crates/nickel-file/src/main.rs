@@ -547,6 +547,12 @@ const FILE_FIXTURE_ASSETS: &[nickel_ui_testkit::FixtureAsset] = &[
         license: "Same license as Nickel",
         sha256: "e6bd3410eb2b294b2f3fc600271f35d8ef6cbd9c2182add560bdc584ac539e92",
     },
+    nickel_ui_testkit::FixtureAsset {
+        id: "nickel-file-unknown-file",
+        path: "assets/concepts/nickel-file-icon-family/unknown-file.png",
+        license: "Same license as Nickel",
+        sha256: "e2132ad8b5ca505ea2f453f533835f4d81f8a6f33853e50c73081e05d4e141de",
+    },
 ];
 
 impl nickel_ui_testkit::FixtureProvider for FileFixtureProvider {

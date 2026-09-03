@@ -226,6 +226,7 @@ fn nickel_runtime_master(kind: SemanticIconKind) -> &'static RgbaImage {
     static MUSIC: OnceLock<RgbaImage> = OnceLock::new();
     static IMAGE: OnceLock<RgbaImage> = OnceLock::new();
     static TEXT: OnceLock<RgbaImage> = OnceLock::new();
+    static UNKNOWN: OnceLock<RgbaImage> = OnceLock::new();
     let (slot, bytes): (&OnceLock<RgbaImage>, &[u8]) = match kind {
         SemanticIconKind::Folder => (
             &FOLDER,
@@ -247,9 +248,13 @@ fn nickel_runtime_master(kind: SemanticIconKind) -> &'static RgbaImage {
             &IMAGE,
             include_bytes!("../../../assets/concepts/nickel-file-icon-family/image-file.png"),
         ),
-        SemanticIconKind::TextFile | SemanticIconKind::UnknownFile => (
+        SemanticIconKind::TextFile => (
             &TEXT,
             include_bytes!("../../../assets/concepts/nickel-file-icon-family/text-file.png"),
+        ),
+        SemanticIconKind::UnknownFile => (
+            &UNKNOWN,
+            include_bytes!("../../../assets/concepts/nickel-file-icon-family/unknown-file.png"),
         ),
     };
     slot.get_or_init(|| {
@@ -537,6 +542,19 @@ mod tests {
                 "visible artwork must fill the optical box"
             );
         }
+        let text = resolve_artwork(
+            FileIconPreference::Nickel,
+            &request(SemanticIconKind::TextFile),
+        );
+        let unknown = resolve_artwork(
+            FileIconPreference::Nickel,
+            &request(SemanticIconKind::UnknownFile),
+        );
+        assert_ne!(
+            text.pixels.as_raw(),
+            unknown.pixels.as_raw(),
+            "generic unknown files need their own recognizable fallback"
+        );
     }
 
     #[test]
