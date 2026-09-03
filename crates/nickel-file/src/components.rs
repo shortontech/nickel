@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use nickel_core::theme::ThemePalette;
-use nickel_ui::{Component, ComponentBuilderExt, Insets, SemanticRole, ui};
+use nickel_ui::{AnyView, Component, ComponentBuilderExt, Insets, SemanticRole, ui};
 
 use crate::{
     DirectoryBrowser, FileEntry,
@@ -20,6 +20,79 @@ pub(crate) fn status_text(app: &FileApp) -> String {
     } else {
         format!("{selected} selected · {total_label}")
     }
+}
+
+pub(crate) fn tab_strip(
+    app: &FileApp,
+    palette: ThemePalette,
+    light_mode: bool,
+) -> AnyView<FileMessage> {
+    let tabs = (0..app.tabs.len()).map(|index| {
+        let active = index == app.active_tab;
+        let tab = if active {
+            tab(
+                index,
+                &app.browser,
+                app.tab_icon.as_ref(),
+                true,
+                palette,
+                light_mode,
+            )
+        } else {
+            let state = app
+                .inactive_tab(index)
+                .expect("inactive tab slot must contain state");
+            tab(
+                index,
+                &state.browser,
+                state.tab_icon.as_ref(),
+                false,
+                palette,
+                light_mode,
+            )
+        };
+        tab.into_element()
+    });
+    AnyView::new(ui! {
+        <Container id={"tab-strip"} height={32.0} background={palette.panel} padding={Insets {
+            top: 5.0, right: 10.0, bottom: 0.0, left: 12.0,
+        }}>
+            <Row gap={3.0} children={tabs}>
+                <Container width={28.0} on_press={FileMessage::NewTab}
+                    focus_border={palette.accent} controller_focus_border={palette.complement} padding={Insets {
+                    top: 1.0, right: 4.0, bottom: 0.0, left: 4.0,
+                }} accessibility_label={"New tab"}>
+                    <Text width={20.0} scale={1.25} color={palette.muted}>{"+"}</Text>
+                </Container>
+            </Row>
+        </Container>
+    })
+}
+
+pub(crate) fn places_sidebar(
+    width: f32,
+    rows: Vec<AnyView<FileMessage>>,
+    palette: ThemePalette,
+) -> AnyView<FileMessage> {
+    AnyView::new(ui! {
+        <Sidebar width={width} background={palette.panel} padding={Insets {
+            top: 14.0, right: 10.0, bottom: 12.0, left: 10.0,
+        }} gap={3.0}>
+            <Text height={34.0} scale={1.55} color={palette.text}>{"Nickel File"}</Text>
+            <HorizontalRule color={palette.muted} spacing_pair={(5.0, 8.0)} />
+            <SidebarSection title={"Places"} color={palette.muted}>{rows.into_iter()}</SidebarSection>
+        </Sidebar>
+    })
+}
+
+pub(crate) fn status_bar(text: String, palette: ThemePalette) -> AnyView<FileMessage> {
+    AnyView::new(ui! {
+        <Container id={"file-footer"} height={30.0} shrink={0.0} background={palette.surface} padding={Insets {
+            top: 7.0, right: 14.0, bottom: 5.0, left: 14.0,
+        }}>
+            <Text scale={1.0} color={palette.muted}>{text}</Text>
+        </Container>
+    })
 }
 
 pub(crate) fn tab(

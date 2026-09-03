@@ -5,9 +5,9 @@ use std::{
 
 use nickel_core::theme::ThemePalette;
 use nickel_ui::{
-    AnyView, Collection, CollectionPresentation, CollectionState, Component, ComponentBuilderExt,
-    Insets, LinearGradient, NavigationScope, Point, Rect, SemanticNodeSnapshot, SemanticRole,
-    TextField, VerticalScroll, VirtualWindow, ui,
+    AnyView, Collection, CollectionPresentation, CollectionState, ComponentBuilderExt, Insets,
+    LinearGradient, NavigationScope, Point, Rect, SemanticNodeSnapshot, SemanticRole, TextField,
+    VerticalScroll, VirtualWindow, ui,
 };
 
 use super::{FileMessage, FileViewMode};
@@ -27,49 +27,10 @@ pub(crate) fn build_view(
 ) -> AnyView<FileMessage> {
     let narrow = _width < NARROW_WORKSPACE_BREAKPOINT;
     let content_height = (height - TOOLBAR_HEIGHT - 30.0).max(0.0);
-    let tabs = (0..app.tabs.len()).map(|index| {
-        let active = index == app.active_tab;
-        let tab = if active {
-            components::tab(
-                index,
-                &app.browser,
-                app.tab_icon.as_ref(),
-                true,
-                palette,
-                light_mode,
-            )
-        } else {
-            let tab = app
-                .inactive_tab(index)
-                .expect("inactive tab slot must contain state");
-            components::tab(
-                index,
-                &tab.browser,
-                tab.tab_icon.as_ref(),
-                false,
-                palette,
-                light_mode,
-            )
-        };
-        tab.into_element()
-    });
     let breadcrumb_width = (_width - if narrow { 390.0 } else { 320.0 }).max(90.0);
     let breadcrumbs =
         collapse_breadcrumbs(breadcrumb_paths(app.browser.current()), breadcrumb_width);
-    let tab_strip = ui! {
-        <Container id={"tab-strip"} height={32.0} background={palette.panel} padding={Insets {
-            top: 5.0, right: 10.0, bottom: 0.0, left: 12.0,
-        }}>
-            <Row gap={3.0} children={tabs}>
-                <Container width={28.0} on_press={FileMessage::NewTab}
-                    focus_border={palette.accent} controller_focus_border={palette.complement} padding={Insets {
-                    top: 1.0, right: 4.0, bottom: 0.0, left: 4.0,
-                }} accessibility_label={"New tab"}>
-                    <Text width={20.0} scale={1.25} color={palette.muted}>{"+"}</Text>
-                </Container>
-            </Row>
-        </Container>
-    };
+    let tab_strip = components::tab_strip(app, palette, light_mode);
     let breadcrumb_row = ui! {
         <Row gap={7.0}>
             {breadcrumbs.iter().enumerate().map(|(index, (label, path))| ui! {
@@ -173,15 +134,7 @@ pub(crate) fn build_view(
         palette,
     );
     let resolved_sidebar_width = if narrow { _width } else { app.sidebar_width };
-    let sidebar = ui! {
-        <Sidebar width={resolved_sidebar_width} background={palette.panel} padding={Insets {
-            top: 14.0, right: 10.0, bottom: 12.0, left: 10.0,
-        }} gap={3.0}>
-            <Text height={34.0} scale={1.55} color={palette.text}>{"Nickel File"}</Text>
-            <HorizontalRule color={palette.muted} spacing_pair={(5.0, 8.0)} />
-            <SidebarSection title={"Places"} color={palette.muted}>{folder_rows.into_iter()}</SidebarSection>
-        </Sidebar>
-    };
+    let sidebar = components::places_sidebar(resolved_sidebar_width, folder_rows, palette);
     let icon_size = (app.tile_width * 0.42).clamp(42.0, 96.0);
     let tile_rows = app
         .browser
@@ -327,13 +280,7 @@ pub(crate) fn build_view(
         }
     };
     let footer_text = components::status_text(app);
-    let footer = ui! {
-        <Container id={"file-footer"} height={30.0} shrink={0.0} background={palette.surface} padding={Insets {
-            top: 7.0, right: 14.0, bottom: 5.0, left: 14.0,
-        }}>
-            <Text scale={1.0} color={palette.muted}>{footer_text}</Text>
-        </Container>
-    };
+    let footer = components::status_bar(footer_text, palette);
     let resize_handle = ui! {
         <Container id={"sidebar-resize"} width={SIDEBAR_RESIZE_WIDTH} shrink={0.0}
             background={if app.is_resizing_sidebar() { palette.accent } else { palette.surface_hover }}
