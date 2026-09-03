@@ -5,8 +5,8 @@ use nickel_ui::backend::PaintCommand;
 use nickel_ui::{
     ActionKind, Align, AnyView, Application, Button, Collection, CollectionPresentation,
     CollectionState, ComponentBuilderExt, Container, HostBatch, HostChangeToken, HostEvent,
-    HostEventOutcome, Image, Insets, NavigationScope, Point, Rect, Row, SemanticAction,
-    SemanticRole, Text, TextAlign, UiEvent, UiHost, UiId, ViewContext,
+    HostEventOutcome, Image, Insets, Point, Rect, Row, SemanticAction, SemanticRole, Text,
+    TextAlign, UiEvent, UiHost, UiId, ViewContext,
 };
 
 use crate::{
@@ -457,9 +457,7 @@ fn preview_view(
                         .accessibility_label(title.clone())
                         .child(preview),
                 );
-            Container::new()
-                .navigation_scope(NavigationScope::group())
-                .child(card)
+            Container::new().child(card)
         },
     )
     .expect("window ids must be unique")

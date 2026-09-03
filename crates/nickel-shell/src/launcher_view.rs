@@ -1608,12 +1608,15 @@ mod tests {
     fn controller_reaches_and_reveals_the_last_search_result() {
         let mut scenario = populated_search_scenario();
         scenario.controller(ControllerAction::Down).unwrap();
+        scenario.controller(ControllerAction::Down).unwrap();
+        scenario.controller(ControllerAction::Right).unwrap();
         for _ in 0..40 {
-            if controller_target(&scenario).contains("application-29") {
+            if controller_target(&scenario).contains("application-28") {
                 break;
             }
             scenario.controller(ControllerAction::Down).unwrap();
         }
+        scenario.controller(ControllerAction::Right).unwrap();
         assert!(
             controller_target(&scenario).contains("application-29"),
             "controller did not traverse the complete search collection"
