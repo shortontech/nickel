@@ -82,10 +82,10 @@ pub fn path_icon_with_theme(
 #[cfg(target_os = "windows")]
 pub fn path_icon_with_theme_at_size(
     path: &std::path::Path,
-    theme: Option<&str>,
-    _physical_size: u32,
+    _theme: Option<&str>,
+    physical_size: u32,
 ) -> Option<image::RgbaImage> {
-    path_icon_with_theme(path, theme)
+    windows::path_icon_at_size(path, physical_size)
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]

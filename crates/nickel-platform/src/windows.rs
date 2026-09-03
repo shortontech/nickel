@@ -124,14 +124,19 @@ fn registry_dword(subkey: &str, value_name: &str) -> Option<u32> {
 }
 
 pub fn path_icon(path: &Path) -> Option<RgbaImage> {
+    path_icon_at_size(path, 32)
+}
+
+pub fn path_icon_at_size(path: &Path, physical_size: u32) -> Option<RgbaImage> {
+    let physical_size = physical_size.clamp(16, 512);
     let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
-    let shortcut = shortcut_icon(path);
+    let shortcut = shortcut_icon(path, physical_size);
     let (image, resolver) = if shortcut.is_some() {
         (shortcut, "shortcut")
-    } else if let Some(internet_shortcut) = internet_shortcut_icon(path) {
+    } else if let Some(internet_shortcut) = internet_shortcut_icon(path, physical_size) {
         (Some(internet_shortcut), "internet-shortcut")
     } else {
-        (shell_path_icon(path), "shell-path")
+        (shell_path_icon(path, physical_size), "shell-path")
     };
     if initialized {
         unsafe { CoUninitialize() };
@@ -162,7 +167,7 @@ pub fn path_icon(path: &Path) -> Option<RgbaImage> {
     image
 }
 
-fn internet_shortcut_icon(path: &Path) -> Option<RgbaImage> {
+fn internet_shortcut_icon(path: &Path, physical_size: u32) -> Option<RgbaImage> {
     if !path
         .extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("url"))
@@ -183,10 +188,11 @@ fn internet_shortcut_icon(path: &Path) -> Option<RgbaImage> {
         }
     }
     let icon_path = icon_path?;
-    extract_icon(&icon_path, icon_index).or_else(|| shell_path_icon(&icon_path))
+    extract_icon(&icon_path, icon_index, physical_size)
+        .or_else(|| shell_path_icon(&icon_path, physical_size))
 }
 
-fn shortcut_icon(path: &Path) -> Option<RgbaImage> {
+fn shortcut_icon(path: &Path, physical_size: u32) -> Option<RgbaImage> {
     if !path
         .extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("lnk"))
@@ -216,7 +222,7 @@ fn shortcut_icon(path: &Path) -> Option<RgbaImage> {
             target = %target.display(),
             "shortcut has no explicit icon; resolving its target"
         );
-        return shell_path_icon(&target);
+        return shell_path_icon(&target, physical_size);
     }
     let length = string_length(&location);
     if length == 0 {
@@ -226,19 +232,19 @@ fn shortcut_icon(path: &Path) -> Option<RgbaImage> {
     let explicit_path =
         std::path::PathBuf::from(std::ffi::OsString::from_wide(&location[..length]));
 
-    let Some(image) = extract_icon(&explicit_path, index) else {
+    let Some(image) = extract_icon(&explicit_path, index, physical_size) else {
         tracing::debug!(
             shortcut = %path.display(),
             icon = %explicit_path.display(),
             index,
             "indexed shortcut icon extraction failed; trying shell path"
         );
-        return shell_path_icon(&explicit_path);
+        return shell_path_icon(&explicit_path, physical_size);
     };
     Some(image)
 }
 
-fn extract_icon(path: &Path, index: i32) -> Option<RgbaImage> {
+fn extract_icon(path: &Path, index: i32, physical_size: u32) -> Option<RgbaImage> {
     let wide = terminated(path);
     let mut icon = HICON::default();
     let count =
@@ -246,14 +252,14 @@ fn extract_icon(path: &Path, index: i32) -> Option<RgbaImage> {
     if count == 0 || icon.0.is_null() {
         return None;
     }
-    let image = render_icon(icon);
+    let image = render_icon(icon, physical_size);
     unsafe {
         let _ = DestroyIcon(icon);
     }
     image
 }
 
-fn shell_path_icon(path: &Path) -> Option<RgbaImage> {
+fn shell_path_icon(path: &Path, physical_size: u32) -> Option<RgbaImage> {
     let wide = terminated(path);
     let mut info = SHFILEINFOW::default();
     unsafe {
@@ -267,19 +273,19 @@ fn shell_path_icon(path: &Path) -> Option<RgbaImage> {
         if result == 0 || info.hIcon.0.is_null() {
             return None;
         }
-        let image = render_icon(info.hIcon);
+        let image = render_icon(info.hIcon, physical_size);
         let _ = DestroyIcon(info.hIcon);
         image
     }
 }
 
-fn render_icon(icon: HICON) -> Option<RgbaImage> {
-    const SIZE: u32 = 32;
+fn render_icon(icon: HICON, physical_size: u32) -> Option<RgbaImage> {
+    let size = physical_size.clamp(16, 512);
     let info = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
             biSize: size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: SIZE as i32,
-            biHeight: -(SIZE as i32),
+            biWidth: size as i32,
+            biHeight: -(size as i32),
             biPlanes: 1,
             biBitCount: 32,
             biCompression: BI_RGB.0,
@@ -313,14 +319,14 @@ fn render_icon(icon: HICON) -> Option<RgbaImage> {
             0,
             0,
             icon,
-            SIZE as i32,
-            SIZE as i32,
+            size as i32,
+            size as i32,
             0,
             None,
             DI_NORMAL,
         )
         .is_ok();
-        let mut rgba = vec![0_u8; (SIZE * SIZE * 4) as usize];
+        let mut rgba = vec![0_u8; (size * size * 4) as usize];
         if drawn && !pixels.is_null() {
             let bgra = std::slice::from_raw_parts(pixels.cast::<u8>(), rgba.len());
             for (source, target) in bgra.chunks_exact(4).zip(rgba.chunks_exact_mut(4)) {
@@ -332,7 +338,7 @@ fn render_icon(icon: HICON) -> Option<RgbaImage> {
         let _ = DeleteDC(memory);
         ReleaseDC(None, screen);
         drawn
-            .then(|| RgbaImage::from_raw(SIZE, SIZE, rgba))
+            .then(|| RgbaImage::from_raw(size, size, rgba))
             .flatten()
     }
 }
