@@ -192,6 +192,48 @@ fn growing_details_name_column_contains_multiline_text_without_row_overlap() {
 }
 
 #[test]
+fn compact_grid_contains_multiline_labels_inside_their_rows() {
+    let entries = (0..5)
+        .map(|index| {
+            let name = if index == 0 {
+                "A deliberately long file name that wraps across\nmultiple lines.txt".to_owned()
+            } else {
+                format!("file-{index}.txt")
+            };
+            FileEntry {
+                path: PathBuf::from("/fixture").join(&name),
+                name: name.into(),
+                is_directory: false,
+                size: Some(10),
+                modified: None,
+            }
+        })
+        .collect();
+    let app = FileApp::with_browser(DirectoryBrowser::fixture(entries), String::new());
+    let palette = ThemePalette::from_appearance(
+        ShellSettings::load_default().resolve_appearance(nickel_platform::appearance()),
+    );
+    let frame = nickel_ui::UiFrame::layout(
+        app.build_view(660.0, 480.0, palette, false),
+        Rect::new(0.0, 0.0, 660.0, 480.0),
+    );
+    let bounds = |suffix: &str| {
+        frame
+            .resolved_layout()
+            .nodes()
+            .iter()
+            .find(|node| node.id.as_str().ends_with(suffix))
+            .unwrap_or_else(|| panic!("missing {suffix}"))
+            .allocated
+    };
+    let first = bounds("/file-entry-0");
+    let next_row = bounds("/file-entry-4");
+
+    assert_eq!(first.size.width, app.tile_width);
+    assert!(first.origin.y + first.size.height <= next_row.origin.y);
+}
+
+#[test]
 fn narrow_places_surface_replaces_squeezed_sidebar_without_losing_view_state() {
     let mut app = FileApp::fixture();
     app.view_mode = FileViewMode::Details;

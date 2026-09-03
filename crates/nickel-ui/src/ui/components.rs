@@ -515,17 +515,20 @@ impl<Message> FileGridItem<Message> {
         Self(
             Container::new()
                 .padding(Insets {
-                    top: 12.0,
-                    right: 8.0,
-                    bottom: 8.0,
-                    left: 8.0,
+                    top: 8.0,
+                    right: 6.0,
+                    bottom: 4.0,
+                    left: 6.0,
                 })
                 .message(message)
                 .child(
-                    Column::new().gap(7.0).child(image.height(62.0)).child(
+                    Column::new().gap(5.0).child(image.height(62.0)).child(
                         Text::new(label)
-                            .height(27.0)
+                            .height(36.0)
                             .scale(1.2)
+                            .wrap(true)
+                            .max_lines(2)
+                            .ellipsis(true)
                             .align(TextAlign::Center),
                     ),
                 ),

@@ -387,6 +387,7 @@ where
         let mut window = 0..total;
         let mut virtual_window = None;
         let mut virtual_grid_columns = None;
+        let mut virtual_grid_item_width = None;
         if let CollectionPresentation::VirtualList {
             item_height,
             offset,
@@ -473,6 +474,7 @@ where
             window = (resolved.range.start * columns)..(resolved.range.end * columns).min(total);
             virtual_window = Some(resolved);
             virtual_grid_columns = Some(columns);
+            virtual_grid_item_width = Some(minimum);
         }
         let selected = &self.interactions.selected;
         let disabled = &self.interactions.disabled;
@@ -573,7 +575,15 @@ where
                     .fill_width()
                     .child(Spacer::vertical(window.leading))
                     .child(
-                        Grid::fixed(virtual_grid_columns.expect("virtual grid resolves columns"))
+                        Grid::new()
+                            .columns(vec![
+                                Track::px(
+                                    virtual_grid_item_width
+                                        .expect("virtual grid resolves item width"),
+                                );
+                                virtual_grid_columns
+                                    .expect("virtual grid resolves columns")
+                            ])
                             .gap(self.gap)
                             .children(children),
                     )
@@ -813,6 +823,21 @@ mod tests {
             .expect("virtual grid retains a real scroll extent");
         assert_eq!(extent.content.height, 112_630.0);
         assert_eq!(extent.offset, 2_200.0);
+
+        let first_cell_id = tree
+            .semantic_nodes()
+            .iter()
+            .find(|node| node.role == Some(SemanticRole::GridCell))
+            .expect("visible grid cell has semantics")
+            .id
+            .clone();
+        let first = tree
+            .resolved_layout()
+            .nodes()
+            .iter()
+            .find(|node| node.id == first_cell_id)
+            .expect("first visible grid cell has layout");
+        assert_eq!(first.allocated.size.width, 100.0);
     }
 
     #[test]
