@@ -2441,8 +2441,6 @@ impl NickelSession {
             )
             .unwrap_or(u16::MAX)
         };
-        let desktops = role_count(ShellRole::Desktop);
-        let panels = role_count(ShellRole::Panel);
         let registered_role_count = |role| {
             u16::try_from(
                 self.registered_shell_role_slots
@@ -2452,12 +2450,14 @@ impl NickelSession {
             )
             .unwrap_or(u16::MAX)
         };
+        // Readiness is a protocol registration barrier, not a rendering
+        // barrier. The shell deliberately waits for readiness before it
+        // presents its first buffers, while XDG surfaces must remain unmapped
+        // until those buffers arrive.
+        let desktops = registered_role_count(ShellRole::Desktop);
+        let panels = registered_role_count(ShellRole::Panel);
         let locks = registered_role_count(ShellRole::Lock);
-        let launchers = u16::from(
-            self.launcher_window
-                .as_ref()
-                .is_some_and(|window| window.alive()),
-        );
+        let launchers = registered_role_count(ShellRole::Launcher);
         let reserved_ordinary_windows = u16::try_from(
             self.windows
                 .snapshot()
@@ -2492,15 +2492,8 @@ impl NickelSession {
                 .filter_map(|registration| registration.output.clone())
                 .collect::<HashSet<_>>()
         };
-        let live_role_outputs = |role| {
-            surfaces
-                .iter()
-                .filter(|surface| surface.role == role)
-                .filter_map(|surface| surface.output.clone())
-                .collect::<HashSet<_>>()
-        };
-        let output_roles_ready = live_role_outputs(ShellRole::Desktop) == output_names
-            && live_role_outputs(ShellRole::Panel) == output_names
+        let output_roles_ready = registered_role_outputs(ShellRole::Desktop) == output_names
+            && registered_role_outputs(ShellRole::Panel) == output_names
             && registered_role_outputs(ShellRole::Lock) == output_names;
         let ready = expected_shell_pid.is_some()
             && expected_shell_pid == authenticated_shell_pid
