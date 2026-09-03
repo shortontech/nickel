@@ -1019,21 +1019,36 @@ impl LiveShell {
     }
 
     pub fn next_host_deadline(&self) -> Option<Instant> {
-        [
-            self.desktop_deadline,
-            self.panel_deadline,
-            self.lock_deadline,
-            self.control_deadline,
-            self.screenshot.next_deadline(),
+        self.host_deadline_sources()
+            .into_iter()
+            .map(|(_, deadline)| deadline)
+            .min()
+    }
+
+    pub fn host_deadline_sources(&self) -> Vec<(&'static str, Instant)> {
+        let mut sources = Vec::new();
+        let mut push = |name, deadline| {
+            if let Some(deadline) = deadline {
+                sources.push((name, deadline));
+            }
+        };
+        push("desktop", self.desktop_deadline);
+        push("panel", self.panel_deadline);
+        push("lock", self.lock_deadline);
+        push("control", self.control_deadline);
+        push("screenshot", self.screenshot.next_deadline());
+        push(
+            "window-preview-host",
             self.preview_frame
                 .as_ref()
                 .and_then(WindowPreviewFrame::next_deadline),
+        );
+        push(
+            "window-preview-open",
             self.preview_pending.map(|(_, deadline)| deadline),
-            self.preview_leave_deadline,
-        ]
-        .into_iter()
-        .flatten()
-        .min()
+        );
+        push("window-preview-close", self.preview_leave_deadline);
+        sources
     }
 
     pub fn scene_change_token(&self, role: SurfaceRole) -> Option<HostChangeToken> {

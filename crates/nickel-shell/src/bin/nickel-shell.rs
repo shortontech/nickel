@@ -1535,6 +1535,7 @@ fn main() -> Result<(), String> {
     let mut overlay_focus_loss: Option<(SurfaceId, SurfaceRole, Instant)> = None;
     let mut diagnostic_loop_started = Instant::now();
     let mut diagnostic_loop_iterations = 0_u64;
+    let mut diagnostic_overdue_after_poll = Vec::new();
     loop {
         diagnostic_loop_iterations = diagnostic_loop_iterations.saturating_add(1);
         let now = Instant::now();
@@ -1587,6 +1588,8 @@ fn main() -> Result<(), String> {
                     fast_due = fast_subscription.is_due(Instant::now()),
                     system_due = system_subscription.is_due(Instant::now()),
                     host_deadline = ?state.next_host_deadline(),
+                    host_deadline_sources = ?state.host_deadline_sources(),
+                    overdue_after_previous_poll = ?diagnostic_overdue_after_poll,
                     "diagnostic: winit shell event loop is busy"
                 );
             }
@@ -1840,6 +1843,11 @@ fn main() -> Result<(), String> {
             sync_visibility(&mut shell, &state);
         }
         let deadline_outcome = state.poll_deadlines(Instant::now());
+        diagnostic_overdue_after_poll = state
+            .host_deadline_sources()
+            .into_iter()
+            .filter(|(_, deadline)| *deadline <= Instant::now())
+            .collect::<Vec<_>>();
         if deadline_outcome.visibility_changed {
             sync_visibility(&mut shell, &state);
         }
