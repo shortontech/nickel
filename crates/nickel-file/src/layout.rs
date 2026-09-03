@@ -15,7 +15,7 @@ use crate::{
     EntrySortKey, SortDirection,
     app::{FileApp, NARROW_WORKSPACE_BREAKPOINT, SIDEBAR_RESIZE_WIDTH, TOOLBAR_HEIGHT},
     components,
-    platform::places,
+    platform::{location_groups, places},
 };
 
 pub(crate) fn build_view(
@@ -126,15 +126,27 @@ pub(crate) fn build_view(
             <Column>{tab_strip}{navigation}</Column>
         </Container>
     };
-    let folder_rows = sidebar_folder_elements(
-        &places(),
-        &app.expanded_folders,
-        app.browser.current(),
-        None,
-        palette,
-    );
+    let location_groups = location_groups()
+        .into_iter()
+        .map(|group| {
+            let rows = sidebar_folder_elements(
+                &group.entries,
+                &app.expanded_folders,
+                app.browser.current(),
+                None,
+                palette,
+            );
+            components::location_group(
+                group.id,
+                group.title,
+                rows,
+                app.collapsed_location_groups.contains(group.id),
+                palette,
+            )
+        })
+        .collect();
     let resolved_sidebar_width = if narrow { _width } else { app.sidebar_width };
-    let sidebar = components::places_sidebar(resolved_sidebar_width, folder_rows, palette);
+    let sidebar = components::places_sidebar(resolved_sidebar_width, location_groups, palette);
     let icon_size = (app.tile_width * 0.42).clamp(42.0, 96.0);
     let tile_rows = app
         .browser

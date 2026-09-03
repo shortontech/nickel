@@ -457,6 +457,39 @@ fn narrow_places_surface_replaces_squeezed_sidebar_without_losing_view_state() {
 }
 
 #[test]
+fn location_groups_omit_empty_sections_and_collapse_without_reordering() {
+    let groups = crate::platform::location_groups();
+    assert!(!groups.is_empty());
+    assert!(groups.iter().all(|group| !group.entries.is_empty()));
+    assert_eq!(groups[0].id, "nickel-home");
+    let home = groups[0].entries[0].1.clone();
+
+    let mut app = FileApp::fixture();
+    let palette = ThemePalette::from_appearance(
+        ShellSettings::load_default().resolve_appearance(nickel_platform::appearance()),
+    );
+    let render = |app: &FileApp| {
+        nickel_ui::UiFrame::layout(
+            app.build_view(960.0, 640.0, palette, false),
+            Rect::new(0.0, 0.0, 960.0, 640.0),
+        )
+    };
+    assert!(
+        !render(&app)
+            .semantic_targets_for_message(&FileMessage::OpenFolder(home.clone()))
+            .is_empty()
+    );
+
+    app.update_message(FileMessage::ToggleLocationGroup("nickel-home".into()));
+    assert!(
+        render(&app)
+            .semantic_targets_for_message(&FileMessage::OpenFolder(home.clone()))
+            .is_empty()
+    );
+    assert_eq!(crate::platform::location_groups()[0].entries[0].1, home);
+}
+
+#[test]
 fn searchable_command_surface_filters_aliases_and_executes_enabled_actions() {
     let mut app = FileApp::fixture();
     app.update_message(FileMessage::ToggleCommandSurface);

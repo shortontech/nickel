@@ -71,7 +71,7 @@ pub(crate) fn tab_strip(
 
 pub(crate) fn places_sidebar(
     width: f32,
-    rows: Vec<AnyView<FileMessage>>,
+    groups: Vec<AnyView<FileMessage>>,
     palette: ThemePalette,
 ) -> AnyView<FileMessage> {
     AnyView::new(ui! {
@@ -80,8 +80,32 @@ pub(crate) fn places_sidebar(
         }} gap={3.0}>
             <Text height={34.0} scale={1.55} color={palette.text}>{"Nickel File"}</Text>
             <HorizontalRule color={palette.muted} spacing_pair={(5.0, 8.0)} />
-            <SidebarSection title={"Places"} color={palette.muted}>{rows.into_iter()}</SidebarSection>
+            <Column gap={4.0} children={groups} />
         </Sidebar>
+    })
+}
+
+pub(crate) fn location_group(
+    id: &str,
+    title: &str,
+    rows: Vec<AnyView<FileMessage>>,
+    collapsed: bool,
+    palette: ThemePalette,
+) -> AnyView<FileMessage> {
+    let group_id = id.to_owned();
+    AnyView::new(ui! {
+        <Column id={format!("location-group-{id}")} gap={2.0}>
+            <Container height={28.0} on_press={FileMessage::ToggleLocationGroup(group_id)}
+                focus_border={palette.accent} controller_focus_border={palette.complement}
+                accessibility_label={format!("{} {title}", if collapsed { "Expand" } else { "Collapse" })}
+                padding={Insets { top: 6.0, right: 4.0, bottom: 4.0, left: 4.0 }}>
+                <Row gap={7.0}>
+                    <Text width={12.0} color={palette.muted}>{if collapsed { "›" } else { "⌄" }}</Text>
+                    <Text color={palette.muted}>{title}</Text>
+                </Row>
+            </Container>
+            {if collapsed { ui! { <></> } } else { ui! { <Column gap={2.0} children={rows} /> } }}
+        </Column>
     })
 }
 

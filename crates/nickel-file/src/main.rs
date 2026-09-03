@@ -53,6 +53,7 @@ pub enum FileMessage {
     ToggleHiddenFiles,
     ResizeSidebar,
     ResizeDetailsColumn(DetailsColumn),
+    ToggleLocationGroup(String),
     TogglePlaces,
     NewTab,
     SwitchTab(usize),
@@ -131,6 +132,7 @@ pub struct FileApp {
     pub(crate) next_icon_id: u16,
     pub(crate) sidebar_width: f32,
     pub(crate) expanded_folders: HashSet<PathBuf>,
+    pub(crate) collapsed_location_groups: HashSet<String>,
     pub(crate) control_down: bool,
     pub(crate) shift_down: bool,
     pub(crate) selection_drag: Option<Point>,
@@ -584,6 +586,7 @@ impl FileApp {
             next_icon_id: 1,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             expanded_folders: HashSet::new(),
+            collapsed_location_groups: HashSet::new(),
             control_down: false,
             shift_down: false,
             selection_drag: None,
@@ -1276,6 +1279,11 @@ impl FileApp {
             }
             FileMessage::ResizeDetailsColumn(column) => {
                 self.begin_details_column_resize(column);
+            }
+            FileMessage::ToggleLocationGroup(group) => {
+                if !self.collapsed_location_groups.remove(&group) {
+                    self.collapsed_location_groups.insert(group);
+                }
             }
             FileMessage::TogglePlaces => self.places_open = !self.places_open,
             FileMessage::NewTab => self.new_tab(),

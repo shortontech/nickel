@@ -1,5 +1,32 @@
 use std::path::{Path, PathBuf};
 
+pub(crate) struct LocationGroup {
+    pub(crate) id: &'static str,
+    pub(crate) title: &'static str,
+    pub(crate) entries: Vec<(String, PathBuf)>,
+}
+
+pub(crate) fn location_groups() -> Vec<LocationGroup> {
+    let mut locations = places().into_iter();
+    let home = locations.next().into_iter().collect::<Vec<_>>();
+    let user_locations = locations.collect::<Vec<_>>();
+    [
+        LocationGroup {
+            id: "nickel-home",
+            title: "Nickel Home",
+            entries: home,
+        },
+        LocationGroup {
+            id: "user-locations",
+            title: "Locations",
+            entries: user_locations,
+        },
+    ]
+    .into_iter()
+    .filter(|group| !group.entries.is_empty())
+    .collect()
+}
+
 #[cfg(not(target_os = "windows"))]
 pub(crate) fn places() -> Vec<(String, PathBuf)> {
     let home = home_directory();
