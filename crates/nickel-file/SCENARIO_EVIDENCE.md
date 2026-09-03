@@ -47,6 +47,7 @@ cargo check -p nickel-file --target x86_64-pc-windows-gnu
 cargo test -p nickel-settings unavailable_named_file_icon_theme_remains_visible_and_accessible
 cargo test -p nickel-platform unavailable_or_non_local_theme_names_return_no_artwork
 cargo test -p nickel-platform scalable_theme_artwork_rasterizes_at_the_requested_physical_size
+cargo build -p nickel-file --target x86_64-pc-windows-gnu
 cargo run -p nickel-ui-workbench --features file-provider -- headless render-variant file.browser wide-details-light /tmp/nickel-file-wide-details-light.png
 cargo run -p nickel-ui-workbench --features file-provider -- headless render-variant file.browser minimum-details-light /tmp/nickel-file-minimum-details-light.png
 cargo run -p nickel-ui-workbench --features file-provider -- headless render-variant file.browser narrow-grid-dark /tmp/nickel-file-narrow-grid-dark.png
@@ -55,9 +56,20 @@ cargo run -p nickel-ui-workbench --features file-provider -- headless render-var
 cargo run -p nickel-ui-workbench --features file-provider -- headless render-variant file.browser unreadable /tmp/nickel-file-unreadable.png
 ```
 
-Live nested compositor acceptance remains distinct from these deterministic host scenarios. The
-available `nickel-session` backends require winit or udev and do not provide an invisible headless
-compositor, so native Windows and Linux acceptance is still outstanding. In particular, completion
-still requires visible browsing checks with Windows System and Nickel artwork, Linux Nickel and an
-installed System theme, unavailable-theme fallback, and a clean Linux environment without desktop
-icon packages. Specs 0123 and 0124 must remain active until that evidence exists.
+Live nested-compositor acceptance was run in the Smithay winit backend at 1200x768. Renderer-owned
+screenshots confirmed native Linux browsing with the default Nickel provider, the explicitly
+selected installed `breeze` System theme, and a deliberately missing System theme falling back to
+Nickel artwork. The live populated grid retained four dense columns, and the
+`bitcards-integrations` label wrapped to two lines without changing row growth or clipping. The
+compositor reported each instance as a mapped, shown window and captured its final frame through
+`nickel-screenshot`.
+
+The Windows GNU build was linked as an x86-64 PE executable and run through Steam Proton
+Experimental inside that same nested compositor. It opened `C:\users\steamuser`, reached its event
+loop, browsed 15 entries, and rendered the Windows System-provider path end to end. This is useful
+cross-platform runtime evidence, but Proton's Wine shell is not evidence of native Windows Explorer
+icon fidelity.
+
+Remaining native-environment gates are therefore a Windows run covering real Windows System icons
+and Nickel artwork, plus a clean Linux installation without desktop icon packages. Specs 0123 and
+0124 remain active until those gates exist.
