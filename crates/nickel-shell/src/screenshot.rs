@@ -377,10 +377,10 @@ impl ScreenshotTool {
         self.capture_deadline = Some(Instant::now() + Duration::from_millis(75));
     }
 
-    pub fn capture_ready(&mut self) -> bool {
+    pub fn capture_ready_at(&mut self, now: Instant) -> bool {
         if self
             .capture_deadline
-            .is_some_and(|deadline| Instant::now() >= deadline)
+            .is_some_and(|deadline| now >= deadline)
         {
             self.capture_deadline = None;
             true

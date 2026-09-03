@@ -1839,20 +1839,19 @@ fn main() -> Result<(), String> {
             codex.open_project_by_id(&mut shell, &project_id)?;
             sync_visibility(&mut shell, &state);
         }
-        if state.screenshot_capture_ready() && state.capture_screenshot() {
+        let deadline_outcome = state.poll_deadlines(Instant::now());
+        if deadline_outcome.visibility_changed {
+            sync_visibility(&mut shell, &state);
+        }
+        if deadline_outcome.capture_screenshot && state.capture_screenshot() {
             sync_visibility(&mut shell, &state);
             focus_visible_overlay(&mut shell, &state);
             render_role(&mut shell, &mut state, SurfaceRole::Screenshot)?;
         }
-        for role in state.poll_host_deadlines(Instant::now()) {
+        for role in deadline_outcome.redraw {
             if state.surface_visible(role) {
                 render_role(&mut shell, &mut state, role)?;
             }
-        }
-        if state.poll_screenshot_pointer(Instant::now())
-            && state.surface_visible(SurfaceRole::Screenshot)
-        {
-            render_role(&mut shell, &mut state, SurfaceRole::Screenshot)?;
         }
         if hover_repaint.is_some_and(|(_, deadline)| Instant::now() >= deadline)
             && let Some((role, _)) = hover_repaint.take()

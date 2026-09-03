@@ -422,6 +422,13 @@ pub struct ShellImageCacheDiagnostics {
     pub preview_bytes: usize,
 }
 
+#[derive(Debug, Default, Eq, PartialEq)]
+pub struct ShellDeadlineOutcome {
+    pub redraw: Vec<SurfaceRole>,
+    pub capture_screenshot: bool,
+    pub visibility_changed: bool,
+}
+
 pub struct LiveShell {
     host_runtime_samples: HostRuntimeSamples,
     launcher: Launcher,
@@ -1022,6 +1029,7 @@ impl LiveShell {
                 .as_ref()
                 .and_then(WindowPreviewFrame::next_deadline),
             self.preview_pending.map(|(_, deadline)| deadline),
+            self.preview_leave_deadline,
         ]
         .into_iter()
         .flatten()
@@ -1191,6 +1199,38 @@ impl LiveShell {
         }
 
         changed
+    }
+
+    pub fn poll_deadlines(&mut self, now: Instant) -> ShellDeadlineOutcome {
+        let mut outcome = ShellDeadlineOutcome {
+            redraw: self.poll_host_deadlines(now),
+            ..ShellDeadlineOutcome::default()
+        };
+        if let Some((index, deadline)) = self.preview_pending
+            && now >= deadline
+        {
+            self.preview_pending = None;
+            let previous = self.preview_group;
+            self.open_window_preview(index);
+            outcome.visibility_changed |= self.preview_group != previous;
+            if self.preview_group.is_some() {
+                outcome.redraw.push(SurfaceRole::WindowPreview);
+            }
+        }
+        if self
+            .preview_leave_deadline
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.preview_leave_deadline = None;
+            let was_open = self.preview_group.is_some();
+            self.close_window_preview();
+            outcome.visibility_changed |= was_open;
+        }
+        outcome.capture_screenshot = self.screenshot.capture_ready_at(now);
+        if self.screenshot.poll_pointer_deadline(now) {
+            outcome.redraw.push(SurfaceRole::Screenshot);
+        }
+        outcome
     }
 
     pub fn notification_click(&mut self, x: f32, y: f32, width: u32, height: u32) -> bool {
@@ -1998,10 +2038,6 @@ impl LiveShell {
         self.launcher_visible == visible
     }
 
-    pub fn screenshot_capture_ready(&mut self) -> bool {
-        self.screenshot.capture_ready()
-    }
-
     pub fn capture_screenshot(&mut self) -> bool {
         match platform::capture_desktop() {
             Ok(capture) => {
@@ -2021,10 +2057,6 @@ impl LiveShell {
     pub fn screenshot_pointer_moved(&mut self, x: f32, y: f32, width: u32, height: u32) -> bool {
         self.screenshot.queue_pointer_moved(x, y, width, height);
         false
-    }
-
-    pub fn poll_screenshot_pointer(&mut self, now: Instant) -> bool {
-        self.screenshot.poll_pointer_deadline(now)
     }
 
     pub fn screenshot_pointer_pressed(&mut self, x: f32, y: f32, width: u32, height: u32) -> bool {
@@ -3293,7 +3325,7 @@ fn tint_panel_icon(mut icon: image::RgbaImage, color: u32) -> image::RgbaImage {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, sync::Arc};
+    use std::{collections::HashMap, sync::Arc, time::Duration};
 
     use image::{Rgba, RgbaImage};
     use nickel_input::KeyCode;
@@ -4177,7 +4209,7 @@ mod tests {
     }
 
     #[test]
-    fn every_advertised_host_deadline_is_consumed_when_due() {
+    fn every_advertised_shell_deadline_is_consumed_when_due() {
         let mut shell = LiveShell::new().unwrap();
         let _ = shell.scene(SurfaceRole::Desktop, 1280, 720);
         let _ = shell.scene(SurfaceRole::Panel, 1280, 56);
@@ -4188,17 +4220,26 @@ mod tests {
         shell.panel_deadline = Some(now);
         shell.lock_deadline = Some(now);
         shell.control_deadline = Some(now);
+        shell.preview_pending = Some((usize::MAX, now));
+        shell.preview_leave_deadline = Some(now);
+        shell.screenshot.request_capture();
+        shell.screenshot.queue_pointer_moved(4.0, 5.0, 800, 600);
+        let due = shell
+            .next_host_deadline()
+            .expect("the shell advertises its earliest wakeup")
+            .max(now + Duration::from_millis(100));
 
-        let _ = shell.poll_host_deadlines(now);
+        let outcome = shell.poll_deadlines(due);
 
-        assert!(shell.desktop_deadline.is_none_or(|deadline| deadline > now));
-        assert!(shell.panel_deadline.is_none_or(|deadline| deadline > now));
-        assert!(shell.lock_deadline.is_none_or(|deadline| deadline > now));
-        assert!(shell.control_deadline.is_none_or(|deadline| deadline > now));
+        assert!(outcome.capture_screenshot);
+        assert!(shell.desktop_deadline.is_none_or(|deadline| deadline > due));
+        assert!(shell.panel_deadline.is_none_or(|deadline| deadline > due));
+        assert!(shell.lock_deadline.is_none_or(|deadline| deadline > due));
+        assert!(shell.control_deadline.is_none_or(|deadline| deadline > due));
         assert!(
             shell
                 .next_host_deadline()
-                .is_none_or(|deadline| deadline > now)
+                .is_none_or(|deadline| deadline > due)
         );
     }
 
