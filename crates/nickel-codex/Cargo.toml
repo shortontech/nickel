@@ -19,6 +19,9 @@ tar.workspace = true
 ctrlc.workspace = true
 dirs.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = ["Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
 proptest.workspace = true
 

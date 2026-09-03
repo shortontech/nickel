@@ -64,18 +64,18 @@ use windows::{
                 SHGetFileInfoW, ShellExecuteW,
             },
             WindowsAndMessaging::{
-                BringWindowToTop, CallNextHookEx, CallWindowProcW, CreateWindowExW, DI_NORMAL,
-                DefWindowProcW, DestroyIcon, DrawIconEx, EnumWindows, GA_ROOT, GA_ROOTOWNER,
-                GCLP_HICON, GCLP_HICONSM, GWL_EXSTYLE, GWLP_WNDPROC, GetAncestor, GetClassLongPtrW,
-                GetClassNameW, GetClientRect, GetCursorPos, GetForegroundWindow,
+                BringWindowToTop, CallNextHookEx, CallWindowProcW, CopyImage, CreateWindowExW,
+                DI_NORMAL, DefWindowProcW, DestroyIcon, DrawIconEx, EnumWindows, GA_ROOT,
+                GA_ROOTOWNER, GCLP_HICON, GCLP_HICONSM, GWL_EXSTYLE, GWLP_WNDPROC, GetAncestor,
+                GetClassLongPtrW, GetClassNameW, GetClientRect, GetCursorPos, GetForegroundWindow,
                 GetLastActivePopup, GetMessageW, GetSystemMenu, GetSystemMetrics,
                 GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
                 GetWindowThreadProcessId, HICON, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTLEFT,
                 HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_BOTTOM, HWND_BROADCAST, HWND_TOPMOST,
-                IsIconic, IsWindow, IsWindowVisible, IsZoomed, KBDLLHOOKSTRUCT, KillTimer,
-                LWA_ALPHA, MSG, MSLLHOOKSTRUCT, PostMessageW, RegisterClassW,
-                RegisterShellHookWindow, RegisterWindowMessageW, SM_CXSMICON, SM_CYSMICON,
-                SPI_GETWORKAREA, SPI_SETWORKAREA, SPIF_SENDCHANGE, SW_HIDE, SW_MAXIMIZE,
+                IMAGE_ICON, IsIconic, IsWindow, IsWindowVisible, IsZoomed, KBDLLHOOKSTRUCT,
+                KillTimer, LR_COPYFROMRESOURCE, LWA_ALPHA, MSG, MSLLHOOKSTRUCT, PostMessageW,
+                RegisterClassW, RegisterShellHookWindow, RegisterWindowMessageW, SM_CXICON,
+                SM_CYICON, SPI_GETWORKAREA, SPI_SETWORKAREA, SPIF_SENDCHANGE, SW_HIDE, SW_MAXIMIZE,
                 SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, SW_SHOWNORMAL,
                 SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
                 SWP_NOZORDER, SendNotifyMessageW, SetForegroundWindow, SetLayeredWindowAttributes,
@@ -3391,10 +3391,27 @@ fn render_icon(icon: HICON) -> Option<image::RgbaImage> {
 }
 
 fn render_tray_icon(icon: HICON) -> Option<image::RgbaImage> {
-    // SAFETY: GetSystemMetrics reads the current process's DPI-aware small-icon dimensions.
-    let width = unsafe { GetSystemMetrics(SM_CXSMICON) }.max(1) as u32;
-    let height = unsafe { GetSystemMetrics(SM_CYSMICON) }.max(1) as u32;
-    render_icon_sized(icon, width, height)
+    // Ask USER32 for the full icon resource before rasterizing. Many tray clients submit a
+    // small HICON even though its resource contains sharper sizes for DPI-aware rendering.
+    let width = unsafe { GetSystemMetrics(SM_CXICON) }.max(1);
+    let height = unsafe { GetSystemMetrics(SM_CYICON) }.max(1);
+    let copied = unsafe {
+        CopyImage(
+            HANDLE(icon.0),
+            IMAGE_ICON,
+            width,
+            height,
+            LR_COPYFROMRESOURCE,
+        )
+        .ok()
+        .map(|handle| HICON(handle.0))
+    };
+    let rendered = render_icon_sized(copied.unwrap_or(icon), width as u32, height as u32);
+    if let Some(copied) = copied {
+        // SAFETY: CopyImage returned a distinct icon because LR_COPYRETURNORG was not requested.
+        let _ = unsafe { DestroyIcon(copied) };
+    }
+    rendered
 }
 
 fn render_icon_sized(icon: HICON, width: u32, height: u32) -> Option<image::RgbaImage> {

@@ -3480,15 +3480,7 @@ fn panel_tray_icons(items: &[TrayItem]) -> Vec<Arc<image::RgbaImage>> {
 
 fn normalize_tray_items(items: Vec<TrayItem>) -> Vec<TrayItem> {
     let keep_from = items.len().saturating_sub(4);
-    items
-        .into_iter()
-        .skip(keep_from)
-        .map(|mut item| {
-            item.icon =
-                crate::icons::resized(&item.icon, PANEL_TRAY_ICON_SIZE, PANEL_TRAY_ICON_SIZE);
-            item
-        })
-        .collect()
+    items.into_iter().skip(keep_from).collect()
 }
 
 fn normalize_preview_image(image: &image::RgbaImage) -> image::RgbaImage {
@@ -4633,7 +4625,7 @@ mod tests {
     }
 
     #[test]
-    fn tray_source_pixels_are_capped_to_the_four_visible_items() {
+    fn tray_source_keeps_only_four_items_without_discarding_source_quality() {
         let items = (0..7)
             .map(|index| TrayItem {
                 id: index.to_string(),
@@ -4653,14 +4645,14 @@ mod tests {
         assert!(
             normalized
                 .iter()
-                .all(|item| item.icon.dimensions() == (18, 18))
+                .all(|item| item.icon.dimensions() == (128, 64))
         );
         assert_eq!(
             normalized
                 .iter()
                 .map(|item| item.icon.as_raw().len())
                 .sum::<usize>(),
-            5_184
+            131_072
         );
     }
 

@@ -5,7 +5,7 @@ use std::{
     fs,
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Stdio,
     sync::mpsc,
     thread,
     time::Duration,
@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::process::command;
 use crate::{CodexError, REQUIRED_PROFILE};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -205,7 +206,8 @@ impl Selector {
         let schema_dir = tempfile::Builder::new()
             .prefix("nickel-codex-schema")
             .tempdir()?;
-        let output = Command::new(&candidate.path)
+        let mut output = command(&candidate.path);
+        let output = output
             .args(["app-server", "generate-json-schema", "--out"])
             .arg(schema_dir.path())
             .stdout(Stdio::null())
@@ -230,11 +232,65 @@ fn profile_digest() -> String {
 }
 
 fn find_on_path(path: &OsString) -> Option<PathBuf> {
-    let name = if cfg!(windows) { "codex.exe" } else { "codex" };
+    #[cfg(windows)]
+    {
+        return find_on_windows_path(path);
+    }
+
+    #[cfg(not(windows))]
+    let name = "codex";
+    #[cfg(not(windows))]
     env::split_paths(path)
         .filter(|entry| !entry.as_os_str().is_empty())
         .map(|entry| entry.join(name))
         .find(|candidate| candidate.is_file())
+}
+
+#[cfg(windows)]
+fn find_on_windows_path(path: &OsString) -> Option<PathBuf> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use windows::{Win32::Storage::FileSystem::SearchPathW, core::PCWSTR};
+
+    fn wide(value: &std::ffi::OsStr) -> Vec<u16> {
+        value.encode_wide().chain(Some(0)).collect()
+    }
+
+    let search_path = wide(path);
+    let filename = wide(std::ffi::OsStr::new("codex"));
+    let path_ext = env::var_os("PATHEXT").unwrap_or_else(|| OsString::from(".COM;.EXE;.BAT;.CMD"));
+
+    path_ext
+        .to_string_lossy()
+        .split(';')
+        .filter(|extension| !extension.is_empty())
+        .find_map(|extension| {
+            let extension = extension.to_ascii_lowercase();
+            let extension = wide(std::ffi::OsStr::new(&extension));
+            let required = unsafe {
+                SearchPathW(
+                    PCWSTR(search_path.as_ptr()),
+                    PCWSTR(filename.as_ptr()),
+                    PCWSTR(extension.as_ptr()),
+                    None,
+                    None,
+                )
+            };
+            if required == 0 {
+                return None;
+            }
+            let mut buffer = vec![0_u16; required as usize + 1];
+            let written = unsafe {
+                SearchPathW(
+                    PCWSTR(search_path.as_ptr()),
+                    PCWSTR(filename.as_ptr()),
+                    PCWSTR(extension.as_ptr()),
+                    Some(&mut buffer),
+                    None,
+                )
+            } as usize;
+            (written != 0 && written < buffer.len())
+                .then(|| PathBuf::from(OsString::from_wide(&buffer[..written])))
+        })
 }
 
 fn deduplicate(candidates: Vec<Candidate>) -> Vec<Candidate> {
@@ -248,9 +304,9 @@ fn deduplicate(candidates: Vec<Candidate>) -> Vec<Candidate> {
         })
         .collect()
 }
-
 fn run_bounded(path: &Path, args: &[&str], timeout: Duration) -> Result<String, CodexError> {
-    let mut child = Command::new(path)
+    let mut child = command(path);
+    let mut child = child
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -376,7 +432,8 @@ fn collect_methods(value: &Value, parent: Option<&str>, methods: &mut HashSet<St
 }
 
 fn initialize_handshake(path: &Path, timeout: Duration) -> Result<(), CodexError> {
-    let mut child = Command::new(path)
+    let mut child = command(path);
+    let mut child = child
         .args(["app-server", "--listen", "stdio://"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

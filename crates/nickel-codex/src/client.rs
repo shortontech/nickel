@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     io::{BufRead, BufReader, ErrorKind, Read, Write},
     path::Path,
-    process::{Child, ChildStdin, Command, Stdio},
+    process::{Child, ChildStdin, Stdio},
     sync::atomic::{AtomicU64, Ordering},
     sync::{Arc, Mutex, mpsc},
     thread,
@@ -19,6 +19,7 @@ use tungstenite::{
 };
 use url::Url;
 
+use crate::process::command;
 use crate::protocol::*;
 
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
@@ -110,7 +111,8 @@ impl CodexClient {
         cwd: &Path,
         request_timeout: Duration,
     ) -> Result<Self, CodexError> {
-        let mut child = Command::new(executable)
+        let mut child = command(executable);
+        let mut child = child
             .args(["app-server", "--listen", "stdio://"])
             .current_dir(cwd)
             .stdin(Stdio::piped())
