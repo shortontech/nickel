@@ -983,6 +983,38 @@ fn new_tab_publishes_immediately_and_reports_open_failure_in_place() {
 }
 
 #[test]
+fn failed_location_state_belongs_to_its_tab_and_recovers_in_place() {
+    let directory = tempfile::tempdir().unwrap();
+    let missing = directory.path().join("missing");
+    let valid = directory.path().join("valid");
+    std::fs::create_dir(&valid).unwrap();
+    std::fs::write(valid.join("recovered.txt"), b"ok").unwrap();
+    let mut app = FileApp::new(directory.path().to_path_buf());
+
+    app.new_tab_at(missing.clone());
+    settle_navigation(&mut app);
+    let failure = app.status.clone();
+    assert!(failure.contains("Could not open new tab"));
+
+    app.switch_tab(0);
+    assert!(app.status.is_empty());
+    assert_eq!(app.browser.current(), directory.path());
+
+    app.switch_tab(1);
+    assert_eq!(app.status, failure);
+    assert_eq!(app.browser.current(), missing);
+    app.navigate_to(valid.clone());
+    settle_navigation(&mut app);
+
+    assert!(app.status.is_empty());
+    assert_eq!(app.browser.current(), valid);
+    assert_eq!(app.browser.entries()[0].display_name(), "recovered.txt");
+    app.switch_tab(0);
+    assert!(app.status.is_empty());
+    assert_eq!(app.browser.current(), directory.path());
+}
+
+#[test]
 fn refresh_keeps_usable_contents_until_async_enumeration_publishes() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("existing.txt"), b"existing").unwrap();
