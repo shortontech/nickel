@@ -122,6 +122,58 @@ fn growing_details_name_column_contains_multiline_text_without_row_overlap() {
 }
 
 #[test]
+fn narrow_places_surface_replaces_squeezed_sidebar_without_losing_view_state() {
+    let mut app = FileApp::fixture();
+    app.view_mode = FileViewMode::Details;
+    app.selected = Some(1);
+    app.selected_entries = HashSet::from([1]);
+    app.file_scroll_offset = 17.0;
+    let palette = ThemePalette::from_appearance(
+        ShellSettings::load_default().resolve_appearance(nickel_platform::appearance()),
+    );
+    let render = |app: &FileApp| {
+        nickel_ui::UiFrame::layout(
+            app.build_view(600.0, 420.0, palette, false),
+            Rect::new(0.0, 0.0, 600.0, 420.0),
+        )
+    };
+
+    let files = render(&app);
+    assert!(
+        files
+            .resolved_layout()
+            .nodes()
+            .iter()
+            .any(|node| node.id.as_str().ends_with("/files-pane"))
+    );
+    assert!(
+        files
+            .resolved_layout()
+            .nodes()
+            .iter()
+            .all(|node| !node.id.as_str().ends_with("/sidebar-pane"))
+    );
+
+    app.update_message(FileMessage::TogglePlaces);
+    let places = render(&app);
+    assert!(
+        places
+            .resolved_layout()
+            .nodes()
+            .iter()
+            .any(|node| node.id.as_str().ends_with("/narrow-places-surface"))
+    );
+    assert_eq!(app.view_mode, FileViewMode::Details);
+    assert_eq!(app.selected_entries, HashSet::from([1]));
+    assert_eq!(app.file_scroll_offset, 17.0);
+
+    app.update_message(FileMessage::TogglePlaces);
+    assert!(!app.places_open);
+    assert_eq!(app.view_mode, FileViewMode::Details);
+    assert_eq!(app.selected_entries, HashSet::from([1]));
+}
+
+#[test]
 fn navigation_from_idle_starts_new_icon_publication_work() {
     let directory = tempfile::tempdir().unwrap();
     let child = directory.path().join("child");
@@ -244,7 +296,7 @@ fn sidebar_divider_and_file_pane_share_one_fixed_boundary() {
         ShellSettings::load_default().resolve_appearance(nickel_platform::appearance()),
     );
 
-    for (width, height) in [(560, 420), (1280, 720)] {
+    for (width, height) in [(760, 420), (1280, 720)] {
         let frame = nickel_ui::UiFrame::layout(
             app.build_view(width as f32, height as f32, palette, false),
             Rect::new(0.0, 0.0, width as f32, height as f32),

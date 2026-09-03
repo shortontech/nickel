@@ -14,7 +14,7 @@ use nickel_ui::{
 use super::{FileMessage, FileViewMode};
 use crate::{
     DirectoryBrowser, FileEntry,
-    app::{FileApp, SIDEBAR_RESIZE_WIDTH, TOOLBAR_HEIGHT},
+    app::{FileApp, NARROW_WORKSPACE_BREAKPOINT, SIDEBAR_RESIZE_WIDTH, TOOLBAR_HEIGHT},
     platform::places,
 };
 
@@ -25,6 +25,7 @@ pub(crate) fn build_view(
     palette: ThemePalette,
     light_mode: bool,
 ) -> AnyView<FileMessage> {
+    let narrow = _width < NARROW_WORKSPACE_BREAKPOINT;
     let content_height = (height - TOOLBAR_HEIGHT - 30.0).max(0.0);
     let tabs = (0..app.tabs.len()).map(|index| {
         let active = index == app.active_tab;
@@ -91,6 +92,16 @@ pub(crate) fn build_view(
             top: 6.0, right: 12.0, bottom: 6.0, left: 10.0,
         }}>
             <Row gap={4.0}>
+                {if narrow {
+                    ui! {
+                        <Button on_press={FileMessage::TogglePlaces} width={74.0} height={34.0}
+                            color={if app.places_open { palette.accent } else { palette.text }}
+                            focus_border={palette.accent} controller_focus_border={palette.complement}
+                            accessibility_label={if app.places_open { "Close places" } else { "Open places" }}>
+                            {if app.places_open { "Files" } else { "Places" }}
+                        </Button>
+                    }
+                } else { ui! { <></> } }}
                 <Button on_press={FileMessage::Back} width={34.0} height={34.0}
                     focus_border={palette.accent} controller_focus_border={palette.complement}
                     color={if app.browser.can_go_back() { palette.text } else { palette.muted }} accessibility_label={"Back"}>
@@ -133,8 +144,9 @@ pub(crate) fn build_view(
         None,
         palette,
     );
+    let resolved_sidebar_width = if narrow { _width } else { app.sidebar_width };
     let sidebar = ui! {
-        <Sidebar width={app.sidebar_width} background={palette.panel} padding={Insets {
+        <Sidebar width={resolved_sidebar_width} background={palette.panel} padding={Insets {
             top: 14.0, right: 10.0, bottom: 12.0, left: 10.0,
         }} gap={3.0}>
             <Text height={34.0} scale={1.55} color={palette.text}>{"Nickel File"}</Text>
@@ -167,7 +179,11 @@ pub(crate) fn build_view(
             </Container>
         }
     } else {
-        let viewport_width = (_width - app.sidebar_width - SIDEBAR_RESIZE_WIDTH - 32.0).max(1.0);
+        let viewport_width = if narrow {
+            (_width - 32.0).max(1.0)
+        } else {
+            (_width - app.sidebar_width - SIDEBAR_RESIZE_WIDTH - 32.0).max(1.0)
+        };
         let viewport_height = (height - TOOLBAR_HEIGHT - 30.0 - 28.0 - 1.0).max(1.0);
         let collection = match app.view_mode {
             FileViewMode::Grid => AnyView::new(
@@ -282,15 +298,37 @@ pub(crate) fn build_view(
             controller_focus_border={palette.complement} accessibility_label={"Resize sidebar"} />
     };
     let sidebar_pane_width = app.sidebar_width + SIDEBAR_RESIZE_WIDTH;
-    let content = ui! {
-        <Container id={"file-layout"} height={content_height} shrink={0.0} accessibility_label={"Files"}>
-            <Row grow={1.0}><Container id={"sidebar-pane"} width={sidebar_pane_width} shrink={0.0}
-                navigation_scope={NavigationScope::pane(false)} navigation_scope_highlight={palette.complement}>
-                <Row width={sidebar_pane_width} shrink={0.0}>{sidebar}{resize_handle}</Row>
+    let content = if narrow {
+        ui! {
+            <Container id={"file-layout"} height={content_height} shrink={0.0} accessibility_label={"Files"}>
+                {if app.places_open {
+                    ui! {
+                        <Container id={"narrow-places-surface"} grow={1.0}
+                            navigation_scope={NavigationScope::pane(true)} navigation_scope_highlight={palette.complement}>
+                            {sidebar}
+                        </Container>
+                    }
+                } else {
+                    ui! {
+                        <Container id={"files-pane"} grow={1.0} min_width={0.0}
+                            navigation_scope={NavigationScope::pane(true)} navigation_scope_highlight={palette.complement}>
+                            {files}
+                        </Container>
+                    }
+                }}
             </Container>
-                <Container id={"files-pane"} grow={1.0} min_width={0.0}
-                navigation_scope={NavigationScope::pane(true)} navigation_scope_highlight={palette.complement}>{files}</Container></Row>
-        </Container>
+        }
+    } else {
+        ui! {
+            <Container id={"file-layout"} height={content_height} shrink={0.0} accessibility_label={"Files"}>
+                <Row grow={1.0}><Container id={"sidebar-pane"} width={sidebar_pane_width} shrink={0.0}
+                    navigation_scope={NavigationScope::pane(false)} navigation_scope_highlight={palette.complement}>
+                    <Row width={sidebar_pane_width} shrink={0.0}>{sidebar}{resize_handle}</Row>
+                </Container>
+                    <Container id={"files-pane"} grow={1.0} min_width={0.0}
+                    navigation_scope={NavigationScope::pane(true)} navigation_scope_highlight={palette.complement}>{files}</Container></Row>
+            </Container>
+        }
     };
     let root = ui! {
         <Column height={height} background={palette.background}>{toolbar}{content}{footer}</Column>
@@ -300,7 +338,11 @@ pub(crate) fn build_view(
 
 pub(crate) fn visible_file_range(app: &FileApp, width: f32, height: f32) -> std::ops::Range<usize> {
     let count = app.browser.entries().len();
-    let viewport_width = (width - app.sidebar_width - SIDEBAR_RESIZE_WIDTH - 32.0).max(1.0);
+    let viewport_width = if width < NARROW_WORKSPACE_BREAKPOINT {
+        (width - 32.0).max(1.0)
+    } else {
+        (width - app.sidebar_width - SIDEBAR_RESIZE_WIDTH - 32.0).max(1.0)
+    };
     let viewport_height = (height - TOOLBAR_HEIGHT - 30.0 - 28.0 - 1.0).max(1.0);
     let gap = 10.0;
     let columns = (((viewport_width + gap) / (app.tile_width.max(1.0) + gap)).floor() as usize)

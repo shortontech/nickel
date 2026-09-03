@@ -30,6 +30,7 @@ pub(crate) const MAX_SIDEBAR_WIDTH: f32 = 360.0;
 pub(crate) const SIDEBAR_RESIZE_WIDTH: f32 = 5.0;
 pub(crate) const TOOLBAR_HEIGHT: f32 = 78.0;
 const DEFAULT_TILE_WIDTH: f32 = 150.0;
+pub(crate) const NARROW_WORKSPACE_BREAKPOINT: f32 = 720.0;
 pub(crate) const MIN_TILE_WIDTH: f32 = 110.0;
 pub(crate) const MAX_TILE_WIDTH: f32 = 240.0;
 
@@ -42,6 +43,7 @@ pub enum FileMessage {
     ContextRefresh,
     ContextSelectAll,
     ResizeSidebar,
+    TogglePlaces,
     NewTab,
     SwitchTab(usize),
     CloseTab(usize),
@@ -86,6 +88,7 @@ pub struct FileApp {
     pub(crate) shift_down: bool,
     pub(crate) selection_drag: Option<Point>,
     pub(crate) resizing_sidebar: bool,
+    pub(crate) places_open: bool,
     pub(crate) tile_width: f32,
     pub(crate) file_scroll_offset: f32,
     pub(crate) view_mode: FileViewMode,
@@ -243,6 +246,7 @@ impl FileApp {
             shift_down: false,
             selection_drag: None,
             resizing_sidebar: false,
+            places_open: false,
             tile_width: DEFAULT_TILE_WIDTH,
             file_scroll_offset: 0.0,
             view_mode: FileViewMode::Grid,
@@ -629,6 +633,7 @@ impl FileApp {
             FileMessage::ResizeSidebar => {
                 self.resizing_sidebar = true;
             }
+            FileMessage::TogglePlaces => self.places_open = !self.places_open,
             FileMessage::NewTab => self.new_tab(),
             FileMessage::Back => self.go_back(),
             FileMessage::Forward => self.go_forward(),
@@ -659,6 +664,7 @@ impl FileApp {
                 }
             }
             FileMessage::OpenFolder(path) | FileMessage::Breadcrumb(path) => {
+                self.places_open = false;
                 self.navigate_to(path);
             }
             FileMessage::Entry(index) => {
