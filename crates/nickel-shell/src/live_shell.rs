@@ -2078,6 +2078,20 @@ impl LiveShell {
     }
 
     fn apply_task_switch_action(&mut self, action: nickel_core::hotkeys::HotkeyAction) -> bool {
+        if self.task_switcher.session().is_none()
+            && matches!(
+                action,
+                nickel_core::hotkeys::HotkeyAction::SwitchNext
+                    | nickel_core::hotkeys::HotkeyAction::SwitchPrevious
+                    | nickel_core::hotkeys::HotkeyAction::SwitchGroupNext
+                    | nickel_core::hotkeys::HotkeyAction::SwitchGroupPrevious
+            )
+            && let FeedState::Ready(windows) = self.window_feed.snapshot(&self.launcher)
+        {
+            // Shortcut dispatch can run between periodic feed refreshes. Starting a switch from a
+            // fresh snapshot keeps the active application and MRU order aligned with Win32 now.
+            self.windows = windows;
+        }
         let windows = self
             .windows
             .iter()
