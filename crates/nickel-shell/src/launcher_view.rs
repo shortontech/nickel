@@ -2103,4 +2103,26 @@ mod tests {
         assert!(diagnostics.retained_pixel_bytes <= diagnostics.byte_capacity);
         assert!(diagnostics.evictions > 0);
     }
+
+    #[test]
+    fn native_window_icons_receive_distinct_stable_renderer_ids() {
+        let mut cache = LauncherIconCache::new();
+        let blue = Arc::new(RgbaImage::from_pixel(
+            32,
+            32,
+            image::Rgba([20, 80, 220, 255]),
+        ));
+        let red = Arc::new(RgbaImage::from_pixel(
+            32,
+            32,
+            image::Rgba([220, 60, 50, 255]),
+        ));
+
+        let (blue_id, _) = cache.resolve_window_icon(crate::model::WindowId(10), Arc::clone(&blue));
+        let (red_id, _) = cache.resolve_window_icon(crate::model::WindowId(20), red);
+        let (blue_again_id, _) = cache.resolve_window_icon(crate::model::WindowId(10), blue);
+
+        assert_ne!(blue_id, red_id);
+        assert_eq!(blue_id, blue_again_id);
+    }
 }

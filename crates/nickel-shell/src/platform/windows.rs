@@ -3493,8 +3493,9 @@ mod tests {
 
     use super::{
         TrayNotifyIconData, application_icon, clamp_preview_x, contain_rect, executable_icon,
-        is_shell_infrastructure, native_hotkey_requests, parse_windows_command, rectangle_covers,
-        restore_legacy_icon_alpha, should_restore_on_activation,
+        is_nickel_host_terminal, is_shell_infrastructure, native_hotkey_requests,
+        parse_windows_command, rectangle_covers, restore_legacy_icon_alpha,
+        should_restore_on_activation,
     };
 
     #[test]
@@ -3563,6 +3564,13 @@ mod tests {
         let image = executable_icon(&std::env::current_exe().expect("test executable path"))
             .expect("Windows Shell returns an executable icon");
         assert!(image.pixels().any(|pixel| pixel.0[3] != 0));
+    }
+
+    #[test]
+    fn shell_host_terminal_matches_only_the_nickel_executable_title() {
+        let executable = std::env::current_exe().expect("test executable path");
+        assert!(is_nickel_host_terminal(&executable.to_string_lossy()));
+        assert!(!is_nickel_host_terminal("PowerShell"));
     }
 
     #[test]
