@@ -12,7 +12,7 @@ use crate::{
     host::FileHostAdapter,
     icons, layout,
     layout::{rect_between, visible_file_range},
-    platform::{home_directory, open_path},
+    platform::{home_directory, location_groups, open_path},
 };
 use nickel_core::{
     shell_settings::{FileIconPreference, ShellSettings},
@@ -742,21 +742,7 @@ impl FileApp {
         let mut app = Self::with_browser(DirectoryBrowser::fixture(entries), String::new());
         app.icon_rx = None;
         app.icons.clear();
-        for entry in app.browser.entries() {
-            let artwork = icons::resolve_artwork(
-                FileIconPreference::Nickel,
-                &icons::ArtworkRequest {
-                    path: &entry.path,
-                    kind: icons::semantic_kind(&entry.path, entry.is_directory),
-                    logical_size: 96,
-                    scale_milli: app.artwork_scale_milli,
-                    appearance: icons::ArtworkAppearance::Dark,
-                },
-            );
-            let id = app.next_icon_id;
-            app.next_icon_id += 1;
-            app.icons.insert(entry.path.clone(), (id, artwork.pixels));
-        }
+        app.refresh_icons_for(FileIconPreference::Nickel, ThemeMode::Dark);
         app
     }
 
@@ -1158,7 +1144,7 @@ impl FileApp {
         } else {
             icons::ArtworkAppearance::Dark
         };
-        let entries = self
+        let mut entries = self
             .browser
             .entries()
             .iter()
@@ -1177,6 +1163,28 @@ impl FileApp {
                 )
             })
             .collect::<Vec<_>>();
+        let mut known_paths = entries
+            .iter()
+            .map(|(path, _, _)| path.clone())
+            .collect::<HashSet<_>>();
+        for (path, is_directory) in location_groups()
+            .into_iter()
+            .flat_map(|group| group.entries)
+            .map(|(_, path)| (path, true))
+        {
+            if known_paths.insert(path.clone()) {
+                let request = icons::ArtworkRequest {
+                    path: &path,
+                    kind: icons::semantic_kind(&path, is_directory),
+                    logical_size: 96,
+                    scale_milli: self.artwork_scale_milli,
+                    appearance: artwork_appearance,
+                };
+                let key =
+                    icons::cache_key_with_theme(preference, self.icon_theme.as_deref(), &request);
+                entries.push((path, is_directory, key));
+            }
+        }
         self.icons
             .retain(|path| entries.iter().any(|(entry, _, _)| entry == path));
         let mut paths = entries
@@ -1212,11 +1220,10 @@ impl FileApp {
             let id = self.next_icon_id;
             self.next_icon_id = self.next_icon_id.checked_add(1).unwrap_or(1);
             if path == self.browser.current() {
-                self.tab_icon = Some((id, artwork.pixels));
-            } else {
-                self.icons
-                    .insert_resolved(key.clone(), (id, artwork.pixels));
+                self.tab_icon = Some((id, artwork.pixels.clone()));
             }
+            self.icons
+                .insert_resolved(key.clone(), (id, artwork.pixels));
         }
         if preference == FileIconPreference::Nickel {
             self.icon_rx = None;
@@ -1305,15 +1312,9 @@ impl FileApp {
                     let id = self.next_icon_id;
                     self.next_icon_id = self.next_icon_id.checked_add(1).unwrap_or(1);
                     if path == self.browser.current() {
-                        self.tab_icon = Some((id, artwork.pixels));
-                    } else if self
-                        .browser
-                        .entries()
-                        .iter()
-                        .any(|entry| entry.path == path)
-                    {
-                        self.icons.insert_resolved(key, (id, artwork.pixels));
+                        self.tab_icon = Some((id, artwork.pixels.clone()));
                     }
+                    self.icons.insert_resolved(key, (id, artwork.pixels));
                 }
                 Ok(_) => {}
                 Err(TryRecvError::Empty) => {

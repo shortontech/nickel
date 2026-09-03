@@ -1746,6 +1746,35 @@ impl<Message> SidebarFolder<Message> {
         }
         self
     }
+
+    /// Adds provider-resolved artwork to the open action while preserving the
+    /// disclosure action as an independent semantic target.
+    pub fn artwork(
+        mut self,
+        asset_id: u16,
+        image: std::sync::Arc<image::RgbaImage>,
+        generation: u64,
+    ) -> Self {
+        if let Some(open) = self
+            .0
+            .0
+            .children
+            .first_mut()
+            .and_then(|row| row.children.get_mut(1))
+        {
+            let label = open.children.pop();
+            let mut row = Row::new().gap(7.0).child(
+                Image::new_with_generation(asset_id, image, generation)
+                    .width(18.0)
+                    .height(18.0),
+            );
+            if let Some(label) = label {
+                row = row.child(label);
+            }
+            open.children.push(row.into_element());
+        }
+        self
+    }
 }
 
 impl<Message> Component<Message> for SidebarFolder<Message> {

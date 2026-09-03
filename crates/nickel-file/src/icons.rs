@@ -151,6 +151,7 @@ impl ArtworkCache {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn insert(&mut self, path: PathBuf, value: (u16, Arc<RgbaImage>)) {
         self.insert_keyed(path, value, None);
     }

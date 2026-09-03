@@ -6,15 +6,15 @@ use std::{
 use nickel_core::theme::ThemePalette;
 use nickel_ui::{
     AnyView, Collection, CollectionPresentation, CollectionState, ComponentBuilderExt, Insets,
-    LinearGradient, NavigationScope, Point, Rect, SemanticNodeSnapshot, SemanticRole, TextField,
-    VerticalScroll, VirtualWindow, ui,
+    LinearGradient, NavigationScope, Point, Rect, SemanticNodeSnapshot, SemanticRole,
+    SidebarFolder, TextField, VerticalScroll, VirtualWindow, ui,
 };
 
 use super::{FileMessage, FileViewMode};
 use crate::{
     EntrySortKey, SortDirection,
     app::{FileApp, NARROW_WORKSPACE_BREAKPOINT, SIDEBAR_RESIZE_WIDTH, TOOLBAR_HEIGHT},
-    components,
+    components, icons,
     platform::{location_groups, places},
 };
 
@@ -134,6 +134,7 @@ pub(crate) fn build_view(
                 &app.expanded_folders,
                 app.browser.current(),
                 None,
+                &app.icons,
                 palette,
             );
             components::location_group(
@@ -625,6 +626,7 @@ pub(crate) fn sidebar_folder_elements(
     expanded: &HashSet<PathBuf>,
     current: &Path,
     hovered_message: Option<&FileMessage>,
+    icons: &icons::ArtworkCache,
     palette: ThemePalette,
 ) -> Vec<AnyView<FileMessage>> {
     #[allow(clippy::too_many_arguments)]
@@ -636,6 +638,7 @@ pub(crate) fn sidebar_folder_elements(
         expanded: &HashSet<PathBuf>,
         current: &Path,
         hovered_message: Option<&FileMessage>,
+        icons: &icons::ArtworkCache,
         palette: ThemePalette,
     ) {
         let is_expanded = expanded.contains(&path);
@@ -644,19 +647,31 @@ pub(crate) fn sidebar_folder_elements(
         let open_message = FileMessage::OpenFolder(path.clone());
         let is_hovered =
             hovered_message == Some(&toggle_message) || hovered_message == Some(&open_message);
-        rows.push(AnyView::new(ui! {
-            <SidebarFolder on_toggle={toggle_message} on_open={open_message} label={label.clone()}
-                accessibility_labels={(format!("Toggle {label}"), format!("Open {label}"))}
-                focus_borders={(palette.accent, palette.complement)}
-                expanded={is_expanded} foreground={if is_active { palette.text } else { palette.muted }}
-                indent={depth} background={if is_active {
-                    palette.accent_soft
-                } else if is_hovered {
-                    palette.surface_hover
-                } else {
-                    palette.panel
-                }} />
-        }));
+        let mut row = SidebarFolder::new(
+            toggle_message,
+            open_message,
+            label.clone(),
+            is_expanded,
+            if is_active {
+                palette.text
+            } else {
+                palette.muted
+            },
+        )
+        .accessibility_labels((format!("Toggle {label}"), format!("Open {label}")))
+        .focus_borders((palette.accent, palette.complement))
+        .indent(depth)
+        .background(if is_active {
+            palette.accent_soft
+        } else if is_hovered {
+            palette.surface_hover
+        } else {
+            palette.panel
+        });
+        if let Some((id, image)) = icons.get(&path) {
+            row = row.artwork(*id, image.clone(), u64::from(*id));
+        }
+        rows.push(AnyView::new(row));
         if !is_expanded || depth >= 6 {
             return;
         }
@@ -688,6 +703,7 @@ pub(crate) fn sidebar_folder_elements(
                 expanded,
                 current,
                 hovered_message,
+                icons,
                 palette,
             );
         }
@@ -703,6 +719,7 @@ pub(crate) fn sidebar_folder_elements(
             expanded,
             current,
             hovered_message,
+            icons,
             palette,
         );
     }

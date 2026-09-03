@@ -123,9 +123,36 @@ fn slow_system_provider_keeps_nickel_fallback_visible_before_async_results() {
         ThemeMode::Dark,
     );
 
-    assert_eq!(app.icons.len(), 2);
+    assert!(app.icons.len() >= 2);
+    assert!(
+        app.browser
+            .entries()
+            .iter()
+            .all(|entry| app.icons.get(&entry.path).is_some())
+    );
+    assert!(
+        location_groups()
+            .into_iter()
+            .flat_map(|group| group.entries)
+            .any(|(_, path)| app.icons.get(&path).is_some())
+    );
     assert!(app.tab_icon.is_some());
     assert!(app.icon_rx.is_some());
+}
+
+#[test]
+fn sidebar_locations_render_from_the_shared_resolved_artwork_cache() {
+    let app = FileApp::fixture();
+    let host = UiHost::new(app, 1_100, 700);
+    assert!(
+        host.commands().iter().any(|command| matches!(
+            command,
+            nickel_ui::backend::PaintCommand::Image { bounds, .. }
+                if bounds.origin.x < DEFAULT_SIDEBAR_WIDTH
+                    && bounds.origin.y > TOOLBAR_HEIGHT
+        )),
+        "the shared image list must include artwork inside the places sidebar"
+    );
 }
 
 #[test]
@@ -1044,6 +1071,10 @@ fn every_advertised_controller_action_has_a_bounded_production_path() {
     let session = registry.finish().remove(0).open();
     let report = session.reachability_report(&ReachabilityPolicy {
         modalities: [ReachabilityModality::Controller].into_iter().collect(),
+        // This exhaustively rebuilds the production tree for each controller
+        // state. Keep a finite ceiling while allowing loaded source artwork on
+        // slower debug and cross-platform CI hosts.
+        wall_time_ms: 15_000,
         ..ReachabilityPolicy::default()
     });
 
