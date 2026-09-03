@@ -5,6 +5,7 @@ use crate::{
 };
 use nickel_ui::{ActionKind, Rect, UiHost};
 use nickel_ui_testkit::{Fixture, FocusDirection, Scenario, ScenarioBudget, Selector};
+use sha2::{Digest, Sha256};
 
 const MINIMUM_SELECTION_TEXT_CONTRAST: f32 = 4.5;
 
@@ -979,6 +980,30 @@ fn every_file_fixture_passes_geometry_accessibility_and_selection_contrast_gates
                 );
             }
         }
+    }
+}
+
+#[test]
+fn every_file_fixture_asset_matches_its_admitted_source_master() {
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for asset in FILE_FIXTURE_ASSETS {
+        let path = repository.join(asset.path);
+        let bytes = std::fs::read(&path)
+            .unwrap_or_else(|error| panic!("could not read {}: {error}", path.display()));
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&bytes)),
+            asset.sha256,
+            "stale fixture digest for {}",
+            asset.path,
+        );
+        let image = image::load_from_memory(&bytes)
+            .unwrap_or_else(|error| panic!("could not decode {}: {error}", path.display()));
+        assert_eq!(
+            (image.width(), image.height()),
+            (1_254, 1_254),
+            "{} must remain the retained source master",
+            asset.path,
+        );
     }
 }
 

@@ -521,7 +521,7 @@ const FILE_FIXTURE_ASSETS: &[nickel_ui_testkit::FixtureAsset] = &[
         id: "nickel-file-home-folder",
         path: "assets/concepts/nickel-file-icon-family/home-folder.png",
         license: "Same license as Nickel",
-        sha256: "2c492d54307371cc58255d3f2cc58e465e14a7959a11b0ca13f5cb1e5181e21c",
+        sha256: "2c492d5438c43d6c0b7e376ce07399560d64fa66b2ebf0ae4054195bcf9cb2e4",
     },
     nickel_ui_testkit::FixtureAsset {
         id: "nickel-file-pictures-folder",

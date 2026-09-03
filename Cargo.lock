@@ -2651,6 +2651,7 @@ dependencies = [
  "nickel-platform",
  "nickel-ui",
  "nickel-ui-testkit",
+ "sha2",
  "tempfile",
  "tracing",
  "windows",
