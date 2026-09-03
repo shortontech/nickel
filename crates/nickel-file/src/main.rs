@@ -142,6 +142,7 @@ pub struct FileApp {
     pub(crate) sidebar_width: f32,
     pub(crate) expanded_folders: HashSet<PathBuf>,
     pub(crate) location_groups: Vec<LocationGroup>,
+    location_groups_rx: Option<Receiver<Vec<LocationGroup>>>,
     pub(crate) sidebar_children: HashMap<PathBuf, Vec<(String, PathBuf)>>,
     sidebar_loading: HashSet<PathBuf>,
     sidebar_sender: mpsc::Sender<SidebarResult>,
@@ -789,6 +790,7 @@ impl FileApp {
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             expanded_folders: HashSet::new(),
             location_groups: resolved_location_groups,
+            location_groups_rx: None,
             sidebar_children: HashMap::new(),
             sidebar_loading: HashSet::new(),
             sidebar_sender,
@@ -1092,6 +1094,40 @@ impl FileApp {
             },
         );
         self.navigation_invalidates_icons = true;
+        self.refresh_location_groups();
+    }
+
+    fn refresh_location_groups(&mut self) {
+        let (sender, receiver) = mpsc::channel();
+        self.location_groups_rx = Some(receiver);
+        let _ = std::thread::Builder::new()
+            .name("nickel-file-locations".into())
+            .spawn(move || {
+                let _ = sender.send(location_groups());
+            });
+    }
+
+    fn poll_location_groups(&mut self) -> bool {
+        let result = match self.location_groups_rx.as_ref() {
+            Some(receiver) => receiver.try_recv(),
+            None => return false,
+        };
+        match result {
+            Ok(groups) => {
+                self.location_groups_rx = None;
+                if self.location_groups == groups {
+                    return false;
+                }
+                self.location_groups = groups;
+                self.refresh_icons();
+                true
+            }
+            Err(TryRecvError::Empty) => false,
+            Err(TryRecvError::Disconnected) => {
+                self.location_groups_rx = None;
+                false
+            }
+        }
     }
 
     fn poll_navigation(&mut self) -> bool {
@@ -1795,6 +1831,7 @@ impl Application for FileApp {
         settings_changed
             || self.poll_navigation()
             || self.poll_sidebar_children()
+            || self.poll_location_groups()
             || before != self.next_icon_id
     }
 
@@ -1805,6 +1842,9 @@ impl Application for FileApp {
                 .as_ref()
                 .map(|_| self.navigation_poll_delay),
             (!self.sidebar_loading.is_empty()).then_some(Duration::from_millis(16)),
+            self.location_groups_rx
+                .as_ref()
+                .map(|_| Duration::from_millis(16)),
         ]
         .into_iter()
         .flatten()

@@ -748,6 +748,24 @@ fn sidebar_expansion_enumerates_children_asynchronously() {
 }
 
 #[test]
+fn refreshed_location_snapshot_publishes_with_fallback_artwork() {
+    let location = tempfile::tempdir().unwrap();
+    let mut app = FileApp::fixture();
+    let groups = vec![crate::platform::LocationGroup {
+        id: "computer-volumes",
+        title: "Computer & volumes",
+        entries: vec![("Portable".into(), location.path().to_path_buf())],
+    }];
+    let (sender, receiver) = std::sync::mpsc::channel();
+    sender.send(groups.clone()).unwrap();
+    app.location_groups_rx = Some(receiver);
+
+    assert!(app.poll_location_groups());
+    assert_eq!(app.location_groups, groups);
+    assert!(app.icons.get(location.path()).is_some());
+}
+
+#[test]
 fn synthetic_location_sources_use_shared_group_order_and_one_target_identity() {
     let shared = PathBuf::from("/fixture/shared");
     let groups = crate::platform::location_groups_from(crate::platform::LocationSources {

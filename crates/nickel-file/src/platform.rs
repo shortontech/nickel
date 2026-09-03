@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LocationGroup {
     pub(crate) id: &'static str,
     pub(crate) title: &'static str,
