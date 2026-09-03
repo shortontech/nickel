@@ -155,6 +155,23 @@ fn provider_revision_changes_refresh_artwork_without_losing_view_state() {
 }
 
 #[test]
+fn display_scale_changes_refresh_physical_artwork_without_losing_selection() {
+    let mut app = FileApp::fixture();
+    let path = app.browser.entries()[0].path.clone();
+    app.selected = Some(0);
+    app.selected_entries = HashSet::from([0]);
+    let generation = app.icon_generation;
+
+    assert!(Application::scale_factor_changed(&mut app, 1.25));
+    assert_eq!(app.artwork_scale_milli, 1_250);
+    assert_ne!(app.icon_generation, generation);
+    assert_eq!(app.selected_entries, HashSet::from([0]));
+    let pixels = &app.icons.get(&path).unwrap().1;
+    assert_eq!((pixels.width(), pixels.height()), (120, 120));
+    assert!(!Application::scale_factor_changed(&mut app, 1.25));
+}
+
+#[test]
 fn details_column_widths_resize_within_bounds_and_belong_to_their_tab() {
     let directory = tempfile::tempdir().unwrap();
     let child = directory.path().join("child");

@@ -268,8 +268,10 @@ impl<F: Fixture> TypedFixtureSession<F> {
 
     fn new_variant(variant: &FixtureVariant) -> Self {
         let (width, height) = logical_fixture_size(variant);
+        let mut scenario = Scenario::new(F::create_variant(variant), width, height);
+        scenario.host_mut().set_scale_factor(variant.scale.factor);
         Self {
-            scenario: Scenario::new(F::create_variant(variant), width, height),
+            scenario,
             variant: *variant,
         }
     }
@@ -291,6 +293,9 @@ impl<F: Fixture> ErasedFixtureSession for TypedFixtureSession<F> {
     fn reset(&mut self) {
         let (width, height) = logical_fixture_size(&self.variant);
         self.scenario = Scenario::new(F::create_variant(&self.variant), width, height);
+        self.scenario
+            .host_mut()
+            .set_scale_factor(self.variant.scale.factor);
     }
 
     fn inspect(&self) -> HostInspection {

@@ -134,6 +134,7 @@ pub struct FileApp {
     pub(crate) icon_theme: Option<String>,
     pub(crate) icon_provider_revision: u64,
     pub(crate) icon_appearance: ThemeMode,
+    pub(crate) artwork_scale_milli: u16,
     pub(crate) next_icon_id: u16,
     pub(crate) sidebar_width: f32,
     pub(crate) expanded_folders: HashSet<PathBuf>,
@@ -668,6 +669,7 @@ impl FileApp {
             ),
             icon_theme: settings.file_icon_theme,
             icon_appearance,
+            artwork_scale_milli: 1_000,
             next_icon_id: 1,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             expanded_folders: HashSet::new(),
@@ -732,7 +734,7 @@ impl FileApp {
                     path: &entry.path,
                     kind: icons::semantic_kind(&entry.path, entry.is_directory),
                     logical_size: 96,
-                    scale_milli: 1_000,
+                    scale_milli: app.artwork_scale_milli,
                     appearance: icons::ArtworkAppearance::Dark,
                 },
             );
@@ -1150,7 +1152,7 @@ impl FileApp {
                     path: &entry.path,
                     kind: icons::semantic_kind(&entry.path, entry.is_directory),
                     logical_size: 96,
-                    scale_milli: 1_000,
+                    scale_milli: self.artwork_scale_milli,
                     appearance: artwork_appearance,
                 };
                 (
@@ -1171,7 +1173,7 @@ impl FileApp {
             path: &current,
             kind: icons::semantic_kind(&current, true),
             logical_size: 96,
-            scale_milli: 1_000,
+            scale_milli: self.artwork_scale_milli,
             appearance: artwork_appearance,
         };
         let current_key =
@@ -1188,7 +1190,7 @@ impl FileApp {
                     path,
                     kind: icons::semantic_kind(path, *is_directory),
                     logical_size: 96,
-                    scale_milli: 1_000,
+                    scale_milli: self.artwork_scale_milli,
                     appearance: artwork_appearance,
                 },
             );
@@ -1215,6 +1217,7 @@ impl FileApp {
         }
         let (tx, rx) = mpsc::channel();
         let icon_theme = self.icon_theme.clone();
+        let artwork_scale_milli = self.artwork_scale_milli;
         self.icon_rx = Some(rx);
         self.icon_poll_delay = std::time::Duration::from_millis(16);
         let _ = std::thread::Builder::new()
@@ -1230,7 +1233,7 @@ impl FileApp {
                             path: &path,
                             kind: icons::semantic_kind(&path, is_directory),
                             logical_size: 96,
-                            scale_milli: 1_000,
+                            scale_milli: artwork_scale_milli,
                             appearance: artwork_appearance,
                         },
                     );
@@ -1637,6 +1640,18 @@ impl Application for FileApp {
         .into_iter()
         .flatten()
         .min()
+    }
+
+    fn scale_factor_changed(&mut self, scale_factor: f32) -> bool {
+        let scale_milli = (scale_factor.clamp(0.25, 8.0) * 1_000.0).round() as u16;
+        if scale_milli == self.artwork_scale_milli {
+            return false;
+        }
+        self.artwork_scale_milli = scale_milli;
+        self.icons.clear();
+        self.tab_icon = None;
+        self.refresh_icons();
+        true
     }
 
     fn title(&self) -> &str {

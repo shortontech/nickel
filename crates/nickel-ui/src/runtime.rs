@@ -424,6 +424,11 @@ pub trait Application: Sized {
         false
     }
 
+    /// Reports the physical pixels per logical pixel used by the host.
+    fn scale_factor_changed(&mut self, _scale_factor: f32) -> bool {
+        false
+    }
+
     fn title(&self) -> &str {
         "Nickel UI"
     }
@@ -955,6 +960,13 @@ impl<A: Application> UiHost<A> {
             false
         }
     }
+    pub fn set_scale_factor(&mut self, scale_factor: f32) -> bool {
+        self.step(HostBatch {
+            scale_factor: Some(scale_factor),
+            ..HostBatch::default()
+        })
+        .changed
+    }
     pub fn new(application: A, width: u32, height: u32) -> Self {
         Self::new_at(application, width, height, Instant::now())
     }
@@ -1281,6 +1293,10 @@ impl<A: Application> UiHost<A> {
             self.scale_factor = scale_factor;
             combined.changed = true;
             combined.invalidation = combined.invalidation.merge(Invalidation::Layout);
+            if self.application.scale_factor_changed(scale_factor) {
+                combined.changed = true;
+                combined.invalidation = combined.invalidation.merge(Invalidation::Paint);
+            }
         }
         if let Some(focused) = batch.window_focused {
             let focus = self.dispatch_ui_event(if focused {
@@ -2033,6 +2049,7 @@ impl<A: Application, H: HostAdapter<A>> ApplicationHandler for ApplicationRuntim
             logical.width,
             logical.height,
         );
+        host.set_scale_factor(self.scale);
         match self
             .adapter
             .started(&mut host, HostServices { window: &window })
@@ -2137,6 +2154,7 @@ impl<A: Application, H: HostAdapter<A>> ApplicationHandler for ApplicationRuntim
                 let logical = window.inner_size().to_logical::<u32>(*scale_factor);
                 if let Some(host) = &mut self.host {
                     host.resize(logical.width, logical.height);
+                    host.set_scale_factor(self.scale);
                 }
                 self.scheduler.invalidate();
             }
