@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, VecDeque},
-    hash::{DefaultHasher, Hash, Hasher},
     path::{Path, PathBuf},
     sync::{Arc, OnceLock},
 };
@@ -280,9 +279,7 @@ impl IconProvider for SystemIconProvider {
     }
 
     fn revision(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        self.theme.hash(&mut hasher);
-        hasher.finish()
+        nickel_platform::path_icon_theme_revision(self.theme.as_deref())
     }
 
     fn resolve(
@@ -319,6 +316,13 @@ pub fn resolve_artwork_with_theme(
 
 pub fn cache_key(preference: FileIconPreference, request: &ArtworkRequest<'_>) -> ArtworkCacheKey {
     cache_key_with_theme(preference, None, request)
+}
+
+pub fn provider_revision(preference: FileIconPreference, theme: Option<&str>) -> u64 {
+    match preference {
+        FileIconPreference::Nickel => NickelIconProvider.revision(),
+        FileIconPreference::System => SystemIconProvider::new(theme).revision(),
+    }
 }
 
 pub fn cache_key_with_theme(

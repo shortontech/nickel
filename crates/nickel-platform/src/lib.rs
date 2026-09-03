@@ -56,11 +56,16 @@ mod macos;
 pub use windows::{appearance, apply_window_appearance, path_icon, show_hidden_files};
 
 #[cfg(target_os = "linux")]
-pub use linux::{installed_icon_themes, path_icon, path_icon_with_theme};
+pub use linux::{installed_icon_themes, path_icon, path_icon_theme_revision, path_icon_with_theme};
 
 #[cfg(not(target_os = "linux"))]
 pub fn installed_icon_themes() -> Vec<String> {
     Vec::new()
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn path_icon_theme_revision(_theme: Option<&str>) -> u64 {
+    1
 }
 
 #[cfg(target_os = "windows")]

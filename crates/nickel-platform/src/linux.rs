@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     env, fs,
+    hash::{DefaultHasher, Hash, Hasher},
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     thread,
@@ -226,6 +227,26 @@ pub fn installed_icon_themes() -> Vec<String> {
     installed_icon_themes_in(icon_search_roots())
 }
 
+pub fn path_icon_theme_revision(theme: Option<&str>) -> u64 {
+    let theme = theme.map(str::to_owned).unwrap_or_else(system_icon_theme);
+    let mut hasher = DefaultHasher::new();
+    theme.hash(&mut hasher);
+    for metadata in icon_search_roots()
+        .into_iter()
+        .map(|root| root.join(&theme).join("index.theme"))
+        .filter_map(|path| fs::metadata(path).ok())
+    {
+        metadata.len().hash(&mut hasher);
+        metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_nanos())
+            .hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
 fn installed_icon_themes_in(roots: impl IntoIterator<Item = PathBuf>) -> Vec<String> {
     let mut themes = roots
         .into_iter()
@@ -352,8 +373,8 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        decode_file_uri, icon_name, installed_icon_themes_in, path_icon_with_theme,
-        value_in_section,
+        decode_file_uri, icon_name, installed_icon_themes_in, path_icon_theme_revision,
+        path_icon_with_theme, value_in_section,
     };
 
     #[test]
@@ -411,5 +432,9 @@ mod tests {
                 .is_none()
         );
         assert!(path_icon_with_theme(Path::new("report.txt"), Some("../hicolor")).is_none());
+        assert_ne!(
+            path_icon_theme_revision(Some("missing-theme-a")),
+            path_icon_theme_revision(Some("missing-theme-b"))
+        );
     }
 }

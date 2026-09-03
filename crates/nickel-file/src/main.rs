@@ -131,6 +131,8 @@ pub struct FileApp {
     navigation_invalidates_icons: bool,
     pub(crate) icon_preference: FileIconPreference,
     pub(crate) icon_theme: Option<String>,
+    pub(crate) icon_provider_revision: u64,
+    pub(crate) icon_appearance: ThemeMode,
     pub(crate) next_icon_id: u16,
     pub(crate) sidebar_width: f32,
     pub(crate) expanded_folders: HashSet<PathBuf>,
@@ -634,6 +636,10 @@ impl FileApp {
     }
 
     fn with_browser(browser: DirectoryBrowser, status: String) -> Self {
+        let settings = ShellSettings::load_default();
+        let icon_appearance = settings
+            .resolve_appearance(nickel_platform::appearance())
+            .mode;
         let mut app = Self {
             browser,
             cursor: Point { x: 0.0, y: 0.0 },
@@ -653,8 +659,13 @@ impl FileApp {
             navigation_poll_delay: Duration::from_millis(16),
             navigation_closes_address: false,
             navigation_invalidates_icons: false,
-            icon_preference: ShellSettings::load_default().file_icon_provider,
-            icon_theme: ShellSettings::load_default().file_icon_theme,
+            icon_preference: settings.file_icon_provider,
+            icon_provider_revision: icons::provider_revision(
+                settings.file_icon_provider,
+                settings.file_icon_theme.as_deref(),
+            ),
+            icon_theme: settings.file_icon_theme,
+            icon_appearance,
             next_icon_id: 1,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             expanded_folders: HashSet::new(),
@@ -1106,9 +1117,16 @@ impl FileApp {
         theme: Option<&str>,
         appearance: ThemeMode,
     ) {
-        if preference != self.icon_preference || self.icon_theme.as_deref() != theme {
+        let provider_revision = icons::provider_revision(preference, theme);
+        if preference != self.icon_preference
+            || self.icon_theme.as_deref() != theme
+            || self.icon_provider_revision != provider_revision
+            || self.icon_appearance != appearance
+        {
             self.icon_preference = preference;
             self.icon_theme = theme.map(str::to_owned);
+            self.icon_provider_revision = provider_revision;
+            self.icon_appearance = appearance;
             self.icons.clear();
             self.tab_icon = None;
         }
@@ -1228,6 +1246,29 @@ impl FileApp {
                     }
                 }
             });
+    }
+
+    fn sync_icon_settings(&mut self) -> bool {
+        let settings = ShellSettings::load_default();
+        let appearance = settings
+            .resolve_appearance(nickel_platform::appearance())
+            .mode;
+        let revision = icons::provider_revision(
+            settings.file_icon_provider,
+            settings.file_icon_theme.as_deref(),
+        );
+        let changed = settings.file_icon_provider != self.icon_preference
+            || settings.file_icon_theme != self.icon_theme
+            || revision != self.icon_provider_revision
+            || appearance != self.icon_appearance;
+        if changed {
+            self.refresh_icons_for_theme(
+                settings.file_icon_provider,
+                settings.file_icon_theme.as_deref(),
+                appearance,
+            );
+        }
+        changed
     }
 
     fn poll_icons(&mut self) {
@@ -1571,9 +1612,10 @@ impl Application for FileApp {
     }
 
     fn poll(&mut self) -> bool {
+        let settings_changed = self.sync_icon_settings();
         let before = self.next_icon_id;
         self.poll_icons();
-        self.poll_navigation() || before != self.next_icon_id
+        settings_changed || self.poll_navigation() || before != self.next_icon_id
     }
 
     fn poll_interval(&self) -> Option<std::time::Duration> {

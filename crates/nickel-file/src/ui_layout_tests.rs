@@ -132,6 +132,23 @@ fn provider_changes_preserve_independent_tab_view_state() {
 }
 
 #[test]
+fn provider_revision_changes_refresh_artwork_without_losing_view_state() {
+    let mut app = FileApp::fixture();
+    app.selected = Some(1);
+    app.selected_entries = HashSet::from([1]);
+    app.file_scroll_offset = 23.0;
+    app.view_mode = FileViewMode::Details;
+    let generation = app.icon_generation;
+    app.icon_provider_revision = app.icon_provider_revision.wrapping_add(1);
+
+    assert!(app.sync_icon_settings());
+    assert_ne!(app.icon_generation, generation);
+    assert_eq!(app.selected_entries, HashSet::from([1]));
+    assert_eq!(app.file_scroll_offset, 23.0);
+    assert_eq!(app.view_mode, FileViewMode::Details);
+}
+
+#[test]
 fn details_column_widths_resize_within_bounds_and_belong_to_their_tab() {
     let directory = tempfile::tempdir().unwrap();
     let child = directory.path().join("child");
