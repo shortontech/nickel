@@ -26,7 +26,7 @@ use nickel_session_protocol::{
     ClientEnvelope, Command as SessionCommand, ErrorCode, Event as SessionEvent,
     Geometry as ProtocolGeometry, OutputSnapshot, OutputTransform, PreviewFrame as ProtocolPreview,
     Query, Request, SecureStorageState as ProtocolSecureStorage, ServerEnvelope, ServerMessage,
-    ShellRole, ShellSurfaceSnapshot, Snapshot as SessionSnapshot, TestOutput,
+    ShellPopoverAnchor, ShellRole, ShellSurfaceSnapshot, Snapshot as SessionSnapshot, TestOutput,
     WindowAction as ProtocolWindowAction, WindowId as ProtocolWindowId, WindowSnapshot,
     WorkspaceId as ProtocolWorkspaceId, WorkspaceSnapshot, WorkspaceState, decode, encode,
 };
@@ -1882,6 +1882,9 @@ impl NickelSession {
             SessionCommand::SetLauncherVisible { visible } => self.set_launcher_visible(visible),
             SessionCommand::SetShellRoleVisible { role, visible } => {
                 self.set_shell_role_visible(role, visible);
+            }
+            SessionCommand::ShowAnchoredShellRole { role, anchor } => {
+                self.show_anchored_shell_role(role, anchor);
             }
             SessionCommand::LogOut => self.loop_signal.stop(),
             SessionCommand::SessionAction { action } => match action {
@@ -4256,6 +4259,99 @@ impl NickelSession {
             }
             self.space.unmap_elem(&window);
         }
+    }
+
+    fn show_anchored_shell_role(&mut self, role: ShellRole, anchor: ShellPopoverAnchor) {
+        use nickel_session_protocol::AnchorSide;
+
+        if !matches!(role, ShellRole::ControlCenter | ShellRole::ProjectMenu) {
+            return;
+        }
+        let Some(output) = self.output_geometry_named(&anchor.output) else {
+            tracing::warn!(?role, output = %anchor.output, "popover anchor output disappeared");
+            self.set_shell_role_visible(role, false);
+            return;
+        };
+        let registry = self.windows.snapshot();
+        let Some(window) = self.shell_windows().find_map(|window| {
+            let id = window
+                .wl_surface()
+                .and_then(|surface| self.surface_windows.get(&surface.id()))?;
+            (registry
+                .iter()
+                .find(|entry| entry.id == *id)
+                .and_then(|entry| ShellRole::from_application_id(&entry.app_id))
+                == Some(role))
+            .then(|| window.clone())
+        }) else {
+            return;
+        };
+        let bounds = anchor.bounds;
+        let anchor_geometry = match anchor.preferred {
+            AnchorSide::Above => Geometry {
+                x: output.x + bounds.x,
+                y: output.y + output.height - shell_layout::PANEL_HEIGHT + bounds.y,
+                width: bounds.width,
+                height: bounds.height,
+            },
+            AnchorSide::Below => Geometry {
+                x: output.x + bounds.x,
+                y: output.y + bounds.y,
+                width: bounds.width,
+                height: bounds.height,
+            },
+            AnchorSide::Left => Geometry {
+                x: output.x + bounds.x,
+                y: output.y + bounds.y,
+                width: bounds.width,
+                height: bounds.height,
+            },
+            AnchorSide::Right => Geometry {
+                x: output.x + output.width - shell_layout::PANEL_HEIGHT + bounds.x,
+                y: output.y + bounds.y,
+                width: bounds.width,
+                height: bounds.height,
+            },
+        };
+        let area = match anchor.preferred {
+            AnchorSide::Above => shell_layout::work_area(output),
+            AnchorSide::Below => Geometry {
+                y: output.y + shell_layout::PANEL_HEIGHT,
+                height: (output.height - shell_layout::PANEL_HEIGHT).max(0),
+                ..output
+            },
+            AnchorSide::Left | AnchorSide::Right => output,
+        };
+        let size = window.geometry().size;
+        let target = shell_layout::anchored_popover(
+            area,
+            anchor_geometry,
+            (size.w.max(1), size.h.max(1)),
+            anchor.preferred,
+        );
+        Self::configure_window(&window, target);
+        let location = Self::shell_surface_location(&window, target);
+        self.hidden_shell_roles.remove(&role);
+        self.hidden_shell_role_locations
+            .insert(role, location.into());
+        self.map_buffered_window(window.clone(), location, true);
+        self.space.raise_element(&window, true);
+        let control = anchor.control.chars().take(80).collect::<String>();
+        tracing::debug!(
+            ?role,
+            %control,
+            output = %anchor.output,
+            anchor_x = anchor_geometry.x,
+            anchor_y = anchor_geometry.y,
+            anchor_width = anchor_geometry.width,
+            anchor_height = anchor_geometry.height,
+            preferred = ?anchor.preferred,
+            final_x = target.x,
+            final_y = target.y,
+            final_width = target.width,
+            final_height = target.height,
+            "placed anchored shell popover"
+        );
     }
 
     pub fn close_window(&mut self, id: WindowId) {

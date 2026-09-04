@@ -14,8 +14,8 @@ use nickel_core::{
     wallpaper_settings::WallpaperSettings,
 };
 use nickel_session_protocol::{
-    PointerInteraction, PreviewTargetAction, ResolvedShellTarget, ShellRole, ShellSemanticTarget,
-    WindowMenuTargetAction,
+    AnchorSide, Geometry, PointerInteraction, PreviewTargetAction, ResolvedShellTarget,
+    ShellPopoverAnchor, ShellRole, ShellSemanticTarget, WindowMenuTargetAction,
 };
 use nickel_ui::Rect;
 use nickel_ui::backend::PaintCommand;
@@ -128,6 +128,14 @@ pub enum PanelAction {
     Tray(String),
     TrayContext(String),
     Control,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct PendingPopoverAnchor {
+    role: ShellRole,
+    control: String,
+    output: String,
+    bounds: Rect,
 }
 
 #[derive(Clone)]
@@ -515,6 +523,7 @@ pub struct LiveShell {
     panel_change_token: HostChangeToken,
     panel_deadline: Option<Instant>,
     panel_output: Option<String>,
+    pending_popover_anchor: Option<PendingPopoverAnchor>,
     all_windows_on_every_bar: bool,
     preview_group: Option<usize>,
     preview_pending: Option<(usize, Instant)>,
@@ -805,6 +814,7 @@ impl LiveShell {
             panel_change_token: HostChangeToken::default(),
             panel_deadline: None,
             panel_output: None,
+            pending_popover_anchor: None,
             all_windows_on_every_bar: shell_settings.all_windows_on_every_bar,
             preview_group: None,
             preview_pending: None,
@@ -1443,6 +1453,30 @@ impl LiveShell {
     }
 
     fn apply_panel_action(&mut self, action: PanelAction) {
+        let anchored_role = match &action {
+            PanelAction::Codex => Some((ShellRole::ProjectMenu, "panel-codex")),
+            PanelAction::Control => Some((ShellRole::ControlCenter, "panel-control")),
+            _ => None,
+        };
+        if anchored_role.is_some() {
+            self.pending_popover_anchor = None;
+        }
+        if let Some((role, control)) = anchored_role
+            && let (Some(output), Some(target)) = (
+                self.panel_output.clone(),
+                self.panel_host
+                    .semantic_targets_for_message(&action)
+                    .into_iter()
+                    .next(),
+            )
+        {
+            self.pending_popover_anchor = Some(PendingPopoverAnchor {
+                role,
+                control: control.to_owned(),
+                output,
+                bounds: target.bounds,
+            });
+        }
         match action {
             PanelAction::Launcher => self.set_launcher_visible(!self.launcher_visible),
             PanelAction::Task(index) => {
@@ -1689,6 +1723,33 @@ impl LiveShell {
 
     pub fn set_panel_output(&mut self, output: impl Into<String>) {
         self.panel_output = Some(output.into());
+    }
+
+    pub fn popover_anchor(&self, preferred: AnchorSide) -> Option<(ShellRole, ShellPopoverAnchor)> {
+        let anchor = self.pending_popover_anchor.as_ref()?;
+        let visible = match anchor.role {
+            ShellRole::ControlCenter => self.control_visible,
+            ShellRole::ProjectMenu => self.codex_project_menu_visible,
+            _ => false,
+        };
+        if !visible {
+            return None;
+        }
+        let bounds = Geometry {
+            x: anchor.bounds.origin.x.floor() as i32,
+            y: anchor.bounds.origin.y.floor() as i32,
+            width: anchor.bounds.size.width.ceil().max(1.0) as i32,
+            height: anchor.bounds.size.height.ceil().max(1.0) as i32,
+        };
+        Some((
+            anchor.role,
+            ShellPopoverAnchor {
+                control: anchor.control.clone(),
+                output: anchor.output.clone(),
+                bounds,
+                preferred,
+            },
+        ))
     }
 
     fn panel_windows(&self) -> Vec<OpenWindow> {
@@ -3697,7 +3758,7 @@ mod tests {
     use image::{Rgba, RgbaImage};
     use nickel_input::KeyCode;
     use nickel_session_protocol::{
-        PointerInteraction, PreviewTargetAction, ScreenshotTargetAction, ShellRole,
+        AnchorSide, PointerInteraction, PreviewTargetAction, ScreenshotTargetAction, ShellRole,
         ShellSemanticTarget, WindowMenuTargetAction,
     };
     use nickel_ui::backend::PaintCommand;
@@ -4296,6 +4357,46 @@ mod tests {
         assert!(shell.apply_panel_effects());
         assert_eq!(shell.window_menu, Some(WindowId(42)));
         assert_eq!(shell.window_menu_anchor_x, Some(expected_anchor));
+    }
+
+    #[test]
+    fn panel_popover_anchor_is_semantic_and_scoped_to_the_invoking_output() {
+        let mut shell = LiveShell::new().unwrap();
+        let _ = shell.scene(SurfaceRole::Panel, 1_280, 56);
+        shell.set_panel_output("left");
+        let target = shell
+            .panel_host
+            .unique_semantic_target_for_message(&super::PanelAction::Control)
+            .expect("control button");
+        let expected = target.bounds;
+        let outcome = shell
+            .panel_host
+            .perform_accessibility_action(target.id, SemanticAction::Invoke(ActionKind::Activate));
+        assert!(outcome.failures.is_empty(), "{:#?}", outcome.failures);
+        assert!(shell.apply_panel_effects());
+        let (role, first) = shell.popover_anchor(AnchorSide::Above).unwrap();
+        assert_eq!(role, ShellRole::ControlCenter);
+        assert_eq!(first.control, "panel-control");
+        assert_eq!(first.output, "left");
+        assert_eq!(first.bounds.x, expected.origin.x.floor() as i32);
+
+        shell.set_panel_output("right");
+        for _ in 0..2 {
+            let target = shell
+                .panel_host
+                .unique_semantic_target_for_message(&super::PanelAction::Control)
+                .unwrap();
+            let outcome = shell.panel_host.perform_accessibility_action(
+                target.id,
+                SemanticAction::Invoke(ActionKind::Activate),
+            );
+            assert!(outcome.failures.is_empty(), "{:#?}", outcome.failures);
+            assert!(shell.apply_panel_effects());
+        }
+        let (_, reopened) = shell.popover_anchor(AnchorSide::Below).unwrap();
+        assert_eq!(reopened.output, "right");
+        assert_eq!(reopened.preferred, AnchorSide::Below);
+        assert_eq!(reopened.bounds, first.bounds);
     }
 
     #[test]

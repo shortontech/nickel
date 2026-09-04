@@ -61,6 +61,77 @@ pub fn bottom_left_in(
     geometry
 }
 
+pub fn anchored_popover(
+    area: Geometry,
+    anchor: Geometry,
+    requested: (i32, i32),
+    preferred: nickel_session_protocol::AnchorSide,
+) -> Geometry {
+    use nickel_session_protocol::AnchorSide;
+
+    let width = requested.0.max(1).min(area.width.max(1));
+    let height = requested.1.max(1).min(area.height.max(1));
+    let gap = 4;
+    let candidate = |side| match side {
+        AnchorSide::Above => Geometry {
+            x: anchor.x + anchor.width - width,
+            y: anchor.y - height - gap,
+            width,
+            height,
+        },
+        AnchorSide::Below => Geometry {
+            x: anchor.x + anchor.width - width,
+            y: anchor.y + anchor.height + gap,
+            width,
+            height,
+        },
+        AnchorSide::Left => Geometry {
+            x: anchor.x - width - gap,
+            y: anchor.y + (anchor.height - height) / 2,
+            width,
+            height,
+        },
+        AnchorSide::Right => Geometry {
+            x: anchor.x + anchor.width + gap,
+            y: anchor.y + (anchor.height - height) / 2,
+            width,
+            height,
+        },
+    };
+    let opposite = match preferred {
+        AnchorSide::Above => AnchorSide::Below,
+        AnchorSide::Below => AnchorSide::Above,
+        AnchorSide::Left => AnchorSide::Right,
+        AnchorSide::Right => AnchorSide::Left,
+    };
+    let fits = |side: AnchorSide, geometry: Geometry| match side {
+        AnchorSide::Above | AnchorSide::Below => {
+            geometry.y >= area.y && geometry.y + geometry.height <= area.y + area.height
+        }
+        AnchorSide::Left | AnchorSide::Right => {
+            geometry.x >= area.x && geometry.x + geometry.width <= area.x + area.width
+        }
+    };
+    let preferred_geometry = candidate(preferred);
+    let mut geometry = if fits(preferred, preferred_geometry) {
+        preferred_geometry
+    } else {
+        let flipped = candidate(opposite);
+        if fits(opposite, flipped) {
+            flipped
+        } else {
+            preferred_geometry
+        }
+    };
+    geometry.x = geometry
+        .x
+        .clamp(area.x, area.x + (area.width - width).max(0));
+    geometry.y = geometry
+        .y
+        .clamp(area.y, area.y + (area.height - height).max(0));
+    geometry
+}
+
 pub fn initial_window(area: Geometry, cascade: i32) -> Geometry {
     let target_width = (area.width * 3 / 4).clamp(640, 1200);
     let target_height = (area.height * 3 / 4).clamp(480, 800);
@@ -79,9 +150,49 @@ pub fn space_location_for_bounds(target: Geometry, surface_geometry: Geometry) -
 #[cfg(test)]
 mod tests {
     use super::{
-        Geometry, bottom_left_in, centered_in, initial_window, output_for_window, panel,
-        space_location_for_bounds, work_area,
+        Geometry, anchored_popover, bottom_left_in, centered_in, initial_window, output_for_window,
+        panel, space_location_for_bounds, work_area,
     };
+    use nickel_session_protocol::AnchorSide;
+
+    #[test]
+    fn anchored_popovers_flip_slide_and_stay_in_negative_origin_work_areas() {
+        let area = Geometry {
+            x: -1920,
+            y: -200,
+            width: 1920,
+            height: 1000,
+        };
+        let bottom_right = Geometry {
+            x: -40,
+            y: 750,
+            width: 32,
+            height: 56,
+        };
+        let placed = anchored_popover(area, bottom_right, (420, 600), AnchorSide::Above);
+        assert_eq!(
+            placed,
+            Geometry {
+                x: -428,
+                y: 146,
+                width: 420,
+                height: 600
+            }
+        );
+
+        let top = Geometry {
+            x: -1900,
+            y: -190,
+            width: 40,
+            height: 40,
+        };
+        let flipped = anchored_popover(area, top, (500, 300), AnchorSide::Above);
+        assert_eq!(flipped.y, -146);
+        assert_eq!(
+            flipped.x, -1920,
+            "placement slides within the invoking output"
+        );
+    }
 
     #[test]
     fn panel_occupies_bottom_edge_and_work_area_stops_above_it() {

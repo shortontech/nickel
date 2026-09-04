@@ -676,6 +676,10 @@ impl WinitShell {
         self.display_geometries().ok()?.get(display_index).copied()
     }
 
+    pub fn panel_edge(&self) -> PanelEdge {
+        self.options.panel_edge
+    }
+
     pub fn surface_mut(&mut self, id: SurfaceId) -> Option<&mut ShellSurface> {
         let index = *self.surface_indices.get(&id.0)?;
         self.surfaces.get_mut(index)

@@ -349,6 +349,11 @@ pub enum ShellCommand {
         role: nickel_session_protocol::ShellRole,
         visible: bool,
     },
+    #[cfg(target_os = "linux")]
+    ShowAnchoredShellRole {
+        role: nickel_session_protocol::ShellRole,
+        anchor: nickel_session_protocol::ShellPopoverAnchor,
+    },
     HideContextMenu,
     HighlightWindow(WindowId),
     ClearWindowHighlight,

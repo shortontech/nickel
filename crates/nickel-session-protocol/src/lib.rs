@@ -78,6 +78,10 @@ pub enum Command {
         role: ShellRole,
         visible: bool,
     },
+    ShowAnchoredShellRole {
+        role: ShellRole,
+        anchor: ShellPopoverAnchor,
+    },
     LogOut,
     SessionAction {
         action: SessionAction,
@@ -795,6 +799,26 @@ pub struct Geometry {
     pub height: i32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnchorSide {
+    Above,
+    Below,
+    Left,
+    Right,
+}
+
+/// A semantic control anchor expressed in the invoking output's logical
+/// coordinate space. Output identity prevents identical per-output controls
+/// from being confused during placement.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShellPopoverAnchor {
+    pub control: String,
+    pub output: String,
+    pub bounds: Geometry,
+    pub preferred: AnchorSide,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutputLayout {
     pub primary: String,
@@ -1352,6 +1376,32 @@ mod tests {
                 envelope
             );
         }
+    }
+
+    #[test]
+    fn semantic_shell_popover_anchor_round_trips_with_output_scope() {
+        let envelope = ClientEnvelope {
+            token: "session-token".into(),
+            request_id: 20,
+            request: Request::Command(Command::ShowAnchoredShellRole {
+                role: ShellRole::ControlCenter,
+                anchor: ShellPopoverAnchor {
+                    control: "panel-control".into(),
+                    output: "HDMI-A-1".into(),
+                    bounds: Geometry {
+                        x: 1720,
+                        y: 0,
+                        width: 96,
+                        height: 56,
+                    },
+                    preferred: AnchorSide::Above,
+                },
+            }),
+        };
+        assert_eq!(
+            decode::<ClientEnvelope>(&encode(&envelope).unwrap()).unwrap(),
+            envelope
+        );
     }
 
     #[test]

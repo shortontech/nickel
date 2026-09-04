@@ -897,6 +897,25 @@ fn sync_visibility(shell: &mut WinitShell, state: &LiveShell) {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn sync_panel_popover_anchor(shell: &WinitShell, state: &LiveShell) {
+    let preferred = match shell.panel_edge() {
+        PanelEdge::Top => nickel_session_protocol::AnchorSide::Below,
+        PanelEdge::Bottom => nickel_session_protocol::AnchorSide::Above,
+    };
+    let Some((role, anchor)) = state.popover_anchor(preferred) else {
+        return;
+    };
+    if let Err(error) =
+        platform::send_shell_command(platform::ShellCommand::ShowAnchoredShellRole { role, anchor })
+    {
+        tracing::warn!(?role, %error, "failed to place anchored shell popover");
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn sync_panel_popover_anchor(_shell: &WinitShell, _state: &LiveShell) {}
+
 fn set_surface_visibility(shell: &mut WinitShell, id: SurfaceId, role: SurfaceRole, visible: bool) {
     let changed = if visible {
         shell.show(id)
@@ -1248,6 +1267,7 @@ fn handle_shell_input(
                     .map(|entry| entry.window().size().0)
                     .unwrap_or_default();
                 if state.panel_click(x, width, button == PointerButton::Secondary) {
+                    sync_panel_popover_anchor(shell, state);
                     sync_visibility(shell, state);
                     state.sync_transient_overlays();
                     focus_visible_overlay(shell, state);
@@ -1334,6 +1354,25 @@ fn handle_shell_input(
                             started.elapsed().as_secs_f64() * 1_000.0
                         );
                     }
+                }
+            }
+        }
+        InputEvent::Touch(nickel_input::TouchEvent::Ended { position, .. })
+            if role == SurfaceRole::Panel =>
+        {
+            let width = shell
+                .surface(surface)
+                .map(|entry| entry.window().size().0)
+                .unwrap_or_default();
+            if state.panel_click(position.x as f32, width, false) {
+                sync_panel_popover_anchor(shell, state);
+                sync_visibility(shell, state);
+                focus_visible_overlay(shell, state);
+                render_role(shell, state, SurfaceRole::ControlCenter)?;
+                if state.surface_visible(SurfaceRole::CodexProjectMenu) {
+                    codex
+                        .present(shell, codex.project_menu)
+                        .map_err(|error| format!("{error:?}"))?;
                 }
             }
         }
@@ -1460,6 +1499,9 @@ fn handle_controller_action(
         _ => false,
     };
     if changed {
+        if role == SurfaceRole::Panel {
+            sync_panel_popover_anchor(shell, state);
+        }
         sync_visibility(shell, state);
         render_role(shell, state, role)?;
     }
