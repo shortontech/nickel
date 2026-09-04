@@ -395,7 +395,31 @@ impl DesktopApplication {
         if let Some(id) = entry {
             match row {
                 0 => self.activate(id),
-                1 => {
+                1 | 2 => {
+                    let paths = self
+                        .layout
+                        .items()
+                        .iter()
+                        .filter(|item| self.layout.selected().contains(&item.id))
+                        .map(|item| item.entry.path.clone())
+                        .collect::<Vec<_>>();
+                    if let Err(error) = nickel_file::publish_file_clipboard(&paths, row == 1) {
+                        self.error = Some(format!("Could not update file clipboard: {error}"));
+                    }
+                }
+                3 => {
+                    if let Some(path) = self
+                        .layout
+                        .items()
+                        .iter()
+                        .find(|item| item.id == id)
+                        .map(|item| item.entry.path.clone())
+                        && let Err(error) = launch_nickel_file_rename(&path)
+                    {
+                        self.error = Some(format!("Could not rename: {error}"));
+                    }
+                }
+                4 => {
                     if let Some(path) = self
                         .layout
                         .items()
@@ -494,8 +518,13 @@ impl DesktopApplication {
         let PhysicalKey::Code(code) = key.physical else {
             return false;
         };
+        let move_selected = key.modifiers.aggregate(AggregateModifier::Alt);
         match code {
             KeyCode::KeyA if self.modifiers.toggle => self.layout.select_all(),
+            KeyCode::ArrowLeft if move_selected => self.move_selected_by(-96.0, 0.0),
+            KeyCode::ArrowRight if move_selected => self.move_selected_by(96.0, 0.0),
+            KeyCode::ArrowUp if move_selected => self.move_selected_by(0.0, -112.0),
+            KeyCode::ArrowDown if move_selected => self.move_selected_by(0.0, 112.0),
             KeyCode::ArrowLeft => self.layout.select_direction(-1, 0, self.modifiers.range),
             KeyCode::ArrowRight => self.layout.select_direction(1, 0, self.modifiers.range),
             KeyCode::ArrowUp => self.layout.select_direction(0, -1, self.modifiers.range),
@@ -512,6 +541,14 @@ impl DesktopApplication {
             _ => return false,
         }
         true
+    }
+
+    fn move_selected_by(&mut self, x: f32, y: f32) {
+        if let Some(id) = self.layout.selected().iter().copied().next() {
+            self.layout
+                .move_group(id, DesktopPoint { x, y }, &self.active_output);
+            self.save_layout();
+        }
     }
 
     fn paint_icons(&mut self) -> Vec<PaintCommand> {
@@ -538,6 +575,13 @@ impl DesktopApplication {
                         self.palette.surface_hover
                     },
                     radius: 8.0,
+                });
+            }
+            if self.pointer_dragged && self.layout.selected().contains(&item.id) {
+                commands.push(PaintCommand::Stroke {
+                    rect: Rect::new(x, y, 96.0, 108.0),
+                    color: self.palette.accent,
+                    width: 2.0,
                 });
             }
             let pixels = self
@@ -589,7 +633,7 @@ impl DesktopApplication {
         }
         if let Some((origin, entry)) = self.context_menu {
             let labels: &[&str] = if entry.is_some() {
-                &["Open", "Properties"]
+                &["Open", "Cut", "Copy", "Rename", "Properties"]
             } else {
                 &[
                     "Name (ascending)",
@@ -710,6 +754,22 @@ fn launch_nickel_file_properties(path: &std::path::Path) -> Result<(), String> {
         });
     std::process::Command::new(executable)
         .arg("--properties")
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn launch_nickel_file_rename(path: &std::path::Path) -> Result<(), String> {
+    let executable = std::env::current_exe()
+        .map_err(|error| error.to_string())?
+        .with_file_name(if cfg!(target_os = "windows") {
+            "nickel-file.exe"
+        } else {
+            "nickel-file"
+        });
+    std::process::Command::new(executable)
+        .arg("--rename")
         .arg(path)
         .spawn()
         .map(|_| ())
@@ -1827,9 +1887,25 @@ impl LiveShell {
 
     pub fn desktop_file_drop(&mut self, source: &std::path::Path) -> bool {
         let application = self.desktop_host.application_mut();
-        let destination = application
+        let target = application
             .hit(application.pointer_position)
-            .and_then(|id| application.layout.items().iter().find(|item| item.id == id))
+            .and_then(|id| application.layout.items().iter().find(|item| item.id == id));
+        if let Some(launcher) = target.filter(|item| {
+            !item.entry.is_directory && nickel_file::is_application_launcher(&item.entry.path)
+        }) {
+            return match nickel_file::open_with_launcher(&launcher.entry.path, source) {
+                Ok(()) => true,
+                Err(error) => {
+                    application.error = Some(format!(
+                        "Could not open {} with {}: {error}",
+                        source.display(),
+                        launcher.entry.display_name()
+                    ));
+                    true
+                }
+            };
+        }
+        let destination = target
             .filter(|item| item.entry.is_directory)
             .map(|item| item.entry.path.clone())
             .unwrap_or_else(nickel_file::desktop_directory);

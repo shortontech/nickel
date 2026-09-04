@@ -885,6 +885,25 @@ impl FileApp {
         app
     }
 
+    pub fn launch_rename(path: PathBuf) -> Self {
+        let location = path
+            .parent()
+            .map(|parent| parent.to_path_buf())
+            .unwrap_or_else(|| path.clone());
+        let mut app = Self::new(location);
+        if let Some(index) = app
+            .browser
+            .entries()
+            .iter()
+            .position(|entry| entry.path == path)
+        {
+            app.selected = Some(index);
+            app.selected_entries.insert(index);
+            <Self as nickel_ui::Application>::update(&mut app, FileMessage::BeginRename);
+        }
+        app
+    }
+
     fn with_browser(browser: DirectoryBrowser, status: String) -> Self {
         let settings = ShellSettings::load_default();
         let (sidebar_sender, sidebar_receiver) = mpsc::channel();
@@ -3071,6 +3090,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let first = arguments.next();
     let application = if first.as_deref() == Some(std::ffi::OsStr::new("--properties")) {
         FileApp::launch_properties(
+            arguments
+                .next()
+                .map(PathBuf::from)
+                .unwrap_or_else(home_directory),
+        )
+    } else if first.as_deref() == Some(std::ffi::OsStr::new("--rename")) {
+        FileApp::launch_rename(
             arguments
                 .next()
                 .map(PathBuf::from)

@@ -511,6 +511,88 @@ pub(crate) fn open_path(_path: &Path) -> Result<(), OpenPathError> {
     Err(OpenPathError::Unsupported)
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) fn open_with_launcher(launcher: &Path, source: &Path) -> Result<(), OpenPathError> {
+    if !launcher.exists() || !source.exists() {
+        return Err(OpenPathError::TargetMissing);
+    }
+    std::process::Command::new("gio")
+        .args([
+            std::ffi::OsStr::new("launch"),
+            launcher.as_os_str(),
+            source.as_os_str(),
+        ])
+        .status()
+        .map_err(spawn_open_error)
+        .and_then(|status| {
+            status
+                .success()
+                .then_some(())
+                .ok_or_else(|| OpenPathError::Platform(format!("gio launch exited with {status}")))
+        })
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn open_with_launcher(launcher: &Path, source: &Path) -> Result<(), OpenPathError> {
+    if !launcher.exists() || !source.exists() {
+        return Err(OpenPathError::TargetMissing);
+    }
+    std::process::Command::new("open")
+        .arg("-a")
+        .arg(launcher)
+        .arg(source)
+        .status()
+        .map_err(spawn_open_error)
+        .and_then(|status| {
+            status
+                .success()
+                .then_some(())
+                .ok_or_else(|| OpenPathError::Platform(format!("open -a exited with {status}")))
+        })
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn open_with_launcher(launcher: &Path, source: &Path) -> Result<(), OpenPathError> {
+    if !launcher.exists() || !source.exists() {
+        return Err(OpenPathError::TargetMissing);
+    }
+    use std::os::windows::ffi::OsStrExt;
+    use windows::{
+        Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
+        core::PCWSTR,
+    };
+    let launcher = launcher
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let source = source
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let verb = "open\0".encode_utf16().collect::<Vec<_>>();
+    // SAFETY: all UTF-16 strings are NUL-terminated and live for this synchronous call.
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            PCWSTR(verb.as_ptr()),
+            PCWSTR(launcher.as_ptr()),
+            PCWSTR(source.as_ptr()),
+            None,
+            SW_SHOWNORMAL,
+        )
+    };
+    (result.0 as isize > 32).then_some(()).ok_or_else(|| {
+        OpenPathError::Platform(format!("Windows shell error {}", result.0 as isize))
+    })
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+pub(crate) fn open_with_launcher(_launcher: &Path, _source: &Path) -> Result<(), OpenPathError> {
+    Err(OpenPathError::Unsupported)
+}
+
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::{OpenPathError, open_path, spawn_open_error, user_directories};

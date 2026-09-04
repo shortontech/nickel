@@ -37,6 +37,24 @@ pub fn open_path(path: &Path) -> Result<(), String> {
     platform::open_path(path).map_err(|error| error.to_string())
 }
 
+pub fn is_application_launcher(path: &Path) -> bool {
+    path.extension().is_some_and(|extension| {
+        let extension = extension.to_string_lossy();
+        extension.eq_ignore_ascii_case("desktop")
+            || extension.eq_ignore_ascii_case("lnk")
+            || extension.eq_ignore_ascii_case("app")
+    })
+}
+
+/// Delivers a negotiated native file drop to an application launcher.
+pub fn open_with_launcher(launcher: &Path, source: &Path) -> Result<(), String> {
+    platform::open_with_launcher(launcher, source).map_err(|error| error.to_string())
+}
+
+pub fn publish_file_clipboard(paths: &[PathBuf], cut: bool) -> Result<(), String> {
+    platform::publish_file_clipboard(paths, cut).map_err(|error| error.to_string())
+}
+
 pub fn file_identity(path: &Path) -> io::Result<FileIdentity> {
     let metadata = fs::metadata(path)?;
     metadata_identity(path, &metadata).ok_or_else(|| {
@@ -642,5 +660,21 @@ mod tests {
         assert_eq!(fs::read(second.join("nested.txt")).unwrap(), b"contents");
         assert_ne!(first, second);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn desktop_launcher_detection_covers_native_platform_shortcuts() {
+        assert!(super::is_application_launcher(std::path::Path::new(
+            "Editor.desktop"
+        )));
+        assert!(super::is_application_launcher(std::path::Path::new(
+            "Editor.LNK"
+        )));
+        assert!(super::is_application_launcher(std::path::Path::new(
+            "Editor.app"
+        )));
+        assert!(!super::is_application_launcher(std::path::Path::new(
+            "notes.txt"
+        )));
     }
 }
