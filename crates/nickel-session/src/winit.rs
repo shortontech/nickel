@@ -498,19 +498,21 @@ pub fn init_winit(
                         let windows = state.preview_capture_candidates(wave);
                         let (renderer, _) = backend.bind().unwrap();
                         for (id, window) in windows {
-                            let (rgba, had_frame) = state.take_preview_capture_buffer(id);
+                            let (rgba, previous_dimensions) = state.take_preview_capture_buffer(id);
                             let mut rgba = rgba;
-                            if capture_preview(renderer, &window, &mut rgba) {
+                            if let Some((width, height)) =
+                                capture_preview(renderer, &window, &mut rgba)
+                            {
                                 state.store_preview(
                                     id,
                                     PreviewFrame {
-                                        width: crate::state::PREVIEW_WIDTH as u16,
-                                        height: crate::state::PREVIEW_HEIGHT as u16,
+                                        width,
+                                        height,
                                         rgba,
                                     },
                                 );
                             } else {
-                                state.preview_capture_failed(id, rgba, had_frame);
+                                state.preview_capture_failed(id, rgba, previous_dimensions);
                             }
                         }
                         last_preview_capture = Instant::now();
@@ -754,18 +756,21 @@ fn capture_bound_framebuffer(
     }
 }
 
-fn capture_preview(renderer: &mut GlesRenderer, window: &Window, rgba: &mut Vec<u8>) -> bool {
+fn capture_preview(
+    renderer: &mut GlesRenderer,
+    window: &Window,
+    rgba: &mut Vec<u8>,
+) -> Option<(u16, u16)> {
     (|| {
-        const WIDTH: i32 = 240;
-        const HEIGHT: i32 = 135;
         let geometry = window.geometry();
-        if geometry.size.w <= 0 || geometry.size.h <= 0 {
-            return None;
-        }
+        let dimensions =
+            crate::state::preview_capture_dimensions(geometry.size.w, geometry.size.h)?;
+        let width = i32::from(dimensions.0);
+        let height = i32::from(dimensions.1);
         let mut texture = Offscreen::<GlesTexture>::create_buffer(
             renderer,
             Fourcc::Abgr8888,
-            (WIDTH, HEIGHT).into(),
+            (width, height).into(),
         )
         .ok()?;
         let mut framebuffer = renderer.bind(&mut texture).ok()?;
@@ -775,7 +780,7 @@ fn capture_preview(renderer: &mut GlesRenderer, window: &Window, rgba: &mut Vec<
             Scale::from(1.0),
             1.0,
         );
-        let damage = Rectangle::from_size((WIDTH, HEIGHT).into());
+        let damage = Rectangle::from_size((width, height).into());
         let reference = Rectangle::from_size(geometry.size.to_physical(1));
         let elements = constrain_render_elements(
             elements,
@@ -791,26 +796,25 @@ fn capture_preview(renderer: &mut GlesRenderer, window: &Window, rgba: &mut Vec<
         )
         .collect::<Vec<_>>();
         let mut frame = renderer
-            .render(&mut framebuffer, (WIDTH, HEIGHT).into(), Transform::Normal)
+            .render(&mut framebuffer, (width, height).into(), Transform::Normal)
             .ok()?;
         frame
             .clear(Color32F::new(0.03, 0.04, 0.06, 1.0), &[damage])
             .ok()?;
         draw_render_elements(&mut frame, 1.0, &elements, &[damage]).ok()?;
         frame.finish().ok()?.wait().ok()?;
-        let buffer_region = Rectangle::<i32, Buffer>::from_size((WIDTH, HEIGHT).into());
+        let buffer_region = Rectangle::<i32, Buffer>::from_size((width, height).into());
         let mapping = renderer
             .copy_framebuffer(&framebuffer, buffer_region, Fourcc::Abgr8888)
             .ok()?;
         let mapped = renderer.map_texture(&mapping).ok()?;
-        if !crate::state::preview_mapping_has_exact_size(mapped) {
+        if !crate::state::preview_mapping_has_exact_size(mapped, dimensions.0, dimensions.1) {
             return None;
         }
         let replacement = crate::state::reuse_preview_pixels(std::mem::take(rgba), mapped);
         *rgba = replacement;
-        Some(())
+        Some(dimensions)
     })()
-    .is_some()
 }
 
 fn normalize_capture_rows(

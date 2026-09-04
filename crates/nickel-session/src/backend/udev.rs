@@ -2303,19 +2303,19 @@ impl NickelSession {
             };
             let mut preview_retry = false;
             for (id, window) in preview_windows {
-                let (rgba, had_frame) = self.take_preview_capture_buffer(id);
+                let (rgba, previous_dimensions) = self.take_preview_capture_buffer(id);
                 let mut rgba = rgba;
-                if capture_preview(&mut renderer, &window, &mut rgba) {
+                if let Some((width, height)) = capture_preview(&mut renderer, &window, &mut rgba) {
                     self.store_preview(
                         id,
                         PreviewFrame {
-                            width: crate::state::PREVIEW_WIDTH as u16,
-                            height: crate::state::PREVIEW_HEIGHT as u16,
+                            width,
+                            height,
                             rgba,
                         },
                     );
                 } else {
-                    self.preview_capture_failed(id, rgba, had_frame);
+                    self.preview_capture_failed(id, rgba, previous_dimensions);
                     preview_retry = true;
                 }
             }
@@ -3231,6 +3231,28 @@ fn switcher_visible_range(count: usize, selected: usize) -> std::ops::Range<usiz
     start..start + visible
 }
 
+fn contained_preview_bounds(
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    source_width: u32,
+    source_height: u32,
+) -> (u32, u32, u32, u32) {
+    let bounds = nickel_ui::ImagePresentation::default().bounds(
+        nickel_ui::Rect::new(x as f32, y as f32, width as f32, height as f32),
+        nickel_ui::Size::new(source_width as f32, source_height as f32),
+    );
+    let fitted_width = bounds.size.width.round().clamp(0.0, width as f32) as u32;
+    let fitted_height = bounds.size.height.round().clamp(0.0, height as f32) as u32;
+    (
+        x + (width - fitted_width) / 2,
+        y + (height - fitted_height) / 2,
+        fitted_width,
+        fitted_height,
+    )
+}
+
 fn task_switcher_buffer(
     state: &NickelSession,
     output_size: smithay::utils::Size<i32, Physical>,
@@ -3291,17 +3313,29 @@ fn task_switcher_buffer(
             ) else {
                 continue;
             };
+            let (thumbnail_x, thumbnail_y, thumbnail_width, thumbnail_height) =
+                contained_preview_bounds(
+                    x + 8,
+                    padding + 8,
+                    card_width - 16,
+                    card_height - 16,
+                    source.width(),
+                    source.height(),
+                );
+            if thumbnail_width == 0 || thumbnail_height == 0 {
+                continue;
+            }
             let thumbnail = image::imageops::resize(
                 &source,
-                card_width - 16,
-                card_height - 16,
+                thumbnail_width,
+                thumbnail_height,
                 image::imageops::FilterType::Triangle,
             );
             image::imageops::overlay(
                 &mut image,
                 &thumbnail,
-                i64::from(x + 8),
-                i64::from(padding + 8),
+                i64::from(thumbnail_x),
+                i64::from(thumbnail_y),
             );
         }
     });
@@ -3340,18 +3374,17 @@ fn capture_preview(
     renderer: &mut NativeRenderer<'_>,
     window: &smithay::desktop::Window,
     rgba: &mut Vec<u8>,
-) -> bool {
+) -> Option<(u16, u16)> {
     (|| {
-        const WIDTH: i32 = 240;
-        const HEIGHT: i32 = 135;
         let geometry = window.geometry();
-        if geometry.size.w <= 0 || geometry.size.h <= 0 {
-            return None;
-        }
+        let dimensions =
+            crate::state::preview_capture_dimensions(geometry.size.w, geometry.size.h)?;
+        let width = i32::from(dimensions.0);
+        let height = i32::from(dimensions.1);
         let mut texture = <NativeRenderer<'_> as Offscreen<GlesTexture>>::create_buffer(
             renderer,
             Fourcc::Abgr8888,
-            (WIDTH, HEIGHT).into(),
+            (width, height).into(),
         )
         .ok()?;
         let mut framebuffer = renderer.bind(&mut texture).ok()?;
@@ -3361,7 +3394,7 @@ fn capture_preview(
             Scale::from(1.0),
             1.0,
         );
-        let damage = Rectangle::from_size((WIDTH, HEIGHT).into());
+        let damage = Rectangle::from_size((width, height).into());
         let reference = Rectangle::from_size(geometry.size.to_physical(1));
         let elements = constrain_render_elements(
             elements,
@@ -3377,26 +3410,25 @@ fn capture_preview(
         )
         .collect::<Vec<_>>();
         let mut frame = renderer
-            .render(&mut framebuffer, (WIDTH, HEIGHT).into(), Transform::Normal)
+            .render(&mut framebuffer, (width, height).into(), Transform::Normal)
             .ok()?;
         frame
             .clear(Color32F::new(0.03, 0.04, 0.06, 1.0), &[damage])
             .ok()?;
         draw_render_elements(&mut frame, 1.0, &elements, &[damage]).ok()?;
         frame.finish().ok()?.wait().ok()?;
-        let region = Rectangle::<i32, Buffer>::from_size((WIDTH, HEIGHT).into());
+        let region = Rectangle::<i32, Buffer>::from_size((width, height).into());
         let mapping = renderer
             .copy_framebuffer(&framebuffer, region, Fourcc::Abgr8888)
             .ok()?;
         let mapped = renderer.map_texture(&mapping).ok()?;
-        if !crate::state::preview_mapping_has_exact_size(mapped) {
+        if !crate::state::preview_mapping_has_exact_size(mapped, dimensions.0, dimensions.1) {
             return None;
         }
         let replacement = crate::state::reuse_preview_pixels(std::mem::take(rgba), mapped);
         *rgba = replacement;
-        Some(())
+        Some(dimensions)
     })()
-    .is_some()
 }
 
 fn save_mapped_capture(

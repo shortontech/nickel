@@ -72,8 +72,6 @@ const RECURRING_DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(30);
 const WALLPAPER_MAX_WIDTH: u32 = 7680;
 const WALLPAPER_MAX_HEIGHT: u32 = 4320;
 const PREVIEW_CACHE_CAPACITY: usize = 32;
-const PREVIEW_CACHE_WIDTH: u32 = 260;
-const PREVIEW_CACHE_HEIGHT: u32 = 116;
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -3654,7 +3652,7 @@ fn normalize_tray_items(items: Vec<TrayItem>) -> Vec<TrayItem> {
 }
 
 fn normalize_preview_image(image: &image::RgbaImage) -> image::RgbaImage {
-    crate::icons::resized(image, PREVIEW_CACHE_WIDTH, PREVIEW_CACHE_HEIGHT)
+    image.clone()
 }
 
 fn retain_preview_generation(
@@ -4768,15 +4766,15 @@ mod tests {
     }
 
     #[test]
-    fn preview_cache_normalizes_source_pixels_to_the_rendered_card_bound() {
-        let source = RgbaImage::from_pixel(640, 360, Rgba([10, 20, 30, 255]));
+    fn preview_cache_retains_authoritative_source_aspect_for_ui_containment() {
+        let source = RgbaImage::from_pixel(240, 135, Rgba([10, 20, 30, 255]));
         let normalized = super::normalize_preview_image(&source);
 
-        assert_eq!(normalized.dimensions(), (260, 116));
-        assert_eq!(normalized.as_raw().len(), 260 * 116 * 4);
+        assert_eq!(normalized.dimensions(), source.dimensions());
+        assert_eq!(normalized.as_raw(), source.as_raw());
         assert_eq!(
             super::PREVIEW_CACHE_CAPACITY * normalized.as_raw().len(),
-            3_860_480
+            4_147_200
         );
     }
 
@@ -4790,13 +4788,9 @@ mod tests {
             icon: RgbaImage::new(18, 18),
         }];
         shell.tray_icons = panel_tray_icons(&shell.tray);
-        shell.preview_images.insert(
-            WindowId(1),
-            Arc::new(RgbaImage::new(
-                super::PREVIEW_CACHE_WIDTH,
-                super::PREVIEW_CACHE_HEIGHT,
-            )),
-        );
+        shell
+            .preview_images
+            .insert(WindowId(1), Arc::new(RgbaImage::new(240, 135)));
 
         let diagnostics = shell.image_cache_diagnostics();
         assert_eq!(diagnostics.wallpaper_entries, 1);
@@ -4804,17 +4798,14 @@ mod tests {
         assert_eq!(diagnostics.tray_entries, 2);
         assert_eq!(diagnostics.tray_bytes, 18 * 18 * 4 * 2);
         assert_eq!(diagnostics.preview_entries, 1);
-        assert_eq!(
-            diagnostics.preview_bytes,
-            super::PREVIEW_CACHE_WIDTH as usize * super::PREVIEW_CACHE_HEIGHT as usize * 4
-        );
+        assert_eq!(diagnostics.preview_bytes, 240 * 135 * 4);
     }
 
     #[test]
     fn preview_cache_churn_releases_previous_group_pixels_and_stays_bounded() {
         let normalized = Arc::new(super::normalize_preview_image(&RgbaImage::from_pixel(
-            640,
-            360,
+            240,
+            135,
             Rgba([10, 20, 30, 255]),
         )));
         let mut cache = HashMap::new();
@@ -4838,7 +4829,7 @@ mod tests {
                     .values()
                     .map(|image| image.as_raw().len())
                     .sum::<usize>(),
-                3_860_480
+                super::PREVIEW_CACHE_CAPACITY * normalized.as_raw().len()
             );
         }
         cache.clear();

@@ -501,6 +501,25 @@ pub const PREVIEW_ENTRIES_PER_VISIBLE_CONSUMER: usize = 7;
 pub const PREVIEW_ENTRY_CAPACITY: usize = PREVIEW_ENTRIES_PER_VISIBLE_CONSUMER * 2;
 pub const PREVIEW_BYTE_CAPACITY: usize = PREVIEW_ENTRY_CAPACITY * PREVIEW_FRAME_BYTES;
 
+pub(crate) fn preview_capture_dimensions(width: i32, height: i32) -> Option<(u16, u16)> {
+    if width <= 0 || height <= 0 {
+        return None;
+    }
+    let width = u64::try_from(width).ok()?;
+    let height = u64::try_from(height).ok()?;
+    let max_width = PREVIEW_WIDTH as u64;
+    let max_height = PREVIEW_HEIGHT as u64;
+    let (fitted_width, fitted_height) = if width * max_height > max_width * height {
+        (max_width, (height * max_width / width).max(1))
+    } else {
+        ((width * max_height / height).max(1), max_height)
+    };
+    Some((
+        u16::try_from(fitted_width).ok()?,
+        u16::try_from(fitted_height).ok()?,
+    ))
+}
+
 fn bounded_preview_ids(ids: Vec<WindowId>, selected: usize) -> Vec<WindowId> {
     let start = selected
         .saturating_sub(PREVIEW_ENTRIES_PER_VISIBLE_CONSUMER / 2)
@@ -565,8 +584,11 @@ pub(crate) fn reuse_preview_pixels(mut rgba: Vec<u8>, mapped: &[u8]) -> Vec<u8> 
     rgba
 }
 
-pub(crate) fn preview_mapping_has_exact_size(mapped: &[u8]) -> bool {
-    mapped.len() == PREVIEW_FRAME_BYTES
+pub(crate) fn preview_mapping_has_exact_size(mapped: &[u8], width: u16, height: u16) -> bool {
+    usize::from(width)
+        .checked_mul(usize::from(height))
+        .and_then(|pixels| pixels.checked_mul(4))
+        .is_some_and(|expected| mapped.len() == expected && expected <= PREVIEW_FRAME_BYTES)
 }
 
 fn record_preview_capture_attempt(
@@ -799,28 +821,36 @@ impl NickelSession {
         candidates
     }
 
-    pub(crate) fn take_preview_capture_buffer(&mut self, id: WindowId) -> (Vec<u8>, bool) {
+    pub(crate) fn take_preview_capture_buffer(
+        &mut self,
+        id: WindowId,
+    ) -> (Vec<u8>, Option<(u16, u16)>) {
         self.preview_frames.remove(&id).map_or_else(
             || {
                 (
                     self.preview_spares
                         .remove(&id)
                         .unwrap_or_else(|| vec![0; PREVIEW_FRAME_BYTES]),
-                    false,
+                    None,
                 )
             },
-            |frame| (frame.rgba, true),
+            |frame| (frame.rgba, Some((frame.width, frame.height))),
         )
     }
 
-    pub(crate) fn preview_capture_failed(&mut self, id: WindowId, rgba: Vec<u8>, had_frame: bool) {
+    pub(crate) fn preview_capture_failed(
+        &mut self,
+        id: WindowId,
+        rgba: Vec<u8>,
+        previous_dimensions: Option<(u16, u16)>,
+    ) {
         self.preview_counters.capture_failures += 1;
-        if had_frame {
+        if let Some((width, height)) = previous_dimensions {
             self.preview_frames.insert(
                 id,
                 PreviewFrame {
-                    width: PREVIEW_WIDTH as u16,
-                    height: PREVIEW_HEIGHT as u16,
+                    width,
+                    height,
                     rgba,
                 },
             );
@@ -5866,9 +5896,9 @@ mod protocol_tests {
         session.preview_frames.insert(
             id,
             super::PreviewFrame {
-                width: super::PREVIEW_WIDTH as u16,
+                width: 75,
                 height: super::PREVIEW_HEIGHT as u16,
-                rgba: vec![41; PREVIEW_FRAME_BYTES],
+                rgba: vec![41; 75 * super::PREVIEW_HEIGHT * 4],
             },
         );
         let allocation = session.preview_frames[&id].rgba.as_ptr();
@@ -5878,6 +5908,8 @@ mod protocol_tests {
 
         assert_eq!(session.preview_frames[&id].rgba.as_ptr(), allocation);
         assert_eq!(session.preview_frames[&id].rgba[0], 41);
+        assert_eq!(session.preview_frames[&id].width, 75);
+        assert_eq!(session.preview_frames[&id].height, 135);
         assert_eq!(session.preview_counters.evictions, 0);
         assert_eq!(session.preview_counters.capture_failures, 1);
     }
@@ -5897,8 +5929,8 @@ mod protocol_tests {
         session.preview_admitted.extend(ids.iter().copied());
         for id in ids {
             let (rgba, had_frame) = session.take_preview_capture_buffer(id);
-            assert!(!had_frame);
-            session.preview_capture_failed(id, rgba, false);
+            assert!(had_frame.is_none());
+            session.preview_capture_failed(id, rgba, None);
         }
 
         assert_eq!(session.preview_bytes(), PREVIEW_BYTE_CAPACITY);
@@ -5913,13 +5945,41 @@ mod protocol_tests {
     fn invalid_mapped_length_leaves_the_capture_lease_untouched() {
         let pixels = vec![23; PREVIEW_FRAME_BYTES];
         let allocation = pixels.as_ptr();
-        assert!(!preview_mapping_has_exact_size(&vec![
-            0;
-            PREVIEW_FRAME_BYTES
-                - 1
-        ]));
+        assert!(!preview_mapping_has_exact_size(
+            &vec![0; PREVIEW_FRAME_BYTES - 1],
+            super::PREVIEW_WIDTH as u16,
+            super::PREVIEW_HEIGHT as u16,
+        ));
         assert_eq!(pixels.as_ptr(), allocation);
         assert_eq!(pixels[0], 23);
+    }
+
+    #[test]
+    fn preview_capture_dimensions_are_bounded_and_preserve_window_aspect() {
+        for (source, expected) in [
+            ((3440, 1440), (240, 100)),
+            ((1920, 1080), (240, 135)),
+            ((1600, 1200), (180, 135)),
+            ((1000, 1000), (135, 135)),
+            ((900, 1600), (75, 135)),
+            ((1919, 1079), (240, 134)),
+        ] {
+            let fitted = super::preview_capture_dimensions(source.0, source.1)
+                .unwrap_or_else(|| panic!("positive source {source:?} has capture dimensions"));
+            assert_eq!(fitted, expected, "source {source:?}");
+            assert!(usize::from(fitted.0) <= super::PREVIEW_WIDTH);
+            assert!(usize::from(fitted.1) <= super::PREVIEW_HEIGHT);
+            if usize::from(fitted.0) == super::PREVIEW_WIDTH {
+                let ideal_height = source.1 as f64 * f64::from(fitted.0) / source.0 as f64;
+                assert!((ideal_height - f64::from(fitted.1)).abs() <= 1.0);
+            } else {
+                assert_eq!(usize::from(fitted.1), super::PREVIEW_HEIGHT);
+                let ideal_width = source.0 as f64 * f64::from(fitted.1) / source.1 as f64;
+                assert!((ideal_width - f64::from(fitted.0)).abs() <= 1.0);
+            }
+        }
+        assert_eq!(super::preview_capture_dimensions(0, 1080), None);
+        assert_eq!(super::preview_capture_dimensions(1920, -1), None);
     }
 
     #[test]

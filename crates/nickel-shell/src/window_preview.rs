@@ -547,6 +547,49 @@ mod tests {
         assert_eq!(native_thumbnail_bounds(1), (306, 50, 566, 166));
     }
 
+    #[test]
+    fn grouped_preview_images_are_contained_and_centered_without_changing_card_geometry() {
+        let palette = ThemePalette::from_appearance(Appearance::default());
+        let expected_activation = build_preview_frame(&group(), &HashMap::new(), None, palette)
+            .semantic_bounds(PreviewAction::Activate(WindowId(4)))
+            .expect("activation target exists");
+
+        for (source, expected_size) in [
+            ((3440, 1440), (260.0, 108.84)),
+            ((1920, 1080), (206.22, 116.0)),
+            ((1200, 1200), (116.0, 116.0)),
+            ((900, 1600), (65.25, 116.0)),
+        ] {
+            let mut previews = HashMap::new();
+            previews.insert(
+                WindowId(4),
+                Arc::new(image::RgbaImage::new(source.0, source.1)),
+            );
+            let frame = build_preview_frame(&group(), &previews, None, palette);
+            let bounds = frame
+                .commands()
+                .iter()
+                .find_map(|command| match command {
+                    PaintCommand::Image { id, bounds, .. }
+                        if *id == preview_image_id(WindowId(4)) =>
+                    {
+                        Some(*bounds)
+                    }
+                    _ => None,
+                })
+                .expect("live preview emits an image command");
+            assert!((bounds.size.width - expected_size.0).abs() < 0.02);
+            assert!((bounds.size.height - expected_size.1).abs() < 0.02);
+            assert!(bounds.size.width <= CARD_WIDTH - CARD_PADDING * 2.0);
+            assert!(bounds.size.height <= THUMBNAIL_HEIGHT);
+            assert_eq!(
+                frame.semantic_bounds(PreviewAction::Activate(WindowId(4))),
+                Some(expected_activation),
+                "source {source:?} must not move interaction geometry"
+            );
+        }
+    }
+
     fn center(rect: Rect) -> Point {
         Point {
             x: rect.origin.x + rect.size.width / 2.0,

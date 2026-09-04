@@ -1,14 +1,49 @@
 use super::{
     DisabledOutput, DrmRenderStrategy, IDENTIFY_BADGE_BYTES, IdentifyBadgeCache,
     RendererLifecycleLedger, RendererRetainedReason, TaskSwitcherBufferKey,
-    consume_pending_dependent, copy_capture_damage, copy_mapped_damage_to_strided,
-    copy_mapped_region_to_strided, damage_bounding_box, dependent_renderers_after_primary_removal,
-    device_activation_priority, draw_memory_render_buffer, drm_render_strategy, mapped_damage_rows,
+    consume_pending_dependent, contained_preview_bounds, copy_capture_damage,
+    copy_mapped_damage_to_strided, copy_mapped_region_to_strided, damage_bounding_box,
+    dependent_renderers_after_primary_removal, device_activation_priority,
+    draw_memory_render_buffer, drm_render_strategy, mapped_damage_rows,
     mark_disabled_outputs_absent, normalize_capture_rows, paced_render_delay,
     parse_kde_cursor_settings, pending_recovery_devices, primary_dependency_to_activate,
     published_disabled_outputs, render_primary_available, renderer_retained_reason,
     switcher_visible_range, union_rectangles,
 };
+
+#[test]
+fn task_switcher_preview_containment_preserves_aspect_and_centers() {
+    let viewport = (11, 17, 203, 137);
+    for (source, expected) in [
+        ((3440, 1440), (203, 85)),
+        ((1920, 1080), (203, 114)),
+        ((4, 3), (183, 137)),
+        ((1000, 1000), (137, 137)),
+        ((900, 1600), (77, 137)),
+    ] {
+        let bounds = contained_preview_bounds(
+            viewport.0, viewport.1, viewport.2, viewport.3, source.0, source.1,
+        );
+        assert_eq!((bounds.2, bounds.3), expected, "source {source:?}");
+        assert!(bounds.0 >= viewport.0 && bounds.1 >= viewport.1);
+        assert!(bounds.0 + bounds.2 <= viewport.0 + viewport.2);
+        assert!(bounds.1 + bounds.3 <= viewport.1 + viewport.3);
+        let horizontal_gap = viewport.2 - bounds.2;
+        let vertical_gap = viewport.3 - bounds.3;
+        assert!((bounds.0 - viewport.0) * 2 <= horizontal_gap);
+        assert!(horizontal_gap <= (bounds.0 - viewport.0) * 2 + 1);
+        assert!((bounds.1 - viewport.1) * 2 <= vertical_gap);
+        assert!(vertical_gap <= (bounds.1 - viewport.1) * 2 + 1);
+        if bounds.2 == viewport.2 {
+            let ideal_height = source.1 as f64 * bounds.2 as f64 / source.0 as f64;
+            assert!((ideal_height - bounds.3 as f64).abs() <= 1.0);
+        } else {
+            assert_eq!(bounds.3, viewport.3);
+            let ideal_width = source.0 as f64 * bounds.3 as f64 / source.1 as f64;
+            assert!((ideal_width - bounds.2 as f64).abs() <= 1.0);
+        }
+    }
+}
 use smithay::utils::{Buffer, Physical, Rectangle, Size};
 use std::collections::HashMap;
 use std::time::Duration;
