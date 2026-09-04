@@ -12,6 +12,10 @@ use crate::{
     host::FileHostAdapter,
     icons, layout,
     layout::{rect_between, visible_file_range},
+    operations::{
+        ClipboardOffer, ItemCapabilities, OperationEffect, RenameEditor, TransferIntent,
+        TransferSource,
+    },
     platform::{LocationGroup, OpenPathError, home_directory, location_groups, open_path},
     watch::DirectoryWatch,
 };
@@ -23,7 +27,8 @@ use nickel_file::{DirectoryBrowser, EntrySortKey, FileEntry, SortDirection};
 use nickel_i18n::Localizer;
 use nickel_ui::{
     AnyView, Application, FrameOverlay, Insets, OverlayAnchor, OverlayMenu, OverlayMenuItem,
-    OverlayStyle, Point, ReadingDirection, Size, TransientSurface, UiId, ViewContext,
+    OverlayStyle, Point, ReadingDirection, Size, TextField, TransientSurface, UiId, ViewContext,
+    ui,
 };
 
 const DEFAULT_SIDEBAR_WIDTH: f32 = 190.0;
@@ -75,6 +80,13 @@ pub enum FileMessage {
     PropertiesScroll(f32),
     ContextRefresh,
     ContextSelectAll,
+    BeginRename,
+    RenameChanged(String),
+    CommitRename,
+    CancelRename,
+    CopySelection,
+    CutSelection,
+    Paste,
     ToggleCommandSurface,
     CommandQueryChanged(String),
     CommandScroll(f32),
@@ -147,6 +159,9 @@ pub struct FileApp {
     pub(crate) cursor: Point,
     pub(crate) selected: Option<usize>,
     pub(crate) selected_entries: HashSet<usize>,
+    pub(crate) rename_editor: Option<RenameEditor>,
+    pub(crate) file_clipboard: Option<ClipboardOffer>,
+    pub(crate) drag_hover: Option<PathBuf>,
     pub(crate) selection_anchor: Option<usize>,
     pub(crate) active_tab_id: u64,
     pub(crate) next_tab_id: u64,
@@ -865,6 +880,9 @@ impl FileApp {
             cursor: Point { x: 0.0, y: 0.0 },
             selected: None,
             selected_entries: HashSet::new(),
+            rename_editor: None,
+            file_clipboard: None,
+            drag_hover: None,
             selection_anchor: None,
             active_tab_id: 0,
             next_tab_id: 1,
@@ -1970,6 +1988,29 @@ impl FileApp {
             self.command_query.clear();
         }
         match message {
+            FileMessage::BeginRename => {
+                if self.selected_entries.len() == 1 {
+                    let index = *self.selected_entries.iter().next().unwrap();
+                    if let (Some(entry), Some(identity)) = (
+                        self.browser.entries().get(index),
+                        self.browser.identity_at(index),
+                    ) {
+                        self.rename_editor =
+                            Some(RenameEditor::begin(identity, entry.path.clone()));
+                        self.pending_focus = Some(UiId::from("file-rename-field"));
+                    }
+                }
+            }
+            FileMessage::RenameChanged(text) => {
+                if let Some(editor) = &mut self.rename_editor {
+                    editor.text = text
+                }
+            }
+            FileMessage::CancelRename => self.rename_editor = None,
+            FileMessage::CommitRename => self.commit_rename(),
+            FileMessage::CopySelection => self.capture_file_clipboard(TransferIntent::Copy),
+            FileMessage::CutSelection => self.capture_file_clipboard(TransferIntent::Move),
+            FileMessage::Paste => self.paste_file_clipboard(),
             FileMessage::ContextEntry(index) => {
                 self.context_anchor = Some(self.cursor);
                 self.context_target = self
@@ -2353,6 +2394,109 @@ impl FileApp {
             FileMessage::FileScroll(offset) => self.file_scroll_offset = offset.max(0.0),
         }
     }
+
+    fn capture_file_clipboard(&mut self, intent: TransferIntent) {
+        let sources = self.selected_entries.iter().copied().collect::<Vec<_>>();
+        let sources = sources
+            .into_iter()
+            .filter_map(|index| {
+                let entry = self.browser.entries().get(index)?;
+                Some(TransferSource {
+                    provider: "local".into(),
+                    identity: self.browser.identity_at(index)?,
+                    path: entry.path.clone(),
+                    capabilities: ItemCapabilities {
+                        readable: true,
+                        removable: true,
+                    },
+                })
+            })
+            .collect();
+        match ClipboardOffer::new(intent, sources) {
+            Ok(offer) => {
+                self.status = if intent == TransferIntent::Move {
+                    "Ready to move selection"
+                } else {
+                    "Copied selection"
+                }
+                .into();
+                self.file_clipboard = Some(offer);
+            }
+            Err(_) => self.status = "Nothing eligible is selected".into(),
+        }
+    }
+
+    fn commit_rename(&mut self) {
+        let names = self
+            .browser
+            .entries()
+            .iter()
+            .map(|entry| entry.name.clone())
+            .collect::<Vec<_>>();
+        let Some(editor) = &mut self.rename_editor else {
+            return;
+        };
+        match editor.commit(names) {
+            Ok(None) => self.rename_editor = None,
+            Ok(Some(OperationEffect::Rename { identity, from, to })) => {
+                let current = self
+                    .browser
+                    .entries()
+                    .iter()
+                    .position(|entry| entry.path == from)
+                    .and_then(|index| self.browser.identity_at(index));
+                if current != Some(identity) {
+                    self.status = "Rename cancelled because the file changed".into();
+                    return;
+                }
+                match std::fs::rename(&from, &to) {
+                    Ok(()) => {
+                        self.rename_editor = None;
+                        self.refresh_directory(self.browser.show_hidden());
+                        self.status = format!(
+                            "Renamed to {}",
+                            to.file_name().unwrap_or_default().to_string_lossy()
+                        );
+                    }
+                    Err(error) => self.status = format!("Could not rename: {error}"),
+                }
+            }
+            Ok(Some(_)) => {}
+            Err(error) => self.status = format!("Invalid name: {error:?}"),
+        }
+    }
+
+    fn paste_file_clipboard(&mut self) {
+        let Some(offer) = self.file_clipboard.clone() else {
+            self.status = "The file clipboard is empty".into();
+            return;
+        };
+        let mut completed = 0;
+        for source in &offer.sources {
+            let Some(name) = source.path.file_name() else {
+                continue;
+            };
+            let destination = self.browser.current().join(name);
+            if destination.exists() || destination.starts_with(&source.path) {
+                continue;
+            }
+            let result = if offer.intent == TransferIntent::Move {
+                std::fs::rename(&source.path, &destination)
+            } else if source.path.is_dir() {
+                crate::operations::copy_directory(&source.path, &destination)
+            } else {
+                std::fs::copy(&source.path, &destination).map(|_| ())
+            };
+            if result.is_ok() {
+                completed += 1;
+            }
+        }
+        if offer.intent == TransferIntent::Move && completed == offer.sources.len() {
+            self.file_clipboard = None;
+        }
+        self.refresh_directory(self.browser.show_hidden());
+        self.status = format!("Transferred {completed} of {} items", offer.sources.len());
+    }
 }
 
 impl Application for FileApp {
@@ -2376,6 +2520,35 @@ impl Application for FileApp {
 
     fn take_focus_request(&mut self) -> Option<UiId> {
         self.pending_focus.take()
+    }
+
+    fn file_drag_event(&mut self, event: nickel_ui::FileDragEvent) -> bool {
+        match event {
+            nickel_ui::FileDragEvent::Hovered(path) => self.drag_hover = Some(path),
+            nickel_ui::FileDragEvent::HoverCancelled => self.drag_hover = None,
+            nickel_ui::FileDragEvent::Dropped(path) => {
+                self.drag_hover = None;
+                let Some(name) = path.file_name() else {
+                    return false;
+                };
+                let destination = self.browser.current().join(name);
+                if destination.exists() || destination == path {
+                    self.status = "Drop rejected: destination exists".into();
+                    return true;
+                }
+                let result = if path.is_dir() {
+                    crate::operations::copy_directory(&path, &destination)
+                } else {
+                    std::fs::copy(path, destination).map(|_| ())
+                };
+                self.status = match result {
+                    Ok(()) => "Dropped file copied".into(),
+                    Err(error) => format!("Could not accept drop: {error}"),
+                };
+                self.refresh_directory(self.browser.show_hidden());
+            }
+        }
+        true
     }
 
     fn frame_overlays(&self, context: ViewContext) -> Vec<FrameOverlay<Self::Message>> {
@@ -2460,28 +2633,20 @@ impl Application for FileApp {
                 };
                 let menu = menu
                     .item(
-                        OverlayMenuItem::disabled_with_reason(
-                            "cut",
-                            "Cut",
-                            "File operations are not implemented yet",
-                        )
-                        .shortcut("Ctrl+X")
-                        .separator_before(true),
+                        OverlayMenuItem::action("cut", "Cut", FileMessage::CutSelection)
+                            .shortcut("Ctrl+X")
+                            .separator_before(true),
                     )
                     .item(
-                        OverlayMenuItem::disabled_with_reason(
-                            "copy",
-                            "Copy",
-                            "File operations are not implemented yet",
-                        )
-                        .shortcut("Ctrl+C"),
+                        OverlayMenuItem::action("copy", "Copy", FileMessage::CopySelection)
+                            .shortcut("Ctrl+C"),
                     );
                 let menu = if entry.is_directory {
                     menu.item(
-                        OverlayMenuItem::disabled_with_reason(
+                        OverlayMenuItem::action(
                             "paste-into",
                             "Paste into Folder",
-                            "File operations are not implemented yet",
+                            FileMessage::Paste,
                         )
                         .shortcut("Ctrl+V"),
                     )
@@ -2495,13 +2660,9 @@ impl Application for FileApp {
                 };
                 FrameOverlay::Menu(configure(
                     menu.item(
-                        OverlayMenuItem::disabled_with_reason(
-                            "rename",
-                            "Rename",
-                            "Rename is not implemented yet",
-                        )
-                        .shortcut("F2")
-                        .separator_before(true),
+                        OverlayMenuItem::action("rename", "Rename", FileMessage::BeginRename)
+                            .shortcut("F2")
+                            .separator_before(true),
                     )
                     .item(OverlayMenuItem::disabled_with_reason(
                         "trash",
@@ -2529,6 +2690,30 @@ impl Application for FileApp {
                 ))
             })
             .collect::<Vec<_>>();
+        if let Some(editor) = &self.rename_editor {
+            let selected = self.selected.unwrap_or(0);
+            let surface = TransientSurface::dialog(
+                "file-rename",
+                OverlayAnchor::InvocationTargetCenter(UiId::new(format!("file-entry-{selected}"))),
+                Size::new(360.0, 92.0),
+                OverlayStyle {
+                    background: palette.surface,
+                    foreground: palette.text,
+                    border: palette.accent,
+                    selected: palette.accent_soft,
+                    radius: 8,
+                },
+            );
+            overlays.push(FrameOverlay::surface(surface, ui! {
+                <Column gap={8.0} padding={Insets::all(10.0)}>
+                    {TextField::on_change(&editor.text, FileMessage::RenameChanged).id("file-rename-field").color(palette.text)}
+                    <Row gap={8.0}>
+                        <Button on_press={FileMessage::CommitRename}>{"Rename"}</Button>
+                        <Button on_press={FileMessage::CancelRename}>{"Cancel"}</Button>
+                    </Row>
+                </Column>
+            }));
+        }
         overlays.push(FrameOverlay::Menu(configure(
             OverlayMenu::new(
                 "file-background-context",
@@ -2745,7 +2930,7 @@ mod live_reconciliation_tests {
 
     use nickel_file::DirectoryBrowser;
 
-    use super::FileApp;
+    use super::{FileApp, FileMessage};
 
     fn settle_live_change(app: &mut FileApp) {
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -2833,6 +3018,29 @@ mod live_reconciliation_tests {
         assert_eq!(app.selected, None);
         assert!(app.selected_entries.is_empty());
         assert_eq!(app.selection_anchor, None);
+    }
+
+    #[test]
+    fn rename_and_multi_file_copy_use_production_messages() {
+        let source = tempfile::tempdir().unwrap();
+        fs::write(source.path().join("a.txt"), b"a").unwrap();
+        fs::write(source.path().join("b.txt"), b"b").unwrap();
+        let mut app = FileApp::new(source.path().to_path_buf());
+        app.selected_entries = HashSet::from([0]);
+        app.selected = Some(0);
+        app.update_message(FileMessage::BeginRename);
+        app.update_message(FileMessage::RenameChanged("renamed.txt".into()));
+        app.update_message(FileMessage::CommitRename);
+        assert!(source.path().join("renamed.txt").exists());
+
+        app.browser = DirectoryBrowser::open(source.path()).unwrap();
+        app.selected_entries = (0..app.browser.entries().len()).collect();
+        app.update_message(FileMessage::CopySelection);
+        let destination = tempfile::tempdir().unwrap();
+        app.browser = DirectoryBrowser::open(destination.path()).unwrap();
+        app.update_message(FileMessage::Paste);
+        assert!(destination.path().join("renamed.txt").exists());
+        assert!(destination.path().join("b.txt").exists());
     }
 }
 

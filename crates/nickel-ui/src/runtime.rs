@@ -146,6 +146,13 @@ pub enum Shortcut {
     DocumentEnd,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FileDragEvent {
+    Hovered(std::path::PathBuf),
+    HoverCancelled,
+    Dropped(std::path::PathBuf),
+}
+
 /// Immutable environmental inputs for a declarative application view.
 ///
 /// The host owns this state and supplies it before every resolve, so responsive
@@ -420,6 +427,12 @@ pub trait Application: Sized {
     /// Offers normalized RGBA clipboard pixels to the focused application.
     /// Returning true makes image data win over simultaneous clipboard text.
     fn paste_clipboard_image(&mut self, _width: u32, _height: u32, _rgba: &[u8]) -> bool {
+        false
+    }
+
+    /// Receives native file drag offers without exposing platform MIME or COM
+    /// details to application policy.
+    fn file_drag_event(&mut self, _event: FileDragEvent) -> bool {
         false
     }
 
@@ -2182,6 +2195,30 @@ impl<A: Application, H: HostAdapter<A>> ApplicationHandler for ApplicationRuntim
                 return;
             }
             WindowEvent::Occluded(false) => self.scheduler.invalidate(),
+            WindowEvent::HoveredFile(path) => {
+                if self.host.as_mut().is_some_and(|host| {
+                    host.application_mut()
+                        .file_drag_event(FileDragEvent::Hovered(path.clone()))
+                }) {
+                    self.scheduler.invalidate();
+                }
+            }
+            WindowEvent::HoveredFileCancelled => {
+                if self.host.as_mut().is_some_and(|host| {
+                    host.application_mut()
+                        .file_drag_event(FileDragEvent::HoverCancelled)
+                }) {
+                    self.scheduler.invalidate();
+                }
+            }
+            WindowEvent::DroppedFile(path) => {
+                if self.host.as_mut().is_some_and(|host| {
+                    host.application_mut()
+                        .file_drag_event(FileDragEvent::Dropped(path.clone()))
+                }) {
+                    self.scheduler.invalidate();
+                }
+            }
             _ => {}
         }
         for normalized in self.input.normalize(nickel_input::DeviceId(0), &event) {

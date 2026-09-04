@@ -322,6 +322,26 @@ fn basename_selection_end(name: &str) -> usize {
         .unwrap_or(name.len())
 }
 
+pub fn copy_directory(source: &Path, destination: &Path) -> std::io::Result<()> {
+    std::fs::create_dir(destination)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        let target = destination.join(entry.file_name());
+        if kind.is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "symbolic links require provider negotiation",
+            ));
+        } else if kind.is_dir() {
+            copy_directory(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(windows)]
 fn is_windows_reserved(name: &str) -> bool {
     let stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();

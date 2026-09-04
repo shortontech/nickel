@@ -181,13 +181,18 @@ impl HostAdapter<FileApp> for FileHostAdapter {
                     ),
                     KeyCode::Backspace => app.go_back(),
                     KeyCode::Escape => {
-                        if app.command_surface_open {
+                        if app.rename_editor.is_some() {
+                            app.update(FileMessage::CancelRename);
+                        } else if app.command_surface_open {
                             app.update(FileMessage::ToggleCommandSurface);
                         } else if app.address_editing {
                             app.update(FileMessage::ToggleAddressEditing);
                         } else {
                             app.clear_selection();
                         }
+                    }
+                    KeyCode::Enter if app.rename_editor.is_some() => {
+                        app.update(FileMessage::CommitRename)
                     }
                     KeyCode::Enter if alt_down => app.update(FileMessage::ContextProperties),
                     KeyCode::Enter if app.address_editing => app.submit_address(),
@@ -196,6 +201,10 @@ impl HostAdapter<FileApp> for FileHostAdapter {
                     KeyCode::KeyA if app.control_down => {
                         app.select_all();
                     }
+                    KeyCode::KeyC if app.control_down => app.update(FileMessage::CopySelection),
+                    KeyCode::KeyX if app.control_down => app.update(FileMessage::CutSelection),
+                    KeyCode::KeyV if app.control_down => app.update(FileMessage::Paste),
+                    KeyCode::F2 => app.update(FileMessage::BeginRename),
                     KeyCode::F5 => {
                         app.update(FileMessage::Refresh);
                     }
@@ -210,7 +219,12 @@ impl HostAdapter<FileApp> for FileHostAdapter {
                         | KeyCode::Escape
                         | KeyCode::Enter
                         | KeyCode::Space
-                ) || (app.control_down && key == KeyCode::KeyA);
+                ) || key == KeyCode::F2
+                    || (app.control_down
+                        && matches!(
+                            key,
+                            KeyCode::KeyA | KeyCode::KeyC | KeyCode::KeyX | KeyCode::KeyV
+                        ));
                 changed = true;
             }
             InputEvent::Pointer(PointerEvent::Motion { position, .. }) => {
