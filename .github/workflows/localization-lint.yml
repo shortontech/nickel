@@ -1,0 +1,14 @@
+name: Localization lint
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  localization-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Reject new or changed untranslated UI strings
+        run: cargo run -p nickel-i18n-lint -- --baseline assets/i18n-lint-baseline.tsv crates
