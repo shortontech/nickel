@@ -2548,8 +2548,8 @@ impl Application for WorkbenchApp {
                 .max_lines(2)
                 .background(if selected { 0x243957 } else { 0x182131 })
                 .border(if selected { 0x69a7ff } else { 0x2b3a50 }, 1.0)
-                .focus_border(0x8fc1ff)
-                .controller_focus_border(0xffd166)
+                .focus_background_tint(0x8fc1ff)
+                .controller_focus_background_tint(0xffd166)
                 .radius(8.0)
                 .color(if selected { 0xf5f9ff } else { 0xc8d2e1 })
             }));
@@ -2568,8 +2568,8 @@ impl Application for WorkbenchApp {
                 .padding(Insets::symmetric(10.0, 6.0))
                 .background(if selected { 0x24528a } else { 0x202c3d })
                 .border(if selected { 0x76b5ff } else { 0x34445b }, 1.0)
-                .focus_border(0x8fc1ff)
-                .controller_focus_border(0xffd166)
+                .focus_background_tint(0x8fc1ff)
+                .controller_focus_background_tint(0xffd166)
                 .radius(7.0)
                 .color(0xf1f6fc)
         }));
@@ -2950,8 +2950,8 @@ impl Application for WorkbenchApp {
                                                 )
                                                 .background(0x2f78c4)
                                                 .border(0x75b8ff, 1.0)
-                                                .focus_border(0x8fc1ff)
-                                                .controller_focus_border(0xffd166)
+                                                .focus_background_tint(0x8fc1ff)
+                                                .controller_focus_background_tint(0xffd166)
                                                 .radius(7.0)
                                                 .color(0xffffff),
                                             )
@@ -2962,8 +2962,8 @@ impl Application for WorkbenchApp {
                                                 )
                                                 .background(0x202c3d)
                                                 .border(0x40536c, 1.0)
-                                                .focus_border(0x8fc1ff)
-                                                .controller_focus_border(0xffd166)
+                                                .focus_background_tint(0x8fc1ff)
+                                                .controller_focus_background_tint(0xffd166)
                                                 .radius(7.0)
                                                 .color(0xe7edf5),
                                             ),

@@ -2796,14 +2796,14 @@ fn literal_semantic_roles_have_stable_accessibility_mappings() {
 }
 
 #[test]
-fn controller_selected_value_controls_paint_focus_above_their_native_surface() {
+fn controller_selected_value_uses_child_background_without_a_focus_stroke() {
     const CONTROLLER_FOCUS: Color = 0xff4fb3;
 
     let mut slider_state = UiStateStore::default();
     let slider = || {
         Slider::on_change(map_volume, 0.5)
             .id("volume")
-            .controller_focus_border(CONTROLLER_FOCUS)
+            .controller_focus_background_tint(CONTROLLER_FOCUS)
     };
     let initial_slider = UiFrame::layout_with_state(
         slider(),
@@ -2820,10 +2820,14 @@ fn controller_selected_value_controls_paint_focus_above_their_native_surface() {
         slider_state.navigation().controller_selected(),
         Some(&UiId::from("root/volume"))
     );
-    assert!(matches!(
-        selected_slider.commands().last(),
-        Some(PaintCommand::Stroke { color, width, .. })
-            if *color == CONTROLLER_FOCUS && *width == 2.0
+    let expected = crate::focused_surface(0x202020, CONTROLLER_FOCUS);
+    assert!(
+        selected_slider.commands().iter().any(
+            |command| matches!(command, PaintCommand::Fill { color, .. } if *color == expected)
+        )
+    );
+    assert!(!selected_slider.commands().iter().any(
+        |command| matches!(command, PaintCommand::Stroke { color, .. } if *color == CONTROLLER_FOCUS)
     ));
 
     let mut dropdown_state = UiStateStore::default();
@@ -2834,13 +2838,19 @@ fn controller_selected_value_controls_paint_focus_above_their_native_surface() {
             [("On", TestMessage::Option(1))],
         )
         .id("animations")
-        .controller_focus_border(CONTROLLER_FOCUS)
+        .controller_focus_background_tint(CONTROLLER_FOCUS)
     };
     let initial_dropdown = UiFrame::layout_with_state(
         dropdown(),
         Rect::new(0.0, 0.0, 180.0, 42.0),
         &mut dropdown_state,
     );
+    let initial_bounds = initial_dropdown
+        .semantic_targets_for_message(&TestMessage::Named("toggle"))
+        .into_iter()
+        .next()
+        .expect("dropdown target")
+        .bounds;
     initial_dropdown.handle_event(&mut dropdown_state, UiEvent::ControllerDown);
     let selected_dropdown = UiFrame::layout_with_state(
         dropdown(),
@@ -2851,10 +2861,18 @@ fn controller_selected_value_controls_paint_focus_above_their_native_surface() {
         dropdown_state.navigation().controller_selected(),
         Some(&UiId::from("root/animations"))
     );
-    assert!(matches!(
-        selected_dropdown.commands().last(),
-        Some(PaintCommand::Stroke { color, width, .. })
-            if *color == CONTROLLER_FOCUS && *width == 2.0
+    assert_eq!(
+        selected_dropdown.semantic_targets_for_message(&TestMessage::Named("toggle"))[0].bounds,
+        initial_bounds,
+        "focus presentation must not change layout or hit geometry"
+    );
+    assert!(
+        selected_dropdown.commands().iter().any(
+            |command| matches!(command, PaintCommand::Fill { color, .. } if *color == expected)
+        )
+    );
+    assert!(!selected_dropdown.commands().iter().any(
+        |command| matches!(command, PaintCommand::Stroke { color, .. } if *color == CONTROLLER_FOCUS)
     ));
 }
 

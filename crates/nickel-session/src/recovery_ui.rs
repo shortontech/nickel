@@ -76,7 +76,7 @@ impl Application for RecoveryApplication {
                             .radius(7.0)
                             .background(0x9d3444)
                             .color(0xffffff)
-                            .focus_border(0xff9aa7),
+                            .focus_background_tint(0xff9aa7),
                     )
                     .child(
                         Button::new(RecoveryAction::Exit, "Esc  Log out safely")
@@ -88,7 +88,7 @@ impl Application for RecoveryApplication {
                             .background(0x37272b)
                             .border(0x6b4b52, 1.0)
                             .color(0xe8c9cd)
-                            .focus_border(0xff9aa7),
+                            .focus_background_tint(0xff9aa7),
                     ),
             )
     }

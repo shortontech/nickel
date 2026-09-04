@@ -459,8 +459,8 @@ impl SettingsApp {
                     value={f32::from(self.shell_settings.desktop_count.saturating_sub(1)) / 7.0}
                     on_change={desktop_count_message} width={520.0}
                     adjustment_step={1.0 / 7.0}
-                    focus_border={theme.borders.focus}
-                    controller_focus_border={theme.borders.controller_focus} />
+                    focus_background_tint={theme.borders.focus}
+                    controller_focus_background_tint={theme.borders.controller_focus} />
                 <Row height={46.0} gap={8.0} children={desktop_choices} />
             </Column>
         }

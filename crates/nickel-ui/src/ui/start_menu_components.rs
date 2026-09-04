@@ -722,7 +722,7 @@ impl<Message> ShortcutRow<Message> {
             .accessibility_description(&supporting)
             .accessibility_state(semantic_state)
             .enabled(state.enabled)
-            .controller_focus_border(theme.borders.controller_focus)
+            .controller_focus_background_tint(theme.borders.controller_focus)
             .child(content);
         if state.focused {
             row = row.border(theme.borders.focus, 2.0);

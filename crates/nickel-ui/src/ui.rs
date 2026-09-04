@@ -803,10 +803,11 @@ pub struct Style {
     pub hover_background: Option<Background>,
     /// Semantic background applied while an interactive element is pressed.
     pub pressed_background: Option<Background>,
-    /// Semantic border applied for keyboard or accessibility focus.
-    pub focus_border: Option<Color>,
-    /// Semantic border applied to the current controller target.
-    pub controller_focus_border: Option<Color>,
+    /// Semantic hue/lightness cue applied to the child background for keyboard
+    /// or accessibility focus.
+    pub focus_background_tint: Option<Color>,
+    /// Semantic hue/lightness cue applied to the current controller target.
+    pub controller_focus_background_tint: Option<Color>,
     pub controller_pane_border: Option<Color>,
     /// Semantic background applied to a selected or entered controller scope.
     pub controller_scope_background: Option<Background>,
@@ -868,8 +869,8 @@ impl Default for Style {
             foreground: None,
             hover_background: None,
             pressed_background: None,
-            focus_border: None,
-            controller_focus_border: None,
+            focus_background_tint: None,
+            controller_focus_background_tint: None,
             controller_pane_border: None,
             controller_scope_background: None,
             text_align: TextAlign::Start,
@@ -1146,13 +1147,13 @@ impl<Message> Element<Message> {
         self
     }
 
-    pub fn focus_border(mut self, color: Color) -> Self {
-        self.style.focus_border = Some(color);
+    pub fn focus_background_tint(mut self, color: Color) -> Self {
+        self.style.focus_background_tint = Some(color);
         self
     }
 
-    pub fn controller_focus_border(mut self, color: Color) -> Self {
-        self.style.controller_focus_border = Some(color);
+    pub fn controller_focus_background_tint(mut self, color: Color) -> Self {
+        self.style.controller_focus_background_tint = Some(color);
         self
     }
 

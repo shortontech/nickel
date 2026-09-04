@@ -5973,20 +5973,38 @@ fn apply_transient_state<Message>(
         {
             element.style.background = Some(background);
         }
-        let active_border =
+        let active_focus_tint =
             if state.window_focused() && state.navigation().controller_selected() == Some(id) {
                 element
                     .style
-                    .controller_focus_border
-                    .or(element.style.focus_border)
-            } else if state.focused() == Some(id) {
-                element.style.focus_border
+                    .controller_focus_background_tint
+                    .or(element.style.focus_background_tint)
+            } else if state.focused() == Some(id)
+                && matches!(
+                    state.input_modality(),
+                    InputModality::Keyboard | InputModality::Accessibility
+                )
+            {
+                element.style.focus_background_tint
             } else {
                 None
             };
-        if let Some(border) = active_border {
-            element.style.border = Some(border);
-            element.style.border_width = element.style.border_width.max(2.0);
+        if let Some(tint) = active_focus_tint {
+            let transform = |color| {
+                element.style.foreground.map_or_else(
+                    || crate::focused_surface(color, tint),
+                    |foreground| crate::focused_surface_with_foreground(color, tint, foreground),
+                )
+            };
+            element.style.background = Some(match element.style.background {
+                Some(Background::Solid(color)) => Background::Solid(transform(color)),
+                Some(Background::LinearGradient(mut gradient)) => {
+                    gradient.start = transform(gradient.start);
+                    gradient.end = transform(gradient.end);
+                    Background::LinearGradient(gradient)
+                }
+                None => Background::Solid(transform(0x202020)),
+            });
         }
         if state.window_focused()
             && element

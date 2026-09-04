@@ -711,8 +711,8 @@ fn build_launcher_view_directional(
     .id("launcher-search-results")
     .presentation(CollectionPresentation::UniformGrid { columns })
     .gap(GRID_GAP)
-    .item_focus_border(theme.borders.focus)
-    .item_controller_focus_border(theme.borders.controller_focus)
+    .item_focus_background_tint(theme.borders.focus)
+    .item_controller_focus_background_tint(theme.borders.controller_focus)
     .navigation_scope(
         NavigationScope::group()
             .traversal(NavigationTraversal::Grid)
@@ -989,8 +989,8 @@ fn build_dashboard_view_directional(
         columns: if width >= 820.0 { 4 } else { 3 },
     })
     .gap(theme.spacing.control)
-    .item_focus_border(theme.borders.focus)
-    .item_controller_focus_border(theme.borders.controller_focus)
+    .item_focus_background_tint(theme.borders.focus)
+    .item_controller_focus_background_tint(theme.borders.controller_focus)
     .navigation_scope(NavigationScope::group().traversal(NavigationTraversal::Grid))
     .controller_scope_background(theme.surfaces.selected)
     .on_activate(|id| LauncherAction::LaunchApplication(id.clone()));

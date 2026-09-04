@@ -98,7 +98,7 @@ pub(crate) fn build_view(
         ui! {
             <Container id={"file-content"} grow={1.0} padding={Insets::all(28.0)}
                 on_press={FileMessage::SelectionSurface} context_message={FileMessage::ContextBackground}
-                focus_border={palette.accent} controller_focus_border={palette.complement}
+                focus_background_tint={palette.accent} controller_focus_background_tint={palette.complement}
                 accessibility_label={"Files"}>
                 <Text color={palette.muted} wrap={true} max_lines={3}>{empty_message}</Text>
             </Container>
@@ -195,8 +195,8 @@ pub(crate) fn build_view(
             }}>
                 {scroll}
                 <Container id={"file-content"} height={1.0} on_press={FileMessage::SelectionSurface}
-                    context_message={FileMessage::ContextBackground} focus_border={palette.accent}
-                    controller_focus_border={palette.complement} accessibility_label={"Files background"} />
+                    context_message={FileMessage::ContextBackground} focus_background_tint={palette.accent}
+                    controller_focus_background_tint={palette.complement} accessibility_label={"Files background"} />
             </Column>
         }
     };
@@ -205,8 +205,8 @@ pub(crate) fn build_view(
     let resize_handle = ui! {
         <Container id={"sidebar-resize"} width={SIDEBAR_RESIZE_WIDTH} shrink={0.0}
             background={if app.is_resizing_sidebar() { palette.accent } else { palette.surface_hover }}
-            on_press={FileMessage::ResizeSidebar} focus_border={palette.accent}
-            controller_focus_border={palette.complement} accessibility_label={"Resize sidebar"} />
+            on_press={FileMessage::ResizeSidebar} focus_background_tint={palette.accent}
+            controller_focus_background_tint={palette.complement} accessibility_label={"Resize sidebar"} />
     };
     let sidebar_pane_width = app.sidebar_width + SIDEBAR_RESIZE_WIDTH;
     let content = if app.command_surface_open {
@@ -381,7 +381,7 @@ pub(crate) fn sidebar_folder_elements(
             },
         )
         .accessibility_labels((format!("Toggle {label}"), format!("Open {label}")))
-        .focus_borders((palette.accent, palette.complement))
+        .focus_background_tints((palette.accent, palette.complement))
         .indent(depth)
         .background(if is_active {
             palette.accent_soft

@@ -30,7 +30,7 @@ pub(crate) fn navigation_toolbar(
                         ui! { <></> }
                     }}
                     <Container on_press={FileMessage::Breadcrumb(path.clone())}
-                        focus_border={palette.accent} controller_focus_border={palette.complement} padding={Insets {
+                        focus_background_tint={palette.accent} controller_focus_background_tint={palette.complement} padding={Insets {
                         top: 4.0, right: 2.0, bottom: 3.0, left: 2.0,
                     }} accessibility_label={format!("Open {label}")}>
                         <Text scale={1.05} color={palette.text}>{label}</Text>
@@ -68,38 +68,38 @@ pub(crate) fn navigation_toolbar(
                     ui! {
                         <Button on_press={FileMessage::TogglePlaces} width={74.0} height={34.0}
                             color={if app.places_open { palette.accent } else { palette.text }}
-                            focus_border={palette.accent} controller_focus_border={palette.complement}
+                            focus_background_tint={palette.accent} controller_focus_background_tint={palette.complement}
                             accessibility_label={if app.places_open { "Close places" } else { "Open places" }}>
                             {if app.places_open { "Files" } else { "Places" }}
                         </Button>
                     }
                 } else { ui! { <></> } }}
                 <Button on_press={FileMessage::Back} enabled={app.browser.can_go_back() && !app.navigation_pending()} width={34.0} height={34.0}
-                    focus_border={palette.accent} controller_focus_border={palette.complement}
+                    focus_background_tint={palette.accent} controller_focus_background_tint={palette.complement}
                     color={if app.browser.can_go_back() { palette.text } else { palette.muted }} accessibility_label={"Back"}>{"←"}</Button>
                 <Button on_press={FileMessage::Forward} enabled={app.browser.can_go_forward() && !app.navigation_pending()} width={34.0} height={34.0}
-                    focus_border={palette.accent} controller_focus_border={palette.complement}
+                    focus_background_tint={palette.accent} controller_focus_background_tint={palette.complement}
                     color={if app.browser.can_go_forward() { palette.text } else { palette.muted }} accessibility_label={"Forward"}>{"→"}</Button>
                 <Button on_press={FileMessage::Up} enabled={app.browser.can_go_up() && !app.navigation_pending()} width={34.0} height={34.0} color={palette.text}
-                    focus_border={palette.accent} controller_focus_border={palette.complement} accessibility_label={"Up one folder"}>{"↑"}</Button>
+                    focus_background_tint={palette.accent} controller_focus_background_tint={palette.complement} accessibility_label={"Up one folder"}>{"↑"}</Button>
                 {location_control}
                 <Button on_press={FileMessage::ToggleAddressEditing} width={34.0} height={34.0}
                     color={if app.address_editing { palette.accent } else { palette.text }}
-                    focus_border={palette.accent} controller_focus_border={palette.complement}
+                    focus_background_tint={palette.accent} controller_focus_background_tint={palette.complement}
                     accessibility_label={if app.address_editing { "Cancel location editing" } else { "Edit location" }}>
                     {if app.address_editing { "×" } else { "✎" }}
                 </Button>
                 <Button on_press={FileMessage::Refresh} enabled={!app.navigation_pending()} width={34.0} height={34.0} color={palette.text}
-                    focus_border={palette.accent} controller_focus_border={palette.complement} accessibility_label={"Refresh"}>{"↻"}</Button>
+                    focus_background_tint={palette.accent} controller_focus_background_tint={palette.complement} accessibility_label={"Refresh"}>{"↻"}</Button>
                 <Button on_press={FileMessage::SetViewMode(FileViewMode::Grid)} width={34.0} height={34.0}
                     color={if app.view_mode == FileViewMode::Grid { palette.accent } else { palette.text }}
-                    focus_border={palette.accent} controller_focus_border={palette.complement} accessibility_label={"Grid view"}>{"▦"}</Button>
+                    focus_background_tint={palette.accent} controller_focus_background_tint={palette.complement} accessibility_label={"Grid view"}>{"▦"}</Button>
                 <Button on_press={FileMessage::SetViewMode(FileViewMode::Details)} width={34.0} height={34.0}
                     color={if app.view_mode == FileViewMode::Details { palette.accent } else { palette.text }}
-                    focus_border={palette.accent} controller_focus_border={palette.complement} accessibility_label={"Details view"}>{"☷"}</Button>
+                    focus_background_tint={palette.accent} controller_focus_background_tint={palette.complement} accessibility_label={"Details view"}>{"☷"}</Button>
                 <Button on_press={FileMessage::ToggleCommandSurface} width={42.0} height={34.0}
                     color={if app.command_surface_open { palette.accent } else { palette.text }}
-                    focus_border={palette.accent} controller_focus_border={palette.complement}
+                    focus_background_tint={palette.accent} controller_focus_background_tint={palette.complement}
                     accessibility_label={"Open commands"}>{"⌘"}</Button>
             </Row>
         </Container>
@@ -140,31 +140,31 @@ pub(crate) fn details_header(
             <Row gap={12.0}>
                 <Text width={32.0} color={palette.muted}>{""}</Text>
                 <Container grow={1.0} min_width={120.0} on_press={FileMessage::SortBy(EntrySortKey::Name)}
-                    focus_border={palette.accent} controller_focus_border={palette.complement}
+                    focus_background_tint={palette.accent} controller_focus_background_tint={palette.complement}
                     semantic_role={SemanticRole::Button} accessibility_label={"Sort by name"}>
                     <Text color={palette.muted}>{name_sort}</Text>
                 </Container>
                 <Container width={widths.type_width} on_press={FileMessage::SortBy(EntrySortKey::Type)}
-                    focus_border={palette.accent} controller_focus_border={palette.complement}
+                    focus_background_tint={palette.accent} controller_focus_background_tint={palette.complement}
                     semantic_role={SemanticRole::Button} accessibility_label={"Sort by type"}>
                     <Text color={palette.muted}>{type_sort}</Text>
                 </Container>
                 <Container id={"resize-details-type"} width={5.0} on_press={FileMessage::ResizeDetailsColumn(DetailsColumn::Type)}
-                    background={palette.surface_hover} focus_border={palette.accent} accessibility_label={"Resize type column"} />
+                    background={palette.surface_hover} focus_background_tint={palette.accent} accessibility_label={"Resize type column"} />
                 <Container width={widths.modified_width} on_press={FileMessage::SortBy(EntrySortKey::Modified)}
-                    focus_border={palette.accent} controller_focus_border={palette.complement}
+                    focus_background_tint={palette.accent} controller_focus_background_tint={palette.complement}
                     semantic_role={SemanticRole::Button} accessibility_label={"Sort by modified time"}>
                     <Text color={palette.muted}>{modified_sort}</Text>
                 </Container>
                 <Container id={"resize-details-modified"} width={5.0} on_press={FileMessage::ResizeDetailsColumn(DetailsColumn::Modified)}
-                    background={palette.surface_hover} focus_border={palette.accent} accessibility_label={"Resize modified column"} />
+                    background={palette.surface_hover} focus_background_tint={palette.accent} accessibility_label={"Resize modified column"} />
                 <Container width={widths.size_width} on_press={FileMessage::SortBy(EntrySortKey::Size)}
-                    focus_border={palette.accent} controller_focus_border={palette.complement}
+                    focus_background_tint={palette.accent} controller_focus_background_tint={palette.complement}
                     semantic_role={SemanticRole::Button} accessibility_label={"Sort by size"}>
                     <Text color={palette.muted}>{size_sort}</Text>
                 </Container>
                 <Container id={"resize-details-size"} width={5.0} on_press={FileMessage::ResizeDetailsColumn(DetailsColumn::Size)}
-                    background={palette.surface_hover} focus_border={palette.accent} accessibility_label={"Resize size column"} />
+                    background={palette.surface_hover} focus_background_tint={palette.accent} accessibility_label={"Resize size column"} />
             </Row>
         </Container>
     })
@@ -319,7 +319,7 @@ pub(crate) fn command_surface(
                         <Container id={format!("file-command-{index}")} height={42.0}
                             on_press={message} enabled={enabled} background={palette.surface}
                             hover_background={palette.surface_hover} pressed_background={palette.accent_soft}
-                            focus_border={palette.accent} controller_focus_border={palette.complement}
+                            focus_background_tint={palette.accent} controller_focus_background_tint={palette.complement}
                             padding={Insets { top: 9.0, right: 12.0, bottom: 7.0, left: 12.0 }}
                             semantic_role={SemanticRole::Button} accessibility_label={accessibility_label}>
                             <Row gap={12.0}>
@@ -435,7 +435,7 @@ pub(crate) fn tab_strip(
         }}>
             <Row gap={3.0} children={tabs}>
                 <Container width={28.0} on_press={FileMessage::NewTab}
-                    focus_border={palette.accent} controller_focus_border={palette.complement} padding={Insets {
+                    focus_background_tint={palette.accent} controller_focus_background_tint={palette.complement} padding={Insets {
                     top: 1.0, right: 4.0, bottom: 0.0, left: 4.0,
                 }} accessibility_label={"New tab"}>
                     <Text width={20.0} scale={1.25} color={palette.muted}>{"+"}</Text>
@@ -472,7 +472,7 @@ pub(crate) fn location_group(
     AnyView::new(ui! {
         <Column id={format!("location-group-{id}")} gap={2.0}>
             <Container height={28.0} on_press={FileMessage::ToggleLocationGroup(group_id)}
-                focus_border={palette.accent} controller_focus_border={palette.complement}
+                focus_background_tint={palette.accent} controller_focus_background_tint={palette.complement}
                 accessibility_label={format!("{} {title}", if collapsed { "Expand" } else { "Collapse" })}
                 padding={Insets { top: 6.0, right: 4.0, bottom: 4.0, left: 4.0 }}>
                 <Row gap={7.0}>
@@ -521,7 +521,7 @@ pub(crate) fn tab(
                     top: 4.0, right: 4.0, bottom: 3.0, left: 9.0,
                 }}>
                     <Container width={125.0} height={25.0} on_press={FileMessage::SwitchTab(index)}
-                        focus_border={palette.accent} controller_focus_border={palette.complement}
+                        focus_background_tint={palette.accent} controller_focus_background_tint={palette.complement}
                         accessibility_label={format!("Tab {label}")}><Row gap={6.0}>
                         {if let Some((id, image)) = icon {
                             ui! { <Image asset_id={*id} image={image.clone()} generation={u64::from(*id)} fit={ImageFit::Contain} width={16.0} height={16.0} /> }
@@ -532,7 +532,7 @@ pub(crate) fn tab(
                             color={if active { palette.text } else { palette.muted }}>{label.clone()}</Text>
                         </Row></Container>
                     <Container width={20.0} on_press={FileMessage::CloseTab(index)}
-                        focus_border={palette.accent} controller_focus_border={palette.complement} accessibility_label={format!("Close {label}")}>
+                        focus_background_tint={palette.accent} controller_focus_background_tint={palette.complement} accessibility_label={format!("Close {label}")}>
                         <Text width={20.0} color={palette.muted}>{"×"}</Text>
                     </Container>
                 </Row>
@@ -556,7 +556,7 @@ pub(crate) fn grid_item(
         <FileGridItem on_press={FileMessage::Entry(index)} label={entry.display_name()}
             asset_id={icon_id} image={icon_image} generation={u64::from(icon_id)}
             borderless_palette={(if selected { palette.accent_soft } else if light_mode { 0xffffff } else { palette.background }, palette.text)}
-            icon_size={icon_size} focus_border={palette.accent} controller_focus_border={palette.complement}
+            icon_size={icon_size} focus_background_tint={palette.accent} controller_focus_background_tint={palette.complement}
             id={format!("file-entry-{index}")} context_message={FileMessage::ContextEntry(index)}
             semantic_role={SemanticRole::Button} accessibility_label={entry.display_name()} />
     }
@@ -597,7 +597,7 @@ pub(crate) fn details_row(
             padding={Insets { top: 7.0, right: 10.0, bottom: 7.0, left: 10.0 }}
             on_press={FileMessage::Entry(index)} context_message={FileMessage::ContextEntry(index)}
             semantic_role={SemanticRole::Button} accessibility_label={entry.display_name()}
-            focus_border={palette.accent} controller_focus_border={palette.complement}>
+            focus_background_tint={palette.accent} controller_focus_background_tint={palette.complement}>
             <Row gap={12.0}>
                 <Image asset_id={icon_id} image={icon_image} generation={u64::from(icon_id)} fit={ImageFit::Contain} width={28.0} height={28.0} />
                 <Container id={format!("details-name-{index}")} grow={1.0} min_width={120.0} height={44.0}>

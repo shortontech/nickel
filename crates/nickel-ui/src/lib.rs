@@ -60,7 +60,7 @@ pub use theme::{
     EasingCurve, FontWeight, MotionPreference, MotionScale, PlatformThemePreferences, RadiusScale,
     ResolvedAppearance, ResolvedThemePreferences, SemanticTheme, SemanticTokenSet, SizingScale,
     SpacingScale, SurfaceColors, TextColors, TextStyle, ThemePreferences, TransparencyPreference,
-    TypographyScale,
+    TypographyScale, focused_surface, focused_surface_with_foreground,
 };
 pub use ui::{
     ACTION_LEGEND_COMPACT_BREAKPOINT, AccessibilityNode, AccountSummaryRow, ActionKind,
@@ -196,9 +196,9 @@ mod declarative_tests {
                 <Container id={"content"} navigation_scope={NavigationScope::pane(true)}
                     navigation_scope_highlight={0x8b5cf6}>
                     <Container id={"audio"} navigation_scope={NavigationScope::group()}
-                        controller_focus_border={0x55d98b}>
+                        controller_focus_background_tint={0x55d98b}>
                         <Slider id={"volume"} value={0.5} on_change={volume}
-                            adjustment_step={0.1} controller_focus_border={0x55d98b} />
+                            adjustment_step={0.1} controller_focus_background_tint={0x55d98b} />
                     </Container>
                 </Container>
             </Row>

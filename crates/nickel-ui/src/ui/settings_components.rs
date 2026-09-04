@@ -200,7 +200,7 @@ impl<Message> NavigationItem<Message> {
                 } else {
                     theme.surfaces.sidebar
                 })
-                .controller_focus_border(theme.borders.controller_focus)
+                .controller_focus_background_tint(theme.borders.controller_focus)
                 .message(message)
                 .child(row)
                 .semantic_role(SemanticRole::NavigationItem)
@@ -704,8 +704,8 @@ impl<Message> Switch<Message> {
                 theme.surfaces.raised
             })
             .interaction_backgrounds(theme.surfaces.hover, theme.surfaces.pressed)
-            .focus_border(theme.borders.focus)
-            .controller_focus_border(theme.borders.controller_focus)
+            .focus_background_tint(theme.borders.focus)
+            .controller_focus_background_tint(theme.borders.controller_focus)
             .accessibility_state(match state {
                 SwitchState::Off => "off",
                 SwitchState::On => "on",
@@ -992,8 +992,8 @@ impl<Message> SliderField<Message> {
                         theme.accent.ordinary,
                         theme.text.primary,
                     )
-                    .focus_border(theme.borders.focus)
-                    .controller_focus_border(theme.borders.controller_focus)
+                    .focus_background_tint(theme.borders.focus)
+                    .controller_focus_background_tint(theme.borders.controller_focus)
                     .width(330.0)
                     .accessibility_label(label.clone()),
             )
@@ -1039,8 +1039,8 @@ impl<Message> SelectField<Message> {
                 theme.surfaces.hover,
                 theme.text.primary,
             )
-            .focus_border(theme.borders.focus)
-            .controller_focus_border(theme.borders.controller_focus)
+            .focus_background_tint(theme.borders.focus)
+            .controller_focus_background_tint(theme.borders.controller_focus)
             .accessibility_label(label.clone());
         Self(
             SettingsRow::new(theme, label, supporting_text)
@@ -1180,8 +1180,8 @@ impl<Message> TabList<Message> {
                     .height(38.0)
                     .message(message)
                     .interaction_backgrounds(theme.surfaces.hover, theme.surfaces.pressed)
-                    .focus_border(theme.borders.focus)
-                    .controller_focus_border(theme.borders.controller_focus)
+                    .focus_background_tint(theme.borders.focus)
+                    .controller_focus_background_tint(theme.borders.controller_focus)
                     .semantic_role(SemanticRole::Tab)
                     .accessibility_label(&label)
                     .accessibility_state(if selected { "selected" } else { "unselected" })
@@ -1320,8 +1320,8 @@ impl<Message> ChoiceCard<Message> {
                 .padding(Insets::all(theme.spacing.content))
                 .background(theme.surfaces.card)
                 .interaction_backgrounds(theme.surfaces.hover, theme.surfaces.pressed)
-                .focus_border(theme.borders.focus)
-                .controller_focus_border(theme.borders.controller_focus)
+                .focus_background_tint(theme.borders.focus)
+                .controller_focus_background_tint(theme.borders.controller_focus)
                 .border(
                     if selected {
                         theme.accent.ordinary
@@ -1537,8 +1537,8 @@ impl<Message> ColorSwatch<Message> {
                 .height(42.0)
                 .message(message)
                 .interaction_backgrounds(theme.surfaces.hover, theme.surfaces.pressed)
-                .focus_border(theme.borders.focus)
-                .controller_focus_border(theme.borders.controller_focus)
+                .focus_background_tint(theme.borders.focus)
+                .controller_focus_background_tint(theme.borders.controller_focus)
                 .semantic_role(SemanticRole::Radio)
                 .accessibility_label(label)
                 .accessibility_state(if selected { "selected" } else { "unselected" })
@@ -1555,8 +1555,8 @@ impl<Message> ColorSwatch<Message> {
                 .border(theme.surfaces.raised, 1.0)
                 .message(message)
                 .interaction_backgrounds(theme.surfaces.hover, theme.surfaces.pressed)
-                .focus_border(theme.borders.focus)
-                .controller_focus_border(theme.borders.controller_focus)
+                .focus_background_tint(theme.borders.focus)
+                .controller_focus_background_tint(theme.borders.controller_focus)
                 .semantic_role(SemanticRole::Button)
                 .accessibility_label("Choose a custom color")
                 .child(

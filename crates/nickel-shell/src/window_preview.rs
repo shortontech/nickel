@@ -97,8 +97,8 @@ impl Application for WindowMenuApp {
                         .id(format!("window-menu-action-{index}"))
                         .height(MENU_ROW_HEIGHT)
                         .background(self.palette.panel)
-                        .focus_border(self.palette.accent)
-                        .controller_focus_border(self.palette.accent)
+                        .focus_background_tint(self.palette.accent)
+                        .controller_focus_background_tint(self.palette.accent)
                         .color(self.palette.text),
                 )
             },

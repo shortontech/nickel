@@ -1,5 +1,90 @@
 use crate::Color;
 
+/// Resolve a keyboard/controller focus cue into a child-surface color.
+///
+/// Saturated surfaces borrow the semantic cue's hue. As the surface becomes
+/// achromatic the transform continuously changes to a lightness difference,
+/// so focus never depends on hue alone. This operates on semantic surface
+/// colors before painting; source images are deliberately outside this path.
+pub fn focused_surface(base: Color, cue: Color) -> Color {
+    let (base_hue, base_saturation, base_lightness) = rgb_to_hsl(base);
+    let (cue_hue, cue_saturation, _) = rgb_to_hsl(cue);
+    let hue_weight = ((base_saturation - 0.06) / 0.24).clamp(0.0, 1.0);
+
+    let hue = interpolate_hue(base_hue, cue_hue, 0.72 * hue_weight);
+    let saturated =
+        (base_saturation + (cue_saturation.max(0.28) - base_saturation) * 0.42).clamp(0.0, 0.82);
+    let saturation = base_saturation + (saturated - base_saturation) * hue_weight;
+
+    // Move toward the side with more perceptual headroom. The bounded delta
+    // avoids destroying the semantic tone in very light and very dark themes.
+    let lightness_delta = if base_lightness >= 0.52 { -0.16 } else { 0.16 };
+    let lightness =
+        (base_lightness + lightness_delta * (1.0 - 0.45 * hue_weight)).clamp(0.08, 0.92);
+    hsl_to_rgb(hue, saturation, lightness)
+}
+
+/// Preserve readable foreground contrast while applying [`focused_surface`].
+pub fn focused_surface_with_foreground(base: Color, cue: Color, foreground: Color) -> Color {
+    let focused = focused_surface(base, cue);
+    if contrast_ratio(focused, foreground) >= 4.5 {
+        return focused;
+    }
+    let target = if relative_luminance(foreground) > 0.45 {
+        0x080808
+    } else {
+        0xf7f7f7
+    };
+    (1..=20)
+        .map(|step| mix(focused, target, step * 5))
+        .find(|candidate| contrast_ratio(*candidate, foreground) >= 4.5)
+        .unwrap_or(target)
+}
+
+fn rgb_to_hsl(color: Color) -> (f32, f32, f32) {
+    let red = ((color >> 16) & 0xff) as f32 / 255.0;
+    let green = ((color >> 8) & 0xff) as f32 / 255.0;
+    let blue = (color & 0xff) as f32 / 255.0;
+    let maximum = red.max(green).max(blue);
+    let minimum = red.min(green).min(blue);
+    let lightness = (maximum + minimum) / 2.0;
+    let difference = maximum - minimum;
+    if difference <= f32::EPSILON {
+        return (0.0, 0.0, lightness);
+    }
+    let saturation = difference / (1.0 - (2.0 * lightness - 1.0).abs());
+    let hue = if maximum == red {
+        60.0 * ((green - blue) / difference).rem_euclid(6.0)
+    } else if maximum == green {
+        60.0 * ((blue - red) / difference + 2.0)
+    } else {
+        60.0 * ((red - green) / difference + 4.0)
+    };
+    (hue, saturation, lightness)
+}
+
+fn hsl_to_rgb(hue: f32, saturation: f32, lightness: f32) -> Color {
+    let chroma = (1.0 - (2.0 * lightness - 1.0).abs()) * saturation;
+    let section = hue.rem_euclid(360.0) / 60.0;
+    let secondary = chroma * (1.0 - (section.rem_euclid(2.0) - 1.0).abs());
+    let (red, green, blue) = match section as u32 {
+        0 => (chroma, secondary, 0.0),
+        1 => (secondary, chroma, 0.0),
+        2 => (0.0, chroma, secondary),
+        3 => (0.0, secondary, chroma),
+        4 => (secondary, 0.0, chroma),
+        _ => (chroma, 0.0, secondary),
+    };
+    let offset = lightness - chroma / 2.0;
+    let channel = |value: f32| ((value + offset).clamp(0.0, 1.0) * 255.0).round() as Color;
+    (channel(red) << 16) | (channel(green) << 8) | channel(blue)
+}
+
+fn interpolate_hue(from: f32, to: f32, amount: f32) -> f32 {
+    let distance = (to - from + 180.0).rem_euclid(360.0) - 180.0;
+    (from + distance * amount).rem_euclid(360.0)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SurfaceColors {
     pub window: Color,
@@ -603,6 +688,48 @@ mod tests {
         assert_eq!(contrasting_text(0x000000), 0xffffff);
         assert_eq!(contrasting_text(0xffffff), 0x111111);
         assert_eq!(mix(0x000000, 0xffffff, 50), 0x808080);
+    }
+
+    #[test]
+    fn achromatic_focus_uses_bounded_lightness_difference() {
+        for base in [0x101010, 0x404040, 0x808080, 0xd8d8d8, 0xf4f4f4] {
+            let focused = focused_surface(base, 0x35b875);
+            let (_, saturation, lightness) = rgb_to_hsl(focused);
+            assert!(
+                saturation < 0.03,
+                "gray surface gained chroma: {focused:06x}"
+            );
+            assert!((0.08..=0.92).contains(&lightness));
+            assert_ne!(focused, base);
+        }
+    }
+
+    #[test]
+    fn saturation_sweep_has_no_strategy_discontinuity() {
+        let mut previous = focused_surface(hsl_to_rgb(210.0, 0.0, 0.30), 0xd94b9b);
+        for step in 1..=100 {
+            let saturation = step as f32 / 100.0;
+            let current = focused_surface(hsl_to_rgb(210.0, saturation, 0.30), 0xd94b9b);
+            let channel_delta = |shift: u32| {
+                (((current >> shift) & 0xff_u32) as i32 - ((previous >> shift) & 0xff_u32) as i32)
+                    .abs()
+            };
+            assert!(
+                channel_delta(16)
+                    .max(channel_delta(8))
+                    .max(channel_delta(0))
+                    <= 18
+            );
+            previous = current;
+        }
+    }
+
+    #[test]
+    fn focused_surface_preserves_required_foreground_contrast() {
+        for (base, foreground) in [(0x202020, 0xf0f0f0), (0xe8e8e8, 0x111111)] {
+            let focused = focused_surface_with_foreground(base, 0x9050e0, foreground);
+            assert!(contrast_ratio(focused, foreground) >= 4.5);
+        }
     }
 
     #[test]

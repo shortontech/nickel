@@ -263,8 +263,8 @@ fn button(value: ControlAction, label: impl Into<String>) -> Button<ControlActio
         .radius(7.0)
         .background(0x34445f)
         .color(PRIMARY)
-        .focus_border(ACCENT)
-        .controller_focus_border(ACCENT)
+        .focus_background_tint(ACCENT)
+        .controller_focus_background_tint(ACCENT)
 }
 
 fn section(id: &str, expanded: bool, value: ControlAction) -> AnyView<ControlAction> {
@@ -282,8 +282,8 @@ fn section(id: &str, expanded: bool, value: ControlAction) -> AnyView<ControlAct
         .padding(8.0)
         .background(CARD)
         .color(SECONDARY)
-        .focus_border(ACCENT)
-        .controller_focus_border(ACCENT),
+        .focus_background_tint(ACCENT)
+        .controller_focus_background_tint(ACCENT),
     )
 }
 

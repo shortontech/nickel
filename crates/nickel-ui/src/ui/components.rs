@@ -571,13 +571,13 @@ impl<Message> FileGridItem<Message> {
         self
     }
 
-    pub fn focus_border(mut self, color: Color) -> Self {
-        self.0 = self.0.focus_border(color);
+    pub fn focus_background_tint(mut self, color: Color) -> Self {
+        self.0 = self.0.focus_background_tint(color);
         self
     }
 
-    pub fn controller_focus_border(mut self, color: Color) -> Self {
-        self.0 = self.0.controller_focus_border(color);
+    pub fn controller_focus_background_tint(mut self, color: Color) -> Self {
+        self.0 = self.0.controller_focus_background_tint(color);
         self
     }
 }
@@ -1329,13 +1329,13 @@ impl<Message> Container<Message> {
         self
     }
 
-    pub fn focus_border(mut self, color: Color) -> Self {
-        self.0 = self.0.focus_border(color);
+    pub fn focus_background_tint(mut self, color: Color) -> Self {
+        self.0 = self.0.focus_background_tint(color);
         self
     }
 
-    pub fn controller_focus_border(mut self, color: Color) -> Self {
-        self.0 = self.0.controller_focus_border(color);
+    pub fn controller_focus_background_tint(mut self, color: Color) -> Self {
+        self.0 = self.0.controller_focus_background_tint(color);
         self
     }
 
@@ -1748,11 +1748,11 @@ impl<Message> SidebarFolder<Message> {
 
     /// Applies modality-specific focus rings to both semantic actions in the
     /// folder row without turning the noninteractive wrapper into a target.
-    pub fn focus_borders(mut self, colors: (Color, Color)) -> Self {
+    pub fn focus_background_tints(mut self, colors: (Color, Color)) -> Self {
         if let Some(row) = self.0.0.children.first_mut() {
             for action in &mut row.children {
-                action.style.focus_border = Some(colors.0);
-                action.style.controller_focus_border = Some(colors.1);
+                action.style.focus_background_tint = Some(colors.0);
+                action.style.controller_focus_background_tint = Some(colors.1);
             }
         }
         self
@@ -1948,8 +1948,8 @@ impl<Message> Button<Message> {
         };
         self.0.0.style.hover_background = Some(Background::Solid(theme.surfaces.hover));
         self.0.0.style.pressed_background = Some(Background::Solid(theme.surfaces.pressed));
-        self.0.0.style.focus_border = Some(theme.borders.focus);
-        self.0.0.style.controller_focus_border = Some(theme.borders.controller_focus);
+        self.0.0.style.focus_background_tint = Some(theme.borders.focus);
+        self.0.0.style.controller_focus_background_tint = Some(theme.borders.controller_focus);
         if presentation == ButtonPresentation::Disabled {
             self.0.0.message = None;
         }
@@ -1964,13 +1964,13 @@ impl<Message> Button<Message> {
         self
     }
 
-    pub fn focus_border(mut self, color: Color) -> Self {
-        self.0 = self.0.focus_border(color);
+    pub fn focus_background_tint(mut self, color: Color) -> Self {
+        self.0 = self.0.focus_background_tint(color);
         self
     }
 
-    pub fn controller_focus_border(mut self, color: Color) -> Self {
-        self.0 = self.0.controller_focus_border(color);
+    pub fn controller_focus_background_tint(mut self, color: Color) -> Self {
+        self.0 = self.0.controller_focus_background_tint(color);
         self
     }
 
@@ -2254,8 +2254,8 @@ impl<Message> Component<Message> for RadioOption<Message> {
                 if self.selected { 2.0 } else { 1.0 },
             )
             .interaction_backgrounds(self.theme.surfaces.hover, self.theme.surfaces.pressed)
-            .focus_border(self.theme.borders.focus)
-            .controller_focus_border(self.theme.borders.controller_focus)
+            .focus_background_tint(self.theme.borders.focus)
+            .controller_focus_background_tint(self.theme.borders.controller_focus)
             .message(self.message)
             .enabled(self.enabled)
             .semantic_role(SemanticRole::Radio)
@@ -2403,8 +2403,8 @@ impl<Message> RadioButton<Message> {
                 .height(34.0)
                 .message(message)
                 .interaction_backgrounds(hover, pressed)
-                .focus_border(focus)
-                .controller_focus_border(controller_focus)
+                .focus_background_tint(focus)
+                .controller_focus_background_tint(controller_focus)
                 .child(
                     Row::new()
                         .gap(10.0)
@@ -2523,13 +2523,13 @@ impl<Message> Slider<Message> {
         self
     }
 
-    pub fn focus_border(mut self, color: Color) -> Self {
-        self.0 = self.0.focus_border(color);
+    pub fn focus_background_tint(mut self, color: Color) -> Self {
+        self.0 = self.0.focus_background_tint(color);
         self
     }
 
-    pub fn controller_focus_border(mut self, color: Color) -> Self {
-        self.0 = self.0.controller_focus_border(color);
+    pub fn controller_focus_background_tint(mut self, color: Color) -> Self {
+        self.0 = self.0.controller_focus_background_tint(color);
         self
     }
 }
@@ -2664,13 +2664,13 @@ impl<Message> Dropdown<Message> {
         self.colors(colors.0, colors.1, colors.2)
     }
 
-    pub fn focus_border(mut self, color: Color) -> Self {
-        self.0.style.focus_border = Some(color);
+    pub fn focus_background_tint(mut self, color: Color) -> Self {
+        self.0.style.focus_background_tint = Some(color);
         self
     }
 
-    pub fn controller_focus_border(mut self, color: Color) -> Self {
-        self.0.style.controller_focus_border = Some(color);
+    pub fn controller_focus_background_tint(mut self, color: Color) -> Self {
+        self.0.style.controller_focus_background_tint = Some(color);
         self
     }
 }
@@ -3107,10 +3107,18 @@ mod semantic_control_tests {
         let _ = tree.handle_event(&mut state, UiEvent::PointerReleased(point));
         let _ = tree.handle_event(&mut state, UiEvent::FocusNext);
         tree = UiFrame::layout_with_state(view(), bounds, &mut state);
-        assert!(tree.commands().iter().any(|command| matches!(
+        let focused = crate::focused_surface(theme.accent.ordinary, theme.borders.focus);
+        assert!(
+            tree.commands().iter().any(|command| matches!(
+                command,
+                PaintCommand::RoundedFill { color, .. } if *color == focused
+            )),
+            "expected {focused:06x} in {:?}",
+            tree.commands()
+        );
+        assert!(!tree.commands().iter().any(|command| matches!(
             command,
-            PaintCommand::RoundedFill { color, radius, .. }
-                if *color == theme.borders.focus && *radius == theme.radii.control
+            PaintCommand::Stroke { color, .. } if *color == theme.borders.focus
         )));
     }
 

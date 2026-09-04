@@ -120,8 +120,8 @@ pub struct Collection<T, K, Message, Render, View> {
     id: UiId,
     accessibility_label: Option<String>,
     gap: f32,
-    item_focus_border: Option<Color>,
-    item_controller_focus_border: Option<Color>,
+    item_focus_background_tint: Option<Color>,
+    item_controller_focus_background_tint: Option<Color>,
     navigation_scope: Option<NavigationScope>,
     controller_scope_background: Option<Background>,
     interactions: CollectionInteractions<K, Message>,
@@ -186,8 +186,8 @@ where
             id: UiId::from("collection"),
             accessibility_label: None,
             gap: 0.0,
-            item_focus_border: None,
-            item_controller_focus_border: None,
+            item_focus_background_tint: None,
+            item_controller_focus_background_tint: None,
             navigation_scope: None,
             controller_scope_background: None,
             interactions: CollectionInteractions::default(),
@@ -216,14 +216,14 @@ where
     }
 
     /// Paints keyboard focus on the keyed item which owns its semantic actions.
-    pub fn item_focus_border(mut self, color: Color) -> Self {
-        self.item_focus_border = Some(color);
+    pub fn item_focus_background_tint(mut self, color: Color) -> Self {
+        self.item_focus_background_tint = Some(color);
         self
     }
 
     /// Paints controller selection on the keyed item which owns its semantic actions.
-    pub fn item_controller_focus_border(mut self, color: Color) -> Self {
-        self.item_controller_focus_border = Some(color);
+    pub fn item_controller_focus_background_tint(mut self, color: Color) -> Self {
+        self.item_controller_focus_background_tint = Some(color);
         self
     }
 
@@ -525,11 +525,11 @@ where
                 if let Some(row_height) = virtual_row_height {
                     item_container = item_container.height(row_height);
                 }
-                if let Some(color) = self.item_focus_border {
-                    item_container = item_container.focus_border(color);
+                if let Some(color) = self.item_focus_background_tint {
+                    item_container = item_container.focus_background_tint(color);
                 }
-                if let Some(color) = self.item_controller_focus_border {
-                    item_container = item_container.controller_focus_border(color);
+                if let Some(color) = self.item_controller_focus_background_tint {
+                    item_container = item_container.controller_focus_background_tint(color);
                 }
                 let mut element = item_container.into_element();
                 if !is_disabled && let Some(action) = &self.interactions.activate {

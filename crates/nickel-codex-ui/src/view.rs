@@ -1200,7 +1200,7 @@ fn project_menu_view(state: &ChatState, settings_error: Option<&str>) -> impl Vi
             <Row fill_width shrink={0.0} gap={8.0}>
                 <Text scale={1.25} color={TEXT} grow={1.0}>{"Codex projects"}</Text>
                 <Button on_press={ChatMessage::Refresh} background={PANEL} color={TEXT}
-                    controller_focus_border={controller_focus}>{"Retry"}</Button>
+                    controller_focus_background_tint={controller_focus}>{"Retry"}</Button>
             </Row>
             <Text color={MUTED} shrink={0.0}>{status}</Text>
             <Container id={id!(project_search_container)} accessibility_label={"Search projects"}
@@ -1228,7 +1228,7 @@ fn project_menu_view(state: &ChatState, settings_error: Option<&str>) -> impl Vi
                         <Button key={project.id.clone()} height={42.0}
                             on_press={ChatMessage::NewChatIn(root, project.id.clone())}
                             background={PANEL} color={TEXT} label_align={TextAlign::Start}
-                            controller_focus_border={controller_focus}
+                            controller_focus_background_tint={controller_focus}
                             padding={Insets::symmetric(12.0, 8.0)} fill_width>{&project.name}</Button>
                     }
                 })}
