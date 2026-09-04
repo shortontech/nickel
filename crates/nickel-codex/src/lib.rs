@@ -13,7 +13,7 @@ pub use protocol::{
     NetworkPolicyAmendment, Project, ProjectPage, ProjectPageResult, ProjectedItem,
     ProjectedThread, Projection, ReasoningEffortOption, ServerRequestId, StartThread, StartTurn,
     Thread, ThreadHistoryItem, ThreadHistoryTurn, ThreadId, ThreadPage, ThreadPageResult,
-    ThreadRuntime, ThreadRuntimeStatus, Turn, TurnId, UserInputAnswer,
+    ThreadRuntime, ThreadRuntimeStatus, Turn, TurnId, TurnImage, UserInputAnswer,
 };
 pub use replay::{ReplayBackend, ReplayScenario};
 pub use selection::{

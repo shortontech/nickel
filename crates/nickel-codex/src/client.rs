@@ -809,6 +809,16 @@ fn set_socket_timeout(stream: &mut MaybeTlsStream<std::net::TcpStream>, timeout:
     let _ = result;
 }
 
+fn turn_input(text: String, images: Vec<crate::TurnImage>) -> Vec<Value> {
+    let mut input = vec![json!({"type": "text", "text": text})];
+    input.extend(
+        images
+            .into_iter()
+            .map(|image| json!({"type": "image", "url": image.data_url})),
+    );
+    input
+}
+
 impl CodexBackend for CodexClient {
     fn account(&self) -> Result<AccountState, CodexError> {
         let value = self.request("account/read", json!({"refreshToken": false}))?;
@@ -950,7 +960,8 @@ impl CodexBackend for CodexClient {
     }
     fn start_turn(&self, request: StartTurn) -> Result<Turn, CodexError> {
         let thread_id = request.thread_id.clone();
-        let value = self.request("turn/start", json!({"threadId": request.thread_id.0, "input": [{"type": "text", "text": request.text}], "model": request.model, "effort": request.reasoning_effort}))?;
+        let input = turn_input(request.text, request.images);
+        let value = self.request("turn/start", json!({"threadId": request.thread_id.0, "input": input, "model": request.model, "effort": request.reasoning_effort}))?;
         let turn = value.get("turn").unwrap_or(&value);
         Ok(Turn {
             id: TurnId(
@@ -1213,6 +1224,23 @@ mod tests {
     use proptest::prelude::*;
     use tungstenite::{Message, accept_hdr};
 
+    #[test]
+    fn turn_input_associates_text_and_images_exactly_once() {
+        let input = turn_input(
+            "hello 世界".into(),
+            vec![crate::TurnImage {
+                data_url: "data:image/png;base64,c2VjcmV0".into(),
+            }],
+        );
+        assert_eq!(
+            input,
+            vec![
+                json!({"type":"text", "text":"hello 世界"}),
+                json!({"type":"image", "url":"data:image/png;base64,c2VjcmV0"}),
+            ]
+        );
+    }
+
     use super::*;
 
     #[test]
@@ -1436,6 +1464,7 @@ mod tests {
             .start_turn(StartTurn {
                 thread_id: thread.id.clone(),
                 text: "hello remotely".into(),
+                images: Vec::new(),
                 model: None,
                 reasoning_effort: Some("high".into()),
             })

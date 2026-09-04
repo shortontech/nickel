@@ -203,8 +203,25 @@ pub struct StartThread {
 pub struct StartTurn {
     pub thread_id: ThreadId,
     pub text: String,
+    /// In-memory images encoded as data URLs for the app-server `image` input.
+    /// Callers must not persist or log these values.
+    pub images: Vec<TurnImage>,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct TurnImage {
+    pub data_url: String,
+}
+
+impl std::fmt::Debug for TurnImage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TurnImage")
+            .field("encoded_bytes", &self.data_url.len())
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -802,6 +802,15 @@ impl WinitShell {
         self.clipboard.as_ref()?.borrow_mut().get_text().ok()
     }
 
+    pub fn clipboard_image(&self) -> Option<(u32, u32, Vec<u8>)> {
+        let image = self.clipboard.as_ref()?.borrow_mut().get_image().ok()?;
+        Some((
+            u32::try_from(image.width).ok()?,
+            u32::try_from(image.height).ok()?,
+            image.bytes.into_owned(),
+        ))
+    }
+
     pub fn set_clipboard_text(&self, text: &str) {
         if let Some(clipboard) = &self.clipboard {
             let _ = clipboard.borrow_mut().set_text(text);

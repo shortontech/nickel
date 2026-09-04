@@ -1,7 +1,12 @@
+mod attachments;
 mod controller;
 mod model;
 mod view;
 
+pub use attachments::{
+    AttachmentError, AttachmentId, AttachmentLimits, ClipboardOffer, ClipboardPaste,
+    PendingAttachment,
+};
 pub use controller::{
     BackendMode, ChatController, ControllerCommand, ControllerEvent, create_managed_workspace,
 };
@@ -131,7 +136,7 @@ mod tests {
         state.draft = "   ".into();
         assert!(state.begin_send().is_none());
         state.draft = "hello".into();
-        assert_eq!(state.begin_send().as_deref(), Some("hello"));
+        assert_eq!(state.begin_send().map(|sent| sent.0), Some("hello".into()));
         assert_eq!(state.items[0].kind, ChatItemKind::User);
     }
 
@@ -140,7 +145,7 @@ mod tests {
         let mut state = ChatState::default();
         state.status = ConnectionStatus::Ready;
         state.draft = "hello".into();
-        assert_eq!(state.begin_send().as_deref(), Some("hello"));
+        assert_eq!(state.begin_send().map(|sent| sent.0), Some("hello".into()));
 
         state.apply(
             1,
@@ -855,7 +860,9 @@ mod tests {
         app.state.status = ConnectionStatus::Ready;
         app.state.draft = "first\nsecond".into();
         assert!(app.shortcut(Shortcut::Submit));
-        assert!(app.state.draft.is_empty());
+        // Submission is staged until the backend acknowledges TurnStarted, so a failed
+        // transport cannot destroy the user's draft or attachments.
+        assert_eq!(app.state.draft, "first\nsecond");
         assert_eq!(app.state.items.back().unwrap().kind, ChatItemKind::User);
     }
 

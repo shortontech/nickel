@@ -2626,6 +2626,7 @@ dependencies = [
 name = "nickel-codex"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "ctrlc",
  "dirs",
  "flate2",
@@ -2657,6 +2658,7 @@ dependencies = [
 name = "nickel-codex-ui"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "dirs",
  "image",
  "jiff",

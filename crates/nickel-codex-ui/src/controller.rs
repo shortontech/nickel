@@ -68,6 +68,7 @@ pub enum ControllerCommand {
     SelectThread(ThreadId),
     Send {
         text: String,
+        images: Vec<nickel_codex::TurnImage>,
         model: Option<String>,
         reasoning_effort: Option<String>,
     },
@@ -101,6 +102,7 @@ pub enum ControllerEvent {
     },
     ThreadCreated(Thread),
     ThreadSelected(Thread),
+    TurnAccepted,
     Protocol(CodexEvent),
     Incompatible(String),
     Unavailable(String),
@@ -340,6 +342,7 @@ fn run_worker(
             }
             ControllerCommand::Send {
                 text,
+                images,
                 model,
                 reasoning_effort,
             } => {
@@ -363,11 +366,15 @@ fn run_worker(
                         backend.start_turn(StartTurn {
                             thread_id,
                             text,
+                            images,
                             model,
                             reasoning_effort,
                         })
                     })
-                    .map(|turn| active_turn = Some(turn.id))
+                    .map(|turn| {
+                        active_turn = Some(turn.id);
+                        let _ = send(ControllerEvent::TurnAccepted);
+                    })
                     .map_err(|error| error.to_string())
             }
             ControllerCommand::Shell(command) => {

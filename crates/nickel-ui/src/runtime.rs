@@ -417,6 +417,12 @@ pub trait Application: Sized {
         false
     }
 
+    /// Offers normalized RGBA clipboard pixels to the focused application.
+    /// Returning true makes image data win over simultaneous clipboard text.
+    fn paste_clipboard_image(&mut self, _width: u32, _height: u32, _rgba: &[u8]) -> bool {
+        false
+    }
+
     /// Reports the controller presentation currently driving this host.
     /// Applications can retain it when controller-specific legends are part
     /// of their declarative view.
@@ -952,6 +958,14 @@ pub struct SemanticActionFailure {
 }
 
 impl<A: Application> UiHost<A> {
+    pub fn paste_clipboard_image(&mut self, width: u32, height: u32, rgba: &[u8]) -> bool {
+        if self.application.paste_clipboard_image(width, height, rgba) {
+            self.rebuild();
+            true
+        } else {
+            false
+        }
+    }
     pub fn set_controller_family(&mut self, family: ControllerFamily) -> bool {
         if self.application.controller_family_changed(family) {
             self.rebuild();
@@ -2183,6 +2197,25 @@ impl<A: Application, H: HostAdapter<A>> ApplicationHandler for ApplicationRuntim
                 continue;
             }
             self.flush_pending_continuous_input(event_loop, &window);
+            let image_pasted = if is_clipboard_paste(&normalized) {
+                self.clipboard
+                    .as_mut()
+                    .and_then(|clipboard| clipboard.get_image().ok())
+                    .and_then(|image| {
+                        let width = u32::try_from(image.width).ok()?;
+                        let height = u32::try_from(image.height).ok()?;
+                        self.host.as_mut().map(|host| {
+                            host.paste_clipboard_image(width, height, image.bytes.as_ref())
+                        })
+                    })
+                    .unwrap_or(false)
+            } else {
+                false
+            };
+            if image_pasted {
+                self.scheduler.invalidate();
+                continue;
+            }
             let clipboard_text = self
                 .clipboard
                 .as_mut()
@@ -2197,6 +2230,14 @@ impl<A: Application, H: HostAdapter<A>> ApplicationHandler for ApplicationRuntim
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         self.stop();
     }
+}
+
+fn is_clipboard_paste(input: &nickel_input::InputEvent) -> bool {
+    matches!(input, nickel_input::InputEvent::Key(key)
+        if key.edge == nickel_input::KeyEdge::Pressed
+        && matches!(key.logical, nickel_input::LogicalKey::Character(ref value) if value.eq_ignore_ascii_case("v"))
+        && (key.modifiers.aggregate(nickel_input::AggregateModifier::Control)
+            || key.modifiers.aggregate(nickel_input::AggregateModifier::Super)))
 }
 
 #[cfg(test)]

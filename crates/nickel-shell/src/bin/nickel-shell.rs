@@ -1,6 +1,8 @@
 use nickel_codex::ThreadId;
 use nickel_codex_ui::{ChatApplication, ConnectionStatus, ShellRequest, shell_application};
-use nickel_input::{InputEvent, KeyEdge, LogicalKey, NamedKey, PointerButton, PointerEvent};
+use nickel_input::{
+    AggregateModifier, InputEvent, KeyEdge, LogicalKey, NamedKey, PointerButton, PointerEvent,
+};
 use nickel_ui::{
     Application, ControllerAction, ControllerInput, HostBatch, HostChangeToken, HostEvent,
     HostEventOutcome, HostFailure, HostFailureStage, UiHost,
@@ -17,6 +19,14 @@ mod allocation_counter;
 #[global_allocator]
 static GLOBAL_ALLOCATOR: allocation_counter::CountingSystemAllocator =
     allocation_counter::CountingSystemAllocator;
+
+fn is_clipboard_paste(event: &InputEvent) -> bool {
+    matches!(event, InputEvent::Key(key)
+        if key.edge == KeyEdge::Pressed
+        && matches!(&key.logical, LogicalKey::Character(value) if value.eq_ignore_ascii_case("v"))
+        && (key.modifiers.aggregate(AggregateModifier::Control)
+            || key.modifiers.aggregate(AggregateModifier::Super)))
+}
 
 #[allow(dead_code)]
 mod desktop {
@@ -333,6 +343,10 @@ impl<A: Application> EmbeddedUiSurface<A> {
             }],
             ..HostBatch::default()
         })
+    }
+
+    fn paste_clipboard_image(&mut self, width: u32, height: u32, rgba: &[u8]) -> bool {
+        self.host.paste_clipboard_image(width, height, rgba)
     }
 
     fn window_focus(&mut self, focused: bool) -> HostEventOutcome {
@@ -1073,10 +1087,31 @@ fn handle_codex_event(
         return Ok(true);
     }
     let outcome = match event {
-        ShellEvent::Input { event, .. } => codex
-            .host_mut(surface)
-            .expect("Codex host exists")
-            .normalized_input(event.clone(), shell.clipboard_text()),
+        ShellEvent::Input { event, .. } => {
+            let image_pasted = if is_clipboard_paste(event) {
+                shell
+                    .clipboard_image()
+                    .is_some_and(|(width, height, bytes)| {
+                        codex
+                            .host_mut(surface)
+                            .expect("Codex host exists")
+                            .paste_clipboard_image(width, height, &bytes)
+                    })
+            } else {
+                false
+            };
+            if image_pasted {
+                HostEventOutcome {
+                    changed: true,
+                    ..HostEventOutcome::default()
+                }
+            } else {
+                codex
+                    .host_mut(surface)
+                    .expect("Codex host exists")
+                    .normalized_input(event.clone(), shell.clipboard_text())
+            }
+        }
         ShellEvent::FocusChanged { focused, .. } => codex
             .host_mut(surface)
             .expect("Codex host exists")

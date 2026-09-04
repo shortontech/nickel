@@ -12,6 +12,7 @@ use nickel_markdown::{MarkdownDocument, markdown_selection_runs};
 use nickel_ui::{SelectionDocument, SelectionRun};
 
 use crate::ControllerEvent;
+use crate::{AttachmentError, AttachmentId, AttachmentLimits, PendingAttachment};
 
 const MAX_ITEMS: usize = 2_000;
 const MAX_ITEM_ALIASES: usize = 2_000;
@@ -81,6 +82,9 @@ pub struct ChatState {
     pub interrupt_requested: bool,
     pub items: VecDeque<ChatItem>,
     pub draft: String,
+    pub attachments: Vec<PendingAttachment>,
+    next_attachment_id: u64,
+    send_pending: bool,
     pub interaction_answer: String,
     pub pending: Vec<PendingInteraction>,
     pub diagnostics: VecDeque<String>,
@@ -123,6 +127,9 @@ impl Default for ChatState {
             interrupt_requested: false,
             items: VecDeque::new(),
             draft: String::new(),
+            attachments: Vec::new(),
+            next_attachment_id: 1,
+            send_pending: false,
             interaction_answer: String::new(),
             pending: Vec::new(),
             diagnostics: VecDeque::new(),
@@ -149,14 +156,16 @@ impl ChatState {
     pub fn can_send(&self) -> bool {
         self.status == ConnectionStatus::Ready
             && self.active_turn.is_none()
-            && !self.draft.trim().is_empty()
+            && !self.send_pending
+            && (!self.draft.trim().is_empty() || !self.attachments.is_empty())
     }
 
-    pub fn begin_send(&mut self) -> Option<String> {
+    pub fn begin_send(&mut self) -> Option<(String, Vec<nickel_codex::TurnImage>)> {
         if !self.can_send() {
             return None;
         }
-        let text = std::mem::take(&mut self.draft);
+        let text = self.draft.clone();
+        self.send_pending = true;
         self.local_sequence += 1;
         self.push_item(ChatItem {
             id: format!("local-user-{}", self.local_sequence),
@@ -164,7 +173,65 @@ impl ChatState {
             text: text.clone(),
             complete: true,
         });
-        Some(text)
+        let images = self
+            .attachments
+            .iter()
+            .map(PendingAttachment::turn_image)
+            .collect();
+        Some((text, images))
+    }
+
+    pub fn attach_image(&mut self, bytes: &[u8]) -> Result<AttachmentId, AttachmentError> {
+        let limits = AttachmentLimits::default();
+        if self.attachments.len() >= limits.count {
+            return Err(AttachmentError::TooMany);
+        }
+        let decoded = self
+            .attachments
+            .iter()
+            .map(|item| item.preview.as_raw().len())
+            .sum::<usize>();
+        let id = AttachmentId(self.next_attachment_id);
+        let attachment = PendingAttachment::decode(id, bytes, limits)?;
+        if decoded.saturating_add(attachment.preview.as_raw().len())
+            > limits.aggregate_decoded_bytes
+        {
+            return Err(AttachmentError::AggregateLimit);
+        }
+        self.next_attachment_id = self.next_attachment_id.saturating_add(1);
+        self.attachments.push(attachment);
+        Ok(id)
+    }
+
+    pub fn attach_rgba(
+        &mut self,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> Result<AttachmentId, AttachmentError> {
+        let limits = AttachmentLimits::default();
+        if self.attachments.len() >= limits.count {
+            return Err(AttachmentError::TooMany);
+        }
+        let used = self
+            .attachments
+            .iter()
+            .map(|item| item.preview.as_raw().len())
+            .sum::<usize>();
+        let id = AttachmentId(self.next_attachment_id);
+        let attachment = PendingAttachment::from_rgba(id, width, height, rgba, limits)?;
+        if used.saturating_add(attachment.preview.as_raw().len()) > limits.aggregate_decoded_bytes {
+            return Err(AttachmentError::AggregateLimit);
+        }
+        self.next_attachment_id = self.next_attachment_id.saturating_add(1);
+        self.attachments.push(attachment);
+        Ok(id)
+    }
+
+    pub fn remove_attachment(&mut self, id: AttachmentId) -> bool {
+        let before = self.attachments.len();
+        self.attachments.retain(|attachment| attachment.id != id);
+        before != self.attachments.len()
     }
 
     pub fn apply(&mut self, generation: u64, event: ControllerEvent) -> bool {
@@ -233,8 +300,17 @@ impl ChatState {
                 self.record_selected_thread(thread);
             }
             ControllerEvent::ThreadSelected(thread) => {
+                self.attachments.clear();
+                self.send_pending = false;
                 self.hydrate_thread(&thread);
                 self.record_selected_thread(thread);
+            }
+            ControllerEvent::TurnAccepted => {
+                if self.send_pending {
+                    self.draft.clear();
+                    self.attachments.clear();
+                    self.send_pending = false;
+                }
             }
             ControllerEvent::Protocol(event) => self.apply_protocol(event),
             ControllerEvent::Incompatible(message) => {
@@ -252,7 +328,10 @@ impl ChatState {
                 self.active_turn = None;
                 self.interrupt_requested = false;
             }
-            ControllerEvent::OperationFailed(message) => self.push_diagnostic(message),
+            ControllerEvent::OperationFailed(message) => {
+                self.send_pending = false;
+                self.push_diagnostic(message);
+            }
             ControllerEvent::Failure(message) => {
                 self.status = ConnectionStatus::Disconnected;
                 self.push_diagnostic(message);
@@ -359,6 +438,11 @@ impl ChatState {
                 self.interrupt_requested = false;
             }
             EventKind::TurnStarted { turn_id, .. } => {
+                if self.send_pending {
+                    self.draft.clear();
+                    self.attachments.clear();
+                    self.send_pending = false;
+                }
                 self.clear_exploration();
                 self.turn_agent_index = None;
                 self.active_turn = Some(turn_id);
@@ -816,6 +900,38 @@ mod tests {
 
     const TINY_DERIVED_OPERATION_P95_ADDITION: std::time::Duration =
         std::time::Duration::from_micros(100);
+
+    #[test]
+    fn failed_send_retains_unicode_draft_and_images_until_turn_is_accepted() {
+        let mut state = ChatState {
+            status: ConnectionStatus::Ready,
+            draft: "hello 世界".into(),
+            ..ChatState::default()
+        };
+        state.attach_rgba(1, 1, &[1, 2, 3, 255]).unwrap();
+        let (text, images) = state.begin_send().unwrap();
+        assert_eq!(text, "hello 世界");
+        assert_eq!(images.len(), 1);
+        assert!(!state.can_send());
+        state.apply(1, ControllerEvent::OperationFailed("offline".into()));
+        assert_eq!(state.draft, "hello 世界");
+        assert_eq!(state.attachments.len(), 1);
+        assert!(state.can_send());
+
+        state.begin_send().unwrap();
+        state.apply(
+            1,
+            ControllerEvent::Protocol(CodexEvent {
+                sequence: 1,
+                kind: EventKind::TurnStarted {
+                    thread_id: ThreadId("t".into()),
+                    turn_id: TurnId("turn".into()),
+                },
+            }),
+        );
+        assert!(state.draft.is_empty());
+        assert!(state.attachments.is_empty());
+    }
 
     fn representative_long_transcript() -> ChatState {
         let mut state = ChatState::default();

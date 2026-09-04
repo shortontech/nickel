@@ -221,6 +221,7 @@ fn backend_operation(
                 let turn = backend.start_turn(StartTurn {
                     thread_id: thread.id.clone(),
                     text,
+                    images: Vec::new(),
                     model: None,
                     reasoning_effort: None,
                 })?;
@@ -247,6 +248,7 @@ fn backend_operation(
                     backend.start_turn(StartTurn {
                         thread_id: ThreadId(id.clone()),
                         text,
+                        images: Vec::new(),
                         model: None,
                         reasoning_effort: None,
                     })

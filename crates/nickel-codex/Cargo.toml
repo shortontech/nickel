@@ -18,6 +18,7 @@ flate2.workspace = true
 tar.workspace = true
 ctrlc.workspace = true
 dirs.workspace = true
+base64.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = ["Win32_Storage_FileSystem"] }

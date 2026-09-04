@@ -18,7 +18,7 @@ nickel-render-assets = { path = "../nickel-render-assets" }
 ui-declarative-macros = "0.1.0"
 softbuffer.workspace = true
 winit.workspace = true
-arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }
+arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control", "image-data"] }
 smallvec.workspace = true
 unicode-segmentation.workspace = true
 tracing.workspace = true

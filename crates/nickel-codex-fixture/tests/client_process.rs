@@ -50,6 +50,7 @@ fn real_stdio_process_supports_typed_lifecycle_and_streaming() {
         .start_turn(StartTurn {
             thread_id: thread.id.clone(),
             text: "hello".into(),
+            images: Vec::new(),
             model: None,
             reasoning_effort: None,
         })
@@ -312,6 +313,7 @@ fn duplicate_terminal_notifications_are_idempotent() {
         .start_turn(StartTurn {
             thread_id: ThreadId("fixture-thread".into()),
             text: "duplicate".into(),
+            images: Vec::new(),
             model: None,
             reasoning_effort: None,
         })
@@ -349,6 +351,7 @@ fn explicit_interrupt_reaches_terminal_interrupted_state() {
         .start_turn(StartTurn {
             thread_id: ThreadId("fixture-thread".into()),
             text: "interrupt".into(),
+            images: Vec::new(),
             model: None,
             reasoning_effort: None,
         })
@@ -411,6 +414,7 @@ fn slow_consumer_is_bounded_and_projected_state_remains_complete() {
         .start_turn(StartTurn {
             thread_id: ThreadId("fixture-thread".into()),
             text: "flood".into(),
+            images: Vec::new(),
             model: None,
             reasoning_effort: None,
         })

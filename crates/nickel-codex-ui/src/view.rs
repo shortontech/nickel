@@ -38,6 +38,8 @@ static DEFAULT_CODEX_SETTINGS: std::sync::LazyLock<CodexSettings> =
 #[derive(Clone, Debug, PartialEq)]
 pub enum ChatMessage {
     DraftChanged(String),
+    PasteImage(Vec<u8>),
+    RemoveAttachment(crate::AttachmentId),
     Send,
     ConfirmShell,
     CancelShell,
@@ -481,6 +483,14 @@ impl Application for ChatApplication {
     fn update(&mut self, message: Self::Message) {
         match message {
             ChatMessage::DraftChanged(value) => self.state.draft = value,
+            ChatMessage::PasteImage(bytes) => {
+                if let Err(error) = self.state.attach_image(&bytes) {
+                    self.state.report_diagnostic(error.to_string());
+                }
+            }
+            ChatMessage::RemoveAttachment(id) => {
+                self.state.remove_attachment(id);
+            }
             ChatMessage::Send => {
                 let command = self.state.draft.trim().to_owned();
                 if command == "/model" {
@@ -507,9 +517,10 @@ impl Application for ChatApplication {
                     } else {
                         self.pending_shell_command = Some(command);
                     }
-                } else if let Some(text) = self.state.begin_send() {
+                } else if let Some((text, images)) = self.state.begin_send() {
                     self.controller.send(ControllerCommand::Send {
                         text,
+                        images,
                         model: self.state.selected_model.clone(),
                         reasoning_effort: self.state.selected_reasoning_effort.clone(),
                     });
@@ -576,6 +587,7 @@ impl Application for ChatApplication {
                 self.resume_picker_pending = None;
             }
             ChatMessage::NewChat => {
+                self.state.attachments.clear();
                 self.resume_picker_open = false;
                 self.resume_picker_pending = None;
                 if self.project_menu_mode {
@@ -889,6 +901,16 @@ impl Application for ChatApplication {
                 if let Err(error) = result {
                     self.state.report_diagnostic(error);
                 }
+            }
+        }
+    }
+
+    fn paste_clipboard_image(&mut self, width: u32, height: u32, rgba: &[u8]) -> bool {
+        match self.state.attach_rgba(width, height, rgba) {
+            Ok(_) => true,
+            Err(error) => {
+                self.state.report_diagnostic(error.to_string());
+                true
             }
         }
     }
@@ -1507,6 +1529,15 @@ fn configured_chat_view(
                             background={ERROR} radius={6.0}>
                             <Text color={TEXT} grow={1.0}>{format!("Conversations unavailable: {diagnostic}")}</Text>
                             <Button on_press={ChatMessage::Refresh}>{"Retry"}</Button>
+                        </Row>
+                    })}
+                    {state.attachments.iter().map(|attachment| ui! {
+                        <Row padding={Insets::all(8.0)} gap={8.0} background={SIDEBAR} radius={6.0}>
+                            <Image asset_id={attachment.id.0 as u16} image={attachment.preview.clone()} generation={attachment.id.0}
+                                width={48.0} height={48.0} fit={ImageFit::Contain} decorative />
+                            <Text color={MUTED}>{format!("{} × {} · {} KiB", attachment.width, attachment.height, attachment.encoded_size.div_ceil(1024))}</Text>
+                            <Button on_press={ChatMessage::RemoveAttachment(attachment.id)}
+                                accessibility_label={format!("Remove image attachment {}", attachment.id.0)}>{"Remove"}</Button>
                         </Row>
                     })}
                     <Container id={id!(composer_viewport)} accessibility_label={"Message composer"}
