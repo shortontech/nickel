@@ -46,8 +46,8 @@ pub use runtime::{
     ControllerPollSchedule, DefaultHostAdapter, EffectEvidence, FileDragEvent, FrameOverlay,
     GlobalAction, HostAdapter, HostBatch, HostChangeToken, HostEvent, HostEventOutcome,
     HostFailure, HostFailureStage, HostInspection, HostServices, HostTelemetry, MessageEvidence,
-    OverlayDeclarationFailure, Popover, SemanticActionFailure, Shortcut, Tooltip, UiHost,
-    ViewContext, run, run_with_adapter,
+    OutboundFileDrag, OverlayDeclarationFailure, Popover, SemanticActionFailure, Shortcut, Tooltip,
+    UiHost, ViewContext, run, run_with_adapter,
 };
 pub use state::{InputModality, Invalidation, NavigationState, TransientState, UiId, UiStateStore};
 pub use text_context_menu::{

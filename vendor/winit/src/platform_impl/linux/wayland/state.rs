@@ -16,9 +16,10 @@ use sctk::reexports::client::{Connection, Proxy, QueueHandle};
 
 use sctk::compositor::{CompositorHandler, CompositorState};
 use sctk::data_device_manager::{
-    data_offer::{DataOfferHandler, DragOffer, SelectionOffer},
+    data_device::DataDeviceHandler,
+    data_offer::{DataOfferHandler, DragOffer},
     data_source::{DataSourceHandler, DragSource},
-    DataDeviceHandler, DataDeviceManagerState, WritePipe,
+    DataDeviceManagerState, WritePipe,
 };
 use sctk::reexports::client::protocol::{
     wl_data_device::WlDataDevice, wl_data_device_manager::DndAction,
@@ -502,4 +503,3 @@ sctk::delegate_shm!(WinitState);
 sctk::delegate_xdg_shell!(WinitState);
 sctk::delegate_xdg_window!(WinitState);
 sctk::delegate_data_device!(WinitState);
-sctk::delegate_data_source!(WinitState);

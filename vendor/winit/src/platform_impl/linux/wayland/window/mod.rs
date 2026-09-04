@@ -32,6 +32,7 @@ use crate::window::{
 
 use super::event_loop::sink::EventSink;
 use super::output::MonitorHandle;
+use super::seat::WinitPointerDataExt;
 use super::state::WinitState;
 use super::types::xdg_activation::XdgActivationTokenData;
 use super::{ActiveEventLoop, WaylandError, WindowId};

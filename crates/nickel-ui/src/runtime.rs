@@ -92,6 +92,30 @@ fn queue_continuous_input(
     ));
 }
 
+#[cfg(target_os = "linux")]
+fn file_uri_list(paths: &[std::path::PathBuf]) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let mut payload = Vec::new();
+    for path in paths {
+        payload.extend_from_slice(b"file://");
+        for byte in path.as_os_str().as_bytes() {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.' | b'~') {
+                payload.push(*byte);
+            } else {
+                const HEX: &[u8; 16] = b"0123456789ABCDEF";
+                payload.extend_from_slice(&[
+                    b'%',
+                    HEX[(byte >> 4) as usize],
+                    HEX[(byte & 15) as usize],
+                ]);
+            }
+        }
+        payload.extend_from_slice(b"\r\n");
+    }
+    payload
+}
+
 fn wait_duration(
     now: Instant,
     deadlines: impl IntoIterator<Item = Option<Instant>>,
@@ -151,6 +175,12 @@ pub enum FileDragEvent {
     Hovered(std::path::PathBuf),
     HoverCancelled,
     Dropped(std::path::PathBuf),
+}
+
+/// An application request to begin a native outbound file drag.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OutboundFileDrag {
+    pub paths: Vec<std::path::PathBuf>,
 }
 
 /// Immutable environmental inputs for a declarative application view.
@@ -434,6 +464,12 @@ pub trait Application: Sized {
     /// details to application policy.
     fn file_drag_event(&mut self, _event: FileDragEvent) -> bool {
         false
+    }
+
+    /// Takes a pending outbound file drag. Hosts call this synchronously while
+    /// handling the pointer press/motion that supplied the native drag serial.
+    fn take_outbound_file_drag(&mut self) -> Option<OutboundFileDrag> {
+        None
     }
 
     /// Reports the controller presentation currently driving this host.
@@ -1863,6 +1899,27 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
             ..HostBatch::default()
         });
         self.apply_input_outcome(window, outcome);
+        self.start_pending_file_drag(window);
+    }
+
+    fn start_pending_file_drag(&mut self, window: &Window) {
+        let Some(drag) = self
+            .host
+            .as_mut()
+            .and_then(|host| host.application_mut().take_outbound_file_drag())
+        else {
+            return;
+        };
+        #[cfg(target_os = "linux")]
+        {
+            use winit::platform::wayland::WindowExtWayland;
+            let payload = file_uri_list(&drag.paths);
+            if let Err(error) = window.start_file_drag(payload) {
+                tracing::warn!(%error, "could not begin native Wayland file drag");
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = (drag, window);
     }
 
     fn flush_pending_continuous_input(&mut self, event_loop: &ActiveEventLoop, window: &Window) {
@@ -3708,6 +3765,21 @@ mod tests {
         assert_eq!(
             host.inspect().available_semantic_actions,
             [crate::ActionKind::Activate]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn outbound_file_drag_uses_encoded_crlf_uri_list() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let paths = [
+            std::path::PathBuf::from("/tmp/a file.txt"),
+            std::path::PathBuf::from(std::ffi::OsString::from_vec(b"/tmp/nonutf8-\xff".to_vec())),
+        ];
+        assert_eq!(
+            super::file_uri_list(&paths),
+            b"file:///tmp/a%20file.txt\r\nfile:///tmp/nonutf8-%FF\r\n"
         );
     }
 }

@@ -2677,6 +2677,17 @@ impl Application for FileApp {
         true
     }
 
+    fn take_outbound_file_drag(&mut self) -> Option<nickel_ui::OutboundFileDrag> {
+        let offer = self.outbound_drag.take()?;
+        Some(nickel_ui::OutboundFileDrag {
+            paths: offer
+                .sources
+                .into_iter()
+                .map(|source| source.path)
+                .collect(),
+        })
+    }
+
     fn frame_overlays(&self, context: ViewContext) -> Vec<FrameOverlay<Self::Message>> {
         let file_surface_is_mounted = !(self.command_surface_open
             || context.viewport.size.width < NARROW_WORKSPACE_BREAKPOINT && self.places_open);
