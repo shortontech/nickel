@@ -1041,7 +1041,19 @@ mod tests {
                 title: Some(id.0.clone()),
                 cwd: Some(cwd.into()),
                 last_used_at: Some(1),
-                turns: Vec::new(),
+                turns: (id.0 == "eligible")
+                    .then(|| nickel_codex::ThreadHistoryTurn {
+                        id: TurnId("history".into()),
+                        status: "completed".into(),
+                        items: vec![nickel_codex::ThreadHistoryItem {
+                            id: "message".into(),
+                            item_type: "agentMessage".into(),
+                            text: "latest preview text".into(),
+                            command_actions: Vec::new(),
+                        }],
+                    })
+                    .into_iter()
+                    .collect(),
                 model: None,
                 reasoning_effort: None,
             });
@@ -1078,6 +1090,16 @@ mod tests {
 
         app.update(ChatMessage::ToggleModelPicker);
         app.update(ChatMessage::ToggleResumePicker);
+        app.resume_picker_loading = false;
+        let resume_tree = UiFrame::layout(
+            app.view(nickel_ui::ViewContext::new(
+                Rect::new(0.0, 0.0, 900.0, 640.0),
+                nickel_ui::InputModality::Keyboard,
+            )),
+            Rect::new(0.0, 0.0, 900.0, 640.0),
+        );
+        assert!(has_accessible_text(&resume_tree, "Already active"));
+        assert!(has_accessible_text(&resume_tree, "latest preview text"));
         let mut scenario = Scenario::new(app, 900, 640);
         let button = |name: &str| nickel_ui::SemanticSelector::RoleAndName {
             role: SemanticRole::Button,
@@ -1093,6 +1115,161 @@ mod tests {
             scenario.host_mut().application_mut().take_shell_requests(),
             vec![ShellRequest::ResumeThread(ThreadId("eligible".into()))]
         );
+    }
+
+    #[test]
+    fn resume_preview_uses_last_message_normalizes_and_bounds_text() {
+        let long = format!("  newest\n\t{}  ", "é".repeat(220));
+        let thread = Thread {
+            id: ThreadId("stable-thread-id".into()),
+            title: None,
+            cwd: None,
+            last_used_at: None,
+            turns: vec![nickel_codex::ThreadHistoryTurn {
+                id: TurnId("turn".into()),
+                status: "completed".into(),
+                items: vec![
+                    nickel_codex::ThreadHistoryItem {
+                        id: "old".into(),
+                        item_type: "userMessage".into(),
+                        text: "older message".into(),
+                        command_actions: Vec::new(),
+                    },
+                    nickel_codex::ThreadHistoryItem {
+                        id: "new".into(),
+                        item_type: "agentMessage".into(),
+                        text: long,
+                        command_actions: Vec::new(),
+                    },
+                ],
+            }],
+            model: None,
+            reasoning_effort: None,
+        };
+        let preview = super::view::resume_preview(&thread).unwrap();
+        assert!(preview.starts_with("newest é"));
+        assert!(!preview.contains('\n'));
+        assert_eq!(preview.chars().count(), 181);
+        assert!(preview.ends_with('…'));
+    }
+
+    #[test]
+    fn thread_snapshots_are_recent_first_deduplicated_and_bounded() {
+        let mut state = ChatState::default();
+        let make = |id: &str, recency| Thread {
+            id: ThreadId(id.into()),
+            title: None,
+            cwd: None,
+            last_used_at: Some(recency),
+            turns: Vec::new(),
+            model: None,
+            reasoning_effort: None,
+        };
+        let mut runtime = std::collections::HashMap::new();
+        runtime.insert(
+            ThreadId("old".into()),
+            nickel_codex::ThreadRuntime::default(),
+        );
+        runtime.insert(
+            ThreadId("new".into()),
+            nickel_codex::ThreadRuntime::default(),
+        );
+        runtime.insert(
+            ThreadId("discarded".into()),
+            nickel_codex::ThreadRuntime::default(),
+        );
+        state.apply(
+            1,
+            ControllerEvent::Ready {
+                provenance: "fixture".into(),
+                account: Default::default(),
+                models: Vec::new(),
+                projects: Vec::new(),
+                threads: vec![make("old", 1), make("new", 3), make("old", 9)],
+                runtime,
+                thread_error: None,
+            },
+        );
+        assert_eq!(
+            state
+                .threads
+                .iter()
+                .map(|thread| thread.id.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["new", "old"]
+        );
+        assert!(
+            !state
+                .thread_runtime
+                .contains_key(&ThreadId("discarded".into()))
+        );
+    }
+
+    #[test]
+    fn resume_failure_keeps_picker_recoverable_and_escape_cancels_it() {
+        let backend = ReplayBackend::from_json(r#"{"name":"resume","events":[]}"#).unwrap();
+        let mut app = ChatApplication::new(BackendMode::Replay {
+            backend,
+            cwd: "/projects/nickel".into(),
+        })
+        .as_shell_chat(std::path::Path::new("/projects/nickel"));
+        let thread = ThreadId("eligible".into());
+        app.resume_picker_open = true;
+        app.update(ChatMessage::SelectThread(thread));
+        app.report_resume_rejection("writer lease raced");
+        assert!(app.resume_picker_open);
+        assert!(app.resume_picker_pending.is_none());
+        assert_eq!(
+            app.state.diagnostics.back().map(String::as_str),
+            Some("writer lease raced")
+        );
+        assert!(app.shortcut(Shortcut::Escape));
+        assert!(!app.resume_picker_open);
+    }
+
+    #[test]
+    fn resume_picker_distinguishes_loading_empty_failure_and_retry() {
+        let backend = ReplayBackend::from_json(r#"{"name":"resume-states","events":[]}"#).unwrap();
+        let mut app = ChatApplication::new(BackendMode::Replay {
+            backend,
+            cwd: "/projects/nickel".into(),
+        });
+        app.resume_picker_open = true;
+        app.resume_picker_loading = true;
+        let frame = UiFrame::layout(
+            app.view(nickel_ui::ViewContext::new(
+                Rect::new(0.0, 0.0, 900.0, 640.0),
+                nickel_ui::InputModality::Keyboard,
+            )),
+            Rect::new(0.0, 0.0, 900.0, 640.0),
+        );
+        assert!(has_accessible_text(&frame, "Loading recent conversations"));
+
+        app.resume_picker_loading = false;
+        let frame = UiFrame::layout(
+            app.view(nickel_ui::ViewContext::new(
+                Rect::new(0.0, 0.0, 900.0, 640.0),
+                nickel_ui::InputModality::Keyboard,
+            )),
+            Rect::new(0.0, 0.0, 900.0, 640.0),
+        );
+        assert!(has_accessible_text(&frame, "No conversations yet"));
+
+        app.state.thread_error = Some("offline".into());
+        let frame = UiFrame::layout(
+            app.view(nickel_ui::ViewContext::new(
+                Rect::new(0.0, 0.0, 900.0, 640.0),
+                nickel_ui::InputModality::Keyboard,
+            )),
+            Rect::new(0.0, 0.0, 900.0, 640.0),
+        );
+        assert!(has_accessible_text(
+            &frame,
+            "Could not load conversations: offline"
+        ));
+        app.update(ChatMessage::RefreshResumePicker);
+        assert!(app.resume_picker_open);
+        assert!(app.resume_picker_loading);
     }
 
     #[test]

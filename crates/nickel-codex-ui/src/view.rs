@@ -52,6 +52,8 @@ pub enum ChatMessage {
     ToggleCommandPicker,
     SelectCommand(String),
     ToggleResumePicker,
+    RefreshResumePicker,
+    CloseResumePicker,
     Interrupt,
     Approve(ServerRequestId, String),
     Decline(ServerRequestId, String),
@@ -158,6 +160,8 @@ pub struct ChatApplication {
     pub(crate) model_picker_open: bool,
     model_picker_generation: u64,
     pub(crate) resume_picker_open: bool,
+    pub(crate) resume_picker_loading: bool,
+    pub(crate) resume_picker_pending: Option<nickel_codex::ThreadId>,
     pub(crate) command_picker_open: bool,
 }
 
@@ -176,6 +180,8 @@ struct ChatOverlays<'a> {
     pending_shell_command: Option<&'a str>,
     model_picker_generation: u64,
     resume_picker_open: bool,
+    resume_picker_loading: bool,
+    resume_picker_pending: Option<&'a nickel_codex::ThreadId>,
     command_picker_open: bool,
     project_root: Option<&'a std::path::Path>,
     project_id: Option<&'a str>,
@@ -291,6 +297,8 @@ impl ChatApplication {
             model_picker_open: false,
             model_picker_generation: 0,
             resume_picker_open: false,
+            resume_picker_loading: false,
+            resume_picker_pending: None,
             command_picker_open: false,
         }
     }
@@ -317,7 +325,6 @@ impl ChatApplication {
     pub fn resume_thread(&mut self, id: nickel_codex::ThreadId) -> Result<(), String> {
         self.pending_initial_resume = Some(id.clone());
         self.shell_writer_thread = Some(id.clone());
-        self.state.begin_thread_selection(id.clone());
         if self.controller.send(ControllerCommand::SelectThread(id)) {
             Ok(())
         } else {
@@ -333,6 +340,8 @@ impl ChatApplication {
 
     pub fn report_resume_rejection(&mut self, message: impl Into<String>) {
         self.pending_initial_resume = None;
+        self.resume_picker_pending = None;
+        self.resume_picker_open = true;
         self.state.report_diagnostic(message);
     }
 
@@ -354,11 +363,16 @@ impl ChatApplication {
             if generation == self.state.generation {
                 match &event {
                     ControllerEvent::ThreadSelected(thread) => {
+                        if self.resume_picker_pending.as_ref() == Some(&thread.id) {
+                            self.resume_picker_pending = None;
+                            self.resume_picker_open = false;
+                        }
                         if self.pending_initial_resume.as_ref() == Some(&thread.id) {
                             self.pending_initial_resume = None;
                         }
                     }
                     ControllerEvent::OperationFailed(_) => {
+                        self.resume_picker_pending = None;
                         if self.pending_initial_resume.take().is_some()
                             && let Some(thread) = self.shell_writer_thread.take()
                         {
@@ -369,11 +383,16 @@ impl ChatApplication {
                     | ControllerEvent::Incompatible(_)
                     | ControllerEvent::Unavailable(_) => {
                         self.pending_initial_resume = None;
+                        self.resume_picker_loading = false;
+                        self.resume_picker_pending = None;
                         if let Some(thread) = self.shell_writer_thread.take() {
                             self.shell_requests.push(ShellRequest::ResumeFailed(thread));
                         }
                     }
                     _ => {}
+                }
+                if matches!(event, ControllerEvent::Ready { .. }) {
+                    self.resume_picker_loading = false;
                 }
             }
             changed |= self.state.apply(generation, event);
@@ -540,10 +559,25 @@ impl Application for ChatApplication {
                 self.model_picker_open = false;
                 self.command_picker_open = false;
                 if self.resume_picker_open {
+                    self.resume_picker_loading = true;
                     self.controller.send(ControllerCommand::LoadThreads);
+                } else {
+                    self.resume_picker_pending = None;
                 }
             }
+            ChatMessage::RefreshResumePicker => {
+                self.resume_picker_loading = true;
+                self.resume_picker_pending = None;
+                self.controller.send(ControllerCommand::LoadThreads);
+            }
+            ChatMessage::CloseResumePicker => {
+                self.resume_picker_open = false;
+                self.resume_picker_loading = false;
+                self.resume_picker_pending = None;
+            }
             ChatMessage::NewChat => {
+                self.resume_picker_open = false;
+                self.resume_picker_pending = None;
                 if self.project_menu_mode {
                     self.settings_error =
                         Some("Choose + beside a project for a new conversation".into());
@@ -597,7 +631,9 @@ impl Application for ChatApplication {
                 self.reconnect_controller();
             }
             ChatMessage::SelectThread(id) => {
-                self.resume_picker_open = false;
+                if self.resume_picker_pending.is_some() {
+                    return;
+                }
                 if self.shell_host
                     && self.state.thread_runtime.get(&id).is_some_and(|runtime| {
                         runtime.status == nickel_codex::ThreadRuntimeStatus::Active
@@ -609,6 +645,7 @@ impl Application for ChatApplication {
                     return;
                 }
                 if self.shell_host {
+                    self.resume_picker_pending = Some(id.clone());
                     self.shell_requests.push(ShellRequest::ResumeThread(id));
                     return;
                 }
@@ -622,7 +659,7 @@ impl Application for ChatApplication {
                 {
                     self.window_title = project_window_title(cwd);
                 }
-                self.state.begin_thread_selection(id.clone());
+                self.resume_picker_pending = Some(id.clone());
                 self.controller.send(ControllerCommand::SelectThread(id));
             }
             ChatMessage::Interrupt => {
@@ -871,6 +908,10 @@ impl Application for ChatApplication {
                 true
             }
             Shortcut::Newline => false,
+            Shortcut::Escape if self.resume_picker_open => {
+                self.update(ChatMessage::CloseResumePicker);
+                true
+            }
             Shortcut::Escape if self.state.active_turn.is_some() => {
                 self.update(ChatMessage::Interrupt);
                 true
@@ -896,6 +937,8 @@ impl Application for ChatApplication {
                     pending_shell_command: self.pending_shell_command.as_deref(),
                     model_picker_generation: self.model_picker_generation,
                     resume_picker_open: self.resume_picker_open,
+                    resume_picker_loading: self.resume_picker_loading,
+                    resume_picker_pending: self.resume_picker_pending.as_ref(),
                     command_picker_open: self.command_picker_open,
                     project_root: self.shell_project.as_ref().map(|(root, _)| root.as_path()),
                     project_id: self
@@ -1194,6 +1237,145 @@ fn project_menu_view(state: &ChatState, settings_error: Option<&str>) -> impl Vi
     }
 }
 
+const RESUME_PREVIEW_LIMIT: usize = 180;
+
+pub(crate) fn resume_preview(thread: &nickel_codex::Thread) -> Option<String> {
+    let text = thread
+        .turns
+        .iter()
+        .rev()
+        .flat_map(|turn| turn.items.iter().rev())
+        .find(|item| {
+            matches!(
+                item.item_type.as_str(),
+                "userMessage" | "agentMessage" | "user_message" | "agent_message"
+            ) && !item.text.trim().is_empty()
+        })?
+        .text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut chars = text.chars();
+    let preview = chars
+        .by_ref()
+        .take(RESUME_PREVIEW_LIMIT)
+        .collect::<String>();
+    Some(if chars.next().is_some() {
+        format!("{preview}…")
+    } else {
+        preview
+    })
+}
+
+fn resume_recency(last_used_at: Option<i64>, now: i64) -> String {
+    let Some(timestamp) = last_used_at else {
+        return "Last used unknown".into();
+    };
+    let age = now.saturating_sub(timestamp).max(0);
+    match age {
+        0..=59 => "Used just now".into(),
+        60..=3_599 => format!("Used {} min ago", age / 60),
+        3_600..=86_399 => format!("Used {} hr ago", age / 3_600),
+        _ => format!("Used {} days ago", age / 86_400),
+    }
+}
+
+fn thread_belongs_to_project(
+    thread: &nickel_codex::Thread,
+    runtime: &nickel_codex::ThreadRuntime,
+    project_root: Option<&std::path::Path>,
+    project_id: Option<&str>,
+) -> bool {
+    runtime.project_id.as_deref().map_or_else(
+        || {
+            project_root.is_none_or(|root| {
+                thread
+                    .cwd
+                    .as_deref()
+                    .is_some_and(|cwd| cwd.starts_with(root))
+            })
+        },
+        |thread_project| project_id == Some(thread_project),
+    )
+}
+
+fn resume_picker(
+    state: &ChatState,
+    project_root: Option<&std::path::Path>,
+    project_id: Option<&str>,
+    loading: bool,
+    pending: Option<&nickel_codex::ThreadId>,
+) -> AnyView<ChatMessage> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs() as i64);
+    let threads = state
+        .threads
+        .iter()
+        .filter_map(|thread| {
+            state
+                .thread_runtime
+                .get(&thread.id)
+                .filter(|runtime| {
+                    thread_belongs_to_project(thread, runtime, project_root, project_id)
+                })
+                .map(|runtime| (thread, runtime))
+        })
+        .collect::<Vec<_>>();
+    let has_threads = !threads.is_empty();
+    AnyView::new(ui! {
+        <Column id={id!(resume_picker)} fill_width grow={1.0} min_height={0.0}
+            padding={Insets::all(8.0)} gap={6.0} background={PANEL}
+            border={Border::new(BORDER, 1.0)} radius={8.0}>
+            <Row fill_width gap={8.0}>
+                <Text color={TEXT} grow={1.0}>{"Resume conversation"}</Text>
+                <Button on_press={ChatMessage::NewChat}>{"New"}</Button>
+                <Button on_press={ChatMessage::CloseResumePicker}>{"Back"}</Button>
+            </Row>
+            {[()].into_iter().filter(|_| loading).map(|_| ui! {
+                <Text color={MUTED}>{"Loading recent conversations…"}</Text>
+            })}
+            {[()].into_iter().filter(|_| !loading && state.thread_error.is_some()).map(|_| ui! {
+                <Row fill_width gap={8.0}>
+                    <Text color={TEXT} grow={1.0}>{format!("Could not load conversations: {}", state.thread_error.as_deref().unwrap_or("Unknown error"))}</Text>
+                    <Button on_press={ChatMessage::RefreshResumePicker}>{"Retry"}</Button>
+                </Row>
+            })}
+            {[()].into_iter().filter(|_| !loading && state.thread_error.is_none() && !has_threads).map(|_| ui! {
+                <Text color={MUTED}>{"No conversations yet for this project."}</Text>
+            })}
+            <Column id={id!(resume_conversation_list)} fill_width grow={1.0} min_height={0.0}
+                overflow_y={Overflow::Auto} gap={4.0}>
+                {threads.into_iter().filter(|_| !loading && state.thread_error.is_none()).map(|(thread, runtime)| {
+                    let title = thread.title.clone().filter(|title| !title.trim().is_empty())
+                        .unwrap_or_else(|| "Untitled conversation".into());
+                    let identity = thread.id.0.clone();
+                    let preview = resume_preview(thread).unwrap_or_else(|| "No message preview available".into());
+                    let label = format!("{title} — {} — {identity}\n{preview}", resume_recency(thread.last_used_at, now));
+                    let active = runtime.status == nickel_codex::ThreadRuntimeStatus::Active;
+                    let resumable = matches!(runtime.status, nickel_codex::ThreadRuntimeStatus::Idle | nickel_codex::ThreadRuntimeStatus::NotLoaded);
+                    let waiting = pending == Some(&thread.id);
+                    if resumable && pending.is_none() {
+                        AnyView::new(ui! {
+                            <Button key={thread.id.0.clone()} label_align={TextAlign::Start} fill_width
+                                accessibility_label={title.clone()}
+                                on_press={ChatMessage::SelectThread(thread.id.clone())}>{label}</Button>
+                        })
+                    } else {
+                        let status = if waiting { "Resuming…" } else if active { "Already active" } else { "Unavailable" };
+                        AnyView::new(ui! {
+                            <Column key={thread.id.0.clone()} fill_width padding={Insets::all(10.0)} background={SIDEBAR} radius={6.0}>
+                                <Text color={MUTED}>{label}</Text>
+                                <Text color={MUTED}>{status}</Text>
+                            </Column>
+                        })
+                    }
+                })}
+            </Column>
+        </Column>
+    })
+}
+
 fn configured_chat_view(
     state: &ChatState,
     settings: &CodexSettings,
@@ -1206,6 +1388,8 @@ fn configured_chat_view(
         pending_shell_command,
         model_picker_generation,
         resume_picker_open,
+        resume_picker_loading,
+        resume_picker_pending,
         command_picker_open,
         project_root,
         project_id,
@@ -1242,15 +1426,23 @@ fn configured_chat_view(
                     accessibility_label={"Conversation"} semantic_role={SemanticRole::Group}
                     overflow_y={Overflow::Auto} follow_scroll_end={state.conversation_pinned}
                     on_scroll={conversation_scrolled}>
-                    {if state.items.is_empty() {
-                        ui! {
+                    {if resume_picker_open {
+                        resume_picker(
+                            state,
+                            project_root,
+                            project_id,
+                            resume_picker_loading,
+                            resume_picker_pending,
+                        )
+                    } else if state.items.is_empty() {
+                        AnyView::new(ui! {
                             <Container grow={1.0} fill_width padding={Insets::all(28.0)}>
                                 <Text scale={2.0} color={TEXT}>{"What are we building?"}</Text>
                                 <Text color={MUTED}>{"Start a conversation with Codex. Tool requests always require an explicit decision."}</Text>
                             </Container>
-                        }
+                        })
                     } else {
-                        ui! {
+                        AnyView::new(ui! {
                             {SelectionRegion::new(transcript_document)
                                 .id(id!(transcript_selection))
                                 .fill_width()
@@ -1263,7 +1455,7 @@ fn configured_chat_view(
                                         .skip(transcript_range.start)
                                         .take(transcript_range.len())
                                         .map(|(_, item)| ui! { <ItemCard key={item.id.clone()} item={item} /> })))}
-                        }
+                        })
                     }}
                 </Column>
                 <Column id={id!(composer)} fill_width shrink={0.0} gap={8.0}>
@@ -1289,31 +1481,6 @@ fn configured_chat_view(
                             <Text color={MUTED}>{"/permissions — unavailable: use approval prompts"}</Text>
                             <Text color={MUTED}>{"/feedback — unavailable in this client"}</Text>
                             <Text color={MUTED}>{"/logout — unavailable: manage the Codex CLI account externally"}</Text>
-                        </Column>
-                    })}
-                    {[()].into_iter().filter(|_| resume_picker_open).map(|_| ui! {
-                        <Column fill_width max_height={280.0} overflow_y={Overflow::Auto}
-                            padding={Insets::all(8.0)} gap={4.0} background={PANEL}
-                            border={Border::new(BORDER, 1.0)} radius={8.0}>
-                            <Text color={MUTED}>{"Resume conversation"}</Text>
-                            {state.threads.iter().filter(|thread| {
-                                state.thread_runtime.get(&thread.id).is_some_and(|runtime| {
-                                    let belongs_to_project = runtime.project_id.as_deref().map_or_else(
-                                        || project_root.is_none_or(|root| {
-                                            thread.cwd.as_deref().is_some_and(|cwd| cwd.starts_with(root))
-                                        }),
-                                        |thread_project| project_id == Some(thread_project),
-                                    );
-                                    belongs_to_project && matches!(runtime.status,
-                                        nickel_codex::ThreadRuntimeStatus::Idle
-                                            | nickel_codex::ThreadRuntimeStatus::NotLoaded)
-                                })
-                            }).map(|thread| ui! {
-                                <Button key={thread.id.0.clone()} label_align={TextAlign::Start} fill_width
-                                    on_press={ChatMessage::SelectThread(thread.id.clone())}>
-                                    {thread.title.clone().unwrap_or_else(|| "Untitled conversation".into())}
-                                </Button>
-                            })}
                         </Column>
                     })}
                     {state.pending.iter().map(|interaction| ui! {

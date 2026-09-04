@@ -205,8 +205,27 @@ impl ChatState {
                         .and_then(|model| model.default_reasoning_effort.clone());
                 }
                 self.projects = projects.into_iter().take(100).collect();
-                self.threads = threads.into_iter().take(MAX_THREADS).collect();
-                self.thread_runtime = runtime;
+                let mut seen = HashSet::new();
+                self.threads = threads
+                    .into_iter()
+                    .filter(|thread| seen.insert(thread.id.clone()))
+                    .collect();
+                self.threads.sort_by(|left, right| {
+                    right
+                        .last_used_at
+                        .cmp(&left.last_used_at)
+                        .then_with(|| left.id.0.cmp(&right.id.0))
+                });
+                self.threads.truncate(MAX_THREADS);
+                let retained = self
+                    .threads
+                    .iter()
+                    .map(|thread| thread.id.clone())
+                    .collect::<HashSet<_>>();
+                self.thread_runtime = runtime
+                    .into_iter()
+                    .filter(|(id, _)| retained.contains(id))
+                    .collect();
                 self.thread_snapshot_available = thread_error.is_none();
                 self.thread_error = thread_error.map(|message| sanitize_diagnostic(&message));
             }
