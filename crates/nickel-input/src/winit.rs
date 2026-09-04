@@ -280,6 +280,13 @@ fn key_text_event(
         .then_some(text)
         .flatten()
         .filter(|text| !text.is_empty())
+        // Named editing/activation keys can carry their control-code text on
+        // Wayland (for example Backspace as U+0008 and Enter as U+000D). The
+        // normalized key event already owns those semantics; committing the
+        // control payload would insert it into focused text fields as well.
+        // IME commit events use a separate path and deliberately remain
+        // lossless, including multiline input.
+        .filter(|text| text.chars().all(|character| !character.is_control()))
         .map(|text| {
             InputEvent::Text(TextEvent::Commit {
                 device,
@@ -652,6 +659,14 @@ mod tests {
         );
         assert_eq!(
             key_text_event(device, order, ElementState::Pressed, Some("")),
+            None
+        );
+        assert_eq!(
+            key_text_event(device, order, ElementState::Pressed, Some("\r")),
+            None
+        );
+        assert_eq!(
+            key_text_event(device, order, ElementState::Pressed, Some("\u{8}")),
             None
         );
     }
