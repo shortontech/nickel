@@ -407,6 +407,7 @@ pub struct NickelSession {
     /// Live XDG protocol roles outlive their mapped compositor representation.
     pub(crate) xdg_toplevel_windows: HashMap<ObjectId, Window>,
     pub(crate) mapped_xdg_toplevels: HashSet<ObjectId>,
+    pub(crate) restored_xdg_toplevels: HashSet<ObjectId>,
     pub(crate) xdg_toplevel_locations: HashMap<ObjectId, Point<i32, Logical>>,
     pub(crate) shell_owned_windows: HashSet<WindowId>,
     pub x11_windows: HashMap<u32, WindowId>,
@@ -1398,6 +1399,7 @@ impl NickelSession {
             surface_windows: HashMap::new(),
             xdg_toplevel_windows: HashMap::new(),
             mapped_xdg_toplevels: HashSet::new(),
+            restored_xdg_toplevels: HashSet::new(),
             xdg_toplevel_locations: HashMap::new(),
             shell_owned_windows: HashSet::new(),
             x11_windows: HashMap::new(),
@@ -3791,6 +3793,9 @@ impl NickelSession {
     pub(crate) fn clamp_initial_managed_x11_geometry(
         &self,
         geometry: Rectangle<i32, Logical>,
+        requested_position: bool,
+        parent_output: Option<&str>,
+        cascade: i32,
     ) -> Rectangle<i32, Logical> {
         let content = Geometry {
             x: geometry.loc.x,
@@ -3798,22 +3803,31 @@ impl NickelSession {
             width: geometry.size.w.max(1),
             height: geometry.size.h.max(1),
         };
-        let outputs = self
-            .space
-            .outputs()
-            .filter_map(|output| self.space.output_geometry(output))
-            .map(|output| Geometry {
-                x: output.loc.x,
-                y: output.loc.y,
-                width: output.size.w,
-                height: output.size.h,
-            })
-            .collect::<Vec<_>>();
-        let Some(output) = shell_layout::output_for_window(content, &outputs) else {
+        let active_output = self.new_window_active_output_name();
+        let Some(decision) = shell_layout::resolve_window_output(
+            &self.placement_outputs(),
+            parent_output,
+            requested_position.then_some(content),
+            None,
+            active_output.as_deref(),
+        ) else {
             return geometry;
         };
-        let content =
-            clamp_decorated_content_to_work_area(content, self.work_area_for_output(output));
+        let content = if requested_position {
+            clamp_decorated_content_to_work_area(content, decision.work_area)
+        } else {
+            shell_layout::initial_window_sized(
+                decision.work_area,
+                (content.width, content.height),
+                cascade,
+            )
+        };
+        tracing::info!(
+            output = %decision.output_name,
+            reason = ?decision.reason,
+            requested_position,
+            "diagnostic: captured X11 new-window placement"
+        );
         Rectangle::new(
             (content.x, content.y).into(),
             (content.width, content.height).into(),
@@ -5200,6 +5214,51 @@ impl NickelSession {
             .or_else(|| self.workspaces.active_output().map(str::to_owned))
             .or_else(|| self.primary_output_name.clone())
             .or_else(|| self.space.outputs().next().map(|output| output.name()))
+    }
+
+    pub(crate) fn new_window_active_output_name(&self) -> Option<String> {
+        self.windows
+            .snapshot()
+            .into_iter()
+            .find(|window| window.active && !self.shell_owned_windows.contains(&window.id))
+            .and_then(|window| self.window_for_registry_id(window.id))
+            .and_then(|window| self.output_name_for_window(&window))
+            .or_else(|| self.workspaces.active_output().map(str::to_owned))
+            .or_else(|| self.output_name_at_pointer())
+    }
+
+    pub(crate) fn placement_outputs(&self) -> Vec<shell_layout::PlacementOutput> {
+        let primary = self.primary_output_name.as_deref();
+        self.space
+            .outputs()
+            .filter_map(|output| {
+                let geometry = self.space.output_geometry(output)?;
+                let geometry = Geometry {
+                    x: geometry.loc.x,
+                    y: geometry.loc.y,
+                    width: geometry.size.w,
+                    height: geometry.size.h,
+                };
+                Some(shell_layout::PlacementOutput {
+                    name: output.name(),
+                    work_area: self.work_area_for_output(geometry),
+                    primary: primary == Some(output.name().as_str()),
+                })
+            })
+            .collect()
+    }
+
+    pub(crate) fn output_name_for_window(&self, window: &Window) -> Option<String> {
+        let geometry = self.output_geometry_for_window(window)?;
+        self.space.outputs().find_map(|output| {
+            self.space.output_geometry(output).and_then(|candidate| {
+                (candidate.loc.x == geometry.x
+                    && candidate.loc.y == geometry.y
+                    && candidate.size.w == geometry.width
+                    && candidate.size.h == geometry.height)
+                    .then(|| output.name())
+            })
+        })
     }
 
     fn output_geometry_for_window(&self, window: &Window) -> Option<Geometry> {

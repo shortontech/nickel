@@ -133,16 +133,32 @@ impl XdgShellHandler for NickelSession {
         // app ID arrives. Giving those provisional surfaces an ordinary app
         // configure makes a hidden transient recreate as a full application
         // window and temporarily steals pointer hit testing from the panel.
-        let geometry = (!is_shell_client)
+        let parent_output = surface.parent().and_then(|parent| {
+            self.xdg_toplevel_window(&parent)
+                .and_then(|window| self.output_name_for_window(&window))
+        });
+        let active_output = self.new_window_active_output_name();
+        let placement = (!is_shell_client)
             .then(|| {
-                self.preferred_interaction_output_name()
-                    .as_deref()
-                    .and_then(|name| self.output_geometry_named(name))
-                    .or_else(|| self.output_geometry_for_shell())
+                shell_layout::resolve_window_output(
+                    &self.placement_outputs(),
+                    parent_output.as_deref(),
+                    None,
+                    None,
+                    active_output.as_deref(),
+                )
             })
-            .flatten()
-            .map(shell_layout::work_area)
-            .map(|area| shell_layout::initial_window(area, cascade));
+            .flatten();
+        if let Some(placement) = &placement {
+            tracing::info!(
+                surface = ?surface_id,
+                output = %placement.output_name,
+                reason = ?placement.reason,
+                "diagnostic: captured Wayland new-window placement"
+            );
+        }
+        let geometry =
+            placement.map(|placement| shell_layout::initial_window(placement.work_area, cascade));
         if let Some(geometry) = geometry {
             surface.with_pending_state(|state| {
                 state.size = Some((geometry.width, geometry.height).into());
@@ -165,6 +181,7 @@ impl XdgShellHandler for NickelSession {
             self.space.unmap_elem(&window);
         }
         self.mapped_xdg_toplevels.remove(&surface_id);
+        self.restored_xdg_toplevels.remove(&surface_id);
         self.xdg_toplevel_windows.remove(&surface_id);
         self.xdg_toplevel_locations.remove(&surface_id);
         let window_id = self.surface_windows.get(&surface_id).copied();
@@ -564,11 +581,61 @@ impl NickelSession {
             // unmapped state.
             return Some(window);
         }
-        let location = self
+        let restoring = self.restored_xdg_toplevels.remove(&surface_id);
+        let mut location = self
             .xdg_toplevel_locations
             .get(&surface_id)
             .copied()
             .unwrap_or_default();
+        let outputs = self.placement_outputs();
+        let size = window.geometry().size;
+        let captured = shell_layout::Geometry {
+            x: location.x,
+            y: location.y,
+            width: size.w.max(1),
+            height: size.h.max(1),
+        };
+        let parent_output = window.toplevel().and_then(|toplevel| {
+            toplevel.parent().and_then(|parent| {
+                self.xdg_toplevel_window(&parent)
+                    .and_then(|parent| self.output_name_for_window(&parent))
+            })
+        });
+        let restored_output = restoring
+            .then(|| {
+                outputs
+                    .iter()
+                    .find(|output| {
+                        shell_layout::is_reachable(captured, std::slice::from_ref(output))
+                    })
+                    .map(|output| output.name.clone())
+            })
+            .flatten();
+        if parent_output.is_some() || restoring || !shell_layout::is_reachable(captured, &outputs) {
+            let active_output = self.new_window_active_output_name();
+            if let Some(decision) = shell_layout::resolve_window_output(
+                &outputs,
+                parent_output.as_deref(),
+                None,
+                restored_output.as_deref(),
+                active_output.as_deref(),
+            ) {
+                let replacement = if decision.reason == shell_layout::PlacementReason::Restored {
+                    shell_layout::constrain_to_area(captured, decision.work_area)
+                } else {
+                    shell_layout::centered_in(decision.work_area, (captured.width, captured.height))
+                };
+                location = (replacement.x, replacement.y).into();
+                self.xdg_toplevel_locations
+                    .insert(surface_id.clone(), location);
+                tracing::info!(
+                    surface = ?surface_id,
+                    output = %decision.output_name,
+                    reason = ?decision.reason,
+                    "diagnostic: revalidated Wayland new-window placement before map"
+                );
+            }
+        }
         self.space.map_element(window.clone(), location, true);
         if let Some(toplevel) = window.toplevel() {
             self.update_window_metadata(toplevel);
@@ -598,6 +665,7 @@ impl NickelSession {
         if !self.mapped_xdg_toplevels.remove(&surface_id) {
             return Some(window);
         }
+        self.restored_xdg_toplevels.insert(surface_id.clone());
         if let Some(location) = self.space.element_location(&window) {
             self.xdg_toplevel_locations
                 .insert(surface_id.clone(), location);

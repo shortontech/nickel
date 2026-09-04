@@ -222,7 +222,23 @@ impl NickelSession {
             let _ = surface.configure(geometry);
         }
         if managed {
-            let clamped = self.clamp_initial_managed_x11_geometry(geometry);
+            let requested_position = surface
+                .size_hints()
+                .is_some_and(|hints| hints.position.is_some());
+            let parent_output = surface.is_transient_for().and_then(|parent| {
+                self.space.elements().find_map(|window| {
+                    window
+                        .x11_surface()
+                        .filter(|candidate| candidate.window_id() == parent)
+                        .and_then(|_| self.output_name_for_window(window))
+                })
+            });
+            let clamped = self.clamp_initial_managed_x11_geometry(
+                geometry,
+                requested_position,
+                parent_output.as_deref(),
+                i32::try_from(self.windows.len() % 8).unwrap_or(0) * 32,
+            );
             if clamped != geometry {
                 geometry = clamped;
                 let _ = surface.configure(geometry);
