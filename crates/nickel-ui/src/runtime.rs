@@ -165,6 +165,45 @@ fn start_windows_file_drag(paths: &[std::path::PathBuf]) -> Result<(), String> {
     result
 }
 
+#[cfg(target_os = "macos")]
+fn start_macos_file_drag(window: &Window, paths: &[std::path::PathBuf]) -> Result<(), String> {
+    use objc2::{AnyThread, MainThreadMarker, rc::Retained, runtime::ProtocolObject};
+    use objc2_app_kit::{NSDraggingItem, NSPasteboardWriting, NSTextView, NSView};
+    use objc2_foundation::{NSArray, NSPoint, NSRect, NSSize, NSString, NSURL};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let handle = window.window_handle().map_err(|error| error.to_string())?;
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return Err("not an AppKit window".into());
+    };
+    // SAFETY: winit owns this NSView for at least the duration of the synchronous event callback.
+    let view = unsafe { &*handle.ns_view.as_ptr().cast::<NSView>() };
+    let event = view
+        .window()
+        .and_then(|window| window.currentEvent())
+        .ok_or("no initiating AppKit event")?;
+    let items = paths
+        .iter()
+        .filter_map(|path| path.to_str())
+        .map(|path| {
+            let url = NSURL::fileURLWithPath(&NSString::from_str(path));
+            let writer: Retained<ProtocolObject<dyn NSPasteboardWriting>> =
+                ProtocolObject::from_retained(url);
+            let item = NSDraggingItem::initWithPasteboardWriter(NSDraggingItem::alloc(), &writer);
+            item.setDraggingFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(32.0, 32.0)));
+            item
+        })
+        .collect::<Vec<_>>();
+    if items.is_empty() {
+        return Err("drag has no representable file paths".into());
+    }
+    let items = NSArray::from_retained_slice(&items);
+    let source =
+        NSTextView::new(MainThreadMarker::new().ok_or("drag must start on AppKit main thread")?);
+    let source = ProtocolObject::from_ref(&*source);
+    view.beginDraggingSessionWithItems_event_source(&items, &event, source);
+    Ok(())
+}
+
 fn wait_duration(
     now: Instant,
     deadlines: impl IntoIterator<Item = Option<Instant>>,
@@ -1973,7 +2012,11 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
         if let Err(error) = start_windows_file_drag(&drag.paths) {
             tracing::warn!(%error, "could not begin native Windows file drag");
         }
-        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+        #[cfg(target_os = "macos")]
+        if let Err(error) = start_macos_file_drag(window, &drag.paths) {
+            tracing::warn!(%error, "could not begin native macOS file drag");
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
         let _ = (drag, window);
     }
 
