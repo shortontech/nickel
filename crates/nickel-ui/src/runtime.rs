@@ -116,6 +116,55 @@ fn file_uri_list(paths: &[std::path::PathBuf]) -> Vec<u8> {
     payload
 }
 
+#[cfg(target_os = "windows")]
+fn start_windows_file_drag(paths: &[std::path::PathBuf]) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::{
+        System::{
+            Com::IDataObject,
+            Ole::{DROPEFFECT_COPY, DROPEFFECT_MOVE, IDropSource},
+        },
+        UI::Shell::{ILCreateFromPathW, ILFree, SHCreateDataObject, SHDoDragDrop},
+    };
+    use windows::core::PCWSTR;
+    let wide = paths
+        .iter()
+        .map(|path| {
+            path.as_os_str()
+                .encode_wide()
+                .chain(Some(0))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let pidls = wide
+        .iter()
+        .map(|path| unsafe { ILCreateFromPathW(PCWSTR(path.as_ptr())) })
+        .collect::<Vec<_>>();
+    if pidls.iter().any(|pidl| pidl.is_null()) {
+        return Err("could not create shell drag items".into());
+    }
+    let pointers = pidls
+        .iter()
+        .map(|pidl| *pidl as *const _)
+        .collect::<Vec<_>>();
+    let result = unsafe {
+        let data: IDataObject = SHCreateDataObject(None, Some(&pointers), None::<&IDataObject>)
+            .map_err(|error| error.to_string())?;
+        SHDoDragDrop(
+            None,
+            &data,
+            None::<&IDropSource>,
+            DROPEFFECT_COPY | DROPEFFECT_MOVE,
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+    };
+    for pidl in pidls {
+        unsafe { ILFree(Some(pidl.cast())) }
+    }
+    result
+}
+
 fn wait_duration(
     now: Instant,
     deadlines: impl IntoIterator<Item = Option<Instant>>,
@@ -1903,6 +1952,8 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
     }
 
     fn start_pending_file_drag(&mut self, window: &Window) {
+        #[cfg(target_os = "windows")]
+        let _ = window;
         let Some(drag) = self
             .host
             .as_mut()
@@ -1918,7 +1969,11 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
                 tracing::warn!(%error, "could not begin native Wayland file drag");
             }
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "windows")]
+        if let Err(error) = start_windows_file_drag(&drag.paths) {
+            tracing::warn!(%error, "could not begin native Windows file drag");
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         let _ = (drag, window);
     }
 

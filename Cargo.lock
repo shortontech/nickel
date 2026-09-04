@@ -2944,6 +2944,7 @@ dependencies = [
  "tracing",
  "ui-declarative-macros",
  "unicode-segmentation",
+ "windows",
  "winit 0.30.13",
 ]
 
