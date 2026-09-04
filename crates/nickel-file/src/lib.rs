@@ -17,6 +17,7 @@ pub mod desktop;
 pub(crate) mod host;
 pub mod icons;
 pub(crate) mod layout;
+pub mod operations;
 pub(crate) mod platform;
 pub mod properties;
 pub mod selection_summary;
