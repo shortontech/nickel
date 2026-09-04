@@ -1209,7 +1209,7 @@ fn top_corner_radius_emits_rounded_fill() {
         Container::new()
             .width(120.0)
             .height(32.0)
-            .background(0xffffff)
+            .background(0xf7f7f5)
             .top_corner_radius(7.0),
         Rect::new(0.0, 0.0, 120.0, 32.0),
     );

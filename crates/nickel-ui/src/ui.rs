@@ -793,6 +793,53 @@ pub enum PaintCommand {
     PopClip,
 }
 
+pub(crate) fn assert_background_color_policy(identity: &str, commands: &[PaintCommand]) {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    // A terminal owns its viewport palette. Its surrounding root must retain a
+    // different identity so title bars, menus, and other Nickel chrome remain checked.
+    if identity
+        .split('/')
+        .any(|segment| segment == "terminal-viewport")
+    {
+        return;
+    }
+    for (index, command) in commands.iter().enumerate() {
+        let colors: &[Color] = match command {
+            PaintCommand::Fill { color, .. }
+            | PaintCommand::TopRoundedFill { color, .. }
+            | PaintCommand::RoundedFill { color, .. }
+            | PaintCommand::OverlayFill { color, .. } => std::slice::from_ref(color),
+            PaintCommand::Gradient { gradient, .. } => {
+                if is_prohibited_background(gradient.start)
+                    || is_prohibited_background(gradient.end)
+                {
+                    panic!(
+                        "prohibited pure-black/white UI background in {identity} paint command {index}"
+                    );
+                }
+                continue;
+            }
+            PaintCommand::Stroke { .. }
+            | PaintCommand::OverlayStroke { .. }
+            | PaintCommand::Text { .. }
+            | PaintCommand::StyledText { .. }
+            | PaintCommand::Image { .. }
+            | PaintCommand::PushClip(_)
+            | PaintCommand::PopClip => continue,
+        };
+        if colors.iter().any(|color| is_prohibited_background(*color)) {
+            panic!("prohibited pure-black/white UI background in {identity} paint command {index}");
+        }
+    }
+}
+
+const fn is_prohibited_background(color: Color) -> bool {
+    let rgb = color & 0x00ff_ffff;
+    rgb == 0x000000 || rgb == 0xffffff
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Style {
     pub background: Option<Background>,
@@ -2091,3 +2138,31 @@ pub use start_menu_components::*;
 
 mod tree;
 pub use tree::*;
+
+#[cfg(test)]
+mod background_policy_tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "prohibited pure-black/white UI background in root/dialog")]
+    fn runtime_policy_attributes_extreme_fills_to_the_component_root() {
+        assert_background_color_policy(
+            "root/dialog",
+            &[PaintCommand::Fill {
+                rect: Rect::new(0.0, 0.0, 10.0, 10.0),
+                color: 0x000000,
+            }],
+        );
+    }
+
+    #[test]
+    fn terminal_viewport_has_the_only_runtime_background_exception() {
+        assert_background_color_policy(
+            "root/terminal-viewport",
+            &[PaintCommand::Fill {
+                rect: Rect::new(0.0, 0.0, 10.0, 10.0),
+                color: 0xffffff,
+            }],
+        );
+    }
+}

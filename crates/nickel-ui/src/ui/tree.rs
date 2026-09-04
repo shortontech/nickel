@@ -1317,6 +1317,7 @@ impl<Message: Clone> UiFrame<Message> {
         tree.hits.append(&mut tree.overlay_hits);
         tree.emit_accessibility_geometry();
         tree.validate_clip_commands();
+        crate::ui::assert_background_color_policy(root_id.as_str(), &tree.commands);
         tree.release_build_scratch();
         tree
     }

@@ -405,13 +405,13 @@ impl SemanticTokenSet {
     ) -> Self {
         Self {
             surfaces: SurfaceColors {
-                window,
-                sidebar,
-                card,
-                raised,
-                hover,
-                pressed: mix(hover, primary_text, 18),
-                selected: accent_soft,
+                window: compliant_surface(window),
+                sidebar: compliant_surface(sidebar),
+                card: compliant_surface(card),
+                raised: compliant_surface(raised),
+                hover: compliant_surface(hover),
+                pressed: compliant_surface(mix(hover, primary_text, 18)),
+                selected: compliant_surface(accent_soft),
             },
             borders: BorderColors {
                 subtle: mix(card, primary_text, 12),
@@ -461,7 +461,14 @@ pub struct SemanticTheme {
 }
 
 impl SemanticTheme {
-    pub const fn from_tokens(tokens: SemanticTokenSet) -> Self {
+    pub const fn from_tokens(mut tokens: SemanticTokenSet) -> Self {
+        tokens.surfaces.window = compliant_surface(tokens.surfaces.window);
+        tokens.surfaces.sidebar = compliant_surface(tokens.surfaces.sidebar);
+        tokens.surfaces.card = compliant_surface(tokens.surfaces.card);
+        tokens.surfaces.raised = compliant_surface(tokens.surfaces.raised);
+        tokens.surfaces.hover = compliant_surface(tokens.surfaces.hover);
+        tokens.surfaces.pressed = compliant_surface(tokens.surfaces.pressed);
+        tokens.surfaces.selected = compliant_surface(tokens.surfaces.selected);
         Self {
             surfaces: tokens.surfaces,
             borders: tokens.borders,
@@ -522,6 +529,17 @@ impl SemanticTheme {
             theme.motion = theme.motion.reduced();
         }
         theme
+    }
+}
+
+/// Canonical last-resort surface colors for imported or platform-provided themes.
+/// Text, glyph, image, and terminal colors intentionally do not pass through here.
+const fn compliant_surface(color: Color) -> Color {
+    let alpha = color & 0xff00_0000;
+    match color & 0x00ff_ffff {
+        0x000000 => alpha | 0x101114,
+        0xffffff => alpha | 0xf7f7f5,
+        _ => color,
     }
 }
 
@@ -602,6 +620,27 @@ mod tests {
         tokens.text.warning = 0xabcdef;
         tokens.motion.ordinary_ms = 240;
         assert_eq!(SemanticTheme::from_tokens(tokens).tokens(), tokens);
+    }
+
+    #[test]
+    fn imported_extreme_surface_colors_use_canonical_fallback_roles() {
+        let mut imported = tokens();
+        imported.surfaces.window = 0x000000;
+        imported.surfaces.sidebar = 0xffffff;
+        imported.surfaces.selected = 0x000000;
+        imported.surfaces.raised = 0x80ff_ffff;
+        imported.text.primary = 0xffffff;
+
+        let theme = SemanticTheme::from_tokens(imported);
+
+        assert_eq!(theme.surfaces.window, 0x101114);
+        assert_eq!(theme.surfaces.sidebar, 0xf7f7f5);
+        assert_eq!(theme.surfaces.selected, 0x101114);
+        assert_eq!(theme.surfaces.raised, 0x80f7_f7f5);
+        assert_eq!(
+            theme.text.primary, 0xffffff,
+            "foreground white remains valid"
+        );
     }
 
     #[test]

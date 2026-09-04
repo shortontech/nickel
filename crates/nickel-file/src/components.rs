@@ -510,9 +510,9 @@ pub(crate) fn tab(
         .unwrap_or_else(|| browser.current().display().to_string());
     ui! {
         <Container width={170.0} background={if active {
-            if light_mode { 0xffffff } else { palette.background }
+            palette.background
         } else if light_mode {
-            mix_rgb(palette.panel, 0xffffff)
+            mix_rgb(palette.panel, palette.background)
         } else {
             palette.panel
         }} top_corner_radius={5.0} accessibility_label={format!("Tab {label}")}>
@@ -549,13 +549,13 @@ pub(crate) fn grid_item(
     icon: Option<(u16, Arc<image::RgbaImage>)>,
     palette: ThemePalette,
     icon_size: f32,
-    light_mode: bool,
+    _light_mode: bool,
 ) -> impl Component<FileMessage> + use<> {
     let (icon_id, icon_image) = icon.unwrap_or_else(empty_artwork);
     ui! {
         <FileGridItem on_press={FileMessage::Entry(index)} label={entry.display_name()}
             asset_id={icon_id} image={icon_image} generation={u64::from(icon_id)}
-            borderless_palette={(if selected { palette.accent_soft } else if light_mode { 0xffffff } else { palette.background }, palette.text)}
+            borderless_palette={(if selected { palette.accent_soft } else { palette.background }, palette.text)}
             icon_size={icon_size} focus_background_tint={palette.accent} controller_focus_background_tint={palette.complement}
             id={format!("file-entry-{index}")} context_message={FileMessage::ContextEntry(index)}
             semantic_role={SemanticRole::Button} accessibility_label={entry.display_name()} />
@@ -568,7 +568,7 @@ pub(crate) fn details_row(
     selected: bool,
     icon: Option<(u16, Arc<image::RgbaImage>)>,
     palette: ThemePalette,
-    light_mode: bool,
+    _light_mode: bool,
     widths: DetailsColumnWidths,
 ) -> impl Component<FileMessage> + use<> {
     let (icon_id, icon_image) = icon.unwrap_or_else(empty_artwork);
@@ -592,7 +592,7 @@ pub(crate) fn details_row(
     };
     ui! {
         <Container id={format!("file-entry-{index}")} height={58.0}
-            background={if selected { palette.accent_soft } else if light_mode { 0xffffff } else { palette.background }}
+            background={if selected { palette.accent_soft } else { palette.background }}
             hover_background={palette.surface_hover} pressed_background={palette.accent_soft}
             padding={Insets { top: 7.0, right: 10.0, bottom: 7.0, left: 10.0 }}
             on_press={FileMessage::Entry(index)} context_message={FileMessage::ContextEntry(index)}

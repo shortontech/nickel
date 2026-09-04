@@ -28,6 +28,9 @@ pub const CLOSE_GLYPH: char = '\u{f2d3}';
 const TITLEBAR_CACHE_MAX_ENTRIES: usize = 64;
 const TITLEBAR_CACHE_MAX_BYTES: usize = 16 * 1024 * 1024;
 
+/// Nickel-owned window shadow tint. Keep distinct from terminal/content color.
+const WINDOW_SHADOW_RGB: [f32; 3] = [0.035, 0.043, 0.055];
+
 #[derive(Clone)]
 struct TitlebarCacheEntry {
     owner: Option<u64>,
@@ -122,7 +125,12 @@ pub fn shadow_layers(width: i32, height: i32) -> Vec<ShadowLayer> {
         .map(|(spread, vertical_offset, alpha)| ShadowLayer {
             buffer: SolidColorBuffer::new(
                 (key.0 + spread * 2, key.1 + spread * 2),
-                [0.0, 0.0, 0.0, alpha],
+                [
+                    WINDOW_SHADOW_RGB[0],
+                    WINDOW_SHADOW_RGB[1],
+                    WINDOW_SHADOW_RGB[2],
+                    alpha,
+                ],
             ),
             offset: (-spread, -spread + vertical_offset),
         })

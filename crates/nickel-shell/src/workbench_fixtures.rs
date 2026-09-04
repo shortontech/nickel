@@ -359,8 +359,8 @@ fn fixture_palette(theme: FixtureTheme) -> ThemePalette {
         }),
         FixtureTheme::Dark => palette(),
         FixtureTheme::HighContrast => ThemePalette {
-            background: 0x000000,
-            panel: 0x000000,
+            background: 0x101114,
+            panel: 0x17191d,
             surface: 0x111111,
             surface_hover: 0x222222,
             text: 0xffffff,

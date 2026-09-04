@@ -278,7 +278,10 @@ pub fn init_winit(
                                     .map(WinitFrameElement::from),
                             );
                             let dim_buffer =
-                                SolidColorBuffer::new(size.to_logical(1), [0.0, 0.0, 0.0, 0.62]);
+                                SolidColorBuffer::new(
+                                    size.to_logical(1),
+                                    crate::state::shell_scrim(0.62),
+                                );
                             overlay_elements.push(WinitFrameElement::from(
                                 SolidColorRenderElement::from_buffer(
                                     &dim_buffer,
@@ -292,7 +295,10 @@ pub fn init_winit(
                         overlay_elements.extend(window_elements);
                         if state.dimmed && !state.locked {
                             let dim =
-                                SolidColorBuffer::new(size.to_logical(1), [0.0, 0.0, 0.0, 0.48]);
+                                SolidColorBuffer::new(
+                                    size.to_logical(1),
+                                    crate::state::shell_scrim(0.48),
+                                );
                             overlay_elements.insert(
                                 0,
                                 WinitFrameElement::from(SolidColorRenderElement::from_buffer(

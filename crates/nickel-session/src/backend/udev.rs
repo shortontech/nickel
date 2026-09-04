@@ -2535,7 +2535,8 @@ impl NickelSession {
                             .map(|element| NativeElement::from(NativeCustomElement::from(element))),
                     );
                 }
-                let dim = SolidColorBuffer::new(output_geometry.size, [0.0, 0.0, 0.0, 0.62]);
+                let dim =
+                    SolidColorBuffer::new(output_geometry.size, crate::state::shell_scrim(0.62));
                 peek_elements.push(
                     NativeCustomElement::from(SolidColorRenderElement::from_buffer(
                         &dim,
@@ -2582,7 +2583,7 @@ impl NickelSession {
                     .output_geometry(&output)
                     .map(|geometry| geometry.size)
                     .unwrap_or_else(|| (1, 1).into());
-                let dim = SolidColorBuffer::new(size, [0.0, 0.0, 0.0, 0.48]);
+                let dim = SolidColorBuffer::new(size, crate::state::shell_scrim(0.48));
                 elements.insert(
                     0,
                     NativeCustomElement::from(SolidColorRenderElement::from_buffer(

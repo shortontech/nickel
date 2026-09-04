@@ -67,6 +67,12 @@ use smithay::{
     xwayland::{X11Wm, xwm::XwmId},
 };
 
+/// Nickel-owned overlay color used to dim shell content without painting a
+/// pure-black translucent background.
+pub(crate) const fn shell_scrim(alpha: f32) -> [f32; 4] {
+    [0.035, 0.043, 0.055, alpha]
+}
+
 use crate::{
     shell_layout::{self, Geometry},
     window_registry::{WindowId, WindowRegistry},
