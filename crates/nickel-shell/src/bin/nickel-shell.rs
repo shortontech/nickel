@@ -2069,6 +2069,12 @@ fn main() -> Result<(), String> {
                 .surface(surface)
                 .is_some_and(|entry| entry.role() == SurfaceRole::Panel) =>
             {
+                if let Some(output) = shell
+                    .surface(surface)
+                    .map(|entry| entry.output_name().to_owned())
+                {
+                    state.set_panel_output(output);
+                }
                 if state.panel_pointer_left() {
                     render_role(&mut shell, &mut state, SurfaceRole::Panel)?;
                 }

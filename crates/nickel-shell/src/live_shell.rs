@@ -519,6 +519,7 @@ pub struct LiveShell {
     control_visible: bool,
     codex_project_menu_visible: bool,
     panel_hover: Option<PanelHover>,
+    panel_hover_output: Option<String>,
     panel_host: nickel_ui::UiHost<PanelApplication>,
     panel_change_token: HostChangeToken,
     panel_deadline: Option<Instant>,
@@ -810,6 +811,7 @@ impl LiveShell {
             control_visible: false,
             codex_project_menu_visible: false,
             panel_hover: None,
+            panel_hover_output: None,
             panel_host,
             panel_change_token: HostChangeToken::default(),
             panel_deadline: None,
@@ -1674,6 +1676,7 @@ impl LiveShell {
             .and_then(|action| self.panel_hover_for_action(action));
         let changed = hovered != self.panel_hover;
         self.panel_hover = hovered;
+        self.panel_hover_output.clone_from(&self.panel_output);
         if let Some(PanelHover::Task(index)) = hovered {
             if self.preview_group != Some(index)
                 && self.preview_pending.map(|(pending, _)| pending) != Some(index)
@@ -1725,6 +1728,12 @@ impl LiveShell {
         self.panel_output = Some(output.into());
     }
 
+    fn visible_panel_hover(&self) -> Option<PanelHover> {
+        (self.panel_hover_output == self.panel_output)
+            .then_some(self.panel_hover)
+            .flatten()
+    }
+
     pub fn popover_anchor(&self, preferred: AnchorSide) -> Option<(ShellRole, ShellPopoverAnchor)> {
         let anchor = self.pending_popover_anchor.as_ref()?;
         let visible = match anchor.role {
@@ -1773,10 +1782,11 @@ impl LiveShell {
     }
 
     pub fn panel_pointer_left(&mut self) -> bool {
-        if self.panel_hover.is_none() {
+        if self.panel_hover.is_none() || self.panel_hover_output != self.panel_output {
             return false;
         }
         self.panel_hover = None;
+        self.panel_hover_output = None;
         self.preview_pending = None;
         if self.preview_group.is_some() && !self.preview_pointer_inside {
             self.preview_leave_deadline = Some(Instant::now() + PREVIEW_LEAVE_DELAY);
@@ -3071,6 +3081,7 @@ impl LiveShell {
                     })
             })
             .collect();
+        let visible_panel_hover = self.visible_panel_hover();
         let application = self.panel_host.application_mut();
         let task_icons_changed = application.task_icons.len() != task_icons.len()
             || application
@@ -3087,7 +3098,7 @@ impl LiveShell {
         let application_changed = application.palette != self.palette
             || application.windows != self.windows
             || application.tray != self.tray
-            || application.panel_hover != self.panel_hover
+            || application.panel_hover != visible_panel_hover
             || application.launcher_visible != self.launcher_visible
             || application.codex_project_menu_visible != self.codex_project_menu_visible
             || application.control_visible != self.control_visible
@@ -3101,7 +3112,7 @@ impl LiveShell {
         application.codex_icon = Arc::clone(&self.codex_icon);
         application.task_icons = task_icons;
         application.palette = self.palette;
-        application.panel_hover = self.panel_hover;
+        application.panel_hover = visible_panel_hover;
         application.launcher_visible = self.launcher_visible;
         application.codex_project_menu_visible = self.codex_project_menu_visible;
         application.control_visible = self.control_visible;
@@ -4798,6 +4809,27 @@ mod tests {
 
         assert!(shell.panel_pointer_moved(center.x, 1280));
         assert_eq!(shell.panel_hover, Some(super::PanelHover::Tray(0)));
+    }
+
+    #[test]
+    fn panel_hover_is_projected_only_on_the_output_that_received_pointer_input() {
+        let mut shell = LiveShell::new().unwrap();
+        shell.panel_hover = Some(super::PanelHover::Launcher);
+        shell.panel_hover_output = Some("DP-1".into());
+
+        shell.set_panel_output("DP-1");
+        assert_eq!(
+            shell.visible_panel_hover(),
+            Some(super::PanelHover::Launcher)
+        );
+        shell.set_panel_output("HDMI-A-1");
+        assert_eq!(shell.visible_panel_hover(), None);
+        assert!(!shell.panel_pointer_left());
+        assert_eq!(shell.panel_hover, Some(super::PanelHover::Launcher));
+
+        shell.set_panel_output("DP-1");
+        assert!(shell.panel_pointer_left());
+        assert_eq!(shell.panel_hover, None);
     }
 
     #[test]

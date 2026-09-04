@@ -5,7 +5,7 @@
 //! accelerated backend without owning the application event pump.
 
 use std::cell::Cell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 #[cfg(target_os = "windows")]
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -58,6 +58,8 @@ fn windows_wait_timeout_millis(timeout: Duration) -> u32 {
 pub const PANEL_HEIGHT: u32 = 56;
 const RUNTIME_SAMPLE_CAPACITY: usize = 64;
 const OUTPUT_RETIREMENT_SETTLE: Duration = Duration::from_millis(500);
+const OUTPUT_CREATION_RETRY_MIN: Duration = Duration::from_millis(50);
+const OUTPUT_CREATION_RETRY_MAX: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum PanelEdge {
@@ -86,6 +88,29 @@ impl Default for ShellOptions {
 #[derive(Default)]
 struct OutputRetirementTracker {
     missing_since: HashMap<String, Instant>,
+}
+
+#[derive(Default)]
+struct OutputCreationRetry {
+    failures: u32,
+    deadline: Option<Instant>,
+}
+
+impl OutputCreationRetry {
+    fn failed(&mut self, now: Instant) {
+        self.failures = self.failures.saturating_add(1);
+        let multiplier = 1_u32 << self.failures.saturating_sub(1).min(6);
+        self.deadline = Some(
+            now + OUTPUT_CREATION_RETRY_MIN
+                .saturating_mul(multiplier)
+                .min(OUTPUT_CREATION_RETRY_MAX),
+        );
+    }
+
+    fn succeeded(&mut self) {
+        self.failures = 0;
+        self.deadline = None;
+    }
 }
 
 impl OutputRetirementTracker {
@@ -135,6 +160,28 @@ fn durable_presenter_peak(
     current: &AggregatePresenterCacheDiagnostics,
 ) -> usize {
     previous_peak_bytes.max(current.peak_cache_bytes)
+}
+
+fn desired_output_surfaces(
+    output_names: &[String],
+    create_desktops: bool,
+    bar_on_all_displays: bool,
+) -> HashSet<(String, SurfaceRole)> {
+    let panel_outputs = panel_outputs(output_names, bar_on_all_displays)
+        .into_iter()
+        .collect::<HashSet<_>>();
+    output_names
+        .iter()
+        .flat_map(|output| {
+            [SurfaceRole::Desktop, SurfaceRole::Panel, SurfaceRole::Lock]
+                .into_iter()
+                .filter(|role| {
+                    (*role != SurfaceRole::Desktop || create_desktops)
+                        && (*role != SurfaceRole::Panel || panel_outputs.contains(output))
+                })
+                .map(|role| (output.clone(), role))
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -230,7 +277,7 @@ pub struct ShellRuntimeDiagnostics {
     pub warm_present_allocations: Vec<u64>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum SurfaceRole {
     Desktop,
     Panel,
@@ -360,6 +407,7 @@ pub struct WinitShell {
     warm_present_allocations: VecDeque<u64>,
     presenter_cache_peak_bytes: Cell<usize>,
     output_retirements: OutputRetirementTracker,
+    output_creation_retry: OutputCreationRetry,
     pending_input_started: Option<Instant>,
     clipboard: Option<std::cell::RefCell<arboard::Clipboard>>,
     started: Instant,
@@ -401,6 +449,7 @@ impl WinitShell {
             warm_present_allocations: VecDeque::with_capacity(RUNTIME_SAMPLE_CAPACITY),
             presenter_cache_peak_bytes: Cell::new(0),
             output_retirements: OutputRetirementTracker::default(),
+            output_creation_retry: OutputCreationRetry::default(),
             pending_input_started: None,
             clipboard: arboard::Clipboard::new().ok().map(std::cell::RefCell::new),
             started,
@@ -424,20 +473,39 @@ impl WinitShell {
         self.surface_indices.clear();
         self.native_surface_indices.clear();
         self.output_retirements = OutputRetirementTracker::default();
+        self.output_creation_retry = OutputCreationRetry::default();
         let displays = require_displays(self.display_geometries()?)?;
         let output_names = self.display_names()?;
+        let create_desktops =
+            self.options.create_desktop_surfaces && crate::platform::renders_desktop_background();
+        let desired = desired_output_surfaces(
+            &output_names,
+            create_desktops,
+            self.options.bar_on_all_displays,
+        );
+        let mut output_creation_failed = false;
         for (display_index, geometry) in displays.iter().copied().enumerate() {
             let output_name = output_names.get(display_index).ok_or_else(|| {
                 "winit output identity count changed during shell startup".to_string()
             })?;
-            if self.options.create_desktop_surfaces && crate::platform::renders_desktop_background()
-            {
-                self.create_surface(SurfaceRole::Desktop, display_index, geometry, output_name)?;
+            for role in [SurfaceRole::Desktop, SurfaceRole::Panel, SurfaceRole::Lock] {
+                if !desired.contains(&(output_name.clone(), role)) {
+                    continue;
+                }
+                if let Err(error) = self.create_surface(role, display_index, geometry, output_name)
+                {
+                    output_creation_failed = true;
+                    tracing::warn!(
+                        output = output_name,
+                        ?role,
+                        %error,
+                        "failed to create startup output-owned shell surface; retry scheduled"
+                    );
+                }
             }
-            if self.options.bar_on_all_displays || display_index == 0 {
-                self.create_surface(SurfaceRole::Panel, display_index, geometry, output_name)?;
-            }
-            self.create_surface(SurfaceRole::Lock, display_index, geometry, output_name)?;
+        }
+        if output_creation_failed {
+            self.output_creation_retry.failed(Instant::now());
         }
         let primary = displays[0];
         let primary_name = output_names.first().ok_or_else(|| {
@@ -470,80 +538,86 @@ impl WinitShell {
                 surface.window.set_visible(false);
             }
             self.rebuild_surface_indices();
+            self.output_creation_retry.succeeded();
             tracing::info!("winit shell is dormant while no displays are available");
             return Ok(());
         }
-        let wanted_panel_outputs = panel_outputs(&output_names, self.options.bar_on_all_displays);
+        let create_desktops =
+            self.options.create_desktop_surfaces && crate::platform::renders_desktop_background();
+        let desired = desired_output_surfaces(
+            &output_names,
+            create_desktops,
+            self.options.bar_on_all_displays,
+        );
+        // A settings policy change is authoritative immediately. Missing outputs remain
+        // dormant for the retirement grace period so a transient topology snapshot or a
+        // quick reconnect can preserve their stable surface identities.
         self.surfaces.retain(|surface| {
             surface.role != SurfaceRole::Panel
-                || wanted_panel_outputs.contains(&surface.output_name)
+                || desired.contains(&(surface.output_name.clone(), SurfaceRole::Panel))
         });
+        for surface in &mut self.surfaces {
+            if output_role(surface.role)
+                && !desired.contains(&(surface.output_name.clone(), surface.role))
+            {
+                surface.display_connected = false;
+                surface.presenter = None;
+                surface.window.set_visible(false);
+            }
+        }
         self.rebuild_surface_indices();
-        let panels_match_outputs = wanted_panel_outputs.iter().all(|output_name| {
-            self.surfaces.iter().any(|surface| {
-                surface.display_connected
-                    && surface.role == SurfaceRole::Panel
-                    && surface.output_name == *output_name
-            })
-        });
-        if !panels_match_outputs {
-            for surface in &mut self.surfaces {
-                if matches!(
-                    surface.role,
-                    SurfaceRole::Desktop | SurfaceRole::Panel | SurfaceRole::Lock
-                ) && (!output_names.iter().any(|name| name == &surface.output_name)
-                    || (surface.role == SurfaceRole::Panel
-                        && !wanted_panel_outputs.contains(&surface.output_name)))
-                {
-                    surface.display_connected = false;
-                    surface.presenter = None;
-                    surface.window.set_visible(false);
+        let mut creation_failed = false;
+        for (display_index, geometry) in displays.iter().copied().enumerate() {
+            let output_name = output_names.get(display_index).ok_or_else(|| {
+                "winit output identity count changed during shell sync".to_string()
+            })?;
+            for role in [SurfaceRole::Desktop, SurfaceRole::Panel, SurfaceRole::Lock] {
+                if !desired.contains(&(output_name.clone(), role)) {
+                    continue;
                 }
-            }
-            self.rebuild_surface_indices();
-            for (display_index, geometry) in displays.iter().copied().enumerate() {
-                let output_name = output_names.get(display_index).ok_or_else(|| {
-                    "winit output identity count changed during shell sync".to_string()
-                })?;
-                for role in [SurfaceRole::Desktop, SurfaceRole::Panel, SurfaceRole::Lock] {
-                    if role == SurfaceRole::Desktop
-                        && (!self.options.create_desktop_surfaces
-                            || !crate::platform::renders_desktop_background())
+                if self.surfaces.iter().any(|surface| {
+                    surface.display_connected
+                        && surface.role == role
+                        && surface.output_name == *output_name
+                }) {
+                    continue;
+                }
+                if let Some(surface) = self.surfaces.iter_mut().find(|surface| {
+                    !surface.display_connected
+                        && surface.role == role
+                        && surface.output_name == *output_name
+                }) {
+                    surface.display_index = display_index;
+                    surface.display_connected = true;
+                    let (_, x, y, width, height, _) =
+                        surface_geometry(role, geometry, self.options.panel_edge);
+                    surface
+                        .window
+                        .set_outer_position(LogicalPosition::new(x, y));
+                    let _ = surface
+                        .window
+                        .request_inner_size(LogicalSize::new(width, height));
+                    surface.window.set_visible(true);
+                } else {
+                    if let Err(error) =
+                        self.create_surface(role, display_index, geometry, output_name)
                     {
-                        continue;
-                    }
-                    if role == SurfaceRole::Panel && !wanted_panel_outputs.contains(output_name) {
-                        continue;
-                    }
-                    if self.surfaces.iter().any(|surface| {
-                        surface.display_connected
-                            && surface.role == role
-                            && surface.output_name == *output_name
-                    }) {
-                        continue;
-                    }
-                    if let Some(surface) = self.surfaces.iter_mut().find(|surface| {
-                        !surface.display_connected
-                            && surface.role == role
-                            && surface.output_name == *output_name
-                    }) {
-                        surface.display_index = display_index;
-                        surface.display_connected = true;
-                        let (_, x, y, width, height, _) =
-                            surface_geometry(role, geometry, self.options.panel_edge);
-                        surface
-                            .window
-                            .set_outer_position(LogicalPosition::new(x, y));
-                        let _ = surface
-                            .window
-                            .request_inner_size(LogicalSize::new(width, height));
-                        surface.window.set_visible(true);
-                    } else {
-                        self.create_surface(role, display_index, geometry, output_name)?;
+                        creation_failed = true;
+                        tracing::warn!(
+                            output = output_name,
+                            ?role,
+                            %error,
+                            "failed to create output-owned shell surface; retry scheduled"
+                        );
                     }
                 }
             }
-            self.rebuild_surface_indices();
+        }
+        self.rebuild_surface_indices();
+        if creation_failed {
+            self.output_creation_retry.failed(Instant::now());
+        } else {
+            self.output_creation_retry.succeeded();
         }
 
         let primary = displays[0];
@@ -641,7 +715,13 @@ impl WinitShell {
     }
 
     pub fn next_output_retirement_deadline(&self) -> Option<Instant> {
-        self.output_retirements.next_deadline()
+        match (
+            self.output_retirements.next_deadline(),
+            self.output_creation_retry.deadline,
+        ) {
+            (Some(left), Some(right)) => Some(left.min(right)),
+            (left, right) => left.or(right),
+        }
     }
 
     fn rebuild_surface_indices(&mut self) {
@@ -1581,13 +1661,15 @@ mod tests {
     #[cfg(target_os = "linux")]
     use super::surface_is_ephemeral;
     use super::{
-        DESKTOP_TITLE, DisplayGeometry, LAUNCHER_TITLE, OUTPUT_RETIREMENT_SETTLE,
-        OutputRetirementTracker, PANEL_TITLE, PanelEdge, SurfaceRole, durable_presenter_peak,
-        output_role_is_retired, panel_outputs, parse_proc_status_rss, require_displays,
-        shell_surface_title, surface_geometry, surface_is_borderless,
+        DESKTOP_TITLE, DisplayGeometry, LAUNCHER_TITLE, OUTPUT_CREATION_RETRY_MAX,
+        OUTPUT_CREATION_RETRY_MIN, OUTPUT_RETIREMENT_SETTLE, OutputCreationRetry,
+        OutputRetirementTracker, PANEL_TITLE, PanelEdge, SurfaceRole, desired_output_surfaces,
+        durable_presenter_peak, output_role_is_retired, panel_outputs, parse_proc_status_rss,
+        require_displays, shell_surface_title, surface_geometry, surface_is_borderless,
     };
 
     use nickel_ui::AggregatePresenterCacheDiagnostics;
+    use std::collections::HashSet;
     use std::time::{Duration, Instant};
 
     #[cfg(target_os = "linux")]
@@ -1671,6 +1753,77 @@ mod tests {
         assert_eq!(panel_outputs(&outputs, false), vec!["DP-1"]);
         assert_eq!(panel_outputs(&outputs, true), outputs);
         assert_eq!(panel_outputs(&[], false), Vec::<String>::new());
+    }
+
+    #[test]
+    fn every_enabled_output_requires_its_own_wallpaper_bar_and_lock() {
+        let outputs = vec!["DP-1".to_owned(), "HDMI-A-1".to_owned()];
+        let desired = desired_output_surfaces(&outputs, true, true);
+        assert_eq!(desired.len(), 6);
+        for output in outputs {
+            for role in [SurfaceRole::Desktop, SurfaceRole::Panel, SurfaceRole::Lock] {
+                assert!(
+                    desired.contains(&(output.clone(), role)),
+                    "{output} {role:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn hotplug_requires_output_chrome_even_when_the_existing_panel_is_healthy() {
+        let before = desired_output_surfaces(&["DP-1".to_owned()], true, false);
+        let after =
+            desired_output_surfaces(&["DP-1".to_owned(), "HDMI-A-1".to_owned()], true, false);
+        let added = after.difference(&before).cloned().collect::<HashSet<_>>();
+        assert_eq!(
+            added,
+            HashSet::from([
+                ("HDMI-A-1".to_owned(), SurfaceRole::Desktop),
+                ("HDMI-A-1".to_owned(), SurfaceRole::Lock),
+            ])
+        );
+        assert!(after.contains(&("DP-1".to_owned(), SurfaceRole::Panel)));
+        assert!(!after.contains(&("HDMI-A-1".to_owned(), SurfaceRole::Panel)));
+    }
+
+    #[test]
+    fn output_reordering_does_not_change_stable_surface_ownership() {
+        let forward =
+            desired_output_surfaces(&["DP-1".to_owned(), "HDMI-A-1".to_owned()], true, true);
+        let reversed =
+            desired_output_surfaces(&["HDMI-A-1".to_owned(), "DP-1".to_owned()], true, true);
+        assert_eq!(forward, reversed);
+    }
+
+    #[test]
+    fn desktop_policy_does_not_suppress_per_output_bars() {
+        let desired =
+            desired_output_surfaces(&["DP-1".to_owned(), "HDMI-A-1".to_owned()], false, true);
+        assert_eq!(desired.len(), 4);
+        assert!(
+            desired
+                .iter()
+                .all(|(_, role)| *role == SurfaceRole::Panel || *role == SurfaceRole::Lock)
+        );
+    }
+
+    #[test]
+    fn failed_output_surface_creation_retries_with_a_bounded_backoff() {
+        let started = Instant::now();
+        let mut retry = OutputCreationRetry::default();
+        retry.failed(started);
+        assert_eq!(retry.deadline, Some(started + OUTPUT_CREATION_RETRY_MIN));
+        for step in 1..12 {
+            retry.failed(started + Duration::from_secs(step));
+        }
+        assert_eq!(
+            retry.deadline,
+            Some(started + Duration::from_secs(11) + OUTPUT_CREATION_RETRY_MAX)
+        );
+        retry.succeeded();
+        assert_eq!(retry.deadline, None);
+        assert_eq!(retry.failures, 0);
     }
 
     #[test]
