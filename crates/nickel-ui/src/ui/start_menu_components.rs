@@ -374,6 +374,7 @@ pub struct ShortcutState {
     pub focused: bool,
     pub hovered: bool,
     pub pressed: bool,
+    pub menu_owner: bool,
     pub enabled: bool,
 }
 
@@ -384,6 +385,7 @@ impl Default for ShortcutState {
             focused: false,
             hovered: false,
             pressed: false,
+            menu_owner: false,
             enabled: true,
         }
     }
@@ -698,13 +700,17 @@ impl<Message> ShortcutRow<Message> {
             content
         };
         let background = if state.pressed {
-            theme.surfaces.pressed
+            Some(theme.surfaces.pressed)
+        } else if state.menu_owner {
+            Some(theme.surfaces.raised)
         } else if state.selected {
-            theme.surfaces.selected
+            Some(theme.surfaces.selected)
         } else if state.hovered {
-            theme.surfaces.hover
+            Some(theme.surfaces.hover)
+        } else if state.focused {
+            Some(theme.surfaces.window)
         } else {
-            theme.surfaces.window
+            None
         };
         let semantic_state = if !state.enabled {
             "disabled"
@@ -712,6 +718,8 @@ impl<Message> ShortcutRow<Message> {
             "unavailable"
         } else if state.pressed {
             "pressed"
+        } else if state.menu_owner {
+            "menu-owner"
         } else if state.focused {
             "focused"
         } else if state.selected {
@@ -721,22 +729,27 @@ impl<Message> ShortcutRow<Message> {
         } else {
             "available"
         };
-        let background = if state.focused {
-            crate::focused_surface(background, theme.borders.focus)
-        } else {
-            background
-        };
+        let background = background.map(|background| {
+            if state.focused {
+                crate::focused_surface(background, theme.borders.focus)
+            } else {
+                background
+            }
+        });
         let mut row = Container::new()
             .fill_width()
             .min_height(52.0)
             .padding(Insets::all(theme.spacing.control))
             .radius(theme.radii.control)
-            .background(background)
+            .interaction_backgrounds(theme.surfaces.hover, theme.surfaces.pressed)
             .accessibility_label(label)
             .accessibility_description(&supporting)
             .accessibility_state(semantic_state)
             .enabled(state.enabled)
             .child(content);
+        if let Some(background) = background {
+            row = row.background(background);
+        }
         if !state.focused {
             row = row
                 .focus_background_tint(theme.borders.focus)
@@ -1059,7 +1072,9 @@ impl<Message> CompactIconTile<Message> {
                 .height(48.0)
                 .padding(Insets::all(theme.spacing.compact))
                 .radius(theme.radii.control)
-                .background(theme.surfaces.raised)
+                .interaction_backgrounds(theme.surfaces.hover, theme.surfaces.pressed)
+                .focus_background_tint(theme.borders.focus)
+                .controller_focus_background_tint(theme.borders.controller_focus)
                 .align_items(Align::Center)
                 .justify_content(Justify::Center)
                 .accessibility_label(label)
@@ -1239,6 +1254,35 @@ mod tests {
             tree.accessibility_nodes()
                 .iter()
                 .any(|node| { node.interactive && node.label.as_deref() == Some("Nickel") })
+        );
+    }
+
+    #[test]
+    fn idle_shortcut_is_transparent_without_losing_hover_or_hit_geometry() {
+        let bounds = Rect::new(0.0, 0.0, 280.0, 64.0);
+        let mut state = UiStateStore::default();
+        let idle = UiFrame::layout_with_state(actionable_row(), bounds, &mut state);
+        assert!(!idle.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::Fill { .. } | PaintCommand::RoundedFill { .. }
+        )));
+        assert_eq!(
+            idle.message_at(Point { x: 20.0, y: 20.0 }),
+            Some(&Message::Open)
+        );
+
+        idle.handle_event(
+            &mut state,
+            UiEvent::PointerMoved(Point { x: 20.0, y: 20.0 }),
+        );
+        let hovered = UiFrame::layout_with_state(actionable_row(), bounds, &mut state);
+        assert!(hovered.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::RoundedFill { color, .. } if *color == theme().surfaces.hover
+        )));
+        assert_eq!(
+            hovered.message_at(Point { x: 20.0, y: 20.0 }),
+            Some(&Message::Open)
         );
     }
 

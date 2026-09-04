@@ -1545,30 +1545,6 @@ fn configured_chat_view(
                     }}
                 </Column>
                 <Column id={id!(composer)} fill_width shrink={0.0} gap={8.0}>
-                    {[()].into_iter().filter(|_| command_picker_open).map(|_| ui! {
-                        <Column fill_width max_height={280.0} overflow_y={Overflow::Auto}
-                            padding={Insets::all(8.0)} gap={4.0} background={PANEL}
-                            border={Border::new(BORDER, 1.0)} radius={8.0}>
-                            <Text color={MUTED}>{"Commands"}</Text>
-                            <Button label_align={TextAlign::Start} fill_width
-                                on_press={ChatMessage::SelectCommand("/model".into())}>{"/model — choose model and reasoning"}</Button>
-                            <Button label_align={TextAlign::Start} fill_width
-                                on_press={ChatMessage::SelectCommand("/resume".into())}>{"/resume — resume a project conversation"}</Button>
-                            <Button label_align={TextAlign::Start} fill_width
-                                on_press={ChatMessage::SelectCommand("/new".into())}>{"/new — start a new conversation"}</Button>
-                            <Button label_align={TextAlign::Start} fill_width
-                                on_press={ChatMessage::SelectCommand("/clear".into())}>{"/clear — clear into a new conversation"}</Button>
-                            <Text color={MUTED}>{"/review — unavailable: backend support not implemented"}</Text>
-                            <Text color={MUTED}>{"/compact — unavailable: backend support not implemented"}</Text>
-                            <Text color={MUTED}>{"/plan — unavailable: use a natural-language request"}</Text>
-                            <Text color={MUTED}>{"/status — unavailable: status is shown below the composer"}</Text>
-                            <Text color={MUTED}>{"/diff — unavailable: file changes appear inline"}</Text>
-                            <Text color={MUTED}>{"/mention — unavailable: file mention chooser not implemented"}</Text>
-                            <Text color={MUTED}>{"/permissions — unavailable: use approval prompts"}</Text>
-                            <Text color={MUTED}>{"/feedback — unavailable in this client"}</Text>
-                            <Text color={MUTED}>{"/logout — unavailable: manage the Codex CLI account externally"}</Text>
-                        </Column>
-                    })}
                     {state.pending.iter().map(|interaction| ui! {
                         <InteractionCard interaction={interaction} answer={&state.interaction_answer} />
                     })}
@@ -1614,7 +1590,27 @@ fn configured_chat_view(
                             color={TEXT} wrap={true} />
                     </Container>
                     <Row shrink={0.0} gap={8.0}>
-                        <Button on_press={ChatMessage::ToggleCommandPicker}>{"Commands"}</Button>
+                        {Menu::new(
+                            ChatMessage::ToggleCommandPicker,
+                            "Commands",
+                            [
+                                MenuItem::new("/model — choose model and reasoning", ChatMessage::SelectCommand("/model".into())),
+                                MenuItem::new("/resume — resume a project conversation", ChatMessage::SelectCommand("/resume".into())),
+                                MenuItem::new("/new — start a new conversation", ChatMessage::SelectCommand("/new".into())),
+                                MenuItem::new("/clear — clear into a new conversation", ChatMessage::SelectCommand("/clear".into())),
+                                MenuItem::disabled("/review — unavailable: backend support not implemented"),
+                                MenuItem::disabled("/compact — unavailable: backend support not implemented"),
+                                MenuItem::disabled("/plan — unavailable: use a natural-language request"),
+                                MenuItem::disabled("/status — unavailable: status is shown below the composer"),
+                                MenuItem::disabled("/diff — unavailable: file changes appear inline"),
+                                MenuItem::disabled("/mention — unavailable: file mention chooser not implemented"),
+                                MenuItem::disabled("/permissions — unavailable: use approval prompts"),
+                                MenuItem::disabled("/feedback — unavailable in this client"),
+                                MenuItem::disabled("/logout — unavailable: manage the Codex CLI account externally"),
+                            ],
+                        ).id(id!(command_picker)).width(460.0).expanded(command_picker_open)
+                            .accessibility_label("Commands")
+                            .colors(PANEL, SIDEBAR, TEXT)}
                         <Button on_press={ChatMessage::ToggleResumePicker}>{"Resume"}</Button>
                         {Dropdown::new(
                             ChatMessage::ToggleModelPicker,

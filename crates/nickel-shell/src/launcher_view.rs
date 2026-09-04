@@ -690,8 +690,6 @@ fn build_launcher_view_directional(
                 .min_height(TILE_HEIGHT)
                 .padding(Insets::all(theme.spacing.control))
                 .radius(theme.radii.card)
-                .background(theme.surfaces.raised)
-                .border(theme.borders.ordinary, theme.sizing.border)
                 .align_items(nickel_ui::Align::Center)
                 .child(
                     Image::new(icon.0, icon.1)
@@ -713,6 +711,11 @@ fn build_launcher_view_directional(
     .gap(GRID_GAP)
     .item_focus_background_tint(theme.borders.focus)
     .item_controller_focus_background_tint(theme.borders.controller_focus)
+    .item_interaction_backgrounds(
+        theme.surfaces.hover,
+        theme.surfaces.pressed,
+        theme.surfaces.selected,
+    )
     .navigation_scope(
         NavigationScope::group()
             .traversal(NavigationTraversal::Grid)
@@ -970,8 +973,6 @@ fn build_dashboard_view_directional(
                 .padding(Insets::all(theme.spacing.control))
                 .gap(theme.spacing.compact)
                 .radius(theme.radii.card)
-                .background(theme.surfaces.raised)
-                .border(theme.borders.ordinary, theme.sizing.border)
                 .align_items(nickel_ui::Align::Center)
                 .child(Image::new(icon.0, icon.1).width(48.0).height(48.0))
                 .child(
@@ -991,6 +992,11 @@ fn build_dashboard_view_directional(
     .gap(theme.spacing.control)
     .item_focus_background_tint(theme.borders.focus)
     .item_controller_focus_background_tint(theme.borders.controller_focus)
+    .item_interaction_backgrounds(
+        theme.surfaces.hover,
+        theme.surfaces.pressed,
+        theme.surfaces.selected,
+    )
     .navigation_scope(NavigationScope::group().traversal(NavigationTraversal::Grid))
     .controller_scope_background(theme.surfaces.selected)
     .on_activate(|id| LauncherAction::LaunchApplication(id.clone()));

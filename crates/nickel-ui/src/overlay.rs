@@ -371,6 +371,8 @@ pub struct OverlayMenu<Message> {
     pub radius: f32,
     pub items: Vec<OverlayMenuItem<Message>>,
     pub background: Color,
+    pub border: Color,
+    pub border_width: f32,
     pub foreground: Color,
     pub text_scale: f32,
     pub text_align: TextAlign,
@@ -398,6 +400,8 @@ impl<Message> OverlayMenu<Message> {
             radius: 0.0,
             items: Vec::new(),
             background: 0x202630,
+            border: 0x5a6472,
+            border_width: 1.0,
             foreground: 0xe8edf4,
             text_scale: 2.0,
             text_align: TextAlign::Start,
@@ -427,7 +431,15 @@ impl<Message> OverlayMenu<Message> {
 
     pub fn semantic_style(mut self, style: OverlayStyle) -> Self {
         self.background = style.background;
+        self.border = style.border;
+        self.border_width = 1.0;
         self.foreground = style.foreground;
+        self.item_hover = Some(crate::focused_surface_with_foreground(
+            style.background,
+            style.border,
+            style.foreground,
+        ));
+        self.item_pressed = Some(style.selected);
         self.item_selected = Some(crate::focused_surface_with_foreground(
             style.background,
             style.selected,
@@ -917,6 +929,15 @@ mod tests {
             .semantic_style(style);
         assert_eq!(menu.kind, TransientKind::Tooltip);
         assert_eq!(menu.background, theme.surfaces.raised);
+        assert_eq!(menu.border, theme.borders.ordinary);
+        assert_eq!(
+            menu.item_hover,
+            Some(crate::focused_surface_with_foreground(
+                theme.surfaces.raised,
+                theme.borders.ordinary,
+                theme.text.primary,
+            ))
+        );
         assert_eq!(
             menu.item_selected,
             Some(crate::focused_surface_with_foreground(

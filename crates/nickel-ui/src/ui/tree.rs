@@ -1024,6 +1024,13 @@ impl<Message: Clone> UiFrame<Message> {
             color: menu.background,
             radius: menu.radius,
         });
+        if menu.border_width > 0.0 {
+            self.commands.push(PaintCommand::OverlayStroke {
+                rect: rect.inset(Insets::all(menu.border_width / 2.0)),
+                color: menu.border,
+                width: menu.border_width,
+            });
+        }
         let menu_index = self.resolved.nodes.len();
         self.resolved.nodes.push(ResolvedNode {
             component: "Menu",
@@ -1647,6 +1654,24 @@ impl<Message: Clone> UiFrame<Message> {
         ) {
             modality_invalidation = modality_invalidation.merge(state.set_hovered(None));
         }
+        let dismiss_blurred_choices = matches!(
+            &intent,
+            InteractionIntent::Event(
+                UiEvent::FocusNext
+                    | UiEvent::FocusPrevious
+                    | UiEvent::KeyboardNavigateUp
+                    | UiEvent::KeyboardNavigateDown
+                    | UiEvent::KeyboardNavigateLeft
+                    | UiEvent::KeyboardNavigateRight
+                    | UiEvent::ControllerUp
+                    | UiEvent::ControllerDown
+                    | UiEvent::ControllerLeft
+                    | UiEvent::ControllerRight
+                    | UiEvent::ControllerNext
+                    | UiEvent::ControllerPrevious
+                    | UiEvent::AccessibilityFocus(_)
+            )
+        );
         let mut outcome = match intent {
             InteractionIntent::Event(event) => self.reduce_event(state, event),
             InteractionIntent::Invoke { target, action } => {
@@ -1707,8 +1732,39 @@ impl<Message: Clone> UiFrame<Message> {
                 }
             }
         };
+        if dismiss_blurred_choices {
+            outcome.invalidation = outcome
+                .invalidation
+                .merge(self.dismiss_blurred_dropdowns(state));
+        }
         outcome.invalidation = outcome.invalidation.merge(modality_invalidation);
         Ok(outcome)
+    }
+
+    fn dismiss_blurred_dropdowns(&self, state: &mut UiStateStore) -> Invalidation {
+        let focused = state.focused().cloned();
+        let blurred = self
+            .resolved
+            .nodes()
+            .iter()
+            .filter(|node| node.component == "Dropdown")
+            .filter(|node| {
+                state
+                    .state(&node.id)
+                    .is_some_and(|entry| entry.dropdown_open)
+            })
+            .filter(|node| {
+                focused
+                    .as_ref()
+                    .is_none_or(|focused| !self.is_descendant_or_self(&node.id, focused))
+            })
+            .map(|node| node.id.clone())
+            .collect::<Vec<_>>();
+        blurred
+            .into_iter()
+            .fold(Invalidation::None, |invalidation, id| {
+                invalidation.merge(state.set_dropdown_open(id, false))
+            })
     }
 
     fn perform_scroll_action(

@@ -122,6 +122,9 @@ pub struct Collection<T, K, Message, Render, View> {
     gap: f32,
     item_focus_background_tint: Option<Color>,
     item_controller_focus_background_tint: Option<Color>,
+    item_hover_background: Option<Background>,
+    item_pressed_background: Option<Background>,
+    item_selected_background: Option<Background>,
     navigation_scope: Option<NavigationScope>,
     controller_scope_background: Option<Background>,
     interactions: CollectionInteractions<K, Message>,
@@ -188,6 +191,9 @@ where
             gap: 0.0,
             item_focus_background_tint: None,
             item_controller_focus_background_tint: None,
+            item_hover_background: None,
+            item_pressed_background: None,
+            item_selected_background: None,
             navigation_scope: None,
             controller_scope_background: None,
             interactions: CollectionInteractions::default(),
@@ -224,6 +230,18 @@ where
     /// Paints controller selection on the keyed item which owns its semantic actions.
     pub fn item_controller_focus_background_tint(mut self, color: Color) -> Self {
         self.item_controller_focus_background_tint = Some(color);
+        self
+    }
+
+    pub fn item_interaction_backgrounds(
+        mut self,
+        hover: impl Into<Background>,
+        pressed: impl Into<Background>,
+        selected: impl Into<Background>,
+    ) -> Self {
+        self.item_hover_background = Some(hover.into());
+        self.item_pressed_background = Some(pressed.into());
+        self.item_selected_background = Some(selected.into());
         self
     }
 
@@ -530,6 +548,14 @@ where
                 }
                 if let Some(color) = self.item_controller_focus_background_tint {
                     item_container = item_container.controller_focus_background_tint(color);
+                }
+                if let (Some(hover), Some(pressed)) =
+                    (self.item_hover_background, self.item_pressed_background)
+                {
+                    item_container = item_container.interaction_backgrounds(hover, pressed);
+                }
+                if is_selected && let Some(background) = self.item_selected_background {
+                    item_container = item_container.background(background);
                 }
                 let mut element = item_container.into_element();
                 if !is_disabled && let Some(action) = &self.interactions.activate {

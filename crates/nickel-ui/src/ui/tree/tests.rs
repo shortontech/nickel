@@ -1319,6 +1319,51 @@ fn window_focus_loss_closes_an_open_dropdown() {
 }
 
 #[test]
+fn choice_menu_internal_focus_is_not_blur_but_external_focus_dismisses() {
+    let mut state = UiStateStore::default();
+    let view = || {
+        Column::new()
+            .child(
+                Dropdown::new(
+                    TestMessage::Named("toggle"),
+                    "Model",
+                    [("First", TestMessage::Named("first"))],
+                )
+                .id("choice")
+                .accessibility_label("Model"),
+            )
+            .child(
+                Container::new()
+                    .id("outside")
+                    .message(TestMessage::Named("outside"))
+                    .accessibility_label("Outside"),
+            )
+    };
+    let bounds = Rect::new(0.0, 0.0, 240.0, 140.0);
+    let _tree = UiFrame::layout_with_state(view(), bounds, &mut state);
+    let choice = UiId::from("root/choice");
+    state.set_dropdown_open(choice.clone(), true);
+    let tree = UiFrame::layout_with_state(view(), bounds, &mut state);
+    let option = choice.scoped("option-0");
+
+    tree.transition(
+        &mut state,
+        InputSource::Accessibility,
+        InteractionIntent::Event(UiEvent::AccessibilityFocus(option)),
+    )
+    .unwrap();
+    assert!(state.state(&choice).unwrap().dropdown_open);
+
+    tree.transition(
+        &mut state,
+        InputSource::Accessibility,
+        InteractionIntent::Event(UiEvent::AccessibilityFocus(UiId::from("root/outside"))),
+    )
+    .unwrap();
+    assert!(!state.state(&choice).unwrap().dropdown_open);
+}
+
+#[test]
 fn controller_activation_opens_dropdown_and_enters_its_options() {
     let mut state = UiStateStore::default();
     let dropdown = || {

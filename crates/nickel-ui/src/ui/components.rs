@@ -2794,6 +2794,30 @@ impl<Message: Clone> Menu<Message> {
         self
     }
 
+    pub fn accessibility_label(mut self, label: impl Into<String>) -> Self {
+        self.0.style.accessibility_label = Some(label.into());
+        self
+    }
+
+    pub fn expanded(mut self, expanded: bool) -> Self {
+        if let Kind::Dropdown {
+            expanded: is_expanded,
+            options,
+            ..
+        } = &mut self.0.kind
+        {
+            *is_expanded = expanded;
+            self.0.style.height = Length::Px(
+                30.0 + if expanded {
+                    options.len() as f32 * 36.0
+                } else {
+                    0.0
+                },
+            );
+        }
+        self
+    }
+
     pub fn colors(
         mut self,
         background: Color,
