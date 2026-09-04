@@ -3793,10 +3793,10 @@ impl NickelSession {
         if role == ShellRole::Screenshot {
             self.place_screenshot_surface(&window);
         }
-        if self.hidden_shell_roles.contains(&role)
-            && let Some(location) = self.space.element_location(&window)
-        {
-            self.hidden_shell_role_locations.insert(role, location);
+        if self.hidden_shell_roles.contains(&role) {
+            if let Some(location) = self.space.element_location(&window) {
+                self.hidden_shell_role_locations.insert(role, location);
+            }
             self.space.unmap_elem(&window);
         }
     }
@@ -4007,11 +4007,11 @@ impl NickelSession {
         }
         window.override_z_index(50);
         self.context_menu_window = Some(window.clone());
-        if self.hidden_shell_roles.contains(&ShellRole::ContextMenu)
-            && let Some(location) = self.space.element_location(&window)
-        {
-            self.hidden_shell_role_locations
-                .insert(ShellRole::ContextMenu, location);
+        if self.hidden_shell_roles.contains(&ShellRole::ContextMenu) {
+            if let Some(location) = self.space.element_location(&window) {
+                self.hidden_shell_role_locations
+                    .insert(ShellRole::ContextMenu, location);
+            }
             self.space.unmap_elem(&window);
         }
     }
@@ -4031,11 +4031,11 @@ impl NickelSession {
             self.clear_overlay_preview_interest();
         }
         self.preview_window = Some(window.clone());
-        if self.hidden_shell_roles.contains(&ShellRole::Preview)
-            && let Some(location) = self.space.element_location(&window)
-        {
-            self.hidden_shell_role_locations
-                .insert(ShellRole::Preview, location);
+        if self.hidden_shell_roles.contains(&ShellRole::Preview) {
+            if let Some(location) = self.space.element_location(&window) {
+                self.hidden_shell_role_locations
+                    .insert(ShellRole::Preview, location);
+            }
             self.space.unmap_elem(&window);
         }
     }
@@ -4188,8 +4188,10 @@ impl NickelSession {
                 .remove(&role)
                 .unwrap_or_default();
             self.map_buffered_window(window, location, false);
-        } else if let Some(location) = self.space.element_location(&window) {
-            self.hidden_shell_role_locations.insert(role, location);
+        } else {
+            if let Some(location) = self.space.element_location(&window) {
+                self.hidden_shell_role_locations.insert(role, location);
+            }
             self.space.unmap_elem(&window);
         }
     }
