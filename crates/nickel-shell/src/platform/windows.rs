@@ -2385,8 +2385,14 @@ fn handle_shell_app_command(command: u32) -> bool {
                 Ok((volume_percent, muted)) => {
                     if let Some(sender) = SHORTCUT_SENDER.get() {
                         let _ = sender.send(GlobalShortcut::AudioChanged {
+                            available: true,
                             volume_percent,
                             muted,
+                            output_name: audio_status()
+                                .devices
+                                .into_iter()
+                                .find(|device| device.is_default)
+                                .map(|device| device.name),
                         });
                     }
                 }

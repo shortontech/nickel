@@ -3235,12 +3235,28 @@ impl LiveShell {
                 true
             }
             platform::GlobalShortcut::AudioChanged {
+                available,
                 volume_percent,
                 muted,
+                output_name,
             } => {
+                self.audio.available = available;
                 self.audio.volume_percent = volume_percent;
                 self.audio.muted = muted;
-                self.volume_osd_until = Some(Instant::now() + Duration::from_millis(1500));
+                if let Some(name) = output_name {
+                    for device in &mut self.audio.devices {
+                        device.is_default = device.name == name;
+                    }
+                    if !self.audio.devices.iter().any(|device| device.name == name) {
+                        self.audio.devices.push(platform::AudioDeviceStatus {
+                            id: name.clone(),
+                            name,
+                            is_default: true,
+                        });
+                    }
+                }
+                self.volume_osd_until =
+                    available.then(|| Instant::now() + Duration::from_millis(1500));
                 true
             }
             platform::GlobalShortcut::Screenshot(platform::ScreenshotAction::ActiveWindow) => {
@@ -3717,11 +3733,24 @@ impl LiveShell {
         let width = width as f32;
         let height = height as f32;
         let percent = self.audio.volume_percent.min(100);
-        let label = if self.audio.muted {
+        let mut label = if self.audio.muted {
             "Muted".to_owned()
         } else {
             format!("Volume {percent}%")
         };
+        let output = if self.locked {
+            Some("Audio output")
+        } else {
+            self.audio
+                .devices
+                .iter()
+                .find(|device| device.is_default)
+                .map(|device| device.name.as_str())
+        };
+        if let Some(output) = output {
+            label.push_str(" · ");
+            label.push_str(output);
+        }
         let track = Rect::new(24.0, height - 28.0, (width - 48.0).max(0.0), 8.0);
         let fill = Rect::new(
             track.origin.x,
@@ -6309,8 +6338,10 @@ mod tests {
         assert!(!shell.surface_visible(SurfaceRole::VolumeOsd));
 
         shell.global_shortcut(GlobalShortcut::AudioChanged {
+            available: true,
             volume_percent: 47,
             muted: false,
+            output_name: None,
         });
         let first_deadline = shell.volume_osd_until.unwrap();
         assert!(shell.surface_visible(SurfaceRole::VolumeOsd));
@@ -6319,8 +6350,10 @@ mod tests {
         ));
 
         shell.global_shortcut(GlobalShortcut::AudioChanged {
+            available: true,
             volume_percent: 47,
             muted: true,
+            output_name: None,
         });
         assert!(shell.volume_osd_until.unwrap() >= first_deadline);
         assert!(
@@ -6332,6 +6365,29 @@ mod tests {
         let outcome = shell.poll_deadlines(Instant::now() + Duration::from_secs(2));
         assert!(outcome.visibility_changed);
         assert!(!shell.surface_visible(SurfaceRole::VolumeOsd));
+
+        shell.global_shortcut(GlobalShortcut::AudioChanged {
+            available: false,
+            volume_percent: 0,
+            muted: false,
+            output_name: None,
+        });
+        assert!(!shell.surface_visible(SurfaceRole::VolumeOsd));
+
+        shell.global_shortcut(GlobalShortcut::LockState { locked: true });
+        shell.global_shortcut(GlobalShortcut::AudioChanged {
+            available: true,
+            volume_percent: 47,
+            muted: false,
+            output_name: Some("Private Bluetooth Headset".into()),
+        });
+        let commands = shell.volume_osd_scene(320, 88);
+        assert!(commands.iter().any(
+            |command| matches!(command, PaintCommand::Text { text, .. } if text == "Volume 47% · Audio output")
+        ));
+        assert!(!commands.iter().any(
+            |command| matches!(command, PaintCommand::Text { text, .. } if text.contains("Private"))
+        ));
     }
 
     #[test]

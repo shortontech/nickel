@@ -1561,8 +1561,14 @@ pub fn launcher_hotkey_receiver() -> super::GlobalShortcutFeed {
             while let Ok(status) = updates.recv() {
                 if audio_sender
                     .send(GlobalShortcut::AudioChanged {
+                        available: status.available,
                         volume_percent: status.volume_percent,
                         muted: status.muted,
+                        output_name: status
+                            .devices
+                            .iter()
+                            .find(|device| device.is_default)
+                            .map(|device| device.name.clone()),
                     })
                     .is_err()
                 {

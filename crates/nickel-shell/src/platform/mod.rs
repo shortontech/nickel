@@ -276,14 +276,16 @@ pub enum ScreenshotAction {
     ActiveWindowToFile,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub enum GlobalShortcut {
     ReloadShellSettings,
     ToggleLauncher,
     ShowLauncher,
     HideLauncher,
-    LockState { locked: bool },
+    LockState {
+        locked: bool,
+    },
     ShowRun,
     SwitchNext,
     SwitchPrevious,
@@ -291,7 +293,12 @@ pub enum GlobalShortcut {
     SwitchGroupPrevious,
     CommitSwitch,
     Screenshot(ScreenshotAction),
-    AudioChanged { volume_percent: u8, muted: bool },
+    AudioChanged {
+        available: bool,
+        volume_percent: u8,
+        muted: bool,
+        output_name: Option<String>,
+    },
     ConsumerControl(nickel_session_protocol::ConsumerControl),
 }
 

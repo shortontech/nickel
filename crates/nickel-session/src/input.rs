@@ -107,7 +107,6 @@ impl NickelSession {
             .event_loop_handle
             .insert_source(timer, move |_, _, session| {
                 if session.consumer_repeat_epoch != epoch
-                    || session.locked
                     || !session.held_consumer_controls.contains(&control)
                 {
                     return TimeoutAction::Drop;
