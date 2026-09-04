@@ -174,12 +174,30 @@ pub(crate) fn read_file_clipboard() -> Result<(bool, Vec<PathBuf>), String> {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+#[cfg(target_os = "macos")]
+pub(crate) fn publish_file_clipboard(paths: &[PathBuf], _cut: bool) -> Result<(), String> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|error| error.to_string())?;
+    clipboard
+        .set()
+        .file_list(paths)
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn read_file_clipboard() -> Result<(bool, Vec<PathBuf>), String> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|error| error.to_string())?;
+    clipboard
+        .get()
+        .file_list()
+        .map(|paths| (false, paths))
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 pub(crate) fn publish_file_clipboard(_paths: &[PathBuf], _cut: bool) -> Result<(), String> {
     Err("native file clipboard adapter unavailable".into())
 }
-
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 pub(crate) fn read_file_clipboard() -> Result<(bool, Vec<PathBuf>), String> {
     Err("native file clipboard adapter unavailable".into())
 }

@@ -37,6 +37,7 @@ incremental = false
 
 [patch.crates-io]
 ui-declarative-macros = { path = "crates/ui-declarative-macros" }
+winit = { path = "vendor/winit" }
 
 [workspace.package]
 edition = "2024"
