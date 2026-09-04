@@ -801,11 +801,42 @@ fn sync_visibility(shell: &mut WinitShell, state: &LiveShell) {
         if role == SurfaceRole::Launcher {
             continue;
         }
-        if state.surface_visible(role) {
-            shell.show(id);
+        let visible = state.surface_visible(role);
+        let changed = if visible {
+            shell.show(id)
         } else {
-            shell.hide(id);
+            shell.hide(id)
+        };
+        #[cfg(target_os = "linux")]
+        if changed
+            && let Some(role) = session_visibility_role(role)
+            && let Err(error) =
+                platform::send_shell_command(platform::ShellCommand::SetShellRoleVisible {
+                    role,
+                    visible,
+                })
+        {
+            tracing::warn!(?role, visible, %error, "failed to reconcile compositor shell visibility");
         }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn session_visibility_role(role: SurfaceRole) -> Option<nickel_session_protocol::ShellRole> {
+    use nickel_session_protocol::ShellRole;
+    match role {
+        SurfaceRole::ControlCenter => Some(ShellRole::ControlCenter),
+        SurfaceRole::Notification => Some(ShellRole::Notification),
+        SurfaceRole::VolumeOsd => Some(ShellRole::VolumeOsd),
+        SurfaceRole::WindowPreview => Some(ShellRole::Preview),
+        SurfaceRole::WindowContextMenu => Some(ShellRole::ContextMenu),
+        SurfaceRole::CodexProjectMenu => Some(ShellRole::ProjectMenu),
+        SurfaceRole::Screenshot => Some(ShellRole::Screenshot),
+        SurfaceRole::Desktop
+        | SurfaceRole::Panel
+        | SurfaceRole::Launcher
+        | SurfaceRole::Lock
+        | SurfaceRole::CodexChat => None,
     }
 }
 

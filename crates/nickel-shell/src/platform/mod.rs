@@ -344,6 +344,11 @@ pub enum ShellCommand {
     FocusScreenshot,
     #[cfg(target_os = "linux")]
     RestoreApplicationFocus,
+    #[cfg(target_os = "linux")]
+    SetShellRoleVisible {
+        role: nickel_session_protocol::ShellRole,
+        visible: bool,
+    },
     HideContextMenu,
     HighlightWindow(WindowId),
     ClearWindowHighlight,

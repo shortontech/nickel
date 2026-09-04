@@ -1107,6 +1107,7 @@ fn session_request_operation(request: &SessionRequest) -> &'static str {
             SessionCommand::ReloadShellSettings => "reload-shell-settings",
             SessionCommand::ToggleLauncher => "toggle-launcher",
             SessionCommand::SetLauncherVisible { .. } => "set-launcher-visible",
+            SessionCommand::SetShellRoleVisible { .. } => "set-shell-role-visible",
             SessionCommand::LogOut => "log-out",
             SessionCommand::SessionAction { .. } => "session-action",
             SessionCommand::Unlock => "unlock",
@@ -1289,6 +1290,9 @@ fn shell_command_payload(command: ShellCommand) -> SessionCommand {
             role: SessionShellRole::Screenshot,
         },
         ShellCommand::RestoreApplicationFocus => SessionCommand::RestoreApplicationFocus,
+        ShellCommand::SetShellRoleVisible { role, visible } => {
+            SessionCommand::SetShellRoleVisible { role, visible }
+        }
         ShellCommand::HideContextMenu => SessionCommand::HideOverlay,
         ShellCommand::HighlightWindow(window) => SessionCommand::HighlightWindow {
             window: Some(SessionWindowId(window.0)),

@@ -429,6 +429,8 @@ pub struct NickelSession {
     shell_focus_restore_window: Option<WindowId>,
     pub(crate) pending_shell_focus_role: Option<ShellRole>,
     pub utility_windows: Vec<Window>,
+    hidden_shell_roles: HashSet<ShellRole>,
+    hidden_shell_role_locations: HashMap<ShellRole, Point<i32, Logical>>,
     screenshot_output_name: Option<String>,
     pub context_menu_window: Option<Window>,
     pub preview_window: Option<Window>,
@@ -1385,6 +1387,8 @@ impl NickelSession {
             shell_focus_restore_window: None,
             pending_shell_focus_role: None,
             utility_windows: Vec::new(),
+            hidden_shell_roles: HashSet::new(),
+            hidden_shell_role_locations: HashMap::new(),
             screenshot_output_name: None,
             context_menu_window: None,
             preview_window: None,
@@ -1836,6 +1840,9 @@ impl NickelSession {
             }
             SessionCommand::ToggleLauncher => self.toggle_launcher(),
             SessionCommand::SetLauncherVisible { visible } => self.set_launcher_visible(visible),
+            SessionCommand::SetShellRoleVisible { role, visible } => {
+                self.set_shell_role_visible(role, visible);
+            }
             SessionCommand::LogOut => self.loop_signal.stop(),
             SessionCommand::SessionAction { action } => match action {
                 nickel_session_protocol::SessionAction::RestartShell => {
@@ -3786,6 +3793,12 @@ impl NickelSession {
         if role == ShellRole::Screenshot {
             self.place_screenshot_surface(&window);
         }
+        if self.hidden_shell_roles.contains(&role)
+            && let Some(location) = self.space.element_location(&window)
+        {
+            self.hidden_shell_role_locations.insert(role, location);
+            self.space.unmap_elem(&window);
+        }
     }
 
     fn place_screenshot_surface(&mut self, window: &Window) {
@@ -3993,7 +4006,14 @@ impl NickelSession {
             self.retire_replaced_shell_window(previous);
         }
         window.override_z_index(50);
-        self.context_menu_window = Some(window);
+        self.context_menu_window = Some(window.clone());
+        if self.hidden_shell_roles.contains(&ShellRole::ContextMenu)
+            && let Some(location) = self.space.element_location(&window)
+        {
+            self.hidden_shell_role_locations
+                .insert(ShellRole::ContextMenu, location);
+            self.space.unmap_elem(&window);
+        }
     }
 
     pub fn register_preview(&mut self, window: Window) {
@@ -4010,7 +4030,14 @@ impl NickelSession {
         {
             self.clear_overlay_preview_interest();
         }
-        self.preview_window = Some(window);
+        self.preview_window = Some(window.clone());
+        if self.hidden_shell_roles.contains(&ShellRole::Preview)
+            && let Some(location) = self.space.element_location(&window)
+        {
+            self.hidden_shell_role_locations
+                .insert(ShellRole::Preview, location);
+            self.space.unmap_elem(&window);
+        }
     }
 
     pub fn show_context_menu(
@@ -4123,6 +4150,48 @@ impl NickelSession {
         self.preview_highlight = None;
         self.clear_overlay_preview_interest();
         eprintln!("nickel-session: transient overlays hidden");
+    }
+
+    fn set_shell_role_visible(&mut self, role: ShellRole, visible: bool) {
+        if matches!(
+            role,
+            ShellRole::Desktop | ShellRole::Panel | ShellRole::Lock | ShellRole::Launcher
+        ) {
+            return;
+        }
+        let registry = self.windows.snapshot();
+        if visible {
+            self.hidden_shell_roles.remove(&role);
+        } else {
+            self.hidden_shell_roles.insert(role);
+        }
+        let window = self.shell_windows().find_map(|window| {
+            let id = window
+                .wl_surface()
+                .and_then(|surface| self.surface_windows.get(&surface.id()))?;
+            (registry
+                .iter()
+                .find(|entry| entry.id == *id)
+                .and_then(|entry| ShellRole::from_application_id(&entry.app_id))
+                == Some(role))
+            .then(|| window.clone())
+        });
+        let Some(window) = window else {
+            return;
+        };
+        if visible {
+            if self.space.elements().any(|mapped| mapped == &window) {
+                return;
+            }
+            let location = self
+                .hidden_shell_role_locations
+                .remove(&role)
+                .unwrap_or_default();
+            self.map_buffered_window(window, location, false);
+        } else if let Some(location) = self.space.element_location(&window) {
+            self.hidden_shell_role_locations.insert(role, location);
+            self.space.unmap_elem(&window);
+        }
     }
 
     pub fn close_window(&mut self, id: WindowId) {

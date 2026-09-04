@@ -244,6 +244,19 @@ pub enum SurfaceRole {
     CodexChat,
 }
 
+#[cfg(target_os = "linux")]
+fn surface_is_ephemeral(role: SurfaceRole) -> bool {
+    matches!(
+        role,
+        SurfaceRole::Notification
+            | SurfaceRole::VolumeOsd
+            | SurfaceRole::WindowPreview
+            | SurfaceRole::WindowContextMenu
+            | SurfaceRole::CodexProjectMenu
+            | SurfaceRole::Screenshot
+    )
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DisplayGeometry {
     pub x: i32,
@@ -299,6 +312,7 @@ pub struct ShellSurface {
     initial_exposed: bool,
     presenter: Option<SoftbufferPresenter>,
     last_host_change_token: Option<HostChangeToken>,
+    visible: bool,
     window: Window,
 }
 
@@ -329,6 +343,7 @@ pub struct WinitShell {
     surfaces: Vec<ShellSurface>,
     graphics: Option<SharedGraphics>,
     surface_indices: HashMap<WindowId, usize>,
+    native_surface_indices: HashMap<WindowId, usize>,
     events: EventLoop<ShellUserEvent>,
     #[cfg(target_os = "windows")]
     external_events: Arc<Mutex<VecDeque<ShellUserEvent>>>,
@@ -368,6 +383,7 @@ impl WinitShell {
             surfaces: Vec::new(),
             graphics: None,
             surface_indices: HashMap::new(),
+            native_surface_indices: HashMap::new(),
             events,
             #[cfg(target_os = "windows")]
             external_events,
@@ -404,6 +420,7 @@ impl WinitShell {
     pub fn create_shell_surfaces(&mut self) -> Result<(), String> {
         self.surfaces.clear();
         self.surface_indices.clear();
+        self.native_surface_indices.clear();
         self.output_retirements = OutputRetirementTracker::default();
         let displays = require_displays(self.display_geometries()?)?;
         let output_names = self.display_names()?;
@@ -606,6 +623,7 @@ impl WinitShell {
 
     fn rebuild_surface_indices(&mut self) {
         self.surface_indices.clear();
+        self.native_surface_indices.clear();
         for (index, surface) in self
             .surfaces
             .iter()
@@ -613,6 +631,8 @@ impl WinitShell {
             .filter(|(_, surface)| surface.display_connected)
         {
             self.surface_indices.insert(surface.id.0, index);
+            self.native_surface_indices
+                .insert(surface.window.id(), index);
         }
     }
 
@@ -674,6 +694,7 @@ impl WinitShell {
         let id = SurfaceId(window.id());
         let index = self.surfaces.len();
         self.surface_indices.insert(id.0, index);
+        self.native_surface_indices.insert(window.id(), index);
         self.surfaces.push(ShellSurface {
             id,
             role: SurfaceRole::CodexChat,
@@ -684,6 +705,7 @@ impl WinitShell {
             initial_exposed: false,
             presenter: None,
             last_host_change_token: None,
+            visible: true,
             window,
         });
         Ok(id)
@@ -848,6 +870,10 @@ impl WinitShell {
 
     pub fn show(&mut self, id: SurfaceId) -> bool {
         let shown = self.surface_mut(id).is_some_and(|surface| {
+            if surface.visible {
+                return false;
+            }
+            surface.visible = true;
             surface.last_host_change_token = None;
             surface.window.set_visible(true);
             surface.window.request_redraw();
@@ -860,7 +886,15 @@ impl WinitShell {
     }
 
     pub fn hide(&mut self, id: SurfaceId) -> bool {
-        let hidden = self.surface_mut(id).is_some_and(|surface| {
+        let Some(index) = self.surface_indices.get(&id.0).copied() else {
+            return false;
+        };
+        let hidden = {
+            let surface = &mut self.surfaces[index];
+            if !surface.visible {
+                return false;
+            }
+            surface.visible = false;
             // Repeated reconciliation must
             // still release a lightweight presentation surface populated while
             // the native window was already hidden (for example by prewarm).
@@ -869,11 +903,73 @@ impl WinitShell {
             surface.presenter = None;
             surface.window.set_visible(false);
             true
-        });
+        };
+        #[cfg(target_os = "linux")]
+        if hidden
+            && surface_is_ephemeral(self.surfaces[index].role)
+            && let Err(error) = self.recreate_hidden_wayland_surface(index)
+        {
+            tracing::warn!(
+                role = ?self.surfaces[index].role,
+                %error,
+                "failed to recreate hidden ephemeral Wayland surface"
+            );
+        }
         if hidden {
             self.pending_events.push_back(ShellEvent::Hidden(id));
         }
         hidden
+    }
+
+    #[cfg(target_os = "linux")]
+    fn recreate_hidden_wayland_surface(&mut self, index: usize) -> Result<(), String> {
+        let surface = &self.surfaces[index];
+        let geometry = self
+            .displays
+            .get(surface.display_index)
+            .map(|(geometry, _)| *geometry)
+            .or_else(|| self.displays.first().map(|(geometry, _)| *geometry))
+            .ok_or_else(|| "cannot recreate a shell surface without an output".to_owned())?;
+        let (base_title, x, y, width, height, _) =
+            surface_geometry(surface.role, geometry, self.options.panel_edge);
+        let title = shell_surface_title(surface.role, base_title, &surface.output_name);
+        let attributes = Window::default_attributes()
+            .with_title(title)
+            .with_position(LogicalPosition::new(x, y))
+            .with_inner_size(LogicalSize::new(width, height))
+            .with_decorations(!surface_is_borderless(surface.role))
+            .with_resizable(matches!(
+                surface.role,
+                SurfaceRole::WindowPreview
+                    | SurfaceRole::WindowContextMenu
+                    | SurfaceRole::Screenshot
+            ))
+            .with_visible(true)
+            .with_name(&surface.application_id, &surface.application_id);
+        #[allow(deprecated)]
+        let replacement = self
+            .events
+            .create_window(attributes)
+            .map_err(|error| error.to_string())?;
+        if matches!(
+            surface.role,
+            SurfaceRole::CodexProjectMenu | SurfaceRole::Screenshot
+        ) {
+            replacement.set_ime_allowed(true);
+        }
+        if surface.role == SurfaceRole::Screenshot {
+            replacement.set_min_inner_size(Some(LogicalSize::new(720, 480)));
+        }
+        let retired_native_id = surface.window.id();
+        self.native_surface_indices.remove(&retired_native_id);
+        self.input_adapters.remove(&retired_native_id);
+        let surface = &mut self.surfaces[index];
+        surface.window = replacement;
+        surface.initial_exposed = false;
+        surface.last_host_change_token = None;
+        self.native_surface_indices
+            .insert(surface.window.id(), index);
+        Ok(())
     }
 
     pub fn raise(&mut self, id: SurfaceId) -> bool {
@@ -995,7 +1091,7 @@ impl WinitShell {
     }
 
     fn pump_events(&mut self, timeout: Option<Duration>) {
-        let indices = &self.surface_indices;
+        let indices = &self.native_surface_indices;
         let surfaces = &self.surfaces;
         let adapters = &mut self.input_adapters;
         let devices = &mut self.devices;
@@ -1036,7 +1132,7 @@ impl WinitShell {
                     let Some(&index) = indices.get(&window_id) else {
                         return;
                     };
-                    let surface = SurfaceId(window_id);
+                    let surface = surfaces[index].id;
                     let scale = surfaces[index].window.scale_factor();
                     let native_device = window_event_device(&event);
                     // Winit omits a device on lifecycle and IME events. Its documented dummy
@@ -1185,6 +1281,7 @@ impl WinitShell {
         let id = SurfaceId(window.id());
         let index = self.surfaces.len();
         self.surface_indices.insert(id.0, index);
+        self.native_surface_indices.insert(window.id(), index);
         self.surfaces.push(ShellSurface {
             id,
             role,
@@ -1195,6 +1292,11 @@ impl WinitShell {
             initial_exposed: false,
             presenter: None,
             last_host_change_token: None,
+            // Start reconciled as visible even when the native window was
+            // requested hidden so the first policy pass performs the real
+            // platform hide transition. This matters on Wayland, where the
+            // winit visibility hint itself is intentionally a no-op.
+            visible: true,
             window,
         });
         Ok(())
@@ -1431,6 +1533,8 @@ pub(crate) fn parse_proc_status_rss(status: &str) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    use super::surface_is_ephemeral;
     use super::{
         DESKTOP_TITLE, DisplayGeometry, LAUNCHER_TITLE, OUTPUT_RETIREMENT_SETTLE,
         OutputRetirementTracker, PANEL_TITLE, PanelEdge, SurfaceRole, durable_presenter_peak,
@@ -1440,6 +1544,31 @@ mod tests {
 
     use nickel_ui::AggregatePresenterCacheDiagnostics;
     use std::time::{Duration, Instant};
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn wayland_surface_lifecycle_keeps_only_high_frequency_chrome_warm() {
+        for role in [
+            SurfaceRole::Notification,
+            SurfaceRole::VolumeOsd,
+            SurfaceRole::WindowPreview,
+            SurfaceRole::WindowContextMenu,
+            SurfaceRole::CodexProjectMenu,
+            SurfaceRole::Screenshot,
+        ] {
+            assert!(surface_is_ephemeral(role), "{role:?}");
+        }
+        for role in [
+            SurfaceRole::Desktop,
+            SurfaceRole::Panel,
+            SurfaceRole::Lock,
+            SurfaceRole::Launcher,
+            SurfaceRole::ControlCenter,
+            SurfaceRole::CodexChat,
+        ] {
+            assert!(!surface_is_ephemeral(role), "{role:?}");
+        }
+    }
 
     #[test]
     fn process_presenter_peak_survives_destroyed_presenters() {

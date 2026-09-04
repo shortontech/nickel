@@ -74,6 +74,10 @@ pub enum Command {
     SetLauncherVisible {
         visible: bool,
     },
+    SetShellRoleVisible {
+        role: ShellRole,
+        visible: bool,
+    },
     LogOut,
     SessionAction {
         action: SessionAction,
@@ -144,7 +148,7 @@ pub enum TestOutput {
     },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionAction {
     RestartShell,
@@ -805,7 +809,7 @@ pub struct OutputPlacement {
     pub enabled: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ShellRole {
     Desktop,
@@ -1298,6 +1302,7 @@ mod tests {
             ShellRole::ContextMenu,
             ShellRole::Preview,
             ShellRole::Notification,
+            ShellRole::VolumeOsd,
             ShellRole::ProjectMenu,
             ShellRole::Lock,
             ShellRole::Screenshot,
@@ -1323,6 +1328,24 @@ mod tests {
                 token: "session-token".into(),
                 request_id: 13,
                 request: Request::Command(command),
+            };
+            assert_eq!(
+                decode::<ClientEnvelope>(&encode(&envelope).unwrap()).unwrap(),
+                envelope
+            );
+        }
+    }
+
+    #[test]
+    fn shell_visibility_round_trips_with_a_typed_role() {
+        for visible in [false, true] {
+            let envelope = ClientEnvelope {
+                token: "session-token".into(),
+                request_id: 19,
+                request: Request::Command(Command::SetShellRoleVisible {
+                    role: ShellRole::VolumeOsd,
+                    visible,
+                }),
             };
             assert_eq!(
                 decode::<ClientEnvelope>(&encode(&envelope).unwrap()).unwrap(),
