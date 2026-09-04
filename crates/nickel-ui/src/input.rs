@@ -1,8 +1,8 @@
 //! Shared focused-input policy for Nickel UI component trees.
 
 use nickel_input::{
-    AggregateModifier, InputEvent, KeyCode, KeyEdge, LogicalKey, NamedKey, PhysicalKey,
-    PointerButton, PointerEvent, TextEvent, TouchEvent, TouchId,
+    AggregateModifier, DeviceId, EventOrder, InputEvent, KeyCode, KeyEdge, LogicalKey, NamedKey,
+    PhysicalKey, PointerButton, PointerEvent, TextEvent, TouchEvent, TouchId,
 };
 
 use crate::{Point, Shortcut, UiEvent};
@@ -32,6 +32,13 @@ pub enum InputCommand {
 pub struct FocusedInputDispatcher {
     pointer: Point,
     active_touch: Option<TouchId>,
+    consumed_text: Option<ConsumedTextTransaction>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ConsumedTextTransaction {
+    device: DeviceId,
+    order: EventOrder,
 }
 
 impl FocusedInputDispatcher {
@@ -44,6 +51,19 @@ impl FocusedInputDispatcher {
         event: &InputEvent,
         context: InputContext,
     ) -> Vec<InputCommand> {
+        if let InputEvent::Text(
+            TextEvent::Commit { device, order, .. } | TextEvent::Preedit { device, order, .. },
+        ) = event
+            && self.consumed_text
+                == Some(ConsumedTextTransaction {
+                    device: *device,
+                    order: *order,
+                })
+        {
+            self.consumed_text = None;
+            return Vec::new();
+        }
+
         match event {
             InputEvent::Text(TextEvent::Commit { text, .. }) => {
                 vec![InputCommand::Ui(UiEvent::TextInput(text.clone()))]
@@ -151,18 +171,36 @@ impl FocusedInputDispatcher {
                 }
                 commands
             }
-            InputEvent::FocusGained { .. } => vec![InputCommand::Ui(UiEvent::FocusGained)],
-            InputEvent::FocusLost { .. } => vec![InputCommand::Ui(UiEvent::FocusLost)],
-            InputEvent::DeviceRemoved { .. } => vec![InputCommand::Ui(UiEvent::DeviceRemoved)],
+            InputEvent::FocusGained { .. } => {
+                self.consumed_text = None;
+                vec![InputCommand::Ui(UiEvent::FocusGained)]
+            }
+            InputEvent::FocusLost { .. } => {
+                self.consumed_text = None;
+                vec![InputCommand::Ui(UiEvent::FocusLost)]
+            }
+            InputEvent::DeviceRemoved { device, .. } => {
+                if self
+                    .consumed_text
+                    .is_some_and(|transaction| transaction.device == *device)
+                {
+                    self.consumed_text = None;
+                }
+                vec![InputCommand::Ui(UiEvent::DeviceRemoved)]
+            }
             InputEvent::Key(event) if event.edge == KeyEdge::Pressed => {
                 let shift = event.modifiers.aggregate(AggregateModifier::Shift);
                 let control = event.modifiers.aggregate(AggregateModifier::Control);
                 let text_editing = context.text_focused && !context.navigation_active;
-                let command = if cfg!(target_os = "macos") {
+                let command_modifier = if cfg!(target_os = "macos") {
                     event.modifiers.aggregate(AggregateModifier::Super)
                 } else {
                     control
                 };
+                // AltGr is commonly reported as Control+Alt. It produces text and must not be
+                // mistaken for an editing shortcut merely because Control is present.
+                let command =
+                    command_modifier && !event.modifiers.aggregate(AggregateModifier::Alt);
                 let command = match (&event.logical, &event.physical) {
                     (_, PhysicalKey::Code(KeyCode::F10)) if shift && !event.repeat => {
                         InputCommand::Ui(UiEvent::KeyboardContextMenu)
@@ -314,25 +352,31 @@ impl FocusedInputDispatcher {
                     (LogicalKey::Character(value), _)
                         if command && value.eq_ignore_ascii_case("c") =>
                     {
+                        self.consume_text_from(event);
                         return vec![InputCommand::Copy];
                     }
                     (_, PhysicalKey::Code(KeyCode::KeyC)) if command => {
+                        self.consume_text_from(event);
                         return vec![InputCommand::Copy];
                     }
                     (LogicalKey::Character(value), _)
                         if command && value.eq_ignore_ascii_case("x") =>
                     {
+                        self.consume_text_from(event);
                         return vec![InputCommand::Cut];
                     }
                     (_, PhysicalKey::Code(KeyCode::KeyX)) if command => {
+                        self.consume_text_from(event);
                         return vec![InputCommand::Cut];
                     }
                     (LogicalKey::Character(value), _)
                         if command && value.eq_ignore_ascii_case("v") =>
                     {
+                        self.consume_text_from(event);
                         return vec![InputCommand::Paste];
                     }
                     (_, PhysicalKey::Code(KeyCode::KeyV)) if command => {
+                        self.consume_text_from(event);
                         return vec![InputCommand::Paste];
                     }
                     _ => return Vec::new(),
@@ -350,6 +394,9 @@ impl FocusedInputDispatcher {
                 {
                     Vec::new()
                 } else {
+                    if consumes_correlated_text(&command) {
+                        self.consume_text_from(event);
+                    }
                     vec![match command {
                         InputCommand::Ui(_) | InputCommand::Application { .. } => command,
                         InputCommand::Copy | InputCommand::Cut | InputCommand::Paste => {
@@ -361,6 +408,33 @@ impl FocusedInputDispatcher {
             InputEvent::Key(_) | InputEvent::Pointer(_) | InputEvent::Touch(_) => Vec::new(),
         }
     }
+
+    fn consume_text_from(&mut self, event: &nickel_input::KeyEvent) {
+        self.consumed_text = Some(ConsumedTextTransaction {
+            device: event.device,
+            order: event.order,
+        });
+    }
+}
+
+fn consumes_correlated_text(command: &InputCommand) -> bool {
+    matches!(
+        command,
+        InputCommand::Ui(
+            UiEvent::TextSelectAll
+                | UiEvent::TextBackspace
+                | UiEvent::TextBackspaceWord
+                | UiEvent::TextDelete
+                | UiEvent::TextMoveLeft { .. }
+                | UiEvent::TextMoveRight { .. }
+                | UiEvent::TextMoveWordLeft { .. }
+                | UiEvent::TextMoveWordRight { .. }
+                | UiEvent::TextMoveHome { .. }
+                | UiEvent::TextMoveEnd { .. }
+                | UiEvent::TextMoveDocumentHome { .. }
+                | UiEvent::TextMoveDocumentEnd { .. }
+        )
+    )
 }
 
 #[cfg(test)]
@@ -371,16 +445,33 @@ mod tests {
 
     use super::*;
 
-    fn key(logical: LogicalKey, physical: KeyCode, sides: &[Modifier]) -> InputEvent {
+    fn key_at(
+        order: u64,
+        logical: LogicalKey,
+        physical: KeyCode,
+        sides: &[Modifier],
+    ) -> InputEvent {
         InputEvent::Key(KeyEvent {
             device: DeviceId(1),
-            order: EventOrder(1),
+            order: EventOrder(order),
             physical: PhysicalKey::Code(physical),
             logical,
             location: KeyLocation::Standard,
             edge: KeyEdge::Pressed,
             repeat: false,
             modifiers: ModifierState::from_sides(sides.iter().copied()),
+        })
+    }
+
+    fn key(logical: LogicalKey, physical: KeyCode, sides: &[Modifier]) -> InputEvent {
+        key_at(1, logical, physical, sides)
+    }
+
+    fn commit(device: u64, order: u64, text: &str) -> InputEvent {
+        InputEvent::Text(TextEvent::Commit {
+            device: DeviceId(device),
+            order: EventOrder(order),
+            text: text.into(),
         })
     }
 
@@ -505,5 +596,116 @@ mod tests {
             dispatch.dispatch(&cancelled),
             [InputCommand::Ui(UiEvent::PointerCancelled)]
         );
+    }
+
+    #[test]
+    fn select_all_suppresses_only_its_correlated_text_commit() {
+        let mut dispatch = FocusedInputDispatcher::default();
+        let control_a = key_at(
+            7,
+            LogicalKey::Character("a".into()),
+            KeyCode::KeyA,
+            &[Modifier::ControlLeft],
+        );
+
+        assert_eq!(
+            dispatch.dispatch_with_context(
+                &control_a,
+                InputContext {
+                    text_focused: true,
+                    ..InputContext::default()
+                }
+            ),
+            [InputCommand::Ui(UiEvent::TextSelectAll)]
+        );
+        assert!(dispatch.dispatch(&commit(1, 7, "a")).is_empty());
+        assert_eq!(
+            dispatch.dispatch(&commit(1, 8, "a")),
+            [InputCommand::Ui(UiEvent::TextInput("a".into()))]
+        );
+    }
+
+    #[test]
+    fn consumed_text_is_correlated_by_device_order_and_cleared_on_focus_loss() {
+        let mut dispatch = FocusedInputDispatcher::default();
+        dispatch.dispatch(&key_at(
+            3,
+            LogicalKey::Character("x".into()),
+            KeyCode::KeyX,
+            &[Modifier::ControlLeft],
+        ));
+        assert_eq!(
+            dispatch.dispatch(&commit(2, 3, "x")),
+            [InputCommand::Ui(UiEvent::TextInput("x".into()))]
+        );
+        assert!(dispatch.dispatch(&commit(1, 3, "x")).is_empty());
+
+        dispatch.dispatch(&key_at(
+            4,
+            LogicalKey::Character("a".into()),
+            KeyCode::KeyA,
+            &[Modifier::ControlLeft],
+        ));
+        dispatch.dispatch(&InputEvent::FocusLost {
+            order: EventOrder(5),
+        });
+        assert_eq!(
+            dispatch.dispatch(&commit(1, 4, "a")),
+            [InputCommand::Ui(UiEvent::TextInput("a".into()))]
+        );
+    }
+
+    #[test]
+    fn altgr_text_and_ime_transactions_are_not_suppressed() {
+        let mut dispatch = FocusedInputDispatcher::default();
+        assert!(
+            dispatch
+                .dispatch(&key_at(
+                    9,
+                    LogicalKey::Character("@".into()),
+                    KeyCode::KeyQ,
+                    &[Modifier::ControlLeft, Modifier::AltRight],
+                ))
+                .is_empty()
+        );
+        assert_eq!(
+            dispatch.dispatch(&commit(1, 9, "@")),
+            [InputCommand::Ui(UiEvent::TextInput("@".into()))]
+        );
+        let preedit = InputEvent::Text(TextEvent::Preedit {
+            device: DeviceId(1),
+            order: EventOrder(10),
+            text: "世".into(),
+            selection: Some((0, 3)),
+        });
+        assert_eq!(
+            dispatch.dispatch(&preedit),
+            [InputCommand::Ui(UiEvent::ImePreedit("世".into()))]
+        );
+        assert_eq!(
+            dispatch.dispatch(&commit(1, 11, "世界")),
+            [InputCommand::Ui(UiEvent::TextInput("世界".into()))]
+        );
+    }
+
+    #[test]
+    fn every_clipboard_shortcut_consumes_its_key_generated_text() {
+        let mut dispatch = FocusedInputDispatcher::default();
+        for (order, code, character, expected) in [
+            (20, KeyCode::KeyC, "c", InputCommand::Copy),
+            (21, KeyCode::KeyX, "x", InputCommand::Cut),
+            (22, KeyCode::KeyV, "v", InputCommand::Paste),
+        ] {
+            assert_eq!(
+                dispatch.dispatch(&key_at(
+                    order,
+                    LogicalKey::Character(character.into()),
+                    code,
+                    &[Modifier::ControlLeft],
+                )),
+                [expected]
+            );
+            assert!(dispatch.dispatch(&commit(1, order, character)).is_empty());
+        }
     }
 }

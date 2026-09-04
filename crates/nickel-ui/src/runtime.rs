@@ -2231,6 +2231,14 @@ mod tests {
         submits: usize,
     }
 
+    struct MultilineInputApplication {
+        text: String,
+    }
+
+    struct SecureInputApplication {
+        text: String,
+    }
+
     #[derive(Default)]
     struct ControllerApplication;
 
@@ -2351,6 +2359,32 @@ mod tests {
             }
             self.submits += 1;
             true
+        }
+    }
+
+    impl Application for MultilineInputApplication {
+        type Message = Message;
+
+        fn update(&mut self, message: Self::Message) {
+            let Message::Changed(text) = message;
+            self.text = text;
+        }
+
+        fn view(&self, _context: ViewContext) -> impl crate::View<Self::Message> {
+            TextField::on_change(&self.text, Message::Changed).wrap(true)
+        }
+    }
+
+    impl Application for SecureInputApplication {
+        type Message = Message;
+
+        fn update(&mut self, message: Self::Message) {
+            let Message::Changed(text) = message;
+            self.text = text;
+        }
+
+        fn view(&self, _context: ViewContext) -> impl crate::View<Self::Message> {
+            TextField::on_change_masked(&self.text, '•', Message::Changed)
         }
     }
 
@@ -3072,6 +3106,56 @@ mod tests {
                 .changed
         );
         assert_eq!(host.application_mut().text, "pasted");
+    }
+
+    #[test]
+    fn consumed_select_all_text_does_not_reach_single_multiline_or_secure_fields() {
+        fn exercise<A: Application<Message = Message>>(
+            host: &mut UiHost<A>,
+            text: impl for<'a> FnOnce(&'a mut A) -> &'a str,
+        ) {
+            host.handle_input(&focus_event(), None);
+            assert!(host.input_context().text_focused);
+            host.handle_input(&command_key(2, KeyCode::KeyA, "a"), None);
+            let leaked = host.handle_input(
+                &InputEvent::Text(TextEvent::Commit {
+                    device: DeviceId(1),
+                    order: EventOrder(2),
+                    text: "a".into(),
+                }),
+                None,
+            );
+            assert!(!leaked.changed);
+            assert_eq!(text(host.application_mut()), "unchanged");
+        }
+
+        let mut single = UiHost::new(
+            InputApplication {
+                text: "unchanged".into(),
+                submits: 0,
+            },
+            320,
+            48,
+        );
+        exercise(&mut single, |application| &application.text);
+
+        let mut multiline = UiHost::new(
+            MultilineInputApplication {
+                text: "unchanged".into(),
+            },
+            320,
+            96,
+        );
+        exercise(&mut multiline, |application| &application.text);
+
+        let mut secure = UiHost::new(
+            SecureInputApplication {
+                text: "unchanged".into(),
+            },
+            320,
+            48,
+        );
+        exercise(&mut secure, |application| &application.text);
     }
 
     #[derive(Clone, Copy, Debug)]
