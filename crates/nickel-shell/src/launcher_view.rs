@@ -1691,6 +1691,23 @@ mod tests {
             .host_mut()
             .handle_input(&navigation_key(7, KeyCode::Home, NamedKey::Home), None);
         assert!(controller_target(&scenario).contains("application-00"));
+
+        scenario
+            .host_mut()
+            .handle_input(&navigation_key(8, KeyCode::End, NamedKey::End), None);
+        scenario
+            .host_mut()
+            .handle_input(&navigation_key(9, KeyCode::PageUp, NamedKey::PageUp), None);
+        let page_up_target = controller_target(&scenario);
+        assert!(
+            !page_up_target.contains("application-29"),
+            "PageUp did not move away from the final entry"
+        );
+        scenario.host_mut().handle_input(
+            &navigation_key(10, KeyCode::ArrowUp, NamedKey::ArrowUp),
+            None,
+        );
+        assert_ne!(controller_target(&scenario), page_up_target);
     }
 
     #[test]
@@ -1742,6 +1759,86 @@ mod tests {
         let after_pixels = first_y(&scenario);
         assert!(after_pixels < after_lines);
         assert!((after_lines - after_pixels - 2.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn launcher_scroll_is_contained_and_filtering_reconciles_the_viewport() {
+        let mut scenario = populated_search_scenario();
+        let scroll = scenario
+            .host()
+            .semantic_targets_for_message(&LauncherAction::SearchScroll)
+            .into_iter()
+            .next()
+            .expect("application results expose a scroll viewport");
+        let inside = nickel_input::Point {
+            x: f64::from(scroll.bounds.origin.x + scroll.bounds.size.width / 2.0),
+            y: f64::from(scroll.bounds.origin.y + scroll.bounds.size.height / 2.0),
+        };
+        let axis = |order, position| {
+            InputEvent::Pointer(PointerEvent::Axis {
+                device: DeviceId(1),
+                order: EventOrder(order),
+                delta: Vector { x: 0.0, y: -40.0 },
+                discrete: None,
+                position: Some(position),
+            })
+        };
+        scenario.host_mut().handle_input(&axis(1, inside), None);
+        let scrolled_y = scenario
+            .semantic_nodes()
+            .into_iter()
+            .find(|node| node.id.as_str().contains("application-00"))
+            .unwrap()
+            .bounds
+            .origin
+            .y;
+        let outside = nickel_input::Point { x: 2.0, y: 2.0 };
+        let outside_outcome = scenario.host_mut().handle_input(&axis(2, outside), None);
+        assert!(!outside_outcome.changed);
+        let unchanged_y = scenario
+            .semantic_nodes()
+            .into_iter()
+            .find(|node| node.id.as_str().contains("application-00"))
+            .unwrap()
+            .bounds
+            .origin
+            .y;
+        assert_eq!(
+            unchanged_y, scrolled_y,
+            "outside input reached the menu viewport"
+        );
+
+        let mut replacement = Launcher::new(vec![Application::new(
+            "application-00".into(),
+            "Application 00".into(),
+            None,
+            None,
+            None,
+        )]);
+        replacement.open_search();
+        scenario
+            .host_mut()
+            .application_mut()
+            .sync(&replacement, palette(), None);
+        scenario.host_mut().step(HostBatch {
+            events: vec![HostEvent::Poll],
+            ..HostBatch::default()
+        });
+        let only = scenario
+            .semantic_nodes()
+            .into_iter()
+            .find(|node| node.id.as_str().contains("application-00"))
+            .expect("filtered result remains reachable");
+        assert!(
+            only.bounds.origin.y >= scroll.bounds.origin.y,
+            "item={:?} viewport={:?}",
+            only.bounds,
+            scroll.bounds
+        );
+        assert!(
+            only.bounds.origin.y + only.bounds.size.height
+                <= scroll.bounds.origin.y + scroll.bounds.size.height
+        );
     }
 
     #[test]

@@ -51,17 +51,28 @@ impl FocusedInputDispatcher {
         event: &InputEvent,
         context: InputContext,
     ) -> Vec<InputCommand> {
-        if let InputEvent::Text(
-            TextEvent::Commit { device, order, .. } | TextEvent::Preedit { device, order, .. },
-        ) = event
-            && self.consumed_text
-                == Some(ConsumedTextTransaction {
-                    device: *device,
-                    order: *order,
-                })
-        {
-            self.consumed_text = None;
-            return Vec::new();
+        if let InputEvent::Text(text_event) = event {
+            let (device, order, committed) = match text_event {
+                TextEvent::Commit { device, order, .. } => (*device, *order, true),
+                TextEvent::Preedit { device, order, .. } => (*device, *order, false),
+            };
+            if self.consumed_text == Some(ConsumedTextTransaction { device, order }) {
+                // One composition transaction may contain multiple preedit
+                // updates followed by a commit. Keep suppressing until the
+                // commit closes that exact device/order transaction.
+                if committed {
+                    self.consumed_text = None;
+                }
+                return Vec::new();
+            }
+            if self.consumed_text.is_some_and(|transaction| {
+                transaction.device == device && order.0 > transaction.order.0
+            }) {
+                // A backend is allowed to omit a correlated text event. A
+                // later transaction proves the old suppression can no longer
+                // match, so retire it without eating genuine input.
+                self.consumed_text = None;
+            }
         }
 
         match event {
@@ -465,6 +476,8 @@ fn consumes_correlated_text(command: &InputCommand) -> bool {
         command,
         InputCommand::Ui(
             UiEvent::TextSelectAll
+                | UiEvent::TextUndo
+                | UiEvent::TextRedo
                 | UiEvent::TextBackspace
                 | UiEvent::TextBackspaceWord
                 | UiEvent::TextDelete
@@ -476,7 +489,10 @@ fn consumes_correlated_text(command: &InputCommand) -> bool {
                 | UiEvent::TextMoveEnd { .. }
                 | UiEvent::TextMoveDocumentHome { .. }
                 | UiEvent::TextMoveDocumentEnd { .. }
-        )
+        ) | InputCommand::Application {
+            shortcut: Shortcut::Reload,
+            ..
+        }
     )
 }
 
@@ -515,6 +531,15 @@ mod tests {
             device: DeviceId(device),
             order: EventOrder(order),
             text: text.into(),
+        })
+    }
+
+    fn preedit(device: u64, order: u64, text: &str) -> InputEvent {
+        InputEvent::Text(TextEvent::Preedit {
+            device: DeviceId(device),
+            order: EventOrder(order),
+            text: text.into(),
+            selection: None,
         })
     }
 
@@ -841,5 +866,100 @@ mod tests {
             );
             assert!(dispatch.dispatch(&commit(1, order, character)).is_empty());
         }
+    }
+
+    #[test]
+    fn consumed_composition_suppresses_every_preedit_until_its_commit() {
+        let mut dispatch = FocusedInputDispatcher::default();
+        dispatch.dispatch_with_context(
+            &key_at(
+                30,
+                LogicalKey::Character("a".into()),
+                KeyCode::KeyA,
+                &[Modifier::ControlLeft],
+            ),
+            InputContext {
+                text_focused: true,
+                ..InputContext::default()
+            },
+        );
+        assert!(dispatch.dispatch(&preedit(1, 30, "a")).is_empty());
+        assert!(dispatch.dispatch(&preedit(1, 30, "A")).is_empty());
+        assert!(dispatch.dispatch(&commit(1, 30, "A")).is_empty());
+        assert_eq!(
+            dispatch.dispatch(&commit(1, 31, "b")),
+            [InputCommand::Ui(UiEvent::TextInput("b".into()))]
+        );
+    }
+
+    #[test]
+    fn undo_redo_and_reload_suppress_correlated_layout_text() {
+        let mut dispatch = FocusedInputDispatcher::default();
+        let context = InputContext {
+            text_focused: true,
+            ..InputContext::default()
+        };
+        for (order, sides, expected) in [
+            (
+                40,
+                vec![Modifier::ControlLeft],
+                InputCommand::Ui(UiEvent::TextUndo),
+            ),
+            (
+                41,
+                vec![Modifier::ControlLeft, Modifier::ShiftRight],
+                InputCommand::Ui(UiEvent::TextRedo),
+            ),
+        ] {
+            assert_eq!(
+                dispatch.dispatch_with_context(
+                    &key_at(
+                        order,
+                        LogicalKey::Character("z".into()),
+                        KeyCode::KeyZ,
+                        &sides,
+                    ),
+                    context,
+                ),
+                [expected]
+            );
+            assert!(dispatch.dispatch(&commit(1, order, "z")).is_empty());
+        }
+        assert!(matches!(
+            dispatch.dispatch_with_context(
+                &key_at(
+                    42,
+                    LogicalKey::Character("r".into()),
+                    KeyCode::KeyR,
+                    &[Modifier::ControlLeft],
+                ),
+                context,
+            )[..],
+            [InputCommand::Application {
+                shortcut: Shortcut::Reload,
+                ..
+            }]
+        ));
+        assert!(dispatch.dispatch(&commit(1, 42, "r")).is_empty());
+    }
+
+    #[test]
+    fn omitted_backend_commit_cannot_leave_sticky_suppression() {
+        let mut dispatch = FocusedInputDispatcher::default();
+        dispatch.dispatch(&key_at(
+            50,
+            LogicalKey::Character("x".into()),
+            KeyCode::KeyX,
+            &[Modifier::ControlLeft],
+        ));
+        assert_eq!(
+            dispatch.dispatch(&commit(1, 51, "q")),
+            [InputCommand::Ui(UiEvent::TextInput("q".into()))]
+        );
+        assert_eq!(
+            dispatch.dispatch(&commit(1, 50, "x")),
+            [InputCommand::Ui(UiEvent::TextInput("x".into()))],
+            "the retired transaction must not suppress an old delayed event"
+        );
     }
 }
