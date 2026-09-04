@@ -316,6 +316,10 @@ impl WindowFeed {
         Vec::new()
     }
 
+    pub fn primary_output(&self) -> Option<String> {
+        self.outputs().into_iter().next()
+    }
+
     pub fn workspaces(&self) -> FeedState<Vec<super::WorkspaceSummary>> {
         FeedState::Ready(Vec::new())
     }
@@ -358,6 +362,10 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
 
 pub fn register_session_shell() -> Result<(), super::SessionRequestError> {
     Ok(())
+}
+
+pub fn configured_primary_output() -> Option<String> {
+    None
 }
 
 pub fn launcher_hotkey_receiver() -> super::GlobalShortcutFeed {

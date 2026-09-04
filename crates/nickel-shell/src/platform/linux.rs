@@ -1144,6 +1144,16 @@ pub fn register_session_shell() -> Result<(), SessionRequestError> {
     }
 }
 
+pub fn configured_primary_output() -> Option<String> {
+    match one_shot_session_request(SessionRequest::Query(SessionQuery::Outputs)) {
+        Ok(ServerMessage::Outputs(outputs)) => outputs
+            .into_iter()
+            .find(|output| output.primary)
+            .map(|output| output.name),
+        _ => None,
+    }
+}
+
 pub fn shell_readiness()
 -> Result<nickel_session_protocol::ShellReadinessSnapshot, SessionRequestError> {
     match one_shot_session_request(SessionRequest::Query(SessionQuery::ShellReadiness))? {
@@ -1344,6 +1354,7 @@ pub struct WindowFeed {
     path: PathBuf,
     outputs: RefCell<HashMap<WindowId, String>>,
     available_outputs: RefCell<Vec<String>>,
+    primary_output: RefCell<Option<String>>,
 }
 
 pub fn show_window_system_menu(_: WindowId) -> bool {
@@ -1363,6 +1374,7 @@ impl WindowFeed {
             path,
             outputs: RefCell::new(HashMap::new()),
             available_outputs: RefCell::new(Vec::new()),
+            primary_output: RefCell::new(None),
         }
     }
 
@@ -1379,6 +1391,11 @@ impl WindowFeed {
                     .iter()
                     .map(|output| output.name.clone())
                     .collect();
+                *self.primary_output.borrow_mut() = snapshot
+                    .outputs
+                    .iter()
+                    .find(|output| output.primary)
+                    .map(|output| output.name.clone());
                 for window in &snapshot.windows {
                     if let Some(output) = owning_output(window.geometry, &snapshot.outputs) {
                         outputs.insert(WindowId(window.id.0), output);
@@ -1425,6 +1442,10 @@ impl WindowFeed {
 
     pub fn outputs(&self) -> Vec<String> {
         self.available_outputs.borrow().clone()
+    }
+
+    pub fn primary_output(&self) -> Option<String> {
+        self.primary_output.borrow().clone()
     }
 
     pub fn workspaces(&self) -> FeedState<Vec<super::WorkspaceSummary>> {

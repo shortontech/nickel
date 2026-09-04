@@ -2968,6 +2968,10 @@ pub fn register_session_shell() -> Result<(), super::SessionRequestError> {
     Ok(())
 }
 
+pub fn configured_primary_output() -> Option<String> {
+    None
+}
+
 fn should_restore_on_activation(iconic: bool, covers_monitor: bool) -> bool {
     iconic && !covers_monitor
 }
@@ -3176,6 +3180,10 @@ impl WindowFeed {
 
     pub fn outputs(&self) -> Vec<String> {
         Vec::new()
+    }
+
+    pub fn primary_output(&self) -> Option<String> {
+        self.outputs().into_iter().next()
     }
 
     pub fn workspaces(&self) -> FeedState<Vec<super::WorkspaceSummary>> {

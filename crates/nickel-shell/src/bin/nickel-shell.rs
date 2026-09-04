@@ -1910,6 +1910,7 @@ fn main() -> Result<(), String> {
         nickel_core::shell_settings::ShellSettings::load_default().bar_on_all_displays;
     let mut shell = WinitShell::new_with_options(started, shell_options)?;
     wait_for_initial_display(&mut shell)?;
+    shell.set_primary_output_name(platform::configured_primary_output())?;
     shell.create_shell_surfaces()?;
     #[cfg(target_os = "linux")]
     wait_for_shell_readiness()?;
@@ -2541,7 +2542,9 @@ fn main() -> Result<(), String> {
                 .runtime_snapshot(feature_settings.codex_generation)
                 .save_default();
             let system_changed = state.refresh_system();
-            if system_changed {
+            let primary_output_changed =
+                shell.set_primary_output_name(state.primary_output_name())?;
+            if system_changed || primary_output_changed {
                 sync_visibility(&mut shell, &state);
                 render_all(&mut shell, &mut state)?;
             }

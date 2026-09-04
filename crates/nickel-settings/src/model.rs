@@ -47,6 +47,9 @@ pub(super) struct SettingsApp {
         Option<std::sync::mpsc::Receiver<nickel_platform::FileDialogOutcome>>,
     pub(super) wallpaper_poll_delay: Duration,
     pub(super) appearance_save_deadline: Option<Instant>,
+    pub(super) desktop_count_save_deadline: Option<Instant>,
+    pub(super) desktop_count_previous: Option<ShellSettings>,
+    pub(super) session_events: Option<std::sync::mpsc::Receiver<nickel_session_protocol::Event>>,
     pub(super) network_adapters: Vec<NetworkAdapter>,
     pub(super) wifi_networks: Vec<WifiNetwork>,
     pub(super) network_available: bool,
@@ -156,6 +159,13 @@ impl Default for SettingsApp {
             wallpaper_dialog_rx: None,
             wallpaper_poll_delay: Duration::from_millis(16),
             appearance_save_deadline: None,
+            desktop_count_save_deadline: None,
+            desktop_count_previous: None,
+            session_events: if cfg!(test) {
+                None
+            } else {
+                session_event_receiver()
+            },
             network_adapters: Vec::new(),
             wifi_networks: Vec::new(),
             network_available: false,
@@ -181,6 +191,8 @@ impl SettingsApp {
         };
         if page == SettingsPage::OptionalFeatures {
             app.start_codex_probe();
+        } else if page == SettingsPage::Bar {
+            app.refresh_workspace_state();
         }
         app
     }
@@ -282,6 +294,57 @@ mod tests {
         app.set_appearance_intensity(77);
         assert_eq!(app.shell_settings.accent_intensity, Some(77));
         assert!(app.appearance_save_deadline.is_some());
+    }
+
+    #[test]
+    fn desktop_count_preview_coalesces_and_commits_only_the_latest_value() {
+        let mut app = SettingsApp::default();
+        let original = app.shell_settings.clone();
+        app.set_desktop_count(2);
+        app.set_desktop_count(7);
+        app.set_desktop_count(4);
+        assert_eq!(app.shell_settings.desktop_count, 4);
+        assert_eq!(app.desktop_count_previous.as_ref(), Some(&original));
+        assert!(app.desktop_count_save_deadline.is_some());
+        assert_eq!(app.status, "Desktop count pending");
+
+        app.desktop_count_save_deadline = Some(Instant::now());
+        app.tick();
+        assert!(app.desktop_count_previous.is_none());
+        assert!(app.desktop_count_save_deadline.is_none());
+        assert_eq!(app.shell_settings.desktop_count, 4);
+    }
+
+    #[test]
+    fn authoritative_workspace_broadcast_updates_count_and_active_control() {
+        let mut app = SettingsApp::default();
+        let state = nickel_session_protocol::WorkspaceState {
+            active: nickel_session_protocol::WorkspaceId(7),
+            active_output: Some("HDMI-A-1".into()),
+            ordered: vec![
+                nickel_session_protocol::WorkspaceSnapshot {
+                    id: nickel_session_protocol::WorkspaceId(2),
+                    windows: Vec::new(),
+                    focused: None,
+                },
+                nickel_session_protocol::WorkspaceSnapshot {
+                    id: nickel_session_protocol::WorkspaceId(7),
+                    windows: Vec::new(),
+                    focused: None,
+                },
+            ],
+        };
+        app.apply_workspace_state(&state);
+        assert_eq!(app.shell_settings.desktop_count, 2);
+        assert_eq!(app.shell_settings.active_desktop, 1);
+
+        app.set_desktop_count(6);
+        app.apply_workspace_state(&state);
+        assert_eq!(
+            app.shell_settings.desktop_count, 6,
+            "pending preview is authoritative locally"
+        );
+        assert_eq!(app.shell_settings.active_desktop, 1);
     }
 
     #[test]

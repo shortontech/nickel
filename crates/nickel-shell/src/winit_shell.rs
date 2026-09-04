@@ -166,8 +166,9 @@ fn desired_output_surfaces(
     output_names: &[String],
     create_desktops: bool,
     bar_on_all_displays: bool,
+    primary_output: Option<&str>,
 ) -> HashSet<(String, SurfaceRole)> {
-    let panel_outputs = panel_outputs(output_names, bar_on_all_displays)
+    let panel_outputs = panel_outputs(output_names, bar_on_all_displays, primary_output)
         .into_iter()
         .collect::<HashSet<_>>();
     output_names
@@ -416,6 +417,7 @@ pub struct WinitShell {
     clipboard: Option<std::cell::RefCell<arboard::Clipboard>>,
     started: Instant,
     options: ShellOptions,
+    primary_output_name: Option<String>,
 }
 
 impl WinitShell {
@@ -458,6 +460,7 @@ impl WinitShell {
             clipboard: arboard::Clipboard::new().ok().map(std::cell::RefCell::new),
             started,
             options,
+            primary_output_name: None,
         })
     }
 
@@ -486,6 +489,7 @@ impl WinitShell {
             &output_names,
             create_desktops,
             self.options.bar_on_all_displays,
+            self.primary_output_name.as_deref(),
         );
         let mut output_creation_failed = false;
         for (display_index, geometry) in displays.iter().copied().enumerate() {
@@ -552,6 +556,7 @@ impl WinitShell {
             &output_names,
             create_desktops,
             self.options.bar_on_all_displays,
+            self.primary_output_name.as_deref(),
         );
         // A settings policy change is authoritative immediately. Missing outputs remain
         // dormant for the retirement grace period so a transient topology snapshot or a
@@ -689,6 +694,17 @@ impl WinitShell {
         }
         self.options.bar_on_all_displays = enabled;
         self.sync_display_geometry()?;
+        Ok(true)
+    }
+
+    pub fn set_primary_output_name(&mut self, output: Option<String>) -> Result<bool, String> {
+        if self.primary_output_name == output {
+            return Ok(false);
+        }
+        self.primary_output_name = output;
+        if !self.options.bar_on_all_displays {
+            self.sync_display_geometry()?;
+        }
         Ok(true)
     }
 
@@ -1424,11 +1440,20 @@ impl WinitShell {
     }
 }
 
-fn panel_outputs(output_names: &[String], all_displays: bool) -> Vec<String> {
+fn panel_outputs(
+    output_names: &[String],
+    all_displays: bool,
+    primary_output: Option<&str>,
+) -> Vec<String> {
     if all_displays {
         output_names.to_vec()
     } else {
-        output_names.first().cloned().into_iter().collect()
+        primary_output
+            .filter(|primary| output_names.iter().any(|output| output == primary))
+            .map(str::to_owned)
+            .or_else(|| output_names.iter().min().cloned())
+            .into_iter()
+            .collect()
     }
 }
 
@@ -1758,15 +1783,47 @@ mod tests {
     #[test]
     fn panel_scope_reconciles_primary_and_all_display_topologies() {
         let outputs = vec!["DP-1".to_owned(), "HDMI-A-1".to_owned()];
-        assert_eq!(panel_outputs(&outputs, false), vec!["DP-1"]);
-        assert_eq!(panel_outputs(&outputs, true), outputs);
-        assert_eq!(panel_outputs(&[], false), Vec::<String>::new());
+        assert_eq!(
+            panel_outputs(&outputs, false, Some("HDMI-A-1")),
+            vec!["HDMI-A-1"]
+        );
+        assert_eq!(
+            panel_outputs(&outputs, false, Some("missing")),
+            vec!["DP-1"]
+        );
+        assert_eq!(panel_outputs(&outputs, true, Some("HDMI-A-1")), outputs);
+        assert_eq!(panel_outputs(&[], false, None), Vec::<String>::new());
+    }
+
+    #[test]
+    fn primary_panel_policy_is_stable_across_reorder_hotplug_and_fallback() {
+        let original = vec!["DP-1".to_owned(), "HDMI-A-1".to_owned()];
+        let reordered = vec!["HDMI-A-1".to_owned(), "DP-1".to_owned()];
+        let expanded = vec![
+            "USB-C-1".to_owned(),
+            "HDMI-A-1".to_owned(),
+            "DP-1".to_owned(),
+        ];
+        for outputs in [&original, &reordered, &expanded] {
+            assert_eq!(
+                panel_outputs(outputs, false, Some("HDMI-A-1")),
+                vec!["HDMI-A-1"]
+            );
+        }
+        assert_eq!(
+            panel_outputs(&["USB-C-1".into(), "DP-1".into()], false, Some("HDMI-A-1")),
+            vec!["DP-1"]
+        );
+        assert_eq!(
+            panel_outputs(&reordered, false, Some("HDMI-A-1")),
+            vec!["HDMI-A-1"]
+        );
     }
 
     #[test]
     fn every_enabled_output_requires_its_own_wallpaper_bar_and_lock() {
         let outputs = vec!["DP-1".to_owned(), "HDMI-A-1".to_owned()];
-        let desired = desired_output_surfaces(&outputs, true, true);
+        let desired = desired_output_surfaces(&outputs, true, true, None);
         assert_eq!(desired.len(), 6);
         for output in outputs {
             for role in [SurfaceRole::Desktop, SurfaceRole::Panel, SurfaceRole::Lock] {
@@ -1780,9 +1837,13 @@ mod tests {
 
     #[test]
     fn hotplug_requires_output_chrome_even_when_the_existing_panel_is_healthy() {
-        let before = desired_output_surfaces(&["DP-1".to_owned()], true, false);
-        let after =
-            desired_output_surfaces(&["DP-1".to_owned(), "HDMI-A-1".to_owned()], true, false);
+        let before = desired_output_surfaces(&["DP-1".to_owned()], true, false, None);
+        let after = desired_output_surfaces(
+            &["DP-1".to_owned(), "HDMI-A-1".to_owned()],
+            true,
+            false,
+            None,
+        );
         let added = after.difference(&before).cloned().collect::<HashSet<_>>();
         assert_eq!(
             added,
@@ -1797,17 +1858,29 @@ mod tests {
 
     #[test]
     fn output_reordering_does_not_change_stable_surface_ownership() {
-        let forward =
-            desired_output_surfaces(&["DP-1".to_owned(), "HDMI-A-1".to_owned()], true, true);
-        let reversed =
-            desired_output_surfaces(&["HDMI-A-1".to_owned(), "DP-1".to_owned()], true, true);
+        let forward = desired_output_surfaces(
+            &["DP-1".to_owned(), "HDMI-A-1".to_owned()],
+            true,
+            true,
+            None,
+        );
+        let reversed = desired_output_surfaces(
+            &["HDMI-A-1".to_owned(), "DP-1".to_owned()],
+            true,
+            true,
+            None,
+        );
         assert_eq!(forward, reversed);
     }
 
     #[test]
     fn desktop_policy_does_not_suppress_per_output_bars() {
-        let desired =
-            desired_output_surfaces(&["DP-1".to_owned(), "HDMI-A-1".to_owned()], false, true);
+        let desired = desired_output_surfaces(
+            &["DP-1".to_owned(), "HDMI-A-1".to_owned()],
+            false,
+            true,
+            None,
+        );
         assert_eq!(desired.len(), 4);
         assert!(
             desired

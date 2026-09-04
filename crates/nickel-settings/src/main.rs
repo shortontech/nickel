@@ -14,7 +14,8 @@ use nickel_session_protocol::{
     ServerEnvelope, ServerMessage,
 };
 use persistence::{
-    try_save_shell_settings, try_save_wallpaper_settings, try_update_optional_feature_settings,
+    load_shell_settings, try_save_shell_settings, try_save_wallpaper_settings,
+    try_update_optional_feature_settings,
 };
 use platform::*;
 
@@ -637,6 +638,7 @@ impl SettingsApp {
                     SettingsPage::Network => self.load_linux_network(),
                     SettingsPage::Bluetooth => self.load_bluetooth(),
                     SettingsPage::DefaultApps => self.load_default_apps(),
+                    SettingsPage::Bar => self.refresh_workspace_state(),
                     SettingsPage::OptionalFeatures => {
                         self.refresh_optional_feature_state();
                         self.start_codex_probe();
@@ -654,6 +656,7 @@ impl SettingsApp {
                     SettingsPage::Network => self.load_linux_network(),
                     SettingsPage::Bluetooth => self.load_bluetooth(),
                     SettingsPage::DefaultApps => self.load_default_apps(),
+                    SettingsPage::Bar => self.refresh_workspace_state(),
                     SettingsPage::OptionalFeatures => {
                         self.refresh_optional_feature_state();
                         self.start_codex_probe();
@@ -804,21 +807,25 @@ impl SettingsApp {
                 self.persist_appearance();
             }
             SettingsMessage::BarPrimaryDisplay => {
+                self.flush_pending_desktop_count();
                 let previous = self.shell_settings.clone();
                 self.shell_settings.bar_on_all_displays = false;
                 self.persist_shell_behavior(previous);
             }
             SettingsMessage::BarAllDisplays => {
+                self.flush_pending_desktop_count();
                 let previous = self.shell_settings.clone();
                 self.shell_settings.bar_on_all_displays = true;
                 self.persist_shell_behavior(previous);
             }
             SettingsMessage::BarDisplayWindows => {
+                self.flush_pending_desktop_count();
                 let previous = self.shell_settings.clone();
                 self.shell_settings.all_windows_on_every_bar = false;
                 self.persist_shell_behavior(previous);
             }
             SettingsMessage::BarAllWindows => {
+                self.flush_pending_desktop_count();
                 let previous = self.shell_settings.clone();
                 self.shell_settings.all_windows_on_every_bar = true;
                 self.persist_shell_behavior(previous);
@@ -1023,16 +1030,21 @@ impl SettingsApp {
     }
 
     fn set_desktop_count(&mut self, count: u8) {
+        let count = count.clamp(1, 8);
         if count == self.shell_settings.desktop_count {
             return;
         }
-        let previous = self.shell_settings.clone();
-        self.shell_settings.desktop_count = count.clamp(1, 8);
+        if self.desktop_count_previous.is_none() {
+            self.desktop_count_previous = Some(self.shell_settings.clone());
+        }
+        self.shell_settings.desktop_count = count;
         self.shell_settings.active_desktop = self
             .shell_settings
             .active_desktop
             .min(count.saturating_sub(1));
-        self.persist_shell_behavior(previous);
+        self.desktop_count_save_deadline = Some(Instant::now() + Duration::from_millis(100));
+        self.status = "Desktop count pending".into();
+        self.request_redraw();
     }
 
     fn persist_shell_behavior(&mut self, previous: ShellSettings) {
@@ -1049,7 +1061,17 @@ impl SettingsApp {
         if let Err(error) = result {
             self.shell_settings = previous.clone();
             let _ = try_save_shell_settings(&previous);
+            let error = error.chars().take(240).collect::<String>();
             self.status = format!("Could not apply shell setting: {error}");
+        } else {
+            self.status = "Nickel Bar settings applied".into();
+        }
+    }
+
+    fn flush_pending_desktop_count(&mut self) {
+        self.desktop_count_save_deadline = None;
+        if let Some(previous) = self.desktop_count_previous.take() {
+            self.persist_shell_behavior(previous);
         }
     }
 
@@ -1308,6 +1330,32 @@ impl SettingsApp {
         self.poll_wifi_power();
         self.poll_codex_probe();
         let now = Instant::now();
+        let session_events = self
+            .session_events
+            .as_ref()
+            .map(|receiver| receiver.try_iter().collect::<Vec<_>>())
+            .unwrap_or_default();
+        for event in session_events {
+            match event {
+                nickel_session_protocol::Event::ShellSettingsChanged => {
+                    if self.desktop_count_previous.is_none() {
+                        self.shell_settings = load_shell_settings();
+                    }
+                    self.refresh_workspace_state();
+                    self.request_redraw();
+                }
+                nickel_session_protocol::Event::Workspaces(workspaces) => {
+                    self.apply_workspace_state(&workspaces);
+                    self.request_redraw();
+                }
+                nickel_session_protocol::Event::Snapshot(_) => {
+                    self.load_outputs();
+                    self.refresh_workspace_state();
+                    self.request_redraw();
+                }
+                _ => {}
+            }
+        }
         if self.page == SettingsPage::OptionalFeatures && now >= self.next_optional_feature_refresh
         {
             self.refresh_optional_feature_state();
@@ -1319,6 +1367,15 @@ impl SettingsApp {
         {
             self.persist_appearance();
             self.appearance_save_deadline = None;
+        }
+        if self
+            .desktop_count_save_deadline
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.desktop_count_save_deadline = None;
+            if let Some(previous) = self.desktop_count_previous.take() {
+                self.persist_shell_behavior(previous);
+            }
         }
         if self.page == SettingsPage::Bluetooth && now >= self.next_bluetooth_refresh {
             self.load_bluetooth();
@@ -1367,6 +1424,31 @@ impl SettingsApp {
             self.wifi_refreshes_left = 0;
         }
         self.request_redraw();
+    }
+
+    fn refresh_workspace_state(&mut self) {
+        let Ok(ServerMessage::Workspaces(workspaces)) =
+            session_request(SessionRequest::Query(SessionQuery::Workspaces))
+        else {
+            return;
+        };
+        self.apply_workspace_state(&workspaces);
+    }
+
+    fn apply_workspace_state(&mut self, workspaces: &nickel_session_protocol::WorkspaceState) {
+        if let Some(active) = workspaces
+            .ordered
+            .iter()
+            .position(|workspace| workspace.id == workspaces.active)
+        {
+            self.shell_settings.active_desktop = u8::try_from(active).unwrap_or(u8::MAX);
+        }
+        if self.desktop_count_previous.is_none()
+            && let Ok(count) = u8::try_from(workspaces.ordered.len())
+            && (1..=8).contains(&count)
+        {
+            self.shell_settings.desktop_count = count;
+        }
     }
 
     fn poll_wifi_power(&mut self) {
@@ -1655,6 +1737,7 @@ impl Application for SettingsApp {
         let now = Instant::now();
         let mut deadlines = Vec::with_capacity(4);
         deadlines.extend(self.appearance_save_deadline);
+        deadlines.extend(self.desktop_count_save_deadline);
         deadlines.extend(self.next_wifi_refresh);
         if self.page == SettingsPage::Bluetooth {
             deadlines.push(self.next_bluetooth_refresh);

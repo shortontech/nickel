@@ -2685,6 +2685,10 @@ impl LiveShell {
             .collect()
     }
 
+    pub fn primary_output_name(&self) -> Option<String> {
+        self.window_feed.primary_output()
+    }
+
     pub fn panel_pointer_left(&mut self) -> bool {
         if self.panel_hover.is_none() || self.panel_hover_output != self.panel_output {
             return false;

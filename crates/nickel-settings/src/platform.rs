@@ -504,10 +504,58 @@ pub(super) fn session_request(request: SessionRequest) -> std::io::Result<Server
     result
 }
 
+#[cfg(target_os = "linux")]
+pub(super) fn session_event_receiver()
+-> Option<std::sync::mpsc::Receiver<nickel_session_protocol::Event>> {
+    use std::{os::unix::net::UnixDatagram, path::PathBuf};
+    let server = std::env::var_os("NICKEL_SESSION_CONTROL").map(PathBuf::from)?;
+    let token = std::env::var("NICKEL_SESSION_TOKEN").ok()?;
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let client = runtime.join(format!(
+        "nickel-settings-{}-events.sock",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&client);
+    let socket = UnixDatagram::bind(&client).ok()?;
+    let envelope = ClientEnvelope {
+        token,
+        request_id: 1,
+        request: SessionRequest::Subscribe,
+    };
+    let frame = nickel_session_protocol::encode(&envelope).ok()?;
+    socket.send_to(&frame, server).ok()?;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("nickel-settings-session-events".into())
+        .spawn(move || {
+            let mut frame = vec![0_u8; nickel_session_protocol::MAX_FRAME_BYTES];
+            while let Ok(length) = socket.recv(&mut frame) {
+                if let Ok(envelope) =
+                    nickel_session_protocol::decode::<ServerEnvelope>(&frame[..length])
+                    && let ServerMessage::Event(event) = envelope.message
+                    && sender.send(event).is_err()
+                {
+                    break;
+                }
+            }
+            let _ = std::fs::remove_file(client);
+        })
+        .ok()?;
+    Some(receiver)
+}
+
 #[cfg(not(target_os = "linux"))]
 pub(super) fn session_request(_request: SessionRequest) -> std::io::Result<ServerMessage> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "live display settings are currently Linux-only",
     ))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(super) fn session_event_receiver()
+-> Option<std::sync::mpsc::Receiver<nickel_session_protocol::Event>> {
+    None
 }

@@ -636,10 +636,10 @@ impl SettingsApp {
         let desktop_choices = (0..self.shell_settings.desktop_count).map(|index| {
             ui! {
                 <Container width={64.0} height={46.0} background={palette.surface}
-                    border={(if index == 0 { palette.accent } else { palette.muted }, 2.0)}
+                    border={(if index == self.shell_settings.active_desktop { palette.accent } else { palette.muted }, 2.0)}
                     padding={Insets { top: 9.0, right: 4.0, bottom: 4.0, left: 4.0 }}>
                     <Text align={TextAlign::Center} scale={1.0}
-                        color={if index == 0 { palette.text } else { palette.muted }}>
+                        color={if index == self.shell_settings.active_desktop { palette.text } else { palette.muted }}>
                         {format!("{}", index + 1)}
                     </Text>
                 </Container>

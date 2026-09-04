@@ -134,6 +134,10 @@ pub fn register_session_shell() -> Result<(), super::SessionRequestError> {
     Ok(())
 }
 
+pub fn configured_primary_output() -> Option<String> {
+    None
+}
+
 pub struct WindowFeed;
 
 pub fn show_window_system_menu(_: WindowId) -> bool {
