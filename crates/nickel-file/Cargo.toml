@@ -19,6 +19,7 @@ nickel-i18n = { path = "../nickel-i18n" }
 nickel-logging = { path = "../nickel-logging" }
 nickel-platform = { path = "../nickel-platform" }
 nickel-ui-testkit = { path = "../nickel-ui-testkit" }
+notify.workspace = true
 tracing.workspace = true
 winit.workspace = true
 
@@ -29,6 +30,8 @@ tempfile = "3"
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { workspace = true, features = [
     "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
     "Win32_System_Com",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",

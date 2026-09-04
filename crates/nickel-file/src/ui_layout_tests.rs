@@ -93,12 +93,12 @@ fn failed_production_launch_remains_recoverable_in_the_requested_tab() {
 }
 
 #[test]
-fn idle_file_host_checks_external_settings_periodically() {
+fn idle_file_host_checks_live_directory_changes_promptly() {
     let mut app = FileApp::new(home_directory());
     app.icon_rx = None;
     assert_eq!(
         Application::poll_interval(&app),
-        Some(std::time::Duration::from_secs(1))
+        Some(std::time::Duration::from_millis(100))
     );
 }
 
@@ -1026,7 +1026,7 @@ fn navigation_from_idle_publishes_fallback_before_optional_provider_work() {
 
     assert_eq!(
         Application::poll_interval(&app),
-        Some(std::time::Duration::from_secs(1))
+        Some(std::time::Duration::from_millis(100))
     );
     app.navigate_to(child.clone());
 

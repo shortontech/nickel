@@ -1,6 +1,6 @@
 use std::{
     cmp::Ordering,
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     ffi::OsString,
     fs, io,
     path::{Path, PathBuf},
@@ -17,6 +17,7 @@ pub(crate) mod host;
 pub mod icons;
 pub(crate) mod layout;
 pub(crate) mod platform;
+pub(crate) mod watch;
 
 pub use app::{FileApp, FileFixtureProvider, FileMessage, FileViewMode, run};
 
@@ -55,8 +56,12 @@ pub struct DirectoryBrowser {
     history: Vec<PathBuf>,
     forward_history: Vec<PathBuf>,
     entries: Vec<FileEntry>,
+    identities: HashMap<PathBuf, FileIdentity>,
     show_hidden: bool,
 }
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct FileIdentity(u64, u64);
 
 impl DirectoryBrowser {
     #[doc(hidden)]
@@ -66,6 +71,7 @@ impl DirectoryBrowser {
             history: Vec::new(),
             forward_history: Vec::new(),
             entries,
+            identities: HashMap::new(),
             show_hidden: true,
         }
     }
@@ -77,6 +83,7 @@ impl DirectoryBrowser {
             history: Vec::new(),
             forward_history: Vec::new(),
             entries: Vec::new(),
+            identities: HashMap::new(),
             show_hidden,
         }
     }
@@ -86,12 +93,13 @@ impl DirectoryBrowser {
 
     pub fn open_with_hidden(path: impl Into<PathBuf>, show_hidden: bool) -> io::Result<Self> {
         let current = path.into();
-        let entries = read_entries_with_hidden(&current, show_hidden)?;
+        let (entries, identities) = read_entries_with_identities(&current, show_hidden)?;
         Ok(Self {
             current,
             history: Vec::new(),
             forward_history: Vec::new(),
             entries,
+            identities,
             show_hidden,
         })
     }
@@ -102,6 +110,18 @@ impl DirectoryBrowser {
 
     pub fn entries(&self) -> &[FileEntry] {
         &self.entries
+    }
+
+    pub(crate) fn identity_at(&self, index: usize) -> Option<FileIdentity> {
+        self.entries
+            .get(index)
+            .and_then(|entry| self.identities.get(&entry.path).copied())
+    }
+
+    pub(crate) fn index_of_identity(&self, identity: FileIdentity) -> Option<usize> {
+        self.entries
+            .iter()
+            .position(|entry| self.identities.get(&entry.path).copied() == Some(identity))
     }
 
     pub fn can_go_back(&self) -> bool {
@@ -122,11 +142,12 @@ impl DirectoryBrowser {
 
     pub fn enter(&mut self, path: impl Into<PathBuf>) -> io::Result<()> {
         let next = path.into();
-        let entries = read_entries_with_hidden(&next, self.show_hidden)?;
+        let (entries, identities) = read_entries_with_identities(&next, self.show_hidden)?;
         self.history.push(self.current.clone());
         self.forward_history.clear();
         self.current = next;
         self.entries = entries;
+        self.identities = identities;
         Ok(())
     }
 
@@ -134,11 +155,12 @@ impl DirectoryBrowser {
         let Some(previous) = self.history.last().cloned() else {
             return Ok(false);
         };
-        let entries = read_entries_with_hidden(&previous, self.show_hidden)?;
+        let (entries, identities) = read_entries_with_identities(&previous, self.show_hidden)?;
         self.history.pop();
         self.forward_history.push(self.current.clone());
         self.current = previous;
         self.entries = entries;
+        self.identities = identities;
         Ok(true)
     }
 
@@ -146,11 +168,12 @@ impl DirectoryBrowser {
         let Some(next) = self.forward_history.last().cloned() else {
             return Ok(false);
         };
-        let entries = read_entries_with_hidden(&next, self.show_hidden)?;
+        let (entries, identities) = read_entries_with_identities(&next, self.show_hidden)?;
         self.forward_history.pop();
         self.history.push(self.current.clone());
         self.current = next;
         self.entries = entries;
+        self.identities = identities;
         Ok(true)
     }
 
@@ -163,13 +186,15 @@ impl DirectoryBrowser {
     }
 
     pub fn refresh(&mut self) -> io::Result<()> {
-        self.entries = read_entries_with_hidden(&self.current, self.show_hidden)?;
+        (self.entries, self.identities) =
+            read_entries_with_identities(&self.current, self.show_hidden)?;
         Ok(())
     }
 
     pub fn set_show_hidden(&mut self, show_hidden: bool) -> io::Result<()> {
         self.show_hidden = show_hidden;
-        self.entries = read_entries_with_hidden(&self.current, self.show_hidden)?;
+        (self.entries, self.identities) =
+            read_entries_with_identities(&self.current, self.show_hidden)?;
         Ok(())
     }
 
@@ -216,7 +241,15 @@ pub fn read_entries(path: &Path) -> io::Result<Vec<FileEntry>> {
 }
 
 fn read_entries_with_hidden(path: &Path, show_hidden: bool) -> io::Result<Vec<FileEntry>> {
+    read_entries_with_identities(path, show_hidden).map(|(entries, _)| entries)
+}
+
+fn read_entries_with_identities(
+    path: &Path,
+    show_hidden: bool,
+) -> io::Result<(Vec<FileEntry>, HashMap<PathBuf, FileIdentity>)> {
     let hidden_names = hidden_names(path);
+    let mut identities = HashMap::new();
     let mut entries = fs::read_dir(path)?
         .filter_map(|entry| {
             let entry = entry.ok()?;
@@ -225,9 +258,13 @@ fn read_entries_with_hidden(path: &Path, show_hidden: bool) -> io::Result<Vec<Fi
                 return None;
             }
             let is_directory = metadata_is_directory(&metadata);
+            let path = entry.path();
+            if let Some(identity) = metadata_identity(&path, &metadata) {
+                identities.insert(path.clone(), identity);
+            }
             Some(FileEntry {
                 name: entry.file_name(),
-                path: entry.path(),
+                path,
                 is_directory,
                 size: (!is_directory && metadata.is_file()).then_some(metadata.len()),
                 modified: metadata.modified().ok(),
@@ -240,7 +277,66 @@ fn read_entries_with_hidden(path: &Path, show_hidden: bool) -> io::Result<Vec<Fi
             .cmp(&left.is_directory)
             .then_with(|| compare_names(&left.name, &right.name))
     });
-    Ok(entries)
+    Ok((entries, identities))
+}
+
+#[cfg(unix)]
+fn metadata_identity(_path: &Path, metadata: &fs::Metadata) -> Option<FileIdentity> {
+    use std::os::unix::fs::MetadataExt;
+    Some(FileIdentity(metadata.dev(), metadata.ino()))
+}
+
+#[cfg(target_os = "windows")]
+fn metadata_identity(path: &Path, _metadata: &fs::Metadata) -> Option<FileIdentity> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::{
+        Win32::{
+            Foundation::CloseHandle,
+            Storage::FileSystem::{
+                BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_FLAG_BACKUP_SEMANTICS,
+                FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle,
+                OPEN_EXISTING,
+            },
+        },
+        core::PCWSTR,
+    };
+
+    let wide = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    // SAFETY: `wide` is a live, NUL-terminated UTF-16 path; no security or template pointers are
+    // supplied. The returned owned kernel handle is closed below on every subsequent path.
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(wide.as_ptr()),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            None,
+        )
+        .ok()?
+    };
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: `handle` is valid and `information` points to writable storage of the required type.
+    let result = unsafe { GetFileInformationByHandle(handle, &mut information) };
+    // SAFETY: `handle` was returned by `CreateFileW` and is closed exactly once here.
+    let _ = unsafe { CloseHandle(handle) };
+    result.ok()?;
+    let index =
+        (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
+    Some(FileIdentity(
+        u64::from(information.dwVolumeSerialNumber),
+        index,
+    ))
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
+fn metadata_identity(_path: &Path, _metadata: &fs::Metadata) -> Option<FileIdentity> {
+    None
 }
 
 fn hidden_names(path: &Path) -> HashSet<OsString> {
@@ -440,6 +536,36 @@ mod tests {
             shown_names,
             [".hidden", ".secret", "listed.txt", "visible.txt"]
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn refresh_tracks_external_create_rename_and_remove_by_stable_identity() {
+        let root = temporary_directory("live-reconcile");
+        let original = root.join("original.txt");
+        let renamed = root.join("renamed.txt");
+        fs::write(&original, b"content").unwrap();
+        let mut browser = DirectoryBrowser::open(&root).unwrap();
+        let identity = browser.identity_at(0).expect("native stable identity");
+
+        fs::write(root.join("created.txt"), b"new").unwrap();
+        fs::rename(&original, &renamed).unwrap();
+        browser.refresh().unwrap();
+        assert_eq!(
+            browser
+                .entries()
+                .iter()
+                .map(FileEntry::display_name)
+                .collect::<Vec<_>>(),
+            ["created.txt", "renamed.txt"]
+        );
+        let renamed_index = browser.index_of_identity(identity).unwrap();
+        assert_eq!(browser.entries()[renamed_index].path, renamed);
+
+        fs::remove_file(&renamed).unwrap();
+        browser.refresh().unwrap();
+        assert!(browser.index_of_identity(identity).is_none());
+        assert_eq!(browser.entries().len(), 1);
         fs::remove_dir_all(root).unwrap();
     }
 }

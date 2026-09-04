@@ -13,6 +13,7 @@ use crate::{
     icons, layout,
     layout::{rect_between, visible_file_range},
     platform::{LocationGroup, home_directory, location_groups, open_path},
+    watch::DirectoryWatch,
 };
 use nickel_core::{
     shell_settings::{FileIconPreference, ShellSettings},
@@ -37,6 +38,8 @@ pub(crate) const MAX_TILE_WIDTH: f32 = 240.0;
 const MIN_DETAILS_COLUMN_WIDTH: f32 = 72.0;
 const MAX_DETAILS_COLUMN_WIDTH: f32 = 320.0;
 const SETTINGS_SYNC_INTERVAL: Duration = Duration::from_secs(1);
+const DIRECTORY_WATCH_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const DIRECTORY_WATCH_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 type NavigationResult = (u64, Result<Option<DirectoryBrowser>, String>);
 type SidebarResult = (PathBuf, Result<Vec<(String, PathBuf)>, String>);
 
@@ -135,6 +138,9 @@ pub struct FileApp {
     navigation_poll_delay: Duration,
     navigation_closes_address: bool,
     navigation_invalidates_icons: bool,
+    navigation_preserves_selection: bool,
+    directory_watch: Option<DirectoryWatch>,
+    directory_watch_retry_at: Option<Instant>,
     pub(crate) icon_preference: FileIconPreference,
     pub(crate) icon_theme: Option<String>,
     pub(crate) icon_provider_revision: u64,
@@ -633,6 +639,9 @@ pub(crate) struct FileTab {
     navigation_poll_delay: Duration,
     navigation_closes_address: bool,
     navigation_invalidates_icons: bool,
+    navigation_preserves_selection: bool,
+    directory_watch: Option<DirectoryWatch>,
+    directory_watch_retry_at: Option<Instant>,
 }
 
 impl FileApp {
@@ -829,6 +838,9 @@ impl FileApp {
             navigation_poll_delay: Duration::from_millis(16),
             navigation_closes_address: false,
             navigation_invalidates_icons: false,
+            navigation_preserves_selection: false,
+            directory_watch: None,
+            directory_watch_retry_at: None,
             icon_preference: settings.file_icon_provider,
             icon_provider_revision: icons::provider_revision(
                 settings.file_icon_provider,
@@ -879,6 +891,7 @@ impl FileApp {
                 ReadingDirection::LeftToRight
             },
         };
+        app.ensure_directory_watch();
         app.refresh_icons();
         app
     }
@@ -956,6 +969,15 @@ impl FileApp {
             &mut self.navigation_invalidates_icons,
             &mut target.navigation_invalidates_icons,
         );
+        std::mem::swap(
+            &mut self.navigation_preserves_selection,
+            &mut target.navigation_preserves_selection,
+        );
+        std::mem::swap(&mut self.directory_watch, &mut target.directory_watch);
+        std::mem::swap(
+            &mut self.directory_watch_retry_at,
+            &mut target.directory_watch_retry_at,
+        );
         self.tabs[self.active_tab] = Some(target);
         self.active_tab = index;
         self.refresh_icons();
@@ -968,6 +990,7 @@ impl FileApp {
     fn new_tab_at(&mut self, path: PathBuf) {
         let show_hidden = nickel_platform::show_hidden_files();
         let browser = DirectoryBrowser::loading(path.clone(), show_hidden);
+        let directory_watch = DirectoryWatch::start(&path).ok();
         let (sender, receiver) = mpsc::channel();
         let _ = std::thread::Builder::new()
             .name("nickel-file-new-tab".into())
@@ -1001,6 +1024,9 @@ impl FileApp {
             navigation_poll_delay: Duration::from_millis(16),
             navigation_closes_address: false,
             navigation_invalidates_icons: true,
+            navigation_preserves_selection: false,
+            directory_watch,
+            directory_watch_retry_at: None,
         }));
         self.switch_tab(self.tabs.len() - 1);
     }
@@ -1122,6 +1148,7 @@ impl FileApp {
         self.navigation_poll_delay = Duration::from_millis(16);
         self.navigation_closes_address = closes_address;
         self.navigation_invalidates_icons = false;
+        self.navigation_preserves_selection = false;
         self.status = format!("{progress}…");
         let _ = std::thread::Builder::new()
             .name("nickel-file-navigation".into())
@@ -1134,6 +1161,11 @@ impl FileApp {
     }
 
     fn refresh_directory(&mut self, show_hidden: bool) {
+        self.reconcile_directory(show_hidden);
+        self.refresh_location_groups();
+    }
+
+    fn reconcile_directory(&mut self, show_hidden: bool) {
         self.start_navigation(
             "Refreshing".into(),
             "Could not refresh",
@@ -1146,7 +1178,7 @@ impl FileApp {
             },
         );
         self.navigation_invalidates_icons = true;
-        self.refresh_location_groups();
+        self.navigation_preserves_selection = true;
     }
 
     fn refresh_location_groups(&mut self) {
@@ -1192,6 +1224,27 @@ impl FileApp {
                 self.navigation_rx = None;
                 match result {
                     Ok(Some(browser)) => {
+                        let focused = self.selected.and_then(|index| {
+                            self.browser
+                                .entries()
+                                .get(index)
+                                .map(|entry| (self.browser.identity_at(index), entry.path.clone()))
+                        });
+                        let selected = self
+                            .selected_entries
+                            .iter()
+                            .filter_map(|index| {
+                                self.browser.entries().get(*index).map(|entry| {
+                                    (self.browser.identity_at(*index), entry.path.clone())
+                                })
+                            })
+                            .collect::<Vec<_>>();
+                        let anchor = self.selection_anchor.and_then(|index| {
+                            self.browser
+                                .entries()
+                                .get(index)
+                                .map(|entry| (self.browser.identity_at(index), entry.path.clone()))
+                        });
                         self.browser = browser;
                         if self.navigation_invalidates_icons {
                             self.icons.clear();
@@ -1202,14 +1255,26 @@ impl FileApp {
                             self.address_editing = false;
                             self.address_text.clear();
                         }
-                        self.navigation_changed();
+                        if self.navigation_preserves_selection {
+                            self.reconciliation_changed(focused, selected, anchor);
+                        } else {
+                            self.navigation_changed();
+                        }
+                        self.navigation_preserves_selection = false;
                     }
                     Ok(None) => {
                         self.navigation_invalidates_icons = false;
+                        self.navigation_preserves_selection = false;
                         self.status.clear();
                     }
                     Err(error) => {
                         self.navigation_invalidates_icons = false;
+                        if self.navigation_preserves_selection {
+                            self.directory_watch = None;
+                            self.directory_watch_retry_at =
+                                Some(Instant::now() + DIRECTORY_WATCH_RETRY_INTERVAL);
+                        }
+                        self.navigation_preserves_selection = false;
                         self.status = error;
                     }
                 }
@@ -1226,6 +1291,7 @@ impl FileApp {
             Err(TryRecvError::Disconnected) => {
                 self.navigation_rx = None;
                 self.navigation_invalidates_icons = false;
+                self.navigation_preserves_selection = false;
                 self.status = "Could not open location: navigation worker stopped".into();
                 true
             }
@@ -1239,7 +1305,95 @@ impl FileApp {
         self.selection_anchor = None;
         self.set_scroll_offset(0.0);
         self.status.clear();
+        self.ensure_directory_watch();
         self.refresh_icons();
+    }
+
+    fn reconciliation_changed(
+        &mut self,
+        focused: Option<(Option<nickel_file::FileIdentity>, PathBuf)>,
+        selected: Vec<(Option<nickel_file::FileIdentity>, PathBuf)>,
+        anchor: Option<(Option<nickel_file::FileIdentity>, PathBuf)>,
+    ) {
+        self.browser.sort(self.sort_key, self.sort_direction);
+        let resolve = |candidate: &(Option<nickel_file::FileIdentity>, PathBuf)| {
+            self.browser
+                .entries()
+                .iter()
+                .position(|entry| entry.path == candidate.1)
+                .or_else(|| {
+                    candidate
+                        .0
+                        .and_then(|identity| self.browser.index_of_identity(identity))
+                })
+        };
+        self.selected_entries = selected.iter().filter_map(resolve).collect();
+        self.selected = focused
+            .as_ref()
+            .and_then(resolve)
+            .or_else(|| self.selected_entries.iter().copied().min());
+        self.selection_anchor = anchor.as_ref().and_then(resolve).or(self.selected);
+        self.status.clear();
+        self.ensure_directory_watch();
+        self.refresh_icons();
+    }
+
+    fn ensure_directory_watch(&mut self) {
+        if self
+            .directory_watch
+            .as_ref()
+            .is_some_and(|watch| watch.watches(self.browser.current()))
+        {
+            return;
+        }
+        match DirectoryWatch::start(self.browser.current()) {
+            Ok(watch) => {
+                self.directory_watch = Some(watch);
+                self.directory_watch_retry_at = None;
+                if self.status.starts_with("Live updates are unavailable:") {
+                    self.status.clear();
+                }
+            }
+            Err(error) => {
+                self.directory_watch = None;
+                self.directory_watch_retry_at =
+                    Some(Instant::now() + DIRECTORY_WATCH_RETRY_INTERVAL);
+                if self.browser.current().exists() {
+                    self.status = format!(
+                        "Live updates are unavailable: {error}. Retrying automatically; Refresh remains available."
+                    );
+                }
+                tracing::warn!(
+                    path = %self.browser.current().display(),
+                    %error,
+                    "live directory updates are unavailable"
+                );
+            }
+        }
+    }
+
+    fn poll_directory_watch(&mut self) -> bool {
+        if let Some(retry_at) = self.directory_watch_retry_at
+            && Instant::now() >= retry_at
+        {
+            self.ensure_directory_watch();
+        }
+        let Some(watch) = self.directory_watch.as_ref() else {
+            return false;
+        };
+        if let Some(error) = watch.take_failure() {
+            self.status = format!(
+                "Live updates are unavailable: {error}. Retrying automatically; Refresh remains available."
+            );
+            self.directory_watch = None;
+            self.directory_watch_retry_at = Some(Instant::now() + DIRECTORY_WATCH_RETRY_INTERVAL);
+            return true;
+        }
+        if self.navigation_rx.is_some() || !watch.take_invalidation() {
+            return false;
+        }
+        self.reconcile_directory(self.browser.show_hidden());
+        true
     }
 
     fn sort_by(&mut self, key: EntrySortKey) {
@@ -1894,6 +2048,7 @@ impl Application for FileApp {
         self.poll_icons();
         settings_changed
             || self.poll_navigation()
+            || self.poll_directory_watch()
             || self.poll_sidebar_children()
             || self.poll_location_groups()
             || before != self.next_icon_id
@@ -1902,6 +2057,8 @@ impl Application for FileApp {
     fn poll_interval(&self) -> Option<std::time::Duration> {
         [
             Some(SETTINGS_SYNC_INTERVAL),
+            (self.directory_watch.is_some() || self.directory_watch_retry_at.is_some())
+                .then_some(DIRECTORY_WATCH_POLL_INTERVAL),
             self.icon_rx.as_ref().map(|_| self.icon_poll_delay),
             self.navigation_rx
                 .as_ref()
@@ -1944,6 +2101,107 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .map(PathBuf::from)
         .unwrap_or_else(home_directory);
     nickel_ui::run_with_adapter(FileApp::launch(path), FileHostAdapter::default())
+}
+
+#[cfg(test)]
+mod live_reconciliation_tests {
+    use std::{
+        collections::HashSet,
+        fs, thread,
+        time::{Duration, Instant},
+    };
+
+    use nickel_file::DirectoryBrowser;
+
+    use super::FileApp;
+
+    fn settle_live_change(app: &mut FileApp) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            app.poll_directory_watch();
+            app.poll_navigation();
+            if app.navigation_rx.is_none()
+                && app
+                    .directory_watch
+                    .as_ref()
+                    .is_none_or(|watch| !watch.take_invalidation())
+            {
+                return;
+            }
+            assert!(Instant::now() < deadline, "live reconciliation timed out");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn native_invalidation_reconciles_the_visible_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = FileApp::new(directory.path().to_path_buf());
+        settle_live_change(&mut app);
+
+        fs::write(directory.path().join("appeared.txt"), b"new").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !app
+            .browser
+            .entries()
+            .iter()
+            .any(|entry| entry.display_name() == "appeared.txt")
+        {
+            app.poll_directory_watch();
+            app.poll_navigation();
+            assert!(Instant::now() < deadline, "created file did not appear");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn external_rename_preserves_focus_selection_and_anchor() {
+        let directory = tempfile::tempdir().unwrap();
+        let original = directory.path().join("original.txt");
+        let renamed = directory.path().join("renamed.txt");
+        fs::write(&original, b"content").unwrap();
+        let mut app = FileApp::new(directory.path().to_path_buf());
+        app.selected = Some(0);
+        app.selected_entries = HashSet::from([0]);
+        app.selection_anchor = Some(0);
+        let identity = app.browser.identity_at(0).unwrap();
+
+        fs::rename(&original, &renamed).unwrap();
+        let refreshed = DirectoryBrowser::open(directory.path()).unwrap();
+        app.browser = refreshed;
+        app.reconciliation_changed(
+            Some((Some(identity), original.clone())),
+            vec![(Some(identity), original.clone())],
+            Some((Some(identity), original)),
+        );
+
+        assert_eq!(app.selected, Some(0));
+        assert_eq!(app.selected_entries, HashSet::from([0]));
+        assert_eq!(app.selection_anchor, Some(0));
+        assert_eq!(app.browser.entries()[0].path, renamed);
+    }
+
+    #[test]
+    fn removed_selection_is_repaired_without_selecting_a_neighbor() {
+        let directory = tempfile::tempdir().unwrap();
+        let removed = directory.path().join("a.txt");
+        fs::write(&removed, b"a").unwrap();
+        fs::write(directory.path().join("b.txt"), b"b").unwrap();
+        let mut app = FileApp::new(directory.path().to_path_buf());
+        let identity = app.browser.identity_at(0).unwrap();
+
+        fs::remove_file(&removed).unwrap();
+        app.browser = DirectoryBrowser::open(directory.path()).unwrap();
+        app.reconciliation_changed(
+            Some((Some(identity), removed.clone())),
+            vec![(Some(identity), removed.clone())],
+            Some((Some(identity), removed)),
+        );
+
+        assert_eq!(app.selected, None);
+        assert!(app.selected_entries.is_empty());
+        assert_eq!(app.selection_anchor, None);
+    }
 }
 
 #[cfg(test)]
