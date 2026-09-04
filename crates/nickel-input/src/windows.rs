@@ -6,7 +6,8 @@
 
 use crate::{
     Binding, DeviceId, EventOrder, InputEvent, KeyCode, KeyEdge, KeyEvent, KeyLocation, LogicalKey,
-    Modifier, ModifierState, NativeCode, NativeKey, PhysicalKey, ShortcutEngine, ShortcutOutcome,
+    Modifier, ModifierState, NativeCode, NativeKey, PhysicalKey, PointerButton, ShortcutEngine,
+    ShortcutOutcome,
 };
 
 pub const WINDOWS_KEYBOARD_DEVICE: DeviceId = DeviceId(0x5749_4e4b_4244);
@@ -30,6 +31,12 @@ pub enum InjectedEventPolicy {
 pub struct WindowsDispatch<A> {
     pub normalized: KeyEvent,
     pub outcomes: Vec<ShortcutOutcome<A>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SuperPointerGesture {
+    Move,
+    Resize,
 }
 
 #[derive(Clone, Debug)]
@@ -105,6 +112,18 @@ impl<A: Clone> WindowsInputAdapter<A> {
         }
         self.engine.chord_held_modifiers();
         true
+    }
+
+    pub fn begin_pointer_gesture(&mut self, button: PointerButton) -> Option<SuperPointerGesture> {
+        let gesture = match button {
+            PointerButton::Primary => SuperPointerGesture::Move,
+            PointerButton::Secondary => SuperPointerGesture::Resize,
+            _ => return None,
+        };
+        if !self.begin_pointer_chord() {
+            return None;
+        }
+        Some(gesture)
     }
 
     pub fn modifier_held(&self, modifier: crate::AggregateModifier) -> bool {
@@ -466,7 +485,10 @@ mod tests {
     fn pointer_gesture_chords_super_and_reset_clears_state() {
         let mut adapter = WindowsInputAdapter::<()>::new([]);
         adapter.handle_key_code(KeyCode::SuperLeft, KeyEdge::Pressed);
-        assert!(adapter.begin_pointer_chord());
+        assert_eq!(
+            adapter.begin_pointer_gesture(PointerButton::Primary),
+            Some(SuperPointerGesture::Move)
+        );
         assert!(
             adapter
                 .handle_key_code(KeyCode::SuperLeft, KeyEdge::Released)

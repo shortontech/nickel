@@ -94,9 +94,9 @@ use windows::{
 
 use nickel_core::hotkeys::{HotkeyAction, HotkeyOutcome, HotkeySnapshot, KeyCode, KeyEdge};
 use nickel_input::{
-    AggregateModifier, PhysicalKey, Shortcut, ShortcutKey, ShortcutTrigger,
+    AggregateModifier, PhysicalKey, PointerButton, Shortcut, ShortcutKey, ShortcutTrigger,
     global::{GlobalShortcutEdge, Registration, RegistrationError, RegistrationTable},
-    windows::{NativeKeyboardEvent, WindowsInputAdapter, physical_key},
+    windows::{NativeKeyboardEvent, SuperPointerGesture, WindowsInputAdapter, physical_key},
 };
 
 use crate::{
@@ -960,6 +960,11 @@ fn run_super_key_hook(
             reconcile_modifier_release(message.wParam.0);
         }
     }
+    registrations.clear();
+    RUN_HOTKEY_REGISTERED.store(false, Ordering::Release);
+    if let Ok(mut adapter) = windows_input_adapter().lock() {
+        adapter.reset();
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1035,6 +1040,8 @@ static SHORTCUT_SENDER: std::sync::OnceLock<Sender<GlobalShortcut>> = std::sync:
 static WINDOWS_INPUT_ADAPTER: std::sync::OnceLock<Mutex<WindowsInputAdapter<HotkeyAction>>> =
     std::sync::OnceLock::new();
 static RUN_HOTKEY_REGISTERED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static WINDOW_SWITCH_ACTIVE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 const SUPER_RELEASE_TIMER: usize = 0x4e04;
 const ALT_RELEASE_TIMER: usize = 0x4e05;
@@ -1157,14 +1164,15 @@ unsafe extern "system" fn super_key_hook(code: i32, wparam: WPARAM, lparam: LPAR
     if key == Some(KeyCode::KeyR)
         && RUN_HOTKEY_REGISTERED.load(std::sync::atomic::Ordering::Acquire)
     {
-        if edge == KeyEdge::Pressed
-            && let Ok(mut adapter) = windows_input_adapter().lock()
-        {
+        if let Ok(mut adapter) = windows_input_adapter().lock() {
             // RegisterHotKey owns Super+R dispatch. The hook only records that another key joined
             // the Super press, preventing the later release from toggling the launcher.
-            adapter.observe_key_code(KeyCode::KeyR, KeyEdge::Pressed);
+            adapter.observe_key_code(KeyCode::KeyR, edge);
         }
-        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+        // RegisterHotKey owns dispatch, while the hook owns suppression. The
+        // shared adapter observes both edges only to maintain coherent state;
+        // it cannot dispatch a second action on this path.
+        return LRESULT(1);
     }
     if matches!(
         key,
@@ -1375,6 +1383,18 @@ fn send_hotkey_action(action: Option<HotkeyAction>) {
 
 fn send_hotkey_outcomes(outcomes: Vec<nickel_input::ShortcutOutcome<HotkeyAction>>) {
     for outcome in outcomes {
+        match outcome.action {
+            HotkeyAction::SwitchNext
+            | HotkeyAction::SwitchPrevious
+            | HotkeyAction::SwitchGroupNext
+            | HotkeyAction::SwitchGroupPrevious => {
+                WINDOW_SWITCH_ACTIVE.store(true, Ordering::Release);
+            }
+            HotkeyAction::CommitSwitch if !WINDOW_SWITCH_ACTIVE.swap(false, Ordering::AcqRel) => {
+                continue;
+            }
+            _ => {}
+        }
         send_hotkey_action(Some(outcome.action));
     }
 }
@@ -1431,7 +1451,7 @@ unsafe extern "system" fn windows_mouse_hook(code: i32, wparam: WPARAM, lparam: 
     const VK_LWIN: i32 = 0x5b;
     const VK_RWIN: i32 = 0x5c;
     let physical_super = unsafe { GetAsyncKeyState(VK_LWIN) < 0 || GetAsyncKeyState(VK_RWIN) < 0 };
-    let (super_held, chord_started) = windows_input_adapter()
+    let (super_held, gesture) = windows_input_adapter()
         .lock()
         .map(|mut adapter| {
             // Mouse and keyboard low-level hooks are delivered independently. A mouse-down can
@@ -1441,10 +1461,15 @@ unsafe extern "system" fn windows_mouse_hook(code: i32, wparam: WPARAM, lparam: 
                 adapter.observe_key_code(KeyCode::SuperLeft, KeyEdge::Pressed);
             }
             let super_held = adapter.modifier_held(AggregateModifier::Super);
-            let chord_started = adapter.begin_pointer_chord();
-            (super_held, chord_started)
+            let gesture = adapter.begin_pointer_gesture(if message == WM_LBUTTONDOWN {
+                PointerButton::Primary
+            } else {
+                PointerButton::Secondary
+            });
+            (super_held, gesture)
         })
         .unwrap_or_default();
+    let chord_started = gesture.is_some();
     tracing::debug!(
         super_held,
         physical_super,
@@ -1459,6 +1484,7 @@ unsafe extern "system" fn windows_mouse_hook(code: i32, wparam: WPARAM, lparam: 
     if !chord_started {
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
     }
+    let gesture = gesture.expect("a started pointer chord has a typed gesture");
     let snapshot = windows_input_adapter()
         .lock()
         .map(|adapter| windows_input_snapshot(&adapter))
@@ -1499,7 +1525,8 @@ unsafe extern "system" fn windows_mouse_hook(code: i32, wparam: WPARAM, lparam: 
             window: target.0 as isize,
             start: event.pt,
             rectangle,
-            resize_edge: (message == WM_RBUTTONDOWN).then(|| resize_hit_test(target, event.pt)),
+            resize_edge: (gesture == SuperPointerGesture::Resize)
+                .then(|| resize_hit_test(target, event.pt)),
             last_update: event.time,
         });
     }
@@ -1711,13 +1738,6 @@ fn quote_windows_argument(argument: &str) -> String {
         return argument.to_owned();
     }
     format!("\"{}\"", argument.replace('"', "\\\""))
-}
-
-pub fn paste_text_if_requested(_: &str) -> Option<String> {
-    // Command recognition and its associated text suppression are one
-    // normalized nickel-ui transaction. Character inspection plus
-    // GetAsyncKeyState here could leak the command's literal `v`.
-    None
 }
 
 fn launch_uri(uri: &str) -> windows::core::Result<bool> {

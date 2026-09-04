@@ -49,10 +49,6 @@ pub fn wallpaper() -> Wallpaper {
     Wallpaper::default()
 }
 
-pub fn paste_text_if_requested(_: &str) -> Option<String> {
-    None
-}
-
 pub fn capture_active_window() -> Result<(), String> {
     let image = capture_active_window_image()?;
     copy_image_to_clipboard(&image)

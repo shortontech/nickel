@@ -24,7 +24,7 @@ fn workspace_keyboard_chords_reach_the_workspace_reducer() {
         .expect_workspace("second")
         .expect_authority_path(
             "window.workspace.visible",
-            &["HotkeyController", "Workspaces directional reducer"],
+            &["ShortcutEngine", "Workspaces directional reducer"],
         );
 }
 

@@ -3,7 +3,7 @@
 use crate::{
     active_output::{ActiveOutputContext, InvocationSource, resolve_active_output},
     focus::{FocusRequest, FocusTransactions},
-    hotkeys::{HotkeyAction, HotkeyController, KeyCode, KeyEdge},
+    hotkeys::{CompositorShortcutAdapter, HotkeyAction, KeyCode, KeyEdge},
     launcher::{
         LauncherActivation, LauncherActivationSource, LauncherPointerTarget,
         LauncherSemanticTarget, LauncherTransition, LauncherVisibility,
@@ -164,7 +164,7 @@ impl Default for ScenarioBudget {
 pub struct Scenario {
     name: String,
     windows: Vec<WindowFact>,
-    hotkeys: HotkeyController,
+    hotkeys: CompositorShortcutAdapter,
     switcher: TaskSwitcher<String>,
     platform: RecordingPlatform,
     trace: Vec<String>,
@@ -222,7 +222,7 @@ pub fn scenario(name: impl Into<String>) -> Scenario {
     Scenario {
         name: name.into(),
         windows: Vec::new(),
-        hotkeys: HotkeyController::default(),
+        hotkeys: CompositorShortcutAdapter::default(),
         switcher: TaskSwitcher::default(),
         platform: RecordingPlatform::default(),
         trace: Vec::new(),
@@ -858,7 +858,7 @@ impl Scenario {
         self.actions.push(action);
         self.authority.push(AuthorityRecord {
             field: "input.actions".into(),
-            path: format!("semantic key -> HotkeyController -> {action:?}"),
+            path: format!("semantic key -> ShortcutEngine -> {action:?}"),
         });
         let workspace_transition = match action {
             HotkeyAction::SwitchWorkspacePrevious | HotkeyAction::SwitchWorkspaceNext => {
@@ -897,7 +897,7 @@ impl Scenario {
         if let Some(transition) = workspace_transition {
             self.apply_workspace_transition(
                 transition.expect("directional workspace target must remain valid"),
-                "HotkeyController -> Workspaces directional reducer",
+                "ShortcutEngine -> Workspaces directional reducer",
             );
             return;
         }
@@ -924,7 +924,7 @@ impl Scenario {
             self.authority.push(AuthorityRecord {
                 field: "screenshot.effect".into(),
                 path: format!(
-                    "semantic key -> HotkeyController -> {action:?} -> ScreenshotEffect::{effect:?}"
+                    "semantic key -> ShortcutEngine -> {action:?} -> ScreenshotEffect::{effect:?}"
                 ),
             });
             return;
@@ -933,7 +933,7 @@ impl Scenario {
         let effects = (self.task_reduce)(&mut self.switcher, action, &windows);
         self.apply_task_effects(
             effects,
-            format!("semantic key -> HotkeyController -> {action:?} -> TaskSwitcher"),
+            format!("semantic key -> ShortcutEngine -> {action:?} -> TaskSwitcher"),
         );
     }
 

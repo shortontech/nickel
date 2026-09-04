@@ -96,6 +96,10 @@ name = "nickel-test-tray"
 path = "src/bin/nickel-test-tray.rs"
 
 [[bin]]
+name = "nickel-input-harness"
+path = "src/bin/nickel-input-harness.rs"
+
+[[bin]]
 name = "nickel-launcher-verify"
 path = "src/bin/nickel-launcher-verify.rs"
 required-features = ["workbench-fixtures"]

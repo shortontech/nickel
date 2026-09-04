@@ -8,7 +8,11 @@ fn main() {
 mod windows_harness {
     use std::sync::{Mutex, OnceLock};
 
-    use nickel_core::hotkeys::{KeyCode, HotkeyAction, HotkeyController, KeyEdge};
+    use nickel_core::hotkeys::{HotkeyAction, default_bindings};
+    use nickel_input::{
+        KeyEdge,
+        windows::{InjectedEventPolicy, NativeKeyboardEvent, WindowsInputAdapter},
+    };
     use windows::Win32::{
         Foundation::{LPARAM, LRESULT, WPARAM},
         UI::WindowsAndMessaging::{
@@ -18,17 +22,24 @@ mod windows_harness {
         },
     };
 
-    const VK_LWIN: u32 = 0x5b;
-    const VK_RWIN: u32 = 0x5c;
-    const VK_R: u32 = 0x52;
     const MARKER: usize = 0x4e49_434b_454c_5445;
     const EXPECTED_EVENTS: usize = 6;
 
-    #[derive(Default)]
     struct State {
-        controller: HotkeyController,
+        adapter: WindowsInputAdapter<HotkeyAction>,
         seen: usize,
         failures: Vec<String>,
+    }
+
+    impl Default for State {
+        fn default() -> Self {
+            Self {
+                adapter: WindowsInputAdapter::new(default_bindings())
+                    .with_injected_policy(InjectedEventPolicy::Accept),
+                seen: 0,
+                failures: Vec::new(),
+            }
+        }
     }
 
     static STATE: OnceLock<Mutex<State>> = OnceLock::new();
@@ -49,34 +60,67 @@ mod windows_harness {
         } else {
             return LRESULT(1);
         };
-        let key = match event.vkCode {
-            VK_LWIN | VK_RWIN => KeyCode::SuperLeft,
-            VK_R => KeyCode::KeyR,
-            _ => KeyCode::KeyA,
-        };
-
         if let Ok(mut state) = STATE.get_or_init(Default::default).lock() {
-            let outcome = state.controller.handle(key, edge);
+            let dispatch = state
+                .adapter
+                .handle_native(NativeKeyboardEvent {
+                    virtual_key: event.vkCode,
+                    scan_code: event.scanCode,
+                    extended: event.flags.0 & 1 != 0,
+                    edge,
+                    injected: event.flags.0 & 0x10 != 0,
+                })
+                .expect("the acceptance harness explicitly permits its marked injected events");
+            let key = dispatch.normalized.physical;
+            let outcome = dispatch.outcomes.first();
             let index = state.seen;
             let expected = [
-                (KeyCode::SuperLeft, KeyEdge::Pressed, None, true),
                 (
-                    KeyCode::KeyR,
+                    nickel_input::PhysicalKey::Code(nickel_input::KeyCode::SuperLeft),
+                    KeyEdge::Pressed,
+                    None,
+                    false,
+                ),
+                (
+                    nickel_input::PhysicalKey::Code(nickel_input::KeyCode::KeyR),
                     KeyEdge::Pressed,
                     Some(HotkeyAction::ShowRun),
                     true,
                 ),
-                (KeyCode::KeyR, KeyEdge::Released, None, true),
-                (KeyCode::SuperLeft, KeyEdge::Released, None, true),
-                (KeyCode::KeyR, KeyEdge::Pressed, None, false),
-                (KeyCode::KeyR, KeyEdge::Released, None, false),
-            ][index.min(EXPECTED_EVENTS - 1)];
-            if (key, edge, outcome.action, outcome.suppress) != expected {
+                (
+                    nickel_input::PhysicalKey::Code(nickel_input::KeyCode::KeyR),
+                    KeyEdge::Released,
+                    None,
+                    false,
+                ),
+                (
+                    nickel_input::PhysicalKey::Code(nickel_input::KeyCode::SuperLeft),
+                    KeyEdge::Released,
+                    None,
+                    false,
+                ),
+                (
+                    nickel_input::PhysicalKey::Code(nickel_input::KeyCode::KeyR),
+                    KeyEdge::Pressed,
+                    None,
+                    false,
+                ),
+                (
+                    nickel_input::PhysicalKey::Code(nickel_input::KeyCode::KeyR),
+                    KeyEdge::Released,
+                    None,
+                    false,
+                ),
+            ][index.min(EXPECTED_EVENTS - 1)]
+            .clone();
+            let action = outcome.map(|outcome| outcome.action);
+            let suppress = outcome.is_some_and(|outcome| outcome.suppress);
+            if (key.clone(), edge, action, suppress) != expected {
                 state.failures.push(format!(
                     "event {}: got ({key:?}, {edge:?}, {:?}, suppress={}), expected {expected:?}",
                     index + 1,
-                    outcome.action,
-                    outcome.suppress
+                    action,
+                    suppress
                 ));
             }
             state.seen += 1;

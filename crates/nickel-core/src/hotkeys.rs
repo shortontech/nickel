@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 
 use nickel_input::{
-    AggregateModifier, PhysicalKey, Shortcut, ShortcutKey, ShortcutTrigger,
+    AggregateModifier, Binding, DeviceId, EventOrder, InputEvent, KeyEvent, KeyLocation,
+    LogicalKey, Modifier, ModifierState, NativeCode, NativeKey, PhysicalKey, Shortcut,
+    ShortcutEngine, ShortcutKey, ShortcutTrigger,
     global::{
         GlobalShortcutAdapter, GlobalShortcutEdge, Registration, RegistrationError, RegistrationId,
         RegistrationTable, ShortcutCapability, ShortcutOwnership,
@@ -30,17 +32,25 @@ pub enum HotkeyAction {
 
 #[derive(Debug)]
 pub struct CompositorShortcutAdapter {
-    controller: HotkeyController,
+    engine: ShortcutEngine<RegistrationId>,
+    next_order: u64,
     registrations: RegistrationTable<HotkeyAction>,
     actions: BTreeMap<HotkeyAction, RegistrationId>,
+    bindings: BTreeMap<RegistrationId, Binding<RegistrationId>>,
+    switch_active: bool,
+    launcher_visible: bool,
 }
 
 impl Default for CompositorShortcutAdapter {
     fn default() -> Self {
         let mut adapter = Self {
-            controller: HotkeyController::default(),
+            engine: ShortcutEngine::default(),
+            next_order: 0,
             registrations: RegistrationTable::default(),
             actions: BTreeMap::new(),
+            bindings: BTreeMap::new(),
+            switch_active: false,
+            launcher_visible: false,
         };
         for registration in compositor_registrations() {
             let action = registration.action;
@@ -55,47 +65,178 @@ impl Default for CompositorShortcutAdapter {
 
 impl CompositorShortcutAdapter {
     pub fn handle(&mut self, key: KeyCode, edge: KeyEdge) -> HotkeyOutcome {
-        let mut outcome = self.controller.handle(key, edge);
-        if let Some(action) = outcome.action {
-            outcome.action = self
-                .actions
-                .get(&action)
-                .and_then(|id| {
-                    self.registrations
-                        .deliver(*id, GlobalShortcutEdge::Activated)
-                })
+        let suppress_owned = self.event_is_owned(key);
+        self.next_order = self.next_order.saturating_add(1);
+        let event = InputEvent::Key(shared_key_event(
+            key,
+            edge,
+            self.next_order,
+            self.engine.modifiers(),
+        ));
+        let recognized = self.engine.handle(&event);
+        let suppress = suppress_owned || recognized.iter().any(|outcome| outcome.suppress);
+        let action = recognized.into_iter().find_map(|outcome| {
+            let id = outcome.action;
+            let candidate = self
+                .registrations
+                .deliver(id, GlobalShortcutEdge::Activated)
                 .map(|event| event.action);
+            if candidate == Some(HotkeyAction::CommitSwitch) && !self.switch_active {
+                return None;
+            }
+            let delivered = candidate;
+            if matches!(
+                delivered,
+                Some(
+                    HotkeyAction::SwitchNext
+                        | HotkeyAction::SwitchPrevious
+                        | HotkeyAction::SwitchGroupNext
+                        | HotkeyAction::SwitchGroupPrevious
+                )
+            ) {
+                self.switch_active = true;
+            } else if delivered == Some(HotkeyAction::CommitSwitch) {
+                self.switch_active = false;
+            }
+            delivered
+        });
+        if key == KeyCode::KeyR
+            && edge == KeyEdge::Released
+            && self.engine.modifiers().aggregate(AggregateModifier::Super)
+        {
+            self.engine
+                .reconcile_modifier(COMPOSITOR_KEYBOARD, Modifier::SuperLeft, false);
+            self.engine
+                .reconcile_modifier(COMPOSITOR_KEYBOARD, Modifier::SuperRight, false);
         }
-        outcome
+        HotkeyOutcome { action, suppress }
     }
 
     pub fn handle_unmapped(&mut self, edge: KeyEdge) -> HotkeyOutcome {
-        self.controller.handle_unmapped(edge)
+        if edge == KeyEdge::Pressed {
+            self.engine.chord_held_modifiers();
+        }
+        HotkeyOutcome::default()
+    }
+
+    pub fn handle_reconciled(&mut self, key: KeyCode, edge: KeyEdge) -> HotkeyOutcome {
+        if key == KeyCode::PrintScreen
+            && edge == KeyEdge::Released
+            && !self.snapshot().print_screen_held
+        {
+            let pressed = self.handle(key, KeyEdge::Pressed);
+            let _ = self.handle(key, KeyEdge::Released);
+            return pressed;
+        }
+        self.handle(key, edge)
     }
 
     pub fn snapshot(&self) -> HotkeySnapshot {
-        self.controller.snapshot()
+        let held = |key| {
+            self.engine
+                .pressed_keys(COMPOSITOR_KEYBOARD)
+                .any(|pressed| pressed == &PhysicalKey::Code(key))
+        };
+        HotkeySnapshot {
+            super_held: self.engine.modifiers().aggregate(AggregateModifier::Super),
+            alt_held: self.engine.modifiers().aggregate(AggregateModifier::Alt),
+            shift_held: self.engine.modifiers().aggregate(AggregateModifier::Shift),
+            control_held: self
+                .engine
+                .modifiers()
+                .aggregate(AggregateModifier::Control),
+            tab_held: held(KeyCode::Tab),
+            grave_held: held(KeyCode::Backquote),
+            run_held: held(KeyCode::KeyR),
+            lock_held: held(KeyCode::KeyL),
+            print_screen_held: held(KeyCode::PrintScreen),
+            left_held: held(KeyCode::ArrowLeft),
+            right_held: held(KeyCode::ArrowRight),
+            switch_active: self.switch_active,
+            launcher_visible: self.launcher_visible,
+            ..HotkeySnapshot::default()
+        }
     }
 
     pub fn begin_pointer_chord(&mut self) -> bool {
-        self.controller.begin_pointer_chord()
+        if !self.engine.modifiers().aggregate(AggregateModifier::Super) {
+            return false;
+        }
+        self.engine.chord_held_modifiers();
+        true
     }
 
     pub fn reconcile_super(&mut self, physically_held: bool) {
-        self.controller.reconcile_super(physically_held);
+        if !physically_held {
+            self.engine
+                .reconcile_modifier(COMPOSITOR_KEYBOARD, Modifier::SuperLeft, false);
+            self.engine
+                .reconcile_modifier(COMPOSITOR_KEYBOARD, Modifier::SuperRight, false);
+        }
     }
 
     pub fn reconcile_alt(&mut self, physically_held: bool) -> Option<HotkeyAction> {
-        self.controller.reconcile_alt(physically_held)
+        if physically_held {
+            return None;
+        }
+        let held = [KeyCode::AltLeft, KeyCode::AltRight]
+            .into_iter()
+            .filter(|key| {
+                self.engine
+                    .pressed_keys(COMPOSITOR_KEYBOARD)
+                    .any(|pressed| pressed == &PhysicalKey::Code(*key))
+            })
+            .collect::<Vec<_>>();
+        held.into_iter()
+            .find_map(|key| self.handle(key, KeyEdge::Released).action)
     }
 
     pub fn launcher_visibility_applied(&mut self, visible: bool) {
-        self.controller.launcher_visibility_applied(visible);
+        self.launcher_visible = visible;
     }
 
     pub fn reset_pressed_state(&mut self) {
-        self.controller = HotkeyController::default();
+        self.engine.reset();
+        self.switch_active = false;
         self.registrations.reset_edges();
+    }
+
+    fn event_is_owned(&self, key: KeyCode) -> bool {
+        let modifiers = self.engine.modifiers();
+        match key {
+            KeyCode::Tab | KeyCode::Backquote | KeyCode::PrintScreen => {
+                modifiers.aggregate(AggregateModifier::Alt) || key == KeyCode::PrintScreen
+            }
+            KeyCode::KeyR => modifiers.aggregate(AggregateModifier::Super),
+            KeyCode::KeyL => {
+                modifiers.aggregate(AggregateModifier::Super)
+                    || (modifiers.aggregate(AggregateModifier::Control)
+                        && modifiers.aggregate(AggregateModifier::Alt))
+            }
+            KeyCode::ArrowLeft | KeyCode::ArrowRight => {
+                modifiers.aggregate(AggregateModifier::Super)
+                    && modifiers.aggregate(AggregateModifier::Control)
+            }
+            _ => false,
+        }
+    }
+}
+
+const COMPOSITOR_KEYBOARD: DeviceId = DeviceId(0x0043_4f4d_504b_4244);
+
+fn shared_key_event(key: KeyCode, edge: KeyEdge, order: u64, modifiers: ModifierState) -> KeyEvent {
+    KeyEvent {
+        device: COMPOSITOR_KEYBOARD,
+        order: EventOrder(order),
+        physical: PhysicalKey::Code(key),
+        logical: LogicalKey::Native(NativeKey {
+            namespace: "nickel-compositor".into(),
+            code: NativeCode::Numeric(key as u64),
+        }),
+        location: KeyLocation::Standard,
+        edge,
+        repeat: false,
+        modifiers,
     }
 }
 
@@ -112,16 +253,32 @@ impl GlobalShortcutAdapter<HotkeyAction> for CompositorShortcutAdapter {
         &mut self,
         registration: Registration<HotkeyAction>,
     ) -> Result<RegistrationId, RegistrationError> {
-        self.registrations.register(registration)
+        let shortcut = registration.shortcut.clone();
+        let suppress = !matches!(
+            registration.shortcut.trigger,
+            ShortcutTrigger::ModifierReleased(_) | ShortcutTrigger::ModifierReleasedAfterChord(_)
+        );
+        let id = self.registrations.register(registration)?;
+        let binding = Binding {
+            suppress,
+            shortcut,
+            action: id,
+        };
+        self.bindings.insert(id, binding);
+        self.engine.set_bindings(self.bindings.values().cloned());
+        Ok(id)
     }
 
     fn unregister(&mut self, id: RegistrationId) -> bool {
         self.actions.retain(|_, registered| *registered != id);
+        self.bindings.remove(&id);
+        self.engine.set_bindings(self.bindings.values().cloned());
         self.registrations.unregister(id)
     }
 
     fn reset(&mut self) {
-        self.controller = HotkeyController::default();
+        self.engine.reset();
+        self.switch_active = false;
         self.registrations.reset_edges();
     }
 }
@@ -291,302 +448,6 @@ pub struct HotkeySnapshot {
     pub switch_active: bool,
     pub launcher_visible: bool,
 }
-
-#[derive(Debug, Default)]
-pub struct HotkeyController {
-    super_held: bool,
-    super_chorded: bool,
-    alt_held: bool,
-    shift_held: bool,
-    control_held: bool,
-    tab_held: bool,
-    grave_held: bool,
-    run_held: bool,
-    lock_held: bool,
-    print_screen_held: bool,
-    left_held: bool,
-    right_held: bool,
-    switch_active: bool,
-    launcher_visible: bool,
-}
-
-impl HotkeyController {
-    pub fn snapshot(&self) -> HotkeySnapshot {
-        HotkeySnapshot {
-            super_held: self.super_held,
-            super_chorded: self.super_chorded,
-            alt_held: self.alt_held,
-            shift_held: self.shift_held,
-            control_held: self.control_held,
-            tab_held: self.tab_held,
-            grave_held: self.grave_held,
-            run_held: self.run_held,
-            lock_held: self.lock_held,
-            print_screen_held: self.print_screen_held,
-            left_held: self.left_held,
-            right_held: self.right_held,
-            switch_active: self.switch_active,
-            launcher_visible: self.launcher_visible,
-        }
-    }
-
-    pub fn handle(&mut self, key: KeyCode, edge: KeyEdge) -> HotkeyOutcome {
-        match (key, edge) {
-            (KeyCode::SuperLeft | KeyCode::SuperRight, KeyEdge::Pressed) => {
-                if !self.super_held {
-                    self.super_held = true;
-                    self.super_chorded = false;
-                }
-                // Observe Super without taking it away from the platform or applications.
-                // This lets another shell present its own Start surface alongside Nickel.
-                HotkeyOutcome::default()
-            }
-            (KeyCode::SuperLeft | KeyCode::SuperRight, KeyEdge::Released) => {
-                if !self.super_held {
-                    return HotkeyOutcome::default();
-                }
-                self.super_held = false;
-                let action = (!self.super_chorded).then_some(HotkeyAction::ToggleLauncher);
-                self.super_chorded = false;
-                HotkeyOutcome {
-                    action,
-                    suppress: false,
-                }
-            }
-            (KeyCode::KeyR, KeyEdge::Pressed) if self.super_held => {
-                self.super_chorded = true;
-                let action = (!self.run_held).then_some(HotkeyAction::ShowRun);
-                self.run_held = true;
-                HotkeyOutcome {
-                    action,
-                    suppress: true,
-                }
-            }
-            (KeyCode::KeyR, KeyEdge::Released) if self.run_held => {
-                self.run_held = false;
-                // Super+R transfers focus to Run, and the platform may omit the later Super
-                // release from the low-level hook during that transition. End the completed chord
-                // here so a missed release cannot make subsequent R presses look like shortcuts.
-                self.super_held = false;
-                self.super_chorded = false;
-                HotkeyOutcome {
-                    suppress: true,
-                    ..Default::default()
-                }
-            }
-            (KeyCode::KeyL, KeyEdge::Pressed)
-                if self.super_held || (self.control_held && self.alt_held) =>
-            {
-                if self.super_held {
-                    self.super_chorded = true;
-                }
-                let action = (!self.lock_held).then_some(HotkeyAction::LockSession);
-                self.lock_held = true;
-                HotkeyOutcome {
-                    action,
-                    suppress: true,
-                }
-            }
-            (KeyCode::KeyL, KeyEdge::Released) if self.lock_held => {
-                self.lock_held = false;
-                HotkeyOutcome {
-                    suppress: true,
-                    ..Default::default()
-                }
-            }
-            (KeyCode::AltLeft | KeyCode::AltRight, KeyEdge::Pressed) => {
-                self.alt_held = true;
-                HotkeyOutcome::default()
-            }
-            (KeyCode::AltLeft | KeyCode::AltRight, KeyEdge::Released) => {
-                self.alt_held = false;
-                self.tab_held = false;
-                self.grave_held = false;
-                self.print_screen_held = false;
-                let action = self.switch_active.then_some(HotkeyAction::CommitSwitch);
-                self.switch_active = false;
-                HotkeyOutcome {
-                    action,
-                    suppress: false,
-                }
-            }
-            (KeyCode::ShiftLeft | KeyCode::ShiftRight, edge) => {
-                self.shift_held = edge == KeyEdge::Pressed;
-                HotkeyOutcome::default()
-            }
-            (KeyCode::ControlLeft | KeyCode::ControlRight, edge) => {
-                self.control_held = edge == KeyEdge::Pressed;
-                HotkeyOutcome::default()
-            }
-            (KeyCode::ArrowLeft | KeyCode::ArrowRight, KeyEdge::Pressed)
-                if self.super_held && self.control_held =>
-            {
-                self.super_chorded = true;
-                let held = match key {
-                    KeyCode::ArrowLeft => &mut self.left_held,
-                    KeyCode::ArrowRight => &mut self.right_held,
-                    _ => unreachable!(),
-                };
-                if *held {
-                    return HotkeyOutcome {
-                        suppress: true,
-                        ..Default::default()
-                    };
-                }
-                *held = true;
-                let action = match (key, self.shift_held) {
-                    (KeyCode::ArrowLeft, false) => HotkeyAction::SwitchWorkspacePrevious,
-                    (KeyCode::ArrowRight, false) => HotkeyAction::SwitchWorkspaceNext,
-                    (KeyCode::ArrowLeft, true) => HotkeyAction::MoveWindowToPreviousWorkspace,
-                    (KeyCode::ArrowRight, true) => HotkeyAction::MoveWindowToNextWorkspace,
-                    _ => unreachable!(),
-                };
-                HotkeyOutcome {
-                    action: Some(action),
-                    suppress: true,
-                }
-            }
-            (KeyCode::ArrowLeft | KeyCode::ArrowRight, KeyEdge::Released) => {
-                match key {
-                    KeyCode::ArrowLeft => self.left_held = false,
-                    KeyCode::ArrowRight => self.right_held = false,
-                    _ => unreachable!(),
-                }
-                HotkeyOutcome {
-                    suppress: self.super_held && self.control_held,
-                    ..Default::default()
-                }
-            }
-            (KeyCode::Tab, KeyEdge::Pressed) if self.alt_held => {
-                let action = if self.tab_held {
-                    None
-                } else if self.shift_held {
-                    Some(HotkeyAction::SwitchPrevious)
-                } else {
-                    Some(HotkeyAction::SwitchNext)
-                };
-                self.tab_held = true;
-                self.switch_active = true;
-                HotkeyOutcome {
-                    action,
-                    suppress: true,
-                }
-            }
-            (KeyCode::Tab, KeyEdge::Released) if self.tab_held => {
-                self.tab_held = false;
-                HotkeyOutcome {
-                    suppress: true,
-                    ..Default::default()
-                }
-            }
-            (KeyCode::Backquote, KeyEdge::Pressed) if self.alt_held => {
-                let action = if self.grave_held {
-                    None
-                } else if self.shift_held {
-                    Some(HotkeyAction::SwitchGroupPrevious)
-                } else {
-                    Some(HotkeyAction::SwitchGroupNext)
-                };
-                self.grave_held = true;
-                self.switch_active = true;
-                HotkeyOutcome {
-                    action,
-                    suppress: true,
-                }
-            }
-            (KeyCode::Backquote, KeyEdge::Released) if self.grave_held => {
-                self.grave_held = false;
-                HotkeyOutcome {
-                    suppress: true,
-                    ..Default::default()
-                }
-            }
-            (KeyCode::PrintScreen, KeyEdge::Pressed) => {
-                let action =
-                    (!self.print_screen_held).then_some(if self.alt_held && self.shift_held {
-                        HotkeyAction::CaptureActiveWindowToFile
-                    } else if self.alt_held {
-                        HotkeyAction::CaptureActiveWindow
-                    } else {
-                        HotkeyAction::ShowScreenshotTool
-                    });
-                self.print_screen_held = true;
-                HotkeyOutcome {
-                    action,
-                    suppress: true,
-                }
-            }
-            (KeyCode::PrintScreen, KeyEdge::Released) if self.print_screen_held => {
-                self.print_screen_held = false;
-                HotkeyOutcome {
-                    suppress: true,
-                    ..Default::default()
-                }
-            }
-            _ => {
-                if self.super_held && edge == KeyEdge::Pressed {
-                    self.super_chorded = true;
-                }
-                HotkeyOutcome::default()
-            }
-        }
-    }
-
-    pub fn handle_unmapped(&mut self, edge: KeyEdge) -> HotkeyOutcome {
-        if self.super_held && edge == KeyEdge::Pressed {
-            self.super_chorded = true;
-        }
-        HotkeyOutcome::default()
-    }
-
-    pub fn handle_reconciled(&mut self, key: KeyCode, edge: KeyEdge) -> HotkeyOutcome {
-        if key == KeyCode::PrintScreen && edge == KeyEdge::Released && !self.print_screen_held {
-            let pressed = self.handle(key, KeyEdge::Pressed);
-            self.handle(key, KeyEdge::Released);
-            return pressed;
-        }
-        self.handle(key, edge)
-    }
-
-    pub fn begin_pointer_chord(&mut self) -> bool {
-        if self.super_held {
-            self.super_chorded = true;
-            true
-        } else {
-            false
-        }
-    }
-
-    pub fn reconcile_super(&mut self, physically_held: bool) {
-        if !physically_held {
-            self.super_held = false;
-            self.super_chorded = false;
-            self.run_held = false;
-            self.lock_held = false;
-            self.left_held = false;
-            self.right_held = false;
-        }
-    }
-
-    pub fn reconcile_alt(&mut self, physically_held: bool) -> Option<HotkeyAction> {
-        if physically_held || !self.alt_held {
-            return None;
-        }
-        self.alt_held = false;
-        self.tab_held = false;
-        self.grave_held = false;
-        self.print_screen_held = false;
-        self.lock_held = false;
-        let action = self.switch_active.then_some(HotkeyAction::CommitSwitch);
-        self.switch_active = false;
-        action
-    }
-
-    pub fn launcher_visibility_applied(&mut self, visible: bool) {
-        self.launcher_visible = visible;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use nickel_input::global::{
@@ -596,8 +457,8 @@ mod tests {
     use nickel_input::{KeyCode, KeyEdge};
 
     use super::{
-        CompositorShortcutAdapter, HotkeyAction, HotkeyController, HotkeyOutcome,
-        compositor_registrations, default_bindings,
+        CompositorShortcutAdapter, HotkeyAction, HotkeyOutcome, compositor_registrations,
+        default_bindings,
     };
 
     #[test]
@@ -685,7 +546,7 @@ mod tests {
     #[test]
     fn super_release_toggles_launcher_once() {
         for key in [KeyCode::SuperLeft, KeyCode::SuperRight] {
-            let mut controller = HotkeyController::default();
+            let mut controller = CompositorShortcutAdapter::default();
             assert_eq!(
                 controller.handle(key, KeyEdge::Pressed),
                 HotkeyOutcome::default()
@@ -712,7 +573,7 @@ mod tests {
 
     #[test]
     fn pointer_chord_never_toggles_launcher() {
-        let mut controller = HotkeyController::default();
+        let mut controller = CompositorShortcutAdapter::default();
         controller.handle(KeyCode::SuperLeft, KeyEdge::Pressed);
         assert!(controller.begin_pointer_chord());
         assert_eq!(
@@ -725,7 +586,7 @@ mod tests {
 
     #[test]
     fn run_release_ends_super_chord_even_without_super_release() {
-        let mut controller = HotkeyController::default();
+        let mut controller = CompositorShortcutAdapter::default();
         controller.handle(KeyCode::SuperLeft, KeyEdge::Pressed);
         assert_eq!(
             controller.handle(KeyCode::KeyR, KeyEdge::Pressed),
@@ -750,7 +611,7 @@ mod tests {
 
     #[test]
     fn alt_tab_commits_on_alt_release() {
-        let mut controller = HotkeyController::default();
+        let mut controller = CompositorShortcutAdapter::default();
         assert_eq!(
             controller.handle(KeyCode::AltLeft, KeyEdge::Pressed),
             HotkeyOutcome::default()
@@ -780,7 +641,7 @@ mod tests {
 
     #[test]
     fn repeated_alt_tab_keydowns_are_suppressed_until_release() {
-        let mut controller = HotkeyController::default();
+        let mut controller = CompositorShortcutAdapter::default();
         controller.handle(KeyCode::AltLeft, KeyEdge::Pressed);
         assert_eq!(
             controller.handle(KeyCode::Tab, KeyEdge::Pressed).action,
@@ -803,7 +664,7 @@ mod tests {
 
     #[test]
     fn alt_grave_cycles_within_active_group() {
-        let mut controller = HotkeyController::default();
+        let mut controller = CompositorShortcutAdapter::default();
         controller.handle(KeyCode::AltLeft, KeyEdge::Pressed);
         assert_eq!(
             controller
@@ -822,7 +683,7 @@ mod tests {
 
     #[test]
     fn alt_print_screen_captures_once_per_press() {
-        let mut controller = HotkeyController::default();
+        let mut controller = CompositorShortcutAdapter::default();
         controller.handle(KeyCode::AltLeft, KeyEdge::Pressed);
         assert_eq!(
             controller.handle(KeyCode::PrintScreen, KeyEdge::Pressed),
@@ -849,7 +710,7 @@ mod tests {
 
     #[test]
     fn alt_shift_print_screen_uses_the_file_capture_action() {
-        let mut controller = HotkeyController::default();
+        let mut controller = CompositorShortcutAdapter::default();
         controller.handle(KeyCode::AltLeft, KeyEdge::Pressed);
         controller.handle(KeyCode::ShiftLeft, KeyEdge::Pressed);
 
@@ -864,7 +725,7 @@ mod tests {
 
     #[test]
     fn print_screen_opens_crop_tool() {
-        let mut controller = HotkeyController::default();
+        let mut controller = CompositorShortcutAdapter::default();
         assert_eq!(
             controller.handle(KeyCode::PrintScreen, KeyEdge::Pressed),
             HotkeyOutcome {
@@ -877,7 +738,7 @@ mod tests {
 
     #[test]
     fn orphaned_print_screen_release_opens_crop_tool_once() {
-        let mut controller = HotkeyController::default();
+        let mut controller = CompositorShortcutAdapter::default();
         assert_eq!(
             controller.handle_reconciled(KeyCode::PrintScreen, KeyEdge::Released),
             HotkeyOutcome {
@@ -890,7 +751,7 @@ mod tests {
 
     #[test]
     fn physical_reconciliation_clears_stale_super() {
-        let mut controller = HotkeyController::default();
+        let mut controller = CompositorShortcutAdapter::default();
         controller.handle(KeyCode::SuperLeft, KeyEdge::Pressed);
         controller.reconcile_super(false);
         assert!(!controller.begin_pointer_chord());
@@ -898,7 +759,7 @@ mod tests {
 
     #[test]
     fn workspace_chords_distinguish_switch_move_direction_and_repeats() {
-        let mut controller = HotkeyController::default();
+        let mut controller = CompositorShortcutAdapter::default();
         controller.handle(KeyCode::SuperLeft, KeyEdge::Pressed);
         controller.handle(KeyCode::ControlLeft, KeyEdge::Pressed);
         assert_eq!(
@@ -930,7 +791,7 @@ mod tests {
             vec![KeyCode::SuperLeft],
             vec![KeyCode::ControlRight, KeyCode::AltLeft],
         ] {
-            let mut controller = HotkeyController::default();
+            let mut controller = CompositorShortcutAdapter::default();
             for modifier in modifiers {
                 controller.handle(modifier, KeyEdge::Pressed);
             }

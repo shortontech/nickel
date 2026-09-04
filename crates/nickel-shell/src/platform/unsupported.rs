@@ -9,10 +9,6 @@ pub fn wallpaper() -> Wallpaper {
     Wallpaper::default()
 }
 
-pub fn paste_text_if_requested(_: &str) -> Option<String> {
-    None
-}
-
 pub fn network_status() -> super::NetworkStatus {
     super::NetworkStatus::default()
 }

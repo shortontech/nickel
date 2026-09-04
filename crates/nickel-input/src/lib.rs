@@ -568,6 +568,11 @@ impl<A: Clone> ShortcutEngine<A> {
     pub fn reset(&mut self) {
         self.devices.clear();
     }
+    /// Replaces the binding set without disturbing currently observed device
+    /// state. Registration adapters use this after an explicit add/remove.
+    pub fn set_bindings(&mut self, bindings: impl IntoIterator<Item = Binding<A>>) {
+        self.bindings = bindings.into_iter().collect();
+    }
 
     /// Records that a non-key gesture used the currently held modifiers.
     ///
@@ -620,10 +625,11 @@ impl<A: Clone> ShortcutEngine<A> {
     fn handle_key(&mut self, event: &KeyEvent) -> Vec<ShortcutOutcome<A>> {
         self.observe_order(event.order);
         let modifier = modifier_for(&event.physical);
-        let (genuine_press, modifier_was_chorded) = {
+        let (genuine_press, genuine_release, modifier_was_chorded) = {
             let state = self.devices.entry(event.device).or_default();
             let was_pressed = state.pressed.contains(&event.physical);
             let genuine_press = event.edge == KeyEdge::Pressed && !was_pressed && !event.repeat;
+            let genuine_release = event.edge == KeyEdge::Released && was_pressed;
 
             if event.edge == KeyEdge::Pressed {
                 state.pressed.insert(event.physical.clone());
@@ -641,7 +647,7 @@ impl<A: Clone> ShortcutEngine<A> {
             }
             let modifier_was_chorded =
                 modifier.is_some_and(|side| state.chorded_modifiers.contains(&side));
-            (genuine_press, modifier_was_chorded)
+            (genuine_press, genuine_release, modifier_was_chorded)
         };
 
         if genuine_press && modifier.is_none() {
@@ -666,14 +672,14 @@ impl<A: Clone> ShortcutEngine<A> {
                         && exact_modifiers(&binding.shortcut.modifiers, &aggregate)
                 }
                 ShortcutTrigger::ModifierReleased(side) => {
-                    event.edge == KeyEdge::Released
+                    genuine_release
                         && modifier == Some(side)
                         && !modifier_was_chorded
                         && exact_modifiers(&binding.shortcut.modifiers, &modifiers_after_release)
                         && shortcut_key_matches(&binding.shortcut.key, event)
                 }
                 ShortcutTrigger::ModifierReleasedAfterChord(side) => {
-                    event.edge == KeyEdge::Released
+                    genuine_release
                         && modifier == Some(side)
                         && modifier_was_chorded
                         && exact_modifiers(&binding.shortcut.modifiers, &modifiers_after_release)
