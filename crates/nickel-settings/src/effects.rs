@@ -2,13 +2,13 @@ use super::*;
 
 impl SettingsApp {
     pub(crate) fn load_bluetooth(&mut self) {
-        self.bluetooth = match read_bluetooth_snapshot() {
-            Ok(snapshot) => snapshot,
+        match read_bluetooth_snapshot() {
+            Ok(snapshot) => self.bluetooth = snapshot,
             Err(error) => {
                 tracing::warn!(%error, "failed to read Bluetooth settings");
-                BluetoothSnapshot::default()
+                self.bluetooth_status = Some(error);
             }
-        };
+        }
         tracing::debug!(
             available = self.bluetooth.available,
             powered = self.bluetooth.powered,

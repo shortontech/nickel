@@ -60,6 +60,9 @@ pub(super) struct SettingsApp {
     pub(super) next_wifi_refresh: Option<Instant>,
     pub(super) wifi_refreshes_left: u8,
     pub(super) bluetooth: BluetoothSnapshot,
+    pub(super) bluetooth_operation: Option<BluetoothOperation>,
+    pub(super) bluetooth_operation_rx: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
+    pub(super) bluetooth_status: Option<String>,
     pub(super) next_bluetooth_refresh: Instant,
     pub(super) next_network_refresh: Instant,
 }
@@ -176,6 +179,9 @@ impl Default for SettingsApp {
             next_wifi_refresh: None,
             wifi_refreshes_left: 0,
             bluetooth: BluetoothSnapshot::default(),
+            bluetooth_operation: None,
+            bluetooth_operation_rx: None,
+            bluetooth_status: None,
             next_bluetooth_refresh: Instant::now(),
             next_network_refresh: Instant::now(),
         }

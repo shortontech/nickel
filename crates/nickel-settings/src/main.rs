@@ -354,6 +354,13 @@ struct BluetoothSnapshot {
     devices: Vec<BluetoothDevice>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum BluetoothOperation {
+    SetPower(bool),
+    SetDiscovery(bool),
+    ToggleDevice(String),
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum SettingsPage {
     Display,
@@ -663,15 +670,28 @@ impl SettingsApp {
             SettingsMessage::SidebarSearchChanged(value) => self.sidebar_query = value,
             SettingsMessage::ShowNavigation => self.active_destination = None,
             SettingsMessage::SetBluetoothPower(enabled) => {
-                if !self.bluetooth.available || enabled == self.bluetooth.powered {
+                if !self.bluetooth.available
+                    || self.bluetooth_operation_rx.is_some()
+                    || enabled == self.bluetooth.powered
+                {
                     return;
                 }
-                let _ = set_bluetooth_adapter_property("Powered", enabled);
-                self.next_bluetooth_refresh = Instant::now();
+                self.start_bluetooth_operation(BluetoothOperation::SetPower(enabled), move || {
+                    set_bluetooth_adapter_property("Powered", enabled)
+                });
             }
             SettingsMessage::BluetoothDiscovery => {
-                let _ = set_bluetooth_adapter_property("Discovering", !self.bluetooth.discovering);
-                self.next_bluetooth_refresh = Instant::now();
+                if !self.bluetooth.available
+                    || !self.bluetooth.powered
+                    || self.bluetooth_operation_rx.is_some()
+                {
+                    return;
+                }
+                let enabled = !self.bluetooth.discovering;
+                self.start_bluetooth_operation(
+                    BluetoothOperation::SetDiscovery(enabled),
+                    move || set_bluetooth_adapter_property("Discovering", enabled),
+                );
             }
             SettingsMessage::SetWifiPower(enabled) => {
                 if !self.network_available
@@ -716,10 +736,19 @@ impl SettingsApp {
             }
             SettingsMessage::RetryCodexProbe => self.start_codex_probe(),
             SettingsMessage::BluetoothDevice(index) => {
-                if let Some(device) = self.bluetooth.devices.get(index) {
-                    let _ = toggle_bluetooth_device(device);
-                    self.next_bluetooth_refresh = Instant::now();
+                let Some(device) = self.bluetooth.devices.get(index).cloned() else {
+                    return;
+                };
+                if !self.bluetooth.available
+                    || !self.bluetooth.powered
+                    || self.bluetooth_operation_rx.is_some()
+                {
+                    return;
                 }
+                let id = device.id.clone();
+                self.start_bluetooth_operation(BluetoothOperation::ToggleDevice(id), move || {
+                    toggle_bluetooth_device(&device)
+                });
             }
             SettingsMessage::AppearanceLight => {
                 self.shell_settings.theme = ThemePreference::Light;
@@ -1324,6 +1353,7 @@ impl SettingsApp {
     fn tick(&mut self) {
         self.poll_wallpaper_dialog();
         self.poll_wifi_power();
+        self.poll_bluetooth_operation();
         self.poll_codex_probe();
         let now = Instant::now();
         let session_events = self
@@ -1463,6 +1493,47 @@ impl SettingsApp {
                 self.wifi_status =
                     self.localizer
                         .value("settings-network-connection-failed", "error", &error);
+                self.request_redraw();
+            }
+        }
+    }
+
+    fn start_bluetooth_operation(
+        &mut self,
+        operation: BluetoothOperation,
+        request: impl FnOnce() -> Result<(), String> + Send + 'static,
+    ) {
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(request());
+        });
+        self.bluetooth_operation = Some(operation);
+        self.bluetooth_operation_rx = Some(receiver);
+        self.bluetooth_status = None;
+        self.request_redraw();
+    }
+
+    fn poll_bluetooth_operation(&mut self) {
+        let Some(receiver) = self.bluetooth_operation_rx.as_ref() else {
+            return;
+        };
+        let result = match receiver.try_recv() {
+            Ok(result) => result,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Err("Bluetooth request stopped before completion".to_owned())
+            }
+        };
+        self.bluetooth_operation_rx = None;
+        self.bluetooth_operation = None;
+        match result {
+            Ok(()) => {
+                self.bluetooth_status = None;
+                self.load_bluetooth();
+            }
+            Err(error) => {
+                self.bluetooth_status = Some(error);
+                self.next_bluetooth_refresh = Instant::now() + Duration::from_secs(2);
                 self.request_redraw();
             }
         }
@@ -1750,6 +1821,9 @@ impl Application for SettingsApp {
         if self.wifi_power_rx.is_some() {
             deadlines.push(now + Duration::from_millis(16));
         }
+        if self.bluetooth_operation_rx.is_some() {
+            deadlines.push(now + Duration::from_millis(16));
+        }
         if self.page == SettingsPage::OptionalFeatures {
             deadlines.push(self.next_optional_feature_refresh);
         }
@@ -1909,11 +1983,12 @@ mod tests {
     use nickel_ui::{Application, SemanticRole};
 
     use super::{
-        BluetoothDevice, CodexSource, ControllerAction, FeatureEffectiveState, FeatureHealth,
-        FeatureInstallation, FeaturePolicy, FeatureSupport, FileIconPreference, NetworkAdapter,
-        OptionalFeatureRuntime, OptionalFeatureSettings, Rect, SIDEBAR_WIDTH, SettingsApp,
-        SettingsHostAdapter, SettingsMessage, SettingsPage, ThemePreference, UiHost,
-        WallpaperSettings, attach_rect_centered, codex_feature_state, constrain_center, snap_rect,
+        BluetoothDevice, BluetoothOperation, CodexSource, ControllerAction, FeatureEffectiveState,
+        FeatureHealth, FeatureInstallation, FeaturePolicy, FeatureSupport, FileIconPreference,
+        NetworkAdapter, OptionalFeatureRuntime, OptionalFeatureSettings, Rect, SIDEBAR_WIDTH,
+        SettingsApp, SettingsHostAdapter, SettingsMessage, SettingsPage, ThemePreference, UiHost,
+        WallpaperSettings, WifiNetwork, attach_rect_centered, codex_feature_state,
+        constrain_center, snap_rect,
     };
 
     #[test]
@@ -2342,6 +2417,188 @@ mod tests {
     }
 
     #[test]
+    fn pending_bluetooth_operation_preserves_confirmed_state_and_disables_commands() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Bluetooth);
+        app.bluetooth.available = true;
+        app.bluetooth.powered = true;
+        app.bluetooth.discovering = false;
+        app.bluetooth.devices.push(BluetoothDevice {
+            id: "/test/device".into(),
+            name: "Headphones".into(),
+            paired: true,
+            connected: false,
+            battery_percent: Some(80),
+        });
+        let (_sender, receiver) = std::sync::mpsc::channel();
+        app.bluetooth_operation = Some(BluetoothOperation::SetPower(false));
+        app.bluetooth_operation_rx = Some(receiver);
+
+        let tree = app.build_ui(850.0, 900.0);
+        assert!(
+            tree.semantic_targets_for_message(&SettingsMessage::SetBluetoothPower(false))
+                .is_empty()
+        );
+        assert!(
+            tree.semantic_targets_for_message(&SettingsMessage::BluetoothDiscovery)
+                .is_empty()
+        );
+        let power = tree
+            .accessibility_nodes()
+            .iter()
+            .find(|node| node.id.as_str().ends_with("bluetooth-power"))
+            .expect("pending Bluetooth power switch");
+        assert_eq!(power.state.as_deref(), Some("on disabled"));
+        assert!(!power.enabled);
+        assert!(
+            app.bluetooth.powered,
+            "pending state is not effective state"
+        );
+    }
+
+    #[test]
+    fn failed_bluetooth_operation_preserves_snapshot_and_exposes_error() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Bluetooth);
+        app.bluetooth.available = true;
+        app.bluetooth.powered = false;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        sender.send(Err("permission denied".to_owned())).unwrap();
+        app.bluetooth_operation = Some(BluetoothOperation::SetPower(true));
+        app.bluetooth_operation_rx = Some(receiver);
+
+        app.poll_bluetooth_operation();
+
+        assert!(!app.bluetooth.powered);
+        assert!(app.bluetooth_operation.is_none());
+        assert!(app.bluetooth_operation_rx.is_none());
+        assert_eq!(app.bluetooth_status.as_deref(), Some("permission denied"));
+    }
+
+    #[test]
+    fn settings_low_level_click_targets_are_limited_to_documented_composites() {
+        let source = include_str!("view/pages.rs");
+        let click_targets = source
+            .lines()
+            .filter(|line| line.contains("on_press={"))
+            .collect::<Vec<_>>();
+        assert_eq!(click_targets.len(), 7, "{click_targets:#?}");
+        for required in [
+            "SelectDisplay",
+            "WifiNetwork",
+            "BluetoothDevice",
+            "BarPrimaryDisplay",
+            "BarAllDisplays",
+            "BarDisplayWindows",
+            "BarAllWindows",
+        ] {
+            assert!(
+                click_targets.iter().any(|line| line.contains(required)),
+                "missing documented custom composite for {required}: {click_targets:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_settings_page_builds_across_layout_theme_and_capability_variants() {
+        let pages = [
+            SettingsPage::Display,
+            SettingsPage::Bar,
+            SettingsPage::Appearance,
+            SettingsPage::Network,
+            SettingsPage::Bluetooth,
+            SettingsPage::DefaultApps,
+            SettingsPage::OptionalFeatures,
+            SettingsPage::KeyboardShortcuts,
+            SettingsPage::About,
+        ];
+        for page in pages {
+            for (width, height) in [(560.0, 580.0), (1424.0, 1200.0)] {
+                let mut app = SettingsApp::with_initial_page(page);
+                app.shell_settings.theme = ThemePreference::Light;
+                app.network_available = true;
+                app.bluetooth.available = true;
+                app.bluetooth.powered = true;
+                let tree = app.build_ui(width, height);
+                assert!(
+                    !tree.accessibility_nodes().is_empty(),
+                    "empty semantic tree for {page:?} at {width}x{height}"
+                );
+            }
+        }
+        for (page, dark, available) in [
+            (SettingsPage::Appearance, true, true),
+            (SettingsPage::Network, false, false),
+            (SettingsPage::Bluetooth, false, false),
+        ] {
+            let mut app = SettingsApp::with_initial_page(page);
+            app.shell_settings.theme = if dark {
+                ThemePreference::Dark
+            } else {
+                ThemePreference::Light
+            };
+            app.network_available = available;
+            app.bluetooth.available = available;
+            assert!(!app.build_ui(850.0, 900.0).accessibility_nodes().is_empty());
+        }
+    }
+
+    #[test]
+    fn documented_custom_setting_cards_expose_button_semantics_and_state() {
+        let display = SettingsApp::with_initial_page(SettingsPage::Display).build_ui(850.0, 900.0);
+        let display_card = display
+            .accessibility_nodes()
+            .iter()
+            .find(|node| node.id.as_str().ends_with("display-card-0"))
+            .expect("display card");
+        assert_eq!(display_card.semantic_role, Some(SemanticRole::Button));
+        assert!(
+            display_card
+                .label
+                .as_deref()
+                .is_some_and(|label| !label.is_empty())
+        );
+        assert!(display_card.state.is_some());
+
+        let mut network = SettingsApp::with_initial_page(SettingsPage::Network);
+        network.wifi_networks.push(WifiNetwork {
+            id: "test".into(),
+            profile: "Test network".into(),
+            signal: 75,
+            connected: true,
+            saved: true,
+            secure: true,
+            #[cfg(target_os = "windows")]
+            interface: 0,
+        });
+        let network = network.build_ui(850.0, 900.0);
+        let wifi = network
+            .accessibility_nodes()
+            .iter()
+            .find(|node| node.id.as_str().ends_with("wifi-network-0"))
+            .expect("Wi-Fi network card");
+        assert_eq!(wifi.semantic_role, Some(SemanticRole::Button));
+        assert_eq!(wifi.state.as_deref(), Some("connected"));
+
+        let mut bluetooth = SettingsApp::with_initial_page(SettingsPage::Bluetooth);
+        bluetooth.bluetooth.available = true;
+        bluetooth.bluetooth.powered = true;
+        bluetooth.bluetooth.devices.push(BluetoothDevice {
+            id: "test".into(),
+            name: "Headphones".into(),
+            paired: true,
+            connected: false,
+            battery_percent: Some(75),
+        });
+        let bluetooth = bluetooth.build_ui(850.0, 900.0);
+        let device = bluetooth
+            .accessibility_nodes()
+            .iter()
+            .find(|node| node.id.as_str().ends_with("bluetooth-device-0"))
+            .expect("Bluetooth device card");
+        assert_eq!(device.semantic_role, Some(SemanticRole::Button));
+        assert_eq!(device.state.as_deref(), Some("not connected"));
+    }
+
+    #[test]
     fn unavailable_named_file_icon_theme_remains_visible_and_accessible() {
         let mut app = SettingsApp::with_initial_page(SettingsPage::Appearance);
         app.shell_settings.file_icon_provider = FileIconPreference::System;
@@ -2478,8 +2735,13 @@ mod tests {
                     image::Rgba([pixel.r, pixel.g, pixel.b, pixel.a])
                 },
             );
-            let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../target/nickel-ui-snapshots")
+            let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| {
+                    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target")
+                });
+            let output = target_dir
+                .join("nickel-ui-snapshots")
                 .join(format!("appearance-{name}.png"));
             std::fs::create_dir_all(output.parent().unwrap()).unwrap();
             image.save(output).unwrap();

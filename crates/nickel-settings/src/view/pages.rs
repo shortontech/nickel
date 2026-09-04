@@ -319,7 +319,10 @@ impl SettingsApp {
                     border={(border_color, border_width)} radius={theme.radii.card}
                     padding={Insets::all(18.0)}
                     on_drag={(SettingsMessage::SelectDisplay(index), display_drag_message)}
-                    on_press={SettingsMessage::SelectDisplay(index)}>
+                    on_press={SettingsMessage::SelectDisplay(index)}
+                    semantic_role={SemanticRole::Button}
+                    accessibility_label={format!("{} display, {}", display.name, detail)}
+                    accessibility_state={if selected { "selected" } else { "not selected" }}>
                     <Column gap={8.0}>
                         <Text scale={1.5} color={palette.text}>{&display.name}</Text>
                         <Text color={palette.muted}>{detail}</Text>
@@ -401,14 +404,18 @@ impl SettingsApp {
                     )
                 };
                 ui! {
-                    <Container height={44.0}
+                    <Container id={format!("wifi-network-{index}")} height={44.0}
                         background={palette.surface}
                         hover_background={palette.surface_hover}
                         pressed_background={palette.surface_hover}
                         border={(if network.connected { palette.accent } else { palette.muted },
                             if network.connected { 2.0 } else { 1.0 })}
                         padding={Insets { top: 12.0, right: 14.0, bottom: 8.0, left: 14.0 }}
-                        on_press={SettingsMessage::WifiNetwork(index)}>
+                        on_press={SettingsMessage::WifiNetwork(index)}
+                        enabled={self.pending_wifi_profile.is_none()}
+                        semantic_role={SemanticRole::Button}
+                        accessibility_label={format!("{}, {}", network.profile, detail)}
+                        accessibility_state={if network.connected { "connected" } else { "not connected" }}>
                         <Row>
                             <Text color={palette.text} width={316.0}>{&network.profile}</Text>
                             <Text scale={1.0} color={if network.connected { palette.complement } else { palette.muted }}>
@@ -529,12 +536,18 @@ impl SettingsApp {
                     .unwrap_or_default();
                 ui! {
                     <Container height={68.0}
+                        id={format!("bluetooth-device-{index}")}
                         background={palette.surface}
                         hover_background={palette.surface_hover}
                         pressed_background={palette.surface_hover}
                         border={(if device.connected { palette.accent } else { palette.muted },
                             if device.connected { 2.0 } else { 1.0 })}
                         on_press={SettingsMessage::BluetoothDevice(index)}
+                        enabled={self.bluetooth.available && self.bluetooth.powered && self.bluetooth_operation_rx.is_none()}
+                        semantic_role={SemanticRole::Button}
+                        accessibility_label={format!("{}, {}, {}", device.name, status,
+                            if detail.is_empty() { "battery unknown".to_owned() } else { detail.clone() })}
+                        accessibility_state={if device.connected { "connected" } else { "not connected" }}
                         padding={Insets { top: 12.0, right: 14.0, bottom: 10.0, left: 14.0 }}>
                         <Row>
                             <Column grow={1.0} gap={7.0}>
@@ -549,7 +562,35 @@ impl SettingsApp {
                 }
             });
 
-        let adapter_status = if !self.bluetooth.available {
+        let adapter_status = if let Some(operation) = &self.bluetooth_operation {
+            match operation {
+                BluetoothOperation::SetPower(true) => {
+                    self.localizer.text("settings-bluetooth-powering-on")
+                }
+                BluetoothOperation::SetPower(false) => {
+                    self.localizer.text("settings-bluetooth-powering-off")
+                }
+                BluetoothOperation::SetDiscovery(true) => {
+                    self.localizer.text("settings-bluetooth-discovery-starting")
+                }
+                BluetoothOperation::SetDiscovery(false) => {
+                    self.localizer.text("settings-bluetooth-discovery-stopping")
+                }
+                BluetoothOperation::ToggleDevice(device) => {
+                    let name = self
+                        .bluetooth
+                        .devices
+                        .iter()
+                        .find(|candidate| candidate.id == *device)
+                        .map(|candidate| candidate.name.as_str())
+                        .unwrap_or("device");
+                    self.localizer
+                        .value("settings-bluetooth-device-updating", "device", name)
+                }
+            }
+        } else if let Some(error) = &self.bluetooth_status {
+            error.clone()
+        } else if !self.bluetooth.available {
             self.localizer
                 .text("settings-bluetooth-service-unavailable")
         } else if self.bluetooth.powered {
@@ -562,11 +603,18 @@ impl SettingsApp {
         } else {
             self.localizer.text("settings-bluetooth-discovery-start")
         };
+        let operation_pending = self.bluetooth_operation_rx.is_some();
+        let discovery_available =
+            self.bluetooth.available && self.bluetooth.powered && !operation_pending;
         let discovery_button = Button::semantic(
             self.ui_theme(),
             SettingsMessage::BluetoothDiscovery,
             discoverability,
-            ButtonPresentation::Secondary,
+            if discovery_available {
+                ButtonPresentation::Secondary
+            } else {
+                ButtonPresentation::Disabled
+            },
         )
         .width(150.0);
         let device_list = if self.bluetooth.devices.is_empty() {
@@ -579,8 +627,12 @@ impl SettingsApp {
         } else {
             ui! { <Column gap={10.0} children={device_cards} /> }
         };
-        let bluetooth_switch_state = if !self.bluetooth.available {
-            SwitchState::DisabledOff
+        let bluetooth_switch_state = if !self.bluetooth.available || operation_pending {
+            if self.bluetooth.powered {
+                SwitchState::DisabledOn
+            } else {
+                SwitchState::DisabledOff
+            }
         } else if self.bluetooth.powered {
             SwitchState::On
         } else {
@@ -599,8 +651,7 @@ impl SettingsApp {
         .trailing(
             Switch::with_state(
                 bluetooth_switch_state,
-                self.bluetooth
-                    .available
+                (self.bluetooth.available && !operation_pending)
                     .then_some(bluetooth_power_message as fn(bool) -> SettingsMessage),
                 theme,
             )
