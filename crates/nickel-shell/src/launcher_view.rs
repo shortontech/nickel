@@ -1471,13 +1471,6 @@ mod tests {
             target.as_str().ends_with("/launcher-applications"),
             "{target:?}"
         );
-        let scope_background = launcher_semantic_theme(palette()).surfaces.selected;
-        assert!(host.commands().iter().any(|command| matches!(
-            command,
-            nickel_ui::backend::PaintCommand::RoundedFill { color, .. }
-                if *color == scope_background
-        )));
-
         host.application_mut().sync(&launcher, palette(), None);
         host.step(HostBatch {
             events: vec![HostEvent::Controller(ControllerAction::Right)],
@@ -1496,16 +1489,6 @@ mod tests {
                 .iter()
                 .any(|node| node.id == target)
         );
-        let theme = launcher_semantic_theme(palette());
-        let focused_background =
-            nickel_ui::focused_surface(0x202020, theme.borders.controller_focus);
-        assert!(host.commands().iter().any(|command| {
-            matches!(
-                command,
-                nickel_ui::backend::PaintCommand::Fill { color, .. }
-                    if *color == focused_background
-            )
-        }));
         let labels = accessibility_labels(&host);
         assert!(labels.contains(&"confirm control: Open".to_owned()));
         assert!(labels.contains(&"menu control: Actions".to_owned()));

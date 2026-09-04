@@ -2773,12 +2773,24 @@ impl<Message: Clone> UiFrame<Message> {
             }
             UiEvent::ControllerDown | UiEvent::KeyboardNavigateDown => self
                 .move_controller_spatial(state, ControllerDirection::Down, &mut outcome.messages),
-            UiEvent::KeyboardNavigatePageUp => self
-                .operate_navigation_scroll(state, -1.0, &mut outcome.messages)
-                .unwrap_or_else(|| self.move_controller_page(state, -1)),
-            UiEvent::KeyboardNavigatePageDown => self
-                .operate_navigation_scroll(state, 1.0, &mut outcome.messages)
-                .unwrap_or_else(|| self.move_controller_page(state, 1)),
+            UiEvent::KeyboardNavigatePageUp => {
+                let moved = self.move_controller_page(state, -1);
+                if moved == Invalidation::None {
+                    self.operate_navigation_scroll(state, -1.0, &mut outcome.messages)
+                        .unwrap_or(Invalidation::None)
+                } else {
+                    moved
+                }
+            }
+            UiEvent::KeyboardNavigatePageDown => {
+                let moved = self.move_controller_page(state, 1);
+                if moved == Invalidation::None {
+                    self.operate_navigation_scroll(state, 1.0, &mut outcome.messages)
+                        .unwrap_or(Invalidation::None)
+                } else {
+                    moved
+                }
+            }
             UiEvent::KeyboardNavigateStart => self.move_controller_boundary(state, false),
             UiEvent::KeyboardNavigateEnd => self.move_controller_boundary(state, true),
             UiEvent::ControllerLeft | UiEvent::KeyboardNavigateLeft => {
