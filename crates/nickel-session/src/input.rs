@@ -75,8 +75,7 @@ impl NickelSession {
                 |_session, _modifiers, _handle| FilterResult::Forward,
             );
         }
-        self.hotkeys.reconcile_super(false);
-        let _ = self.hotkeys.reconcile_alt(false);
+        self.hotkeys.reset_pressed_state();
         self.cancel_consumer_control_repeats();
     }
 
@@ -315,9 +314,6 @@ impl NickelSession {
                                 session.consumer_control_key(control, state);
                                 return FilterResult::Intercept(None);
                             }
-                            if session.locked {
-                                return FilterResult::Forward;
-                            }
                             if modifiers.ctrl
                                 && modifiers.alt
                                 && let Some(vt) = vt_from_keysym(sym)
@@ -344,7 +340,19 @@ impl NickelSession {
                                 Some(key) => session.hotkeys.handle(key, edge),
                                 None => session.hotkeys.handle_unmapped(edge),
                             };
+                            if outcome.action == Some(HotkeyAction::LockSession) {
+                                session.lock_session();
+                                return FilterResult::Intercept(None);
+                            }
+                            if session.locked {
+                                return if outcome.suppress {
+                                    FilterResult::Intercept(None)
+                                } else {
+                                    FilterResult::Forward
+                                };
+                            }
                             match outcome.action {
+                                Some(HotkeyAction::LockSession) => unreachable!(),
                                 Some(HotkeyAction::ToggleLauncher) => {
                                     session.toggle_launcher_visibility()
                                 }
@@ -1094,6 +1102,9 @@ fn key_code_from_keysym(sym: Keysym) -> Option<KeyCode> {
     match sym {
         value if value == Keysym::new(keysyms::KEY_Super_L) => Some(KeyCode::SuperLeft),
         value if value == Keysym::new(keysyms::KEY_Super_R) => Some(KeyCode::SuperRight),
+        value if value == Keysym::new(keysyms::KEY_l) || value == Keysym::new(keysyms::KEY_L) => {
+            Some(KeyCode::KeyL)
+        }
         value if value == Keysym::new(keysyms::KEY_Alt_L) => Some(KeyCode::AltLeft),
         value if value == Keysym::new(keysyms::KEY_Alt_R) => Some(KeyCode::AltRight),
         value if value == Keysym::new(keysyms::KEY_Shift_L) => Some(KeyCode::ShiftLeft),
@@ -1272,6 +1283,18 @@ mod tests {
         assert_eq!(
             super::key_code_from_keysym(Keysym::new(keysyms::KEY_ISO_Left_Tab)),
             Some(nickel_core::hotkeys::KeyCode::Tab)
+        );
+    }
+
+    #[test]
+    fn xkb_l_keysyms_map_to_the_lock_hotkey() {
+        assert_eq!(
+            super::key_code_from_keysym(Keysym::new(keysyms::KEY_l)),
+            Some(nickel_core::hotkeys::KeyCode::KeyL)
+        );
+        assert_eq!(
+            super::key_code_from_keysym(Keysym::new(keysyms::KEY_L)),
+            Some(nickel_core::hotkeys::KeyCode::KeyL)
         );
     }
 

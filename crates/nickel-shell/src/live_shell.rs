@@ -414,9 +414,9 @@ impl nickel_ui::Application for LockApplication {
                     .background(0x20283a)
                     .radius(10.0)
                     .padding(Insets {
-                        top: 10.0,
+                        top: 9.0,
                         right: 16.0,
-                        bottom: 8.0,
+                        bottom: 9.0,
                         left: 16.0,
                     })
                     .child(
@@ -429,6 +429,7 @@ impl nickel_ui::Application for LockApplication {
                         .id("lock-password-input")
                         .accessibility_label("Password")
                         .scale(18.0)
+                        .single_line_height(28.0)
                         .color(password_color),
                     ),
             );
@@ -4191,6 +4192,44 @@ mod tests {
                 },
             )
             .unwrap();
+    }
+
+    #[test]
+    fn lock_password_placeholder_and_masked_text_are_vertically_centered() {
+        for password in ["", "nickel"] {
+            let scenario = Scenario::new(super::LockApplication::fixture(password, None), 960, 540);
+            let field = scenario
+                .host()
+                .commands()
+                .iter()
+                .find_map(|command| match command {
+                    PaintCommand::RoundedFill { rect, color, .. }
+                        if *color == 0x20283a && rect.size.width == 340.0 =>
+                    {
+                        Some(*rect)
+                    }
+                    _ => None,
+                })
+                .expect("lock password field paint");
+            let text = scenario
+                .host()
+                .commands()
+                .iter()
+                .find_map(|command| match command {
+                    PaintCommand::Text { bounds, .. }
+                        if (bounds.origin.x - (field.origin.x + 16.0)).abs() <= 0.5
+                            && bounds.origin.y >= field.origin.y
+                            && bounds.origin.y < field.origin.y + field.size.height =>
+                    {
+                        Some(*bounds)
+                    }
+                    _ => None,
+                })
+                .expect("lock password text paint");
+            let field_center = field.origin.y + field.size.height / 2.0;
+            let text_center = text.origin.y + text.size.height / 2.0;
+            assert!((field_center - text_center).abs() <= 0.5);
+        }
     }
 
     #[test]

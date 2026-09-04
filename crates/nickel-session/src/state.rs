@@ -3917,7 +3917,7 @@ impl NickelSession {
         }
     }
 
-    fn lock_session(&mut self) {
+    pub(crate) fn lock_session(&mut self) {
         if self.locked {
             return;
         }

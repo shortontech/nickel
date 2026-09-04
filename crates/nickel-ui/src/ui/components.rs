@@ -1102,6 +1102,7 @@ impl<Message> Header<Message> {
 pub struct TextField<Message = String> {
     text: Text<Message>,
     displayed: String,
+    single_line_height: Option<f32>,
 }
 
 impl<Message> TextField<Message> {
@@ -1110,6 +1111,7 @@ impl<Message> TextField<Message> {
         Self {
             text: Text::new(&displayed),
             displayed,
+            single_line_height: None,
         }
     }
 
@@ -1119,6 +1121,7 @@ impl<Message> TextField<Message> {
             Self {
                 text: Text::new(&displayed),
                 displayed,
+                single_line_height: None,
             }
         } else {
             Self::new(editor)
@@ -1129,6 +1132,7 @@ impl<Message> TextField<Message> {
         let mut field = Self {
             text: Text::new(value),
             displayed: value.to_owned(),
+            single_line_height: None,
         };
         if let Kind::Text { input_value, .. } = &mut field.text.0.kind {
             *input_value = Some(value.to_owned());
@@ -1150,6 +1154,7 @@ impl<Message> TextField<Message> {
         let mut field = Self {
             text: Text::new(&displayed),
             displayed,
+            single_line_height: None,
         };
         if let Kind::Text { input_value, .. } = &mut field.text.0.kind {
             *input_value = Some(value.to_owned());
@@ -1165,6 +1170,7 @@ impl<Message> TextField<Message> {
         let mut field = Self {
             text: Text::new(&displayed),
             displayed,
+            single_line_height: None,
         };
         if let Kind::Text {
             input_value,
@@ -1193,6 +1199,7 @@ impl<Message> TextField<Message> {
         let mut field = Self {
             text: Text::new(&displayed),
             displayed,
+            single_line_height: None,
         };
         if let Kind::Text {
             input_value,
@@ -1240,13 +1247,33 @@ impl<Message> TextField<Message> {
         self.text.0 = self.text.0.grow(grow);
         self
     }
+
+    /// Keeps a single-line editor vertically centered in a taller field.
+    ///
+    /// The wrapper uses the measured text line rather than a font-specific
+    /// pixel offset, so placeholder, masked, selected, caret, and IME paint
+    /// all share the same origin. Multiline fields remain unaffected unless
+    /// they explicitly opt into this single-line presentation.
+    pub fn single_line_height(mut self, height: f32) -> Self {
+        self.text = self.text.wrap(false).max_lines(1);
+        self.single_line_height = Some(height.max(0.0));
+        self
+    }
 }
 
 impl<Message> Component<Message> for TextField<Message> {
     fn into_element(self) -> Element<Message> {
-        self.text
+        let text = self
+            .text
             .into_element()
-            .semantic_role(SemanticRole::TextField)
+            .semantic_role(SemanticRole::TextField);
+        match self.single_line_height {
+            Some(height) => Element::flex(Axis::Vertical)
+                .height(height)
+                .justify_content(Justify::Center)
+                .child(text),
+            None => text,
+        }
     }
 }
 

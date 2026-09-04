@@ -1312,6 +1312,7 @@ fn trace_input(
 
 fn send_hotkey_action(action: Option<HotkeyAction>) {
     let shortcut = match action {
+        Some(HotkeyAction::LockSession) => GlobalShortcut::LockState { locked: true },
         Some(HotkeyAction::ToggleLauncher) => GlobalShortcut::ToggleLauncher,
         Some(HotkeyAction::ShowRun) => GlobalShortcut::ShowRun,
         Some(HotkeyAction::SwitchNext) => GlobalShortcut::SwitchNext,

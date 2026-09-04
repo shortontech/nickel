@@ -11,6 +11,7 @@ pub use nickel_input::{KeyCode, KeyEdge};
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum HotkeyAction {
+    LockSession,
     ToggleLauncher,
     ShowRun,
     SwitchNext,
@@ -91,6 +92,11 @@ impl CompositorShortcutAdapter {
     pub fn launcher_visibility_applied(&mut self, visible: bool) {
         self.controller.launcher_visibility_applied(visible);
     }
+
+    pub fn reset_pressed_state(&mut self) {
+        self.controller = HotkeyController::default();
+        self.registrations.reset_edges();
+    }
 }
 
 impl GlobalShortcutAdapter<HotkeyAction> for CompositorShortcutAdapter {
@@ -138,6 +144,18 @@ fn compositor_registrations() -> Vec<Registration<HotkeyAction>> {
             ToggleLauncher,
         ),
         registration(KeyCode::KeyR, [Super], ShortcutTrigger::Pressed, ShowRun),
+        registration(
+            KeyCode::KeyL,
+            [Super],
+            ShortcutTrigger::Pressed,
+            LockSession,
+        ),
+        registration(
+            KeyCode::KeyL,
+            [Control, Alt],
+            ShortcutTrigger::Pressed,
+            LockSession,
+        ),
         registration(KeyCode::Tab, [Alt], ShortcutTrigger::Pressed, SwitchNext),
         registration(
             KeyCode::Tab,
@@ -246,6 +264,7 @@ pub struct HotkeySnapshot {
     pub tab_held: bool,
     pub grave_held: bool,
     pub run_held: bool,
+    pub lock_held: bool,
     pub print_screen_held: bool,
     pub left_held: bool,
     pub right_held: bool,
@@ -263,6 +282,7 @@ pub struct HotkeyController {
     tab_held: bool,
     grave_held: bool,
     run_held: bool,
+    lock_held: bool,
     print_screen_held: bool,
     left_held: bool,
     right_held: bool,
@@ -281,6 +301,7 @@ impl HotkeyController {
             tab_held: self.tab_held,
             grave_held: self.grave_held,
             run_held: self.run_held,
+            lock_held: self.lock_held,
             print_screen_held: self.print_screen_held,
             left_held: self.left_held,
             right_held: self.right_held,
@@ -328,6 +349,26 @@ impl HotkeyController {
                 // here so a missed release cannot make subsequent R presses look like shortcuts.
                 self.super_held = false;
                 self.super_chorded = false;
+                HotkeyOutcome {
+                    suppress: true,
+                    ..Default::default()
+                }
+            }
+            (KeyCode::KeyL, KeyEdge::Pressed)
+                if self.super_held || (self.control_held && self.alt_held) =>
+            {
+                if self.super_held {
+                    self.super_chorded = true;
+                }
+                let action = (!self.lock_held).then_some(HotkeyAction::LockSession);
+                self.lock_held = true;
+                HotkeyOutcome {
+                    action,
+                    suppress: true,
+                }
+            }
+            (KeyCode::KeyL, KeyEdge::Released) if self.lock_held => {
+                self.lock_held = false;
                 HotkeyOutcome {
                     suppress: true,
                     ..Default::default()
@@ -501,6 +542,7 @@ impl HotkeyController {
             self.super_held = false;
             self.super_chorded = false;
             self.run_held = false;
+            self.lock_held = false;
             self.left_held = false;
             self.right_held = false;
         }
@@ -514,6 +556,7 @@ impl HotkeyController {
         self.tab_held = false;
         self.grave_held = false;
         self.print_screen_held = false;
+        self.lock_held = false;
         let action = self.switch_active.then_some(HotkeyAction::CommitSwitch);
         self.switch_active = false;
         action
@@ -831,6 +874,56 @@ mod tests {
                 .handle(KeyCode::ArrowLeft, KeyEdge::Pressed)
                 .action,
             Some(HotkeyAction::MoveWindowToPreviousWorkspace)
+        );
+    }
+
+    #[test]
+    fn both_lock_chords_are_edge_triggered_and_consumed() {
+        for modifiers in [
+            vec![KeyCode::SuperLeft],
+            vec![KeyCode::ControlRight, KeyCode::AltLeft],
+        ] {
+            let mut controller = HotkeyController::default();
+            for modifier in modifiers {
+                controller.handle(modifier, KeyEdge::Pressed);
+            }
+            assert_eq!(
+                controller.handle(KeyCode::KeyL, KeyEdge::Pressed),
+                HotkeyOutcome {
+                    action: Some(HotkeyAction::LockSession),
+                    suppress: true,
+                }
+            );
+            assert_eq!(
+                controller.handle(KeyCode::KeyL, KeyEdge::Pressed),
+                HotkeyOutcome {
+                    action: None,
+                    suppress: true,
+                }
+            );
+            assert_eq!(
+                controller.handle(KeyCode::KeyL, KeyEdge::Released),
+                HotkeyOutcome {
+                    action: None,
+                    suppress: true,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn resetting_pressed_state_recovers_from_missing_releases() {
+        let mut adapter = CompositorShortcutAdapter::default();
+        adapter.handle(KeyCode::ControlLeft, KeyEdge::Pressed);
+        adapter.handle(KeyCode::AltRight, KeyEdge::Pressed);
+        assert_eq!(
+            adapter.handle(KeyCode::KeyL, KeyEdge::Pressed).action,
+            Some(HotkeyAction::LockSession)
+        );
+        adapter.reset_pressed_state();
+        assert_eq!(
+            adapter.handle(KeyCode::KeyL, KeyEdge::Pressed),
+            HotkeyOutcome::default()
         );
     }
 }
