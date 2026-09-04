@@ -21,6 +21,7 @@ nickel-platform = { path = "../nickel-platform" }
 nickel-ui-testkit = { path = "../nickel-ui-testkit" }
 notify.workspace = true
 tracing.workspace = true
+sys-locale.workspace = true
 winit.workspace = true
 arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }
 

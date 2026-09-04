@@ -325,6 +325,10 @@ pub enum ShellEvent {
         surface: SurfaceId,
         event: InputEvent,
     },
+    FileDrop {
+        surface: SurfaceId,
+        path: std::path::PathBuf,
+    },
     Shown(SurfaceId),
     Hidden(SurfaceId),
     CloseRequested(SurfaceId),
@@ -1471,6 +1475,10 @@ fn translate_window_event(
         WindowEvent::ScaleFactorChanged { .. } => Some(ShellEvent::DisplayTopologyChanged),
         WindowEvent::RedrawRequested => Some(ShellEvent::Redraw(surface)),
         WindowEvent::Destroyed => Some(ShellEvent::Hidden(surface)),
+        WindowEvent::DroppedFile(path) => Some(ShellEvent::FileDrop {
+            surface,
+            path: path.clone(),
+        }),
         _ => None,
     }
 }

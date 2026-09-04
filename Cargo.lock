@@ -2697,6 +2697,7 @@ dependencies = [
  "nickel-ui-testkit",
  "notify",
  "sha2",
+ "sys-locale",
  "tempfile",
  "tracing",
  "windows",

@@ -874,6 +874,17 @@ impl FileApp {
         app
     }
 
+    pub fn launch_properties(path: PathBuf) -> Self {
+        let location = path
+            .parent()
+            .map(|parent| parent.to_path_buf())
+            .unwrap_or_else(|| path.clone());
+        let mut app = Self::new(location);
+        app.context_target = Some(path);
+        <Self as nickel_ui::Application>::update(&mut app, FileMessage::ContextProperties);
+        app
+    }
+
     fn with_browser(browser: DirectoryBrowser, status: String) -> Self {
         let settings = ShellSettings::load_default();
         let (sidebar_sender, sidebar_receiver) = mpsc::channel();
@@ -3056,11 +3067,19 @@ impl Application for FileApp {
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let _log_path = nickel_logging::init("nickel-file").ok();
-    let path = std::env::args_os()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(home_directory);
-    nickel_ui::run_with_adapter(FileApp::launch(path), FileHostAdapter::default())
+    let mut arguments = std::env::args_os().skip(1);
+    let first = arguments.next();
+    let application = if first.as_deref() == Some(std::ffi::OsStr::new("--properties")) {
+        FileApp::launch_properties(
+            arguments
+                .next()
+                .map(PathBuf::from)
+                .unwrap_or_else(home_directory),
+        )
+    } else {
+        FileApp::launch(first.map(PathBuf::from).unwrap_or_else(home_directory))
+    };
+    nickel_ui::run_with_adapter(application, FileHostAdapter::default())
 }
 
 #[cfg(test)]

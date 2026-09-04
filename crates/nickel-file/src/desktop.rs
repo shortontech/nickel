@@ -96,6 +96,7 @@ pub struct DesktopLayout {
     grouping: FolderGrouping,
     cell: (f32, f32),
     remembered_outputs: HashMap<DesktopEntryId, String>,
+    locale: String,
 }
 
 impl DesktopLayout {
@@ -109,6 +110,7 @@ impl DesktopLayout {
             grouping: FolderGrouping::Mixed,
             cell: (96.0, 112.0),
             remembered_outputs: HashMap::new(),
+            locale: sys_locale::get_locale().unwrap_or_else(|| "en-US".into()),
         }
     }
 
@@ -437,8 +439,10 @@ impl DesktopLayout {
             }
             Arrangement::Sorted { key, direction } => {
                 let grouping = self.grouping;
-                self.items
-                    .sort_by(|left, right| compare_items(left, right, key, grouping, direction));
+                let locale = self.locale.clone();
+                self.items.sort_by(|left, right| {
+                    compare_items(left, right, key, grouping, direction, &locale)
+                });
                 self.place_in_visual_order();
             }
         }
@@ -498,26 +502,27 @@ fn compare_items(
     key: SortKey,
     grouping: FolderGrouping,
     direction: SortDirection,
+    locale: &str,
 ) -> Ordering {
     let folder_order = match grouping {
         FolderGrouping::Mixed => Ordering::Equal,
         FolderGrouping::FoldersFirst => right.entry.is_directory.cmp(&left.entry.is_directory),
     };
     let value_order = match key {
-        SortKey::Name => names(left, right),
+        SortKey::Name => names(left, right, locale),
         SortKey::Kind => extension(&left.entry)
             .cmp(&extension(&right.entry))
-            .then_with(|| names(left, right)),
+            .then_with(|| names(left, right, locale)),
         SortKey::Size => left
             .entry
             .size
             .cmp(&right.entry.size)
-            .then_with(|| names(left, right)),
+            .then_with(|| names(left, right, locale)),
         SortKey::Modified => left
             .entry
             .modified
             .cmp(&right.entry.modified)
-            .then_with(|| names(left, right)),
+            .then_with(|| names(left, right, locale)),
     };
     let value_order = match direction {
         SortDirection::Ascending => value_order,
@@ -528,11 +533,31 @@ fn compare_items(
         .then_with(|| left.id.cmp(&right.id))
 }
 
-fn names(left: &DesktopItem, right: &DesktopItem) -> Ordering {
-    left.entry
-        .display_name()
-        .to_lowercase()
-        .cmp(&right.entry.display_name().to_lowercase())
+fn names(left: &DesktopItem, right: &DesktopItem, locale: &str) -> Ordering {
+    locale_sort_key(&left.entry.display_name(), locale)
+        .cmp(&locale_sort_key(&right.entry.display_name(), locale))
+}
+
+fn locale_sort_key(value: &str, locale: &str) -> String {
+    let language = locale.split(['-', '_']).next().unwrap_or(locale);
+    let value = if matches!(language, "tr" | "az") {
+        value.replace('I', "ı").replace('İ', "i")
+    } else {
+        value.to_owned()
+    };
+    let folded = value.to_lowercase();
+    match language {
+        "de" => folded
+            .replace('ä', "ae")
+            .replace('ö', "oe")
+            .replace('ü', "ue")
+            .replace('ß', "ss"),
+        "sv" => folded
+            .replace('å', "{a")
+            .replace('ä', "{b")
+            .replace('ö', "{c"),
+        _ => folded,
+    }
 }
 
 fn extension(entry: &FileEntry) -> String {
@@ -816,6 +841,13 @@ mod tests {
             "main",
         );
         assert_eq!(layout.arrangement(), Arrangement::Manual);
+    }
+
+    #[test]
+    fn locale_collation_handles_turkish_german_and_swedish_primary_order() {
+        assert_eq!(locale_sort_key("İSTANBUL", "tr-TR"), "istanbul");
+        assert_eq!(locale_sort_key("Ähre", "de-DE"), "aehre");
+        assert!(locale_sort_key("Örebro", "sv-SE") > locale_sort_key("Zebra", "sv-SE"));
     }
 
     #[test]

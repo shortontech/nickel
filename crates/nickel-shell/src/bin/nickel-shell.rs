@@ -1668,7 +1668,13 @@ fn handle_controller_action(
     let focused_surface = shell
         .surfaces()
         .find(|surface| surface.window().has_input_focus())
-        .map(|surface| surface.id());
+        .map(|surface| surface.id())
+        .or_else(|| {
+            shell
+                .surfaces()
+                .find(|surface| surface.role() == SurfaceRole::Desktop)
+                .map(|surface| surface.id())
+        });
     let focused_role =
         focused_surface.and_then(|surface| shell.surface(surface).map(|entry| entry.role()));
     if controller_target_role(state.surface_visible(SurfaceRole::Launcher), focused_role)
@@ -1720,6 +1726,7 @@ fn handle_controller_action(
         SurfaceRole::WindowContextMenu => state.window_menu_host_controller(action),
         SurfaceRole::Notification => state.notification_controller(action),
         SurfaceRole::Panel => state.panel_controller(action, width),
+        SurfaceRole::Desktop => state.desktop_controller(action),
         SurfaceRole::Launcher => unreachable!("launcher controller input is handled semantically"),
         SurfaceRole::Screenshot => state.screenshot_controller(action),
         _ => false,
@@ -2196,6 +2203,15 @@ fn main() -> Result<(), String> {
                 );
                 shell.finish_input_observation();
                 result?;
+            }
+            Some(ShellEvent::FileDrop { surface, path }) => {
+                if shell
+                    .surface(surface)
+                    .is_some_and(|entry| entry.role() == SurfaceRole::Desktop)
+                    && state.desktop_file_drop(&path)
+                {
+                    render_role(&mut shell, &mut state, SurfaceRole::Desktop)?;
+                }
             }
             Some(ShellEvent::CloseRequested(surface))
                 if shell

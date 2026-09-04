@@ -73,7 +73,7 @@ pub use ui::{
     FallbackAvatar, FieldGroup, FileGrid, FileGridItem, FrameRequest, FrameResourceDiagnostics,
     GradientAxis, Grid, GridColumnSpec, Header, HorizontalRule, Icon, Image, ImageAlignment,
     ImageFit, ImagePresentation, InlineButtonGroup, InputSource, InteractionIntent,
-    InteractionState, LauncherSearchField, LayoutDiagnostic, LinearGradient, Menu, MenuBar,
+    InteractionState, LauncherSearchField, Layer, LayoutDiagnostic, LinearGradient, Menu, MenuBar,
     MenuItem, NavigationDirection, NavigationEntry, NavigationExit, NavigationItem,
     NavigationNeighbors, NavigationScope, NavigationSectionLabel, NavigationTraversal, PageHeader,
     PointerIcon, PreviewState, PreviewTile, ProjectStatusRow, RESPONSIVE_NAVIGATION_BREAKPOINT,

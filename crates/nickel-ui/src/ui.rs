@@ -865,6 +865,8 @@ pub struct Style {
     pub text_align: TextAlign,
     pub padding: Insets,
     pub gap: f32,
+    /// Child origin within an absolute `Layer` parent.
+    pub absolute_position: Option<Point>,
     pub width: Length,
     pub height: Length,
     pub min_width: f32,
@@ -927,6 +929,7 @@ impl Default for Style {
             text_align: TextAlign::Start,
             padding: Insets::default(),
             gap: 0.0,
+            absolute_position: None,
             width: Length::Auto,
             height: Length::Auto,
             min_width: 0.0,
@@ -966,6 +969,7 @@ impl Default for Style {
 #[derive(Clone, Debug)]
 enum Kind {
     Flex(Axis),
+    Layer,
     VerticalScroll {
         offset: f32,
         controlled: bool,
@@ -1026,6 +1030,7 @@ impl Kind {
         match self {
             Self::Flex(Axis::Horizontal) => "Row",
             Self::Flex(Axis::Vertical) => "Column",
+            Self::Layer => "Layer",
             Self::VerticalScroll { .. } => "VerticalScroll",
             Self::Grid { .. } => "Grid",
             Self::CustomPaint { .. } => "CustomPaint",
@@ -1102,6 +1107,12 @@ impl<Message> Element<Message> {
             navigation_scope: None,
             adjustment_step: 0.05,
         }
+    }
+
+    fn layer() -> Self {
+        let mut element = Self::flex(Axis::Vertical);
+        element.kind = Kind::Layer;
+        element
     }
 
     fn text(value: impl Into<String>, scale: f32) -> Self {
@@ -1241,6 +1252,11 @@ impl<Message> Element<Message> {
 
     pub fn gap(mut self, gap: f32) -> Self {
         self.style.gap = gap;
+        self
+    }
+
+    pub fn position(mut self, position: Point) -> Self {
+        self.style.absolute_position = Some(position);
         self
     }
 

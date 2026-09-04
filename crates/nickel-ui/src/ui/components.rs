@@ -1,6 +1,46 @@
 use super::*;
 use crate::SemanticTheme;
 
+pub struct Layer<Message = String>(Element<Message>);
+
+impl<Message> Default for Layer<Message> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<Message> Layer<Message> {
+    pub fn new() -> Self {
+        Self(Element::layer())
+    }
+    pub fn child(mut self, child: impl Component<Message>) -> Self {
+        self.0 = self.0.child(child);
+        self
+    }
+    pub fn children(mut self, children: impl IntoIterator<Item = impl Component<Message>>) -> Self {
+        self.0 = self.0.children(children);
+        self
+    }
+    pub fn width(mut self, width: f32) -> Self {
+        self.0 = self.0.width(width);
+        self
+    }
+    pub fn height(mut self, height: f32) -> Self {
+        self.0 = self.0.height(height);
+        self
+    }
+    pub fn id(mut self, id: impl Into<UiId>) -> Self {
+        self.0 = self.0.id(id);
+        self
+    }
+}
+
+impl<Message> Component<Message> for Layer<Message> {
+    fn into_element(self) -> Element<Message> {
+        self.0
+    }
+}
+
 pub struct Spacer<Message = String>(Element<Message>);
 
 impl<Message> Default for Spacer<Message> {
@@ -1381,6 +1421,11 @@ impl<Message> Container<Message> {
 
     pub fn gap(mut self, gap: f32) -> Self {
         self.0 = self.0.gap(gap);
+        self
+    }
+
+    pub fn position(mut self, position: Point) -> Self {
+        self.0 = self.0.position(position);
         self
     }
 

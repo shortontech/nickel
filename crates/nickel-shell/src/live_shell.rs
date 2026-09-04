@@ -29,8 +29,8 @@ use nickel_ui::Rect;
 use nickel_ui::backend::PaintCommand;
 use nickel_ui::{
     AnyView, Column, Container, ControllerAction, HostBatch, HostChangeToken, HostEvent, Image,
-    ImageFit, Insets, Point, Row, SemanticRole, Shortcut, Spacer, Text, TextAlign, TextField,
-    UiEvent, ViewContext,
+    ImageFit, Insets, Layer, Point, Row, SemanticRole, Shortcut, Spacer, Text, TextAlign,
+    TextField, UiEvent, ViewContext,
 };
 
 use crate::{
@@ -166,6 +166,12 @@ pub struct DesktopApplication {
     modifiers: SelectionModifiers,
     context_menu: Option<(DesktopPoint, Option<DesktopEntryId>)>,
     error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum DesktopMessage {
+    Activate(DesktopEntryId),
+    Context(DesktopEntryId),
 }
 
 impl DesktopApplication {
@@ -387,8 +393,21 @@ impl DesktopApplication {
         }
         let row = ((local.y - origin.y) / 30.0) as usize;
         if let Some(id) = entry {
-            if row == 0 {
-                self.activate(id);
+            match row {
+                0 => self.activate(id),
+                1 => {
+                    if let Some(path) = self
+                        .layout
+                        .items()
+                        .iter()
+                        .find(|item| item.id == id)
+                        .map(|item| item.entry.path.clone())
+                        && let Err(error) = launch_nickel_file_properties(&path)
+                    {
+                        self.error = Some(format!("Could not show properties: {error}"));
+                    }
+                }
+                _ => {}
             }
         } else {
             match row {
@@ -681,32 +700,88 @@ fn launch_nickel_file(path: &std::path::Path) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
-impl nickel_ui::Application for DesktopApplication {
-    type Message = ();
+fn launch_nickel_file_properties(path: &std::path::Path) -> Result<(), String> {
+    let executable = std::env::current_exe()
+        .map_err(|error| error.to_string())?
+        .with_file_name(if cfg!(target_os = "windows") {
+            "nickel-file.exe"
+        } else {
+            "nickel-file"
+        });
+    std::process::Command::new(executable)
+        .arg("--properties")
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
 
-    fn update(&mut self, (): Self::Message) {}
+impl nickel_ui::Application for DesktopApplication {
+    type Message = DesktopMessage;
+
+    fn update(&mut self, message: Self::Message) {
+        match message {
+            DesktopMessage::Activate(id) => self.activate(id),
+            DesktopMessage::Context(id) => {
+                if let Some(item) = self.layout.items().iter().find(|item| item.id == id) {
+                    self.context_menu = Some((
+                        DesktopPoint {
+                            x: item.position.x - self.output_origin.x,
+                            y: item.position.y - self.output_origin.y,
+                        },
+                        Some(id),
+                    ));
+                }
+            }
+        }
+    }
 
     fn view(&self, context: ViewContext) -> impl nickel_ui::View<Self::Message> {
         let width = context.viewport.size.width;
         let height = context.viewport.size.height;
-        let root = Container::new()
-            .id("desktop")
-            .semantic_role(SemanticRole::ApplicationPresentation)
-            .accessibility_label("Desktop")
-            .background(self.palette.background)
-            .width(width)
-            .height(height);
+        let mut layer = Layer::new().width(width).height(height);
         if let Some(wallpaper) = &self.wallpaper {
-            root.child(
+            layer = layer.child(
                 Image::new(1, Arc::clone(wallpaper))
                     .width(width)
                     .height(height)
                     .fit(ImageFit::Stretch)
                     .decorative(),
-            )
-        } else {
-            root
+            );
         }
+        for item in self
+            .layout
+            .items()
+            .iter()
+            .filter(|item| item.output == self.active_output)
+        {
+            let position = Point {
+                x: item.position.x - self.output_origin.x,
+                y: item.position.y - self.output_origin.y,
+            };
+            layer = layer.child(
+                Container::new()
+                    .id(format!("desktop-entry-{}-{}", item.id.0.0, item.id.0.1))
+                    .position(position)
+                    .width(96.0)
+                    .height(108.0)
+                    .message(DesktopMessage::Activate(item.id))
+                    .context_message(DesktopMessage::Context(item.id))
+                    .semantic_role(SemanticRole::GridCell)
+                    .accessibility_label(item.entry.display_name())
+                    .interaction_backgrounds(self.palette.surface_hover, self.palette.accent_soft)
+                    .focus_background_tint(self.palette.accent)
+                    .controller_focus_background_tint(self.palette.complement),
+            );
+        }
+        Container::new()
+            .id("desktop")
+            .semantic_role(SemanticRole::ApplicationPresentation)
+            .accessibility_label("Desktop")
+            .background(self.palette.background)
+            .width(width)
+            .height(height)
+            .child(layer)
     }
 
     fn title(&self) -> &str {
@@ -1737,6 +1812,33 @@ impl LiveShell {
                 y: position.y as f32,
             }),
             _ => false,
+        }
+    }
+
+    pub fn desktop_controller(&mut self, action: ControllerAction) -> bool {
+        let outcome = self.desktop_host.step(HostBatch {
+            events: vec![HostEvent::Controller(action)],
+            ..HostBatch::default()
+        });
+        self.desktop_change_token = outcome.change_token;
+        self.desktop_deadline = outcome.next_deadline;
+        outcome.changed
+    }
+
+    pub fn desktop_file_drop(&mut self, source: &std::path::Path) -> bool {
+        let application = self.desktop_host.application_mut();
+        let destination = application
+            .hit(application.pointer_position)
+            .and_then(|id| application.layout.items().iter().find(|item| item.id == id))
+            .filter(|item| item.entry.is_directory)
+            .map(|item| item.entry.path.clone())
+            .unwrap_or_else(nickel_file::desktop_directory);
+        match nickel_file::copy_into(source, &destination) {
+            Ok(_) => application.refresh_directory(true),
+            Err(error) => {
+                application.error = Some(format!("Could not drop {}: {error}", source.display()));
+                true
+            }
         }
     }
 
@@ -6095,5 +6197,21 @@ mod tests {
             1.5,
         );
         assert!(desktop.paint_icons().is_empty());
+
+        desktop.set_active_output(
+            "left".into(),
+            nickel_file::desktop::Point { x: -400.0, y: 0.0 },
+            1.0,
+        );
+        let host = UiHost::new(desktop, 400, 600);
+        let entry = host
+            .accessibility_nodes()
+            .iter()
+            .find(|node| node.semantic_role == Some(SemanticRole::GridCell))
+            .expect("desktop entry belongs to Nickel UI semantic authority");
+        assert_eq!(entry.label.as_deref(), Some("document.txt"));
+        assert_eq!(entry.rect.size.width, 96.0);
+        assert!(entry.actions.contains(&ActionKind::Activate));
+        assert!(entry.actions.contains(&ActionKind::ContextMenu));
     }
 }

@@ -4673,6 +4673,20 @@ pub(super) fn measure_element<Message>(
                 },
             )
         }
+        Kind::Layer => element
+            .children
+            .iter()
+            .map(|child| {
+                let size = measure_element(child, child_constraints);
+                let position = child.style.absolute_position.unwrap_or_default();
+                Size::new(position.x + size.width, position.y + size.height)
+            })
+            .fold(Size::default(), |measured, child| {
+                Size::new(
+                    measured.width.max(child.width),
+                    measured.height.max(child.height),
+                )
+            }),
         Kind::Flex(axis) => {
             let sizes = element
                 .children
@@ -5104,7 +5118,10 @@ fn emit_element<Message: Clone>(
             });
         }
         let foreground = element.style.foreground.or(inherited_foreground);
-        if matches!(element.kind, Kind::Flex(_) | Kind::Grid { .. }) {
+        if matches!(
+            element.kind,
+            Kind::Flex(_) | Kind::Grid { .. } | Kind::Layer
+        ) {
             for (&child_index, child) in node.children.iter().zip(&element.children) {
                 emit_element(child, child_index, foreground, tree);
             }
@@ -5636,7 +5653,7 @@ fn emit_element<Message: Clone>(
             }
             tree.commands.push(PaintCommand::PopClip);
         }
-        Kind::Flex(_) | Kind::Grid { .. } => {
+        Kind::Flex(_) | Kind::Grid { .. } | Kind::Layer => {
             for (&child_index, child) in node.children.iter().zip(&element.children) {
                 emit_element(child, child_index, foreground, tree);
             }
@@ -5964,6 +5981,27 @@ fn layout_element<Message: Clone>(
         | Kind::Image { .. }
         | Kind::Slider { .. }
         | Kind::Dropdown { .. } => {}
+        Kind::Layer => {
+            let content = rect.inset(element.style.padding);
+            for (index, child) in element.children.iter().enumerate() {
+                let position = child.style.absolute_position.unwrap_or_default();
+                let size = measure_element(child, Constraints::loose(content.size));
+                let bounds = Rect::new(
+                    content.origin.x + position.x,
+                    content.origin.y + position.y,
+                    size.width.min((content.size.width - position.x).max(0.0)),
+                    size.height.min((content.size.height - position.y).max(0.0)),
+                );
+                child_indices.push(layout_element(
+                    child,
+                    &resolved_child_id(id, child, index),
+                    bounds,
+                    foreground,
+                    descendant_clip,
+                    tree,
+                ));
+            }
+        }
         Kind::Flex(axis) => {
             let scroll_rect = rect.inset(element.style.padding);
             let scrollable_y = *axis == Axis::Vertical

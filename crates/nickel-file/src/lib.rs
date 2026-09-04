@@ -37,6 +37,43 @@ pub fn open_path(path: &Path) -> Result<(), String> {
     platform::open_path(path).map_err(|error| error.to_string())
 }
 
+/// Copies one external drag/clipboard source into a provider directory without overwriting.
+pub fn copy_into(source: &Path, destination: &Path) -> io::Result<PathBuf> {
+    let name = source
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "source has no file name"))?;
+    let mut target = destination.join(name);
+    if target.exists() {
+        let stem = source.file_stem().unwrap_or(name).to_string_lossy();
+        let extension = source.extension().map(|value| value.to_string_lossy());
+        target = (2_u32..)
+            .map(|number| {
+                let name = extension.as_ref().map_or_else(
+                    || format!("{stem} ({number})"),
+                    |extension| format!("{stem} ({number}).{extension}"),
+                );
+                destination.join(name)
+            })
+            .find(|candidate| !candidate.exists())
+            .expect("an unused collision suffix exists");
+    }
+    copy_recursively(source, &target)?;
+    Ok(target)
+}
+
+fn copy_recursively(source: &Path, target: &Path) -> io::Result<()> {
+    if source.is_dir() {
+        fs::create_dir(target)?;
+        for entry in fs::read_dir(source)? {
+            let entry = entry?;
+            copy_recursively(&entry.path(), &target.join(entry.file_name()))?;
+        }
+    } else {
+        fs::copy(source, target)?;
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FileEntry {
     pub name: OsString,
@@ -582,6 +619,22 @@ mod tests {
         browser.refresh().unwrap();
         assert!(browser.index_of_identity(identity).is_none());
         assert_eq!(browser.entries().len(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn external_drop_copy_preserves_directories_and_resolves_collisions() {
+        let root = temporary_directory("drop-copy");
+        let source = root.join("source");
+        let destination = root.join("desktop");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(source.join("nested.txt"), b"contents").unwrap();
+        let first = super::copy_into(&source, &destination).unwrap();
+        let second = super::copy_into(&source, &destination).unwrap();
+        assert_eq!(fs::read(first.join("nested.txt")).unwrap(), b"contents");
+        assert_eq!(fs::read(second.join("nested.txt")).unwrap(), b"contents");
+        assert_ne!(first, second);
         fs::remove_dir_all(root).unwrap();
     }
 }
