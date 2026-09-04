@@ -201,7 +201,8 @@ pub(crate) fn build_view(
         }
     };
     let footer_text = components::status_text(app);
-    let footer = components::status_bar(footer_text, palette);
+    let footer_accessibility_text = components::status_accessibility_text(app);
+    let footer = components::status_bar(footer_text, footer_accessibility_text, palette);
     let resize_handle = ui! {
         <Container id={"sidebar-resize"} width={SIDEBAR_RESIZE_WIDTH} shrink={0.0}
             background={if app.is_resizing_sidebar() { palette.accent } else { palette.surface_hover }}

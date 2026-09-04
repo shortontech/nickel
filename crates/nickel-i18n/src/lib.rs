@@ -109,6 +109,47 @@ impl Localizer {
         self.format(id, Some(&args))
     }
 
+    /// Formats a logical byte count through the active locale. The exact count
+    /// remains available to callers; this is only the compact visible label.
+    pub fn bytes(&self, bytes: u64) -> String {
+        let (id, value) = if bytes < 1_024 {
+            ("size-bytes", bytes as f64)
+        } else if bytes < 1_048_576 {
+            ("size-kibibytes", bytes as f64 / 1_024.0)
+        } else if bytes < 1_073_741_824 {
+            ("size-mebibytes", bytes as f64 / 1_048_576.0)
+        } else if bytes < 1_099_511_627_776 {
+            ("size-gibibytes", bytes as f64 / 1_073_741_824.0)
+        } else {
+            ("size-tebibytes", bytes as f64 / 1_099_511_627_776.0)
+        };
+        let args = args([("value", FluentValue::from(value))]);
+        self.format(id, Some(&args))
+    }
+
+    pub fn file_selection_summary(&self, count: usize, size: Option<&str>) -> String {
+        let count_label = self.number("file-selection-count", "count", count as i64);
+        let Some(size) = size else { return count_label };
+        let values = args([
+            ("count", FluentValue::from(count_label)),
+            ("size", FluentValue::from(size)),
+        ]);
+        self.format("file-selection-summary", Some(&values))
+    }
+
+    pub fn file_selection_accessible_bytes(&self, count: usize, bytes: Option<u64>) -> String {
+        let count_label = self.number("file-selection-count", "count", count as i64);
+        let Some(bytes) = bytes else {
+            return count_label;
+        };
+        let bytes = bytes.to_string();
+        let values = args([
+            ("count", FluentValue::from(count_label)),
+            ("bytes", FluentValue::from(bytes)),
+        ]);
+        self.format("file-selection-accessible-bytes", Some(&values))
+    }
+
     pub fn format(&self, id: &str, args: Option<&FluentArgs<'_>>) -> String {
         format_from(&self.selected, id, args)
             .or_else(|| {
@@ -217,5 +258,16 @@ mod tests {
         );
         assert!(!Localizer::for_locale(Some("es-MX")).is_right_to_left());
         assert!(Localizer::for_locale(Some("ar")).is_right_to_left());
+    }
+
+    #[test]
+    fn file_sizes_and_selection_counts_use_the_selected_locale() {
+        let spanish = Localizer::for_locale(Some("es"));
+        assert_eq!(
+            spanish.file_selection_summary(2, Some(&spanish.bytes(2048))),
+            "2 seleccionados · 2 KiB"
+        );
+        let arabic = Localizer::for_locale(Some("ar"));
+        assert!(arabic.file_selection_summary(2, None).contains("تم تحديد"));
     }
 }

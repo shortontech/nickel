@@ -18,6 +18,8 @@ pub(crate) mod host;
 pub mod icons;
 pub(crate) mod layout;
 pub(crate) mod platform;
+pub mod properties;
+pub mod selection_summary;
 pub(crate) mod watch;
 
 pub use app::{FileApp, FileFixtureProvider, FileMessage, FileViewMode, run};
@@ -282,13 +284,13 @@ fn read_entries_with_identities(
 }
 
 #[cfg(unix)]
-fn metadata_identity(_path: &Path, metadata: &fs::Metadata) -> Option<FileIdentity> {
+pub(crate) fn metadata_identity(_path: &Path, metadata: &fs::Metadata) -> Option<FileIdentity> {
     use std::os::unix::fs::MetadataExt;
     Some(FileIdentity(metadata.dev(), metadata.ino()))
 }
 
 #[cfg(target_os = "windows")]
-fn metadata_identity(path: &Path, _metadata: &fs::Metadata) -> Option<FileIdentity> {
+pub(crate) fn metadata_identity(path: &Path, _metadata: &fs::Metadata) -> Option<FileIdentity> {
     use std::os::windows::ffi::OsStrExt;
     use windows::{
         Win32::{

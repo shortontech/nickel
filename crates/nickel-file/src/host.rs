@@ -189,6 +189,7 @@ impl HostAdapter<FileApp> for FileHostAdapter {
                             app.clear_selection();
                         }
                     }
+                    KeyCode::Enter if alt_down => app.update(FileMessage::ContextProperties),
                     KeyCode::Enter if app.address_editing => app.submit_address(),
                     KeyCode::Enter => app.activate_selected(),
                     KeyCode::Space => app.toggle_active_selection(),

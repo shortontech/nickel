@@ -3,7 +3,7 @@
 //! This module is deliberately the only place where Nickel applications deal
 //! with MIME databases, Windows consent UI, or Launch Services limitations.
 
-use std::fmt;
+use std::{fmt, path::Path};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum AssociationTarget {
@@ -41,6 +41,8 @@ pub struct ApplicationHandler {
     /// Stable platform identity (`.desktop` id, registered application id, or bundle id).
     pub id: String,
     pub name: String,
+    pub icon: Option<String>,
+    pub source: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -117,6 +119,74 @@ pub fn association_backend() -> Box<dyn AssociationBackend> {
     Box::new(UnsupportedAssociations)
 }
 
+/// Resolves the operating-system type authority for a concrete file.
+pub fn association_target_for_file(path: &Path) -> Result<AssociationTarget, AssociationError> {
+    #[cfg(target_os = "linux")]
+    {
+        let output = std::process::Command::new("xdg-mime")
+            .arg("query")
+            .arg("filetype")
+            .arg(path)
+            .output()
+            .map_err(|error| AssociationError(format!("could not run xdg-mime: {error}")))?;
+        if output.status.success() {
+            let mime = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            if !mime.is_empty() {
+                return Ok(AssociationTarget::mime(mime));
+            }
+        }
+    }
+    infer_portable_mime(path)
+        .map(AssociationTarget::mime)
+        .ok_or_else(|| {
+            AssociationError("the operating system could not resolve this file type".into())
+        })
+}
+
+fn infer_portable_mime(path: &Path) -> Option<&'static str> {
+    match path
+        .extension()?
+        .to_string_lossy()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "txt" | "log" => Some("text/plain"),
+        "md" => Some("text/markdown"),
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "pdf" => Some("application/pdf"),
+        "mp3" => Some("audio/mpeg"),
+        "mp4" => Some("video/mp4"),
+        _ => None,
+    }
+}
+
+/// Opens exactly one file with a selected handler without changing its default.
+pub fn open_once_with(path: &Path, handler: &ApplicationHandler) -> Result<(), AssociationError> {
+    #[cfg(target_os = "linux")]
+    {
+        let status = std::process::Command::new("gtk-launch")
+            .arg(handler.id.trim_end_matches(".desktop"))
+            .arg(path)
+            .status()
+            .map_err(|error| {
+                AssociationError(format!("could not launch {}: {error}", handler.name))
+            })?;
+        status
+            .success()
+            .then_some(())
+            .ok_or_else(|| AssociationError(format!("{} exited with {status}", handler.name)))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (path, handler);
+        Err(AssociationError(
+            "open once with a chosen handler is unavailable on this platform build".into(),
+        ))
+    }
+}
+
 #[cfg(target_os = "linux")]
 struct LinuxAssociations;
 
@@ -185,6 +255,10 @@ impl LinuxAssociations {
                     handlers.push(ApplicationHandler {
                         id: id.into(),
                         name: Self::desktop_name(id),
+                        icon: contents
+                            .lines()
+                            .find_map(|line| line.strip_prefix("Icon=").map(str::to_owned)),
+                        source: path.display().to_string(),
                     });
                     if handlers.len() == 128 {
                         break;
@@ -203,6 +277,8 @@ impl AssociationBackend for LinuxAssociations {
         let effective = Self::query(target)?.map(|id| ApplicationHandler {
             name: Self::desktop_name(&id),
             id,
+            icon: None,
+            source: "freedesktop MIME default".into(),
         });
         let mut handlers = Self::handlers(target);
         if let Some(current) = effective.as_ref()
@@ -297,8 +373,15 @@ impl AssociationBackend for WindowsAssociations {
         _: &AssociationTarget,
         _: &str,
     ) -> Result<ChangeOutcome, AssociationError> {
+        std::process::Command::new("explorer.exe")
+            .arg("ms-settings:defaultapps")
+            .spawn()
+            .map_err(|error| {
+                AssociationError(format!("could not open Windows Default apps: {error}"))
+            })?;
         Ok(ChangeOutcome::NativeConsentRequired {
-            detail: "Choose the default in Windows Settings".into(),
+            detail: "Windows Default apps was opened; choose the application there, then refresh"
+                .into(),
         })
     }
 }
@@ -372,6 +455,8 @@ mod tests {
                 effective: Some(ApplicationHandler {
                     name: id.clone(),
                     id: id.clone(),
+                    icon: None,
+                    source: "fixture".into(),
                 }),
                 handlers: Vec::new(),
                 capability: AssociationCapability::DirectUserChange,
@@ -418,5 +503,14 @@ mod tests {
                 .unwrap(),
             ChangeOutcome::Rejected { .. }
         ));
+    }
+
+    #[test]
+    fn portable_file_type_fallback_is_explicit_and_bounded() {
+        assert_eq!(
+            infer_portable_mime(Path::new("readme.txt")),
+            Some("text/plain")
+        );
+        assert_eq!(infer_portable_mime(Path::new("archive.unknown")), None);
     }
 }

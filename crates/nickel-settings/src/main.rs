@@ -1764,10 +1764,14 @@ mod tests {
             effective: Some(nickel_platform::ApplicationHandler {
                 id: "current.desktop".into(),
                 name: "Current Browser".into(),
+                icon: None,
+                source: "fixture".into(),
             }),
             handlers: vec![nickel_platform::ApplicationHandler {
                 id: "other.desktop".into(),
                 name: "Other Browser".into(),
+                icon: None,
+                source: "fixture".into(),
             }],
             capability: nickel_platform::AssociationCapability::DirectUserChange,
             detail: "User-level association".into(),

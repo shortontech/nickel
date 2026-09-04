@@ -439,11 +439,48 @@ fn status_area_reports_selection_and_total_without_hiding_errors() {
     let mut app = FileApp::fixture();
     assert_eq!(file_status_text(&app), "3 items · fixture");
 
-    app.selected_entries = HashSet::from([0, 2]);
-    assert_eq!(file_status_text(&app), "2 selected · 3 items · fixture");
+    app.selected_entries = HashSet::from([1, 2]);
+    assert_eq!(
+        file_status_text(&app),
+        "2 selected · 640 B · 3 items · fixture"
+    );
 
     app.status = "Could not refresh: unavailable".into();
     assert_eq!(file_status_text(&app), app.status);
+}
+
+#[test]
+fn selection_status_omits_size_for_containers_and_unknown_metadata() {
+    let (_directory, mut app) = selection_app(3);
+    app.browser = DirectoryBrowser::fixture(vec![
+        FileEntry {
+            name: "folder".into(),
+            path: "/fixture/folder".into(),
+            is_directory: true,
+            size: None,
+            modified: None,
+        },
+        FileEntry {
+            name: "known".into(),
+            path: "/fixture/known".into(),
+            is_directory: false,
+            size: Some(12),
+            modified: None,
+        },
+        FileEntry {
+            name: "unknown".into(),
+            path: "/fixture/unknown".into(),
+            is_directory: false,
+            size: None,
+            modified: None,
+        },
+    ]);
+    app.selected_entries = HashSet::from([1]);
+    assert!(file_status_text(&app).contains("1 selected · 12 B"));
+    app.selected_entries = HashSet::from([0, 1]);
+    assert!(file_status_text(&app).starts_with("2 selected · 3 items"));
+    app.selected_entries = HashSet::from([1, 2]);
+    assert!(file_status_text(&app).starts_with("2 selected · 3 items"));
 }
 
 #[test]
@@ -1985,6 +2022,27 @@ fn context_menu_discloses_unimplemented_common_capabilities() {
     ] {
         assert!(labels.contains(expected), "missing {expected}: {labels:?}");
     }
+}
+
+#[test]
+fn properties_action_opens_one_parented_semantic_dialog() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("report.txt"), b"report").unwrap();
+    let browser = DirectoryBrowser::open(directory.path()).unwrap();
+    let mut host = UiHost::new(FileApp::with_browser(browser, String::new()), 860, 620);
+    host.application_mut().selected = Some(0);
+    host.application_mut().selected_entries.insert(0);
+    host.application_mut()
+        .update(FileMessage::ContextProperties);
+    assert_eq!(
+        host.application().properties.as_ref().unwrap().logical_size,
+        Some(6)
+    );
+    host.application_mut()
+        .update(FileMessage::ContextProperties);
+    assert!(host.application().properties.is_some());
+    host.application_mut().update(FileMessage::CloseProperties);
+    assert!(host.application().properties.is_none());
 }
 
 #[test]

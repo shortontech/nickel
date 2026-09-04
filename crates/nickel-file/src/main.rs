@@ -22,8 +22,8 @@ use nickel_core::{
 use nickel_file::{DirectoryBrowser, EntrySortKey, FileEntry, SortDirection};
 use nickel_i18n::Localizer;
 use nickel_ui::{
-    AnyView, Application, FrameOverlay, Insets, OverlayAnchor, OverlayMenu, OverlayMenuItem, Point,
-    ReadingDirection, UiId, ViewContext,
+    AnyView, Application, FrameOverlay, Insets, OverlayAnchor, OverlayMenu, OverlayMenuItem,
+    OverlayStyle, Point, ReadingDirection, Size, TransientSurface, UiId, ViewContext,
 };
 
 const DEFAULT_SIDEBAR_WIDTH: f32 = 190.0;
@@ -59,6 +59,20 @@ pub enum FileMessage {
     ContextBackground,
     ContextOpen,
     ContextOpenNewTab,
+    ContextProperties,
+    CloseProperties,
+    DiscardProperties,
+    PropertiesSelectHandler(usize),
+    PropertiesOpenOnce,
+    PropertiesRequestDefault,
+    PropertiesConfirmDefault,
+    PropertiesCalculateSize,
+    PropertiesCancelSize,
+    PropertiesToggleReadonly,
+    PropertiesToggleHidden,
+    PropertiesApply,
+    PropertiesOk,
+    PropertiesScroll(f32),
     ContextRefresh,
     ContextSelectAll,
     ToggleCommandSurface,
@@ -142,6 +156,18 @@ pub struct FileApp {
     /// invocation. They deliberately do not follow later pointer or model motion.
     pub(crate) context_anchor: Option<Point>,
     pub(crate) context_target: Option<PathBuf>,
+    pub(crate) properties: Option<crate::properties::EntryProperties>,
+    pub(crate) properties_association: Option<nickel_platform::AssociationSnapshot>,
+    properties_association_rx:
+        Option<Receiver<Result<nickel_platform::AssociationSnapshot, String>>>,
+    pub(crate) properties_association_status: String,
+    pub(crate) properties_handler: Option<usize>,
+    pub(crate) properties_confirm_default: bool,
+    pub(crate) properties_size_job: Option<crate::properties::RecursiveSizeJob>,
+    pub(crate) properties_size_progress: Option<String>,
+    pub(crate) properties_edits: Option<crate::properties::PropertyEdits>,
+    pub(crate) properties_scroll: f32,
+    pub(crate) properties_confirm_close: bool,
     activation_rx: Option<Receiver<ActivationResult>>,
     pub(crate) icons: icons::ArtworkCache,
     pub(crate) icon_rx:
@@ -846,6 +872,17 @@ impl FileApp {
             last_click: None,
             context_anchor: None,
             context_target: None,
+            properties: None,
+            properties_association: None,
+            properties_association_rx: None,
+            properties_association_status: String::new(),
+            properties_handler: None,
+            properties_confirm_default: false,
+            properties_size_job: None,
+            properties_size_progress: None,
+            properties_edits: None,
+            properties_scroll: 0.0,
+            properties_confirm_close: false,
             activation_rx: None,
             icons: icons::ArtworkCache::default(),
             icon_rx: None,
@@ -1884,6 +1921,34 @@ impl FileApp {
             .collect()
     }
 
+    pub(crate) fn selection_summary(&self) -> crate::selection_summary::SelectionSummary {
+        crate::selection_summary::SelectionSummary::from_entries(
+            self.browser
+                .entries()
+                .iter()
+                .enumerate()
+                .filter_map(|(index, entry)| {
+                    self.selected_entries.contains(&index).then_some(entry)
+                }),
+        )
+    }
+
+    fn close_properties(&mut self) {
+        self.properties = None;
+        self.properties_association = None;
+        self.properties_association_rx = None;
+        self.properties_association_status.clear();
+        self.properties_handler = None;
+        self.properties_confirm_default = false;
+        self.properties_confirm_close = false;
+        if let Some(job) = self.properties_size_job.take() {
+            job.cancel();
+        }
+        self.properties_size_progress = None;
+        self.properties_edits = None;
+        self.properties_scroll = 0.0;
+    }
+
     pub(crate) fn ensure_selection_visible(&mut self) {
         self.pending_ensure_visible = self.selected.is_some();
     }
@@ -1947,6 +2012,205 @@ impl FileApp {
                     self.new_tab_at(entry.path);
                 }
             }
+            FileMessage::ContextProperties => {
+                if self.properties.is_some() {
+                    return;
+                }
+                self.status.clear();
+                let target = self
+                    .context_target
+                    .as_ref()
+                    .and_then(|path| {
+                        self.browser
+                            .entries()
+                            .iter()
+                            .enumerate()
+                            .find(|(_, entry)| &entry.path == path)
+                    })
+                    .or_else(|| {
+                        (self.selected_entries.len() == 1)
+                            .then(|| {
+                                self.selected.and_then(|index| {
+                                    self.browser
+                                        .entries()
+                                        .get(index)
+                                        .map(|entry| (index, entry))
+                                })
+                            })
+                            .flatten()
+                    });
+                if let Some((index, entry)) = target {
+                    match crate::properties::EntryProperties::load(
+                        entry,
+                        self.browser.identity_at(index),
+                    ) {
+                        Ok(properties) => {
+                            self.properties_edits = Some(crate::properties::PropertyEdits {
+                                readonly: properties.readonly,
+                                hidden: properties.hidden,
+                            });
+                            self.properties = Some(properties);
+                        }
+                        Err(error) => self.status = format!("Could not read properties: {error}"),
+                    }
+                }
+                if let Some(path) = self.properties.as_ref().map(|value| value.path.clone()) {
+                    let (sender, receiver) = mpsc::channel();
+                    self.properties_association_rx = Some(receiver);
+                    self.properties_association_status = "Loading applications…".into();
+                    std::thread::spawn(move || {
+                        let result = nickel_platform::association_target_for_file(&path)
+                            .and_then(|target| {
+                                nickel_platform::association_backend().inspect(&target)
+                            })
+                            .map_err(|error| error.to_string());
+                        let _ = sender.send(result);
+                    });
+                }
+            }
+            FileMessage::CloseProperties => {
+                let dirty = self
+                    .properties
+                    .as_ref()
+                    .zip(self.properties_edits)
+                    .is_some_and(|(properties, edits)| {
+                        edits.readonly != properties.readonly || edits.hidden != properties.hidden
+                    });
+                if dirty {
+                    self.properties_confirm_close = true;
+                    return;
+                }
+                self.close_properties();
+            }
+            FileMessage::DiscardProperties => self.close_properties(),
+            FileMessage::PropertiesSelectHandler(index) => {
+                if self
+                    .properties_association
+                    .as_ref()
+                    .is_some_and(|snapshot| index < snapshot.handlers.len())
+                {
+                    self.properties_handler = Some(index);
+                }
+            }
+            FileMessage::PropertiesOpenOnce => {
+                if let (Some(properties), Some(snapshot), Some(index)) = (
+                    self.properties.as_ref(),
+                    self.properties_association.as_ref(),
+                    self.properties_handler,
+                ) && let Some(handler) = snapshot.handlers.get(index)
+                    && let Err(error) = nickel_platform::open_once_with(&properties.path, handler)
+                {
+                    self.status = format!("Could not open with {}: {error}", handler.name);
+                }
+            }
+            FileMessage::PropertiesRequestDefault => self.properties_confirm_default = true,
+            FileMessage::PropertiesConfirmDefault => {
+                self.properties_confirm_default = false;
+                if let (Some(snapshot), Some(index)) = (
+                    self.properties_association.as_ref(),
+                    self.properties_handler,
+                ) && let Some(handler) = snapshot.handlers.get(index)
+                {
+                    match nickel_platform::change_and_verify(
+                        nickel_platform::association_backend().as_ref(),
+                        &snapshot.target,
+                        &handler.id,
+                    ) {
+                        Ok(nickel_platform::ChangeOutcome::Confirmed(updated)) => {
+                            self.properties_association = Some(updated);
+                            self.icons.clear();
+                            self.refresh_icons();
+                        }
+                        Ok(nickel_platform::ChangeOutcome::NativeConsentRequired { detail })
+                        | Ok(nickel_platform::ChangeOutcome::Rejected { detail }) => {
+                            self.status = detail
+                        }
+                        Err(error) => {
+                            self.status = format!("Could not change default application: {error}")
+                        }
+                    }
+                }
+            }
+            FileMessage::PropertiesCalculateSize => {
+                if let Some(properties) = self
+                    .properties
+                    .as_ref()
+                    .filter(|value| value.kind == "Folder")
+                {
+                    self.properties_size_job = Some(crate::properties::calculate_recursive_size(
+                        properties.path.clone(),
+                    ));
+                    self.properties_size_progress = Some("Calculating…".into());
+                }
+            }
+            FileMessage::PropertiesCancelSize => {
+                if let Some(job) = self.properties_size_job.take() {
+                    job.cancel();
+                }
+                self.properties_size_progress = Some("Calculation cancelled".into());
+            }
+            FileMessage::PropertiesToggleReadonly => {
+                if let Some(edits) = self.properties_edits.as_mut() {
+                    edits.readonly = !edits.readonly;
+                }
+            }
+            FileMessage::PropertiesToggleHidden => {
+                if let Some(edits) = self.properties_edits.as_mut() {
+                    edits.hidden = !edits.hidden;
+                }
+            }
+            FileMessage::PropertiesApply => {
+                if let (Some(properties), Some(edits)) =
+                    (self.properties.as_ref(), self.properties_edits)
+                {
+                    let outcome = crate::properties::apply_edits(properties, edits);
+                    if outcome.readonly.is_ok() && outcome.hidden.is_ok() {
+                        self.status = "Properties applied".into();
+                        let entry = FileEntry {
+                            name: outcome.path.file_name().unwrap_or_default().to_owned(),
+                            path: outcome.path.clone(),
+                            is_directory: outcome.path.is_dir(),
+                            size: None,
+                            modified: None,
+                        };
+                        self.properties =
+                            crate::properties::EntryProperties::load(&entry, properties.identity)
+                                .ok();
+                        self.properties_edits = self.properties.as_ref().map(|value| {
+                            crate::properties::PropertyEdits {
+                                readonly: value.readonly,
+                                hidden: value.hidden,
+                            }
+                        });
+                        self.refresh_directory(self.browser.show_hidden());
+                    } else {
+                        self.status = format!(
+                            "Some properties were not applied: read-only: {:?}; hidden: {:?}",
+                            outcome.readonly.err(),
+                            outcome.hidden.err()
+                        );
+                    }
+                }
+            }
+            FileMessage::PropertiesOk => {
+                if let (Some(properties), Some(edits)) =
+                    (self.properties.as_ref(), self.properties_edits)
+                {
+                    let outcome = crate::properties::apply_edits(properties, edits);
+                    if outcome.readonly.is_ok() && outcome.hidden.is_ok() {
+                        self.close_properties();
+                        self.status = "Properties applied".into();
+                        self.refresh_directory(self.browser.show_hidden());
+                    } else {
+                        self.status = format!(
+                            "Some properties were not applied: read-only: {:?}; hidden: {:?}",
+                            outcome.readonly.err(),
+                            outcome.hidden.err()
+                        );
+                    }
+                }
+            }
+            FileMessage::PropertiesScroll(offset) => self.properties_scroll = offset.max(0.0),
             FileMessage::ContextRefresh => {
                 self.refresh_directory(self.browser.show_hidden());
             }
@@ -2172,10 +2436,10 @@ impl Application for FileApp {
                     )
                     .shortcut("Enter"),
                 )
-                .item(OverlayMenuItem::disabled_with_reason(
+                .item(OverlayMenuItem::action(
                     "open-with",
                     "Open With",
-                    "Application chooser is not implemented yet",
+                    FileMessage::ContextProperties,
                 ));
                 let menu = if entry.is_directory {
                     menu.item(
@@ -2257,10 +2521,10 @@ impl Application for FileApp {
                         "Open in Terminal",
                         "Terminal integration is not implemented yet",
                     ))
-                    .item(OverlayMenuItem::disabled_with_reason(
+                    .item(OverlayMenuItem::action(
                         "properties",
                         "Properties",
-                        "Properties are not implemented yet",
+                        FileMessage::ContextProperties,
                     )),
                 ))
             })
@@ -2314,6 +2578,24 @@ impl Application for FileApp {
                 width: 1.0,
             });
         }
+        if let Some(properties) = self.properties.as_ref() {
+            let surface = TransientSurface::dialog(
+                "file-properties-dialog",
+                OverlayAnchor::Node(UiId::from("file-content")),
+                Size::new(500.0, 620.0),
+                OverlayStyle {
+                    background: palette.surface,
+                    foreground: palette.text,
+                    border: palette.muted,
+                    selected: palette.accent_soft,
+                    radius: 8,
+                },
+            );
+            overlays.push(FrameOverlay::surface(
+                surface,
+                crate::components::properties_dialog(self, properties, palette),
+            ));
+        }
         overlays
     }
 
@@ -2321,7 +2603,72 @@ impl Application for FileApp {
         let settings_changed = self.sync_icon_settings();
         let before = self.next_icon_id;
         self.poll_icons();
+        let properties_changed = if let Some(job) = self.properties_size_job.as_ref() {
+            match job.receiver.try_recv() {
+                Ok(crate::properties::RecursiveSizeUpdate::Progress { entries, bytes }) => {
+                    self.properties_size_progress = Some(format!(
+                        "{entries} entries · {}",
+                        self.localizer.bytes(bytes)
+                    ));
+                    true
+                }
+                Ok(crate::properties::RecursiveSizeUpdate::Complete(bytes)) => {
+                    self.properties_size_progress =
+                        Some(format!("Folder contents: {}", self.localizer.bytes(bytes)));
+                    self.properties_size_job = None;
+                    true
+                }
+                Ok(crate::properties::RecursiveSizeUpdate::Failed(error)) => {
+                    self.properties_size_progress =
+                        Some(format!("Could not calculate size: {error}"));
+                    self.properties_size_job = None;
+                    true
+                }
+                Ok(crate::properties::RecursiveSizeUpdate::Cancelled) => {
+                    self.properties_size_progress = Some("Calculation cancelled".into());
+                    self.properties_size_job = None;
+                    true
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.properties_size_job = None;
+                    true
+                }
+                Err(TryRecvError::Empty) => false,
+            }
+        } else {
+            false
+        };
+        let association_changed = if let Some(receiver) = self.properties_association_rx.as_ref() {
+            match receiver.try_recv() {
+                Ok(Ok(snapshot)) => {
+                    self.properties_handler = snapshot.effective.as_ref().and_then(|effective| {
+                        snapshot
+                            .handlers
+                            .iter()
+                            .position(|handler| handler.id == effective.id)
+                    });
+                    self.properties_association = Some(snapshot);
+                    self.properties_association_status.clear();
+                    self.properties_association_rx = None;
+                    true
+                }
+                Ok(Err(error)) => {
+                    self.properties_association_status = error;
+                    self.properties_association_rx = None;
+                    true
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.properties_association_rx = None;
+                    true
+                }
+                Err(TryRecvError::Empty) => false,
+            }
+        } else {
+            false
+        };
         settings_changed
+            || properties_changed
+            || association_changed
             || self.poll_activation()
             || self.poll_navigation()
             || self.poll_directory_watch()
@@ -2344,6 +2691,12 @@ impl Application for FileApp {
                 .map(|_| Duration::from_millis(16)),
             (!self.sidebar_loading.is_empty()).then_some(Duration::from_millis(16)),
             self.location_groups_rx
+                .as_ref()
+                .map(|_| Duration::from_millis(16)),
+            self.properties_size_job
+                .as_ref()
+                .map(|_| Duration::from_millis(16)),
+            self.properties_association_rx
                 .as_ref()
                 .map(|_| Duration::from_millis(16)),
         ]

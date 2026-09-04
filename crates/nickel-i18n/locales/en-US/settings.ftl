@@ -222,3 +222,15 @@ file-command-sort-modified = Sort by modified
 file-command-sort-size = Sort by size
 file-command-hide-hidden = Hide hidden files
 file-command-show-hidden = Show hidden files
+size-bytes = { $value } B
+size-kibibytes = { $value } KiB
+size-mebibytes = { $value } MiB
+size-gibibytes = { $value } GiB
+size-tebibytes = { $value } TiB
+file-selection-count =
+    { $count ->
+        [one] 1 selected
+       *[other] { $count } selected
+    }
+file-selection-summary = { $count } · { $size }
+file-selection-accessible-bytes = { $count } · { $bytes } bytes

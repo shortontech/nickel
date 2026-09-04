@@ -14,6 +14,129 @@ use crate::{
     },
 };
 
+pub(crate) fn properties_dialog(
+    app: &FileApp,
+    properties: &crate::properties::EntryProperties,
+    palette: ThemePalette,
+) -> AnyView<FileMessage> {
+    let localizer = &app.localizer;
+    let size = properties
+        .logical_size
+        .map(|bytes| localizer.bytes(bytes))
+        .unwrap_or_else(|| "Not calculated".into());
+    let allocated = properties
+        .allocated_size
+        .map(|bytes| localizer.bytes(bytes))
+        .unwrap_or_else(|| "Unavailable".into());
+    let modified = properties
+        .modified
+        .map(format_modified)
+        .unwrap_or_else(|| "Unavailable".into());
+    let accessed = properties
+        .accessed
+        .map(format_modified)
+        .unwrap_or_else(|| "Unavailable".into());
+    let created = properties
+        .created
+        .map(format_modified)
+        .unwrap_or_else(|| "Unavailable".into());
+    let stale = properties.is_stale();
+    let association = app.properties_association.as_ref();
+    let handlers = association.map(|snapshot| snapshot.handlers.iter().enumerate().map(|(index, handler)| {
+        let selected = app.properties_handler == Some(index);
+        ui! {
+            <Button id={format!("properties-handler-{index}")} on_press={FileMessage::PropertiesSelectHandler(index)}
+                width={410.0} height={30.0} color={if selected { palette.accent } else { palette.text }}
+                accessibility_label={format!("{} for {}; {}", handler.name, association.unwrap().target.platform_key(), handler.source)}>
+                {handler.name.clone()}
+            </Button>
+        }
+    }).collect::<Vec<_>>()).unwrap_or_default();
+    let row = |label: &'static str, value: String| {
+        ui! {
+            <Row height={28.0} gap={12.0}>
+                <Text width={110.0} color={palette.muted}>{label}</Text>
+                <Text color={palette.text} wrap={true} max_lines={2} grow={1.0}>{value}</Text>
+            </Row>
+        }
+    };
+    let content = ui! {
+        <Column gap={8.0}>
+            <Text height={28.0} scale={1.35} color={palette.text}>{format!("{} Properties", properties.name)}</Text>
+            {if app.status.is_empty() { ui! { <></> } } else { ui! { <Text height={24.0} color={palette.accent}>{app.status.clone()}</Text> } }}
+            {if stale { ui! { <Text height={22.0} color={palette.accent}>{"This item changed or is no longer available."}</Text> } } else { ui! { <></> } }}
+            {row("Kind", properties.kind.clone())}
+            {row("Location", properties.path.parent().unwrap_or(&properties.path).display().to_string())}
+            {row("Size", size)}
+            {row("On disk", allocated)}
+            {row("Modified", modified)}
+            {row("Accessed", accessed)}
+            {row("Created", created)}
+            {row("Owner", properties.owner.clone().unwrap_or_else(|| "Unavailable".into()))}
+            {row("Permissions", properties.permissions.clone())}
+            {if let Some(target) = properties.symlink_target.as_ref() { row("Link target", target.display().to_string()) } else { ui! { <></> } }}
+            <Row height={32.0} gap={8.0}>
+                <Button on_press={FileMessage::PropertiesToggleReadonly} enabled={!stale} width={145.0} height={30.0} color={palette.text}>{if app.properties_edits.is_some_and(|edits| edits.readonly) { "Read-only: On" } else { "Read-only: Off" }}</Button>
+                <Button on_press={FileMessage::PropertiesToggleHidden} enabled={!stale} width={145.0} height={30.0} color={palette.text}>{if app.properties_edits.is_some_and(|edits| edits.hidden) { "Hidden: On" } else { "Hidden: Off" }}</Button>
+            </Row>
+            {if properties.kind == "Folder" { ui! {
+                <Row height={34.0} gap={8.0}>
+                    <Button on_press={if app.properties_size_job.is_some() { FileMessage::PropertiesCancelSize } else { FileMessage::PropertiesCalculateSize }} width={150.0} height={32.0} color={palette.text}>
+                        {if app.properties_size_job.is_some() { "Cancel calculation" } else { "Calculate contents" }}
+                    </Button>
+                    <Text color={palette.muted} grow={1.0}>{app.properties_size_progress.clone().unwrap_or_default()}</Text>
+                </Row>
+            } } else { ui! { <></> } }}
+            {if let Some(snapshot) = association { ui! {
+                <Column gap={5.0}>
+                    <Text height={22.0} color={palette.text}>{format!("Open with — {}", snapshot.target.platform_key())}</Text>
+                    <Column gap={4.0} children={handlers} />
+                    <Row height={34.0} gap={8.0}>
+                        <Button on_press={FileMessage::PropertiesOpenOnce} enabled={app.properties_handler.is_some()} width={120.0} height={32.0} color={palette.text}>{"Open once"}</Button>
+                        <Button on_press={FileMessage::PropertiesRequestDefault} enabled={app.properties_handler.is_some() && !stale} width={120.0} height={32.0} color={palette.text}>{"Make default"}</Button>
+                    </Row>
+                    {if app.properties_confirm_default { ui! {
+                        <Row height={36.0} gap={8.0}>
+                            <Text color={palette.text} grow={1.0}>{format!("Change the default for {}?", snapshot.target.platform_key())}</Text>
+                            <Button on_press={FileMessage::PropertiesConfirmDefault} width={90.0} height={32.0} color={palette.text}>{"Confirm"}</Button>
+                        </Row>
+                    } } else { ui! { <></> } }}
+                </Column>
+            } } else { ui! { <Text height={22.0} color={palette.muted}>{if app.properties_association_status.is_empty() { "No supported file association is available.".into() } else { app.properties_association_status.clone() }}</Text> } }}
+            {if app.properties_confirm_close { ui! {
+                <Row height={36.0} gap={8.0}>
+                    <Text color={palette.text} grow={1.0}>{"Discard unsaved property changes?"}</Text>
+                    <Button on_press={FileMessage::DiscardProperties} width={90.0} height={32.0} color={palette.text}>{"Discard"}</Button>
+                </Row>
+            } } else { ui! { <></> } }}
+            <Row height={38.0}>
+                <Container grow={1.0} />
+                <Button id={"file-properties-apply"} on_press={FileMessage::PropertiesApply}
+                    enabled={!stale} width={90.0} height={34.0} color={palette.text}>{"Apply"}</Button>
+                <Button id={"file-properties-ok"} on_press={FileMessage::PropertiesOk}
+                    enabled={!stale} width={90.0} height={34.0} color={palette.text}>{"OK"}</Button>
+                <Button id={"file-properties-close"} on_press={FileMessage::CloseProperties}
+                    width={90.0} height={34.0} color={palette.text}>{"Cancel"}</Button>
+            </Row>
+        </Column>
+    };
+    let scroll = VerticalScroll::new(
+        FileMessage::PropertiesScroll(app.properties_scroll),
+        app.properties_scroll,
+    )
+    .on_scroll(FileMessage::PropertiesScroll)
+    .controlled(true)
+    .height(576.0)
+    .child(content);
+    AnyView::new(ui! {
+        <Container id={"file-properties-content"} semantic_role={SemanticRole::Dialog}
+            accessibility_label={format!("Properties for {}", properties.name)}
+            background={palette.surface} padding={Insets::all(22.0)}>
+            {scroll}
+        </Container>
+    })
+}
+
 pub(crate) fn navigation_toolbar(
     app: &FileApp,
     breadcrumbs: &[(String, PathBuf)],
@@ -394,8 +517,18 @@ pub(crate) fn status_text(app: &FileApp) -> String {
     if selected == 0 {
         format!("{total_label} · {location}")
     } else {
-        format!("{selected} selected · {total_label} · {location}")
+        let summary = app.selection_summary().visible_label(&app.localizer);
+        format!("{summary} · {total_label} · {location}")
     }
+}
+
+pub(crate) fn status_accessibility_text(app: &FileApp) -> String {
+    if !app.status.is_empty() || app.selected_entries.is_empty() {
+        return status_text(app);
+    }
+    let summary = app.selection_summary().accessible_label(&app.localizer);
+    let total = app.browser.entries().len();
+    format!("{summary}; {total} total items")
 }
 
 pub(crate) fn tab_strip(
@@ -485,9 +618,13 @@ pub(crate) fn location_group(
     })
 }
 
-pub(crate) fn status_bar(text: String, palette: ThemePalette) -> AnyView<FileMessage> {
+pub(crate) fn status_bar(
+    text: String,
+    accessibility_text: String,
+    palette: ThemePalette,
+) -> AnyView<FileMessage> {
     AnyView::new(ui! {
-        <Container id={"file-footer"} height={30.0} shrink={0.0} background={palette.surface} padding={Insets {
+        <Container id={"file-footer"} accessibility_label={accessibility_text} height={30.0} shrink={0.0} background={palette.surface} padding={Insets {
             top: 7.0, right: 14.0, bottom: 5.0, left: 14.0,
         }}>
             <Text scale={1.0} color={palette.muted}>{text}</Text>
