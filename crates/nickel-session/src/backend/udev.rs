@@ -1515,6 +1515,14 @@ impl NickelSession {
         }
         if let Some(primary_gpu) = primary_to_activate {
             self.activate_drm_device(handle, primary_gpu)?;
+            // The dependent may fail to open (for example, an EVDI device can
+            // remain busy briefly during display-manager handoff). Discover
+            // the primary's own outputs before attempting it so the usable
+            // primary renderer is not retired merely because the dependent
+            // never reached the later connector-scan phase.
+            if let Err(error) = self.scan_connectors_inner(primary_gpu, None) {
+                tracing::warn!(node = %primary_gpu, %error, "failed to reconcile primary DRM connectors");
+            }
         }
         if let Err(error) = self.activate_drm_device(handle, node) {
             self.retire_inactive_renderers();
