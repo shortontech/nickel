@@ -28,9 +28,10 @@ use nickel_session_protocol::{
 use nickel_ui::Rect;
 use nickel_ui::backend::PaintCommand;
 use nickel_ui::{
-    AnyView, Column, Container, ControllerAction, FrameOverlay, HostBatch, HostChangeToken,
-    HostEvent, Image, ImageFit, Insets, Layer, OverlayAnchor, OverlayMenu, OverlayMenuItem, Point,
-    Row, SemanticRole, Shortcut, Spacer, Text, TextAlign, TextField, UiEvent, UiId, ViewContext,
+    AnyView, Column, Container, ControllerAction, DragGesture, DragPhase, FrameOverlay, HostBatch,
+    HostChangeToken, HostEvent, Image, ImageFit, Insets, Layer, OverlayAnchor, OverlayMenu,
+    OverlayMenuItem, Point, Row, SemanticRole, Shortcut, Spacer, Text, TextAlign, TextField,
+    UiEvent, UiId, ViewContext,
 };
 
 use crate::{
@@ -128,11 +129,15 @@ enum PanelHover {
     Control,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum PanelAction {
     Launcher,
     Task(usize),
     TaskContext(usize),
+    ToggleTaskPin(String),
+    MoveTaskPinLeft(String),
+    MoveTaskPinRight(String),
+    TaskDrag(usize, DragGesture),
     Codex,
     Tray(String),
     TrayContext(String),
@@ -974,17 +979,107 @@ pub struct PanelApplication {
     clock: String,
     date: String,
     effects: Vec<PanelAction>,
+    task_drag: Option<(usize, isize)>,
+}
+
+fn map_task_drag(seed: PanelAction, gesture: DragGesture) -> PanelAction {
+    let PanelAction::Task(index) = seed else {
+        unreachable!("task drag seeds retain their task index")
+    };
+    PanelAction::TaskDrag(index, gesture)
 }
 
 impl nickel_ui::Application for PanelApplication {
     type Message = PanelAction;
 
     fn update(&mut self, message: Self::Message) {
+        if let PanelAction::TaskDrag(index, gesture) = message {
+            let direction = if gesture.position.x < gesture.bounds.origin.x {
+                -1
+            } else if gesture.position.x > gesture.bounds.origin.x + gesture.bounds.size.width {
+                1
+            } else {
+                0
+            };
+            match gesture.phase {
+                DragPhase::Started | DragPhase::Moved => {
+                    self.task_drag = (direction != 0).then_some((index, direction));
+                }
+                DragPhase::Ended => {
+                    let pending = self
+                        .task_drag
+                        .take()
+                        .or((direction != 0).then_some((index, direction)));
+                    if let Some((index, direction)) = pending
+                        && let Some(id) = self
+                            .launcher
+                            .taskbar_applications(&self.windows)
+                            .get(index)
+                            .filter(|task| task.pinned)
+                            .and_then(|task| task.application_id.as_ref())
+                    {
+                        self.effects.push(if direction < 0 {
+                            PanelAction::MoveTaskPinLeft(id.as_str().to_owned())
+                        } else {
+                            PanelAction::MoveTaskPinRight(id.as_str().to_owned())
+                        });
+                    }
+                }
+                DragPhase::Cancelled => self.task_drag = None,
+            }
+            return;
+        }
         self.effects.push(message);
     }
 
     fn view(&self, context: ViewContext) -> impl nickel_ui::View<Self::Message> {
         self.panel_view(context.viewport.size.width, context.viewport.size.height)
+    }
+
+    fn frame_overlays(&self, _context: ViewContext) -> Vec<FrameOverlay<Self::Message>> {
+        let tasks = self.launcher.taskbar_applications(&self.windows);
+        let pinned_count = tasks.iter().take_while(|task| task.pinned).count();
+        tasks
+            .iter()
+            .take(12)
+            .enumerate()
+            .filter_map(|(index, task)| {
+                if !task.windows.is_empty() {
+                    return None;
+                }
+                let application_id = task.application_id.as_ref()?;
+                let id = application_id.as_str().to_owned();
+                let mut menu = OverlayMenu::new(
+                    format!("panel-task-menu-{id}"),
+                    OverlayAnchor::InvocationTarget(UiId::new(format!("panel-task-{index}"))),
+                );
+                if task.pinned {
+                    if index > 0 {
+                        menu = menu.item(OverlayMenuItem::action(
+                            "move-left",
+                            "Move Left",
+                            PanelAction::MoveTaskPinLeft(id.clone()),
+                        ));
+                    }
+                    if index + 1 < pinned_count {
+                        menu = menu.item(OverlayMenuItem::action(
+                            "move-right",
+                            "Move Right",
+                            PanelAction::MoveTaskPinRight(id.clone()),
+                        ));
+                    }
+                }
+                Some(FrameOverlay::Menu(menu.item(OverlayMenuItem::action(
+                    "toggle-pin",
+                    if task.pinned {
+                        "Unpin from Nickel Bar"
+                    } else {
+                        "Pin to Nickel Bar"
+                    },
+                    PanelAction::ToggleTaskPin(id),
+                ))))
+            })
+            .collect()
     }
 
     fn title(&self) -> &str {
@@ -1080,6 +1175,7 @@ impl PanelApplication {
             clock,
             date,
             effects: Vec::new(),
+            task_drag: None,
         }
     }
 
@@ -1569,6 +1665,7 @@ impl LiveShell {
                 clock,
                 date,
                 effects: Vec::new(),
+                task_drag: None,
             },
             1920,
             56,
@@ -1759,9 +1856,9 @@ impl LiveShell {
         let preview_group = self.preview_group.and_then(|index| {
             let panel_windows = self.panel_windows();
             self.launcher
-                .group_windows(&panel_windows)
+                .taskbar_applications(&panel_windows)
                 .get(index)
-                .cloned()
+                .map(|task| task.window_group())
         });
         let preview_refresh_now = Instant::now();
         if let Some(group) = preview_group
@@ -2391,7 +2488,7 @@ impl LiveShell {
             PanelAction::Launcher => self.set_launcher_visible(!self.launcher_visible),
             PanelAction::Task(index) => {
                 let panel_windows = self.panel_windows();
-                let groups = self.launcher.group_windows(&panel_windows);
+                let groups = self.launcher.taskbar_applications(&panel_windows);
                 if groups
                     .get(index)
                     .is_some_and(|group| group.windows.len() > 1)
@@ -2409,11 +2506,17 @@ impl LiveShell {
                         },
                     );
                     self.close_window_preview();
+                } else if let Some(application_id) = groups
+                    .get(index)
+                    .filter(|group| group.available)
+                    .and_then(|group| group.application_id.as_ref())
+                {
+                    self.launch_application_by_id(application_id.as_str());
                 }
             }
             PanelAction::TaskContext(index) => {
                 let panel_windows = self.panel_windows();
-                let groups = self.launcher.group_windows(&panel_windows);
+                let groups = self.launcher.taskbar_applications(&panel_windows);
                 let Some(window) = groups.get(index).and_then(|group| {
                     group
                         .windows
@@ -2448,6 +2551,22 @@ impl LiveShell {
                 #[cfg(target_os = "linux")]
                 let _ = send_session_command("focus-context-menu", ShellCommand::FocusContextMenu);
             }
+            PanelAction::ToggleTaskPin(id) => {
+                self.launcher.toggle_pin(&id);
+                self.persist_launcher_preferences();
+            }
+            PanelAction::MoveTaskPinLeft(id) => {
+                if self.launcher.move_pin(&id, -1) {
+                    self.persist_launcher_preferences();
+                }
+            }
+            PanelAction::MoveTaskPinRight(id) => {
+                if self.launcher.move_pin(&id, 1) {
+                    self.persist_launcher_preferences();
+                }
+            }
+            // Drag gestures are reduced by `PanelApplication` into a typed move action.
+            PanelAction::TaskDrag(_, _) => {}
             PanelAction::Codex => {
                 if !self.launcher.codex_available() {
                     self.codex_project_menu_visible = false;
@@ -2482,7 +2601,7 @@ impl LiveShell {
                 output,
                 interaction,
             } => {
-                let groups = self.launcher.group_windows(&self.windows);
+                let groups = self.launcher.taskbar_applications(&self.windows);
                 let index = groups.iter().take(12).position(|group| {
                     group
                         .application_id
@@ -2610,7 +2729,12 @@ impl LiveShell {
     fn panel_hover_for_action(&self, action: &PanelAction) -> Option<PanelHover> {
         Some(match action {
             PanelAction::Launcher => PanelHover::Launcher,
-            PanelAction::Task(index) | PanelAction::TaskContext(index) => PanelHover::Task(*index),
+            PanelAction::Task(index)
+            | PanelAction::TaskContext(index)
+            | PanelAction::TaskDrag(index, _) => PanelHover::Task(*index),
+            PanelAction::ToggleTaskPin(_)
+            | PanelAction::MoveTaskPinLeft(_)
+            | PanelAction::MoveTaskPinRight(_) => return None,
             PanelAction::Codex => PanelHover::Codex,
             PanelAction::Tray(id) | PanelAction::TrayContext(id) => self
                 .tray
@@ -2948,6 +3072,16 @@ impl LiveShell {
             ),
             MenuAction::TogglePin(application) => self
                 .apply_launcher_action(LauncherAction::TogglePin(application.as_str().to_owned())),
+            MenuAction::MovePinLeft(application) => {
+                if self.launcher.move_pin(application.as_str(), -1) {
+                    self.persist_launcher_preferences();
+                }
+            }
+            MenuAction::MovePinRight(application) => {
+                if self.launcher.move_pin(application.as_str(), 1) {
+                    self.persist_launcher_preferences();
+                }
+            }
         }
     }
 
@@ -3066,7 +3200,7 @@ impl LiveShell {
             );
         } else if let Some(index) = self.preview_group {
             let panel_windows = self.panel_windows();
-            let groups = self.launcher.group_windows(&panel_windows);
+            let groups = self.launcher.taskbar_applications(&panel_windows);
             if let Some(group) = groups.get(index) {
                 let windows = group
                     .windows
@@ -3151,8 +3285,11 @@ impl LiveShell {
             return;
         }
         let panel_windows = self.panel_windows();
-        let groups = self.launcher.group_windows(&panel_windows);
-        if groups.get(index).is_none() {
+        let groups = self.launcher.taskbar_applications(&panel_windows);
+        if groups
+            .get(index)
+            .is_none_or(|group| group.windows.is_empty())
+        {
             return;
         }
         self.preview_pending = None;
@@ -3961,9 +4098,9 @@ impl LiveShell {
             self.preview_group.and_then(|index| {
                 let panel_windows = self.panel_windows();
                 self.launcher
-                    .group_windows(&panel_windows)
+                    .taskbar_applications(&panel_windows)
                     .get(index)
-                    .cloned()
+                    .map(|task| task.window_group())
             })
         });
         let Some(group) = group else {
@@ -4094,7 +4231,7 @@ impl LiveShell {
 
     fn sync_panel_host(&mut self) -> bool {
         let panel_windows = self.panel_windows();
-        let groups = self.launcher.group_windows(&panel_windows);
+        let groups = self.launcher.taskbar_applications(&panel_windows);
         let task_icons: Vec<Option<(u16, Arc<image::RgbaImage>)>> = groups
             .iter()
             .take(12)
@@ -4139,13 +4276,14 @@ impl LiveShell {
                     _ => true,
                 });
         let application_changed = application.palette != self.palette
-            || application.windows != self.windows
+            || application.windows != panel_windows
             || application.tray != self.tray
             || application.panel_hover != visible_panel_hover
             || application.launcher_visible != self.launcher_visible
             || application.codex_project_menu_visible != self.codex_project_menu_visible
             || application.control_visible != self.control_visible
             || application.launcher.codex_available() != self.launcher.codex_available()
+            || application.launcher.preferences() != self.launcher.preferences()
             || task_icons_changed;
         application.launcher.clone_from(&self.launcher);
         application.windows = panel_windows;
@@ -4214,7 +4352,7 @@ impl PanelApplication {
                         .height(32.0),
                 ),
         );
-        let groups = self.launcher.group_windows(&self.windows);
+        let groups = self.launcher.taskbar_applications(&self.windows);
         for (index, group) in groups.iter().take(12).enumerate() {
             let hovered = self.panel_hover == Some(PanelHover::Task(index));
             let icon = self.task_icons.get(index).cloned().flatten();
@@ -4240,16 +4378,28 @@ impl PanelApplication {
             let indicator_width = if group.active() { 20.0 } else { 12.0 };
             let indicator_color = if group.active() {
                 self.palette.accent
+            } else if group.windows.is_empty() {
+                self.palette.panel
             } else {
                 self.palette.muted
+            };
+            let label = if !group.available {
+                format!("{} (Unavailable, pinned)", group.application_name)
+            } else if group.pinned && group.windows.is_empty() {
+                format!("{} (Pinned)", group.application_name)
+            } else if group.pinned {
+                format!("{} (Pinned, running)", group.application_name)
+            } else {
+                group.application_name.clone()
             };
             row = row.child(
                 Container::new()
                     .id(format!("panel-task-{index}"))
-                    .accessibility_label(&group.application_name)
+                    .accessibility_label(label)
                     .semantic_role(SemanticRole::Button)
                     .message(PanelAction::Task(index))
                     .context_message(PanelAction::TaskContext(index))
+                    .on_drag((PanelAction::Task(index), map_task_drag))
                     .width(PANEL_ITEM_WIDTH)
                     .height(height)
                     .padding(Insets {
@@ -4258,7 +4408,13 @@ impl PanelApplication {
                         bottom: 3.0,
                         left: 10.0,
                     })
-                    .background(interactive_background(hovered, group.active()))
+                    .background(
+                        if self.task_drag.is_some_and(|(dragged, _)| dragged == index) {
+                            self.palette.accent_soft
+                        } else {
+                            interactive_background(hovered, group.active())
+                        },
+                    )
                     .radius(8.0)
                     .child(
                         Column::new()
@@ -5003,7 +5159,7 @@ mod tests {
             &reopened,
             shell.palette,
             &application_id,
-            "Unpin",
+            "Unpin from Nickel Bar",
         ));
 
         shell.launcher_preferences_path = Some(directory.path().to_path_buf());
@@ -5021,7 +5177,7 @@ mod tests {
             &shell.launcher,
             shell.palette,
             &application_id,
-            "Pin",
+            "Pin to Nickel Bar",
         ));
 
         shell.launcher_preferences_path = Some(preferences_path.clone());
@@ -5080,8 +5236,11 @@ mod tests {
         let origin = application_context_target(&pin, application_id);
         pin.controller_semantic_action(&origin, ActionKind::ContextMenu)
             .expect("production controller context action opens application menu");
-        pin.controller_activate(&Selector::role_name(SemanticRole::MenuItem, "Pin"))
-            .expect("controller reaches and confirms Pin");
+        pin.controller_activate(&Selector::role_name(
+            SemanticRole::MenuItem,
+            "Pin to Nickel Bar",
+        ))
+        .expect("controller reaches and confirms Pin");
         assert!(pin.host().inspect().open_overlay.is_none());
         assert_eq!(
             pin.host().inspect().controller_target.as_ref(),
@@ -5115,7 +5274,10 @@ mod tests {
             .controller_semantic_action(&origin, ActionKind::ContextMenu)
             .expect("reopened menu uses authoritative favorite state");
         unpin
-            .controller_activate(&Selector::role_name(SemanticRole::MenuItem, "Unpin"))
+            .controller_activate(&Selector::role_name(
+                SemanticRole::MenuItem,
+                "Unpin from Nickel Bar",
+            ))
             .expect("controller reaches and confirms Unpin");
         let effects = unpin.host_mut().application_mut().take_effects();
         assert_eq!(effects, [LauncherAction::TogglePin(application_id.into())]);
@@ -5276,6 +5438,9 @@ mod tests {
     #[test]
     fn semantic_shell_targets_come_from_live_group_preview_and_menu_records() {
         let mut shell = LiveShell::new().unwrap();
+        shell
+            .launcher
+            .set_preferences(LauncherPreferences::default());
         let application_id = ApplicationId::new("org.kde.konsole");
         shell.windows = vec![
             OpenWindow {
@@ -5372,6 +5537,9 @@ mod tests {
     #[test]
     fn taskbar_secondary_click_opens_menu_for_active_group_member_at_item_anchor() {
         let mut shell = LiveShell::new().unwrap();
+        shell
+            .launcher
+            .set_preferences(LauncherPreferences::default());
         let application_id = ApplicationId::new("org.kde.dolphin");
         shell.windows = vec![
             OpenWindow {
@@ -5813,6 +5981,60 @@ mod tests {
                 .semantic_targets_for_message(&super::PanelAction::Task(0))
                 .len(),
             1
+        );
+    }
+
+    #[test]
+    fn taskbar_drag_reorders_a_pin_without_emitting_activation() {
+        let mut launcher = crate::launcher::Launcher::new(vec![
+            crate::model::Application::new(
+                "first".into(),
+                "First".into(),
+                None,
+                None,
+                Some(vec!["first".into()]),
+            ),
+            crate::model::Application::new(
+                "second".into(),
+                "Second".into(),
+                None,
+                None,
+                Some(vec!["second".into()]),
+            ),
+        ]);
+        launcher.set_pins(vec![("first".into(), 0), ("second".into(), 1)]);
+        let mut panel = super::PanelApplication::fixture(
+            launcher,
+            ThemePalette::from_appearance(Appearance::default()),
+        );
+        let bounds = Rect::new(100.0, 0.0, 48.0, 48.0);
+
+        nickel_ui::Application::update(
+            &mut panel,
+            super::PanelAction::TaskDrag(
+                0,
+                nickel_ui::DragGesture {
+                    phase: nickel_ui::DragPhase::Moved,
+                    position: Point { x: 170.0, y: 20.0 },
+                    bounds,
+                },
+            ),
+        );
+        nickel_ui::Application::update(
+            &mut panel,
+            super::PanelAction::TaskDrag(
+                0,
+                nickel_ui::DragGesture {
+                    phase: nickel_ui::DragPhase::Ended,
+                    position: Point { x: 170.0, y: 20.0 },
+                    bounds,
+                },
+            ),
+        );
+
+        assert_eq!(
+            panel.effects,
+            [super::PanelAction::MoveTaskPinRight("first".into())]
         );
     }
 

@@ -236,9 +236,9 @@ impl UiApplication for LauncherApplication {
                 .item(OverlayMenuItem::action(
                     "toggle-pin",
                     if self.launcher.is_pinned(&id) {
-                        "Unpin"
+                        "Unpin from Nickel Bar"
                     } else {
-                        "Pin"
+                        "Pin to Nickel Bar"
                     },
                     LauncherAction::TogglePin(id.clone()),
                 ));

@@ -49,6 +49,8 @@ pub enum MenuAction {
     MoveToDisplay(WindowId, String),
     NewWindow(ApplicationId),
     TogglePin(ApplicationId),
+    MovePinLeft(ApplicationId),
+    MovePinRight(ApplicationId),
 }
 
 pub struct WindowMenuApp {
@@ -267,9 +269,24 @@ pub(crate) fn window_menu_entries(
             MenuAction::NewWindow(application_id.clone()),
         ));
         entries.push((
-            (if pinned { "Unpin" } else { "Pin" }).into(),
+            (if pinned {
+                "Unpin from Nickel Bar"
+            } else {
+                "Pin to Nickel Bar"
+            })
+            .into(),
             MenuAction::TogglePin(application_id.clone()),
         ));
+        if pinned {
+            entries.push((
+                "Move Left".into(),
+                MenuAction::MovePinLeft(application_id.clone()),
+            ));
+            entries.push((
+                "Move Right".into(),
+                MenuAction::MovePinRight(application_id.clone()),
+            ));
+        }
     }
     if capabilities.close {
         entries.push(("Close Window".to_owned(), MenuAction::Close(id)));
@@ -1145,6 +1162,8 @@ mod tests {
                 | MenuAction::MoveToDisplay(..)
                 | MenuAction::NewWindow(..)
                 | MenuAction::TogglePin(..)
+                | MenuAction::MovePinLeft(..)
+                | MenuAction::MovePinRight(..)
         )));
     }
 }

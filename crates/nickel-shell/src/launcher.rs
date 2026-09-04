@@ -57,6 +57,29 @@ pub enum LauncherMode {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskbarApplication {
+    pub application_id: Option<ApplicationId>,
+    pub application_name: String,
+    pub windows: Vec<OpenWindow>,
+    pub pinned: bool,
+    pub available: bool,
+}
+
+impl TaskbarApplication {
+    pub fn active(&self) -> bool {
+        self.windows.iter().any(|window| window.active)
+    }
+
+    pub fn window_group(&self) -> WindowGroup {
+        WindowGroup {
+            application_id: self.application_id.clone(),
+            application_name: self.application_name.clone(),
+            windows: self.windows.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LauncherInput {
     Text(String),
     Preedit(String),
@@ -513,13 +536,100 @@ impl Launcher {
         groups
     }
 
+    pub fn taskbar_applications(&self, windows: &[OpenWindow]) -> Vec<TaskbarApplication> {
+        let mut grouped = self.group_windows(windows);
+        let mut tasks = Vec::new();
+        for pinned in self.preferences.favorites() {
+            let application = self
+                .applications
+                .iter()
+                .find(|application| application.matches_native_id(pinned));
+            let canonical = application
+                .map(|application| application.application_id().clone())
+                .unwrap_or_else(|| ApplicationId::new(pinned.clone()));
+            let mut windows = Vec::new();
+            let mut index = 0;
+            while index < grouped.len() {
+                let matches = grouped[index].application_id.as_ref() == Some(&canonical)
+                    || application.is_some_and(|application| {
+                        grouped[index]
+                            .application_id
+                            .as_ref()
+                            .is_some_and(|id| application.matches_native_id(id.as_str()))
+                    });
+                if matches {
+                    windows.extend(grouped.remove(index).windows);
+                } else {
+                    index += 1;
+                }
+            }
+            tasks.push(TaskbarApplication {
+                application_id: Some(canonical),
+                application_name: application
+                    .map(|application| application.name().to_owned())
+                    .unwrap_or_else(|| pinned.clone()),
+                windows,
+                pinned: true,
+                available: application
+                    .is_some_and(|application| application.launch_command().is_some()),
+            });
+        }
+        tasks.extend(grouped.into_iter().map(|group| TaskbarApplication {
+            application_id: group.application_id,
+            application_name: group.application_name,
+            windows: group.windows,
+            pinned: false,
+            available: true,
+        }));
+        tasks
+    }
+
     pub fn is_pinned(&self, application_id: &str) -> bool {
-        self.preferences.is_favorite(application_id)
+        self.pinned_preference_id(application_id).is_some()
     }
 
     pub fn toggle_pin(&mut self, application_id: &str) {
-        self.preferences.toggle_favorite(application_id);
+        let identity = self
+            .pinned_preference_id(application_id)
+            .unwrap_or_else(|| self.canonical_application_id(application_id))
+            .to_owned();
+        self.preferences.toggle_favorite(&identity);
         self.refresh();
+    }
+
+    pub fn move_pin(&mut self, application_id: &str, direction: isize) -> bool {
+        let identity = self
+            .pinned_preference_id(application_id)
+            .unwrap_or_else(|| self.canonical_application_id(application_id))
+            .to_owned();
+        let changed = self.preferences.move_favorite(&identity, direction);
+        if changed {
+            self.refresh();
+        }
+        changed
+    }
+
+    fn canonical_application_id<'a>(&'a self, application_id: &'a str) -> &'a str {
+        self.applications
+            .iter()
+            .find(|application| application.matches_native_id(application_id))
+            .map_or(application_id, Application::id)
+    }
+
+    fn pinned_preference_id<'a>(&'a self, application_id: &str) -> Option<&'a str> {
+        let application = self
+            .applications
+            .iter()
+            .find(|application| application.matches_native_id(application_id));
+        self.preferences
+            .favorites()
+            .iter()
+            .find(|pinned| {
+                pinned.as_str() == application_id
+                    || application
+                        .is_some_and(|application| application.matches_native_id(pinned.as_str()))
+            })
+            .map(String::as_str)
     }
 
     pub fn set_pins(&mut self, mut pins: Vec<(String, u64)>) {
@@ -754,6 +864,17 @@ mod tests {
         Application, CodexAvailability, DashboardProject, DashboardSection, Launcher, LauncherMode,
         LauncherView, ProjectActivity, normalize_dashboard_projects,
     };
+    use crate::model::{ApplicationId, OpenWindow, WindowId, WindowState};
+
+    fn window(id: u64, application_id: &str, title: &str) -> OpenWindow {
+        OpenWindow {
+            id: WindowId(id),
+            application_id: Some(ApplicationId::new(application_id)),
+            active: false,
+            title: title.into(),
+            state: WindowState::default(),
+        }
+    }
 
     fn project(id: &str, root: &str) -> Project {
         Project {
@@ -1309,6 +1430,117 @@ mod tests {
             launcher.dashboard_projects(),
             DashboardSection::Empty
         ));
+    }
+
+    #[test]
+    fn taskbar_projects_pins_in_saved_order_and_appends_unpinned_windows() {
+        let mut launcher = Launcher::new(vec![
+            Application::new(
+                "org.example.Editor".into(),
+                "Editor".into(),
+                None,
+                None,
+                Some(vec!["editor".into()]),
+            ),
+            Application::new(
+                "org.example.Files".into(),
+                "Files".into(),
+                None,
+                None,
+                Some(vec!["files".into()]),
+            ),
+        ]);
+        launcher.set_pins(vec![
+            ("org.example.Files".into(), 0),
+            ("org.example.Editor".into(), 1),
+        ]);
+
+        let tasks = launcher.taskbar_applications(&[
+            window(1, "org.example.Editor", "Document"),
+            window(2, "org.example.Chat", "Chat"),
+        ]);
+
+        assert_eq!(
+            tasks
+                .iter()
+                .map(|task| task.application_id.as_ref().map(ApplicationId::as_str))
+                .collect::<Vec<_>>(),
+            [
+                Some("org.example.Files"),
+                Some("org.example.Editor"),
+                Some("org.example.Chat")
+            ]
+        );
+        assert!(tasks[0].pinned && tasks[0].windows.is_empty());
+        assert!(tasks[1].pinned && tasks[1].windows.len() == 1);
+        assert!(!tasks[2].pinned);
+    }
+
+    #[test]
+    fn taskbar_merges_native_aliases_without_duplicate_running_item() {
+        let application = Application::new(
+            "org.example.Editor".into(),
+            "Editor".into(),
+            None,
+            None,
+            Some(vec!["editor".into()]),
+        )
+        .with_identity_alias("editor-native");
+        let mut launcher = Launcher::new(vec![application]);
+        launcher.set_pins(vec![("ORG.EXAMPLE.EDITOR.desktop".into(), 0)]);
+
+        let tasks = launcher.taskbar_applications(&[
+            window(1, "editor-native.desktop", "One"),
+            window(2, "editor-native", "Two"),
+        ]);
+
+        assert_eq!(tasks.len(), 1);
+        assert!(tasks[0].pinned && tasks[0].available);
+        assert_eq!(tasks[0].application_name, "Editor");
+        assert_eq!(tasks[0].windows.len(), 2);
+        assert_eq!(
+            tasks[0].application_id.as_ref().map(ApplicationId::as_str),
+            Some("org.example.Editor")
+        );
+    }
+
+    #[test]
+    fn unavailable_pin_is_retained_and_recovers_when_discovery_returns() {
+        let mut launcher = Launcher::new(Vec::new());
+        launcher.set_pins(vec![("org.example.Missing".into(), 0)]);
+        let missing = launcher.taskbar_applications(&[]);
+        assert_eq!(missing.len(), 1);
+        assert!(missing[0].pinned && !missing[0].available);
+
+        let mut launcher = Launcher::new(vec![Application::new(
+            "org.example.Missing".into(),
+            "Recovered".into(),
+            None,
+            None,
+            Some(vec!["recovered".into()]),
+        )]);
+        launcher.set_pins(vec![("org.example.Missing".into(), 0)]);
+        let recovered = launcher.taskbar_applications(&[]);
+        assert_eq!(recovered[0].application_name, "Recovered");
+        assert!(recovered[0].available);
+    }
+
+    #[test]
+    fn unpinning_a_running_application_preserves_its_window_item() {
+        let mut launcher = Launcher::new(vec![Application::new(
+            "org.example.Editor".into(),
+            "Editor".into(),
+            None,
+            None,
+            Some(vec!["editor".into()]),
+        )]);
+        launcher.toggle_pin("org.example.Editor");
+        launcher.toggle_pin("org.example.Editor");
+
+        let tasks = launcher.taskbar_applications(&[window(1, "org.example.Editor", "Document")]);
+        assert_eq!(tasks.len(), 1);
+        assert!(!tasks[0].pinned);
+        assert_eq!(tasks[0].windows.len(), 1);
     }
 
     #[cfg(unix)]

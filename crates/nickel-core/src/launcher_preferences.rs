@@ -96,6 +96,22 @@ impl LauncherPreferences {
         }
     }
 
+    pub fn move_favorite(&mut self, application_id: &str, direction: isize) -> bool {
+        let Some(index) = self.favorites.iter().position(|id| id == application_id) else {
+            return false;
+        };
+        let next = if direction.is_negative() {
+            index.saturating_sub(1)
+        } else {
+            (index + 1).min(self.favorites.len().saturating_sub(1))
+        };
+        if next == index {
+            return false;
+        }
+        self.favorites.swap(index, next);
+        true
+    }
+
     pub fn record_launch(&mut self, application_id: &str) {
         self.recents.retain(|id| id != application_id);
         self.recents.insert(0, application_id.to_owned());
@@ -180,5 +196,17 @@ mod tests {
         let loaded = LauncherPreferences::load(path).expect("load preferences");
         assert_eq!(loaded.favorites(), ["files"]);
         assert!(loaded.recents().is_empty());
+    }
+
+    #[test]
+    fn favorite_reordering_is_stable_bounded_and_ignores_stale_requests() {
+        let mut preferences = LauncherPreferences::default();
+        preferences.replace_favorites(["a".into(), "b".into(), "c".into()]);
+        assert!(preferences.move_favorite("b", -1));
+        assert_eq!(preferences.favorites(), ["b", "a", "c"]);
+        assert!(!preferences.move_favorite("b", -1));
+        assert!(preferences.move_favorite("b", 1));
+        assert_eq!(preferences.favorites(), ["a", "b", "c"]);
+        assert!(!preferences.move_favorite("missing", 1));
     }
 }
