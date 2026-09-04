@@ -172,6 +172,9 @@ pub enum UiEvent {
     PointerReleased(Point),
     PointerCancelled,
     PointerContext(Point),
+    /// Emitted by a platform gesture recognizer after a stationary touch has
+    /// crossed its native long-press threshold.
+    TouchLongPress(Point),
     Scroll {
         point: Point,
         delta_y: f32,
@@ -643,6 +646,7 @@ impl UiEvent {
             | Self::PointerReleased(_)
             | Self::PointerCancelled
             | Self::PointerContext(_)
+            | Self::TouchLongPress(_)
             | Self::Scroll { .. }
             | Self::ScrollHorizontal { .. } => InputSource::Pointer,
             Self::ControllerUp

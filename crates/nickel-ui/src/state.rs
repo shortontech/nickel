@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use crate::{DismissReason, FocusReturn, OverlayId};
+use crate::{DismissReason, FocusReturn, OverlayAnchor, OverlayId};
 use crate::{DocumentSelection, SelectionDocument, TextEditor};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -195,6 +195,16 @@ struct OverlayState {
     last_focus_return: Option<FocusReturn>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TextContextSession {
+    pub editor: UiId,
+    pub document_generation: u64,
+    pub selection_generation: u64,
+    pub secure: bool,
+    pub editable: bool,
+    pub anchor: OverlayAnchor,
+}
+
 #[derive(Clone, Debug)]
 pub struct UiStateStore {
     durable: DurableNodeState,
@@ -202,6 +212,8 @@ pub struct UiStateStore {
     navigation: NavigationState,
     text: TextSelectionState,
     overlays: OverlayState,
+    text_context: Option<TextContextSession>,
+    clipboard_text: Option<String>,
 }
 
 impl Default for UiStateStore {
@@ -234,7 +246,64 @@ impl UiStateStore {
                 selection_documents: HashMap::new(),
             },
             overlays: OverlayState::default(),
+            text_context: None,
+            clipboard_text: None,
         }
+    }
+
+    pub(crate) fn set_clipboard_offer(&mut self, text: Option<&str>) {
+        self.clipboard_text = text.map(ToOwned::to_owned);
+    }
+
+    pub(crate) fn clipboard_text(&self) -> Option<&str> {
+        self.clipboard_text.as_deref()
+    }
+
+    pub(crate) fn text_context(&self) -> Option<&TextContextSession> {
+        self.text_context.as_ref()
+    }
+
+    pub(crate) fn open_text_context(
+        &mut self,
+        editor: UiId,
+        document_generation: u64,
+        selection_generation: u64,
+        secure: bool,
+        anchor: OverlayAnchor,
+    ) -> Invalidation {
+        let menu = OverlayId::new(editor.scoped("text-context-menu"));
+        self.text_context = Some(TextContextSession {
+            editor: editor.clone(),
+            document_generation,
+            selection_generation,
+            secure,
+            editable: true,
+            anchor,
+        });
+        self.open_overlay(menu, editor)
+    }
+
+    pub(crate) fn open_read_only_text_context(
+        &mut self,
+        target: UiId,
+        document_generation: u64,
+        selection_generation: u64,
+        anchor: OverlayAnchor,
+    ) -> Invalidation {
+        let menu = OverlayId::new(target.scoped("text-context-menu"));
+        self.text_context = Some(TextContextSession {
+            editor: target.clone(),
+            document_generation,
+            selection_generation,
+            secure: false,
+            editable: false,
+            anchor,
+        });
+        self.open_overlay(menu, target)
+    }
+
+    pub(crate) fn clear_text_context(&mut self) {
+        self.text_context = None;
     }
 
     pub(crate) fn open_overlay(&mut self, id: OverlayId, invocation_target: UiId) -> Invalidation {
@@ -269,6 +338,7 @@ impl UiStateStore {
             target,
             reason,
         });
+        self.text_context = None;
         Invalidation::Layout
     }
 
@@ -553,11 +623,17 @@ impl UiStateStore {
     pub fn focus_lost(&mut self) -> Invalidation {
         let pressed = self.pointer.pressed.take().is_some();
         let captured = self.pointer.captured.take().is_some();
-        let changed = pressed || captured;
-        if changed {
-            Invalidation::Paint
+        let context = self.text_context.take().is_some();
+        let overlay = if context {
+            self.dismiss_overlay(DismissReason::Cancel)
         } else {
             Invalidation::None
+        };
+        let changed = pressed || captured;
+        if changed {
+            Invalidation::Paint.merge(overlay)
+        } else {
+            overlay
         }
     }
 

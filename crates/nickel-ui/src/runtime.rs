@@ -607,7 +607,18 @@ pub struct UiHost<A: Application> {
     pointer_icon: PointerIcon,
     overlay_failures: Vec<OverlayDeclarationFailure>,
     next_application_deadline: Option<Instant>,
+    pending_long_press: Option<PendingLongPress>,
 }
+
+#[derive(Clone, Copy, Debug)]
+struct PendingLongPress {
+    contact: nickel_input::TouchId,
+    origin: crate::Point,
+    deadline: Instant,
+}
+
+const TOUCH_LONG_PRESS_DELAY: Duration = Duration::from_millis(500);
+const TOUCH_LONG_PRESS_SLOP: f32 = 8.0;
 
 #[derive(Clone, Default)]
 struct OverlayInteractionSnapshot {
@@ -1146,6 +1157,7 @@ impl<A: Application> UiHost<A> {
             pointer_icon: PointerIcon::Default,
             overlay_failures,
             next_application_deadline,
+            pending_long_press: None,
         }
     }
 
@@ -1470,6 +1482,57 @@ impl<A: Application> UiHost<A> {
             }
         }
         for event in batch.events {
+            if let HostEvent::Normalized { input, .. } = &event {
+                match input {
+                    nickel_input::InputEvent::Touch(nickel_input::TouchEvent::Started {
+                        contact,
+                        position,
+                        ..
+                    }) => {
+                        self.pending_long_press = Some(PendingLongPress {
+                            contact: *contact,
+                            origin: crate::Point {
+                                x: position.x as f32,
+                                y: position.y as f32,
+                            },
+                            deadline: now + TOUCH_LONG_PRESS_DELAY,
+                        });
+                    }
+                    nickel_input::InputEvent::Touch(nickel_input::TouchEvent::Moved {
+                        contact,
+                        position,
+                        ..
+                    }) if self
+                        .pending_long_press
+                        .is_some_and(|pending| pending.contact == *contact) =>
+                    {
+                        let pending = self.pending_long_press.expect("matched pending touch");
+                        let dx = position.x as f32 - pending.origin.x;
+                        let dy = position.y as f32 - pending.origin.y;
+                        if dx * dx + dy * dy > TOUCH_LONG_PRESS_SLOP * TOUCH_LONG_PRESS_SLOP {
+                            self.pending_long_press = None;
+                        }
+                    }
+                    nickel_input::InputEvent::Touch(
+                        nickel_input::TouchEvent::Ended { contact, .. }
+                        | nickel_input::TouchEvent::Cancelled { contact, .. },
+                    ) if self
+                        .pending_long_press
+                        .is_some_and(|pending| pending.contact == *contact) =>
+                    {
+                        self.pending_long_press = None;
+                    }
+                    _ => {}
+                }
+            }
+            if self
+                .pending_long_press
+                .is_some_and(|pending| now >= pending.deadline)
+            {
+                let pending = self.pending_long_press.take().expect("due long press");
+                combined.merge(self.dispatch_ui_event(UiEvent::PointerCancelled));
+                combined.merge(self.dispatch_ui_event(UiEvent::TouchLongPress(pending.origin)));
+            }
             let outcome = match event {
                 HostEvent::Ui(event) => self.dispatch_ui_event(event),
                 HostEvent::Controller(action) => self.dispatch_controller_action(action),
@@ -1567,7 +1630,13 @@ impl<A: Application> UiHost<A> {
             frame_generation: self.frame_generation,
             semantic_generation: self.frame_generation,
         };
-        combined.next_deadline = self.next_application_deadline;
+        combined.next_deadline = [
+            self.next_application_deadline,
+            self.pending_long_press.map(|pending| pending.deadline),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
         combined.telemetry.retained_frame_bytes =
             self.tree.resource_diagnostics().estimated_retained_bytes;
         combined.telemetry.input_to_frame_us = elapsed_us(step_started);
@@ -1575,7 +1644,13 @@ impl<A: Application> UiHost<A> {
     }
 
     pub fn next_deadline(&self) -> Option<Instant> {
-        self.next_application_deadline
+        [
+            self.next_application_deadline,
+            self.pending_long_press.map(|pending| pending.deadline),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -1730,6 +1805,7 @@ impl<A: Application> UiHost<A> {
         input: &nickel_input::InputEvent,
         clipboard_text: Option<&str>,
     ) -> HostEventOutcome {
+        self.state.set_clipboard_offer(clipboard_text);
         let context = self.input_context();
         let commands = self.input_dispatcher.dispatch_with_context(input, context);
         let mut combined = HostEventOutcome::default();
@@ -3237,6 +3313,37 @@ mod tests {
         assert_eq!(touch_outcome.messages, pointer_outcome.messages);
         assert_eq!(touch_outcome.invalidation, pointer_outcome.invalidation);
         assert_eq!(touch.inspect(), pointer.inspect());
+    }
+
+    #[test]
+    fn stationary_touch_arms_and_consumes_a_native_long_press_deadline() {
+        let origin = Instant::now();
+        let mut host = UiHost::new(ControllerApplication, 160, 48);
+        let started = host.step(HostBatch {
+            now: Some(origin),
+            events: vec![HostEvent::Normalized {
+                input: InputEvent::Touch(TouchEvent::Started {
+                    device: DeviceId(4),
+                    order: EventOrder(1),
+                    contact: TouchId(1),
+                    position: Point { x: 40.0, y: 20.0 },
+                }),
+                clipboard_text: None,
+            }],
+            ..HostBatch::default()
+        });
+        assert_eq!(
+            started.next_deadline,
+            Some(origin + super::TOUCH_LONG_PRESS_DELAY)
+        );
+
+        let fired = host.step(HostBatch {
+            now: Some(origin + super::TOUCH_LONG_PRESS_DELAY),
+            events: vec![HostEvent::Poll],
+            ..HostBatch::default()
+        });
+        assert!(host.pending_long_press.is_none());
+        assert_ne!(fired.invalidation, Invalidation::None);
     }
 
     #[test]

@@ -1,5 +1,8 @@
 use super::*;
-use std::collections::BTreeSet;
+use std::{
+    collections::BTreeSet,
+    hash::{DefaultHasher, Hash, Hasher},
+};
 
 #[derive(Clone, Debug)]
 struct HitRegion<Message> {
@@ -48,6 +51,14 @@ struct TextInputRegion<Message> {
     line_height: f32,
     initial: String,
     map: fn(String) -> Message,
+    secure: bool,
+}
+
+#[derive(Clone, Debug)]
+struct TextCommandRegion {
+    id: UiId,
+    editor: UiId,
+    command: crate::TextEditCommand,
 }
 
 #[derive(Clone, Debug)]
@@ -123,6 +134,32 @@ struct SelectionRegionBuilder {
     supplied: Option<Arc<SelectionDocument>>,
     runs: Vec<SelectionRunGeometry>,
     logical_runs: Vec<SelectionRun>,
+}
+
+fn selection_document_generation(document: &SelectionDocument) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for run in document.runs() {
+        run.id.hash(&mut hasher);
+        run.text.hash(&mut hasher);
+        (run.boundary_before as u8).hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn document_selection_generation(selection: &crate::DocumentSelection) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for endpoint in [&selection.anchor, &selection.focus] {
+        match endpoint {
+            Some(endpoint) => {
+                true.hash(&mut hasher);
+                endpoint.run_id.hash(&mut hasher);
+                endpoint.offset.hash(&mut hasher);
+                (endpoint.affinity as u8).hash(&mut hasher);
+            }
+            None => false.hash(&mut hasher),
+        }
+    }
+    hasher.finish()
 }
 
 fn text_offset_at<Message>(input: &TextInputRegion<Message>, point: Point) -> usize {
@@ -564,6 +601,7 @@ pub struct UiFrame<Message = String> {
     messages: Vec<MessageRegion<Message>>,
     context_messages: Vec<MessageRegion<Message>>,
     text_inputs: Vec<TextInputRegion<Message>>,
+    text_commands: Vec<TextCommandRegion>,
     selection_regions: Vec<SelectionRegionLayout>,
     selection_paints: HashMap<usize, Vec<Rect>>,
     scrolls: Vec<ScrollRegion<Message>>,
@@ -593,6 +631,7 @@ impl<Message> Default for UiFrame<Message> {
             messages: Vec::new(),
             context_messages: Vec::new(),
             text_inputs: Vec::new(),
+            text_commands: Vec::new(),
             selection_regions: Vec::new(),
             selection_paints: HashMap::new(),
             scrolls: Vec::new(),
@@ -957,7 +996,10 @@ impl<Message: Clone> UiFrame<Message> {
             value: None,
         });
         if menu.focus == crate::OverlayFocusPolicy::FirstItem
-            && let Some(item) = menu.items.iter().find(|item| item.action.is_some())
+            && let Some(item) = menu
+                .items
+                .iter()
+                .find(|item| item.action.is_some() || item.text_command.is_some())
         {
             let id = menu.id.item_id(&item.id);
             let menu_item_ids = menu
@@ -999,7 +1041,7 @@ impl<Message: Clone> UiFrame<Message> {
             );
             let id = menu.id.item_id(&item.id);
             let interaction = InteractionState {
-                interactive: item.action.is_some(),
+                interactive: item.action.is_some() || item.text_command.is_some(),
                 focused: state.focused() == Some(&id),
                 hovered: state.hovered() == Some(&id),
                 pressed: state.pressed() == Some(&id),
@@ -1031,7 +1073,7 @@ impl<Message: Clone> UiFrame<Message> {
                 bold: false,
                 wrap: false,
             });
-            let enabled = item.action.is_some();
+            let enabled = item.action.is_some() || item.text_command.is_some();
             let item_index = self.resolved.nodes.len();
             self.resolved.nodes.push(ResolvedNode {
                 component: "MenuItem",
@@ -1084,6 +1126,13 @@ impl<Message: Clone> UiFrame<Message> {
                     rect: item_rect,
                     message,
                     message_mapper: None,
+                });
+            }
+            if let Some(command) = item.text_command {
+                self.text_commands.push(TextCommandRegion {
+                    id: id.clone(),
+                    editor: menu.anchor.id().clone(),
+                    command,
                 });
             }
             self.accessibility.push(AccessibilityNode {
@@ -1268,6 +1317,7 @@ impl<Message: Clone> UiFrame<Message> {
         tree.prepare_selection_paints(state);
         tree.reset_emission();
         emit_element(&root, 0, None, &mut tree);
+        tree.present_text_context(state);
         tree.append_scrollbars();
         tree.commands.append(&mut tree.overlay_commands);
         tree.hits.append(&mut tree.overlay_hits);
@@ -1320,6 +1370,74 @@ impl<Message: Clone> UiFrame<Message> {
         crate::ui::assert_background_color_policy(root_id.as_str(), &tree.commands);
         tree.release_build_scratch();
         tree
+    }
+
+    fn present_text_context(&mut self, state: &mut UiStateStore) {
+        let Some(session) = state.text_context().cloned() else {
+            return;
+        };
+        if !session.editable {
+            let Some(region) = self.selection_region(&session.editor) else {
+                state.dismiss_overlay(crate::DismissReason::Cancel);
+                return;
+            };
+            let Some(selection) = state.document_selection(&session.editor) else {
+                state.dismiss_overlay(crate::DismissReason::Cancel);
+                return;
+            };
+            if selection_document_generation(&region.document) != session.document_generation
+                || document_selection_generation(selection) != session.selection_generation
+            {
+                state.dismiss_overlay(crate::DismissReason::Cancel);
+                return;
+            }
+            let menu = crate::text_context_menu::internal_read_only_text_context_menu(
+                session.editor.scoped("text-context-menu"),
+                session.anchor,
+                region.document.selected_text(selection).is_some(),
+                region
+                    .document
+                    .runs()
+                    .iter()
+                    .any(|run| !run.text.is_empty()),
+            );
+            let _ = self.present_menu(state, menu);
+            return;
+        }
+        let Some(input) = self
+            .text_inputs
+            .iter()
+            .find(|input| input.id == session.editor && input.secure == session.secure)
+        else {
+            state.dismiss_overlay(crate::DismissReason::Cancel);
+            return;
+        };
+        let Some(editor) = state
+            .state(&session.editor)
+            .and_then(|entry| entry.editor.as_ref())
+            .cloned()
+        else {
+            state.dismiss_overlay(crate::DismissReason::Cancel);
+            return;
+        };
+        if editor.document_generation() != session.document_generation
+            || editor.selection_generation() != session.selection_generation
+        {
+            state.dismiss_overlay(crate::DismissReason::Cancel);
+            return;
+        }
+        let policy = crate::TextContextPolicy {
+            editable: true,
+            secure: input.secure,
+            clipboard_has_text: state.clipboard_text().is_some(),
+        };
+        let menu = crate::text_context_menu::internal_text_context_menu(
+            session.editor.scoped("text-context-menu"),
+            session.anchor,
+            &editor,
+            policy,
+        );
+        let _ = self.present_menu(state, menu);
     }
 
     pub fn resolved_layout(&self) -> &ResolvedLayout {
@@ -1482,7 +1600,15 @@ impl<Message: Clone> UiFrame<Message> {
                         && self.active_overlay.as_ref().is_some_and(|(overlay, _)| {
                             self.is_descendant_or_self(overlay.as_ui_id(), &target)
                         });
-                    let mut outcome = self.perform_semantic_action(&target, action)?;
+                    let mut outcome = EventOutcome::default();
+                    if matches!(action, SemanticAction::Invoke(ActionKind::Activate))
+                        && let Some(invalidation) =
+                            self.activate_text_command(state, &target, &mut outcome)
+                    {
+                        outcome.invalidation = invalidation;
+                    } else {
+                        outcome = self.perform_semantic_action(&target, action)?;
+                    }
                     if dismisses {
                         outcome.invalidation = outcome
                             .invalidation
@@ -2171,7 +2297,26 @@ impl<Message: Clone> UiFrame<Message> {
                 }
                 invalidation
             }
-            UiEvent::PointerContext(point) => {
+            UiEvent::PointerContext(point) | UiEvent::TouchLongPress(point) => {
+                if let Some(target) = self.id_at(point).cloned()
+                    && let Some(invalidation) = self.open_text_context(state, &target, Some(point))
+                {
+                    return EventOutcome {
+                        invalidation,
+                        ..outcome
+                    };
+                }
+                if let Some(target) = self
+                    .selection_hit_at(point)
+                    .map(|(region, _)| region.id.clone())
+                    && let Some(invalidation) =
+                        self.open_read_only_text_context(state, &target, Some(point))
+                {
+                    return EventOutcome {
+                        invalidation,
+                        ..outcome
+                    };
+                }
                 if let Some((target, overlay)) = self
                     .id_at(point)
                     .and_then(|id| {
@@ -2325,7 +2470,17 @@ impl<Message: Clone> UiFrame<Message> {
                 let activates = state
                     .captured()
                     .is_some_and(|captured| released == Some(captured));
-                if activates && let Some(message) = self.message_at_owned(point) {
+                let text_command_invalidation = if activates {
+                    released
+                        .and_then(|target| self.activate_text_command(state, target, &mut outcome))
+                        .unwrap_or(Invalidation::None)
+                } else {
+                    Invalidation::None
+                };
+                if activates
+                    && text_command_invalidation == Invalidation::None
+                    && let Some(message) = self.message_at_owned(point)
+                {
                     outcome.messages.push(message);
                 }
                 let overlay_action = activates
@@ -2361,7 +2516,8 @@ impl<Message: Clone> UiFrame<Message> {
                     .set_pressed(None)
                     .merge(state.set_capture(None))
                     .merge(dropdown_invalidation)
-                    .merge(option_invalidation);
+                    .merge(option_invalidation)
+                    .merge(text_command_invalidation);
                 if overlay_action {
                     invalidation.merge(state.dismiss_overlay(crate::DismissReason::Action))
                 } else {
@@ -2552,6 +2708,16 @@ impl<Message: Clone> UiFrame<Message> {
                 }
             }
             UiEvent::ActivateFocused | UiEvent::KeyboardActivate => {
+                if let Some(target) = state.focused().cloned()
+                    && let Some(invalidation) =
+                        self.activate_text_command(state, &target, &mut outcome)
+                {
+                    return EventOutcome {
+                        invalidation: invalidation
+                            .merge(state.dismiss_overlay(crate::DismissReason::Action)),
+                        ..outcome
+                    };
+                }
                 if let Some(message) = state
                     .focused()
                     .and_then(|id| self.message_for_id(id))
@@ -2567,6 +2733,16 @@ impl<Message: Clone> UiFrame<Message> {
                     .controller_selected()
                     .or_else(|| state.focused())
                     .cloned();
+                if let Some(target) = selected.as_ref()
+                    && let Some(invalidation) =
+                        self.activate_text_command(state, target, &mut outcome)
+                {
+                    return EventOutcome {
+                        invalidation: invalidation
+                            .merge(state.dismiss_overlay(crate::DismissReason::Action)),
+                        ..outcome
+                    };
+                }
                 if let Some(node) = selected
                     .as_ref()
                     .and_then(|id| self.resolved.nodes.iter().find(|node| &node.id == id))
@@ -2655,6 +2831,27 @@ impl<Message: Clone> UiFrame<Message> {
                 }
             }
             UiEvent::ControllerContextMenu => {
+                if let Some(target) = state
+                    .navigation()
+                    .controller_selected()
+                    .or_else(|| state.focused())
+                    .cloned()
+                    && let Some(invalidation) = self.open_text_context(state, &target, None)
+                {
+                    return EventOutcome {
+                        invalidation,
+                        ..outcome
+                    };
+                }
+                if let Some(target) = state.selection_owner().cloned()
+                    && let Some(invalidation) =
+                        self.open_read_only_text_context(state, &target, None)
+                {
+                    return EventOutcome {
+                        invalidation,
+                        ..outcome
+                    };
+                }
                 if let Some((target, overlay)) = state
                     .navigation()
                     .controller_selected()
@@ -2688,6 +2885,23 @@ impl<Message: Clone> UiFrame<Message> {
                     .map_or(Invalidation::None, |id| state.set_dropdown_open(id, true))
             }
             UiEvent::KeyboardContextMenu => {
+                if let Some(target) = state.focused().cloned()
+                    && let Some(invalidation) = self.open_text_context(state, &target, None)
+                {
+                    return EventOutcome {
+                        invalidation,
+                        ..outcome
+                    };
+                }
+                if let Some(target) = state.selection_owner().cloned()
+                    && let Some(invalidation) =
+                        self.open_read_only_text_context(state, &target, None)
+                {
+                    return EventOutcome {
+                        invalidation,
+                        ..outcome
+                    };
+                }
                 if let Some((target, overlay)) = state
                     .focused()
                     .and_then(|id| {
@@ -2722,12 +2936,31 @@ impl<Message: Clone> UiFrame<Message> {
                 }
             }
             UiEvent::AccessibilityActivate(id) => {
+                if let Some(invalidation) = self.activate_text_command(state, &id, &mut outcome) {
+                    return EventOutcome {
+                        invalidation: invalidation
+                            .merge(state.dismiss_overlay(crate::DismissReason::Action)),
+                        ..outcome
+                    };
+                }
                 if let Some(message) = self.message_for_id(&id).cloned() {
                     outcome.messages.push(message);
                 }
                 Invalidation::None
             }
             UiEvent::AccessibilityContextMenu(id) => {
+                if let Some(invalidation) = self.open_text_context(state, &id, None) {
+                    return EventOutcome {
+                        invalidation,
+                        ..outcome
+                    };
+                }
+                if let Some(invalidation) = self.open_read_only_text_context(state, &id, None) {
+                    return EventOutcome {
+                        invalidation,
+                        ..outcome
+                    };
+                }
                 if let Some((target, overlay)) = self
                     .overlay_invokers
                     .iter()
@@ -2791,18 +3024,20 @@ impl<Message: Clone> UiFrame<Message> {
                 })
                 .unwrap_or(Invalidation::None),
             UiEvent::TextUndo => self
-                .edit_focused_text(state, TextEditor::undo)
-                .map(|message| {
-                    outcome.messages.push(message);
-                    Invalidation::Layout
-                })
+                .execute_focused_text_command(
+                    state,
+                    crate::TextEditCommand::Undo,
+                    None,
+                    &mut outcome,
+                )
                 .unwrap_or(Invalidation::None),
             UiEvent::TextRedo => self
-                .edit_focused_text(state, TextEditor::redo)
-                .map(|message| {
-                    outcome.messages.push(message);
-                    Invalidation::Layout
-                })
+                .execute_focused_text_command(
+                    state,
+                    crate::TextEditCommand::Redo,
+                    None,
+                    &mut outcome,
+                )
                 .unwrap_or(Invalidation::None),
             UiEvent::TextMoveLeft { extend_selection } => {
                 if let Some(message) =
@@ -2871,9 +3106,13 @@ impl<Message: Clone> UiFrame<Message> {
                 self.move_document_boundary(state, true, true, extend_selection)
             }
             UiEvent::TextSelectAll => {
-                if let Some(message) = self.edit_focused_text(state, TextEditor::select_all) {
-                    outcome.messages.push(message);
-                    Invalidation::Paint
+                if let Some(invalidation) = self.execute_focused_text_command(
+                    state,
+                    crate::TextEditCommand::SelectAll,
+                    None,
+                    &mut outcome,
+                ) {
+                    invalidation
                 } else if let Some(owner) = state.selection_owner().cloned()
                     && let Some(region) = self.selection_region(&owner)
                 {
@@ -2884,35 +3123,33 @@ impl<Message: Clone> UiFrame<Message> {
                 }
             }
             UiEvent::TextCopy => {
-                outcome.clipboard_text = self.selected_text(state);
-                Invalidation::None
-            }
-            UiEvent::TextCut => {
-                let Some(id) = state.focused().cloned() else {
-                    return outcome;
-                };
-                let Some(input) = self.text_inputs.iter().find(|input| input.id == id) else {
-                    return outcome;
-                };
-                let editor = state.editor(id, &input.initial);
-                outcome.clipboard_text = editor.cut_selection();
-                if outcome.clipboard_text.is_some() {
-                    outcome.messages.push((input.map)(editor.text().to_owned()));
-                    state.show_caret();
-                    Invalidation::Layout
+                if let Some(invalidation) = self.execute_focused_text_command(
+                    state,
+                    crate::TextEditCommand::Copy,
+                    None,
+                    &mut outcome,
+                ) {
+                    invalidation
                 } else {
+                    outcome.clipboard_text = self.selected_text(state);
                     Invalidation::None
                 }
             }
+            UiEvent::TextCut => self
+                .execute_focused_text_command(
+                    state,
+                    crate::TextEditCommand::Cut,
+                    None,
+                    &mut outcome,
+                )
+                .unwrap_or(Invalidation::None),
             UiEvent::TextPaste(text) => self
-                .edit_focused_text(state, |editor| {
-                    let text = text.replace("\r\n", "\n").replace('\r', "\n");
-                    editor.insert(&text);
-                })
-                .map(|message| {
-                    outcome.messages.push(message);
-                    Invalidation::Layout
-                })
+                .execute_focused_text_command(
+                    state,
+                    crate::TextEditCommand::Paste,
+                    Some(&text),
+                    &mut outcome,
+                )
                 .unwrap_or(Invalidation::None),
             UiEvent::SelectionClear => state.clear_document_selection(),
             UiEvent::Dismiss => {
@@ -2980,6 +3217,170 @@ impl<Message: Clone> UiFrame<Message> {
     fn focused_editor<'a>(&self, state: &'a UiStateStore) -> Option<&'a TextEditor> {
         let id = state.focused()?;
         state.state(id)?.editor.as_ref()
+    }
+
+    fn open_text_context(
+        &self,
+        state: &mut UiStateStore,
+        target: &UiId,
+        point: Option<Point>,
+    ) -> Option<Invalidation> {
+        let input = self.text_inputs.iter().find(|input| &input.id == target)?;
+        let editor = state.editor(target.clone(), &input.initial);
+        // Opening a menu cancels composition; it never commits preedit implicitly.
+        editor.cancel_preedit();
+        if let Some(point) = point {
+            let offset = text_offset_at(input, point);
+            let inside_selection = editor
+                .selection()
+                .is_some_and(|selection| selection.contains(&offset) || offset == selection.end);
+            if !inside_selection {
+                editor.place_cursor(offset);
+            }
+        }
+        let document_generation = editor.document_generation();
+        let selection_generation = editor.selection_generation();
+        let secure = input.secure;
+        let anchor = point.map_or_else(
+            || crate::OverlayAnchor::InvocationTargetCenter(target.clone()),
+            |point| crate::OverlayAnchor::Point {
+                invocation_target: target.clone(),
+                point,
+            },
+        );
+        Some(
+            state
+                .set_focus(Some(target.clone()))
+                .merge(state.open_text_context(
+                    target.clone(),
+                    document_generation,
+                    selection_generation,
+                    secure,
+                    anchor,
+                )),
+        )
+    }
+
+    fn open_read_only_text_context(
+        &self,
+        state: &mut UiStateStore,
+        target: &UiId,
+        point: Option<Point>,
+    ) -> Option<Invalidation> {
+        let region = self.selection_region(target)?;
+        let selection = state.document_selection(target)?;
+        let anchor = point.map_or_else(
+            || crate::OverlayAnchor::InvocationTargetCenter(target.clone()),
+            |point| crate::OverlayAnchor::Point {
+                invocation_target: target.clone(),
+                point,
+            },
+        );
+        Some(state.open_read_only_text_context(
+            target.clone(),
+            selection_document_generation(&region.document),
+            document_selection_generation(selection),
+            anchor,
+        ))
+    }
+
+    fn activate_text_command(
+        &self,
+        state: &mut UiStateStore,
+        target: &UiId,
+        outcome: &mut EventOutcome<Message>,
+    ) -> Option<Invalidation> {
+        let command = self.text_commands.iter().find(|item| &item.id == target)?;
+        let session = state.text_context()?.clone();
+        if command.editor != session.editor {
+            state.clear_text_context();
+            return Some(Invalidation::Layout);
+        }
+        if !session.editable {
+            let region = self.selection_region(&session.editor)?;
+            let selection = state.document_selection(&session.editor)?;
+            if selection_document_generation(&region.document) != session.document_generation
+                || document_selection_generation(selection) != session.selection_generation
+            {
+                state.clear_text_context();
+                return Some(Invalidation::Layout);
+            }
+            match command.command {
+                crate::TextEditCommand::Copy => {
+                    outcome.clipboard_text = region.document.selected_text(selection);
+                    return Some(Invalidation::None);
+                }
+                crate::TextEditCommand::SelectAll => {
+                    *state.document_selection_mut(session.editor) = region.document.select_all();
+                    return Some(Invalidation::Paint);
+                }
+                _ => return Some(Invalidation::None),
+            }
+        }
+        let input = self
+            .text_inputs
+            .iter()
+            .find(|input| input.id == session.editor && input.secure == session.secure)?;
+        let clipboard = state.clipboard_text().map(ToOwned::to_owned);
+        let editor = state.editor(session.editor.clone(), &input.initial);
+        if editor.document_generation() != session.document_generation
+            || editor.selection_generation() != session.selection_generation
+        {
+            state.clear_text_context();
+            return Some(Invalidation::Layout);
+        }
+        let effect = crate::execute_text_command(
+            editor,
+            crate::TextContextPolicy {
+                editable: true,
+                secure: session.secure,
+                clipboard_has_text: clipboard.is_some(),
+            },
+            command.command,
+            clipboard.as_deref(),
+        );
+        if effect.changed {
+            outcome.messages.push((input.map)(editor.text().to_owned()));
+        }
+        outcome.clipboard_text = effect.clipboard_text;
+        Some(match command.command {
+            crate::TextEditCommand::Copy => Invalidation::None,
+            crate::TextEditCommand::SelectAll => Invalidation::Paint,
+            _ if effect.changed => Invalidation::Layout,
+            _ => Invalidation::None,
+        })
+    }
+
+    fn execute_focused_text_command(
+        &self,
+        state: &mut UiStateStore,
+        command: crate::TextEditCommand,
+        clipboard: Option<&str>,
+        outcome: &mut EventOutcome<Message>,
+    ) -> Option<Invalidation> {
+        let id = state.focused()?.clone();
+        let input = self.text_inputs.iter().find(|input| input.id == id)?;
+        let editor = state.editor(id, &input.initial);
+        let effect = crate::execute_text_command(
+            editor,
+            crate::TextContextPolicy {
+                editable: true,
+                secure: input.secure,
+                clipboard_has_text: clipboard.is_some(),
+            },
+            command,
+            clipboard,
+        );
+        if effect.changed {
+            outcome.messages.push((input.map)(editor.text().to_owned()));
+        }
+        outcome.clipboard_text = effect.clipboard_text;
+        Some(match command {
+            crate::TextEditCommand::Copy => Invalidation::None,
+            crate::TextEditCommand::SelectAll => Invalidation::Paint,
+            _ if effect.changed => Invalidation::Layout,
+            _ => Invalidation::None,
+        })
     }
 
     fn move_document_selection(
@@ -4802,16 +5203,18 @@ fn emit_element<Message: Clone>(
             value, input_value, ..
         } = &element.kind
     {
-        let (scale, bold, line_height) = match &element.kind {
+        let (scale, bold, line_height, secure) = match &element.kind {
             Kind::Text {
                 scale,
                 bold,
                 line_height,
+                input_mask,
                 ..
             } => (
                 *scale,
                 *bold,
                 line_height.unwrap_or_else(|| text_font_size(*scale) * 1.3),
+                input_mask.is_some(),
             ),
             _ => unreachable!(),
         };
@@ -4823,6 +5226,7 @@ fn emit_element<Message: Clone>(
             line_height,
             initial: input_value.clone().unwrap_or_else(|| value.clone()),
             map,
+            secure,
         });
         if element.message.is_none()
             && let Some(hit_rect) = node

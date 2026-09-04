@@ -1,7 +1,7 @@
-use std::ops::Range;
+use std::{fmt, ops::Range};
 use unicode_segmentation::UnicodeSegmentation;
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Default, Eq, PartialEq)]
 pub struct TextEditor {
     text: String,
     cursor: usize,
@@ -10,6 +10,23 @@ pub struct TextEditor {
     preedit_cursor: Option<Range<usize>>,
     undo: Vec<EditorSnapshot>,
     redo: Vec<EditorSnapshot>,
+}
+
+// Editor state can contain passwords and clipboard-derived text. Keep its
+// Debug representation useful for diagnostics without ever reproducing the
+// document, preedit transaction, or history payloads.
+impl fmt::Debug for TextEditor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TextEditor")
+            .field("text_bytes", &self.text.len())
+            .field("cursor", &self.cursor)
+            .field("anchor", &self.anchor)
+            .field("preedit_bytes", &self.preedit.len())
+            .field("undo_depth", &self.undo.len())
+            .field("redo_depth", &self.redo.len())
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -42,6 +59,22 @@ impl TextEditor {
 
     pub fn cursor(&self) -> usize {
         self.cursor
+    }
+
+    /// Opaque generation used to reject commands from a stale context menu.
+    /// It deliberately cannot reveal document content.
+    pub fn document_generation(&self) -> u64 {
+        fingerprint(self.text.as_bytes())
+    }
+
+    pub fn selection_generation(&self) -> u64 {
+        fingerprint(
+            &[
+                self.cursor.to_le_bytes().as_slice(),
+                self.anchor.to_le_bytes().as_slice(),
+            ]
+            .concat(),
+        )
     }
 
     pub fn selection(&self) -> Option<Range<usize>> {
@@ -342,6 +375,12 @@ impl TextEditor {
     }
 }
 
+fn fingerprint(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
 fn previous_boundary(text: &str, cursor: usize) -> usize {
     text[..cursor]
         .grapheme_indices(true)
@@ -531,5 +570,22 @@ mod tests {
         editor.redo();
         assert_eq!(editor.text(), "zé🦀\nsecond");
         assert_eq!(editor.selection(), None);
+    }
+
+    #[test]
+    fn debug_never_reproduces_document_preedit_or_history_payloads() {
+        let mut editor = TextEditor::new("highly-secret-password");
+        editor.select_all();
+        editor.insert("previous-secret");
+        editor.set_preedit("composition-secret", None);
+        let debug = format!("{editor:?}");
+        for secret in [
+            "highly-secret-password",
+            "previous-secret",
+            "composition-secret",
+        ] {
+            assert!(!debug.contains(secret), "Debug leaked {secret:?}: {debug}");
+        }
+        assert!(debug.contains("text_bytes"));
     }
 }

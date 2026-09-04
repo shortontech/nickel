@@ -275,6 +275,7 @@ pub struct OverlayMenuItem<Message> {
     pub id: UiId,
     pub label: String,
     pub action: Option<Message>,
+    pub(crate) text_command: Option<crate::TextEditCommand>,
     pub disabled_reason: Option<String>,
     pub shortcut: Option<String>,
     pub accessible_name: Option<String>,
@@ -288,6 +289,7 @@ impl<Message> OverlayMenuItem<Message> {
             id: id.into(),
             label: label.into(),
             action: Some(action),
+            text_command: None,
             disabled_reason: None,
             shortcut: None,
             accessible_name: None,
@@ -300,12 +302,24 @@ impl<Message> OverlayMenuItem<Message> {
             id: id.into(),
             label: label.into(),
             action: None,
+            text_command: None,
             disabled_reason: None,
             shortcut: None,
             accessible_name: None,
             tone: TransientTone::Ordinary,
             separator_before: false,
         }
+    }
+
+    pub(crate) fn text_command(
+        id: impl Into<UiId>,
+        label: impl Into<String>,
+        command: crate::TextEditCommand,
+        enabled: bool,
+    ) -> Self {
+        let mut item = Self::disabled(id, label);
+        item.text_command = enabled.then_some(command);
+        item
     }
 
     pub fn disabled_with_reason(

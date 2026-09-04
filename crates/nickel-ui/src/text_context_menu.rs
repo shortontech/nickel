@@ -42,6 +42,18 @@ pub fn text_context_actions(
     editor: &TextEditor,
     policy: TextContextPolicy,
 ) -> Vec<TextContextAction> {
+    let (undo, redo, cut, copy, paste, select_all) = if cfg!(target_os = "macos") {
+        ("Cmd+Z", "Cmd+Shift+Z", "Cmd+X", "Cmd+C", "Cmd+V", "Cmd+A")
+    } else {
+        (
+            "Ctrl+Z",
+            "Ctrl+Shift+Z",
+            "Ctrl+X",
+            "Ctrl+C",
+            "Ctrl+V",
+            "Ctrl+A",
+        )
+    };
     let selection = editor.selection().is_some();
     let action = |command, label, enabled, shortcut| TextContextAction {
         command,
@@ -54,31 +66,31 @@ pub fn text_context_actions(
             TextEditCommand::Undo,
             "Undo",
             policy.editable && editor.can_undo(),
-            "Ctrl+Z",
+            undo,
         ),
         action(
             TextEditCommand::Redo,
             "Redo",
             policy.editable && editor.can_redo(),
-            "Ctrl+Shift+Z",
+            redo,
         ),
         action(
             TextEditCommand::Cut,
             "Cut",
             policy.editable && !policy.secure && selection,
-            "Ctrl+X",
+            cut,
         ),
         action(
             TextEditCommand::Copy,
             "Copy",
             !policy.secure && selection,
-            "Ctrl+C",
+            copy,
         ),
         action(
             TextEditCommand::Paste,
             "Paste",
             policy.editable && policy.clipboard_has_text,
-            "Ctrl+V",
+            paste,
         ),
         action(
             TextEditCommand::Delete,
@@ -90,7 +102,7 @@ pub fn text_context_actions(
             TextEditCommand::SelectAll,
             "Select All",
             !editor.text().is_empty(),
-            "Ctrl+A",
+            select_all,
         ),
     ]
 }
@@ -122,6 +134,60 @@ pub fn text_context_menu<Message: Clone>(
             menu.item(item.shortcut(action.shortcut))
         },
     )
+}
+
+pub(crate) fn internal_text_context_menu<Message: Clone>(
+    id: impl Into<UiId>,
+    anchor: OverlayAnchor,
+    editor: &TextEditor,
+    policy: TextContextPolicy,
+) -> OverlayMenu<Message> {
+    text_context_actions(editor, policy).into_iter().fold(
+        OverlayMenu::new(id, anchor),
+        |menu, action| {
+            menu.item(
+                OverlayMenuItem::text_command(
+                    format!("{:?}", action.command).to_ascii_lowercase(),
+                    action.label,
+                    action.command,
+                    action.enabled,
+                )
+                .shortcut(action.shortcut)
+                .separator_before(matches!(
+                    action.command,
+                    TextEditCommand::Cut | TextEditCommand::SelectAll
+                )),
+            )
+        },
+    )
+}
+
+pub(crate) fn internal_read_only_text_context_menu<Message: Clone>(
+    id: impl Into<UiId>,
+    anchor: OverlayAnchor,
+    copy_enabled: bool,
+    select_all_enabled: bool,
+) -> OverlayMenu<Message> {
+    let (copy, select_all) = if cfg!(target_os = "macos") {
+        ("Cmd+C", "Cmd+A")
+    } else {
+        ("Ctrl+C", "Ctrl+A")
+    };
+    OverlayMenu::new(id, anchor)
+        .item(
+            OverlayMenuItem::text_command("copy", "Copy", TextEditCommand::Copy, copy_enabled)
+                .shortcut(copy),
+        )
+        .item(
+            OverlayMenuItem::text_command(
+                "select-all",
+                "Select All",
+                TextEditCommand::SelectAll,
+                select_all_enabled,
+            )
+            .shortcut(select_all)
+            .separator_before(true),
+        )
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

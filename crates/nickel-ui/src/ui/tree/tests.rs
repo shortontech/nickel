@@ -3260,6 +3260,266 @@ fn focused_text_field_copies_cuts_and_pastes_selection() {
 }
 
 #[test]
+fn every_text_field_owns_the_shared_stable_context_menu_and_secure_policy() {
+    fn query(value: String) -> TestMessage {
+        TestMessage::Query(value)
+    }
+    let bounds = Rect::new(0.0, 0.0, 240.0, 120.0);
+    let build = |state: &mut UiStateStore, value: &str, secure: bool| {
+        let field = if secure {
+            TextField::on_change_masked(value, '•', query).id("query")
+        } else {
+            TextField::on_change(value, query).id("query")
+        };
+        UiFrame::layout_with_state(field, bounds, state)
+    };
+    let editor_id = UiId::from("root/query");
+    let menu_id = UiId::from("root/query/text-context-menu");
+    let copy_id = menu_id.scoped("copy");
+    let select_all_id = menu_id.scoped("selectall");
+
+    let mut state = UiStateStore::default();
+    state.set_clipboard_offer(Some("paste payload"));
+    let initial = build(&mut state, "one\ne\u{301}🦀", false);
+    initial.handle_event(&mut state, UiEvent::FocusNext);
+    initial.handle_event(&mut state, UiEvent::ImePreedit("uncommitted".into()));
+    let opened = initial.handle_event(&mut state, UiEvent::KeyboardContextMenu);
+    assert_eq!(opened.invalidation, Invalidation::Layout);
+    assert_eq!(state.focused(), Some(&editor_id));
+    assert_eq!(
+        state
+            .state(&editor_id)
+            .and_then(|entry| entry.editor.as_ref())
+            .unwrap()
+            .preedit(),
+        "",
+        "menu invocation cancels rather than commits IME preedit"
+    );
+
+    let menu = build(&mut state, "one\ne\u{301}🦀", false);
+    let labels = menu
+        .semantic_nodes()
+        .iter()
+        .filter(|node| node.parent.as_ref() == Some(&menu_id))
+        .map(|node| (node.name.clone().unwrap(), node.enabled))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        labels,
+        [
+            ("Undo".into(), false),
+            ("Redo".into(), false),
+            ("Cut".into(), false),
+            ("Copy".into(), false),
+            ("Paste".into(), true),
+            ("Delete".into(), false),
+            ("Select All".into(), true),
+        ]
+    );
+    state.set_clipboard_offer(None);
+    let refreshed = build(&mut state, "one\ne\u{301}🦀", false);
+    assert!(
+        !refreshed
+            .semantic_nodes()
+            .into_iter()
+            .find(|node| node.name.as_deref() == Some("Paste"))
+            .unwrap()
+            .enabled
+    );
+    menu.transition(
+        &mut state,
+        InputSource::Accessibility,
+        InteractionIntent::Invoke {
+            target: select_all_id,
+            action: SemanticAction::Invoke(ActionKind::Activate),
+        },
+    )
+    .unwrap();
+    assert_eq!(state.focused(), Some(&editor_id));
+    assert!(state.open_overlay_id().is_none());
+
+    let reopened_base = build(&mut state, "one\ne\u{301}🦀", false);
+    reopened_base.handle_event(&mut state, UiEvent::KeyboardContextMenu);
+    let reopened = build(&mut state, "one\ne\u{301}🦀", false);
+    let copied = reopened
+        .transition(
+            &mut state,
+            InputSource::Accessibility,
+            InteractionIntent::Invoke {
+                target: copy_id.clone(),
+                action: SemanticAction::Invoke(ActionKind::Activate),
+            },
+        )
+        .unwrap();
+    assert_eq!(copied.clipboard_text.as_deref(), Some("one\ne\u{301}🦀"));
+
+    let secure_base = build(&mut state, "secret", true);
+    secure_base.handle_event(&mut state, UiEvent::FocusNext);
+    secure_base.handle_event(&mut state, UiEvent::TextSelectAll);
+    secure_base.handle_event(&mut state, UiEvent::KeyboardContextMenu);
+    let secure_menu = build(&mut state, "secret", true);
+    let copy = secure_menu
+        .semantic_nodes()
+        .into_iter()
+        .find(|node| node.id == copy_id)
+        .unwrap();
+    assert!(!copy.enabled);
+    assert!(!format!("{copy:?}").contains("secret"));
+    assert!(
+        secure_menu
+            .transition(
+                &mut state,
+                InputSource::Accessibility,
+                InteractionIntent::Invoke {
+                    target: copy_id,
+                    action: SemanticAction::Invoke(ActionKind::Activate),
+                },
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn every_context_invocation_route_opens_the_same_text_menu() {
+    fn query(value: String) -> TestMessage {
+        TestMessage::Query(value)
+    }
+    let bounds = Rect::new(0.0, 0.0, 200.0, 40.0);
+    let editor = UiId::from("root/query");
+    let invocations = [
+        UiEvent::PointerContext(Point { x: 8.0, y: 8.0 }),
+        UiEvent::TouchLongPress(Point { x: 8.0, y: 8.0 }),
+        UiEvent::KeyboardContextMenu,
+        UiEvent::ControllerContextMenu,
+        UiEvent::AccessibilityContextMenu(editor.clone()),
+    ];
+    for invocation in invocations {
+        let mut state = UiStateStore::default();
+        let frame = UiFrame::layout_with_state(
+            TextField::on_change("text", query).id("query"),
+            bounds,
+            &mut state,
+        );
+        frame.handle_event(&mut state, UiEvent::FocusNext);
+        frame.handle_event(&mut state, invocation);
+        let menu = UiFrame::layout_with_state(
+            TextField::on_change("text", query).id("query"),
+            bounds,
+            &mut state,
+        );
+        assert!(menu.semantic_nodes().iter().any(|node| {
+            node.role == Some(SemanticRole::Menu) && node.id == editor.scoped("text-context-menu")
+        }));
+    }
+}
+
+#[test]
+fn text_context_menu_dismisses_when_its_document_or_field_becomes_stale() {
+    fn query(value: String) -> TestMessage {
+        TestMessage::Query(value)
+    }
+    let bounds = Rect::new(0.0, 0.0, 200.0, 40.0);
+    let mut state = UiStateStore::default();
+    let initial = UiFrame::layout_with_state(
+        TextField::on_change("first", query).id("first"),
+        bounds,
+        &mut state,
+    );
+    initial.handle_event(&mut state, UiEvent::FocusNext);
+    initial.handle_event(&mut state, UiEvent::KeyboardContextMenu);
+    state
+        .editor(UiId::from("root/first"), "first")
+        .insert(" changed");
+    let stale = UiFrame::layout_with_state(
+        TextField::on_change("first changed", query).id("first"),
+        bounds,
+        &mut state,
+    );
+    assert!(state.open_overlay_id().is_none());
+    assert!(
+        stale
+            .semantic_nodes()
+            .iter()
+            .all(|node| node.role != Some(SemanticRole::Menu))
+    );
+
+    let reopened = UiFrame::layout_with_state(
+        TextField::on_change("first", query).id("first"),
+        bounds,
+        &mut state,
+    );
+    reopened.handle_event(&mut state, UiEvent::FocusNext);
+    reopened.handle_event(&mut state, UiEvent::KeyboardContextMenu);
+    let replacement = UiFrame::layout_with_state(
+        TextField::on_change("second", query).id("second"),
+        bounds,
+        &mut state,
+    );
+    assert!(state.open_overlay_id().is_none());
+    assert!(
+        replacement
+            .semantic_nodes()
+            .iter()
+            .all(|node| node.role != Some(SemanticRole::Menu))
+    );
+}
+
+#[test]
+fn read_only_selection_uses_reduced_copy_and_select_all_menu() {
+    let bounds = Rect::new(0.0, 0.0, 240.0, 80.0);
+    let document = Arc::new(SelectionDocument::new([
+        SelectionRun::inline("first", "read-only "),
+        SelectionRun::inline("second", "🦀 text"),
+    ]));
+    let region_id = UiId::from("root/document");
+    let build = |state: &mut UiStateStore, document: Arc<SelectionDocument>| {
+        UiFrame::<TestMessage>::layout_with_state(
+            SelectionRegion::new(document)
+                .id("document")
+                .child(Text::new("read-only 🦀 text").selectable(true)),
+            bounds,
+            state,
+        )
+    };
+
+    let mut state = UiStateStore::default();
+    let initial = build(&mut state, document.clone());
+    *state.document_selection_mut(region_id.clone()) = document.select_all();
+    state.set_selection_owner(Some(region_id.clone()));
+    initial.handle_event(&mut state, UiEvent::KeyboardContextMenu);
+    let menu = build(&mut state, document.clone());
+    let menu_id = region_id.scoped("text-context-menu");
+    let items = menu
+        .semantic_nodes()
+        .into_iter()
+        .filter(|node| node.parent.as_ref() == Some(&menu_id))
+        .map(|node| (node.name.unwrap(), node.enabled))
+        .collect::<Vec<_>>();
+    assert_eq!(items, [("Copy".into(), true), ("Select All".into(), true)]);
+
+    let copied = menu.handle_event(
+        &mut state,
+        UiEvent::AccessibilityActivate(menu_id.scoped("copy")),
+    );
+    assert_eq!(copied.clipboard_text.as_deref(), Some("read-only 🦀 text"));
+    assert!(state.open_overlay_id().is_none());
+
+    let reopened = build(&mut state, document);
+    reopened.handle_event(&mut state, UiEvent::KeyboardContextMenu);
+    let changed = Arc::new(SelectionDocument::new([SelectionRun::inline(
+        "replacement",
+        "different",
+    )]));
+    let stale = build(&mut state, changed);
+    assert!(state.open_overlay_id().is_none());
+    assert!(
+        stale
+            .semantic_nodes()
+            .iter()
+            .all(|node| node.role != Some(SemanticRole::Menu))
+    );
+}
+
+#[test]
 fn multiline_text_field_hit_testing_and_caret_follow_explicit_lines() {
     fn query(value: String) -> TestMessage {
         TestMessage::Query(value)
