@@ -510,6 +510,22 @@ fn image_presentations_resolve_deterministic_bounds_and_alignment() {
         ImagePresentation::new(ImageFit::Tile).bounds(viewport, Size::new(40.0, 20.0)),
         Rect::new(90.0, 60.0, 40.0, 20.0)
     );
+
+    let preview = Rect::new(0.0, 0.0, 260.0, 116.0);
+    for (source, expected) in [
+        (Size::new(3440.0, 1440.0), Size::new(260.0, 108.84)),
+        (Size::new(1920.0, 1080.0), Size::new(206.22, 116.0)),
+        (Size::new(1200.0, 1200.0), Size::new(116.0, 116.0)),
+        (Size::new(900.0, 1600.0), Size::new(65.25, 116.0)),
+    ] {
+        let bounds = ImagePresentation::new(ImageFit::Contain).bounds(preview, source);
+        assert!((bounds.size.width - expected.width).abs() < 0.02);
+        assert!((bounds.size.height - expected.height).abs() < 0.02);
+        assert!(bounds.size.width <= preview.size.width);
+        assert!(bounds.size.height <= preview.size.height);
+        assert!((bounds.origin.x + bounds.size.width / 2.0 - 130.0).abs() < 0.02);
+        assert!((bounds.origin.y + bounds.size.height / 2.0 - 58.0).abs() < 0.02);
+    }
 }
 
 #[test]
