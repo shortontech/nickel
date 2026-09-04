@@ -456,6 +456,30 @@ fn focused_masked_text_field_never_paints_the_input_value() {
 }
 
 #[test]
+fn single_line_text_field_centers_placeholder_and_masked_text() {
+    for value in ["", "nickel"] {
+        let field = Rect::new(0.0, 0.0, 340.0, 28.0);
+        let frame = UiFrame::layout(
+            TextField::on_change_masked_with_placeholder(value, "Password", '•', map_query)
+                .single_line_height(field.size.height),
+            field,
+        );
+        let bounds = frame
+            .commands()
+            .iter()
+            .find_map(|command| match command {
+                PaintCommand::Text { bounds, .. } => Some(*bounds),
+                _ => None,
+            })
+            .expect("single-line text paint");
+
+        let field_center = field.origin.y + field.size.height / 2.0;
+        let text_center = bounds.origin.y + bounds.size.height / 2.0;
+        assert!((field_center - text_center).abs() <= 0.5);
+    }
+}
+
+#[test]
 fn image_presentations_resolve_deterministic_bounds_and_alignment() {
     let viewport = Rect::new(10.0, 20.0, 200.0, 100.0);
     let source = Size::new(100.0, 100.0);

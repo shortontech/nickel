@@ -4264,44 +4264,6 @@ mod tests {
     }
 
     #[test]
-    fn lock_password_placeholder_and_masked_text_are_vertically_centered() {
-        for password in ["", "nickel"] {
-            let scenario = Scenario::new(super::LockApplication::fixture(password, None), 960, 540);
-            let field = scenario
-                .host()
-                .commands()
-                .iter()
-                .find_map(|command| match command {
-                    PaintCommand::RoundedFill { rect, color, .. }
-                        if *color == 0x20283a && rect.size.width == 340.0 =>
-                    {
-                        Some(*rect)
-                    }
-                    _ => None,
-                })
-                .expect("lock password field paint");
-            let text = scenario
-                .host()
-                .commands()
-                .iter()
-                .find_map(|command| match command {
-                    PaintCommand::Text { bounds, .. }
-                        if (bounds.origin.x - (field.origin.x + 16.0)).abs() <= 0.5
-                            && bounds.origin.y >= field.origin.y
-                            && bounds.origin.y < field.origin.y + field.size.height =>
-                    {
-                        Some(*bounds)
-                    }
-                    _ => None,
-                })
-                .expect("lock password text paint");
-            let field_center = field.origin.y + field.size.height / 2.0;
-            let text_center = text.origin.y + text.size.height / 2.0;
-            assert!((field_center - text_center).abs() <= 0.5);
-        }
-    }
-
-    #[test]
     fn control_center_keyboard_navigation_uses_host_semantic_order() {
         let mut shell = LiveShell::new().unwrap();
         shell.control_visible = true;
