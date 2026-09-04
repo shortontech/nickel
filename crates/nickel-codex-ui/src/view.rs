@@ -50,6 +50,7 @@ pub enum ChatMessage {
     Reconnect,
     SelectThread(nickel_codex::ThreadId),
     ToggleModelPicker,
+    ToggleReasoningPicker,
     ToggleApprovalPicker,
     SelectModel(String),
     SelectReasoningEffort(String),
@@ -187,8 +188,8 @@ pub struct ChatApplication {
     shell_project: Option<(PathBuf, Option<String>)>,
     pub(crate) pending_shell_command: Option<String>,
     pub(crate) shell_warning_acknowledged: bool,
-    pub(crate) model_picker_open: bool,
-    model_picker_generation: u64,
+    pub(crate) model_picker_generation: u64,
+    reasoning_picker_generation: u64,
     approval_picker_generation: u64,
     pub(crate) resume_picker_open: bool,
     pub(crate) resume_picker_loading: bool,
@@ -210,6 +211,7 @@ struct RemoteHostEditor {
 struct ChatOverlays<'a> {
     pending_shell_command: Option<&'a str>,
     model_picker_generation: u64,
+    reasoning_picker_generation: u64,
     approval_picker_generation: u64,
     resume_picker_open: bool,
     resume_picker_loading: bool,
@@ -329,8 +331,8 @@ impl ChatApplication {
             shell_project: None,
             pending_shell_command: None,
             shell_warning_acknowledged: false,
-            model_picker_open: false,
             model_picker_generation: 0,
+            reasoning_picker_generation: 0,
             approval_picker_generation: 0,
             resume_picker_open: false,
             resume_picker_loading: false,
@@ -585,14 +587,18 @@ impl Application for ChatApplication {
             }
             ChatMessage::CancelShell => self.pending_shell_command = None,
             ChatMessage::ToggleModelPicker => {
-                self.model_picker_open = !self.model_picker_open;
                 self.model_picker_generation = self.model_picker_generation.saturating_add(1);
+                self.resume_picker_open = false;
+                self.command_picker_open = false;
+            }
+            ChatMessage::ToggleReasoningPicker => {
+                self.reasoning_picker_generation =
+                    self.reasoning_picker_generation.saturating_add(1);
                 self.resume_picker_open = false;
                 self.command_picker_open = false;
             }
             ChatMessage::ToggleApprovalPicker => {
                 self.approval_picker_generation = self.approval_picker_generation.saturating_add(1);
-                self.model_picker_open = false;
                 self.resume_picker_open = false;
                 self.command_picker_open = false;
             }
@@ -606,18 +612,15 @@ impl Application for ChatApplication {
                         Some(candidate.id.as_str()) == self.state.selected_model.as_deref()
                     })
                     .and_then(|candidate| candidate.default_reasoning_effort.clone());
-                self.model_picker_open = false;
             }
             ChatMessage::SelectReasoningEffort(effort) => {
                 self.state.selected_reasoning_effort = Some(effort);
-                self.model_picker_open = false;
             }
             ChatMessage::SelectApprovalPolicy(policy) => {
                 self.state.selected_approval_policy = policy;
             }
             ChatMessage::ToggleCommandPicker => {
                 self.command_picker_open = !self.command_picker_open;
-                self.model_picker_open = false;
                 self.resume_picker_open = false;
             }
             ChatMessage::SelectCommand(command) => {
@@ -627,7 +630,6 @@ impl Application for ChatApplication {
             }
             ChatMessage::ToggleResumePicker => {
                 self.resume_picker_open = !self.resume_picker_open;
-                self.model_picker_open = false;
                 self.command_picker_open = false;
                 if self.resume_picker_open {
                     self.resume_picker_loading = true;
@@ -1018,6 +1020,7 @@ impl Application for ChatApplication {
                 ChatOverlays {
                     pending_shell_command: self.pending_shell_command.as_deref(),
                     model_picker_generation: self.model_picker_generation,
+                    reasoning_picker_generation: self.reasoning_picker_generation,
                     approval_picker_generation: self.approval_picker_generation,
                     resume_picker_open: self.resume_picker_open,
                     resume_picker_loading: self.resume_picker_loading,
@@ -1365,21 +1368,23 @@ fn resume_recency(last_used_at: Option<i64>, now: i64) -> String {
 
 fn thread_belongs_to_project(
     thread: &nickel_codex::Thread,
-    runtime: &nickel_codex::ThreadRuntime,
+    runtime: Option<&nickel_codex::ThreadRuntime>,
     project_root: Option<&std::path::Path>,
     project_id: Option<&str>,
 ) -> bool {
-    runtime.project_id.as_deref().map_or_else(
-        || {
-            project_root.is_none_or(|root| {
-                thread
-                    .cwd
-                    .as_deref()
-                    .is_some_and(|cwd| cwd.starts_with(root))
-            })
-        },
-        |thread_project| project_id == Some(thread_project),
-    )
+    runtime
+        .and_then(|runtime| runtime.project_id.as_deref())
+        .map_or_else(
+            || {
+                project_root.is_none_or(|root| {
+                    thread
+                        .cwd
+                        .as_deref()
+                        .is_some_and(|cwd| cwd.starts_with(root))
+                })
+            },
+            |thread_project| project_id == Some(thread_project),
+        )
 }
 
 fn resume_picker(
@@ -1396,13 +1401,9 @@ fn resume_picker(
         .threads
         .iter()
         .filter_map(|thread| {
-            state
-                .thread_runtime
-                .get(&thread.id)
-                .filter(|runtime| {
-                    thread_belongs_to_project(thread, runtime, project_root, project_id)
-                })
-                .map(|runtime| (thread, runtime))
+            let runtime = state.thread_runtime.get(&thread.id);
+            thread_belongs_to_project(thread, runtime, project_root, project_id)
+                .then_some((thread, runtime))
         })
         .collect::<Vec<_>>();
     let has_threads = !threads.is_empty();
@@ -1435,8 +1436,8 @@ fn resume_picker(
                     let identity = thread.id.0.clone();
                     let preview = resume_preview(thread).unwrap_or_else(|| "No message preview available".into());
                     let label = format!("{title} — {} — {identity}\n{preview}", resume_recency(thread.last_used_at, now));
-                    let active = runtime.status == nickel_codex::ThreadRuntimeStatus::Active;
-                    let resumable = matches!(runtime.status, nickel_codex::ThreadRuntimeStatus::Idle | nickel_codex::ThreadRuntimeStatus::NotLoaded);
+                    let active = runtime.is_some_and(|runtime| runtime.status == nickel_codex::ThreadRuntimeStatus::Active);
+                    let resumable = runtime.is_some_and(|runtime| matches!(runtime.status, nickel_codex::ThreadRuntimeStatus::Idle | nickel_codex::ThreadRuntimeStatus::NotLoaded));
                     let waiting = pending == Some(&thread.id);
                     if resumable && pending.is_none() {
                         AnyView::new(ui! {
@@ -1470,6 +1471,7 @@ fn configured_chat_view(
     let ChatOverlays {
         pending_shell_command,
         model_picker_generation,
+        reasoning_picker_generation,
         approval_picker_generation,
         resume_picker_open,
         resume_picker_loading,
@@ -1634,7 +1636,7 @@ fn configured_chat_view(
                             .find(|model| Some(model.id.as_str()) == state.selected_model.as_deref())
                             .filter(|model| !model.supported_reasoning_efforts.is_empty())
                             .map(|model| Dropdown::new(
-                                ChatMessage::ToggleModelPicker,
+                                ChatMessage::ToggleReasoningPicker,
                                 state.selected_reasoning_effort.clone().unwrap_or_else(|| "Effort".into()),
                                 model.supported_reasoning_efforts.iter().map(|option| (
                                     format!("{} — {}", option.reasoning_effort, option.description),
@@ -1644,6 +1646,7 @@ fn configured_chat_view(
                                 .accessibility_label("Reasoning effort selector")
                                 .semantic_role(SemanticRole::Button)
                                 .overlay(true)
+                                .open_generation(reasoning_picker_generation)
                                 .colors(PANEL, SIDEBAR, TEXT))}
                         {Dropdown::new(
                             ChatMessage::ToggleApprovalPicker,

@@ -900,21 +900,22 @@ mod tests {
 
         app.update(ChatMessage::ToggleCommandPicker);
         assert!(app.command_picker_open);
+        let generation = app.model_picker_generation;
         app.update(ChatMessage::SelectCommand("/model".into()));
-        assert!(app.model_picker_open);
+        assert!(app.model_picker_generation > generation);
         assert!(!app.command_picker_open);
         app.update(ChatMessage::SelectReasoningEffort("high".into()));
         assert_eq!(app.state.selected_reasoning_effort.as_deref(), Some("high"));
 
         app.state.draft = "/model".into();
+        let generation = app.model_picker_generation;
         app.update(ChatMessage::Send);
-        assert!(app.model_picker_open);
+        assert!(app.model_picker_generation > generation);
         assert!(app.state.draft.is_empty());
 
         app.state.draft = "/resume".into();
         app.update(ChatMessage::Send);
         assert!(app.resume_picker_open);
-        assert!(!app.model_picker_open);
 
         app.state.draft = "!printf hello".into();
         app.update(ChatMessage::Send);
@@ -931,6 +932,7 @@ mod tests {
             r#"{"name":"models","models":[{"id":"first","display_name":"First","supported_reasoning_efforts":[]},{"id":"second","display_name":"Second","supported_reasoning_efforts":[]}],"events":[]}"#,
         )
         .unwrap();
+        let backend_probe = backend.clone();
         let directory = tempfile::tempdir().unwrap();
         let mut app = ChatApplication::new(BackendMode::Replay {
             backend,
@@ -998,6 +1000,22 @@ mod tests {
                 })
                 .is_ok()
         );
+
+        {
+            let application = scenario.host_mut().application_mut();
+            application.state.draft = "use the committed model".into();
+            application.update(ChatMessage::Send);
+        }
+        for _ in 0..100 {
+            scenario.host_mut().application_mut().poll_controller();
+            if !backend_probe.started_turns().is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let turns = backend_probe.started_turns();
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].model.as_deref(), Some("second"));
     }
 
     #[test]
@@ -1129,6 +1147,50 @@ mod tests {
             vec![ShellRequest::ResumeThread(thread)]
         );
         assert!(app.state.selected_thread.is_none());
+    }
+
+    #[test]
+    fn standalone_resume_loads_the_selected_transcript_in_the_same_application() {
+        let backend = ReplayBackend::from_json(
+            r#"{"name":"resume","threads":[{"id":"recent","title":"Chosen","cwd":"/projects/nickel","last_used_at":9,"turns":[{"id":"old-turn","status":"completed","items":[{"id":"user","item_type":"userMessage","text":"last useful message","command_actions":[]}]}]}],"thread_runtime":{"recent":{"project_id":"nickel","status":"Idle","active_flags":[],"can_accept_direct_input":true}},"events":[]}"#,
+        ).unwrap();
+        let probe = backend.clone();
+        let mut app = ChatApplication::new(BackendMode::Replay {
+            backend,
+            cwd: "/projects/nickel".into(),
+        });
+        for _ in 0..100 {
+            app.poll_controller();
+            if app.state.status == ConnectionStatus::Ready {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        app.update(ChatMessage::ToggleResumePicker);
+        for _ in 0..100 {
+            app.poll_controller();
+            if !app.resume_picker_loading {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        app.update(ChatMessage::SelectThread(ThreadId("recent".into())));
+        for _ in 0..100 {
+            app.poll_controller();
+            if app.state.selected_thread.as_ref() == Some(&ThreadId("recent".into())) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert_eq!(probe.resumed_threads(), [ThreadId("recent".into())]);
+        assert_eq!(app.state.selected_thread, Some(ThreadId("recent".into())));
+        assert!(!app.resume_picker_open);
+        assert!(
+            app.state
+                .items
+                .iter()
+                .any(|item| item.text == "last useful message")
+        );
     }
 
     #[test]

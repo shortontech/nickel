@@ -34,6 +34,8 @@ pub struct ReplayScenario {
 pub struct ReplayBackend {
     scenario: Arc<ReplayScenario>,
     pending: Arc<Mutex<HashMap<String, String>>>,
+    started_turns: Arc<Mutex<Vec<StartTurn>>>,
+    resumed_threads: Arc<Mutex<Vec<ThreadId>>>,
 }
 
 impl ReplayBackend {
@@ -57,7 +59,17 @@ impl ReplayBackend {
         Ok(Self {
             scenario: Arc::new(scenario),
             pending: Arc::new(Mutex::new(pending)),
+            started_turns: Arc::new(Mutex::new(Vec::new())),
+            resumed_threads: Arc::new(Mutex::new(Vec::new())),
         })
+    }
+
+    pub fn started_turns(&self) -> Vec<StartTurn> {
+        self.started_turns.lock().unwrap().clone()
+    }
+
+    pub fn resumed_threads(&self) -> Vec<ThreadId> {
+        self.resumed_threads.lock().unwrap().clone()
     }
 }
 
@@ -124,14 +136,18 @@ impl CodexBackend for ReplayBackend {
         })
     }
     fn resume_thread(&self, id: ThreadId) -> Result<Thread, CodexError> {
-        self.scenario
+        let thread = self
+            .scenario
             .threads
             .iter()
             .find(|thread| thread.id == id)
             .cloned()
-            .ok_or_else(|| CodexError::Protocol("fixture thread not found".into()))
+            .ok_or_else(|| CodexError::Protocol("fixture thread not found".into()))?;
+        self.resumed_threads.lock().unwrap().push(id);
+        Ok(thread)
     }
     fn start_turn(&self, request: StartTurn) -> Result<Turn, CodexError> {
+        self.started_turns.lock().unwrap().push(request.clone());
         Ok(Turn {
             id: TurnId("fixture-turn".into()),
             thread_id: request.thread_id,

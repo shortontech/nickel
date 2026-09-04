@@ -157,6 +157,28 @@ impl Default for ChatState {
 }
 
 impl ChatState {
+    fn reconcile_selected_model(&mut self) {
+        if self.models.is_empty() {
+            return;
+        }
+        let unavailable = self
+            .selected_model
+            .as_ref()
+            .is_some_and(|id| !self.models.iter().any(|candidate| candidate.id == *id));
+        if self.selected_model.is_none() || unavailable {
+            self.selected_model = self.models.first().map(|model| model.id.clone());
+            self.selected_reasoning_effort = self
+                .models
+                .first()
+                .and_then(|model| model.default_reasoning_effort.clone());
+        }
+        if unavailable {
+            self.report_diagnostic(
+                "The selected model is no longer available; using the first available model",
+            );
+        }
+    }
+
     pub fn can_send(&self) -> bool {
         self.status == ConnectionStatus::Ready
             && self.active_turn.is_none()
@@ -256,18 +278,7 @@ impl ChatState {
                 self.provenance = provenance;
                 self.account = account;
                 self.models = models.into_iter().take(100).collect();
-                let selected_model_unavailable = self
-                    .selected_model
-                    .as_ref()
-                    .is_some_and(|id| !self.models.iter().any(|candidate| candidate.id == *id));
-                if self.selected_model.is_none() || selected_model_unavailable {
-                    self.selected_model = self.models.first().map(|model| model.id.clone());
-                }
-                if selected_model_unavailable {
-                    self.report_diagnostic(
-                        "The selected model is no longer available; using the first available model",
-                    );
-                }
+                self.reconcile_selected_model();
                 if self.selected_reasoning_effort.is_none() {
                     self.selected_reasoning_effort = self
                         .models
@@ -307,6 +318,7 @@ impl ChatState {
                 self.attachments.clear();
                 self.send_pending = false;
                 self.hydrate_thread(&thread);
+                self.reconcile_selected_model();
                 self.record_selected_thread(thread);
             }
             ControllerEvent::TurnAccepted => {
