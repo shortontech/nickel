@@ -1835,6 +1835,21 @@ fn subscription_shortcut(
         .then_some(GlobalShortcut::LockState { locked }),
         ServerMessage::Event(SessionEvent::GlobalShortcut { action }) => Some(match action {
             nickel_session_protocol::ShortcutAction::ShowRun => GlobalShortcut::ShowRun,
+            nickel_session_protocol::ShortcutAction::OpenFiles => GlobalShortcut::OpenFiles,
+            nickel_session_protocol::ShortcutAction::OpenSettings => GlobalShortcut::OpenSettings,
+            nickel_session_protocol::ShortcutAction::ShowControlCenter => {
+                GlobalShortcut::ShowControlCenter
+            }
+            nickel_session_protocol::ShortcutAction::ShowNotifications => {
+                GlobalShortcut::ShowNotifications
+            }
+            nickel_session_protocol::ShortcutAction::ShowDesktop => GlobalShortcut::ShowDesktop,
+            nickel_session_protocol::ShortcutAction::ProjectDisplays => {
+                GlobalShortcut::ProjectDisplays
+            }
+            nickel_session_protocol::ShortcutAction::ShowWindowMenu => {
+                GlobalShortcut::ShowWindowMenu
+            }
             nickel_session_protocol::ShortcutAction::ShowScreenshotTool => {
                 GlobalShortcut::Screenshot(ScreenshotAction::InteractiveRegion)
             }

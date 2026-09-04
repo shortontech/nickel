@@ -384,6 +384,21 @@ impl NickelSession {
                                     .move_active_window_to_workspace(
                                         nickel_core::workspaces::WorkspaceDirection::Next,
                                     ),
+                                Some(HotkeyAction::CreateWorkspace) => session.create_workspace_and_switch(),
+                                Some(HotkeyAction::RemoveActiveWorkspace) => session.remove_active_workspace(),
+                                Some(HotkeyAction::CloseActiveWindow) => session.close_active_window(),
+                                Some(HotkeyAction::MaximizeActiveWindow) => session.maximize_active_window(),
+                                Some(HotkeyAction::RestoreOrMinimizeActiveWindow) => session.minimize_active_window(),
+                                Some(HotkeyAction::MoveWindowToPreviousOutput) => session.move_active_window_to_output_direction(true),
+                                Some(HotkeyAction::MoveWindowToNextOutput) => session.move_active_window_to_output_direction(false),
+                                Some(HotkeyAction::OpenFiles) => session.notify_global_shortcut(nickel_session_protocol::ShortcutAction::OpenFiles),
+                                Some(HotkeyAction::OpenSettings) => session.notify_global_shortcut(nickel_session_protocol::ShortcutAction::OpenSettings),
+                                Some(HotkeyAction::ShowControlCenter) => session.notify_global_shortcut(nickel_session_protocol::ShortcutAction::ShowControlCenter),
+                                Some(HotkeyAction::ShowNotifications) => session.notify_global_shortcut(nickel_session_protocol::ShortcutAction::ShowNotifications),
+                                Some(HotkeyAction::ShowDesktop) => session.notify_global_shortcut(nickel_session_protocol::ShortcutAction::ShowDesktop),
+                                Some(HotkeyAction::ProjectDisplays) => session.notify_global_shortcut(nickel_session_protocol::ShortcutAction::ProjectDisplays),
+                                Some(HotkeyAction::ShowWindowMenu) => session.notify_global_shortcut(nickel_session_protocol::ShortcutAction::ShowWindowMenu),
+                                Some(HotkeyAction::SnapLeading | HotkeyAction::SnapTrailing) => {}
                                 Some(HotkeyAction::CaptureActiveWindow) => {
                                     session.notify_global_shortcut(
                                         nickel_session_protocol::ShortcutAction::CaptureActiveWindow,
@@ -1126,6 +1141,10 @@ fn key_code_from_keysym(sym: Keysym) -> Option<KeyCode> {
         value if value == Keysym::new(keysyms::KEY_Control_R) => Some(KeyCode::ControlRight),
         value if value == Keysym::new(keysyms::KEY_Left) => Some(KeyCode::ArrowLeft),
         value if value == Keysym::new(keysyms::KEY_Right) => Some(KeyCode::ArrowRight),
+        value if value == Keysym::new(keysyms::KEY_Up) => Some(KeyCode::ArrowUp),
+        value if value == Keysym::new(keysyms::KEY_Down) => Some(KeyCode::ArrowDown),
+        value if value == Keysym::new(keysyms::KEY_space) => Some(KeyCode::Space),
+        value if value == Keysym::new(keysyms::KEY_F4) => Some(KeyCode::F4),
         value if value == Keysym::new(keysyms::KEY_0) => Some(KeyCode::Digit0),
         value if value == Keysym::new(keysyms::KEY_1) => Some(KeyCode::Digit1),
         value if value == Keysym::new(keysyms::KEY_2) => Some(KeyCode::Digit2),
@@ -1164,7 +1183,27 @@ fn key_code_from_keysym(sym: Keysym) -> Option<KeyCode> {
         {
             Some(KeyCode::Backquote)
         }
-        value if value == Keysym::new(keysyms::KEY_r) => Some(KeyCode::KeyR),
+        value if value == Keysym::new(keysyms::KEY_a) || value == Keysym::new(keysyms::KEY_A) => {
+            Some(KeyCode::KeyA)
+        }
+        value if value == Keysym::new(keysyms::KEY_d) || value == Keysym::new(keysyms::KEY_D) => {
+            Some(KeyCode::KeyD)
+        }
+        value if value == Keysym::new(keysyms::KEY_e) || value == Keysym::new(keysyms::KEY_E) => {
+            Some(KeyCode::KeyE)
+        }
+        value if value == Keysym::new(keysyms::KEY_i) || value == Keysym::new(keysyms::KEY_I) => {
+            Some(KeyCode::KeyI)
+        }
+        value if value == Keysym::new(keysyms::KEY_n) || value == Keysym::new(keysyms::KEY_N) => {
+            Some(KeyCode::KeyN)
+        }
+        value if value == Keysym::new(keysyms::KEY_p) || value == Keysym::new(keysyms::KEY_P) => {
+            Some(KeyCode::KeyP)
+        }
+        value if value == Keysym::new(keysyms::KEY_r) || value == Keysym::new(keysyms::KEY_R) => {
+            Some(KeyCode::KeyR)
+        }
         _ => None,
     }
 }

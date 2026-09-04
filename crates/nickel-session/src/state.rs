@@ -3218,6 +3218,100 @@ impl NickelSession {
         }
     }
 
+    pub fn create_workspace_and_switch(&mut self) {
+        let Ok(target) = self.workspaces.create() else {
+            return;
+        };
+        let output = self.output_name_at_pointer();
+        if let Ok(transition) = self.workspaces.switch_to(target, output) {
+            self.apply_workspace_transition(transition);
+        }
+    }
+
+    pub fn remove_active_workspace(&mut self) {
+        if let Ok(transition) = self.workspaces.remove(self.workspaces.active()) {
+            self.apply_workspace_transition(transition);
+        }
+    }
+
+    pub fn close_active_window(&mut self) {
+        if let Some(id) = self
+            .windows
+            .snapshot()
+            .into_iter()
+            .find(|window| window.active)
+            .map(|window| window.id)
+        {
+            self.close_window(id);
+        }
+    }
+
+    pub fn maximize_active_window(&mut self) {
+        if let Some(id) = self
+            .windows
+            .snapshot()
+            .into_iter()
+            .find(|window| window.active)
+            .map(|window| window.id)
+        {
+            self.maximize_window(id);
+        }
+    }
+
+    pub fn minimize_active_window(&mut self) {
+        if let Some(id) = self
+            .windows
+            .snapshot()
+            .into_iter()
+            .find(|window| window.active)
+            .map(|window| window.id)
+        {
+            self.minimize_window(id);
+        }
+    }
+
+    pub fn move_active_window_to_output_direction(&mut self, previous: bool) {
+        let Some(id) = self
+            .windows
+            .snapshot()
+            .into_iter()
+            .find(|window| window.active)
+            .map(|window| window.id)
+        else {
+            return;
+        };
+        let Some(window) = self.window_for_registry_id(id) else {
+            return;
+        };
+        let current = self.output_name_for_window(&window);
+        let mut outputs = self
+            .space
+            .outputs()
+            .filter_map(|output| {
+                self.space
+                    .output_geometry(output)
+                    .map(|geometry| (geometry.loc.x, output.name()))
+            })
+            .collect::<Vec<_>>();
+        outputs.sort_by_key(|entry| entry.0);
+        let Some(index) = outputs
+            .iter()
+            .position(|(_, name)| Some(name) == current.as_ref())
+        else {
+            return;
+        };
+        let target = if previous {
+            index.checked_sub(1)
+        } else if index + 1 < outputs.len() {
+            Some(index + 1)
+        } else {
+            None
+        };
+        if let Some(target) = target {
+            self.move_window_to_output(id, &outputs[target].1);
+        }
+    }
+
     fn output_name_at_pointer(&self) -> Option<String> {
         let location = self.seat.get_pointer()?.current_location();
         self.output_name_at(location)

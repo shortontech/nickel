@@ -668,6 +668,13 @@ pub enum Event {
 #[serde(rename_all = "snake_case")]
 pub enum ShortcutAction {
     ShowRun,
+    OpenFiles,
+    OpenSettings,
+    ShowControlCenter,
+    ShowNotifications,
+    ShowDesktop,
+    ProjectDisplays,
+    ShowWindowMenu,
     ShowScreenshotTool,
     CaptureActiveWindow,
     CaptureActiveWindowToFile,

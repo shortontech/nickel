@@ -1264,7 +1264,7 @@ fn windows_input_adapter() -> &'static Mutex<WindowsInputAdapter<HotkeyAction>> 
     WINDOWS_INPUT_ADAPTER.get_or_init(|| {
         let bindings: Vec<_> = nickel_core::hotkeys::default_bindings()
             .into_iter()
-            .filter(|binding| !is_workspace_action(binding.action))
+            .filter(|binding| !is_host_owned_action(binding.action))
             .collect();
         tracing::info!(
             "workspace shortcuts are host-owned on Windows; Nickel leaves them unregistered"
@@ -1273,7 +1273,7 @@ fn windows_input_adapter() -> &'static Mutex<WindowsInputAdapter<HotkeyAction>> 
     })
 }
 
-fn is_workspace_action(action: HotkeyAction) -> bool {
+fn is_host_owned_action(action: HotkeyAction) -> bool {
     matches!(
         action,
         HotkeyAction::SwitchWorkspacePrevious
@@ -1281,6 +1281,17 @@ fn is_workspace_action(action: HotkeyAction) -> bool {
             | HotkeyAction::SwitchWorkspace(_)
             | HotkeyAction::MoveWindowToPreviousWorkspace
             | HotkeyAction::MoveWindowToNextWorkspace
+            | HotkeyAction::CreateWorkspace
+            | HotkeyAction::RemoveActiveWorkspace
+            | HotkeyAction::CloseActiveWindow
+            | HotkeyAction::SnapLeading
+            | HotkeyAction::SnapTrailing
+            | HotkeyAction::MaximizeActiveWindow
+            | HotkeyAction::RestoreOrMinimizeActiveWindow
+            | HotkeyAction::MoveWindowToPreviousOutput
+            | HotkeyAction::MoveWindowToNextOutput
+            | HotkeyAction::ShowDesktop
+            | HotkeyAction::ProjectDisplays
     )
 }
 
@@ -1367,6 +1378,11 @@ fn send_hotkey_action(action: Option<HotkeyAction>) {
         Some(HotkeyAction::LockSession) => GlobalShortcut::LockState { locked: true },
         Some(HotkeyAction::ToggleLauncher) => GlobalShortcut::ToggleLauncher,
         Some(HotkeyAction::ShowRun) => GlobalShortcut::ShowRun,
+        Some(HotkeyAction::OpenFiles) => GlobalShortcut::OpenFiles,
+        Some(HotkeyAction::OpenSettings) => GlobalShortcut::OpenSettings,
+        Some(HotkeyAction::ShowControlCenter) => GlobalShortcut::ShowControlCenter,
+        Some(HotkeyAction::ShowNotifications) => GlobalShortcut::ShowNotifications,
+        Some(HotkeyAction::ShowWindowMenu) => GlobalShortcut::ShowWindowMenu,
         Some(HotkeyAction::SwitchNext) => GlobalShortcut::SwitchNext,
         Some(HotkeyAction::SwitchPrevious) => GlobalShortcut::SwitchPrevious,
         Some(HotkeyAction::SwitchGroupNext) => GlobalShortcut::SwitchGroupNext,
@@ -1386,7 +1402,18 @@ fn send_hotkey_action(action: Option<HotkeyAction>) {
             | HotkeyAction::SwitchWorkspaceNext
             | HotkeyAction::SwitchWorkspace(_)
             | HotkeyAction::MoveWindowToPreviousWorkspace
-            | HotkeyAction::MoveWindowToNextWorkspace,
+            | HotkeyAction::MoveWindowToNextWorkspace
+            | HotkeyAction::CreateWorkspace
+            | HotkeyAction::RemoveActiveWorkspace
+            | HotkeyAction::CloseActiveWindow
+            | HotkeyAction::SnapLeading
+            | HotkeyAction::SnapTrailing
+            | HotkeyAction::MaximizeActiveWindow
+            | HotkeyAction::RestoreOrMinimizeActiveWindow
+            | HotkeyAction::MoveWindowToPreviousOutput
+            | HotkeyAction::MoveWindowToNextOutput
+            | HotkeyAction::ShowDesktop
+            | HotkeyAction::ProjectDisplays,
         ) => return,
         None => return,
     };

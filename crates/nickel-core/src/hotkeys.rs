@@ -16,6 +16,20 @@ pub enum HotkeyAction {
     LockSession,
     ToggleLauncher,
     ShowRun,
+    OpenFiles,
+    OpenSettings,
+    ShowControlCenter,
+    ShowNotifications,
+    ShowDesktop,
+    ProjectDisplays,
+    CloseActiveWindow,
+    ShowWindowMenu,
+    SnapLeading,
+    SnapTrailing,
+    MaximizeActiveWindow,
+    RestoreOrMinimizeActiveWindow,
+    MoveWindowToPreviousOutput,
+    MoveWindowToNextOutput,
     SwitchNext,
     SwitchPrevious,
     SwitchGroupNext,
@@ -29,6 +43,8 @@ pub enum HotkeyAction {
     SwitchWorkspace(usize),
     MoveWindowToPreviousWorkspace,
     MoveWindowToNextWorkspace,
+    CreateWorkspace,
+    RemoveActiveWorkspace,
 }
 
 #[derive(Debug)]
@@ -228,17 +244,30 @@ impl CompositorShortcutAdapter {
             KeyCode::Tab | KeyCode::Backquote | KeyCode::PrintScreen => {
                 modifiers.aggregate(AggregateModifier::Alt) || key == KeyCode::PrintScreen
             }
-            KeyCode::KeyR => modifiers.aggregate(AggregateModifier::Super),
+            KeyCode::KeyR
+            | KeyCode::KeyA
+            | KeyCode::KeyD
+            | KeyCode::KeyE
+            | KeyCode::KeyI
+            | KeyCode::KeyN
+            | KeyCode::KeyP => modifiers.aggregate(AggregateModifier::Super),
             KeyCode::KeyL => {
                 modifiers.aggregate(AggregateModifier::Super)
                     || (modifiers.aggregate(AggregateModifier::Control)
                         && modifiers.aggregate(AggregateModifier::Alt))
             }
             KeyCode::ArrowLeft | KeyCode::ArrowRight => {
-                modifiers.aggregate(AggregateModifier::Control)
-                    && (modifiers.aggregate(AggregateModifier::Super)
-                        || modifiers.aggregate(AggregateModifier::Alt))
+                modifiers.aggregate(AggregateModifier::Super)
+                    || (modifiers.aggregate(AggregateModifier::Control)
+                        && modifiers.aggregate(AggregateModifier::Alt))
             }
+            KeyCode::ArrowUp | KeyCode::ArrowDown => modifiers.aggregate(AggregateModifier::Super),
+            KeyCode::F4 => {
+                modifiers.aggregate(AggregateModifier::Alt)
+                    || (modifiers.aggregate(AggregateModifier::Super)
+                        && modifiers.aggregate(AggregateModifier::Control))
+            }
+            KeyCode::Space => modifiers.aggregate(AggregateModifier::Alt),
             KeyCode::Digit0
             | KeyCode::Digit1
             | KeyCode::Digit2
@@ -347,6 +376,37 @@ fn compositor_registrations() -> Vec<Registration<HotkeyAction>> {
             ToggleLauncher,
         ),
         registration(KeyCode::KeyR, [Super], ShortcutTrigger::Pressed, ShowRun),
+        registration(KeyCode::KeyE, [Super], ShortcutTrigger::Pressed, OpenFiles),
+        registration(
+            KeyCode::KeyI,
+            [Super],
+            ShortcutTrigger::Pressed,
+            OpenSettings,
+        ),
+        registration(
+            KeyCode::KeyA,
+            [Super],
+            ShortcutTrigger::Pressed,
+            ShowControlCenter,
+        ),
+        registration(
+            KeyCode::KeyN,
+            [Super],
+            ShortcutTrigger::Pressed,
+            ShowNotifications,
+        ),
+        registration(
+            KeyCode::KeyD,
+            [Super],
+            ShortcutTrigger::Pressed,
+            ShowDesktop,
+        ),
+        registration(
+            KeyCode::KeyP,
+            [Super],
+            ShortcutTrigger::Pressed,
+            ProjectDisplays,
+        ),
         registration(
             KeyCode::KeyL,
             [Super],
@@ -360,6 +420,54 @@ fn compositor_registrations() -> Vec<Registration<HotkeyAction>> {
             LockSession,
         ),
         registration(KeyCode::Tab, [Alt], ShortcutTrigger::Pressed, SwitchNext),
+        registration(
+            KeyCode::F4,
+            [Alt],
+            ShortcutTrigger::Pressed,
+            CloseActiveWindow,
+        ),
+        registration(
+            KeyCode::Space,
+            [Alt],
+            ShortcutTrigger::Pressed,
+            ShowWindowMenu,
+        ),
+        registration(
+            KeyCode::ArrowLeft,
+            [Super],
+            ShortcutTrigger::Pressed,
+            SnapLeading,
+        ),
+        registration(
+            KeyCode::ArrowRight,
+            [Super],
+            ShortcutTrigger::Pressed,
+            SnapTrailing,
+        ),
+        registration(
+            KeyCode::ArrowUp,
+            [Super],
+            ShortcutTrigger::Pressed,
+            MaximizeActiveWindow,
+        ),
+        registration(
+            KeyCode::ArrowDown,
+            [Super],
+            ShortcutTrigger::Pressed,
+            RestoreOrMinimizeActiveWindow,
+        ),
+        registration(
+            KeyCode::ArrowLeft,
+            [Shift, Super],
+            ShortcutTrigger::Pressed,
+            MoveWindowToPreviousOutput,
+        ),
+        registration(
+            KeyCode::ArrowRight,
+            [Shift, Super],
+            ShortcutTrigger::Pressed,
+            MoveWindowToNextOutput,
+        ),
         registration(
             KeyCode::Tab,
             [Alt, Shift],
@@ -437,6 +545,18 @@ fn compositor_registrations() -> Vec<Registration<HotkeyAction>> {
             [Control, Shift, Super],
             ShortcutTrigger::Pressed,
             MoveWindowToNextWorkspace,
+        ),
+        registration(
+            KeyCode::KeyD,
+            [Control, Super],
+            ShortcutTrigger::Pressed,
+            CreateWorkspace,
+        ),
+        registration(
+            KeyCode::F4,
+            [Control, Super],
+            ShortcutTrigger::Pressed,
+            RemoveActiveWorkspace,
         ),
         registration(
             KeyCode::PrintScreen,
@@ -567,6 +687,39 @@ mod tests {
         CompositorShortcutAdapter, HotkeyAction, HotkeyOutcome, compositor_registrations,
         default_bindings,
     };
+
+    #[test]
+    fn conventional_desktop_defaults_are_registered_once() {
+        use HotkeyAction::*;
+        let registrations = compositor_registrations();
+        for action in [
+            OpenFiles,
+            OpenSettings,
+            ShowControlCenter,
+            ShowNotifications,
+            ShowDesktop,
+            ProjectDisplays,
+            CloseActiveWindow,
+            ShowWindowMenu,
+            SnapLeading,
+            SnapTrailing,
+            MaximizeActiveWindow,
+            RestoreOrMinimizeActiveWindow,
+            MoveWindowToPreviousOutput,
+            MoveWindowToNextOutput,
+            CreateWorkspace,
+            RemoveActiveWorkspace,
+        ] {
+            assert_eq!(
+                registrations
+                    .iter()
+                    .filter(|entry| entry.action == action)
+                    .count(),
+                1,
+                "{action:?}"
+            );
+        }
+    }
 
     #[test]
     fn compositor_adapter_registers_conflicts_and_reports_capability_honestly() {

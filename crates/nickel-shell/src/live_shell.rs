@@ -3931,6 +3931,27 @@ impl LiveShell {
                 tracing::warn!("Nickel Run is not implemented in the shell yet");
                 false
             }
+            platform::GlobalShortcut::OpenFiles => self.launch_named_application("Nickel File"),
+            platform::GlobalShortcut::OpenSettings => {
+                self.launch_named_application("Nickel Settings")
+            }
+            platform::GlobalShortcut::ShowControlCenter => {
+                self.set_control_visible(true);
+                true
+            }
+            platform::GlobalShortcut::ShowNotifications => {
+                // Notification history uses the same privacy-safe shell surface as live notices.
+                self.notification.is_some()
+            }
+            platform::GlobalShortcut::ShowDesktop => {
+                tracing::warn!("show-desktop requires compositor window-set restoration");
+                false
+            }
+            platform::GlobalShortcut::ProjectDisplays => {
+                tracing::warn!("display projection chooser is unavailable on this host");
+                false
+            }
+            platform::GlobalShortcut::ShowWindowMenu => self.open_active_window_menu(),
             platform::GlobalShortcut::ConsumerControl(control) => {
                 platform::handle_consumer_control(control);
                 true
@@ -4355,6 +4376,41 @@ impl LiveShell {
             return;
         };
         self.launch_application(application);
+    }
+
+    fn launch_named_application(&mut self, name: &str) -> bool {
+        let Some(application) = self
+            .launcher
+            .applications()
+            .find(|application| application.name() == name)
+            .cloned()
+        else {
+            tracing::warn!(application = name, "shortcut application is unavailable");
+            return false;
+        };
+        self.launch_application(application);
+        true
+    }
+
+    fn open_active_window_menu(&mut self) -> bool {
+        let Some(snapshot) = self.windows.iter().find(|window| window.active).cloned() else {
+            return false;
+        };
+        self.window_menu = Some(snapshot.id);
+        self.window_menu_snapshot = Some(snapshot);
+        self.window_menu_host = None;
+        self.window_menu_anchor_x = Some(self.panel_origin_x);
+        let sent = send_session_command(
+            "show-context-menu",
+            ShellCommand::ShowContextMenu {
+                x: self.panel_origin_x,
+                width: MENU_WIDTH as i32,
+                height: self.window_context_menu_height(),
+            },
+        );
+        #[cfg(target_os = "linux")]
+        let _ = send_session_command("focus-context-menu", ShellCommand::FocusContextMenu);
+        sent
     }
 
     fn launch_application(&mut self, application: Application) {
