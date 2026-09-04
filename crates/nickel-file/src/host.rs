@@ -183,6 +183,8 @@ impl HostAdapter<FileApp> for FileHostAdapter {
                     KeyCode::Escape => {
                         if app.rename_editor.is_some() {
                             app.update(FileMessage::CancelRename);
+                        } else if app.transfer_rx.is_some() {
+                            app.update(FileMessage::CancelTransfer);
                         } else if app.command_surface_open {
                             app.update(FileMessage::ToggleCommandSurface);
                         } else if app.address_editing {
@@ -245,6 +247,7 @@ impl HostAdapter<FileApp> for FileHostAdapter {
                 });
                 let app = host.application_mut();
                 app.cursor = cursor;
+                app.begin_file_drag_if_threshold(cursor);
                 if let Some(entries) = selected_entries {
                     app.selected_entries = entries;
                     app.selected = app.selected_entries.iter().copied().min();
@@ -272,6 +275,13 @@ impl HostAdapter<FileApp> for FileHostAdapter {
             }
             InputEvent::Pointer(PointerEvent::Button {
                 button: PointerButton::Primary,
+                edge: KeyEdge::Pressed,
+                ..
+            }) => {
+                host.application_mut().primary_down = true;
+            }
+            InputEvent::Pointer(PointerEvent::Button {
+                button: PointerButton::Primary,
                 edge: KeyEdge::Released,
                 ..
             }) => {
@@ -279,6 +289,8 @@ impl HostAdapter<FileApp> for FileHostAdapter {
                 app.resizing_sidebar = false;
                 app.resizing_details_column = None;
                 app.selection_drag = None;
+                app.outbound_drag = None;
+                app.primary_down = false;
                 changed = true;
             }
             InputEvent::Pointer(PointerEvent::Axis { delta, .. }) => {
@@ -296,6 +308,7 @@ impl HostAdapter<FileApp> for FileHostAdapter {
                 app.resizing_sidebar = false;
                 app.resizing_details_column = None;
                 app.selection_drag = None;
+                app.primary_down = false;
             }
             InputEvent::FocusGained { .. } => {
                 host.application_mut().refresh_icons();

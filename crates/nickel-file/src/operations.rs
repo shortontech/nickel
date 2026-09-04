@@ -69,6 +69,54 @@ impl ClipboardOffer {
 
 pub const MAX_TRANSFER_ITEMS: usize = 4096;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DragAction {
+    Copy,
+    Move,
+    Link,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DragOffer {
+    pub sources: Vec<TransferSource>,
+    pub actions: Vec<DragAction>,
+}
+
+impl DragOffer {
+    pub fn bounded(sources: Vec<TransferSource>) -> Result<Self, OperationError> {
+        let clipboard = ClipboardOffer::new(TransferIntent::Copy, sources)?;
+        let mut actions = vec![DragAction::Copy];
+        if clipboard
+            .sources
+            .iter()
+            .all(|source| source.capabilities.removable)
+        {
+            actions.push(DragAction::Move);
+        }
+        Ok(Self {
+            sources: clipboard.sources,
+            actions,
+        })
+    }
+
+    pub fn negotiate(
+        &self,
+        requested: Option<DragAction>,
+        same_provider: bool,
+    ) -> Option<DragAction> {
+        requested
+            .filter(|action| self.actions.contains(action))
+            .or_else(|| {
+                let conventional = if same_provider {
+                    DragAction::Move
+                } else {
+                    DragAction::Copy
+                };
+                self.actions.contains(&conventional).then_some(conventional)
+            })
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OperationError {
     EmptySelection,
@@ -436,10 +484,10 @@ fn is_windows_reserved(name: &str) -> bool {
     matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
         || stem
             .strip_prefix("COM")
-            .is_some_and(|n| matches!(n, "1"..="9"))
+            .is_some_and(|n| n.len() == 1 && n.as_bytes()[0].is_ascii_digit() && n != "0")
         || stem
             .strip_prefix("LPT")
-            .is_some_and(|n| matches!(n, "1"..="9"))
+            .is_some_and(|n| n.len() == 1 && n.as_bytes()[0].is_ascii_digit() && n != "0")
 }
 
 #[cfg(test)]
@@ -618,6 +666,25 @@ mod tests {
         assert_eq!(
             std::fs::read(destination.path().join("payload")).unwrap(),
             b"verified bytes"
+        );
+    }
+
+    #[test]
+    fn drag_offer_is_bounded_and_negotiates_provider_default_and_modifier() {
+        let offer = DragOffer::bounded(vec![
+            source("/a", "local", true),
+            source("/b", "local", true),
+        ])
+        .unwrap();
+        assert_eq!(offer.negotiate(None, true), Some(DragAction::Move));
+        assert_eq!(offer.negotiate(None, false), Some(DragAction::Copy));
+        assert_eq!(
+            offer.negotiate(Some(DragAction::Copy), true),
+            Some(DragAction::Copy)
+        );
+        assert_eq!(
+            offer.negotiate(Some(DragAction::Link), true),
+            Some(DragAction::Move)
         );
     }
 }

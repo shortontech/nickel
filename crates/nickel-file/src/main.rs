@@ -13,7 +13,7 @@ use crate::{
     icons, layout,
     layout::{rect_between, visible_file_range},
     operations::{
-        ClipboardOffer, ConflictPolicy, ItemCapabilities, OperationEffect, RenameEditor,
+        ClipboardOffer, ConflictPolicy, DragOffer, ItemCapabilities, OperationEffect, RenameEditor,
         TransferIntent, TransferReport, TransferSource,
     },
     platform::{LocationGroup, OpenPathError, home_directory, location_groups, open_path},
@@ -50,6 +50,7 @@ const DOUBLE_CLICK_DISTANCE: f32 = 6.0;
 type NavigationResult = (u64, Result<Option<DirectoryBrowser>, String>);
 type SidebarResult = (PathBuf, Result<Vec<(String, PathBuf)>, String>);
 type ActivationResult = (u64, String, Result<(), OpenPathError>);
+type TransferUpdate = (TransferIntent, usize, usize, Option<TransferReport>);
 
 #[derive(Clone, Debug)]
 pub(crate) struct FileClick {
@@ -84,6 +85,7 @@ pub enum FileMessage {
     RenameChanged(String),
     CommitRename,
     CancelRename,
+    CancelTransfer,
     CopySelection,
     CutSelection,
     Paste,
@@ -162,7 +164,10 @@ pub struct FileApp {
     pub(crate) rename_editor: Option<RenameEditor>,
     pub(crate) file_clipboard: Option<ClipboardOffer>,
     pub(crate) drag_hover: Option<PathBuf>,
-    transfer_rx: Option<Receiver<(TransferIntent, usize, TransferReport)>>,
+    pub(crate) outbound_drag: Option<DragOffer>,
+    pub(crate) primary_down: bool,
+    pub(crate) transfer_rx: Option<Receiver<TransferUpdate>>,
+    transfer_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
     pub(crate) selection_anchor: Option<usize>,
     pub(crate) active_tab_id: u64,
     pub(crate) next_tab_id: u64,
@@ -884,7 +889,10 @@ impl FileApp {
             rename_editor: None,
             file_clipboard: None,
             drag_hover: None,
+            outbound_drag: None,
+            primary_down: false,
             transfer_rx: None,
+            transfer_cancel: None,
             selection_anchor: None,
             active_tab_id: 0,
             next_tab_id: 1,
@@ -2009,6 +2017,12 @@ impl FileApp {
                 }
             }
             FileMessage::CancelRename => self.rename_editor = None,
+            FileMessage::CancelTransfer => {
+                if let Some(cancel) = &self.transfer_cancel {
+                    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                    self.status = "Cancelling transfer…".into();
+                }
+            }
             FileMessage::CommitRename => self.commit_rename(),
             FileMessage::CopySelection => self.capture_file_clipboard(TransferIntent::Copy),
             FileMessage::CutSelection => self.capture_file_clipboard(TransferIntent::Move),
@@ -2422,10 +2436,62 @@ impl FileApp {
                     "Copied selection"
                 }
                 .into();
+                let paths = offer
+                    .sources
+                    .iter()
+                    .map(|source| source.path.clone())
+                    .collect::<Vec<_>>();
+                if let Err(error) =
+                    crate::platform::publish_file_clipboard(&paths, intent == TransferIntent::Move)
+                {
+                    tracing::debug!(%error, "native file clipboard unavailable");
+                }
                 self.file_clipboard = Some(offer);
             }
             Err(_) => self.status = "Nothing eligible is selected".into(),
         }
+    }
+
+    pub(crate) fn begin_file_drag_if_threshold(&mut self, cursor: Point) {
+        if !self.primary_down || self.outbound_drag.is_some() {
+            return;
+        }
+        let Some(click) = &self.last_click else {
+            return;
+        };
+        let distance =
+            ((click.position.x - cursor.x).powi(2) + (click.position.y - cursor.y).powi(2)).sqrt();
+        if distance < 6.0 {
+            return;
+        }
+        let Some(clicked) = self
+            .browser
+            .entries()
+            .iter()
+            .position(|entry| entry.path == click.path)
+        else {
+            return;
+        };
+        if !self.selected_entries.contains(&clicked) {
+            return;
+        }
+        let sources = self
+            .selected_entries
+            .iter()
+            .copied()
+            .filter_map(|index| {
+                Some(TransferSource {
+                    provider: "local".into(),
+                    identity: self.browser.identity_at(index)?,
+                    path: self.browser.entries().get(index)?.path.clone(),
+                    capabilities: ItemCapabilities {
+                        readable: true,
+                        removable: true,
+                    },
+                })
+            })
+            .collect();
+        self.outbound_drag = DragOffer::bounded(sources).ok();
     }
 
     fn commit_rename(&mut self) {
@@ -2469,7 +2535,35 @@ impl FileApp {
     }
 
     fn paste_file_clipboard(&mut self) {
-        let Some(offer) = self.file_clipboard.clone() else {
+        let offer = self.file_clipboard.clone().or_else(|| {
+            crate::platform::read_file_clipboard()
+                .ok()
+                .and_then(|(cut, paths)| {
+                    let sources = paths
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, path)| TransferSource {
+                            provider: "native".into(),
+                            identity: crate::FileIdentity(0, index as u64),
+                            path,
+                            capabilities: ItemCapabilities {
+                                readable: true,
+                                removable: cut,
+                            },
+                        })
+                        .collect();
+                    ClipboardOffer::new(
+                        if cut {
+                            TransferIntent::Move
+                        } else {
+                            TransferIntent::Copy
+                        },
+                        sources,
+                    )
+                    .ok()
+                })
+        });
+        let Some(offer) = offer else {
             self.status = "The file clipboard is empty".into();
             return;
         };
@@ -2487,10 +2581,15 @@ impl FileApp {
         let (sender, receiver) = mpsc::channel();
         self.transfer_rx = Some(receiver);
         self.status = format!("Transferring 0 of {total} items…");
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.transfer_cancel = Some(cancelled.clone());
         std::thread::spawn(move || {
-            let cancelled = std::sync::atomic::AtomicBool::new(false);
-            let report = crate::operations::execute_local_transfer(&effect, &cancelled, |_, _| {});
-            let _ = sender.send((offer.intent, total, report));
+            let progress_sender = sender.clone();
+            let report =
+                crate::operations::execute_local_transfer(&effect, &cancelled, |done, _| {
+                    let _ = progress_sender.send((offer.intent, total, done, None));
+                });
+            let _ = sender.send((offer.intent, total, total, Some(report)));
         });
     }
 
@@ -2498,8 +2597,12 @@ impl FileApp {
         let Some(receiver) = &self.transfer_rx else {
             return false;
         };
-        let Ok((intent, total, report)) = receiver.try_recv() else {
+        let Ok((intent, total, completed_progress, report)) = receiver.try_recv() else {
             return false;
+        };
+        let Some(report) = report else {
+            self.status = format!("Transferring {completed_progress} of {total} items…");
+            return true;
         };
         let completed = report.affected.len();
         if intent == TransferIntent::Move && completed == total && report.failed.is_empty() {
@@ -2516,6 +2619,7 @@ impl FileApp {
             )
         };
         self.transfer_rx = None;
+        self.transfer_cancel = None;
         self.refresh_directory(self.browser.show_hidden());
         true
     }

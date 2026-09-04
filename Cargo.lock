@@ -2701,6 +2701,7 @@ dependencies = [
  "windows",
  "winit 0.30.13",
  "winresource",
+ "wl-clipboard-rs",
 ]
 
 [[package]]

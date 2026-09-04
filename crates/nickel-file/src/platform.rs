@@ -6,6 +6,184 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(target_os = "linux")]
+pub(crate) fn publish_file_clipboard(paths: &[PathBuf], cut: bool) -> Result<(), String> {
+    use wl_clipboard_rs::copy::{MimeSource, MimeType, Options, Source};
+    let mut payload = if cut {
+        "cut\n".to_owned()
+    } else {
+        "copy\n".to_owned()
+    };
+    let uris = paths
+        .iter()
+        .map(|path| format!("file://{}\r\n", path.display()))
+        .collect::<String>();
+    payload.push_str(&uris.replace("\r\n", "\n"));
+    Options::new()
+        .copy_multi(vec![
+            MimeSource {
+                source: Source::Bytes(payload.into_bytes().into()),
+                mime_type: MimeType::Specific("x-special/gnome-copied-files".into()),
+            },
+            MimeSource {
+                source: Source::Bytes(uris.into_bytes().into()),
+                mime_type: MimeType::Specific("text/uri-list".into()),
+            },
+            MimeSource {
+                source: Source::Bytes(if cut {
+                    b"1".to_vec().into()
+                } else {
+                    b"0".to_vec().into()
+                }),
+                mime_type: MimeType::Specific("application/x-kde-cutselection".into()),
+            },
+        ])
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn read_file_clipboard() -> Result<(bool, Vec<PathBuf>), String> {
+    use std::io::Read;
+    use wl_clipboard_rs::paste::{ClipboardType, MimeType, Seat, get_contents, get_mime_types};
+    let types = get_mime_types(ClipboardType::Regular, Seat::Unspecified)
+        .map_err(|error| error.to_string())?;
+    let kde_cut = if types.contains("application/x-kde-cutselection") {
+        get_contents(
+            ClipboardType::Regular,
+            Seat::Unspecified,
+            MimeType::Specific("application/x-kde-cutselection"),
+        )
+        .ok()
+        .and_then(|(mut pipe, _)| {
+            let mut value = String::new();
+            pipe.read_to_string(&mut value).ok()?;
+            Some(value.trim() == "1")
+        })
+        .unwrap_or(false)
+    } else {
+        false
+    };
+    let requested = if types.contains("x-special/gnome-copied-files") {
+        "x-special/gnome-copied-files"
+    } else {
+        "text/uri-list"
+    };
+    let (mut pipe, mime) = get_contents(
+        ClipboardType::Regular,
+        Seat::Unspecified,
+        MimeType::Specific(requested),
+    )
+    .map_err(|error| error.to_string())?;
+    let mut text = String::new();
+    pipe.read_to_string(&mut text)
+        .map_err(|error| error.to_string())?;
+    let mut lines = text.lines();
+    let cut = kde_cut || mime == "x-special/gnome-copied-files" && lines.next() == Some("cut");
+    Ok((
+        cut,
+        lines
+            .filter_map(|line| line.strip_prefix("file://"))
+            .map(PathBuf::from)
+            .collect(),
+    ))
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn publish_file_clipboard(paths: &[PathBuf], _cut: bool) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::{
+        Foundation::HANDLE,
+        System::{
+            DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData},
+            Memory::{GHND, GlobalAlloc, GlobalLock, GlobalUnlock},
+        },
+        UI::Shell::DROPFILES,
+    };
+    const CF_HDROP: u32 = 15;
+    let names = paths
+        .iter()
+        .flat_map(|path| path.as_os_str().encode_wide().chain(Some(0)))
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let bytes = std::mem::size_of::<DROPFILES>() + names.len() * 2;
+    unsafe {
+        OpenClipboard(None).map_err(|error| error.to_string())?;
+        struct Guard;
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                unsafe {
+                    let _ = CloseClipboard();
+                }
+            }
+        }
+        let _guard = Guard;
+        EmptyClipboard().map_err(|error| error.to_string())?;
+        let memory = GlobalAlloc(GHND, bytes).map_err(|error| error.to_string())?;
+        let pointer = GlobalLock(memory);
+        if pointer.is_null() {
+            return Err("GlobalLock failed".into());
+        }
+        let header = pointer.cast::<DROPFILES>();
+        (*header).pFiles = std::mem::size_of::<DROPFILES>() as u32;
+        (*header).fWide = true.into();
+        std::ptr::copy_nonoverlapping(
+            names.as_ptr().cast::<u8>(),
+            pointer.cast::<u8>().add(std::mem::size_of::<DROPFILES>()),
+            names.len() * 2,
+        );
+        let _ = GlobalUnlock(memory);
+        SetClipboardData(CF_HDROP, Some(HANDLE(memory.0))).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn read_file_clipboard() -> Result<(bool, Vec<PathBuf>), String> {
+    use windows::Win32::{
+        System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard},
+        UI::Shell::DragQueryFileW,
+    };
+    const CF_HDROP: u32 = 15;
+    unsafe {
+        OpenClipboard(None).map_err(|error| error.to_string())?;
+        struct Guard;
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                unsafe {
+                    let _ = CloseClipboard();
+                }
+            }
+        }
+        let _guard = Guard;
+        let drop = GetClipboardData(CF_HDROP).map_err(|error| error.to_string())?;
+        let count = DragQueryFileW(windows::Win32::UI::Shell::HDROP(drop.0), u32::MAX, None);
+        let mut paths = Vec::with_capacity(count as usize);
+        for index in 0..count {
+            let length = DragQueryFileW(windows::Win32::UI::Shell::HDROP(drop.0), index, None);
+            let mut buffer = vec![0_u16; length as usize + 1];
+            DragQueryFileW(
+                windows::Win32::UI::Shell::HDROP(drop.0),
+                index,
+                Some(&mut buffer),
+            );
+            paths.push(PathBuf::from(String::from_utf16_lossy(
+                &buffer[..length as usize],
+            )));
+        }
+        Ok((false, paths))
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+pub(crate) fn publish_file_clipboard(_paths: &[PathBuf], _cut: bool) -> Result<(), String> {
+    Err("native file clipboard adapter unavailable".into())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+pub(crate) fn read_file_clipboard() -> Result<(bool, Vec<PathBuf>), String> {
+    Err("native file clipboard adapter unavailable".into())
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum OpenPathError {
     AssociationMissing,
