@@ -2044,6 +2044,14 @@ impl NickelSession {
                 };
                 self.apply_workspace_transition(transition);
             }
+            SessionCommand::MoveWindowToOutput { window, output } => {
+                if !self.window_exists(window) {
+                    return protocol_error(ErrorCode::InvalidWindow, "unknown window id");
+                }
+                if !self.move_window_to_output(WindowId(window.0), &output) {
+                    return protocol_error(ErrorCode::InvalidRequest, "unknown output");
+                }
+            }
             SessionCommand::HighlightWindow { window } => {
                 if let Some(window) = window
                     && !self.window_exists(window)
@@ -4634,6 +4642,42 @@ impl NickelSession {
         }
         self.raise_panels();
         self.notify_protocol_snapshot();
+    }
+
+    fn move_window_to_output(&mut self, id: WindowId, output_name: &str) -> bool {
+        let Some(destination) = self.output_geometry_named(output_name) else {
+            return false;
+        };
+        let destination = self.work_area_for_output(destination);
+        if let Some((window, location)) = self.minimized_windows.get_mut(&id) {
+            *location = clamp_window_location(
+                (destination.x, destination.y).into(),
+                window.geometry().size,
+                destination,
+            );
+            self.notify_protocol_snapshot();
+            return true;
+        }
+        if let Some((window, location)) = self.workspace_hidden_windows.get_mut(&id) {
+            *location = clamp_window_location(
+                (destination.x, destination.y).into(),
+                window.geometry().size,
+                destination,
+            );
+            self.notify_protocol_snapshot();
+            return true;
+        }
+        let Some(window) = self.window_for_registry_id(id) else {
+            return false;
+        };
+        let location = clamp_window_location(
+            (destination.x, destination.y).into(),
+            window.geometry().size,
+            destination,
+        );
+        self.map_compositor_moved_window(window, location, false);
+        self.notify_protocol_snapshot();
+        true
     }
 
     pub fn maximize_window(&mut self, id: WindowId) {

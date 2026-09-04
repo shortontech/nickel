@@ -1028,18 +1028,21 @@ mod tests {
                 application_id: Some(application_id.clone()),
                 active: false,
                 title: "First document".into(),
+                state: crate::model::WindowState::default(),
             },
             OpenWindow {
                 id: WindowId(2),
                 application_id: Some(application_id),
                 active: true,
                 title: "Second document".into(),
+                state: crate::model::WindowState::default(),
             },
             OpenWindow {
                 id: WindowId(3),
                 application_id: None,
                 active: false,
                 title: String::new(),
+                state: crate::model::WindowState::default(),
             },
         ]);
 

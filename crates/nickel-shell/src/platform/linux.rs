@@ -1124,6 +1124,7 @@ fn session_request_operation(request: &SessionRequest) -> &'static str {
             SessionCommand::RemoveWorkspace { .. } => "remove-workspace",
             SessionCommand::SwitchWorkspace { .. } => "switch-workspace",
             SessionCommand::MoveWindowToWorkspace { .. } => "move-window-to-workspace",
+            SessionCommand::MoveWindowToOutput { .. } => "move-window-to-output",
             SessionCommand::HighlightWindow { .. } => "highlight-window",
             SessionCommand::WindowAction { .. } => "window-action",
             SessionCommand::TestInput { .. } => "test-input",
@@ -1312,6 +1313,7 @@ fn shell_command_payload(command: ShellCommand) -> SessionCommand {
                 WindowAction::Close => SessionWindowAction::Close,
                 WindowAction::Maximize => SessionWindowAction::MaximizeRestore,
                 WindowAction::Minimize => SessionWindowAction::Minimize,
+                WindowAction::Fullscreen => SessionWindowAction::FullscreenRestore,
             },
         },
         ShellCommand::CreateWorkspace => SessionCommand::CreateWorkspace,
@@ -1328,6 +1330,12 @@ fn shell_command_payload(command: ShellCommand) -> SessionCommand {
                 workspace: nickel_session_protocol::WorkspaceId(workspace),
             }
         }
+        ShellCommand::MoveWindowToDisplay { window, output } => {
+            SessionCommand::MoveWindowToOutput {
+                window: SessionWindowId(window.0),
+                output,
+            }
+        }
     }
 }
 
@@ -1335,6 +1343,7 @@ pub struct WindowFeed {
     socket: Option<std::os::unix::net::UnixDatagram>,
     path: PathBuf,
     outputs: RefCell<HashMap<WindowId, String>>,
+    available_outputs: RefCell<Vec<String>>,
 }
 
 pub fn show_window_system_menu(_: WindowId) -> bool {
@@ -1353,6 +1362,7 @@ impl WindowFeed {
             socket,
             path,
             outputs: RefCell::new(HashMap::new()),
+            available_outputs: RefCell::new(Vec::new()),
         }
     }
 
@@ -1364,16 +1374,35 @@ impl WindowFeed {
             Ok(ServerMessage::Snapshot(snapshot)) => {
                 let mut outputs = self.outputs.borrow_mut();
                 outputs.clear();
+                *self.available_outputs.borrow_mut() = snapshot
+                    .outputs
+                    .iter()
+                    .map(|output| output.name.clone())
+                    .collect();
                 for window in &snapshot.windows {
                     if let Some(output) = owning_output(window.geometry, &snapshot.outputs) {
                         outputs.insert(WindowId(window.id.0), output);
                     }
                 }
+                let multiple_outputs = snapshot.outputs.len() > 1;
                 FeedState::Ready(
                     snapshot
                         .windows
                         .into_iter()
                         .map(|window| OpenWindow {
+                            state: crate::model::WindowState {
+                                minimized: window.minimized,
+                                maximized: window.maximized,
+                                fullscreen: window.fullscreen,
+                                workspace: Some(window.workspace.0),
+                                output: outputs.get(&WindowId(window.id.0)).cloned(),
+                                capabilities: crate::model::WindowCapabilities {
+                                    fullscreen: true,
+                                    move_workspace: true,
+                                    move_display: multiple_outputs,
+                                    ..crate::model::WindowCapabilities::default()
+                                },
+                            },
                             id: WindowId(window.id.0),
                             application_id: resolve_application_id(
                                 &window.application_id,
@@ -1392,6 +1421,10 @@ impl WindowFeed {
 
     pub fn window_output(&self, window: WindowId) -> Option<String> {
         self.outputs.borrow().get(&window).cloned()
+    }
+
+    pub fn outputs(&self) -> Vec<String> {
+        self.available_outputs.borrow().clone()
     }
 
     pub fn workspaces(&self) -> FeedState<Vec<super::WorkspaceSummary>> {
@@ -1863,6 +1896,7 @@ fn parse_window(line: &str, launcher: &Launcher) -> Option<OpenWindow> {
         application_id: resolve_application_id(native_app_id, launcher),
         active,
         title,
+        state: crate::model::WindowState::default(),
     })
 }
 

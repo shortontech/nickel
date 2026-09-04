@@ -42,7 +42,8 @@ use crate::{
     screenshot::ScreenshotTool,
     window_preview::{
         MENU_WIDTH, MenuAction, PreviewAction, WindowMenuApp, WindowPreviewFrame,
-        build_preview_frame, menu_height, preview_dimensions,
+        build_preview_frame, menu_height, menu_height_for_rows, preview_dimensions,
+        window_menu_max_rows,
     },
     winit_shell::SurfaceRole,
 };
@@ -299,12 +300,14 @@ impl PanelApplication {
                 application_id: Some(crate::model::ApplicationId::new("fixture.browser")),
                 active: true,
                 title: "Fixture Browser".into(),
+                state: crate::model::WindowState::default(),
             },
             OpenWindow {
                 id: crate::model::WindowId(202),
                 application_id: Some(crate::model::ApplicationId::new("fixture.editor")),
                 active: false,
                 title: "Fixture Editor".into(),
+                state: crate::model::WindowState::default(),
             },
         ];
         application.task_icons = [
@@ -536,6 +539,7 @@ pub struct LiveShell {
     preview_refresh_deadline: Option<Instant>,
     preview_frame: Option<WindowPreviewFrame>,
     window_menu: Option<crate::model::WindowId>,
+    window_menu_snapshot: Option<OpenWindow>,
     window_menu_anchor_x: Option<i32>,
     window_menu_host: Option<nickel_ui::UiHost<WindowMenuApp>>,
     notification_host: NotificationHost,
@@ -830,6 +834,7 @@ impl LiveShell {
             preview_refresh_deadline: None,
             preview_frame: None,
             window_menu: None,
+            window_menu_snapshot: None,
             window_menu_anchor_x: None,
             window_menu_host: None,
             notification_host,
@@ -919,6 +924,13 @@ impl LiveShell {
                 self.close_window_preview();
                 changed = true;
             }
+            if let Some(snapshot) = self.window_menu_snapshot.as_mut()
+                && let Some(window) = self.windows.iter().find(|window| window.id == snapshot.id)
+                && window != snapshot
+            {
+                snapshot.clone_from(window);
+                changed = true;
+            }
         }
         let workspaces = self.window_feed.workspaces();
         if update_feed_status(
@@ -932,7 +944,9 @@ impl LiveShell {
             && workspaces != self.workspaces
         {
             self.workspaces = workspaces;
-            self.close_window_preview();
+            if self.window_menu.is_none() {
+                self.close_window_preview();
+            }
             changed = true;
         }
         if self
@@ -1520,9 +1534,11 @@ impl LiveShell {
                 }) else {
                     return;
                 };
+                let window_snapshot = window.clone();
                 let window = window.id;
                 self.close_window_preview();
                 self.window_menu = Some(window);
+                self.window_menu_snapshot = Some(window_snapshot);
                 self.window_menu_host = None;
                 let x = self
                     .panel_host
@@ -1537,7 +1553,7 @@ impl LiveShell {
                     ShellCommand::ShowContextMenu {
                         x: self.panel_origin_x + x,
                         width: MENU_WIDTH as i32,
-                        height: menu_height(&self.workspaces) as i32,
+                        height: self.window_context_menu_height(),
                     },
                 );
                 #[cfg(target_os = "linux")]
@@ -1902,6 +1918,11 @@ impl LiveShell {
             }
             PreviewAction::OpenMenu(window) => {
                 self.window_menu = Some(window);
+                self.window_menu_snapshot = self
+                    .windows
+                    .iter()
+                    .find(|candidate| candidate.id == window)
+                    .cloned();
                 self.window_menu_host = None;
                 let x = self.panel_origin_x
                     + self.preview_group.map_or(0, |index| {
@@ -1913,7 +1934,7 @@ impl LiveShell {
                     ShellCommand::ShowContextMenu {
                         x,
                         width: MENU_WIDTH as i32,
-                        height: menu_height(&self.workspaces) as i32,
+                        height: self.window_context_menu_height(),
                     },
                 );
                 #[cfg(target_os = "linux")]
@@ -2003,18 +2024,33 @@ impl LiveShell {
 
     fn apply_window_menu_action(&mut self, action: MenuAction) {
         match action {
+            MenuAction::ShowWorkspaces | MenuAction::ShowDisplays | MenuAction::Back => {}
             MenuAction::Activate(window) => self.send_window_action(window, WindowAction::Activate),
             MenuAction::Close(window) => self.send_window_action(window, WindowAction::Close),
             MenuAction::MaximizeRestore(window) => {
                 self.send_window_action(window, WindowAction::Maximize)
             }
             MenuAction::Minimize(window) => self.send_window_action(window, WindowAction::Minimize),
+            MenuAction::FullscreenRestore(window) => {
+                self.send_window_action(window, WindowAction::Fullscreen)
+            }
             MenuAction::MoveToWorkspace(window, workspace) => {
                 let _ = send_session_command(
                     "move-window-to-workspace",
                     ShellCommand::MoveWindowToWorkspace { window, workspace },
                 );
             }
+            MenuAction::MoveToDisplay(window, output) => {
+                let _ = send_session_command(
+                    "move-window-to-display",
+                    ShellCommand::MoveWindowToDisplay { window, output },
+                );
+            }
+            MenuAction::NewWindow(application) => self.apply_launcher_action(
+                LauncherAction::LaunchApplication(application.as_str().to_owned()),
+            ),
+            MenuAction::TogglePin(application) => self
+                .apply_launcher_action(LauncherAction::TogglePin(application.as_str().to_owned())),
         }
     }
 
@@ -2165,7 +2201,7 @@ impl LiveShell {
                 ShellCommand::ShowContextMenu {
                     x,
                     width: MENU_WIDTH as i32,
-                    height: menu_height(&self.workspaces) as i32,
+                    height: self.window_context_menu_height(),
                 },
             );
         }
@@ -2180,6 +2216,29 @@ impl LiveShell {
             .map(|target| target.bounds.origin.x + target.bounds.size.width / 2.0)
             .unwrap_or(PANEL_ITEM_WIDTH + index as f32 * PANEL_ITEM_WIDTH + PANEL_ITEM_WIDTH / 2.0);
         self.panel_origin_x + (icon_center - width as f32 / 2.0).round() as i32
+    }
+
+    fn window_context_menu_height(&self) -> i32 {
+        let Some(window) = self.window_menu_snapshot.as_ref().or_else(|| {
+            self.window_menu
+                .and_then(|id| self.windows.iter().find(|candidate| candidate.id == id))
+        }) else {
+            return menu_height(&self.workspaces) as i32;
+        };
+        let outputs = self.window_feed.outputs();
+        let application_id = window.application_id.as_ref().filter(|id| {
+            self.launcher
+                .application(id)
+                .is_some_and(|application| application.launch_command().is_some())
+        });
+        let pinned = application_id.is_some_and(|id| self.launcher.is_pinned(id.as_str()));
+        menu_height_for_rows(window_menu_max_rows(
+            window,
+            &self.workspaces,
+            &outputs,
+            application_id,
+            pinned,
+        )) as i32
     }
 
     fn send_window_action(&self, window: crate::model::WindowId, action: WindowAction) {
@@ -2205,6 +2264,7 @@ impl LiveShell {
         self.preview_refresh_deadline = None;
         self.preview_hovered = None;
         self.window_menu = None;
+        self.window_menu_snapshot = None;
         self.window_menu_anchor_x = None;
         self.window_menu_host = None;
     }
@@ -2220,6 +2280,7 @@ impl LiveShell {
         self.preview_refresh_deadline = None;
         self.preview_frame = None;
         self.window_menu = None;
+        self.window_menu_snapshot = None;
         self.window_menu_anchor_x = None;
         self.window_menu_host = None;
         let _ = send_session_command("clear-window-highlight", ShellCommand::ClearWindowHighlight);
@@ -3007,16 +3068,55 @@ impl LiveShell {
             self.window_menu_host = None;
             return Vec::new();
         };
-        let height = menu_height(&self.workspaces).ceil().max(1.0) as u32;
+        let Some(snapshot) = self.window_menu_snapshot.clone().or_else(|| {
+            self.windows
+                .iter()
+                .find(|candidate| candidate.id == window)
+                .cloned()
+        }) else {
+            self.close_window_preview();
+            return Vec::new();
+        };
+        self.window_menu_snapshot
+            .get_or_insert_with(|| snapshot.clone());
+        let outputs = self.window_feed.outputs();
+        let application_id = snapshot
+            .application_id
+            .as_ref()
+            .filter(|id| {
+                self.launcher
+                    .application(id)
+                    .is_some_and(|application| application.launch_command().is_some())
+            })
+            .cloned();
+        let pinned = application_id
+            .as_ref()
+            .is_some_and(|id| self.launcher.is_pinned(id.as_str()));
+        let height = menu_height_for_rows(window_menu_max_rows(
+            &snapshot,
+            &self.workspaces,
+            &outputs,
+            application_id.as_ref(),
+            pinned,
+        ))
+        .ceil()
+        .max(1.0) as u32;
         let host = self.window_menu_host.get_or_insert_with(|| {
             nickel_ui::UiHost::new(
-                WindowMenuApp::new(window, self.workspaces.clone(), self.palette),
+                WindowMenuApp::new(
+                    snapshot.clone(),
+                    self.workspaces.clone(),
+                    outputs.clone(),
+                    application_id.clone(),
+                    pinned,
+                    self.palette,
+                ),
                 MENU_WIDTH.ceil() as u32,
                 height,
             )
         });
         host.application_mut()
-            .sync(window, &self.workspaces, self.palette);
+            .sync(&snapshot, &self.workspaces, &outputs, self.palette);
         host.step(HostBatch {
             surface_size: Some((MENU_WIDTH.ceil() as u32, height)),
             events: vec![HostEvent::Poll],
@@ -3935,7 +4035,7 @@ mod tests {
             ))
             .expect("application semantic target");
         let outcome = host.perform_accessibility_action(
-            target.id,
+            target.id.clone(),
             SemanticAction::Invoke(ActionKind::ContextMenu),
         );
         assert!(outcome.failures.is_empty(), "{:#?}", outcome.failures);
@@ -4255,12 +4355,14 @@ mod tests {
                 application_id: Some(application_id.clone()),
                 active: true,
                 title: "one".into(),
+                state: crate::model::WindowState::default(),
             },
             OpenWindow {
                 id: WindowId(9),
                 application_id: Some(application_id),
                 active: false,
                 title: "two".into(),
+                state: crate::model::WindowState::default(),
             },
         ];
         let _ = shell.scene(SurfaceRole::Panel, 1280, 56);
@@ -4349,12 +4451,14 @@ mod tests {
                 application_id: Some(application_id.clone()),
                 active: false,
                 title: "Files".into(),
+                state: crate::model::WindowState::default(),
             },
             OpenWindow {
                 id: WindowId(42),
                 application_id: Some(application_id),
                 active: true,
                 title: "Downloads".into(),
+                state: crate::model::WindowState::default(),
             },
         ];
         shell.panel_origin_x = 1_920;
@@ -4370,19 +4474,49 @@ mod tests {
         assert_eq!(shell.window_menu, Some(WindowId(42)));
         assert_eq!(shell.window_menu_anchor_x, Some(expected_anchor));
         assert!(shell.preview_group.is_none());
+        assert_eq!(
+            shell.window_menu_snapshot.as_ref().map(|window| window.id),
+            Some(WindowId(42))
+        );
+        shell.windows[0].active = true;
+        shell.windows[1].active = false;
+        assert_eq!(
+            shell.window_menu_snapshot.as_ref().map(|window| window.id),
+            Some(WindowId(42)),
+            "an open menu must not retarget when group activity changes"
+        );
+        shell.windows[0].active = false;
+        shell.windows[1].active = true;
 
         shell.sync_transient_overlays();
         assert_eq!(shell.window_menu_anchor_x, Some(expected_anchor));
 
         shell.close_window_preview();
         let outcome = shell.panel_host.perform_accessibility_action(
-            target.id,
+            target.id.clone(),
             SemanticAction::Invoke(ActionKind::ContextMenu),
         );
         assert!(outcome.failures.is_empty(), "{:#?}", outcome.failures);
         assert!(shell.apply_panel_effects());
         assert_eq!(shell.window_menu, Some(WindowId(42)));
         assert_eq!(shell.window_menu_anchor_x, Some(expected_anchor));
+
+        for event in [
+            HostEvent::Ui(UiEvent::KeyboardContextMenu),
+            HostEvent::Controller(ControllerAction::ContextMenu),
+        ] {
+            shell.close_window_preview();
+            shell.panel_host.step(HostBatch {
+                events: vec![
+                    HostEvent::Ui(UiEvent::AccessibilityFocus(target.id.clone())),
+                    event,
+                ],
+                ..HostBatch::default()
+            });
+            assert!(shell.apply_panel_effects());
+            assert_eq!(shell.window_menu, Some(WindowId(42)));
+            assert_eq!(shell.window_menu_anchor_x, Some(expected_anchor));
+        }
     }
 
     #[test]
@@ -4528,12 +4662,14 @@ mod tests {
                     application_id: None,
                     active: true,
                     title: "one".into(),
+                    state: crate::model::WindowState::default(),
                 },
                 OpenWindow {
                     id: WindowId(9),
                     application_id: None,
                     active: false,
                     title: "two".into(),
+                    state: crate::model::WindowState::default(),
                 },
             ],
         };
@@ -4546,6 +4682,7 @@ mod tests {
         assert_eq!(shell.preview_hovered, Some(WindowId(4)));
 
         shell.window_menu = Some(WindowId(4));
+        shell.window_menu_snapshot = Some(group.windows[0].clone());
         let _ = shell.window_menu_scene();
         assert!(shell.preview_key(Some(KeyCode::ArrowDown)));
         assert!(
@@ -4736,6 +4873,7 @@ mod tests {
             application_id: Some(ApplicationId::new("google-chrome")),
             active: true,
             title: "Chrome".into(),
+            state: crate::model::WindowState::default(),
         });
 
         let _ = shell.scene(SurfaceRole::Panel, 1280, 56);
@@ -4964,6 +5102,7 @@ mod tests {
                     application_id: None,
                     active: false,
                     title: String::new(),
+                    state: crate::model::WindowState::default(),
                 })
                 .collect::<Vec<_>>();
             super::retain_preview_generation(&mut cache, &windows);

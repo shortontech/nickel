@@ -2959,6 +2959,7 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
                 park_iconic_window(hwnd);
                 true
             }
+            WindowAction::Fullscreen => false,
         }
     }
 }
@@ -3173,6 +3174,10 @@ impl WindowFeed {
         None
     }
 
+    pub fn outputs(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     pub fn workspaces(&self) -> FeedState<Vec<super::WorkspaceSummary>> {
         FeedState::Ready(Vec::new())
     }
@@ -3250,6 +3255,13 @@ unsafe extern "system" fn collect_window(hwnd: HWND, state: LPARAM) -> BOOL {
         application_id,
         active: foreground == hwnd || foreground_root == hwnd,
         title,
+        state: crate::model::WindowState {
+            // SAFETY: `hwnd` was just validated by EnumWindows for this callback.
+            minimized: unsafe { IsIconic(hwnd).as_bool() },
+            // SAFETY: `hwnd` was just validated by EnumWindows for this callback.
+            maximized: unsafe { IsZoomed(hwnd).as_bool() },
+            ..crate::model::WindowState::default()
+        },
     });
     BOOL(1)
 }

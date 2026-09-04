@@ -302,6 +302,7 @@ impl WindowFeed {
                     } else {
                         window.title
                     },
+                    state: crate::model::WindowState::default(),
                 })
                 .collect(),
         )
@@ -309,6 +310,10 @@ impl WindowFeed {
 
     pub fn window_output(&self, _: WindowId) -> Option<String> {
         None
+    }
+
+    pub fn outputs(&self) -> Vec<String> {
+        Vec::new()
     }
 
     pub fn workspaces(&self) -> FeedState<Vec<super::WorkspaceSummary>> {
@@ -347,6 +352,7 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
         WindowAction::Minimize => set_window_minimized(&target, true),
         WindowAction::Close => close_window(&target),
         WindowAction::Maximize => false,
+        WindowAction::Fullscreen => false,
     }
 }
 

@@ -536,6 +536,7 @@ impl Fixture for WindowPreviewFixture {
                 application_id: None,
                 active: index == 0,
                 title: format!("Workbench window {}", index + 1),
+                state: crate::model::WindowState::default(),
             })
             .collect::<Vec<_>>();
         let group = WindowGroup {

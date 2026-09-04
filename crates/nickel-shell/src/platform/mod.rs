@@ -221,6 +221,7 @@ pub enum WindowAction {
     Close,
     Maximize,
     Minimize,
+    Fullscreen,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -368,6 +369,10 @@ pub enum ShellCommand {
     MoveWindowToWorkspace {
         window: WindowId,
         workspace: u64,
+    },
+    MoveWindowToDisplay {
+        window: WindowId,
+        output: String,
     },
 }
 

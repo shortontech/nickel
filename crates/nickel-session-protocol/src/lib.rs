@@ -121,6 +121,10 @@ pub enum Command {
         window: WindowId,
         workspace: WorkspaceId,
     },
+    MoveWindowToOutput {
+        window: WindowId,
+        output: String,
+    },
     HighlightWindow {
         window: Option<WindowId>,
     },
@@ -1305,6 +1309,10 @@ mod tests {
             Command::MoveWindowToWorkspace {
                 window: WindowId(11),
                 workspace: WorkspaceId(7),
+            },
+            Command::MoveWindowToOutput {
+                window: WindowId(11),
+                output: "HDMI-A-1".into(),
             },
         ] {
             let envelope = ClientEnvelope {

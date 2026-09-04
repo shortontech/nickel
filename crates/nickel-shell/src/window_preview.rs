@@ -10,7 +10,7 @@ use nickel_ui::{
 };
 
 use crate::{
-    model::{WindowGroup, WindowId},
+    model::{ApplicationId, OpenWindow, WindowGroup, WindowId},
     platform::WorkspaceSummary,
 };
 
@@ -35,42 +35,77 @@ pub enum PreviewAction {
     Dismiss,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MenuAction {
+    ShowWorkspaces,
+    ShowDisplays,
+    Back,
     Activate(WindowId),
     Close(WindowId),
     MaximizeRestore(WindowId),
     Minimize(WindowId),
+    FullscreenRestore(WindowId),
     MoveToWorkspace(WindowId, u64),
+    MoveToDisplay(WindowId, String),
+    NewWindow(ApplicationId),
+    TogglePin(ApplicationId),
 }
 
 pub struct WindowMenuApp {
-    window: WindowId,
+    window: OpenWindow,
     workspaces: Vec<WorkspaceSummary>,
+    outputs: Vec<String>,
+    application_id: Option<ApplicationId>,
+    pinned: bool,
     palette: ThemePalette,
     effects: Vec<MenuAction>,
     dirty: bool,
+    page: WindowMenuPage,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum WindowMenuPage {
+    #[default]
+    Root,
+    Workspaces,
+    Displays,
 }
 
 impl WindowMenuApp {
-    pub fn new(window: WindowId, workspaces: Vec<WorkspaceSummary>, palette: ThemePalette) -> Self {
+    pub fn new(
+        window: OpenWindow,
+        workspaces: Vec<WorkspaceSummary>,
+        outputs: Vec<String>,
+        application_id: Option<ApplicationId>,
+        pinned: bool,
+        palette: ThemePalette,
+    ) -> Self {
         Self {
             window,
             workspaces,
+            outputs,
+            application_id,
+            pinned,
             palette,
             effects: Vec::new(),
             dirty: false,
+            page: WindowMenuPage::Root,
         }
     }
 
     pub fn sync(
         &mut self,
-        window: WindowId,
+        window: &OpenWindow,
         workspaces: &[WorkspaceSummary],
+        outputs: &[String],
         palette: ThemePalette,
     ) {
-        self.window = window;
+        debug_assert_eq!(self.window.id, window.id);
+        self.window.state = window.state.clone();
+        self.window.title.clone_from(&window.title);
+        self.window.active = window.active;
         self.workspaces = workspaces.to_vec();
+        self.outputs = outputs.to_vec();
         self.palette = palette;
         self.dirty = true;
     }
@@ -84,11 +119,49 @@ impl Application for WindowMenuApp {
     type Message = MenuAction;
 
     fn update(&mut self, message: Self::Message) {
+        match message {
+            MenuAction::ShowWorkspaces => {
+                self.page = WindowMenuPage::Workspaces;
+                self.dirty = true;
+                return;
+            }
+            MenuAction::ShowDisplays => {
+                self.page = WindowMenuPage::Displays;
+                self.dirty = true;
+                return;
+            }
+            MenuAction::Back => {
+                self.page = WindowMenuPage::Root;
+                self.dirty = true;
+                return;
+            }
+            MenuAction::MoveToWorkspace(_, workspace)
+                if self.window.state.workspace == Some(workspace) =>
+            {
+                return;
+            }
+            MenuAction::MoveToDisplay(_, ref output)
+                if self.window.state.output.as_ref() == Some(output) =>
+            {
+                return;
+            }
+            _ => {}
+        }
         self.effects.push(message);
     }
 
     fn view(&self, _context: ViewContext) -> impl nickel_ui::View<Self::Message> {
-        let entries = window_menu_entries(self.window, &self.workspaces);
+        let entries = match self.page {
+            WindowMenuPage::Root => window_menu_entries(
+                &self.window,
+                &self.workspaces,
+                &self.outputs,
+                self.application_id.as_ref(),
+                self.pinned,
+            ),
+            WindowMenuPage::Workspaces => workspace_menu_entries(&self.window, &self.workspaces),
+            WindowMenuPage::Displays => display_menu_entries(&self.window, &self.outputs),
+        };
         let content = entries.into_iter().enumerate().fold(
             nickel_ui::Column::new().gap(MENU_ROW_GAP),
             |column, (index, (label, action))| {
@@ -106,7 +179,13 @@ impl Application for WindowMenuApp {
         Container::new()
             .id("window-menu-anchor")
             .width(MENU_WIDTH)
-            .height(menu_height(&self.workspaces))
+            .height(menu_height_for_rows(window_menu_max_rows(
+                &self.window,
+                &self.workspaces,
+                &self.outputs,
+                self.application_id.as_ref(),
+                self.pinned,
+            )))
             .padding(Insets::all(MENU_PADDING))
             .background(self.palette.panel)
             .radius(10.0)
@@ -118,28 +197,126 @@ impl Application for WindowMenuApp {
     }
 }
 
-fn window_menu_entries(
-    window: WindowId,
+pub(crate) fn window_menu_entries(
+    window: &OpenWindow,
+    workspaces: &[WorkspaceSummary],
+    outputs: &[String],
+    application_id: Option<&ApplicationId>,
+    pinned: bool,
+) -> Vec<(String, MenuAction)> {
+    let id = window.id;
+    let capabilities = window.state.capabilities;
+    let mut entries = Vec::new();
+    if capabilities.activate {
+        entries.push((
+            (if window.state.minimized {
+                "Restore"
+            } else {
+                "Activate"
+            })
+            .into(),
+            MenuAction::Activate(id),
+        ));
+    }
+    if capabilities.minimize {
+        entries.push((
+            (if window.state.minimized {
+                "Unminimize"
+            } else {
+                "Minimize"
+            })
+            .into(),
+            if window.state.minimized {
+                MenuAction::Activate(id)
+            } else {
+                MenuAction::Minimize(id)
+            },
+        ));
+    }
+    if capabilities.maximize {
+        entries.push((
+            (if window.state.maximized {
+                "Restore from Maximized"
+            } else {
+                "Maximize"
+            })
+            .into(),
+            MenuAction::MaximizeRestore(id),
+        ));
+    }
+    if capabilities.fullscreen {
+        entries.push((
+            (if window.state.fullscreen {
+                "Leave Fullscreen"
+            } else {
+                "Fullscreen"
+            })
+            .into(),
+            MenuAction::FullscreenRestore(id),
+        ));
+    }
+    if capabilities.move_workspace && !workspaces.is_empty() {
+        entries.push(("Move to Workspace ›".into(), MenuAction::ShowWorkspaces));
+    }
+    if capabilities.move_display && outputs.len() > 1 {
+        entries.push(("Move to Display ›".into(), MenuAction::ShowDisplays));
+    }
+    if let Some(application_id) = application_id {
+        entries.push((
+            "New Window".into(),
+            MenuAction::NewWindow(application_id.clone()),
+        ));
+        entries.push((
+            (if pinned { "Unpin" } else { "Pin" }).into(),
+            MenuAction::TogglePin(application_id.clone()),
+        ));
+    }
+    if capabilities.close {
+        entries.push(("Close Window".to_owned(), MenuAction::Close(id)));
+    }
+    entries
+}
+
+fn workspace_menu_entries(
+    window: &OpenWindow,
     workspaces: &[WorkspaceSummary],
 ) -> Vec<(String, MenuAction)> {
-    let mut entries = vec![
-        (
-            "Activate / Restore".to_owned(),
-            MenuAction::Activate(window),
-        ),
-        ("Minimize".to_owned(), MenuAction::Minimize(window)),
-        (
-            "Maximize / Restore".to_owned(),
-            MenuAction::MaximizeRestore(window),
-        ),
-    ];
-    entries.extend(
-        workspace_move_destinations(workspaces)
-            .into_iter()
-            .map(|(label, workspace)| (label, MenuAction::MoveToWorkspace(window, workspace))),
-    );
-    entries.push(("Close Window".to_owned(), MenuAction::Close(window)));
+    let mut entries = vec![("‹ Window Actions".into(), MenuAction::Back)];
+    entries.extend(workspace_move_destinations(workspaces).into_iter().map(
+        |(label, workspace)| {
+            let checked = window.state.workspace == Some(workspace);
+            (
+                format!("{}Workspace {label}", if checked { "✓ " } else { "" }),
+                MenuAction::MoveToWorkspace(window.id, workspace),
+            )
+        },
+    ));
     entries
+}
+
+fn display_menu_entries(window: &OpenWindow, outputs: &[String]) -> Vec<(String, MenuAction)> {
+    let mut entries = vec![("‹ Window Actions".into(), MenuAction::Back)];
+    entries.extend(outputs.iter().map(|output| {
+        let checked = window.state.output.as_ref() == Some(output);
+        (
+            format!("{}{output}", if checked { "✓ " } else { "" }),
+            MenuAction::MoveToDisplay(window.id, output.clone()),
+        )
+    }));
+    entries
+}
+
+pub(crate) fn window_menu_max_rows(
+    window: &OpenWindow,
+    workspaces: &[WorkspaceSummary],
+    outputs: &[String],
+    application_id: Option<&ApplicationId>,
+    pinned: bool,
+) -> usize {
+    window_menu_entries(window, workspaces, outputs, application_id, pinned)
+        .len()
+        .max(workspaces.len().saturating_add(1))
+        .max(outputs.len().saturating_add(1))
 }
 
 pub struct WindowPreviewFrame {
@@ -510,12 +687,17 @@ pub fn menu_height(workspaces: &[WorkspaceSummary]) -> f32 {
         + row_count.saturating_sub(1) as f32 * MENU_ROW_GAP
 }
 
+pub fn menu_height_for_rows(row_count: usize) -> f32 {
+    MENU_PADDING * 2.0
+        + row_count as f32 * MENU_ROW_HEIGHT
+        + row_count.saturating_sub(1) as f32 * MENU_ROW_GAP
+}
+
 fn workspace_move_destinations(workspaces: &[WorkspaceSummary]) -> Vec<(String, u64)> {
     workspaces
         .iter()
         .enumerate()
-        .filter(|(_, workspace)| !workspace.active)
-        .map(|(index, workspace)| (format!("Move to workspace {}", index + 1), workspace.id))
+        .map(|(index, workspace)| ((index + 1).to_string(), workspace.id))
         .collect()
 }
 
@@ -586,12 +768,14 @@ mod tests {
                     application_id: None,
                     active: true,
                     title: "one".into(),
+                    state: crate::model::WindowState::default(),
                 },
                 OpenWindow {
                     id: WindowId(9),
                     application_id: None,
                     active: false,
                     title: String::new(),
+                    state: crate::model::WindowState::default(),
                 },
             ],
         }
@@ -712,21 +896,49 @@ mod tests {
                 active: false,
             },
         ];
+        let window = OpenWindow {
+            id: WindowId(9),
+            application_id: Some(ApplicationId::new("editor")),
+            active: false,
+            title: "Document".into(),
+            state: crate::model::WindowState {
+                workspace: Some(7),
+                output: Some("left".into()),
+                capabilities: crate::model::WindowCapabilities {
+                    fullscreen: true,
+                    move_workspace: true,
+                    move_display: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        };
+        let outputs = vec!["left".into(), "right".into()];
         let mut host = UiHost::new(
             WindowMenuApp::new(
-                WindowId(9),
+                window.clone(),
                 workspaces.to_vec(),
+                outputs.clone(),
+                window.application_id.clone(),
+                false,
                 ThemePalette::from_appearance(Appearance::default()),
             ),
             MENU_WIDTH as u32,
-            menu_height(&workspaces) as u32,
+            menu_height_for_rows(window_menu_max_rows(
+                &window,
+                &workspaces,
+                &outputs,
+                window.application_id.as_ref(),
+                false,
+            )) as u32,
         );
         for action in [
             MenuAction::Activate(WindowId(9)),
             MenuAction::Minimize(WindowId(9)),
             MenuAction::MaximizeRestore(WindowId(9)),
-            MenuAction::MoveToWorkspace(WindowId(9), 1),
-            MenuAction::MoveToWorkspace(WindowId(9), 8),
+            MenuAction::FullscreenRestore(WindowId(9)),
+            MenuAction::NewWindow(ApplicationId::new("editor")),
+            MenuAction::TogglePin(ApplicationId::new("editor")),
             MenuAction::Close(WindowId(9)),
         ] {
             let target = host
@@ -737,7 +949,97 @@ mod tests {
             host.perform_semantic_action(target.id, SemanticAction::Invoke(ActionKind::Activate));
             assert_eq!(host.application_mut().take_effects(), vec![action]);
         }
-        assert_eq!(host.semantic_nodes().len(), 6);
+        let root = window_menu_entries(
+            &window,
+            &workspaces,
+            &outputs,
+            window.application_id.as_ref(),
+            false,
+        );
+        assert!(
+            root.iter()
+                .any(|(_, action)| *action == MenuAction::ShowWorkspaces)
+        );
+        assert!(
+            root.iter()
+                .any(|(_, action)| *action == MenuAction::ShowDisplays)
+        );
+        let workspace_entries = workspace_menu_entries(&window, &workspaces);
+        assert!(
+            workspace_entries
+                .iter()
+                .any(|(label, _)| label == "✓ Workspace 2")
+        );
+        let display_entries = display_menu_entries(&window, &outputs);
+        assert!(display_entries.iter().any(|(label, _)| label == "✓ left"));
+        host.application_mut()
+            .update(MenuAction::MoveToWorkspace(WindowId(9), 7));
+        host.application_mut()
+            .update(MenuAction::MoveToDisplay(WindowId(9), "left".into()));
+        assert!(host.application_mut().take_effects().is_empty());
+    }
+
+    #[test]
+    fn open_menu_refreshes_state_and_topology_without_retargeting() {
+        let mut captured = OpenWindow {
+            id: WindowId(9),
+            application_id: Some(ApplicationId::new("editor")),
+            active: false,
+            title: "Old title".into(),
+            state: crate::model::WindowState::default(),
+        };
+        let mut menu = WindowMenuApp::new(
+            captured.clone(),
+            vec![],
+            vec!["left".into()],
+            captured.application_id.clone(),
+            false,
+            ThemePalette::from_appearance(Appearance::default()),
+        );
+        captured.active = true;
+        captured.title = "New title".into();
+        captured.state.maximized = true;
+        captured.state.workspace = Some(12);
+        captured.state.output = Some("right".into());
+        captured.state.capabilities.move_workspace = true;
+        captured.state.capabilities.move_display = true;
+        let workspaces = vec![WorkspaceSummary {
+            id: 12,
+            active: true,
+        }];
+        let outputs = vec!["left".into(), "right".into()];
+
+        menu.sync(
+            &captured,
+            &workspaces,
+            &outputs,
+            ThemePalette::from_appearance(Appearance::default()),
+        );
+
+        assert_eq!(menu.window.id, WindowId(9));
+        assert_eq!(menu.window.title, "New title");
+        assert!(
+            window_menu_entries(
+                &menu.window,
+                &menu.workspaces,
+                &menu.outputs,
+                menu.application_id.as_ref(),
+                menu.pinned,
+            )
+            .iter()
+            .any(|(label, action)| label == "Restore from Maximized"
+                && *action == MenuAction::MaximizeRestore(WindowId(9)))
+        );
+        assert!(
+            workspace_menu_entries(&menu.window, &menu.workspaces)
+                .iter()
+                .any(|(label, _)| label == "✓ Workspace 1")
+        );
+        assert!(
+            display_menu_entries(&menu.window, &menu.outputs)
+                .iter()
+                .any(|(label, _)| label == "✓ right")
+        );
     }
 
     #[test]
@@ -745,5 +1047,62 @@ mod tests {
         assert_eq!(window_title(" Notes ", "Editor"), "Notes");
         assert_eq!(window_title("", "Editor"), "Editor");
         assert_eq!(window_title("", ""), "Untitled window");
+    }
+
+    #[test]
+    fn menu_model_uses_inverse_labels_and_omits_unsupported_commands() {
+        let window = OpenWindow {
+            id: WindowId(44),
+            application_id: None,
+            active: false,
+            title: "Player".into(),
+            state: crate::model::WindowState {
+                minimized: true,
+                maximized: true,
+                fullscreen: true,
+                workspace: Some(2),
+                output: Some("right".into()),
+                capabilities: crate::model::WindowCapabilities {
+                    activate: true,
+                    close: true,
+                    minimize: true,
+                    maximize: true,
+                    fullscreen: true,
+                    move_workspace: false,
+                    move_display: false,
+                },
+            },
+        };
+        let entries = window_menu_entries(
+            &window,
+            &[WorkspaceSummary {
+                id: 2,
+                active: true,
+            }],
+            &["left".into(), "right".into()],
+            None,
+            false,
+        );
+        let labels = entries
+            .iter()
+            .map(|(label, _)| label.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            [
+                "Restore",
+                "Unminimize",
+                "Restore from Maximized",
+                "Leave Fullscreen",
+                "Close Window"
+            ]
+        );
+        assert!(!entries.iter().any(|(_, action)| matches!(
+            action,
+            MenuAction::MoveToWorkspace(..)
+                | MenuAction::MoveToDisplay(..)
+                | MenuAction::NewWindow(..)
+                | MenuAction::TogglePin(..)
+        )));
     }
 }

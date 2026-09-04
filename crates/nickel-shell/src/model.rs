@@ -306,6 +306,42 @@ pub struct OpenWindow {
     pub application_id: Option<ApplicationId>,
     pub active: bool,
     pub title: String,
+    pub state: WindowState,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct WindowState {
+    pub minimized: bool,
+    pub maximized: bool,
+    pub fullscreen: bool,
+    pub workspace: Option<u64>,
+    pub output: Option<String>,
+    pub capabilities: WindowCapabilities,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WindowCapabilities {
+    pub activate: bool,
+    pub close: bool,
+    pub minimize: bool,
+    pub maximize: bool,
+    pub fullscreen: bool,
+    pub move_workspace: bool,
+    pub move_display: bool,
+}
+
+impl Default for WindowCapabilities {
+    fn default() -> Self {
+        Self {
+            activate: true,
+            close: true,
+            minimize: true,
+            maximize: true,
+            fullscreen: false,
+            move_workspace: false,
+            move_display: false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
