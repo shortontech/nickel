@@ -1,6 +1,7 @@
 //! Production-authoritative fluent scenarios for shell behavior tests.
 
 use crate::{
+    active_output::{ActiveOutputContext, InvocationSource, resolve_active_output},
     focus::{FocusRequest, FocusTransactions},
     hotkeys::{HotkeyAction, HotkeyController, KeyCode, KeyEdge},
     launcher::{
@@ -178,6 +179,7 @@ pub struct Scenario {
     captured_surfaces: HashMap<String, SurfaceIdentity>,
     captured_focus: HashMap<String, FocusRequest<SurfaceIdentity>>,
     outputs: OutputLayout,
+    recent_interaction_output: Option<String>,
     task_reduce: TaskReducer,
     window_target_resolver: WindowTargetResolver,
     actions: Vec<HotkeyAction>,
@@ -235,6 +237,7 @@ pub fn scenario(name: impl Into<String>) -> Scenario {
         captured_surfaces: HashMap::new(),
         captured_focus: HashMap::new(),
         outputs: OutputLayout::default(),
+        recent_interaction_output: None,
         task_reduce: production_task_reduce,
         window_target_resolver: production_window_target_resolver,
         actions: Vec::new(),
@@ -425,7 +428,14 @@ impl Scenario {
         let transition = self
             .launcher
             .activate(LauncherActivation { source, target });
-        self.apply_launcher_transition(transition, None);
+        let invocation = match source {
+            LauncherActivationSource::Pointer => InvocationSource::Pointer,
+            LauncherActivationSource::Keyboard => InvocationSource::Keyboard,
+            LauncherActivationSource::Controller => InvocationSource::Controller,
+            LauncherActivationSource::Accessibility => InvocationSource::Accessibility,
+        };
+        let output = self.resolve_launcher_output(invocation, None);
+        self.apply_launcher_transition(transition, output);
         self
     }
 
@@ -439,7 +449,24 @@ impl Scenario {
             "scenario {:?} has no output {output:?}",
             self.name
         );
-        self.toggle_launcher(Some(output.to_owned()));
+        self.recent_interaction_output = Some(output.to_owned());
+        let resolved = self.resolve_launcher_output(InvocationSource::Pointer, Some(output));
+        self.toggle_launcher(resolved);
+        self
+    }
+
+    /// Records a non-launcher interaction on an output for fallback selection.
+    pub fn interact_on(mut self, output: &str) -> Self {
+        assert!(
+            self.outputs
+                .outputs()
+                .iter()
+                .any(|item| item.name == output),
+            "scenario {:?} has no output {output:?}",
+            self.name
+        );
+        self.consume_event(format!("interaction on {output:?}"));
+        self.recent_interaction_output = Some(output.to_owned());
         self
     }
 
@@ -450,6 +477,19 @@ impl Scenario {
             field: "outputs.layout".into(),
             path: format!("semantic topology event -> OutputLayout::disconnect({output:?})"),
         });
+        if self.recent_interaction_output.as_deref() == Some(output) {
+            self.recent_interaction_output = None;
+        }
+        if self.platform.launcher_output.as_deref() == Some(output) {
+            self.platform.launcher_output =
+                self.resolve_launcher_output(InvocationSource::Accessibility, None);
+            self.authority.push(AuthorityRecord {
+                field: "launcher.output".into(),
+                path:
+                    "semantic topology event -> active output policy -> atomic launcher relocation"
+                        .into(),
+            });
+        }
         self
     }
 
@@ -1014,6 +1054,45 @@ impl Scenario {
         self.apply_launcher_transition(transition, output);
     }
 
+    fn resolve_launcher_output(
+        &self,
+        source: InvocationSource,
+        pointer_output: Option<&str>,
+    ) -> Option<String> {
+        let focused = self
+            .windows
+            .iter()
+            .find(|window| window.active)
+            .and_then(|window| window.geometry)
+            .and_then(|window| {
+                self.outputs.outputs().iter().find(|output| {
+                    let center_x = window.x + window.width / 2.0;
+                    let center_y = window.y + window.height / 2.0;
+                    center_x >= f64::from(output.x)
+                        && center_x < f64::from(output.x + output.width)
+                        && center_y >= f64::from(output.y)
+                        && center_y < f64::from(output.y + output.height)
+                })
+            })
+            .map(|output| output.name.as_str());
+        let enabled = self
+            .outputs
+            .outputs()
+            .iter()
+            .map(|output| output.name.as_str())
+            .collect::<Vec<_>>();
+        resolve_active_output(
+            source,
+            ActiveOutputContext {
+                pointer: pointer_output,
+                focused_surface: focused,
+                recent_interaction: self.recent_interaction_output.as_deref(),
+                primary: enabled.first().copied(),
+                enabled: &enabled,
+            },
+        )
+    }
+
     fn apply_launcher_transition(
         &mut self,
         transition: LauncherTransition,
@@ -1375,6 +1454,10 @@ impl WindowCursor {
 
     pub fn click(self, target: ClickTarget) -> Scenario {
         self.scenario.click(target)
+    }
+
+    pub fn activate(self, source: LauncherActivationSource, target: ClickTarget) -> Scenario {
+        self.scenario.activate(source, target)
     }
 
     pub fn click_window(self, window: &str) -> Scenario {

@@ -1,3 +1,4 @@
+pub mod active_output;
 pub mod focus;
 pub mod hotkeys;
 pub mod idle;

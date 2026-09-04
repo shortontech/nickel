@@ -14,6 +14,7 @@ use std::{
 };
 
 use nickel_core::{
+    active_output::{ActiveOutputContext, InvocationSource, resolve_active_output},
     focus::FocusTransactions,
     hotkeys::{CompositorShortcutAdapter, HotkeyAction},
     idle::{IdleController, IdleEffect, IdlePolicy},
@@ -414,6 +415,7 @@ pub struct NickelSession {
     pub launcher_window: Option<Window>,
     pub launcher_visibility: LauncherVisibility,
     launcher_output_name: Option<String>,
+    last_interaction_output_name: Option<String>,
     launcher_focus: FocusTransactions<ObjectId>,
     launcher_restore_window: Option<WindowId>,
     launcher_subscribers: Vec<PathBuf>,
@@ -1406,6 +1408,7 @@ impl NickelSession {
             launcher_window: None,
             launcher_visibility: LauncherVisibility::default(),
             launcher_output_name: None,
+            last_interaction_output_name: None,
             launcher_focus: FocusTransactions::default(),
             launcher_restore_window: None,
             launcher_subscribers: Vec::new(),
@@ -1882,6 +1885,9 @@ impl NickelSession {
             }
             SessionCommand::ToggleLauncher => self.toggle_launcher(),
             SessionCommand::SetLauncherVisible { visible } => self.set_launcher_visible(visible),
+            SessionCommand::SetLauncherVisibleFromController { visible } => {
+                self.set_launcher_visible_from(visible, InvocationSource::Controller)
+            }
             SessionCommand::SetShellRoleVisible { role, visible } => {
                 self.set_shell_role_visible(role, visible);
             }
@@ -2328,11 +2334,15 @@ impl NickelSession {
         if self.primary_output_name.as_deref() == Some(name) {
             self.primary_output_name = self.space.outputs().next().map(|output| output.name());
         }
-        if self.launcher_output_name.as_deref() == Some(name) {
-            self.launcher_output_name = self.primary_output_name.clone();
-        }
         self.workspaces
             .output_disconnected(name, self.primary_output_name.clone());
+        if self.last_interaction_output_name.as_deref() == Some(name) {
+            self.last_interaction_output_name = None;
+        }
+        if self.launcher_output_name.as_deref() == Some(name) {
+            self.launcher_output_name =
+                self.resolve_interaction_output(InvocationSource::RecentInteraction);
+        }
     }
 
     fn protocol_outputs(&self) -> Vec<OutputSnapshot> {
@@ -2677,9 +2687,15 @@ impl NickelSession {
     }
 
     pub fn toggle_launcher(&mut self) {
+        // IPC callers do not carry a native event object. Pointer and touch input
+        // update interaction history before the shell requests this transition.
+        self.toggle_launcher_from(InvocationSource::RecentInteraction);
+    }
+
+    fn toggle_launcher_from(&mut self, source: InvocationSource) {
         let visible = self.launcher_visibility.toggle();
         if visible {
-            self.launcher_output_name = self.preferred_interaction_output_name();
+            self.launcher_output_name = self.resolve_interaction_output(source);
         }
         self.hotkeys.launcher_visibility_applied(visible);
         self.apply_launcher_visibility(visible);
@@ -3129,11 +3145,25 @@ impl NickelSession {
         })
     }
 
+    pub(crate) fn note_interaction_at(&mut self, location: Point<f64, Logical>) {
+        self.last_interaction_output_name = self.space.outputs().find_map(|output| {
+            self.space
+                .output_geometry(output)
+                .filter(|geometry| geometry.to_f64().contains(location))
+                .map(|_| output.name())
+        });
+    }
+
     pub fn set_launcher_visible(&mut self, visible: bool) {
+        // Panel pointer/touch input has already updated interaction history.
+        self.set_launcher_visible_from(visible, InvocationSource::RecentInteraction);
+    }
+
+    fn set_launcher_visible_from(&mut self, visible: bool, source: InvocationSource) {
         let changed = self.launcher_visibility.is_visible() != visible;
         if changed && visible {
             self.launcher_show_requested_at = Some(std::time::Instant::now());
-            self.launcher_output_name = self.preferred_interaction_output_name();
+            self.launcher_output_name = self.resolve_interaction_output(source);
         }
         self.launcher_visibility.set(visible);
         self.hotkeys.launcher_visibility_applied(visible);
@@ -3147,7 +3177,10 @@ impl NickelSession {
     }
 
     pub fn toggle_launcher_visibility(&mut self) {
-        self.set_launcher_visible(!self.launcher_visibility.is_visible());
+        self.set_launcher_visible_from(
+            !self.launcher_visibility.is_visible(),
+            InvocationSource::Keyboard,
+        );
     }
 
     pub fn launcher_pointer_press(
@@ -4434,6 +4467,7 @@ impl NickelSession {
         let Some(window) = self.window_for_registry_id(id) else {
             return;
         };
+        self.last_interaction_output_name = self.output_name_for_window(&window);
         self.space.raise_element(&window, true);
         if let Some(surface) = window.x11_surface() {
             self.raise_x11_surface(surface);
@@ -5210,10 +5244,53 @@ impl NickelSession {
     }
 
     pub(crate) fn preferred_interaction_output_name(&self) -> Option<String> {
-        self.output_name_at_pointer()
-            .or_else(|| self.workspaces.active_output().map(str::to_owned))
-            .or_else(|| self.primary_output_name.clone())
-            .or_else(|| self.space.outputs().next().map(|output| output.name()))
+        self.resolve_interaction_output(InvocationSource::Pointer)
+    }
+
+    fn focused_surface_output_name(&self) -> Option<String> {
+        let id = self
+            .windows
+            .snapshot()
+            .into_iter()
+            .find(|window| window.active)?
+            .id;
+        self.output_name_for_window(&self.window_for_registry_id(id)?)
+    }
+
+    fn output_name_for_window(&self, window: &Window) -> Option<String> {
+        let geometry = self.output_geometry_for_window(window)?;
+        self.space.outputs().find_map(|output| {
+            let candidate = self.space.output_geometry(output)?;
+            (candidate.loc.x == geometry.x
+                && candidate.loc.y == geometry.y
+                && candidate.size.w == geometry.width
+                && candidate.size.h == geometry.height)
+                .then(|| output.name())
+        })
+    }
+
+    fn resolve_interaction_output(&self, source: InvocationSource) -> Option<String> {
+        let enabled = self
+            .space
+            .outputs()
+            .map(|output| output.name())
+            .collect::<Vec<_>>();
+        let enabled_refs = enabled.iter().map(String::as_str).collect::<Vec<_>>();
+        let pointer = self.output_name_at_pointer();
+        let focused = self.focused_surface_output_name();
+        resolve_active_output(
+            source,
+            ActiveOutputContext {
+                pointer: pointer.as_deref(),
+                focused_surface: focused.as_deref(),
+                recent_interaction: self
+                    .last_interaction_output_name
+                    .as_deref()
+                    .or_else(|| self.workspaces.active_output()),
+                primary: self.primary_output_name.as_deref(),
+                enabled: &enabled_refs,
+            },
+        )
     }
 
     pub(crate) fn new_window_active_output_name(&self) -> Option<String> {

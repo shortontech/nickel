@@ -2741,7 +2741,7 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
     use std::sync::atomic::Ordering;
 
     let (window, action) = match command {
-        ShellCommand::Show => {
+        ShellCommand::Show | ShellCommand::ShowFromController => {
             let foreground = unsafe { GetForegroundWindow() };
             PREVIOUS_FOREGROUND_WINDOW.store(foreground.0 as isize, Ordering::Relaxed);
             let launcher = LAUNCHER_WINDOW_HANDLE.load(Ordering::Relaxed);

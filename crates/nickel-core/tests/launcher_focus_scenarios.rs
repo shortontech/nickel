@@ -151,3 +151,67 @@ fn invoking_taskbar_output_owns_launcher_without_replacing_its_surface() {
             LauncherEffect::RequestFocus(first_focus_request()),
         ]);
 }
+
+#[test]
+fn alternating_pointer_invocations_move_one_logical_launcher() {
+    scenario("launcher follows alternating taskbars")
+        .output("DP-1", 1920, 1080, 0)
+        .output("portrait", 1440, 2560, 1)
+        .click_panel_launcher_on("DP-1")
+        .capture_surface("launcher", Surface::Launcher)
+        .click_panel_launcher_on("DP-1")
+        .click_panel_launcher_on("portrait")
+        .expect_launcher_output("portrait")
+        .expect_same_surface("launcher", Surface::Launcher);
+}
+
+#[test]
+fn keyboard_and_controller_follow_the_focused_window_output() {
+    for source in [
+        LauncherActivationSource::Keyboard,
+        LauncherActivationSource::Controller,
+    ] {
+        scenario(format!("{source:?} launcher follows focus"))
+            .output("DP-1", 1920, 1080, 0)
+            .output("HDMI-A-1", 2560, 1440, 1)
+            .window("editor")
+            .bounds(2100.0, 100.0, 800.0, 600.0)
+            .active()
+            .activate(source, ClickTarget::PanelLauncher)
+            .expect_launcher_output("HDMI-A-1");
+    }
+}
+
+#[test]
+fn no_focus_uses_recent_interaction_then_primary() {
+    scenario("keyboard launcher uses interaction history")
+        .output("DP-1", 1920, 1080, 0)
+        .output("HDMI-A-1", 2560, 1440, 1)
+        .interact_on("HDMI-A-1")
+        .activate(
+            LauncherActivationSource::Keyboard,
+            ClickTarget::PanelLauncher,
+        )
+        .expect_launcher_output("HDMI-A-1");
+
+    scenario("keyboard launcher falls back to primary")
+        .output("DP-1", 1920, 1080, 0)
+        .output("HDMI-A-1", 2560, 1440, 1)
+        .activate(
+            LauncherActivationSource::Keyboard,
+            ClickTarget::PanelLauncher,
+        )
+        .expect_launcher_output("DP-1");
+}
+
+#[test]
+fn removing_the_launcher_output_relocates_the_existing_surface() {
+    scenario("open launcher output disappears")
+        .output("DP-1", 1920, 1080, 0)
+        .output("HDMI-A-1", 2560, 1440, 1)
+        .click_panel_launcher_on("HDMI-A-1")
+        .capture_surface("launcher", Surface::Launcher)
+        .disconnect_output("HDMI-A-1")
+        .expect_launcher_output("DP-1")
+        .expect_same_surface("launcher", Surface::Launcher);
+}

@@ -2408,7 +2408,17 @@ impl LiveShell {
     /// visibility request to the compositor before mirroring the resulting state.
     pub fn request_launcher_toggle(&mut self) -> bool {
         let visible = !self.launcher_visible;
-        self.set_launcher_visible(visible);
+        let command = if visible {
+            ShellCommand::ShowFromController
+        } else {
+            ShellCommand::Hide
+        };
+        if !send_session_command("controller-launcher-visibility", command) {
+            self.launcher_status = Some("Nickel could not update the launcher.".to_owned());
+            return false;
+        }
+        self.apply_session_launcher_visibility(visible);
+        platform::launcher_visibility_applied(visible);
         self.launcher_visible == visible
     }
 

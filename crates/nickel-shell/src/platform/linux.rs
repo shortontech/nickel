@@ -1108,6 +1108,9 @@ fn session_request_operation(request: &SessionRequest) -> &'static str {
             SessionCommand::ReloadShellSettings => "reload-shell-settings",
             SessionCommand::ToggleLauncher => "toggle-launcher",
             SessionCommand::SetLauncherVisible { .. } => "set-launcher-visible",
+            SessionCommand::SetLauncherVisibleFromController { .. } => {
+                "set-launcher-visible-from-controller"
+            }
             SessionCommand::SetShellRoleVisible { .. } => "set-shell-role-visible",
             SessionCommand::ShowAnchoredShellRole { .. } => "show-anchored-shell-role",
             SessionCommand::LogOut => "log-out",
@@ -1213,6 +1216,9 @@ fn command_response(response: ServerMessage) -> Result<(), SessionRequestError> 
 fn shell_command_payload(command: ShellCommand) -> SessionCommand {
     match command {
         ShellCommand::Show => SessionCommand::SetLauncherVisible { visible: true },
+        ShellCommand::ShowFromController => {
+            SessionCommand::SetLauncherVisibleFromController { visible: true }
+        }
         ShellCommand::Hide => SessionCommand::SetLauncherVisible { visible: false },
         ShellCommand::LogOut => SessionCommand::LogOut,
         ShellCommand::SessionAction(action) => match action {

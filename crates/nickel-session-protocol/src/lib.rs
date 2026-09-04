@@ -74,6 +74,9 @@ pub enum Command {
     SetLauncherVisible {
         visible: bool,
     },
+    SetLauncherVisibleFromController {
+        visible: bool,
+    },
     SetShellRoleVisible {
         role: ShellRole,
         visible: bool,

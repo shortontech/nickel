@@ -314,6 +314,7 @@ impl GlobalShortcutFeed {
 #[derive(Clone)]
 pub enum ShellCommand {
     Show,
+    ShowFromController,
     Hide,
     LogOut,
     SessionAction(SessionAction),
