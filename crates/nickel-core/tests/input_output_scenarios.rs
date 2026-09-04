@@ -57,6 +57,46 @@ fn tab_repeat_while_held_emits_one_switch_action() {
 }
 
 #[test]
+fn reverse_tab_repeat_is_suppressed_and_shift_release_changes_later_direction() {
+    scenario("reverse repeat is suppressed and direction follows current modifiers")
+        .window("current")
+        .app("editor")
+        .active()
+        .window("middle")
+        .app("browser")
+        .window("oldest")
+        .app("terminal")
+        .key_edge(KeyCode::ShiftRight, KeyEdge::Pressed)
+        .key_edge(KeyCode::AltRight, KeyEdge::Pressed)
+        .key_edge(KeyCode::Tab, KeyEdge::Pressed)
+        .key_edge(KeyCode::Tab, KeyEdge::Pressed)
+        .key_edge(KeyCode::Tab, KeyEdge::Released)
+        .key_edge(KeyCode::ShiftRight, KeyEdge::Released)
+        .key_edge(KeyCode::Tab, KeyEdge::Pressed)
+        .key_edge(KeyCode::Tab, KeyEdge::Released)
+        .key_edge(KeyCode::AltRight, KeyEdge::Released)
+        .expect_actions(&[
+            HotkeyAction::SwitchPrevious,
+            HotkeyAction::SwitchNext,
+            HotkeyAction::CommitSwitch,
+        ])
+        .expect_effects(&[
+            TaskSwitchEffect::ShowFlip { session: 1 },
+            TaskSwitchEffect::RequestPreviews(vec![
+                "current".into(),
+                "middle".into(),
+                "oldest".into(),
+            ]),
+            TaskSwitchEffect::SelectPreview("oldest".into()),
+            TaskSwitchEffect::SelectPreview("current".into()),
+            TaskSwitchEffect::HideFlip { session: 1 },
+            TaskSwitchEffect::ActivateWindow("current".into()),
+        ])
+        .expect_active("current")
+        .expect_flip_hidden();
+}
+
+#[test]
 fn print_screen_repeats_are_one_action_per_physical_press() {
     scenario("screenshot shortcut repeats only after release")
         .key_edge(KeyCode::PrintScreen, KeyEdge::Pressed)

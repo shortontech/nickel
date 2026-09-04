@@ -1102,7 +1102,12 @@ fn key_code_from_keysym(sym: Keysym) -> Option<KeyCode> {
         value if value == Keysym::new(keysyms::KEY_Control_R) => Some(KeyCode::ControlRight),
         value if value == Keysym::new(keysyms::KEY_Left) => Some(KeyCode::ArrowLeft),
         value if value == Keysym::new(keysyms::KEY_Right) => Some(KeyCode::ArrowRight),
-        value if value == Keysym::new(keysyms::KEY_Tab) => Some(KeyCode::Tab),
+        value
+            if value == Keysym::new(keysyms::KEY_Tab)
+                || value == Keysym::new(keysyms::KEY_ISO_Left_Tab) =>
+        {
+            Some(KeyCode::Tab)
+        }
         value
             if value == Keysym::new(keysyms::KEY_Print)
                 || value == Keysym::new(keysyms::KEY_Sys_Req) =>
@@ -1255,6 +1260,18 @@ mod tests {
         assert_eq!(
             super::key_code_from_keysym(Keysym::new(keysyms::KEY_Sys_Req)),
             Some(nickel_core::hotkeys::KeyCode::PrintScreen)
+        );
+    }
+
+    #[test]
+    fn xkb_forward_and_reverse_tab_keysyms_share_the_tab_hotkey() {
+        assert_eq!(
+            super::key_code_from_keysym(Keysym::new(keysyms::KEY_Tab)),
+            Some(nickel_core::hotkeys::KeyCode::Tab)
+        );
+        assert_eq!(
+            super::key_code_from_keysym(Keysym::new(keysyms::KEY_ISO_Left_Tab)),
+            Some(nickel_core::hotkeys::KeyCode::Tab)
         );
     }
 
