@@ -13,6 +13,7 @@ extern crate self as nickel_file;
 #[allow(dead_code)]
 pub(crate) mod app;
 pub(crate) mod components;
+pub mod desktop;
 pub(crate) mod host;
 pub mod icons;
 pub(crate) mod layout;
@@ -60,8 +61,8 @@ pub struct DirectoryBrowser {
     show_hidden: bool,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct FileIdentity(u64, u64);
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct FileIdentity(pub u64, pub u64);
 
 impl DirectoryBrowser {
     #[doc(hidden)]
@@ -112,7 +113,7 @@ impl DirectoryBrowser {
         &self.entries
     }
 
-    pub(crate) fn identity_at(&self, index: usize) -> Option<FileIdentity> {
+    pub fn identity_at(&self, index: usize) -> Option<FileIdentity> {
         self.entries
             .get(index)
             .and_then(|entry| self.identities.get(&entry.path).copied())
