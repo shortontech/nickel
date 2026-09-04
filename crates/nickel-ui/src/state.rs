@@ -120,6 +120,7 @@ struct PointerModalityState {
     hovered: Option<UiId>,
     pressed: Option<UiId>,
     captured: Option<UiId>,
+    scrollbar_grab_offset: Option<f32>,
     input_modality: InputModality,
     window_focused: bool,
 }
@@ -219,6 +220,7 @@ impl UiStateStore {
                 hovered: None,
                 pressed: None,
                 captured: None,
+                scrollbar_grab_offset: None,
                 input_modality: InputModality::default(),
                 window_focused: true,
             },
@@ -366,7 +368,18 @@ impl UiStateStore {
     }
 
     pub fn set_capture(&mut self, id: Option<UiId>) -> Invalidation {
+        if id.is_none() {
+            self.pointer.scrollbar_grab_offset = None;
+        }
         replace_if_changed(&mut self.pointer.captured, id, Invalidation::None)
+    }
+
+    pub(crate) fn set_scrollbar_grab_offset(&mut self, offset: f32) {
+        self.pointer.scrollbar_grab_offset = Some(offset);
+    }
+
+    pub(crate) fn scrollbar_grab_offset(&self) -> Option<f32> {
+        self.pointer.scrollbar_grab_offset
     }
 
     pub fn navigation(&self) -> &NavigationState {

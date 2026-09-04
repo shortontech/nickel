@@ -195,9 +195,12 @@ enum ScrollbarAxis {
     Vertical,
 }
 
-const SCROLLBAR_THICKNESS: f32 = 8.0;
+// Shared scrollbar geometry. Keep the painted chrome discoverable while giving
+// it a larger edge-aligned acquisition target than its visual footprint.
+const SCROLLBAR_THICKNESS: f32 = 10.0;
+const SCROLLBAR_HIT_THICKNESS: f32 = 20.0;
 const SCROLLBAR_INSET: f32 = 3.0;
-const SCROLLBAR_MIN_THUMB: f32 = 24.0;
+const SCROLLBAR_MIN_THUMB: f32 = 32.0;
 const SCROLLBAR_GUTTER: f32 = SCROLLBAR_THICKNESS + SCROLLBAR_INSET * 2.0;
 
 fn scrollbar_id(id: &UiId, axis: ScrollbarAxis) -> UiId {
@@ -270,6 +273,28 @@ fn scrollbar_geometry<Message>(
         ),
     };
     Some((track, thumb))
+}
+
+fn scrollbar_hit_rect<Message>(
+    scroll: &ScrollRegion<Message>,
+    axis: ScrollbarAxis,
+) -> Option<Rect> {
+    let (track, _) = scrollbar_geometry(scroll, axis)?;
+    let hit = match axis {
+        ScrollbarAxis::Horizontal => Rect::new(
+            track.origin.x,
+            scroll.rect.origin.y + scroll.rect.size.height - SCROLLBAR_HIT_THICKNESS,
+            track.size.width,
+            SCROLLBAR_HIT_THICKNESS,
+        ),
+        ScrollbarAxis::Vertical => Rect::new(
+            scroll.rect.origin.x + scroll.rect.size.width - SCROLLBAR_HIT_THICKNESS,
+            track.origin.y,
+            SCROLLBAR_HIT_THICKNESS,
+            track.size.height,
+        ),
+    };
+    intersection(hit, scroll.rect).and_then(|hit| intersection(hit, scroll.clip))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1870,12 +1895,12 @@ impl<Message: Clone> UiFrame<Message> {
                 self.commands.push(PaintCommand::PushClip(scroll.clip));
                 self.commands.push(PaintCommand::RoundedFill {
                     rect: track,
-                    color: 0x40343b48,
+                    color: 0x66343b48,
                     radius: SCROLLBAR_THICKNESS / 2.0,
                 });
                 self.commands.push(PaintCommand::RoundedFill {
                     rect: thumb,
-                    color: 0xc08a96a8,
+                    color: 0xd0aeb8c7,
                     radius: SCROLLBAR_THICKNESS / 2.0,
                 });
                 self.commands.push(PaintCommand::PopClip);
@@ -1888,9 +1913,7 @@ impl<Message: Clone> UiFrame<Message> {
             [ScrollbarAxis::Vertical, ScrollbarAxis::Horizontal]
                 .into_iter()
                 .find(|axis| {
-                    scrollbar_geometry(scroll, *axis).is_some_and(|(track, _)| {
-                        contains(track, point) && contains(scroll.clip, point)
-                    })
+                    scrollbar_hit_rect(scroll, *axis).is_some_and(|hit| contains(hit, point))
                 })
                 .map(|axis| (scroll, axis))
         })
@@ -1938,8 +1961,9 @@ impl<Message: Clone> UiFrame<Message> {
                 ),
             };
         let travel = (track_length - thumb_length).max(0.0);
+        let grabbed_offset = state.scrollbar_grab_offset().unwrap_or(thumb_length / 2.0);
         let target = if travel > 0.0 {
-            ((pointer - track_start - thumb_length / 2.0) / travel).clamp(0.0, 1.0) * maximum
+            ((pointer - track_start - grabbed_offset) / travel).clamp(0.0, 1.0) * maximum
         } else {
             0.0
         };
@@ -1964,6 +1988,53 @@ impl<Message: Clone> UiFrame<Message> {
                 invalidation
             }
         }
+    }
+
+    fn page_scrollbar(
+        scroll: &ScrollRegion<Message>,
+        axis: ScrollbarAxis,
+        point: Point,
+        state: &mut UiStateStore,
+        messages: &mut Vec<Message>,
+    ) -> Invalidation {
+        let Some((_, thumb)) = scrollbar_geometry(scroll, axis) else {
+            return Invalidation::None;
+        };
+        let (pointer, thumb_start, thumb_end, amount, maximum) = match axis {
+            ScrollbarAxis::Horizontal => (
+                point.x,
+                thumb.origin.x,
+                thumb.origin.x + thumb.size.width,
+                scroll.extent.viewport.width,
+                (scroll.extent.content.width - scroll.extent.viewport.width).max(0.0),
+            ),
+            ScrollbarAxis::Vertical => (
+                point.y,
+                thumb.origin.y,
+                thumb.origin.y + thumb.size.height,
+                scroll.extent.viewport.height,
+                (scroll.extent.content.height - scroll.extent.viewport.height).max(0.0),
+            ),
+        };
+        let delta = if pointer < thumb_start {
+            -amount
+        } else if pointer > thumb_end {
+            amount
+        } else {
+            return Invalidation::None;
+        };
+        let invalidation = match axis {
+            ScrollbarAxis::Horizontal => state.scroll_by_x(scroll.id.clone(), delta, maximum),
+            ScrollbarAxis::Vertical => state.scroll_by(scroll.id.clone(), delta, maximum),
+        };
+        if invalidation != Invalidation::None
+            && axis == ScrollbarAxis::Vertical
+            && let Some(map) = scroll.offset_mapper
+            && let Some(offset) = state.state(&scroll.id).map(|entry| entry.scroll_offset)
+        {
+            messages.push(map(offset));
+        }
+        invalidation
     }
 
     pub fn handle_event(&self, state: &mut UiStateStore, event: UiEvent) -> EventOutcome<Message> {
@@ -2021,7 +2092,11 @@ impl<Message: Clone> UiFrame<Message> {
                         ..outcome
                     };
                 }
-                let mut invalidation = state.set_hovered(self.id_at(point).cloned());
+                let hovered = self
+                    .scrollbar_at(point)
+                    .map(|(scroll, axis)| scrollbar_id(&scroll.id, axis))
+                    .or_else(|| self.id_at(point).cloned());
+                let mut invalidation = state.set_hovered(hovered);
                 if let Some(captured) = state.captured()
                     && let Some(message) = self.drag_message(captured, DragPhase::Moved, point)
                 {
@@ -2138,17 +2213,32 @@ impl<Message: Clone> UiFrame<Message> {
                     };
                 }
                 if let Some((scroll, axis)) = self.scrollbar_at(point) {
-                    let invalidation = state
-                        .set_focus(None)
-                        .merge(state.set_pressed(Some(scrollbar_id(&scroll.id, axis))))
-                        .merge(state.set_capture(Some(scrollbar_id(&scroll.id, axis))))
-                        .merge(Self::move_scrollbar(
-                            scroll,
-                            axis,
-                            point,
-                            state,
-                            &mut outcome.messages,
-                        ));
+                    let id = scrollbar_id(&scroll.id, axis);
+                    let (_, thumb) = scrollbar_geometry(scroll, axis)
+                        .expect("a hit-tested scrollbar has geometry");
+                    let invalidation = if contains(thumb, point) {
+                        let grab_offset = match axis {
+                            ScrollbarAxis::Horizontal => point.x - thumb.origin.x,
+                            ScrollbarAxis::Vertical => point.y - thumb.origin.y,
+                        };
+                        state.set_scrollbar_grab_offset(grab_offset);
+                        state
+                            .set_focus(None)
+                            .merge(state.set_pressed(Some(id.clone())))
+                            .merge(state.set_capture(Some(id)))
+                            .merge(Invalidation::Paint)
+                    } else {
+                        state
+                            .set_focus(None)
+                            .merge(state.set_pressed(Some(id)))
+                            .merge(Self::page_scrollbar(
+                                scroll,
+                                axis,
+                                point,
+                                state,
+                                &mut outcome.messages,
+                            ))
+                    };
                     return EventOutcome {
                         invalidation,
                         ..outcome

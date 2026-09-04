@@ -788,7 +788,8 @@ fn vertical_scroll_clips_painting_and_hit_regions() {
     assert!(tree.commands.iter().any(|command| matches!(
         command,
         PaintCommand::RoundedFill { rect, .. }
-            if rect.origin.x >= 189.0 && rect.size.width == SCROLLBAR_THICKNESS
+            if rect.origin.x == 200.0 - SCROLLBAR_THICKNESS - SCROLLBAR_INSET
+                && rect.size.width == SCROLLBAR_THICKNESS
     )));
     assert_eq!(
         tree.scroll_extent(&TestMessage::Named("scroll")),
@@ -846,7 +847,7 @@ fn vertical_scroll_clamps_offset_to_content_end() {
 }
 
 #[test]
-fn visible_scrollbar_track_drags_and_releases_shared_scroll_state() {
+fn visible_scrollbar_thumb_drags_and_releases_shared_scroll_state() {
     let mut state = UiStateStore::default();
     let build = |state: &mut UiStateStore| {
         UiFrame::layout_with_state(
@@ -858,7 +859,7 @@ fn visible_scrollbar_track_drags_and_releases_shared_scroll_state() {
         )
     };
     let tree = build(&mut state);
-    let pressed_at = Point { x: 194.0, y: 50.0 };
+    let pressed_at = Point { x: 194.0, y: 20.0 };
 
     tree.handle_event(
         &mut state,
@@ -871,7 +872,7 @@ fn visible_scrollbar_track_drags_and_releases_shared_scroll_state() {
     assert!(ordinary_release.messages.is_empty());
 
     let pressed = tree.handle_event(&mut state, UiEvent::PointerPressed(pressed_at));
-    assert_eq!(pressed.messages, vec![TestMessage::Named("dragged")]);
+    assert!(pressed.messages.is_empty());
     let pressed_offset = state
         .state(&UiId::from("root"))
         .expect("scroll state after press")
@@ -921,6 +922,97 @@ fn visible_scrollbar_track_drags_and_releases_shared_scroll_state() {
         UiEvent::PointerReleased(Point { x: 194.0, y: 90.0 }),
     );
     assert!(state.captured().is_none());
+}
+
+#[test]
+fn scrollbar_hit_target_is_wider_than_its_visible_thumb() {
+    let tree = UiFrame::<()>::layout(
+        VerticalScroll::new((), 0.0).child(Spacer::vertical(240.0)),
+        Rect::new(0.0, 0.0, 200.0, 100.0),
+    );
+    let scroll = tree.scrolls.first().expect("vertical scroll region");
+    let (track, _) =
+        scrollbar_geometry(scroll, ScrollbarAxis::Vertical).expect("visible scrollbar geometry");
+    let hit = scrollbar_hit_rect(scroll, ScrollbarAxis::Vertical)
+        .expect("scrollbar interaction geometry");
+
+    assert_eq!(track.size.width, SCROLLBAR_THICKNESS);
+    assert_eq!(hit.size.width, SCROLLBAR_HIT_THICKNESS);
+    assert!(hit.origin.x < track.origin.x);
+    assert!(
+        tree.scrollbar_at(Point {
+            x: hit.origin.x + 1.0,
+            y: 50.0,
+        })
+        .is_some()
+    );
+}
+
+#[test]
+fn scrollbar_track_click_pages_without_starting_a_drag() {
+    let mut state = UiStateStore::default();
+    let tree = UiFrame::layout_with_state(
+        VerticalScroll::new(TestMessage::Named("scroll"), 0.0)
+            .on_scroll(|_| TestMessage::Named("paged"))
+            .child(Spacer::vertical(400.0)),
+        Rect::new(0.0, 0.0, 200.0, 100.0),
+        &mut state,
+    );
+
+    let outcome = tree.handle_event(
+        &mut state,
+        UiEvent::PointerPressed(Point { x: 181.0, y: 75.0 }),
+    );
+
+    assert_eq!(outcome.messages, vec![TestMessage::Named("paged")]);
+    assert_eq!(
+        state
+            .state(&UiId::from("root"))
+            .expect("scroll state after paging")
+            .scroll_offset,
+        100.0
+    );
+    assert!(state.captured().is_none());
+}
+
+#[test]
+fn scrollbar_drag_preserves_the_pointer_offset_inside_the_thumb() {
+    let mut state = UiStateStore::default();
+    let build = |state: &mut UiStateStore| {
+        UiFrame::layout_with_state(
+            VerticalScroll::new((), 0.0).child(Spacer::vertical(400.0)),
+            Rect::new(0.0, 0.0, 200.0, 100.0),
+            state,
+        )
+    };
+    let tree = build(&mut state);
+    let scroll = tree.scrolls.first().expect("vertical scroll region");
+    let (_, thumb) =
+        scrollbar_geometry(scroll, ScrollbarAxis::Vertical).expect("visible scrollbar geometry");
+    let near_thumb_start = Point {
+        x: 194.0,
+        y: thumb.origin.y + 2.0,
+    };
+
+    tree.handle_event(&mut state, UiEvent::PointerPressed(near_thumb_start));
+    let rebuilt = build(&mut state);
+    rebuilt.handle_event(
+        &mut state,
+        UiEvent::PointerMoved(Point {
+            x: 194.0,
+            y: near_thumb_start.y + 20.0,
+        }),
+    );
+
+    let offset = state
+        .state(&UiId::from("root"))
+        .expect("scroll state after drag")
+        .scroll_offset;
+    let track_travel = scrollbar_geometry(scroll, ScrollbarAxis::Vertical)
+        .map(|(track, thumb)| track.size.height - thumb.size.height)
+        .expect("scrollbar travel");
+    let expected = 20.0 / track_travel * 300.0;
+    assert!((offset - expected).abs() < 0.01, "{offset} != {expected}");
 }
 
 #[test]
