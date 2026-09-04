@@ -45,12 +45,12 @@ mod tests {
     #[cfg(feature = "authenticated-live-tests")]
     use nickel_codex::BackendChoice;
     use nickel_codex::{
-        CodexBackend, CodexEvent, CodexSettings, EventKind, ReplayBackend, ServerRequestId, Thread,
-        ThreadId, TurnId,
+        CodexBackend, CodexEvent, CodexSettings, EventKind, Model, ReplayBackend, ServerRequestId,
+        Thread, ThreadId, TurnId,
     };
     use nickel_ui::{
         Application, DocumentSelection, Rect, SelectionEndpoint, SemanticRole, Shortcut,
-        SoftwareRenderer, UiEvent, UiFrame, UiStateStore,
+        SoftwareRenderer, UiEvent, UiFrame, UiId, UiStateStore,
     };
     use nickel_ui_testkit::{ActivationVia, Scenario, Selector};
 
@@ -901,6 +901,81 @@ mod tests {
     }
 
     #[test]
+    fn model_dropdown_commits_before_blur_and_keeps_the_committed_presentation() {
+        let backend = ReplayBackend::from_json(
+            r#"{"name":"models","models":[{"id":"first","display_name":"First","supported_reasoning_efforts":[]},{"id":"second","display_name":"Second","supported_reasoning_efforts":[]}],"events":[]}"#,
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = ChatApplication::new(BackendMode::Replay {
+            backend,
+            cwd: directory.path().into(),
+        });
+        app.state.status = ConnectionStatus::Ready;
+        app.poll_controller();
+        app.state.models = vec![
+            Model {
+                id: "first".into(),
+                display_name: "First".into(),
+                default_reasoning_effort: None,
+                supported_reasoning_efforts: Vec::new(),
+            },
+            Model {
+                id: "second".into(),
+                display_name: "Second".into(),
+                default_reasoning_effort: None,
+                supported_reasoning_efforts: Vec::new(),
+            },
+        ];
+        app.state.selected_model = Some("first".into());
+        let mut scenario = Scenario::new(app, 900, 640);
+
+        scenario
+            .pointer_activate(&Selector::role_name(SemanticRole::Button, "Model selector"))
+            .unwrap();
+        scenario
+            .pointer_activate(&Selector::role_name(SemanticRole::MenuItem, "Second"))
+            .unwrap();
+        assert_eq!(
+            scenario
+                .host()
+                .application()
+                .state
+                .selected_model
+                .as_deref(),
+            Some("second")
+        );
+
+        scenario.host_mut().handle_event(UiEvent::FocusLost);
+        assert_eq!(
+            scenario
+                .host()
+                .application()
+                .state
+                .selected_model
+                .as_deref(),
+            Some("second")
+        );
+        assert!(
+            scenario
+                .host()
+                .query_unique(&nickel_ui::SemanticSelector::Id(UiId::from(
+                    "model-selector/option-1"
+                )))
+                .is_err()
+        );
+        assert!(
+            scenario
+                .host()
+                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    role: SemanticRole::Button,
+                    name: "Model selector".into(),
+                })
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn shell_hosted_resume_requests_the_shell_lease_before_controller_resume() {
         let backend = ReplayBackend::from_json(r#"{"name":"resume","events":[]}"#).unwrap();
         let mut app = ChatApplication::new(BackendMode::Replay {
@@ -999,7 +1074,7 @@ mod tests {
             )),
             Rect::new(0.0, 0.0, 900.0, 640.0),
         );
-        assert!(has_accessible_text(&models, "high — Deep reasoning"));
+        assert!(has_accessible_text(&models, "Reasoning effort selector"));
 
         app.update(ChatMessage::ToggleModelPicker);
         app.update(ChatMessage::ToggleResumePicker);

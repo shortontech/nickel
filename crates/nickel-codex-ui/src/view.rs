@@ -156,6 +156,7 @@ pub struct ChatApplication {
     pub(crate) pending_shell_command: Option<String>,
     pub(crate) shell_warning_acknowledged: bool,
     pub(crate) model_picker_open: bool,
+    model_picker_generation: u64,
     pub(crate) resume_picker_open: bool,
     pub(crate) command_picker_open: bool,
 }
@@ -173,7 +174,7 @@ struct RemoteHostEditor {
 #[derive(Clone, Copy, Default)]
 struct ChatOverlays<'a> {
     pending_shell_command: Option<&'a str>,
-    model_picker_open: bool,
+    model_picker_generation: u64,
     resume_picker_open: bool,
     command_picker_open: bool,
     project_root: Option<&'a std::path::Path>,
@@ -288,6 +289,7 @@ impl ChatApplication {
             pending_shell_command: None,
             shell_warning_acknowledged: false,
             model_picker_open: false,
+            model_picker_generation: 0,
             resume_picker_open: false,
             command_picker_open: false,
         }
@@ -503,6 +505,7 @@ impl Application for ChatApplication {
             ChatMessage::CancelShell => self.pending_shell_command = None,
             ChatMessage::ToggleModelPicker => {
                 self.model_picker_open = !self.model_picker_open;
+                self.model_picker_generation = self.model_picker_generation.saturating_add(1);
                 self.resume_picker_open = false;
                 self.command_picker_open = false;
             }
@@ -891,7 +894,7 @@ impl Application for ChatApplication {
                 self.settings_error.as_deref(),
                 ChatOverlays {
                     pending_shell_command: self.pending_shell_command.as_deref(),
-                    model_picker_open: self.model_picker_open,
+                    model_picker_generation: self.model_picker_generation,
                     resume_picker_open: self.resume_picker_open,
                     command_picker_open: self.command_picker_open,
                     project_root: self.shell_project.as_ref().map(|(root, _)| root.as_path()),
@@ -1201,7 +1204,7 @@ fn configured_chat_view(
 ) -> impl View<ChatMessage> {
     let ChatOverlays {
         pending_shell_command,
-        model_picker_open,
+        model_picker_generation,
         resume_picker_open,
         command_picker_open,
         project_root,
@@ -1264,38 +1267,6 @@ fn configured_chat_view(
                     }}
                 </Column>
                 <Column id={id!(composer)} fill_width shrink={0.0} gap={8.0}>
-                    {[()].into_iter().filter(|_| model_picker_open).map(|_| ui! {
-                        <Column fill_width max_height={240.0} overflow_y={Overflow::Auto}
-                            padding={Insets::all(8.0)} gap={4.0} background={PANEL}
-                            border={Border::new(BORDER, 1.0)} radius={8.0}>
-                            <Text color={MUTED}>{"Choose model"}</Text>
-                            {state.models.iter().map(|model| ui! {
-                                <Button key={model.id.clone()} label_align={TextAlign::Start} fill_width
-                                    on_press={ChatMessage::SelectModel(model.id.clone())}>
-                                    {if state.selected_model.as_deref() == Some(model.id.as_str()) {
-                                        format!("✓ {}", model.display_name)
-                                    } else { model.display_name.clone() }}
-                                </Button>
-                            })}
-                            <Text color={MUTED}>{"Reasoning effort"}</Text>
-                            {state.models.iter()
-                                .find(|model| Some(model.id.as_str()) == state.selected_model.as_deref())
-                                .into_iter()
-                                .flat_map(|model| model.supported_reasoning_efforts.iter())
-                                .map(|option| ui! {
-                                    <Button key={option.reasoning_effort.clone()}
-                                        label_align={TextAlign::Start} fill_width
-                                        on_press={ChatMessage::SelectReasoningEffort(option.reasoning_effort.clone())}>
-                                        {if state.selected_reasoning_effort.as_deref()
-                                            == Some(option.reasoning_effort.as_str()) {
-                                            format!("✓ {} — {}", option.reasoning_effort, option.description)
-                                        } else {
-                                            format!("{} — {}", option.reasoning_effort, option.description)
-                                        }}
-                                    </Button>
-                                })}
-                        </Column>
-                    })}
                     {[()].into_iter().filter(|_| command_picker_open).map(|_| ui! {
                         <Column fill_width max_height={280.0} overflow_y={Overflow::Auto}
                             padding={Insets::all(8.0)} gap={4.0} background={PANEL}
@@ -1383,12 +1354,37 @@ fn configured_chat_view(
                     <Row shrink={0.0} gap={8.0}>
                         <Button on_press={ChatMessage::ToggleCommandPicker}>{"Commands"}</Button>
                         <Button on_press={ChatMessage::ToggleResumePicker}>{"Resume"}</Button>
-                        <Button on_press={ChatMessage::ToggleModelPicker}>{state.models.iter()
+                        {Dropdown::new(
+                            ChatMessage::ToggleModelPicker,
+                            state.models.iter()
+                                .find(|model| Some(model.id.as_str()) == state.selected_model.as_deref())
+                                .map(|model| model.display_name.clone())
+                                .unwrap_or_else(|| "Model".into()),
+                            state.models.iter().map(|model| (
+                                model.display_name.clone(),
+                                ChatMessage::SelectModel(model.id.clone()),
+                            )),
+                        ).id(id!(model_selector))
+                            .accessibility_label("Model selector")
+                            .semantic_role(SemanticRole::Button)
+                            .overlay(true)
+                            .open_generation(model_picker_generation)
+                            .colors(PANEL, SIDEBAR, TEXT)}
+                        {state.models.iter()
                             .find(|model| Some(model.id.as_str()) == state.selected_model.as_deref())
-                            .map(|model| match state.selected_reasoning_effort.as_deref() {
-                                Some(effort) => format!("{} · {effort}", model.display_name),
-                                None => model.display_name.clone(),
-                            }).unwrap_or_else(|| "Model".into())}</Button>
+                            .filter(|model| !model.supported_reasoning_efforts.is_empty())
+                            .map(|model| Dropdown::new(
+                                ChatMessage::ToggleModelPicker,
+                                state.selected_reasoning_effort.clone().unwrap_or_else(|| "Effort".into()),
+                                model.supported_reasoning_efforts.iter().map(|option| (
+                                    format!("{} — {}", option.reasoning_effort, option.description),
+                                    ChatMessage::SelectReasoningEffort(option.reasoning_effort.clone()),
+                                )),
+                            ).id(id!(reasoning_effort_selector))
+                                .accessibility_label("Reasoning effort selector")
+                                .semantic_role(SemanticRole::Button)
+                                .overlay(true)
+                                .colors(PANEL, SIDEBAR, TEXT))}
                         <Column gap={2.0} grow={1.0}>
                             <Text color={MUTED}>{if state.active_turn.is_some() { "Codex is working…" } else { "Explicit approval is always required" }}</Text>
                             <Text color={MUTED} scale={0.72}>{&state.provenance}</Text>

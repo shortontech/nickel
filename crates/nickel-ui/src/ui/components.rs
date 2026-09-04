@@ -2559,6 +2559,7 @@ impl<Message> Dropdown<Message> {
                 selected: selected.into(),
                 options,
                 expanded: false,
+                open_generation: 0,
                 overlay: false,
                 background: 0x27344c,
                 option_background: 0x34445f,
@@ -2582,6 +2583,41 @@ impl<Message> Dropdown<Message> {
 
     pub fn id(mut self, id: impl Into<UiId>) -> Self {
         self.0 = self.0.id(id);
+        self
+    }
+
+    pub fn accessibility_label(mut self, label: impl Into<String>) -> Self {
+        self.0.style.accessibility_label = Some(label.into());
+        self
+    }
+
+    pub fn semantic_role(mut self, role: SemanticRole) -> Self {
+        self.0.style.semantic_role = Some(role);
+        self
+    }
+
+    /// Paint options in the transient overlay layer instead of growing the
+    /// surrounding layout when the choice list opens.
+    pub fn overlay(mut self, overlay: bool) -> Self {
+        if let Kind::Dropdown {
+            overlay: is_overlay,
+            ..
+        } = &mut self.0.kind
+        {
+            *is_overlay = overlay;
+            self.0.style.height = Length::Px(if overlay { 30.0 } else { 42.0 });
+        }
+        self
+    }
+
+    /// Requests one opening transition for a new application-owned generation.
+    pub fn open_generation(mut self, generation: u64) -> Self {
+        if let Kind::Dropdown {
+            open_generation, ..
+        } = &mut self.0.kind
+        {
+            *open_generation = generation;
+        }
         self
     }
 
@@ -2682,6 +2718,7 @@ impl<Message: Clone> Menu<Message> {
                 selected: label.into(),
                 options: items.iter().map(|item| item.label.clone()).collect(),
                 expanded: false,
+                open_generation: 0,
                 overlay: true,
                 background: 0x171b22,
                 option_background: 0x202630,

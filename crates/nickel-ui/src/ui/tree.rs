@@ -2930,7 +2930,18 @@ impl<Message: Clone> UiFrame<Message> {
                 if let Some(message) = self.cancelled_drag_message(state) {
                     outcome.messages.push(message);
                 }
-                state.set_window_focused(false).merge(state.focus_lost())
+                let dismissed = self
+                    .resolved_layout()
+                    .nodes()
+                    .iter()
+                    .filter(|node| node.component == "Dropdown")
+                    .fold(Invalidation::None, |invalidation, node| {
+                        invalidation.merge(state.set_dropdown_open(node.id.clone(), false))
+                    });
+                state
+                    .set_window_focused(false)
+                    .merge(state.focus_lost())
+                    .merge(dismissed)
             }
             UiEvent::Suspended => {
                 if let Some(message) = self.cancelled_drag_message(state) {
@@ -5052,6 +5063,7 @@ fn emit_element<Message: Clone>(
             background,
             option_background,
             foreground,
+            ..
         } => {
             let header_height = if *overlay { 30.0 } else { 42.0 };
             let option_height = if *overlay { 34.0 } else { 36.0 };
@@ -5987,8 +5999,24 @@ fn apply_transient_state<Message>(
             element.style.border = Some(border);
             element.style.border_width = element.style.border_width.max(3.0);
         }
+        let requested_open_generation = match &element.kind {
+            Kind::Dropdown {
+                open_generation, ..
+            } => Some(*open_generation),
+            _ => None,
+        };
         let (scroll_offset_x, scroll_offset, scroll_at_end, dropdown_open) = {
             let transient = state.touch(id.clone());
+            if requested_open_generation.is_some_and(|generation| {
+                if generation == transient.dropdown_open_generation {
+                    false
+                } else {
+                    transient.dropdown_open_generation = generation;
+                    true
+                }
+            }) {
+                transient.dropdown_open = true;
+            }
             (
                 transient.scroll_offset_x,
                 transient.scroll_offset,

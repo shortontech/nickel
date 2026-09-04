@@ -1081,6 +1081,42 @@ fn expanded_dropdown_exposes_option_actions() {
 }
 
 #[test]
+fn window_focus_loss_closes_an_open_dropdown() {
+    let mut state = UiStateStore::default();
+    let dropdown = || {
+        Dropdown::new(
+            TestMessage::Named("toggle"),
+            "Speakers",
+            [
+                ("Speakers", TestMessage::Option(0)),
+                ("Headphones", TestMessage::Option(1)),
+            ],
+        )
+        .id("audio")
+    };
+    let mut tree =
+        UiFrame::layout_with_state(dropdown(), Rect::new(0.0, 0.0, 240.0, 114.0), &mut state);
+
+    tree.handle_event(
+        &mut state,
+        UiEvent::PointerPressed(Point { x: 20.0, y: 20.0 }),
+    );
+    tree.handle_event(
+        &mut state,
+        UiEvent::PointerReleased(Point { x: 20.0, y: 20.0 }),
+    );
+    tree = UiFrame::layout_with_state(dropdown(), Rect::new(0.0, 0.0, 240.0, 114.0), &mut state);
+    assert!(tree.message_at(Point { x: 20.0, y: 96.0 }).is_some());
+
+    tree.handle_event(&mut state, UiEvent::FocusLost);
+    assert!(
+        !state
+            .state(&UiId::from("root/audio"))
+            .is_some_and(|entry| entry.dropdown_open)
+    );
+}
+
+#[test]
 fn controller_activation_opens_dropdown_and_enters_its_options() {
     let mut state = UiStateStore::default();
     let dropdown = || {

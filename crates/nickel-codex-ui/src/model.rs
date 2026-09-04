@@ -185,8 +185,17 @@ impl ChatState {
                 self.provenance = provenance;
                 self.account = account;
                 self.models = models.into_iter().take(100).collect();
-                if self.selected_model.is_none() {
+                let selected_model_unavailable = self
+                    .selected_model
+                    .as_ref()
+                    .is_some_and(|id| !self.models.iter().any(|candidate| candidate.id == *id));
+                if self.selected_model.is_none() || selected_model_unavailable {
                     self.selected_model = self.models.first().map(|model| model.id.clone());
+                }
+                if selected_model_unavailable {
+                    self.report_diagnostic(
+                        "The selected model is no longer available; using the first available model",
+                    );
                 }
                 if self.selected_reasoning_effort.is_none() {
                     self.selected_reasoning_effort = self

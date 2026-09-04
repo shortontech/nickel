@@ -961,6 +961,7 @@ enum Kind {
         selected: String,
         options: Vec<String>,
         expanded: bool,
+        open_generation: u64,
         overlay: bool,
         background: Color,
         option_background: Color,

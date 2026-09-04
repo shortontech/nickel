@@ -84,6 +84,7 @@ pub struct TransientState {
     /// Whether content growth should keep this scroll region pinned to its end.
     pub scroll_at_end: bool,
     pub dropdown_open: bool,
+    pub dropdown_open_generation: u64,
     pub animation_progress: f32,
     pub editor: Option<TextEditor>,
 }
@@ -96,6 +97,7 @@ impl Default for TransientState {
             scroll_velocity: 0.0,
             scroll_at_end: true,
             dropdown_open: false,
+            dropdown_open_generation: 0,
             animation_progress: 0.0,
             editor: None,
         }
