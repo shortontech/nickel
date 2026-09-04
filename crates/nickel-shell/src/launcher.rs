@@ -41,7 +41,7 @@ pub struct Launcher {
     search_selected: usize,
     dashboard_projects: DashboardSection<Vec<DashboardProject>>,
     dashboard_account: DashboardSection<DashboardAccount>,
-    codex_available: bool,
+    codex_availability: CodexAvailability,
     logout_available: bool,
 }
 
@@ -64,6 +64,20 @@ pub enum LauncherInput {
 pub enum LauncherInputOutcome {
     Updated,
     DismissRequested,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum CodexAvailability {
+    #[default]
+    Unavailable,
+    Recoverable,
+    Ready,
+}
+
+impl CodexAvailability {
+    pub fn shell_entry_visible(self) -> bool {
+        self != Self::Unavailable
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -239,7 +253,7 @@ impl Launcher {
             search_selected: 0,
             dashboard_projects: DashboardSection::Loading,
             dashboard_account: DashboardSection::Loading,
-            codex_available: false,
+            codex_availability: CodexAvailability::Unavailable,
             logout_available: true,
         };
         launcher.refresh();
@@ -359,15 +373,33 @@ impl Launcher {
     }
 
     pub fn codex_available(&self) -> bool {
-        self.codex_available
+        self.codex_availability.shell_entry_visible()
     }
 
-    pub fn set_codex_available(&mut self, available: bool) -> bool {
-        if self.codex_available == available {
+    pub fn codex_availability(&self) -> CodexAvailability {
+        self.codex_availability
+    }
+
+    pub fn set_codex_availability(&mut self, availability: CodexAvailability) -> bool {
+        if self.codex_availability == availability {
             return false;
         }
-        self.codex_available = available;
+        self.codex_availability = availability;
+        if availability == CodexAvailability::Unavailable {
+            self.dashboard_projects = DashboardSection::Unavailable(
+                "Codex is not installed or the integration is disabled".into(),
+            );
+        }
         true
+    }
+
+    #[cfg(any(test, feature = "workbench-fixtures"))]
+    pub fn set_codex_available(&mut self, available: bool) -> bool {
+        self.set_codex_availability(if available {
+            CodexAvailability::Ready
+        } else {
+            CodexAvailability::Unavailable
+        })
     }
 
     pub fn set_dashboard_projects(
@@ -660,8 +692,8 @@ mod tests {
     use nickel_codex::{Project, Thread, ThreadId, ThreadRuntime, ThreadRuntimeStatus};
 
     use super::{
-        Application, DashboardSection, Launcher, LauncherMode, LauncherView, ProjectActivity,
-        normalize_dashboard_projects,
+        Application, CodexAvailability, DashboardProject, DashboardSection, Launcher, LauncherMode,
+        LauncherView, ProjectActivity, normalize_dashboard_projects,
     };
 
     fn project(id: &str, root: &str) -> Project {
@@ -1017,6 +1049,39 @@ mod tests {
         assert!(groups[0].active());
         assert_eq!(groups[0].windows[1].title, "Second document");
         assert_eq!(groups[1].application_name, "Untitled window");
+    }
+
+    #[test]
+    fn unavailable_codex_clears_retained_projects_and_hides_shell_entry() {
+        let mut launcher = Launcher::default();
+        launcher.set_codex_availability(CodexAvailability::Ready);
+        launcher.set_dashboard_projects(DashboardSection::Ready(vec![DashboardProject {
+            id: "private".into(),
+            name: "Private project".into(),
+            roots: vec![PathBuf::from("/private")],
+            chat_count: Some(1),
+            activity: ProjectActivity::Idle,
+            last_used_at: None,
+        }]));
+
+        assert!(launcher.set_codex_availability(CodexAvailability::Unavailable));
+        assert!(!launcher.codex_available());
+        assert!(matches!(
+            launcher.dashboard_projects(),
+            DashboardSection::Unavailable(_)
+        ));
+    }
+
+    #[test]
+    fn recoverable_codex_health_keeps_shell_entry_reachable() {
+        let mut launcher = Launcher::default();
+        launcher.set_codex_availability(CodexAvailability::Recoverable);
+
+        assert!(launcher.codex_available());
+        assert_eq!(
+            launcher.codex_availability(),
+            CodexAvailability::Recoverable
+        );
     }
 
     #[cfg(unix)]

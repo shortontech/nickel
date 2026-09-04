@@ -186,13 +186,56 @@ fn p95_u64(samples: &[u64]) -> Option<u64> {
     samples.get(index).copied()
 }
 
+fn codex_availability(
+    status: ConnectionStatus,
+    authenticated: bool,
+) -> Option<crate::launcher::CodexAvailability> {
+    match status {
+        ConnectionStatus::Loading => None,
+        ConnectionStatus::Unavailable => Some(crate::launcher::CodexAvailability::Unavailable),
+        ConnectionStatus::Ready if authenticated => Some(crate::launcher::CodexAvailability::Ready),
+        ConnectionStatus::Ready => Some(crate::launcher::CodexAvailability::Recoverable),
+        ConnectionStatus::Disconnected | ConnectionStatus::Incompatible => {
+            Some(crate::launcher::CodexAvailability::Recoverable)
+        }
+    }
+}
+
 #[cfg(test)]
 mod allocation_summary_tests {
+    use nickel_codex_ui::ConnectionStatus;
+
+    use crate::launcher::CodexAvailability;
+
     #[test]
     fn allocation_p95_requires_samples_and_uses_nearest_rank() {
         assert_eq!(super::p95_u64(&[]), None);
         assert_eq!(super::p95_u64(&[9, 0, 1, 2, 3]), Some(9));
         assert_eq!(super::p95_u64(&[0; 64]), Some(0));
+    }
+
+    #[test]
+    fn codex_backend_state_projects_truthful_shell_availability() {
+        assert_eq!(
+            super::codex_availability(ConnectionStatus::Loading, false),
+            None
+        );
+        assert_eq!(
+            super::codex_availability(ConnectionStatus::Unavailable, false),
+            Some(CodexAvailability::Unavailable)
+        );
+        assert_eq!(
+            super::codex_availability(ConnectionStatus::Incompatible, false),
+            Some(CodexAvailability::Recoverable)
+        );
+        assert_eq!(
+            super::codex_availability(ConnectionStatus::Ready, false),
+            Some(CodexAvailability::Recoverable)
+        );
+        assert_eq!(
+            super::codex_availability(ConnectionStatus::Ready, true),
+            Some(CodexAvailability::Ready)
+        );
     }
 }
 
@@ -2003,9 +2046,17 @@ fn main() -> Result<(), String> {
                 // The panel entry represents the installed integration, not only a healthy,
                 // authenticated connection. Keep it reachable so its UI can explain and recover
                 // from disconnected, incompatible, or signed-out states.
-                let availability_changed = state.set_codex_available(true);
+                let availability_changed =
+                    codex_availability(snapshot.status.clone(), snapshot.account.authenticated)
+                        .is_some_and(|availability| state.set_codex_availability(availability));
                 let projects = match snapshot.status {
                     ConnectionStatus::Loading => DashboardSection::Loading,
+                    ConnectionStatus::Ready if !snapshot.account.authenticated => {
+                        DashboardSection::Failed {
+                            message: "Sign in to Codex to load projects".into(),
+                            recoverable: true,
+                        }
+                    }
                     ConnectionStatus::Ready if snapshot.thread_snapshot_available => {
                         let projects = normalize_dashboard_projects(
                             &snapshot.projects,
@@ -2037,7 +2088,9 @@ fn main() -> Result<(), String> {
                             DashboardSection::Ready(projects)
                         }
                     }
-                    ConnectionStatus::Disconnected | ConnectionStatus::Incompatible => {
+                    ConnectionStatus::Unavailable
+                    | ConnectionStatus::Disconnected
+                    | ConnectionStatus::Incompatible => {
                         DashboardSection::Unavailable(snapshot.provenance.clone())
                     }
                 };

@@ -23,6 +23,7 @@ const MAX_PENDING: usize = 32;
 pub enum ConnectionStatus {
     Loading,
     Ready,
+    Unavailable,
     Disconnected,
     Incompatible,
 }
@@ -210,6 +211,15 @@ impl ChatState {
             ControllerEvent::Protocol(event) => self.apply_protocol(event),
             ControllerEvent::Incompatible(message) => {
                 self.status = ConnectionStatus::Incompatible;
+                self.push_diagnostic(message);
+                self.active_turn = None;
+                self.interrupt_requested = false;
+            }
+            ControllerEvent::Unavailable(message) => {
+                self.status = ConnectionStatus::Unavailable;
+                self.projects.clear();
+                self.threads.clear();
+                self.thread_runtime.clear();
                 self.push_diagnostic(message);
                 self.active_turn = None;
                 self.interrupt_requested = false;

@@ -611,11 +611,14 @@ impl LiveShell {
         self.launcher.set_dashboard_projects(projects)
     }
 
-    pub fn set_codex_available(&mut self, available: bool) -> bool {
-        if !available {
+    pub fn set_codex_availability(
+        &mut self,
+        availability: crate::launcher::CodexAvailability,
+    ) -> bool {
+        if !availability.shell_entry_visible() {
             self.codex_project_menu_visible = false;
         }
-        self.launcher.set_codex_available(available)
+        self.launcher.set_codex_availability(availability)
     }
 
     pub fn take_requested_codex_project(&mut self) -> Option<String> {

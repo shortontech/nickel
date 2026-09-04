@@ -103,6 +103,7 @@ pub enum ControllerEvent {
     ThreadSelected(Thread),
     Protocol(CodexEvent),
     Incompatible(String),
+    Unavailable(String),
     OperationFailed(String),
     Failure(String),
 }
@@ -216,11 +217,7 @@ fn run_worker(
                         .last()
                         .map(|probe| probe.reason.clone())
                         .unwrap_or_else(|| "no Codex candidate was found".into());
-                    let event = if selection.probes.is_empty() {
-                        ControllerEvent::Failure(reason)
-                    } else {
-                        ControllerEvent::Incompatible(reason)
-                    };
+                    let event = selection_failure_event(selection.probes.is_empty(), reason);
                     let _ = send(event);
                     return;
                 };
@@ -430,6 +427,14 @@ fn run_worker(
         {
             return;
         }
+    }
+}
+
+fn selection_failure_event(no_candidates: bool, reason: String) -> ControllerEvent {
+    if no_candidates {
+        ControllerEvent::Unavailable(reason)
+    } else {
+        ControllerEvent::Incompatible(reason)
     }
 }
 
@@ -695,7 +700,8 @@ mod tests {
 
     use super::{
         ControllerEvent, create_managed_workspace_at, next_new_thread_cwd, project_snapshot,
-        snapshot, sort_projects_by_recent_threads, verify_thread_is_resumable,
+        selection_failure_event, snapshot, sort_projects_by_recent_threads,
+        verify_thread_is_resumable,
     };
 
     fn project(id: &str, root: &str) -> Project {
@@ -912,5 +918,17 @@ mod tests {
                 .to_string(),
             "Codex unavailable: thread thread is not available for a writable resume"
         );
+    }
+
+    #[test]
+    fn candidate_absence_is_not_reported_as_a_connection_failure() {
+        assert!(matches!(
+            selection_failure_event(true, "no Codex candidate was found".into()),
+            ControllerEvent::Unavailable(_)
+        ));
+        assert!(matches!(
+            selection_failure_event(false, "schema mismatch".into()),
+            ControllerEvent::Incompatible(_)
+        ));
     }
 }

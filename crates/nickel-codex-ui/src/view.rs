@@ -363,7 +363,9 @@ impl ChatApplication {
                             self.shell_requests.push(ShellRequest::ResumeFailed(thread));
                         }
                     }
-                    ControllerEvent::Failure(_) | ControllerEvent::Incompatible(_) => {
+                    ControllerEvent::Failure(_)
+                    | ControllerEvent::Incompatible(_)
+                    | ControllerEvent::Unavailable(_) => {
                         self.pending_initial_resume = None;
                         if let Some(thread) = self.shell_writer_thread.take() {
                             self.shell_requests.push(ShellRequest::ResumeFailed(thread));
@@ -579,7 +581,9 @@ impl Application for ChatApplication {
             ChatMessage::Refresh => {
                 if matches!(
                     self.state.status,
-                    ConnectionStatus::Disconnected | ConnectionStatus::Incompatible
+                    ConnectionStatus::Unavailable
+                        | ConnectionStatus::Disconnected
+                        | ConnectionStatus::Incompatible
                 ) {
                     self.reconnect_controller();
                 } else {
@@ -1140,6 +1144,7 @@ fn project_menu_view(state: &ChatState, settings_error: Option<&str>) -> impl Vi
         ConnectionStatus::Ready if state.projects.is_empty() => "No projects available",
         ConnectionStatus::Ready if matching_projects.is_empty() => "No matching projects",
         ConnectionStatus::Ready => "Choose a project",
+        ConnectionStatus::Unavailable => "Codex is not installed",
         ConnectionStatus::Disconnected => "Codex is disconnected",
         ConnectionStatus::Incompatible => "Codex is incompatible",
     };
