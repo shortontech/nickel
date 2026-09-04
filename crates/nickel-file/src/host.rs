@@ -52,6 +52,14 @@ fn navigation_shortcut(key: KeyCode, alt_down: bool) -> Option<NavigationShortcu
     }
 }
 
+fn selection_command_modifier(modifiers: &nickel_input::ModifierState, macos: bool) -> bool {
+    modifiers.aggregate(if macos {
+        AggregateModifier::Super
+    } else {
+        AggregateModifier::Control
+    })
+}
+
 fn adjacent_tab_index(active: usize, count: usize, reverse: bool) -> Option<usize> {
     if count < 2 || active >= count {
         return None;
@@ -95,10 +103,12 @@ impl HostAdapter<FileApp> for FileHostAdapter {
         _services: HostServices<'_>,
     ) -> Result<AdapterOutcome, Box<dyn std::error::Error>> {
         let mut changed = false;
+        let mut consume = false;
         match event.clone() {
             InputEvent::Key(key) => {
                 let app = host.application_mut();
-                app.control_down = key.modifiers.aggregate(AggregateModifier::Control);
+                app.control_down =
+                    selection_command_modifier(&key.modifiers, cfg!(target_os = "macos"));
                 app.shift_down = key.modifiers.aggregate(AggregateModifier::Shift);
                 let alt_down = key.modifiers.aggregate(AggregateModifier::Alt);
                 if key.edge != KeyEdge::Pressed || key.repeat {
@@ -176,25 +186,30 @@ impl HostAdapter<FileApp> for FileHostAdapter {
                         } else if app.address_editing {
                             app.update(FileMessage::ToggleAddressEditing);
                         } else {
-                            app.selected = None;
-                            app.selected_entries.clear();
-                            app.selection_anchor = None;
+                            app.clear_selection();
                         }
                     }
                     KeyCode::Enter if app.address_editing => app.submit_address(),
                     KeyCode::Enter => app.activate_selected(),
+                    KeyCode::Space => app.toggle_active_selection(),
                     KeyCode::KeyA if app.control_down => {
-                        app.selected_entries = (0..app.browser.entries().len()).collect();
-                        app.selected = app
-                            .selected
-                            .or_else(|| (!app.browser.entries().is_empty()).then_some(0));
-                        app.selection_anchor = app.selected;
+                        app.select_all();
                     }
                     KeyCode::F5 => {
                         app.update(FileMessage::Refresh);
                     }
                     _ => {}
                 }
+                consume = matches!(
+                    key,
+                    KeyCode::ArrowDown
+                        | KeyCode::ArrowUp
+                        | KeyCode::ArrowRight
+                        | KeyCode::ArrowLeft
+                        | KeyCode::Escape
+                        | KeyCode::Enter
+                        | KeyCode::Space
+                ) || (app.control_down && key == KeyCode::KeyA);
                 changed = true;
             }
             InputEvent::Pointer(PointerEvent::Motion { position, .. }) => {
@@ -276,7 +291,7 @@ impl HostAdapter<FileApp> for FileHostAdapter {
         self.sync_requested |= changed;
         Ok(AdapterOutcome {
             changed,
-            consume: false,
+            consume,
             exit: host.application().exit_requested,
         })
     }
@@ -342,8 +357,10 @@ impl HostAdapter<FileApp> for FileHostAdapter {
 
 #[cfg(test)]
 mod tests {
-    use super::{NavigationShortcut, adjacent_tab_index, navigation_shortcut};
-    use nickel_input::KeyCode;
+    use super::{
+        NavigationShortcut, adjacent_tab_index, navigation_shortcut, selection_command_modifier,
+    };
+    use nickel_input::{KeyCode, Modifier, ModifierState};
 
     #[test]
     fn conventional_alt_navigation_shortcuts_precede_item_direction() {
@@ -371,5 +388,19 @@ mod tests {
         assert_eq!(adjacent_tab_index(0, 3, true), Some(2));
         assert_eq!(adjacent_tab_index(0, 1, false), None);
         assert_eq!(adjacent_tab_index(2, 2, false), None);
+    }
+
+    #[test]
+    fn selection_command_modifier_maps_both_physical_sides_and_platforms() {
+        for modifier in [Modifier::ControlLeft, Modifier::ControlRight] {
+            let state = ModifierState::from_sides([modifier]);
+            assert!(selection_command_modifier(&state, false));
+            assert!(!selection_command_modifier(&state, true));
+        }
+        for modifier in [Modifier::SuperLeft, Modifier::SuperRight] {
+            let state = ModifierState::from_sides([modifier]);
+            assert!(selection_command_modifier(&state, true));
+            assert!(!selection_command_modifier(&state, false));
+        }
     }
 }

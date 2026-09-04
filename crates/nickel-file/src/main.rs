@@ -1810,20 +1810,78 @@ impl FileApp {
             self.selection_anchor = None;
             return;
         }
-        let current = self.selected.unwrap_or(0) as isize;
-        let next = (current + delta).clamp(0, len as isize - 1) as usize;
+        let Some(current) = self.selected else {
+            self.select_only(0);
+            self.ensure_selection_visible();
+            return;
+        };
+        let next = (current as isize + delta).clamp(0, len as isize - 1) as usize;
         self.selected = Some(next);
         if self.shift_down {
-            let anchor = self.selection_anchor.unwrap_or(current as usize);
-            self.selected_entries.clear();
-            self.selected_entries
-                .extend(anchor.min(next)..=anchor.max(next));
-        } else {
-            self.selected_entries.clear();
-            self.selected_entries.insert(next);
-            self.selection_anchor = Some(next);
+            self.select_range(next, self.control_down);
+        } else if !self.control_down {
+            self.select_only(next);
         }
         self.ensure_selection_visible();
+    }
+
+    fn select_only(&mut self, index: usize) {
+        self.selected = Some(index);
+        self.selected_entries.clear();
+        self.selected_entries.insert(index);
+        self.selection_anchor = Some(index);
+    }
+
+    fn select_range(&mut self, target: usize, additive: bool) {
+        let anchor = self
+            .selection_anchor
+            .filter(|index| *index < self.browser.entries().len())
+            .or(self.selected)
+            .filter(|index| *index < self.browser.entries().len())
+            .unwrap_or(target);
+        if !additive {
+            self.selected_entries.clear();
+        }
+        self.selected_entries
+            .extend(anchor.min(target)..=anchor.max(target));
+        self.selected = Some(target);
+        self.selection_anchor = Some(anchor);
+    }
+
+    pub(crate) fn toggle_active_selection(&mut self) {
+        let Some(index) = self.selected else { return };
+        if !self.selected_entries.remove(&index) {
+            self.selected_entries.insert(index);
+            self.selection_anchor = Some(index);
+        } else if self.selection_anchor == Some(index) {
+            self.selection_anchor = self.selected_entries.iter().copied().min();
+        }
+    }
+
+    pub(crate) fn clear_selection(&mut self) {
+        self.selected = None;
+        self.selected_entries.clear();
+        self.selection_anchor = None;
+    }
+
+    pub(crate) fn select_all(&mut self) {
+        self.selected_entries = (0..self.browser.entries().len()).collect();
+        self.selected = self
+            .selected
+            .filter(|index| *index < self.browser.entries().len())
+            .or_else(|| (!self.browser.entries().is_empty()).then_some(0));
+        self.selection_anchor = self.selected;
+    }
+
+    /// The single, visual-order selection authority used by file commands.
+    pub(crate) fn ordered_selection_snapshot(&self) -> Vec<PathBuf> {
+        self.browser
+            .entries()
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| self.selected_entries.contains(index))
+            .map(|(_, entry)| entry.path.clone())
+            .collect()
     }
 
     pub(crate) fn ensure_selection_visible(&mut self) {
@@ -1893,9 +1951,7 @@ impl FileApp {
                 self.refresh_directory(self.browser.show_hidden());
             }
             FileMessage::ContextSelectAll => {
-                self.selected_entries = (0..self.browser.entries().len()).collect();
-                self.selected = (!self.browser.entries().is_empty()).then_some(0);
-                self.selection_anchor = self.selected;
+                self.select_all();
             }
             FileMessage::ToggleCommandSurface => {
                 self.context_target = None;
@@ -1999,21 +2055,21 @@ impl FileApp {
                     })
                 });
                 if self.shift_down {
-                    let anchor = self.selection_anchor.unwrap_or(index);
-                    self.selected_entries.clear();
-                    self.selected_entries
-                        .extend(anchor.min(index)..=anchor.max(index));
+                    self.select_range(index, self.control_down);
                 } else if self.control_down {
                     if !self.selected_entries.remove(&index) {
                         self.selected_entries.insert(index);
+                        self.selected = Some(index);
+                        self.selection_anchor = Some(index);
+                    } else {
+                        self.selected = self.selected_entries.iter().copied().min();
+                        if self.selection_anchor == Some(index) {
+                            self.selection_anchor = self.selected;
+                        }
                     }
-                    self.selection_anchor = Some(index);
                 } else {
-                    self.selected_entries.clear();
-                    self.selected_entries.insert(index);
-                    self.selection_anchor = Some(index);
+                    self.select_only(index);
                 }
-                self.selected = Some(index);
                 self.last_click = entry_path.map(|path| FileClick {
                     path,
                     position: self.cursor,
@@ -2027,9 +2083,7 @@ impl FileApp {
             FileMessage::SelectionSurface => {
                 self.selection_drag = Some(self.cursor);
                 if !self.control_down && !self.shift_down {
-                    self.selected = None;
-                    self.selected_entries.clear();
-                    self.selection_anchor = None;
+                    self.clear_selection();
                 }
             }
             FileMessage::FileScroll(offset) => self.file_scroll_offset = offset.max(0.0),

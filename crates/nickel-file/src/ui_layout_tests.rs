@@ -41,6 +41,104 @@ fn contrast_ratio(first: u32, second: u32) -> f32 {
     (lighter + 0.05) / (darker + 0.05)
 }
 
+fn selection_app(entry_count: usize) -> (tempfile::TempDir, FileApp) {
+    let directory = tempfile::tempdir().unwrap();
+    for index in 0..entry_count {
+        std::fs::write(directory.path().join(format!("item-{index:04}.txt")), b"x").unwrap();
+    }
+    let app = FileApp::new(directory.path().to_path_buf());
+    (directory, app)
+}
+
+#[test]
+fn pointer_selection_supports_toggle_ranges_and_additive_ranges() {
+    let (_directory, mut app) = selection_app(8);
+
+    app.update_message(FileMessage::Entry(2));
+    assert_eq!(app.selected_entries, HashSet::from([2]));
+    assert_eq!(app.selection_anchor, Some(2));
+
+    app.control_down = true;
+    app.update_message(FileMessage::Entry(6));
+    assert_eq!(app.selected_entries, HashSet::from([2, 6]));
+    assert_eq!(app.selected, Some(6));
+
+    app.control_down = false;
+    app.shift_down = true;
+    app.update_message(FileMessage::Entry(4));
+    assert_eq!(app.selected_entries, HashSet::from([4, 5, 6]));
+
+    app.control_down = true;
+    app.update_message(FileMessage::Entry(1));
+    assert_eq!(app.selected_entries, HashSet::from([1, 2, 3, 4, 5, 6]));
+
+    app.control_down = false;
+    app.update_message(FileMessage::Entry(7));
+    assert_eq!(app.selected_entries, HashSet::from([6, 7]));
+}
+
+#[test]
+fn keyboard_selection_moves_focus_without_destroying_selection() {
+    let (_directory, mut app) = selection_app(10);
+    app.update_message(FileMessage::Entry(3));
+
+    app.control_down = true;
+    app.select_relative(2);
+    assert_eq!(app.selected, Some(5));
+    assert_eq!(app.selected_entries, HashSet::from([3]));
+
+    app.toggle_active_selection();
+    assert_eq!(app.selected_entries, HashSet::from([3, 5]));
+
+    app.shift_down = true;
+    app.select_relative(2);
+    assert_eq!(app.selected, Some(7));
+    assert_eq!(app.selected_entries, HashSet::from([3, 5, 6, 7]));
+
+    app.control_down = false;
+    app.select_relative(-4);
+    assert_eq!(app.selected_entries, HashSet::from([3, 4, 5]));
+
+    app.clear_selection();
+    app.select_relative(5);
+    assert_eq!(app.selected, Some(0));
+    assert_eq!(app.selected_entries, HashSet::from([0]));
+}
+
+#[test]
+fn selection_snapshot_is_stable_visual_order_for_every_consumer() {
+    let (_directory, mut app) = selection_app(6);
+    app.selected_entries = HashSet::from([4, 1, 3]);
+    let expected = [1, 3, 4]
+        .map(|index| app.browser.entries()[index].path.clone())
+        .to_vec();
+    assert_eq!(app.ordered_selection_snapshot(), expected);
+
+    app.update_message(FileMessage::ContextEntry(3));
+    assert_eq!(app.ordered_selection_snapshot(), expected);
+    app.update_message(FileMessage::ContextEntry(0));
+    assert_eq!(
+        app.ordered_selection_snapshot(),
+        vec![app.browser.entries()[0].path.clone()]
+    );
+}
+
+#[test]
+fn select_all_empty_space_and_invalid_anchor_are_deterministic_at_scale() {
+    let (_directory, mut app) = selection_app(2_048);
+    app.selection_anchor = Some(9_999);
+    app.shift_down = true;
+    app.update_message(FileMessage::Entry(2_047));
+    assert_eq!(app.selected_entries, HashSet::from([2_047]));
+
+    app.select_all();
+    assert_eq!(app.ordered_selection_snapshot().len(), 2_048);
+    app.control_down = false;
+    app.shift_down = false;
+    app.update_message(FileMessage::SelectionSurface);
+    assert!(app.ordered_selection_snapshot().is_empty());
+}
+
 fn settle_navigation(app: &mut FileApp) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     while std::time::Instant::now() < deadline {
