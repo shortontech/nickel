@@ -1012,6 +1012,11 @@ pub fn decode<T: DeserializeOwned>(frame: &[u8]) -> Result<T, FrameError> {
 
 impl PreviewFrame {
     pub fn validate(&self) -> Result<(), FrameError> {
+        if self.width == 0 || self.height == 0 {
+            return Err(FrameError::InvalidPayload(
+                "preview dimensions must be non-zero".into(),
+            ));
+        }
         if self.width > MAX_PREVIEW_WIDTH || self.height > MAX_PREVIEW_HEIGHT {
             return Err(FrameError::TooLarge);
         }
@@ -1063,6 +1068,18 @@ mod tests {
             rgba: vec![0; 16],
         };
         assert_eq!(valid.validate(), Ok(()));
+        for (width, height) in [(0, 2), (2, 0), (0, 0)] {
+            assert!(matches!(
+                PreviewFrame {
+                    width,
+                    height,
+                    rgba: Vec::new(),
+                    ..valid.clone()
+                }
+                .validate(),
+                Err(FrameError::InvalidPayload(_))
+            ));
+        }
         assert_eq!(
             PreviewFrame {
                 width: 257,

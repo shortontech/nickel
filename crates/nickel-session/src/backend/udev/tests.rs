@@ -3,7 +3,7 @@ use super::{
     RendererLifecycleLedger, RendererRetainedReason, TaskSwitcherBufferKey,
     consume_pending_dependent, contained_preview_bounds, copy_capture_damage,
     copy_mapped_damage_to_strided, copy_mapped_region_to_strided, damage_bounding_box,
-    dependent_renderers_after_primary_removal, device_activation_priority,
+    dependent_renderers_after_primary_removal, device_activation_priority, draw_contained_preview,
     draw_memory_render_buffer, drm_render_strategy, mapped_damage_rows,
     mark_disabled_outputs_absent, normalize_capture_rows, paced_render_delay,
     parse_kde_cursor_settings, pending_recovery_devices, primary_dependency_to_activate,
@@ -42,6 +42,61 @@ fn task_switcher_preview_containment_preserves_aspect_and_centers() {
             let ideal_width = source.0 as f64 * bounds.3 as f64 / source.1 as f64;
             assert!((ideal_width - bounds.2 as f64).abs() <= 1.0);
         }
+    }
+}
+
+#[test]
+fn task_switcher_containment_preserves_pixels_and_letterbox() {
+    let background = image::Rgba([9, 11, 13, 255]);
+    for source_size in [(13, 5), (16, 9), (12, 9), (9, 9), (5, 13)] {
+        let mut source = image::RgbaImage::from_pixel(
+            source_size.0,
+            source_size.1,
+            image::Rgba([40, 80, 120, 255]),
+        );
+        // Asymmetric landmarks catch transposition, cropping, and mirroring.
+        source.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
+        source.put_pixel(source_size.0 - 1, 0, image::Rgba([0, 255, 0, 255]));
+        source.put_pixel(0, source_size.1 - 1, image::Rgba([0, 0, 255, 255]));
+        let center = (source_size.0 / 2, source_size.1 / 2);
+        source.put_pixel(center.0, center.1, image::Rgba([255, 255, 255, 255]));
+
+        let viewport = (7, 5, 41, 29);
+        let bounds = contained_preview_bounds(
+            viewport.0,
+            viewport.1,
+            viewport.2,
+            viewport.3,
+            source_size.0,
+            source_size.1,
+        );
+        let mut destination = image::RgbaImage::from_pixel(56, 40, background);
+        draw_contained_preview(&mut destination, &source, viewport);
+
+        // Pixels outside the contained rectangle are true letterbox pixels.
+        for y in viewport.1..viewport.1 + viewport.3 {
+            for x in viewport.0..viewport.0 + viewport.2 {
+                let inside = x >= bounds.0
+                    && x < bounds.0 + bounds.2
+                    && y >= bounds.1
+                    && y < bounds.1 + bounds.3;
+                assert_eq!(
+                    destination.get_pixel(x, y) == &background,
+                    !inside,
+                    "source {source_size:?}, pixel ({x}, {y}), bounds {bounds:?}"
+                );
+            }
+        }
+        assert_ne!(
+            destination.get_pixel(bounds.0, bounds.1),
+            destination.get_pixel(bounds.0 + bounds.2 - 1, bounds.1),
+            "asymmetric top landmarks survive for {source_size:?}"
+        );
+        assert_ne!(
+            destination.get_pixel(bounds.0, bounds.1),
+            destination.get_pixel(bounds.0, bounds.1 + bounds.3 - 1),
+            "asymmetric left landmarks survive for {source_size:?}"
+        );
     }
 }
 use smithay::utils::{Buffer, Physical, Rectangle, Size};

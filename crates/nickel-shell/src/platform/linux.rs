@@ -1480,11 +1480,7 @@ impl WindowFeed {
         else {
             return None;
         };
-        let image = image::RgbaImage::from_raw(
-            u32::from(preview.width),
-            u32::from(preview.height),
-            preview.rgba,
-        )?;
+        let image = protocol_preview_image(preview)?;
         Some(WindowPreview { window, image })
     }
 
@@ -1495,6 +1491,17 @@ impl WindowFeed {
     pub fn icon(&self, _: WindowId) -> Option<image::RgbaImage> {
         None
     }
+}
+
+fn protocol_preview_image(
+    preview: nickel_session_protocol::PreviewFrame,
+) -> Option<image::RgbaImage> {
+    preview.validate().ok()?;
+    image::RgbaImage::from_raw(
+        u32::from(preview.width),
+        u32::from(preview.height),
+        preview.rgba,
+    )
 }
 
 fn owning_output(
@@ -1934,6 +1941,7 @@ fn resolve_application_id(native_app_id: &str, launcher: &Launcher) -> Option<Ap
 
 #[cfg(test)]
 mod tests {
+    use super::protocol_preview_image;
     use std::io;
     use std::time::Duration;
 
@@ -2406,5 +2414,37 @@ mod tests {
             .expect("valid window snapshot");
         assert_eq!(window.title, "Project shell");
         assert!(window.active);
+    }
+
+    #[test]
+    fn preview_transport_metadata_is_validated_before_image_construction() {
+        let valid = nickel_session_protocol::PreviewFrame {
+            window: nickel_session_protocol::WindowId(7),
+            width: 2,
+            height: 1,
+            rgba: vec![1, 2, 3, 255, 4, 5, 6, 255],
+        };
+        let image = protocol_preview_image(valid.clone()).expect("valid preview");
+        assert_eq!(image.dimensions(), (2, 1));
+        assert_eq!(image.as_raw(), &valid.rgba);
+
+        for invalid in [
+            nickel_session_protocol::PreviewFrame {
+                width: 0,
+                height: 1,
+                rgba: Vec::new(),
+                ..valid.clone()
+            },
+            nickel_session_protocol::PreviewFrame {
+                width: nickel_session_protocol::MAX_PREVIEW_WIDTH + 1,
+                ..valid.clone()
+            },
+            nickel_session_protocol::PreviewFrame {
+                rgba: vec![0; 7],
+                ..valid
+            },
+        ] {
+            assert!(protocol_preview_image(invalid).is_none());
+        }
     }
 }

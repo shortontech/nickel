@@ -3259,6 +3259,36 @@ fn contained_preview_bounds(
     )
 }
 
+fn draw_contained_preview<D, S>(destination: &mut D, source: &S, viewport: (u32, u32, u32, u32))
+where
+    D: image::GenericImage<Pixel = image::Rgba<u8>>,
+    S: image::GenericImageView<Pixel = image::Rgba<u8>>,
+{
+    let (thumbnail_x, thumbnail_y, thumbnail_width, thumbnail_height) = contained_preview_bounds(
+        viewport.0,
+        viewport.1,
+        viewport.2,
+        viewport.3,
+        source.width(),
+        source.height(),
+    );
+    if thumbnail_width == 0 || thumbnail_height == 0 {
+        return;
+    }
+    let thumbnail = image::imageops::resize(
+        source,
+        thumbnail_width,
+        thumbnail_height,
+        image::imageops::FilterType::Triangle,
+    );
+    image::imageops::overlay(
+        destination,
+        &thumbnail,
+        i64::from(thumbnail_x),
+        i64::from(thumbnail_y),
+    );
+}
+
 fn task_switcher_buffer(
     state: &NickelSession,
     output_size: smithay::utils::Size<i32, Physical>,
@@ -3319,29 +3349,10 @@ fn task_switcher_buffer(
             ) else {
                 continue;
             };
-            let (thumbnail_x, thumbnail_y, thumbnail_width, thumbnail_height) =
-                contained_preview_bounds(
-                    x + 8,
-                    padding + 8,
-                    card_width - 16,
-                    card_height - 16,
-                    source.width(),
-                    source.height(),
-                );
-            if thumbnail_width == 0 || thumbnail_height == 0 {
-                continue;
-            }
-            let thumbnail = image::imageops::resize(
-                &source,
-                thumbnail_width,
-                thumbnail_height,
-                image::imageops::FilterType::Triangle,
-            );
-            image::imageops::overlay(
+            draw_contained_preview(
                 &mut image,
-                &thumbnail,
-                i64::from(thumbnail_x),
-                i64::from(thumbnail_y),
+                &source,
+                (x + 8, padding + 8, card_width - 16, card_height - 16),
             );
         }
     });

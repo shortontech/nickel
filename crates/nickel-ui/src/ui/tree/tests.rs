@@ -546,6 +546,42 @@ fn image_presentations_resolve_deterministic_bounds_and_alignment() {
 }
 
 #[test]
+fn preview_containment_is_scale_invariant_and_rejects_invalid_source_metadata() {
+    let presentation = ImagePresentation::new(ImageFit::Contain);
+    let logical_viewport = Rect::new(7.0, 11.0, 203.0, 137.0);
+    let source = Size::new(1919.0, 1079.0);
+    let logical = presentation.bounds(logical_viewport, source);
+
+    for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+        let physical = presentation.bounds(
+            Rect::new(
+                logical_viewport.origin.x * scale,
+                logical_viewport.origin.y * scale,
+                logical_viewport.size.width * scale,
+                logical_viewport.size.height * scale,
+            ),
+            Size::new(source.width * scale, source.height * scale),
+        );
+        assert!((physical.origin.x / scale - logical.origin.x).abs() < 0.01);
+        assert!((physical.origin.y / scale - logical.origin.y).abs() < 0.01);
+        assert!((physical.size.width / scale - logical.size.width).abs() < 0.01);
+        assert!((physical.size.height / scale - logical.size.height).abs() < 0.01);
+    }
+
+    for invalid in [
+        Size::new(0.0, 10.0),
+        Size::new(10.0, 0.0),
+        Size::new(f32::NAN, 10.0),
+        Size::new(10.0, f32::INFINITY),
+    ] {
+        assert_eq!(
+            presentation.bounds(logical_viewport, invalid).size,
+            Size::new(0.0, 0.0)
+        );
+    }
+}
+
+#[test]
 fn tile_repeats_within_the_real_clip_and_high_density_is_renderer_owned() {
     let source = Arc::new(RgbaImage::new(20, 20));
     let two_x = Arc::new(RgbaImage::new(40, 40));

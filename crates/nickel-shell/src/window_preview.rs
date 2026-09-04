@@ -721,7 +721,8 @@ mod tests {
     use super::*;
     use crate::model::OpenWindow;
     use nickel_core::theme::Appearance;
-    use nickel_ui::{ActionKind, SemanticAction};
+    use nickel_ui::backend::PaintCommand;
+    use nickel_ui::{ActionKind, ImagePresentation, SemanticAction, Size};
 
     #[test]
     fn native_thumbnails_follow_card_geometry() {
@@ -748,6 +749,47 @@ mod tests {
                 Some(expected_activation),
                 "source {source:?} must not move interaction geometry"
             );
+        }
+    }
+
+    #[test]
+    fn grouped_preview_commands_contain_and_center_every_source_shape() {
+        let palette = ThemePalette::from_appearance(Appearance::default());
+        let viewport = native_thumbnail_bounds(0);
+        let viewport = Rect::new(
+            viewport.0 as f32,
+            viewport.1 as f32,
+            (viewport.2 - viewport.0) as f32,
+            (viewport.3 - viewport.1) as f32,
+        );
+        for source in [
+            (3440, 1440),
+            (1920, 1080),
+            (1200, 900),
+            (999, 999),
+            (900, 1600),
+        ] {
+            let mut previews = HashMap::new();
+            previews.insert(
+                WindowId(4),
+                Arc::new(image::RgbaImage::new(source.0, source.1)),
+            );
+            let frame = build_preview_frame(&group(), &previews, None, palette);
+            let actual = frame
+                .commands()
+                .iter()
+                .find_map(|command| match command {
+                    PaintCommand::Image { id, bounds, .. }
+                        if *id == preview_image_id(WindowId(4)) =>
+                    {
+                        Some(*bounds)
+                    }
+                    _ => None,
+                })
+                .expect("grouped preview emits its image command");
+            let expected = ImagePresentation::default()
+                .bounds(viewport, Size::new(source.0 as f32, source.1 as f32));
+            assert_eq!(actual, expected, "source {source:?}");
         }
     }
 
