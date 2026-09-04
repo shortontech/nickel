@@ -508,7 +508,11 @@ enum SettingsEffect {
 }
 
 fn desktop_count_message(fraction: f32) -> SettingsMessage {
-    SettingsMessage::SetDesktopCount(1 + (fraction.clamp(0.0, 1.0) * 7.0).round() as u8)
+    SettingsMessage::SetDesktopCount(
+        1 + (fraction.clamp(0.0, 1.0)
+            * f32::from(nickel_core::shell_settings::MAX_CONFIGURED_WORKSPACES - 1))
+        .round() as u8,
+    )
 }
 
 fn appearance_hue_message(fraction: f32) -> SettingsMessage {
@@ -1055,7 +1059,7 @@ impl SettingsApp {
     }
 
     fn set_desktop_count(&mut self, count: u8) {
-        let count = count.clamp(1, 8);
+        let count = count.clamp(1, nickel_core::shell_settings::MAX_CONFIGURED_WORKSPACES);
         if count == self.shell_settings.desktop_count {
             return;
         }

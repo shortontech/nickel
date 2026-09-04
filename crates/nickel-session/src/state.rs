@@ -3124,6 +3124,22 @@ impl NickelSession {
         }
     }
 
+    pub fn switch_workspace_number(&mut self, number: usize) {
+        let Some(target) = self
+            .workspaces
+            .ordered()
+            .get(number.saturating_sub(1))
+            .map(|workspace| workspace.id)
+        else {
+            tracing::debug!(number, "workspace shortcut target is not configured");
+            return;
+        };
+        let output = self.output_name_at_pointer();
+        if let Ok(transition) = self.workspaces.switch_to(target, output) {
+            self.apply_workspace_transition(transition);
+        }
+    }
+
     pub fn move_active_window_to_workspace(
         &mut self,
         direction: nickel_core::workspaces::WorkspaceDirection,

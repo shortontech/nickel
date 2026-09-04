@@ -1262,10 +1262,26 @@ fn reconcile_modifier_release(timer: usize) {
 
 fn windows_input_adapter() -> &'static Mutex<WindowsInputAdapter<HotkeyAction>> {
     WINDOWS_INPUT_ADAPTER.get_or_init(|| {
-        Mutex::new(WindowsInputAdapter::new(
-            nickel_core::hotkeys::default_bindings(),
-        ))
+        let bindings: Vec<_> = nickel_core::hotkeys::default_bindings()
+            .into_iter()
+            .filter(|binding| !is_workspace_action(binding.action))
+            .collect();
+        tracing::info!(
+            "workspace shortcuts are host-owned on Windows; Nickel leaves them unregistered"
+        );
+        Mutex::new(WindowsInputAdapter::new(bindings))
     })
+}
+
+fn is_workspace_action(action: HotkeyAction) -> bool {
+    matches!(
+        action,
+        HotkeyAction::SwitchWorkspacePrevious
+            | HotkeyAction::SwitchWorkspaceNext
+            | HotkeyAction::SwitchWorkspace(_)
+            | HotkeyAction::MoveWindowToPreviousWorkspace
+            | HotkeyAction::MoveWindowToNextWorkspace
+    )
 }
 
 fn windows_input_snapshot(adapter: &WindowsInputAdapter<HotkeyAction>) -> HotkeySnapshot {
@@ -1368,6 +1384,7 @@ fn send_hotkey_action(action: Option<HotkeyAction>) {
         Some(
             HotkeyAction::SwitchWorkspacePrevious
             | HotkeyAction::SwitchWorkspaceNext
+            | HotkeyAction::SwitchWorkspace(_)
             | HotkeyAction::MoveWindowToPreviousWorkspace
             | HotkeyAction::MoveWindowToNextWorkspace,
         ) => return,

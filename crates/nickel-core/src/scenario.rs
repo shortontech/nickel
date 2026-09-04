@@ -880,6 +880,26 @@ impl Scenario {
                     });
                 Some(self.workspaces.switch_to(target, output))
             }
+            HotkeyAction::SwitchWorkspace(number) => {
+                let target = self
+                    .workspaces
+                    .ordered()
+                    .get(number.saturating_sub(1))
+                    .map(|workspace| workspace.id);
+                target.map(|target| {
+                    let output = self
+                        .workspaces
+                        .active_output()
+                        .map(str::to_owned)
+                        .or_else(|| {
+                            self.outputs
+                                .outputs()
+                                .first()
+                                .map(|output| output.name.clone())
+                        });
+                    self.workspaces.switch_to(target, output)
+                })
+            }
             HotkeyAction::MoveWindowToPreviousWorkspace
             | HotkeyAction::MoveWindowToNextWorkspace => {
                 let direction = if action == HotkeyAction::MoveWindowToPreviousWorkspace {

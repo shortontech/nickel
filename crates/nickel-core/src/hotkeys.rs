@@ -26,6 +26,7 @@ pub enum HotkeyAction {
     ShowScreenshotTool,
     SwitchWorkspacePrevious,
     SwitchWorkspaceNext,
+    SwitchWorkspace(usize),
     MoveWindowToPreviousWorkspace,
     MoveWindowToNextWorkspace,
 }
@@ -234,8 +235,32 @@ impl CompositorShortcutAdapter {
                         && modifiers.aggregate(AggregateModifier::Alt))
             }
             KeyCode::ArrowLeft | KeyCode::ArrowRight => {
-                modifiers.aggregate(AggregateModifier::Super)
-                    && modifiers.aggregate(AggregateModifier::Control)
+                modifiers.aggregate(AggregateModifier::Control)
+                    && (modifiers.aggregate(AggregateModifier::Super)
+                        || modifiers.aggregate(AggregateModifier::Alt))
+            }
+            KeyCode::Digit0
+            | KeyCode::Digit1
+            | KeyCode::Digit2
+            | KeyCode::Digit3
+            | KeyCode::Digit4
+            | KeyCode::Digit5
+            | KeyCode::Digit6
+            | KeyCode::Digit7
+            | KeyCode::Digit8
+            | KeyCode::Digit9
+            | KeyCode::Numpad0
+            | KeyCode::Numpad1
+            | KeyCode::Numpad2
+            | KeyCode::Numpad3
+            | KeyCode::Numpad4
+            | KeyCode::Numpad5
+            | KeyCode::Numpad6
+            | KeyCode::Numpad7
+            | KeyCode::Numpad8
+            | KeyCode::Numpad9 => {
+                modifiers.aggregate(AggregateModifier::Control)
+                    && modifiers.aggregate(AggregateModifier::Alt)
             }
             _ => false,
         }
@@ -391,6 +416,18 @@ fn compositor_registrations() -> Vec<Registration<HotkeyAction>> {
         ),
         registration(
             KeyCode::ArrowLeft,
+            [Control, Alt],
+            ShortcutTrigger::Pressed,
+            SwitchWorkspacePrevious,
+        ),
+        registration(
+            KeyCode::ArrowRight,
+            [Control, Alt],
+            ShortcutTrigger::Pressed,
+            SwitchWorkspaceNext,
+        ),
+        registration(
+            KeyCode::ArrowLeft,
             [Control, Shift, Super],
             ShortcutTrigger::Pressed,
             MoveWindowToPreviousWorkspace,
@@ -420,6 +457,43 @@ fn compositor_registrations() -> Vec<Registration<HotkeyAction>> {
             CaptureActiveWindowToFile,
         ),
     ]
+    .into_iter()
+    .chain(workspace_number_registrations())
+    .collect()
+}
+
+fn workspace_number_registrations() -> impl Iterator<Item = Registration<HotkeyAction>> {
+    use AggregateModifier::{Alt, Control};
+    let keys = [
+        KeyCode::Digit1,
+        KeyCode::Digit2,
+        KeyCode::Digit3,
+        KeyCode::Digit4,
+        KeyCode::Digit5,
+        KeyCode::Digit6,
+        KeyCode::Digit7,
+        KeyCode::Digit8,
+        KeyCode::Digit9,
+        KeyCode::Digit0,
+        KeyCode::Numpad1,
+        KeyCode::Numpad2,
+        KeyCode::Numpad3,
+        KeyCode::Numpad4,
+        KeyCode::Numpad5,
+        KeyCode::Numpad6,
+        KeyCode::Numpad7,
+        KeyCode::Numpad8,
+        KeyCode::Numpad9,
+        KeyCode::Numpad0,
+    ];
+    keys.into_iter().enumerate().map(|(index, key)| {
+        registration(
+            key,
+            [Control, Alt],
+            ShortcutTrigger::Pressed,
+            HotkeyAction::SwitchWorkspace(index % 10 + 1),
+        )
+    })
 }
 
 /// Product bindings consumed by platform-neutral shortcut engines.
@@ -894,6 +968,64 @@ mod tests {
                 .handle(KeyCode::ArrowLeft, KeyEdge::Pressed)
                 .action,
             Some(HotkeyAction::MoveWindowToPreviousWorkspace)
+        );
+    }
+
+    #[test]
+    fn ctrl_alt_workspace_aliases_accept_both_modifier_sides() {
+        for (control, alt) in [
+            (KeyCode::ControlLeft, KeyCode::AltLeft),
+            (KeyCode::ControlRight, KeyCode::AltRight),
+            (KeyCode::ControlLeft, KeyCode::AltRight),
+            (KeyCode::ControlRight, KeyCode::AltLeft),
+        ] {
+            let mut adapter = CompositorShortcutAdapter::default();
+            adapter.handle(control, KeyEdge::Pressed);
+            adapter.handle(alt, KeyEdge::Pressed);
+            assert_eq!(
+                adapter.handle(KeyCode::ArrowLeft, KeyEdge::Pressed),
+                HotkeyOutcome {
+                    action: Some(HotkeyAction::SwitchWorkspacePrevious),
+                    suppress: true,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn top_row_and_keypad_digits_select_the_same_one_based_workspace() {
+        for (top, keypad, number) in [
+            (KeyCode::Digit1, KeyCode::Numpad1, 1),
+            (KeyCode::Digit5, KeyCode::Numpad5, 5),
+            (KeyCode::Digit9, KeyCode::Numpad9, 9),
+            (KeyCode::Digit0, KeyCode::Numpad0, 10),
+        ] {
+            for key in [top, keypad] {
+                let mut adapter = CompositorShortcutAdapter::default();
+                adapter.handle(KeyCode::ControlRight, KeyEdge::Pressed);
+                adapter.handle(KeyCode::AltLeft, KeyEdge::Pressed);
+                assert_eq!(
+                    adapter.handle(key, KeyEdge::Pressed),
+                    HotkeyOutcome {
+                        action: Some(HotkeyAction::SwitchWorkspace(number)),
+                        suppress: true,
+                    }
+                );
+                assert_eq!(adapter.handle(key, KeyEdge::Pressed).action, None);
+                assert!(adapter.handle(key, KeyEdge::Pressed).suppress);
+            }
+        }
+    }
+
+    #[test]
+    fn reset_clears_workspace_chords_after_lost_releases() {
+        let mut adapter = CompositorShortcutAdapter::default();
+        adapter.handle(KeyCode::ControlLeft, KeyEdge::Pressed);
+        adapter.handle(KeyCode::AltRight, KeyEdge::Pressed);
+        adapter.reset_pressed_state();
+        assert_eq!(
+            adapter.handle(KeyCode::Digit2, KeyEdge::Pressed),
+            HotkeyOutcome::default()
         );
     }
 

@@ -29,6 +29,28 @@ fn workspace_keyboard_chords_reach_the_workspace_reducer() {
 }
 
 #[test]
+fn ctrl_alt_numeric_selection_uses_the_same_workspace_reducer() {
+    scenario("numeric workspace shortcut uses production reducers")
+        .output("DP-1", 1920, 1080, 0)
+        .window("editor")
+        .app("editor")
+        .active()
+        .create_workspace("second")
+        .key_edge(KeyCode::ControlRight, KeyEdge::Pressed)
+        .key_edge(KeyCode::AltLeft, KeyEdge::Pressed)
+        .key_edge(KeyCode::Numpad2, KeyEdge::Pressed)
+        .key_edge(KeyCode::Numpad2, KeyEdge::Released)
+        .key_edge(KeyCode::AltLeft, KeyEdge::Released)
+        .key_edge(KeyCode::ControlRight, KeyEdge::Released)
+        .expect_actions(&[HotkeyAction::SwitchWorkspace(2)])
+        .expect_workspace("second")
+        .expect_authority_path(
+            "window.workspace.visible",
+            &["ShortcutEngine", "Workspaces directional reducer"],
+        );
+}
+
+#[test]
 fn workspace_switch_hides_shows_and_restores_focus_in_order() {
     scenario("workspace switch owns visibility and focus ordering")
         .output("DP-1", 1920, 1080, 0)

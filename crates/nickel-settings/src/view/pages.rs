@@ -731,9 +731,11 @@ impl SettingsApp {
                     {self.localizer.number("settings-bar-desktop-count", "count", i64::from(self.shell_settings.desktop_count))}
                 </Text>
                 <Slider id={"bar-desktop-count"}
-                    value={f32::from(self.shell_settings.desktop_count.saturating_sub(1)) / 7.0}
+                    value={f32::from(self.shell_settings.desktop_count.saturating_sub(1)) /
+                        f32::from(nickel_core::shell_settings::MAX_CONFIGURED_WORKSPACES - 1)}
                     on_change={desktop_count_message} width={520.0}
-                    adjustment_step={1.0 / 7.0}
+                    adjustment_step={1.0 /
+                        f32::from(nickel_core::shell_settings::MAX_CONFIGURED_WORKSPACES - 1)}
                     focus_background_tint={theme.borders.focus}
                     controller_focus_background_tint={theme.borders.controller_focus} />
                 <Row height={46.0} gap={8.0} children={desktop_choices} />
@@ -1133,6 +1135,16 @@ impl SettingsApp {
             theme,
             self.localizer.text("settings-keyboard-back"),
             "Escape",
+        ))
+        .child(SettingsRow::new(
+            theme,
+            self.localizer.text("settings-keyboard-workspaces"),
+            if cfg!(target_os = "windows") {
+                self.localizer
+                    .text("settings-keyboard-workspaces-unavailable")
+            } else {
+                self.localizer.text("settings-keyboard-workspaces-value")
+            },
         ))
     }
 

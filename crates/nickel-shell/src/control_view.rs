@@ -585,7 +585,7 @@ fn audio_view(status: &AudioStatus, expanded: bool) -> Card {
 fn workspaces_view(workspaces: &[WorkspaceSummary]) -> Card {
     let mut controls = workspaces
         .iter()
-        .take(8)
+        .take(10)
         .enumerate()
         .map(|(index, workspace)| {
             AnyView::new(

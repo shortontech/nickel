@@ -318,6 +318,9 @@ impl NickelSession {
                                 && modifiers.alt
                                 && let Some(vt) = vt_from_keysym(sym)
                             {
+                                if state == KeyState::Pressed {
+                                    session.hotkeys.reset_pressed_state();
+                                }
                                 return FilterResult::Intercept(
                                     (state == KeyState::Pressed).then_some(vt),
                                 );
@@ -371,6 +374,9 @@ impl NickelSession {
                                     .switch_workspace_direction(
                                         nickel_core::workspaces::WorkspaceDirection::Next,
                                     ),
+                                Some(HotkeyAction::SwitchWorkspace(number)) => {
+                                    session.switch_workspace_number(number)
+                                }
                                 Some(HotkeyAction::MoveWindowToPreviousWorkspace) => session
                                     .move_active_window_to_workspace(
                                         nickel_core::workspaces::WorkspaceDirection::Previous,
@@ -1121,6 +1127,26 @@ fn key_code_from_keysym(sym: Keysym) -> Option<KeyCode> {
         value if value == Keysym::new(keysyms::KEY_Control_R) => Some(KeyCode::ControlRight),
         value if value == Keysym::new(keysyms::KEY_Left) => Some(KeyCode::ArrowLeft),
         value if value == Keysym::new(keysyms::KEY_Right) => Some(KeyCode::ArrowRight),
+        value if value == Keysym::new(keysyms::KEY_0) => Some(KeyCode::Digit0),
+        value if value == Keysym::new(keysyms::KEY_1) => Some(KeyCode::Digit1),
+        value if value == Keysym::new(keysyms::KEY_2) => Some(KeyCode::Digit2),
+        value if value == Keysym::new(keysyms::KEY_3) => Some(KeyCode::Digit3),
+        value if value == Keysym::new(keysyms::KEY_4) => Some(KeyCode::Digit4),
+        value if value == Keysym::new(keysyms::KEY_5) => Some(KeyCode::Digit5),
+        value if value == Keysym::new(keysyms::KEY_6) => Some(KeyCode::Digit6),
+        value if value == Keysym::new(keysyms::KEY_7) => Some(KeyCode::Digit7),
+        value if value == Keysym::new(keysyms::KEY_8) => Some(KeyCode::Digit8),
+        value if value == Keysym::new(keysyms::KEY_9) => Some(KeyCode::Digit9),
+        value if value == Keysym::new(keysyms::KEY_KP_0) => Some(KeyCode::Numpad0),
+        value if value == Keysym::new(keysyms::KEY_KP_1) => Some(KeyCode::Numpad1),
+        value if value == Keysym::new(keysyms::KEY_KP_2) => Some(KeyCode::Numpad2),
+        value if value == Keysym::new(keysyms::KEY_KP_3) => Some(KeyCode::Numpad3),
+        value if value == Keysym::new(keysyms::KEY_KP_4) => Some(KeyCode::Numpad4),
+        value if value == Keysym::new(keysyms::KEY_KP_5) => Some(KeyCode::Numpad5),
+        value if value == Keysym::new(keysyms::KEY_KP_6) => Some(KeyCode::Numpad6),
+        value if value == Keysym::new(keysyms::KEY_KP_7) => Some(KeyCode::Numpad7),
+        value if value == Keysym::new(keysyms::KEY_KP_8) => Some(KeyCode::Numpad8),
+        value if value == Keysym::new(keysyms::KEY_KP_9) => Some(KeyCode::Numpad9),
         value
             if value == Keysym::new(keysyms::KEY_Tab)
                 || value == Keysym::new(keysyms::KEY_ISO_Left_Tab) =>
@@ -1291,6 +1317,26 @@ mod tests {
         assert_eq!(
             super::key_code_from_keysym(Keysym::new(keysyms::KEY_ISO_Left_Tab)),
             Some(nickel_core::hotkeys::KeyCode::Tab)
+        );
+    }
+
+    #[test]
+    fn xkb_top_row_and_keypad_digits_keep_distinct_physical_workspace_keys() {
+        assert_eq!(
+            super::key_code_from_keysym(Keysym::new(keysyms::KEY_0)),
+            Some(nickel_core::hotkeys::KeyCode::Digit0)
+        );
+        assert_eq!(
+            super::key_code_from_keysym(Keysym::new(keysyms::KEY_7)),
+            Some(nickel_core::hotkeys::KeyCode::Digit7)
+        );
+        assert_eq!(
+            super::key_code_from_keysym(Keysym::new(keysyms::KEY_KP_0)),
+            Some(nickel_core::hotkeys::KeyCode::Numpad0)
+        );
+        assert_eq!(
+            super::key_code_from_keysym(Keysym::new(keysyms::KEY_KP_7)),
+            Some(nickel_core::hotkeys::KeyCode::Numpad7)
         );
     }
 

@@ -6,6 +6,9 @@ use std::{
 
 use crate::theme::{Appearance, ThemeMode, accent_from_hue, accent_hue};
 
+pub const SHELL_SETTINGS_VERSION: u8 = 1;
+pub const MAX_CONFIGURED_WORKSPACES: u8 = 10;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ThemePreference {
     System,
@@ -101,6 +104,13 @@ impl ShellSettings {
 
     pub fn load(path: impl AsRef<Path>) -> io::Result<Self> {
         let contents = fs::read_to_string(path)?;
+        if let Some(version) = contents
+            .lines()
+            .find_map(|line| line.strip_prefix("version="))
+            && version.trim().parse::<u8>().ok() != Some(SHELL_SETTINGS_VERSION)
+        {
+            return Ok(Self::default());
+        }
         let mut settings = Self::default();
         for line in contents.lines() {
             let Some((key, value)) = line.split_once('=') else {
@@ -110,9 +120,15 @@ impl ShellSettings {
                 "bar_on_all_displays" => settings.bar_on_all_displays = parse_bool(value),
                 "all_windows_on_every_bar" => settings.all_windows_on_every_bar = parse_bool(value),
                 "desktop_count" => {
-                    settings.desktop_count = value.trim().parse().unwrap_or(4).clamp(1, 8)
+                    settings.desktop_count = value
+                        .trim()
+                        .parse()
+                        .unwrap_or(4)
+                        .clamp(1, MAX_CONFIGURED_WORKSPACES)
                 }
-                "active_desktop" => settings.active_desktop = value.trim().parse().unwrap_or(0),
+                // Legacy files may contain this transient value. Workspace selection is not
+                // restored across sessions, so it is intentionally ignored.
+                "active_desktop" => {}
                 "theme" => {
                     settings.theme = match value.trim() {
                         "light" => ThemePreference::Light,
@@ -155,9 +171,6 @@ impl ShellSettings {
                 _ => {}
             }
         }
-        settings.active_desktop = settings
-            .active_desktop
-            .min(settings.desktop_count.saturating_sub(1));
         Ok(settings)
     }
 
@@ -166,11 +179,11 @@ impl ShellSettings {
         atomic_write(
             path,
             format!(
-                "bar_on_all_displays={}\nall_windows_on_every_bar={}\ndesktop_count={}\nactive_desktop={}\ntheme={}\naccent_hue={}\naccent_intensity={}\nreduce_transparency={}\nanimations={}\nfile_icon_provider={}\nfile_icon_theme={}\npreferred_terminal={}\npreferred_file_manager={}\nidle_dim_seconds={}\nidle_lock_seconds={}\nidle_suspend_seconds={}\n",
+                "version={}\nbar_on_all_displays={}\nall_windows_on_every_bar={}\ndesktop_count={}\ntheme={}\naccent_hue={}\naccent_intensity={}\nreduce_transparency={}\nanimations={}\nfile_icon_provider={}\nfile_icon_theme={}\npreferred_terminal={}\npreferred_file_manager={}\nidle_dim_seconds={}\nidle_lock_seconds={}\nidle_suspend_seconds={}\n",
+                SHELL_SETTINGS_VERSION,
                 self.bar_on_all_displays,
                 self.all_windows_on_every_bar,
                 self.desktop_count,
-                self.active_desktop,
                 match self.theme {
                     ThemePreference::System => "system",
                     ThemePreference::Light => "light",
@@ -254,7 +267,10 @@ fn settings_path() -> io::Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AnimationLevel, FileIconPreference, ShellSettings, ThemePreference};
+    use super::{
+        AnimationLevel, FileIconPreference, MAX_CONFIGURED_WORKSPACES, SHELL_SETTINGS_VERSION,
+        ShellSettings, ThemePreference,
+    };
 
     #[test]
     fn defaults_to_two_display_friendly_bar_and_four_desktops() {
@@ -329,6 +345,65 @@ mod tests {
         let loaded = ShellSettings::load(&path).expect("load settings");
         std::fs::remove_file(path).expect("remove settings fixture");
 
-        assert_eq!(loaded, settings);
+        assert_eq!(loaded.active_desktop, 0);
+        assert_eq!(
+            loaded,
+            ShellSettings {
+                active_desktop: 0,
+                ..settings
+            }
+        );
+    }
+
+    #[test]
+    fn malformed_workspace_count_repairs_only_that_setting() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("shell-settings");
+        std::fs::write(
+            &path,
+            format!(
+                "version={SHELL_SETTINGS_VERSION}\ndesktop_count=broken\nbar_on_all_displays=false\ntheme=dark\n"
+            ),
+        )
+        .unwrap();
+        let loaded = ShellSettings::load(path).unwrap();
+        assert_eq!(loaded.desktop_count, 4);
+        assert!(!loaded.bar_on_all_displays);
+        assert_eq!(loaded.theme, ThemePreference::Dark);
+    }
+
+    #[test]
+    fn workspace_count_is_validated_through_the_tenth_numeric_binding() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("shell-settings");
+        std::fs::write(&path, "desktop_count=255\nactive_desktop=8\n").unwrap();
+        let loaded = ShellSettings::load(path).unwrap();
+        assert_eq!(loaded.desktop_count, MAX_CONFIGURED_WORKSPACES);
+        assert_eq!(loaded.active_desktop, 0);
+    }
+
+    #[test]
+    fn unsupported_settings_versions_fall_back_without_rewriting_the_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("shell-settings");
+        let contents = "version=255\ndesktop_count=9\ntheme=dark\n";
+        std::fs::write(&path, contents).unwrap();
+        assert_eq!(
+            ShellSettings::load(&path).unwrap(),
+            ShellSettings::default()
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), contents);
+    }
+
+    #[test]
+    fn repeated_saves_replace_the_complete_settings_atomically() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("shell-settings");
+        let mut settings = ShellSettings::default();
+        settings.save(&path).unwrap();
+        settings.desktop_count = 10;
+        settings.theme = ThemePreference::Dark;
+        settings.save(&path).unwrap();
+        assert_eq!(ShellSettings::load(path).unwrap(), settings);
     }
 }
