@@ -5257,7 +5257,7 @@ impl NickelSession {
         self.output_name_for_window(&self.window_for_registry_id(id)?)
     }
 
-    fn output_name_for_window(&self, window: &Window) -> Option<String> {
+    pub(crate) fn output_name_for_window(&self, window: &Window) -> Option<String> {
         let geometry = self.output_geometry_for_window(window)?;
         self.space.outputs().find_map(|output| {
             let candidate = self.space.output_geometry(output)?;
@@ -5323,19 +5323,6 @@ impl NickelSession {
                 })
             })
             .collect()
-    }
-
-    pub(crate) fn output_name_for_window(&self, window: &Window) -> Option<String> {
-        let geometry = self.output_geometry_for_window(window)?;
-        self.space.outputs().find_map(|output| {
-            self.space.output_geometry(output).and_then(|candidate| {
-                (candidate.loc.x == geometry.x
-                    && candidate.loc.y == geometry.y
-                    && candidate.size.w == geometry.width
-                    && candidate.size.h == geometry.height)
-                    .then(|| output.name())
-            })
-        })
     }
 
     fn output_geometry_for_window(&self, window: &Window) -> Option<Geometry> {
