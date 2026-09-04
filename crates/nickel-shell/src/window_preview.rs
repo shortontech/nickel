@@ -37,6 +37,7 @@ pub enum PreviewAction {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MenuAction {
+    Activate(WindowId),
     Close(WindowId),
     MaximizeRestore(WindowId),
     Minimize(WindowId),
@@ -122,18 +123,22 @@ fn window_menu_entries(
     workspaces: &[WorkspaceSummary],
 ) -> Vec<(String, MenuAction)> {
     let mut entries = vec![
-        ("Close".to_owned(), MenuAction::Close(window)),
+        (
+            "Activate / Restore".to_owned(),
+            MenuAction::Activate(window),
+        ),
+        ("Minimize".to_owned(), MenuAction::Minimize(window)),
         (
             "Maximize / Restore".to_owned(),
             MenuAction::MaximizeRestore(window),
         ),
-        ("Minimize".to_owned(), MenuAction::Minimize(window)),
     ];
     entries.extend(
         workspace_move_destinations(workspaces)
             .into_iter()
             .map(|(label, workspace)| (label, MenuAction::MoveToWorkspace(window, workspace))),
     );
+    entries.push(("Close Window".to_owned(), MenuAction::Close(window)));
     entries
 }
 
@@ -499,27 +504,19 @@ fn preview_view(
 
 pub fn menu_height(workspaces: &[WorkspaceSummary]) -> f32 {
     let destination_count = workspace_move_destinations(workspaces).len();
-    let row_count = 3 + destination_count;
+    let row_count = 4 + destination_count;
     MENU_PADDING * 2.0
         + row_count as f32 * MENU_ROW_HEIGHT
         + row_count.saturating_sub(1) as f32 * MENU_ROW_GAP
 }
 
 fn workspace_move_destinations(workspaces: &[WorkspaceSummary]) -> Vec<(String, u64)> {
-    let Some(active) = workspaces.iter().position(|workspace| workspace.active) else {
-        return Vec::new();
-    };
-    let mut destinations = Vec::with_capacity(2);
-    if let Some(previous) = active
-        .checked_sub(1)
-        .and_then(|index| workspaces.get(index))
-    {
-        destinations.push(("Move to previous workspace".to_owned(), previous.id));
-    }
-    if let Some(next) = workspaces.get(active + 1) {
-        destinations.push(("Move to next workspace".to_owned(), next.id));
-    }
-    destinations
+    workspaces
+        .iter()
+        .enumerate()
+        .filter(|(_, workspace)| !workspace.active)
+        .map(|(index, workspace)| (format!("Move to workspace {}", index + 1), workspace.id))
+        .collect()
 }
 
 pub fn window_title<'a>(title: &'a str, application_name: &'a str) -> &'a str {
@@ -703,11 +700,12 @@ mod tests {
             menu_height(&workspaces) as u32,
         );
         for action in [
-            MenuAction::Close(WindowId(9)),
-            MenuAction::MaximizeRestore(WindowId(9)),
+            MenuAction::Activate(WindowId(9)),
             MenuAction::Minimize(WindowId(9)),
+            MenuAction::MaximizeRestore(WindowId(9)),
             MenuAction::MoveToWorkspace(WindowId(9), 1),
             MenuAction::MoveToWorkspace(WindowId(9), 8),
+            MenuAction::Close(WindowId(9)),
         ] {
             let target = host
                 .semantic_targets_for_message(&action)
@@ -717,7 +715,7 @@ mod tests {
             host.perform_semantic_action(target.id, SemanticAction::Invoke(ActionKind::Activate));
             assert_eq!(host.application_mut().take_effects(), vec![action]);
         }
-        assert_eq!(host.semantic_nodes().len(), 5);
+        assert_eq!(host.semantic_nodes().len(), 6);
     }
 
     #[test]

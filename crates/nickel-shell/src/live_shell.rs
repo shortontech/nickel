@@ -125,6 +125,7 @@ enum PanelHover {
 pub enum PanelAction {
     Launcher,
     Task(usize),
+    TaskContext(usize),
     Codex,
     Tray(String),
     TrayContext(String),
@@ -527,6 +528,7 @@ pub struct LiveShell {
     preview_refresh_deadline: Option<Instant>,
     preview_frame: Option<WindowPreviewFrame>,
     window_menu: Option<crate::model::WindowId>,
+    window_menu_anchor_x: Option<i32>,
     window_menu_host: Option<nickel_ui::UiHost<WindowMenuApp>>,
     notification_host: NotificationHost,
     panel_origin_x: i32,
@@ -816,6 +818,7 @@ impl LiveShell {
             preview_refresh_deadline: None,
             preview_frame: None,
             window_menu: None,
+            window_menu_anchor_x: None,
             window_menu_host: None,
             notification_host,
             panel_origin_x: 0,
@@ -897,6 +900,13 @@ impl LiveShell {
                 }
             }
             changed |= self.window_icons.len() != previous_icon_count;
+            if self
+                .window_menu
+                .is_some_and(|target| !self.windows.iter().any(|window| window.id == target))
+            {
+                self.close_window_preview();
+                changed = true;
+            }
         }
         let workspaces = self.window_feed.workspaces();
         if update_feed_status(
@@ -1459,6 +1469,41 @@ impl LiveShell {
                     self.close_window_preview();
                 }
             }
+            PanelAction::TaskContext(index) => {
+                let panel_windows = self.panel_windows();
+                let groups = self.launcher.group_windows(&panel_windows);
+                let Some(window) = groups.get(index).and_then(|group| {
+                    group
+                        .windows
+                        .iter()
+                        .find(|window| window.active)
+                        .or_else(|| group.windows.first())
+                }) else {
+                    return;
+                };
+                let window = window.id;
+                self.close_window_preview();
+                self.window_menu = Some(window);
+                self.window_menu_host = None;
+                let x = self
+                    .panel_host
+                    .semantic_targets_for_message(&PanelAction::Task(index))
+                    .into_iter()
+                    .next()
+                    .map(|target| target.bounds.origin.x.round() as i32)
+                    .unwrap_or((PANEL_ITEM_WIDTH * (index + 1) as f32).round() as i32);
+                self.window_menu_anchor_x = Some(self.panel_origin_x + x);
+                let _ = send_session_command(
+                    "show-context-menu",
+                    ShellCommand::ShowContextMenu {
+                        x: self.panel_origin_x + x,
+                        width: MENU_WIDTH as i32,
+                        height: menu_height(&self.workspaces) as i32,
+                    },
+                );
+                #[cfg(target_os = "linux")]
+                let _ = send_session_command("focus-context-menu", ShellCommand::FocusContextMenu);
+            }
             PanelAction::Codex => {
                 if self.launcher_visible {
                     self.set_launcher_visible(false);
@@ -1616,7 +1661,7 @@ impl LiveShell {
     fn panel_hover_for_action(&self, action: &PanelAction) -> Option<PanelHover> {
         Some(match action {
             PanelAction::Launcher => PanelHover::Launcher,
-            PanelAction::Task(index) => PanelHover::Task(*index),
+            PanelAction::Task(index) | PanelAction::TaskContext(index) => PanelHover::Task(*index),
             PanelAction::Codex => PanelHover::Codex,
             PanelAction::Tray(id) | PanelAction::TrayContext(id) => self
                 .tray
@@ -1788,6 +1833,7 @@ impl LiveShell {
                     + self.preview_group.map_or(0, |index| {
                         (PANEL_ITEM_WIDTH + index as f32 * PANEL_ITEM_WIDTH) as i32
                     });
+                self.window_menu_anchor_x = Some(x);
                 let _ = send_session_command(
                     "show-context-menu",
                     ShellCommand::ShowContextMenu {
@@ -1883,6 +1929,7 @@ impl LiveShell {
 
     fn apply_window_menu_action(&mut self, action: MenuAction) {
         match action {
+            MenuAction::Activate(window) => self.send_window_action(window, WindowAction::Activate),
             MenuAction::Close(window) => self.send_window_action(window, WindowAction::Close),
             MenuAction::MaximizeRestore(window) => {
                 self.send_window_action(window, WindowAction::Maximize)
@@ -2038,10 +2085,7 @@ impl LiveShell {
             }
         }
         if self.window_menu.is_some() {
-            let x = self.panel_origin_x
-                + self.preview_group.map_or(0, |index| {
-                    (PANEL_ITEM_WIDTH + index as f32 * PANEL_ITEM_WIDTH) as i32
-                });
+            let x = self.window_menu_anchor_x.unwrap_or(self.panel_origin_x);
             let _ = send_session_command(
                 "show-context-menu",
                 ShellCommand::ShowContextMenu {
@@ -2087,6 +2131,7 @@ impl LiveShell {
         self.preview_refresh_deadline = None;
         self.preview_hovered = None;
         self.window_menu = None;
+        self.window_menu_anchor_x = None;
         self.window_menu_host = None;
     }
 
@@ -2101,6 +2146,7 @@ impl LiveShell {
         self.preview_refresh_deadline = None;
         self.preview_frame = None;
         self.window_menu = None;
+        self.window_menu_anchor_x = None;
         self.window_menu_host = None;
         let _ = send_session_command("clear-window-highlight", ShellCommand::ClearWindowHighlight);
         let _ = send_session_command("hide-context-menu", ShellCommand::HideContextMenu);
@@ -3090,6 +3136,7 @@ impl PanelApplication {
                     .accessibility_label(&group.application_name)
                     .semantic_role(SemanticRole::Button)
                     .message(PanelAction::Task(index))
+                    .context_message(PanelAction::TaskContext(index))
                     .width(PANEL_ITEM_WIDTH)
                     .height(height)
                     .padding(Insets {
@@ -4205,6 +4252,52 @@ mod tests {
         assert!(shell.perform_screenshot_semantic_action(ScreenshotTargetAction::SelectionEnd));
         assert!(shell.perform_screenshot_semantic_action(ScreenshotTargetAction::Confirm));
         assert!(shell.screenshot.confirmed());
+    }
+
+    #[test]
+    fn taskbar_secondary_click_opens_menu_for_active_group_member_at_item_anchor() {
+        let mut shell = LiveShell::new().unwrap();
+        let application_id = ApplicationId::new("org.kde.dolphin");
+        shell.windows = vec![
+            OpenWindow {
+                id: WindowId(41),
+                application_id: Some(application_id.clone()),
+                active: false,
+                title: "Files".into(),
+            },
+            OpenWindow {
+                id: WindowId(42),
+                application_id: Some(application_id),
+                active: true,
+                title: "Downloads".into(),
+            },
+        ];
+        shell.panel_origin_x = 1_920;
+        let _ = shell.scene(SurfaceRole::Panel, 1_280, 56);
+        let target = shell
+            .panel_host
+            .unique_semantic_target_for_message(&super::PanelAction::Task(0))
+            .expect("taskbar item");
+        let expected_anchor = shell.panel_origin_x + target.bounds.origin.x.round() as i32;
+        let center = target.bounds.origin.x + target.bounds.size.width / 2.0;
+
+        assert!(shell.panel_click(center, 1_280, true));
+        assert_eq!(shell.window_menu, Some(WindowId(42)));
+        assert_eq!(shell.window_menu_anchor_x, Some(expected_anchor));
+        assert!(shell.preview_group.is_none());
+
+        shell.sync_transient_overlays();
+        assert_eq!(shell.window_menu_anchor_x, Some(expected_anchor));
+
+        shell.close_window_preview();
+        let outcome = shell.panel_host.perform_accessibility_action(
+            target.id,
+            SemanticAction::Invoke(ActionKind::ContextMenu),
+        );
+        assert!(outcome.failures.is_empty(), "{:#?}", outcome.failures);
+        assert!(shell.apply_panel_effects());
+        assert_eq!(shell.window_menu, Some(WindowId(42)));
+        assert_eq!(shell.window_menu_anchor_x, Some(expected_anchor));
     }
 
     #[test]
