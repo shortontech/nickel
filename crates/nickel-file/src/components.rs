@@ -42,6 +42,13 @@ pub(crate) fn properties_dialog(
         .unwrap_or_else(|| "Unavailable".into());
     let stale = properties.is_stale();
     let association = app.properties_association.as_ref();
+    let default_change_supported = association.is_some_and(|snapshot| {
+        matches!(
+            snapshot.capability,
+            nickel_platform::AssociationCapability::DirectUserChange
+                | nickel_platform::AssociationCapability::NativeConsent
+        )
+    });
     let handlers = association.map(|snapshot| snapshot.handlers.iter().enumerate().map(|(index, handler)| {
         let selected = app.properties_handler == Some(index);
         ui! {
@@ -92,8 +99,9 @@ pub(crate) fn properties_dialog(
                     <Text height={22.0} color={palette.text}>{format!("Open with — {}", snapshot.target.platform_key())}</Text>
                     <Column gap={4.0} children={handlers} />
                     <Row height={34.0} gap={8.0}>
-                        <Button on_press={FileMessage::PropertiesOpenOnce} enabled={app.properties_handler.is_some()} width={120.0} height={32.0} color={palette.text}>{"Open once"}</Button>
-                        <Button on_press={FileMessage::PropertiesRequestDefault} enabled={app.properties_handler.is_some() && !stale} width={120.0} height={32.0} color={palette.text}>{"Make default"}</Button>
+                        <Button on_press={FileMessage::PropertiesOpenOnce} enabled={app.properties_handler.is_some() && nickel_platform::open_once_supported()} width={120.0} height={32.0} color={palette.text}>{"Open once"}</Button>
+                        <Button on_press={FileMessage::PropertiesRequestDefault} enabled={app.properties_handler.is_some() && !stale && default_change_supported} width={120.0} height={32.0} color={palette.text}>{if snapshot.capability == nickel_platform::AssociationCapability::NativeConsent { "System default…" } else { "Make default" }}</Button>
+                        <Button on_press={FileMessage::PropertiesDefaultSettings} width={150.0} height={32.0} color={palette.text}>{"Default app settings"}</Button>
                     </Row>
                     {if app.properties_confirm_default { ui! {
                         <Row height={36.0} gap={8.0}>

@@ -3,7 +3,12 @@
 //! This module is deliberately the only place where Nickel applications deal
 //! with MIME databases, Windows consent UI, or Launch Services limitations.
 
-use std::{fmt, path::Path};
+use std::{
+    collections::VecDeque,
+    fmt,
+    path::Path,
+    sync::{Arc, Mutex, OnceLock},
+};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum AssociationTarget {
@@ -36,6 +41,13 @@ pub enum AssociationCapability {
     Unsupported,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AssociationScope {
+    User,
+    System,
+    Policy,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ApplicationHandler {
     /// Stable platform identity (`.desktop` id, registered application id, or bundle id).
@@ -51,6 +63,7 @@ pub struct AssociationSnapshot {
     pub effective: Option<ApplicationHandler>,
     pub handlers: Vec<ApplicationHandler>,
     pub capability: AssociationCapability,
+    pub scope: AssociationScope,
     pub detail: String,
 }
 
@@ -72,13 +85,89 @@ impl fmt::Display for AssociationError {
 
 impl std::error::Error for AssociationError {}
 
-pub trait AssociationBackend {
+pub trait AssociationBackend: Send + Sync {
     fn inspect(&self, target: &AssociationTarget) -> Result<AssociationSnapshot, AssociationError>;
     fn request_change(
         &self,
         target: &AssociationTarget,
         handler_id: &str,
     ) -> Result<ChangeOutcome, AssociationError>;
+}
+
+const ASSOCIATION_CACHE_CAPACITY: usize = 256;
+
+/// Process-wide association authority shared by Settings and file dialogs.
+/// Every inspection is re-resolved through the OS; the bounded cache exists
+/// only to assign a confirmed generation and never competes with OS state.
+pub struct AssociationService {
+    backend: Box<dyn AssociationBackend>,
+    state: Mutex<AssociationServiceState>,
+}
+
+#[derive(Default)]
+struct AssociationServiceState {
+    generation: u64,
+    projections: VecDeque<(AssociationTarget, AssociationSnapshot)>,
+}
+
+impl AssociationService {
+    fn new(backend: Box<dyn AssociationBackend>) -> Self {
+        Self {
+            backend,
+            state: Mutex::new(AssociationServiceState::default()),
+        }
+    }
+
+    pub fn inspect(
+        &self,
+        target: &AssociationTarget,
+    ) -> Result<AssociationSnapshot, AssociationError> {
+        let mut snapshot = self.backend.inspect(target)?;
+        snapshot.handlers.truncate(128);
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let changed = state
+            .projections
+            .iter()
+            .find(|(cached, _)| cached == target)
+            .is_none_or(|(_, cached)| cached != &snapshot);
+        if changed {
+            state.generation = state.generation.saturating_add(1);
+            state.projections.retain(|(cached, _)| cached != target);
+            state
+                .projections
+                .push_back((target.clone(), snapshot.clone()));
+            while state.projections.len() > ASSOCIATION_CACHE_CAPACITY {
+                state.projections.pop_front();
+            }
+        }
+        Ok(snapshot)
+    }
+
+    pub fn request_change(
+        &self,
+        target: &AssociationTarget,
+        handler_id: &str,
+    ) -> Result<ChangeOutcome, AssociationError> {
+        change_and_verify(self.backend.as_ref(), target, handler_id).map(|outcome| {
+            if matches!(outcome, ChangeOutcome::Confirmed(_)) {
+                let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                state.projections.retain(|(cached, _)| cached != target);
+            }
+            outcome
+        })
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .generation
+    }
+}
+
+pub fn association_service() -> Arc<AssociationService> {
+    static SERVICE: OnceLock<Arc<AssociationService>> = OnceLock::new();
+    Arc::clone(SERVICE.get_or_init(|| Arc::new(AssociationService::new(association_backend()))))
 }
 
 /// Re-query after every request. A setter returning success is not evidence
@@ -143,6 +232,24 @@ pub fn association_target_for_file(path: &Path) -> Result<AssociationTarget, Ass
         })
 }
 
+/// Opens the Nickel Settings surface backed by this same association service.
+pub fn open_default_application_settings() -> Result<(), AssociationError> {
+    let current = std::env::current_exe()
+        .map_err(|error| AssociationError(format!("could not locate Nickel Settings: {error}")))?;
+    let executable = current.with_file_name(if cfg!(target_os = "windows") {
+        "nickel-settings.exe"
+    } else {
+        "nickel-settings"
+    });
+    std::process::Command::new(&executable)
+        .args(["--screen", "default-apps"])
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| {
+            AssociationError(format!("could not open {}: {error}", executable.display()))
+        })
+}
+
 fn infer_portable_mime(path: &Path) -> Option<&'static str> {
     match path
         .extension()?
@@ -178,13 +285,31 @@ pub fn open_once_with(path: &Path, handler: &ApplicationHandler) -> Result<(), A
             .then_some(())
             .ok_or_else(|| AssociationError(format!("{} exited with {status}", handler.name)))
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        let status = std::process::Command::new("/usr/bin/open")
+            .args(["-b", &handler.id])
+            .arg(path)
+            .status()
+            .map_err(|error| {
+                AssociationError(format!("could not launch {}: {error}", handler.name))
+            })?;
+        status
+            .success()
+            .then_some(())
+            .ok_or_else(|| AssociationError(format!("{} exited with {status}", handler.name)))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = (path, handler);
         Err(AssociationError(
             "open once with a chosen handler is unavailable on this platform build".into(),
         ))
     }
+}
+
+pub const fn open_once_supported() -> bool {
+    cfg!(any(target_os = "linux", target_os = "macos"))
 }
 
 #[cfg(target_os = "linux")]
@@ -291,6 +416,7 @@ impl AssociationBackend for LinuxAssociations {
             effective,
             handlers,
             capability: AssociationCapability::DirectUserChange,
+            scope: AssociationScope::User,
             detail: "User-level freedesktop association".into(),
         })
     }
@@ -360,11 +486,87 @@ fn desktop_data_roots() -> Vec<std::path::PathBuf> {
 struct WindowsAssociations;
 
 #[cfg(target_os = "windows")]
+fn windows_effective_handler(
+    target: &AssociationTarget,
+) -> Result<Option<ApplicationHandler>, AssociationError> {
+    use windows::{
+        Win32::UI::Shell::{ASSOCF_NONE, ASSOCSTR_EXECUTABLE, AssocQueryStringW},
+        core::{PCWSTR, PWSTR},
+    };
+
+    let association = target
+        .platform_key()
+        .encode_utf16()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let mut length = 0_u32;
+    // SAFETY: both pointers reference initialized NUL-terminated UTF-16 data;
+    // the first call intentionally supplies no output buffer to obtain length.
+    let first = unsafe {
+        AssocQueryStringW(
+            ASSOCF_NONE,
+            ASSOCSTR_EXECUTABLE,
+            PCWSTR(association.as_ptr()),
+            PCWSTR::null(),
+            None,
+            &mut length,
+        )
+    };
+    if length == 0 {
+        return if first.is_err() {
+            Ok(None)
+        } else {
+            Err(AssociationError(
+                "Windows returned an empty association result".into(),
+            ))
+        };
+    }
+    let mut executable = vec![0_u16; length as usize];
+    // SAFETY: the output buffer contains `length` writable UTF-16 elements and
+    // all other pointer validity requirements match the sizing call above.
+    unsafe {
+        AssocQueryStringW(
+            ASSOCF_NONE,
+            ASSOCSTR_EXECUTABLE,
+            PCWSTR(association.as_ptr()),
+            PCWSTR::null(),
+            Some(PWSTR(executable.as_mut_ptr())),
+            &mut length,
+        )
+    }
+    .ok()
+    .map_err(|error| AssociationError(format!("Windows association query failed: {error}")))?;
+    let end = executable
+        .iter()
+        .position(|unit| *unit == 0)
+        .unwrap_or(executable.len());
+    let id = String::from_utf16_lossy(&executable[..end]);
+    if id.is_empty() {
+        return Ok(None);
+    }
+    let name = Path::new(&id)
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or(&id)
+        .to_owned();
+    Ok(Some(ApplicationHandler {
+        id: id.clone(),
+        name,
+        icon: Some(id.clone()),
+        source: "Windows effective association".into(),
+    }))
+}
+
+#[cfg(target_os = "windows")]
 impl AssociationBackend for WindowsAssociations {
     fn inspect(&self, target: &AssociationTarget) -> Result<AssociationSnapshot, AssociationError> {
+        let effective = windows_effective_handler(target)?;
         Ok(AssociationSnapshot {
-            target: target.clone(), effective: None, handlers: Vec::new(),
+            target: target.clone(),
+            handlers: effective.clone().into_iter().collect(),
+            effective,
             capability: AssociationCapability::NativeConsent,
+            scope: AssociationScope::User,
             detail: "Windows requires its Default apps consent UI; Nickel does not alter protected UserChoice data".into(),
         })
     }
@@ -397,6 +599,7 @@ impl AssociationBackend for MacAssociations {
             effective: None,
             handlers: Vec::new(),
             capability: AssociationCapability::ReadOnly,
+            scope: AssociationScope::System,
             detail: "No public supported setter is available in this Nickel build".into(),
         })
     }
@@ -420,6 +623,7 @@ impl AssociationBackend for UnsupportedAssociations {
             effective: None,
             handlers: Vec::new(),
             capability: AssociationCapability::Unsupported,
+            scope: AssociationScope::System,
             detail: "Default applications are unsupported on this platform".into(),
         })
     }
@@ -437,10 +641,9 @@ impl AssociationBackend for UnsupportedAssociations {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
 
     struct Fixture {
-        current: RefCell<String>,
+        current: Arc<Mutex<String>>,
         confirm: bool,
     }
 
@@ -449,7 +652,7 @@ mod tests {
             &self,
             target: &AssociationTarget,
         ) -> Result<AssociationSnapshot, AssociationError> {
-            let id = self.current.borrow().clone();
+            let id = self.current.lock().unwrap().clone();
             Ok(AssociationSnapshot {
                 target: target.clone(),
                 effective: Some(ApplicationHandler {
@@ -460,6 +663,7 @@ mod tests {
                 }),
                 handlers: Vec::new(),
                 capability: AssociationCapability::DirectUserChange,
+                scope: AssociationScope::User,
                 detail: String::new(),
             })
         }
@@ -469,7 +673,7 @@ mod tests {
             handler_id: &str,
         ) -> Result<ChangeOutcome, AssociationError> {
             if self.confirm {
-                *self.current.borrow_mut() = handler_id.into();
+                *self.current.lock().unwrap() = handler_id.into();
             }
             Ok(ChangeOutcome::Confirmed(self.inspect(target)?))
         }
@@ -478,7 +682,7 @@ mod tests {
     #[test]
     fn successful_setters_are_requeried_before_confirmation() {
         let fixture = Fixture {
-            current: RefCell::new("old.desktop".into()),
+            current: Arc::new(Mutex::new("old.desktop".into())),
             confirm: true,
         };
         let result = change_and_verify(
@@ -495,7 +699,7 @@ mod tests {
     #[test]
     fn failed_verification_retains_a_rejection_outcome() {
         let fixture = Fixture {
-            current: RefCell::new("old.desktop".into()),
+            current: Arc::new(Mutex::new("old.desktop".into())),
             confirm: false,
         };
         assert!(matches!(
@@ -512,5 +716,24 @@ mod tests {
             Some("text/plain")
         );
         assert_eq!(infer_portable_mime(Path::new("archive.unknown")), None);
+    }
+
+    #[test]
+    fn one_service_generation_converges_multiple_consumers_and_external_changes() {
+        let current = Arc::new(Mutex::new("old.desktop".into()));
+        let service = AssociationService::new(Box::new(Fixture {
+            current: Arc::clone(&current),
+            confirm: true,
+        }));
+        let target = AssociationTarget::mime("text/plain");
+        let settings = service.inspect(&target).unwrap();
+        let properties = service.inspect(&target).unwrap();
+        assert_eq!(settings, properties);
+        assert_eq!(service.generation(), 1);
+
+        *current.lock().unwrap() = "external.desktop".into();
+        let refreshed = service.inspect(&target).unwrap();
+        assert_eq!(refreshed.effective.unwrap().id, "external.desktop");
+        assert_eq!(service.generation(), 2);
     }
 }

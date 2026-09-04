@@ -72,6 +72,7 @@ pub enum FileMessage {
     PropertiesOpenOnce,
     PropertiesRequestDefault,
     PropertiesConfirmDefault,
+    PropertiesDefaultSettings,
     PropertiesCalculateSize,
     PropertiesCancelSize,
     PropertiesToggleReadonly,
@@ -2118,7 +2119,7 @@ impl FileApp {
                     std::thread::spawn(move || {
                         let result = nickel_platform::association_target_for_file(&path)
                             .and_then(|target| {
-                                nickel_platform::association_backend().inspect(&target)
+                                nickel_platform::association_service().inspect(&target)
                             })
                             .map_err(|error| error.to_string());
                         let _ = sender.send(result);
@@ -2168,11 +2169,9 @@ impl FileApp {
                     self.properties_handler,
                 ) && let Some(handler) = snapshot.handlers.get(index)
                 {
-                    match nickel_platform::change_and_verify(
-                        nickel_platform::association_backend().as_ref(),
-                        &snapshot.target,
-                        &handler.id,
-                    ) {
+                    match nickel_platform::association_service()
+                        .request_change(&snapshot.target, &handler.id)
+                    {
                         Ok(nickel_platform::ChangeOutcome::Confirmed(updated)) => {
                             self.properties_association = Some(updated);
                             self.icons.clear();
@@ -2186,6 +2185,11 @@ impl FileApp {
                             self.status = format!("Could not change default application: {error}")
                         }
                     }
+                }
+            }
+            FileMessage::PropertiesDefaultSettings => {
+                if let Err(error) = nickel_platform::open_default_application_settings() {
+                    self.status = format!("Could not open default application settings: {error}");
                 }
             }
             FileMessage::PropertiesCalculateSize => {

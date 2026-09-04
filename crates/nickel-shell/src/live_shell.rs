@@ -637,10 +637,13 @@ impl LiveShell {
         self.requested_codex_project.take()
     }
     pub fn new() -> Result<Self, String> {
+        let shell_settings = ShellSettings::load_default();
         let application_discovery = platform::application_discovery();
         let application_status = application_discovery_status_label(application_discovery.status());
         let mut launcher = Launcher::new(application_discovery.into_applications());
-        launcher.set_places(crate::places::applications());
+        launcher.set_places(crate::places::applications(
+            shell_settings.preferred_file_manager.as_deref(),
+        ));
         let launcher_preferences = match LauncherPreferences::load_default() {
             Ok(preferences) => preferences,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -669,7 +672,6 @@ impl LiveShell {
         );
         let wallpaper_settings = WallpaperSettings::load_default();
         let wallpaper_path = wallpaper_settings.image;
-        let shell_settings = ShellSettings::load_default();
         let palette =
             ThemePalette::from_appearance(shell_settings.resolve_appearance(Appearance::default()));
         let panel_icon = crate::icons::load_svg_bytes(
@@ -1038,6 +1040,9 @@ impl LiveShell {
             }
         }
         let shell_settings = ShellSettings::load_default();
+        self.launcher.set_places(crate::places::applications(
+            shell_settings.preferred_file_manager.as_deref(),
+        ));
         if self.all_windows_on_every_bar != shell_settings.all_windows_on_every_bar {
             self.all_windows_on_every_bar = shell_settings.all_windows_on_every_bar;
             self.close_window_preview();

@@ -432,7 +432,12 @@ enum SettingsMessage {
     WifiNetwork(usize),
     NetworkScroll,
     DefaultAppsScroll,
+    DefaultAppTargetChanged(String),
+    AddDefaultAppTarget,
     ToggleDefaultAppSelect(usize),
+    RequestDefaultAppConsent(usize),
+    SetPreferredTerminal(String),
+    SetPreferredFileManager(String),
     SetDefaultApp {
         row: usize,
         handler_id: String,
@@ -529,28 +534,31 @@ fn sidebar_search_message(value: String) -> SettingsMessage {
 fn default_app_categories() -> Vec<DefaultAppRow> {
     [
         (
-            "Web browser",
+            "Web browser (HTTPS scheme)",
             nickel_platform::AssociationTarget::scheme("https"),
         ),
-        ("Mail", nickel_platform::AssociationTarget::scheme("mailto")),
         (
-            "Text editor",
+            "Mail (mailto scheme)",
+            nickel_platform::AssociationTarget::scheme("mailto"),
+        ),
+        (
+            "Text editor (text/plain)",
             nickel_platform::AssociationTarget::mime("text/plain"),
         ),
         (
-            "Image viewer",
+            "Image viewer (image/png)",
             nickel_platform::AssociationTarget::mime("image/png"),
         ),
         (
-            "Audio player",
+            "Audio player (audio/mpeg)",
             nickel_platform::AssociationTarget::mime("audio/mpeg"),
         ),
         (
-            "Video player",
+            "Video player (video/mp4)",
             nickel_platform::AssociationTarget::mime("video/mp4"),
         ),
         (
-            "PDF viewer",
+            "PDF viewer (application/pdf)",
             nickel_platform::AssociationTarget::mime("application/pdf"),
         ),
     ]
@@ -566,9 +574,9 @@ fn default_app_categories() -> Vec<DefaultAppRow> {
 
 impl SettingsApp {
     fn load_default_apps(&mut self) {
-        let backend = nickel_platform::association_backend();
+        let service = nickel_platform::association_service();
         for row in &mut self.default_apps {
-            match backend.inspect(&row.target) {
+            match service.inspect(&row.target) {
                 Ok(snapshot) => {
                     row.snapshot = Some(snapshot);
                     row.status = None;
@@ -578,6 +586,7 @@ impl SettingsApp {
                 }
             }
         }
+        self.next_default_apps_refresh = Instant::now() + Duration::from_secs(2);
     }
 
     fn change_default_app(&mut self, row_index: usize, handler_id: &str) {
@@ -585,8 +594,8 @@ impl SettingsApp {
             return;
         };
         let previous = row.snapshot.clone();
-        let backend = nickel_platform::association_backend();
-        match nickel_platform::change_and_verify(backend.as_ref(), &row.target, handler_id) {
+        let service = nickel_platform::association_service();
+        match service.request_change(&row.target, handler_id) {
             Ok(nickel_platform::ChangeOutcome::Confirmed(snapshot)) => {
                 row.snapshot = Some(snapshot);
                 row.status = Some("Default confirmed by the operating system".into());
@@ -874,12 +883,63 @@ impl SettingsApp {
             | SettingsMessage::NetworkScroll
             | SettingsMessage::DefaultAppsScroll
             | SettingsMessage::AppearanceScroll => {}
+            SettingsMessage::DefaultAppTargetChanged(value) => {
+                self.default_app_target_query = value;
+            }
+            SettingsMessage::AddDefaultAppTarget => {
+                let query = self.default_app_target_query.trim();
+                let target = query
+                    .strip_prefix("scheme:")
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(nickel_platform::AssociationTarget::scheme)
+                    .or_else(|| {
+                        query
+                            .strip_prefix("x-scheme-handler/")
+                            .filter(|value| !value.is_empty())
+                            .map(nickel_platform::AssociationTarget::scheme)
+                    })
+                    .or_else(|| {
+                        query
+                            .contains('/')
+                            .then(|| nickel_platform::AssociationTarget::mime(query))
+                    });
+                if let Some(target) = target {
+                    if !self.default_apps.iter().any(|row| row.target == target) {
+                        let snapshot = nickel_platform::association_service().inspect(&target);
+                        self.default_apps.push(DefaultAppRow {
+                            label: format!("Advanced — {}", target.platform_key()),
+                            target,
+                            snapshot: snapshot.as_ref().ok().cloned(),
+                            status: snapshot.err().map(|error| error.to_string()),
+                        });
+                    }
+                    self.default_app_target_query.clear();
+                } else {
+                    self.status = "Enter a MIME type such as text/markdown or scheme:https".into();
+                }
+            }
             SettingsMessage::ToggleDefaultAppSelect(index) => {
                 self.default_app_select_expanded =
                     (self.default_app_select_expanded != Some(index)).then_some(index);
             }
             SettingsMessage::SetDefaultApp { row, handler_id } => {
                 self.change_default_app(row, &handler_id);
+            }
+            SettingsMessage::RequestDefaultAppConsent(row) => {
+                self.change_default_app(row, "");
+            }
+            SettingsMessage::SetPreferredTerminal(value) => {
+                let previous = self.shell_settings.clone();
+                self.shell_settings.preferred_terminal =
+                    (!value.trim().is_empty()).then(|| value.trim().to_owned());
+                self.persist_shell_behavior(previous);
+            }
+            SettingsMessage::SetPreferredFileManager(value) => {
+                let previous = self.shell_settings.clone();
+                self.shell_settings.preferred_file_manager =
+                    (!value.trim().is_empty()).then(|| value.trim().to_owned());
+                self.persist_shell_behavior(previous);
             }
         }
         self.request_redraw();
@@ -1266,6 +1326,10 @@ impl SettingsApp {
         if self.page == SettingsPage::Network && now >= self.next_network_refresh {
             self.load_linux_network();
         }
+        if self.page == SettingsPage::DefaultApps && now >= self.next_default_apps_refresh {
+            self.load_default_apps();
+            self.request_redraw();
+        }
         let Some(refresh_at) = self.next_wifi_refresh else {
             return;
         };
@@ -1597,6 +1661,9 @@ impl Application for SettingsApp {
         }
         if self.page == SettingsPage::Network {
             deadlines.push(self.next_network_refresh);
+        }
+        if self.page == SettingsPage::DefaultApps {
+            deadlines.push(self.next_default_apps_refresh);
         }
         if self.wallpaper_dialog_rx.is_some() {
             deadlines.push(now + self.wallpaper_poll_delay);
@@ -2006,6 +2073,7 @@ mod tests {
                 source: "fixture".into(),
             }],
             capability: nickel_platform::AssociationCapability::DirectUserChange,
+            scope: nickel_platform::AssociationScope::User,
             detail: "User-level association".into(),
         });
         let tree = app.build_ui(850.0, 900.0);
@@ -2028,6 +2096,24 @@ mod tests {
         assert!(!app.default_apps.iter().any(|row| {
             matches!(row.target, nickel_platform::AssociationTarget::Mime(ref mime) if mime == "inode/directory")
         }));
+        app.update(SettingsMessage::DefaultAppTargetChanged(
+            "text/markdown".into(),
+        ));
+        app.update(SettingsMessage::AddDefaultAppTarget);
+        assert!(app.default_apps.iter().any(|row| {
+            row.target == nickel_platform::AssociationTarget::mime("text/markdown")
+        }));
+
+        app.default_app_select_expanded = None;
+        app.default_apps[0].snapshot.as_mut().unwrap().capability =
+            nickel_platform::AssociationCapability::NativeConsent;
+        let consent = app.build_ui(850.0, 900.0);
+        assert!(
+            !consent
+                .semantic_targets_for_message(&SettingsMessage::RequestDefaultAppConsent(0))
+                .is_empty(),
+            "consent-only platforms must expose their supported system workflow"
+        );
     }
 
     #[test]

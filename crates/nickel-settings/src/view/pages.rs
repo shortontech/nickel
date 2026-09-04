@@ -1,4 +1,5 @@
 use super::*;
+use nickel_ui::{ComponentBuilderExt, Row, TextField};
 
 impl SettingsApp {
     pub(super) fn optional_features_components(
@@ -170,12 +171,16 @@ impl SettingsApp {
             }).collect()).unwrap_or_default();
             let detail = row.status.clone().or_else(|| row.snapshot.as_ref().map(|snapshot| snapshot.detail.clone())).unwrap_or_else(|| "Not loaded".into());
             let mutable = row.snapshot.as_ref().is_some_and(|snapshot| snapshot.capability == nickel_platform::AssociationCapability::DirectUserChange);
+            let native_consent = row.snapshot.as_ref().is_some_and(|snapshot| snapshot.capability == nickel_platform::AssociationCapability::NativeConsent);
             let selector = SelectField::new(theme, row.label.clone(), detail.clone(),
                 SettingsMessage::ToggleDefaultAppSelect(index), current.clone(), options,
                 self.default_app_select_expanded == Some(index)).id(format!("default-app-{index}"));
             ui! {
                 <Container background={palette.surface} border={(palette.muted, 1.0)} padding={Insets::all(4.0)}>
-                    {if mutable { AnyView::new(selector) } else {
+                    {if mutable { AnyView::new(selector) } else if native_consent {
+                        AnyView::new(SettingsRow::new(theme, format!("{} — {}", row.label, detail), current)
+                            .trailing(Button::semantic(theme, SettingsMessage::RequestDefaultAppConsent(index), "Open system settings", ButtonPresentation::Secondary).width(180.0)))
+                    } else {
                         AnyView::new(SettingsRow::new(theme, format!("{} — {}", row.label, detail), current))
                     }}
                 </Container>
@@ -186,10 +191,71 @@ impl SettingsApp {
             SettingsStatusKind::Validation,
             "These are operating-system associations. Terminal and file-manager preferences are separate Nickel-owned settings.",
         );
+        let advanced = SettingsRow::new(
+            theme,
+            "Advanced type or protocol",
+            "Load one MIME type or URI scheme without eagerly enumerating the OS database",
+        )
+        .trailing(
+            Row::new()
+                .gap(6.0)
+                .child(
+                    TextField::on_change_with_placeholder(
+                        &self.default_app_target_query,
+                        "text/markdown or scheme:https",
+                        SettingsMessage::DefaultAppTargetChanged,
+                    )
+                    .id("default-app-advanced-target")
+                    .width(250.0),
+                )
+                .child(
+                    Button::semantic(
+                        theme,
+                        SettingsMessage::AddDefaultAppTarget,
+                        "Load",
+                        ButtonPresentation::Secondary,
+                    )
+                    .width(72.0),
+                ),
+        );
+        let terminal = SettingsRow::new(
+            theme,
+            "Nickel terminal command",
+            "Product-owned; does not change an operating-system association",
+        )
+        .trailing(
+            TextField::on_change_with_placeholder(
+                self.shell_settings
+                    .preferred_terminal
+                    .as_deref()
+                    .unwrap_or(""),
+                "System choice",
+                SettingsMessage::SetPreferredTerminal,
+            )
+            .id("preferred-terminal")
+            .width(260.0),
+        );
+        let file_manager = SettingsRow::new(
+            theme,
+            "Nickel file-manager command",
+            "Product-owned; does not change directory or file associations",
+        )
+        .trailing(
+            TextField::on_change_with_placeholder(
+                self.shell_settings
+                    .preferred_file_manager
+                    .as_deref()
+                    .unwrap_or(""),
+                "Nickel File",
+                SettingsMessage::SetPreferredFileManager,
+            )
+            .id("preferred-file-manager")
+            .width(260.0),
+        );
         ui! {
             <Column grow={1.0} padding={Insets { top: 16.0, right: 24.0, bottom: 20.0, left: 20.0 }} gap={10.0}>
                 <VerticalScroll id={"default-apps-list"} on_scroll={SettingsMessage::DefaultAppsScroll} offset={0.0}>
-                    <Column gap={10.0}>{note}<Column gap={8.0} children={rows} /></Column>
+                    <Column gap={10.0}>{note}{terminal}{file_manager}{advanced}<Column gap={8.0} children={rows} /></Column>
                 </VerticalScroll>
             </Column>
         }

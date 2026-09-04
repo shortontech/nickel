@@ -6,7 +6,7 @@ use std::{
 
 use crate::model::Application;
 
-pub fn applications() -> Vec<Application> {
+pub fn applications(preferred_file_manager: Option<&str>) -> Vec<Application> {
     let home = home_directory();
     let candidates = [
         ("Home", home.clone()),
@@ -17,7 +17,10 @@ pub fn applications() -> Vec<Application> {
         ("Pictures", home.join("Pictures")),
         ("Videos", home.join("Videos")),
     ];
-    let file_manager = nickel_file_executable();
+    let file_manager = preferred_file_manager
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(nickel_file_executable);
     let mut seen = HashSet::new();
     candidates
         .into_iter()
@@ -59,7 +62,7 @@ fn normalized_path(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::nickel_file_executable;
+    use super::{applications, nickel_file_executable};
 
     #[test]
     fn places_launch_the_sibling_file_manager() {
@@ -74,5 +77,20 @@ mod tests {
             executable.file_name().and_then(|name| name.to_str()),
             Some("nickel-file")
         );
+    }
+
+    #[test]
+    fn explicit_product_file_manager_preference_owns_place_launches() {
+        let applications = applications(Some("custom-file-manager"));
+        for application in applications {
+            assert_eq!(
+                application
+                    .launch_command()
+                    .unwrap()
+                    .first()
+                    .map(String::as_str),
+                Some("custom-file-manager")
+            );
+        }
     }
 }

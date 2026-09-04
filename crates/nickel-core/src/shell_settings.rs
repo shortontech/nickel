@@ -58,6 +58,9 @@ pub struct ShellSettings {
     /// theme is temporarily unavailable so the platform adapter can recover
     /// automatically when it returns.
     pub file_icon_theme: Option<String>,
+    /// Product-owned launch preferences, distinct from OS associations.
+    pub preferred_terminal: Option<String>,
+    pub preferred_file_manager: Option<String>,
     pub idle_dim_seconds: Option<u32>,
     pub idle_lock_seconds: Option<u32>,
     pub idle_suspend_seconds: Option<u32>,
@@ -77,6 +80,8 @@ impl Default for ShellSettings {
             animations: AnimationLevel::Normal,
             file_icon_provider: FileIconPreference::default(),
             file_icon_theme: None,
+            preferred_terminal: None,
+            preferred_file_manager: None,
             idle_dim_seconds: Some(300),
             idle_lock_seconds: Some(900),
             idle_suspend_seconds: None,
@@ -141,6 +146,8 @@ impl ShellSettings {
                         theme => Some(theme.to_owned()),
                     }
                 }
+                "preferred_terminal" => settings.preferred_terminal = parse_optional(value),
+                "preferred_file_manager" => settings.preferred_file_manager = parse_optional(value),
                 "idle_dim_seconds" => settings.idle_dim_seconds = parse_timeout(value),
                 "idle_lock_seconds" => settings.idle_lock_seconds = parse_timeout(value),
                 "idle_suspend_seconds" => settings.idle_suspend_seconds = parse_timeout(value),
@@ -161,7 +168,7 @@ impl ShellSettings {
         fs::write(
             path,
             format!(
-                "bar_on_all_displays={}\nall_windows_on_every_bar={}\ndesktop_count={}\nactive_desktop={}\ntheme={}\naccent_hue={}\naccent_intensity={}\nreduce_transparency={}\nanimations={}\nfile_icon_provider={}\nfile_icon_theme={}\nidle_dim_seconds={}\nidle_lock_seconds={}\nidle_suspend_seconds={}\n",
+                "bar_on_all_displays={}\nall_windows_on_every_bar={}\ndesktop_count={}\nactive_desktop={}\ntheme={}\naccent_hue={}\naccent_intensity={}\nreduce_transparency={}\nanimations={}\nfile_icon_provider={}\nfile_icon_theme={}\npreferred_terminal={}\npreferred_file_manager={}\nidle_dim_seconds={}\nidle_lock_seconds={}\nidle_suspend_seconds={}\n",
                 self.bar_on_all_displays,
                 self.all_windows_on_every_bar,
                 self.desktop_count,
@@ -188,6 +195,8 @@ impl ShellSettings {
                     FileIconPreference::System => "system",
                 },
                 self.file_icon_theme.as_deref().unwrap_or("system"),
+                self.preferred_terminal.as_deref().unwrap_or("system"),
+                self.preferred_file_manager.as_deref().unwrap_or("system"),
                 format_timeout(self.idle_dim_seconds),
                 format_timeout(self.idle_lock_seconds),
                 format_timeout(self.idle_suspend_seconds),
@@ -221,6 +230,13 @@ impl ShellSettings {
 
 fn parse_bool(value: &str) -> bool {
     matches!(value.trim(), "1" | "true" | "yes" | "on")
+}
+
+fn parse_optional(value: &str) -> Option<String> {
+    match value.trim() {
+        "" | "system" => None,
+        value => Some(value.to_owned()),
+    }
 }
 
 fn parse_timeout(value: &str) -> Option<u32> {
@@ -284,6 +300,8 @@ mod tests {
             }
         );
         assert_eq!(settings.file_icon_theme, None);
+        assert_eq!(settings.preferred_terminal, None);
+        assert_eq!(settings.preferred_file_manager, None);
         assert_eq!(settings.idle_dim_seconds, Some(300));
         assert_eq!(settings.idle_lock_seconds, Some(900));
         assert_eq!(settings.idle_suspend_seconds, None);
@@ -323,6 +341,8 @@ mod tests {
             animations: AnimationLevel::Off,
             file_icon_provider: FileIconPreference::System,
             file_icon_theme: Some("Papirus-Dark".to_owned()),
+            preferred_terminal: Some("foot".to_owned()),
+            preferred_file_manager: Some("dolphin".to_owned()),
             idle_dim_seconds: Some(90),
             idle_lock_seconds: Some(240),
             idle_suspend_seconds: Some(1_800),
