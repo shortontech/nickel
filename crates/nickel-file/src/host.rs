@@ -182,7 +182,7 @@ impl HostAdapter<FileApp> for FileHostAdapter {
                         }
                     }
                     KeyCode::Enter if app.address_editing => app.submit_address(),
-                    KeyCode::Enter => app.update(FileMessage::ContextOpen),
+                    KeyCode::Enter => app.activate_selected(),
                     KeyCode::KeyA if app.control_down => {
                         app.selected_entries = (0..app.browser.entries().len()).collect();
                         app.selected = app

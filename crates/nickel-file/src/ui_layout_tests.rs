@@ -1754,19 +1754,139 @@ fn context_menu_is_one_semantic_controller_and_accessibility_surface() {
     let menu_items = host.query(&nickel_ui::SemanticSelector::Role(
         nickel_ui::SemanticRole::MenuItem,
     ));
-    assert_eq!(menu_items.len(), 1);
+    assert_eq!(menu_items.len(), 9);
+    assert!(menu_items.iter().any(|item| {
+        item.name.as_deref() == Some("Open") && item.actions.contains(&ActionKind::Activate)
+    }));
     assert!(menu_items.iter().all(|item| {
-        item.actions.contains(&ActionKind::Activate)
-            && host
-                .accessibility_nodes()
-                .iter()
-                .any(|node| node.id == item.id)
+        host.accessibility_nodes()
+            .iter()
+            .any(|node| node.id == item.id)
     }));
 
     host.handle_event(nickel_ui::UiEvent::ControllerDown);
     assert!(host.inspect().controller_target.is_some());
     host.handle_event(nickel_ui::UiEvent::ControllerBack);
     assert!(host.inspect().open_overlay.is_none());
+}
+
+#[test]
+fn double_click_requires_stable_path_time_and_pointer_distance() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::create_dir(directory.path().join("alpha")).unwrap();
+    std::fs::create_dir(directory.path().join("beta")).unwrap();
+
+    let mut moved = FileApp::new(directory.path().to_path_buf());
+    moved.cursor = Point { x: 80.0, y: 80.0 };
+    moved.update_message(FileMessage::Entry(0));
+    moved.cursor = Point { x: 100.0, y: 80.0 };
+    moved.update_message(FileMessage::Entry(0));
+    assert!(
+        !moved.navigation_pending(),
+        "pointer travel cancels a double click"
+    );
+
+    let mut different = FileApp::new(directory.path().to_path_buf());
+    different.cursor = Point { x: 80.0, y: 80.0 };
+    different.update_message(FileMessage::Entry(0));
+    different.update_message(FileMessage::Entry(1));
+    assert!(
+        !different.navigation_pending(),
+        "a second target must not inherit the first target's click"
+    );
+
+    let mut activated = FileApp::new(directory.path().to_path_buf());
+    activated.cursor = Point { x: 80.0, y: 80.0 };
+    activated.update_message(FileMessage::Entry(0));
+    activated.cursor = Point { x: 84.0, y: 83.0 };
+    activated.update_message(FileMessage::Entry(0));
+    assert!(activated.navigation_pending());
+    assert_eq!(
+        activated.status,
+        format!("Opening {}…", directory.path().join("alpha").display())
+    );
+}
+
+#[test]
+fn context_invocation_captures_anchor_and_target_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("alpha.txt"), b"x").unwrap();
+    std::fs::write(directory.path().join("beta.txt"), b"x").unwrap();
+    let mut app = FileApp::new(directory.path().to_path_buf());
+    let anchor = Point { x: 311.0, y: 227.0 };
+    app.cursor = anchor;
+    app.update_message(FileMessage::ContextEntry(0));
+    let target = app.context_target.clone();
+
+    app.cursor = Point { x: 701.0, y: 509.0 };
+    app.selected = Some(1);
+
+    assert_eq!(app.context_anchor, Some(anchor));
+    assert_eq!(target, app.context_target);
+    assert_eq!(
+        app.context_target.as_deref(),
+        Some(directory.path().join("alpha.txt").as_path())
+    );
+    let overlays = Application::frame_overlays(
+        &app,
+        nickel_ui::ViewContext::new(
+            Rect::new(0.0, 0.0, 860.0, 620.0),
+            nickel_ui::InputModality::Pointer,
+        ),
+    );
+    let menu = overlays
+        .into_iter()
+        .find_map(|overlay| match overlay {
+            nickel_ui::FrameOverlay::Menu(menu)
+                if menu.id.as_ui_id().as_str() == "file-entry-0-context" =>
+            {
+                Some(menu)
+            }
+            _ => None,
+        })
+        .expect("entry context menu");
+    assert!(matches!(
+        menu.anchor,
+        nickel_ui::OverlayAnchor::Point { point, .. } if point == anchor
+    ));
+}
+
+#[test]
+fn context_menu_discloses_unimplemented_common_capabilities() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::create_dir(directory.path().join("folder")).unwrap();
+    let mut host = UiHost::new(FileApp::new(directory.path().to_path_buf()), 860, 620);
+    let entry = host
+        .semantic_nodes()
+        .into_iter()
+        .find(|node| node.id.as_str().ends_with("/file-entry-0"))
+        .unwrap()
+        .id;
+    host.handle_event(nickel_ui::UiEvent::AccessibilityContextMenu(entry));
+    let labels = host
+        .query(&nickel_ui::SemanticSelector::Role(
+            nickel_ui::SemanticRole::MenuItem,
+        ))
+        .into_iter()
+        .filter_map(|node| node.name)
+        .collect::<HashSet<_>>();
+    for expected in [
+        "Open",
+        "Open With",
+        "Open in new tab",
+        "Add to Bookmarks",
+        "Cut",
+        "Copy",
+        "Paste into Folder",
+        "New Folder",
+        "Rename",
+        "Move to Trash",
+        "Copy Path",
+        "Open in Terminal",
+        "Properties",
+    ] {
+        assert!(labels.contains(expected), "missing {expected}: {labels:?}");
+    }
 }
 
 #[test]

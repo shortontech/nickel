@@ -12,7 +12,7 @@ use crate::{
     host::FileHostAdapter,
     icons, layout,
     layout::{rect_between, visible_file_range},
-    platform::{LocationGroup, home_directory, location_groups, open_path},
+    platform::{LocationGroup, OpenPathError, home_directory, location_groups, open_path},
     watch::DirectoryWatch,
 };
 use nickel_core::{
@@ -40,8 +40,18 @@ const MAX_DETAILS_COLUMN_WIDTH: f32 = 320.0;
 const SETTINGS_SYNC_INTERVAL: Duration = Duration::from_secs(1);
 const DIRECTORY_WATCH_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const DIRECTORY_WATCH_RETRY_INTERVAL: Duration = Duration::from_secs(2);
+const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
+const DOUBLE_CLICK_DISTANCE: f32 = 6.0;
 type NavigationResult = (u64, Result<Option<DirectoryBrowser>, String>);
 type SidebarResult = (PathBuf, Result<Vec<(String, PathBuf)>, String>);
+type ActivationResult = (u64, String, Result<(), OpenPathError>);
+
+#[derive(Clone, Debug)]
+pub(crate) struct FileClick {
+    path: PathBuf,
+    position: Point,
+    when: Instant,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum FileMessage {
@@ -127,7 +137,12 @@ pub struct FileApp {
     pub(crate) active_tab_id: u64,
     pub(crate) next_tab_id: u64,
     pub(crate) status: String,
-    pub(crate) last_click: Option<(usize, Instant)>,
+    pub(crate) last_click: Option<FileClick>,
+    /// The pointer anchor and filesystem identity are captured by the context
+    /// invocation. They deliberately do not follow later pointer or model motion.
+    pub(crate) context_anchor: Option<Point>,
+    pub(crate) context_target: Option<PathBuf>,
+    activation_rx: Option<Receiver<ActivationResult>>,
     pub(crate) icons: icons::ArtworkCache,
     pub(crate) icon_rx:
         Option<Receiver<(u64, PathBuf, icons::ArtworkCacheKey, icons::ResolvedArtwork)>>,
@@ -624,7 +639,7 @@ pub(crate) struct FileTab {
     pub(crate) selection_anchor: Option<usize>,
     pub(crate) tab_id: u64,
     pub(crate) status: String,
-    pub(crate) last_click: Option<(usize, Instant)>,
+    pub(crate) last_click: Option<FileClick>,
     pub(crate) file_scroll_offset: f32,
     pub(crate) tile_width: f32,
     pub(crate) view_mode: FileViewMode,
@@ -829,6 +844,9 @@ impl FileApp {
             next_tab_id: 1,
             status,
             last_click: None,
+            context_anchor: None,
+            context_target: None,
+            activation_rx: None,
             icons: icons::ArtworkCache::default(),
             icon_rx: None,
             icon_poll_delay: std::time::Duration::from_millis(16),
@@ -1067,11 +1085,28 @@ impl FileApp {
     ) -> AnyView<FileMessage> {
         layout::build_view(self, _width, height, palette, light_mode)
     }
-    fn activate_selected(&mut self) {
-        let Some(index) = self.selected else {
-            return;
-        };
-        let Some(entry) = self.browser.entries().get(index).cloned() else {
+    pub(crate) fn activate_selected(&mut self) {
+        let entry = self
+            .selected
+            .and_then(|index| self.browser.entries().get(index))
+            .cloned();
+        self.activate_entry(entry);
+    }
+
+    fn activate_context_target(&mut self) {
+        let entry = self.context_target.as_ref().and_then(|path| {
+            self.browser
+                .entries()
+                .iter()
+                .find(|entry| &entry.path == path)
+                .cloned()
+        });
+        self.activate_entry(entry);
+    }
+
+    fn activate_entry(&mut self, entry: Option<FileEntry>) {
+        let Some(entry) = entry else {
+            self.status = "The selected item is no longer available".into();
             return;
         };
         let is_directory = entry.is_directory || entry.path.is_dir();
@@ -1083,8 +1118,51 @@ impl FileApp {
         }
         if is_directory {
             self.navigate_to(entry.path);
-        } else if let Err(error) = open_path(&entry.path) {
-            self.status = format!("Could not open {}: {error}", entry.display_name());
+        } else {
+            let label = entry.display_name().to_owned();
+            self.status = format!("Opening {label}…");
+            let path = entry.path;
+            let tab_id = self.active_tab_id;
+            let (sender, receiver) = mpsc::channel();
+            self.activation_rx = Some(receiver);
+            let _ = std::thread::Builder::new()
+                .name("nickel-file-activation".into())
+                .spawn(move || {
+                    let result = open_path(&path);
+                    let _ = sender.send((tab_id, label, result));
+                });
+        }
+    }
+
+    fn poll_activation(&mut self) -> bool {
+        let Some(receiver) = self.activation_rx.as_ref() else {
+            return false;
+        };
+        match receiver.try_recv() {
+            Ok((tab_id, label, result)) => {
+                let status = match result {
+                    Ok(()) => format!("Opened {label}"),
+                    Err(error) => format!("Could not open {label}: {error}"),
+                };
+                if tab_id == self.active_tab_id {
+                    self.status = status;
+                } else if let Some(tab) = self
+                    .tabs
+                    .iter_mut()
+                    .flatten()
+                    .find(|tab| tab.tab_id == tab_id)
+                {
+                    tab.status = status;
+                }
+                self.activation_rx = None;
+                true
+            }
+            Err(TryRecvError::Empty) => false,
+            Err(TryRecvError::Disconnected) => {
+                self.status = "Could not open item: activation worker stopped".into();
+                self.activation_rx = None;
+                true
+            }
         }
     }
 
@@ -1770,6 +1848,12 @@ impl FileApp {
         }
         match message {
             FileMessage::ContextEntry(index) => {
+                self.context_anchor = Some(self.cursor);
+                self.context_target = self
+                    .browser
+                    .entries()
+                    .get(index)
+                    .map(|entry| entry.path.clone());
                 if !self.selected_entries.contains(&index) {
                     self.selected_entries.clear();
                     self.selected_entries.insert(index);
@@ -1779,16 +1863,26 @@ impl FileApp {
                 self.selection_drag = None;
             }
             FileMessage::ContextBackground => {
+                self.context_anchor = Some(self.cursor);
+                self.context_target = None;
                 self.selection_drag = None;
             }
             FileMessage::ContextOpen => {
-                self.activate_selected();
+                self.activate_context_target();
             }
             FileMessage::ContextOpenNewTab => {
-                let entry = self
-                    .selected
-                    .and_then(|index| self.browser.entries().get(index))
-                    .cloned();
+                let entry = match self.context_target.as_ref() {
+                    Some(path) => self
+                        .browser
+                        .entries()
+                        .iter()
+                        .find(|entry| &entry.path == path)
+                        .cloned(),
+                    None => self
+                        .selected
+                        .and_then(|index| self.browser.entries().get(index))
+                        .cloned(),
+                };
                 if let Some(entry) = entry
                     && (entry.is_directory || entry.path.is_dir())
                 {
@@ -1804,6 +1898,8 @@ impl FileApp {
                 self.selection_anchor = self.selected;
             }
             FileMessage::ToggleCommandSurface => {
+                self.context_target = None;
+                self.context_anchor = None;
                 self.command_surface_open = !self.command_surface_open;
                 self.command_query.clear();
                 self.command_scroll_offset = 0.0;
@@ -1886,9 +1982,21 @@ impl FileApp {
                 self.navigate_to(path);
             }
             FileMessage::Entry(index) => {
+                self.context_target = None;
+                self.context_anchor = None;
                 let now = Instant::now();
-                let activate = self.last_click.is_some_and(|(previous, when)| {
-                    previous == index && now.duration_since(when) <= Duration::from_millis(450)
+                let entry_path = self
+                    .browser
+                    .entries()
+                    .get(index)
+                    .map(|entry| entry.path.clone());
+                let activate = entry_path.as_ref().is_some_and(|entry_path| {
+                    self.last_click.as_ref().is_some_and(|previous| {
+                        previous.path == *entry_path
+                            && now.duration_since(previous.when) <= DOUBLE_CLICK_INTERVAL
+                            && (self.cursor.x - previous.position.x).abs() <= DOUBLE_CLICK_DISTANCE
+                            && (self.cursor.y - previous.position.y).abs() <= DOUBLE_CLICK_DISTANCE
+                    })
                 });
                 if self.shift_down {
                     let anchor = self.selection_anchor.unwrap_or(index);
@@ -1906,7 +2014,11 @@ impl FileApp {
                     self.selection_anchor = Some(index);
                 }
                 self.selected = Some(index);
-                self.last_click = Some((index, now));
+                self.last_click = entry_path.map(|path| FileClick {
+                    path,
+                    position: self.cursor,
+                    when: now,
+                });
                 if activate && !self.control_down && !self.shift_down {
                     self.activate_selected();
                     self.last_click = None;
@@ -1960,7 +2072,7 @@ impl Application for FileApp {
         let invocation_anchor = |target: UiId| match context.modality {
             nickel_ui::InputModality::Pointer => OverlayAnchor::Point {
                 invocation_target: target,
-                point: self.cursor,
+                point: self.context_anchor.unwrap_or(self.cursor),
             },
             nickel_ui::InputModality::Keyboard
             | nickel_ui::InputModality::Controller
@@ -1969,7 +2081,7 @@ impl Application for FileApp {
             }
         };
         let configure = |mut menu: OverlayMenu<FileMessage>| {
-            menu.width = 170.0;
+            menu.width = 250.0;
             menu.row_height = 34.0;
             menu.padding = Insets::all(4.0);
             menu.radius = 7.0;
@@ -1998,21 +2110,105 @@ impl Application for FileApp {
                     format!("file-entry-{index}-context"),
                     invocation_anchor(UiId::new(format!("file-entry-{index}"))),
                 )
-                .item(OverlayMenuItem::action(
-                    "open",
-                    self.localizer.text("file-command-open"),
-                    FileMessage::ContextOpen,
+                .item(
+                    OverlayMenuItem::action(
+                        "open",
+                        self.localizer.text("file-command-open"),
+                        FileMessage::ContextOpen,
+                    )
+                    .shortcut("Enter"),
+                )
+                .item(OverlayMenuItem::disabled_with_reason(
+                    "open-with",
+                    "Open With",
+                    "Application chooser is not implemented yet",
                 ));
                 let menu = if entry.is_directory {
-                    menu.item(OverlayMenuItem::action(
-                        "open-new-tab",
-                        self.localizer.text("file-command-open-new-tab"),
-                        FileMessage::ContextOpenNewTab,
+                    menu.item(
+                        OverlayMenuItem::action(
+                            "open-new-tab",
+                            self.localizer.text("file-command-open-new-tab"),
+                            FileMessage::ContextOpenNewTab,
+                        )
+                        .shortcut("Ctrl+Enter"),
+                    )
+                    .item(OverlayMenuItem::disabled_with_reason(
+                        "bookmark",
+                        "Add to Bookmarks",
+                        "Bookmark editing is not implemented yet",
                     ))
                 } else {
                     menu
                 };
-                FrameOverlay::Menu(configure(menu))
+                let menu = menu
+                    .item(
+                        OverlayMenuItem::disabled_with_reason(
+                            "cut",
+                            "Cut",
+                            "File operations are not implemented yet",
+                        )
+                        .shortcut("Ctrl+X")
+                        .separator_before(true),
+                    )
+                    .item(
+                        OverlayMenuItem::disabled_with_reason(
+                            "copy",
+                            "Copy",
+                            "File operations are not implemented yet",
+                        )
+                        .shortcut("Ctrl+C"),
+                    );
+                let menu = if entry.is_directory {
+                    menu.item(
+                        OverlayMenuItem::disabled_with_reason(
+                            "paste-into",
+                            "Paste into Folder",
+                            "File operations are not implemented yet",
+                        )
+                        .shortcut("Ctrl+V"),
+                    )
+                    .item(OverlayMenuItem::disabled_with_reason(
+                        "new-folder",
+                        "New Folder",
+                        "Folder creation is not implemented yet",
+                    ))
+                } else {
+                    menu
+                };
+                FrameOverlay::Menu(configure(
+                    menu.item(
+                        OverlayMenuItem::disabled_with_reason(
+                            "rename",
+                            "Rename",
+                            "Rename is not implemented yet",
+                        )
+                        .shortcut("F2")
+                        .separator_before(true),
+                    )
+                    .item(OverlayMenuItem::disabled_with_reason(
+                        "trash",
+                        "Move to Trash",
+                        "Trash integration is not implemented yet",
+                    ))
+                    .item(
+                        OverlayMenuItem::disabled_with_reason(
+                            "copy-path",
+                            "Copy Path",
+                            "Clipboard integration is not implemented yet",
+                        )
+                        .separator_before(true),
+                    )
+                    .item(OverlayMenuItem::disabled_with_reason(
+                        "open-terminal",
+                        "Open in Terminal",
+                        "Terminal integration is not implemented yet",
+                    ))
+                    .item(OverlayMenuItem::disabled_with_reason(
+                        "properties",
+                        "Properties",
+                        "Properties are not implemented yet",
+                    )),
+                ))
             })
             .collect::<Vec<_>>();
         overlays.push(FrameOverlay::Menu(configure(
@@ -2020,15 +2216,40 @@ impl Application for FileApp {
                 "file-background-context",
                 invocation_anchor(UiId::from("file-content")),
             )
-            .item(OverlayMenuItem::action(
-                "refresh",
-                self.localizer.text("file-command-refresh"),
-                FileMessage::ContextRefresh,
+            .item(
+                OverlayMenuItem::action(
+                    "refresh",
+                    self.localizer.text("file-command-refresh"),
+                    FileMessage::ContextRefresh,
+                )
+                .shortcut("F5"),
+            )
+            .item(
+                OverlayMenuItem::action(
+                    "select-all",
+                    self.localizer.text("file-command-select-all"),
+                    FileMessage::ContextSelectAll,
+                )
+                .shortcut("Ctrl+A"),
+            )
+            .item(
+                OverlayMenuItem::disabled_with_reason(
+                    "paste",
+                    "Paste",
+                    "File operations are not implemented yet",
+                )
+                .shortcut("Ctrl+V")
+                .separator_before(true),
+            )
+            .item(OverlayMenuItem::disabled_with_reason(
+                "new-folder",
+                "New Folder",
+                "Folder creation is not implemented yet",
             ))
-            .item(OverlayMenuItem::action(
-                "select-all",
-                self.localizer.text("file-command-select-all"),
-                FileMessage::ContextSelectAll,
+            .item(OverlayMenuItem::disabled_with_reason(
+                "properties",
+                "Properties",
+                "Folder properties are not implemented yet",
             )),
         )));
         if let Some(start) = self.selection_drag {
@@ -2047,6 +2268,7 @@ impl Application for FileApp {
         let before = self.next_icon_id;
         self.poll_icons();
         settings_changed
+            || self.poll_activation()
             || self.poll_navigation()
             || self.poll_directory_watch()
             || self.poll_sidebar_children()
@@ -2063,6 +2285,9 @@ impl Application for FileApp {
             self.navigation_rx
                 .as_ref()
                 .map(|_| self.navigation_poll_delay),
+            self.activation_rx
+                .as_ref()
+                .map(|_| Duration::from_millis(16)),
             (!self.sidebar_loading.is_empty()).then_some(Duration::from_millis(16)),
             self.location_groups_rx
                 .as_ref()

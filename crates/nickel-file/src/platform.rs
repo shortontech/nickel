@@ -1,7 +1,44 @@
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::io;
 use std::{
     collections::HashSet,
+    fmt,
     path::{Path, PathBuf},
 };
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum OpenPathError {
+    AssociationMissing,
+    PermissionDenied,
+    TargetMissing,
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+    Unsupported,
+    Platform(String),
+}
+
+impl fmt::Display for OpenPathError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AssociationMissing => formatter.write_str("no default application is available"),
+            Self::PermissionDenied => formatter.write_str("permission was denied"),
+            Self::TargetMissing => formatter.write_str("the target no longer exists"),
+            #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+            Self::Unsupported => {
+                formatter.write_str("opening files is unsupported on this platform")
+            }
+            Self::Platform(error) => formatter.write_str(error),
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn spawn_open_error(error: io::Error) -> OpenPathError {
+    match error.kind() {
+        io::ErrorKind::NotFound => OpenPathError::AssociationMissing,
+        io::ErrorKind::PermissionDenied => OpenPathError::PermissionDenied,
+        _ => OpenPathError::Platform(error.to_string()),
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LocationGroup {
@@ -193,7 +230,10 @@ pub(crate) fn home_directory() -> PathBuf {
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) fn open_path(path: &Path) -> Result<(), String> {
+pub(crate) fn open_path(path: &Path) -> Result<(), OpenPathError> {
+    if !path.exists() {
+        return Err(OpenPathError::TargetMissing);
+    }
     use std::os::windows::ffi::OsStrExt;
     use windows::{
         Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
@@ -220,36 +260,78 @@ pub(crate) fn open_path(path: &Path) -> Result<(), String> {
     if result.0 as isize > 32 {
         Ok(())
     } else {
-        Err(format!("Windows shell error {}", result.0 as isize))
+        match result.0 as isize {
+            2 | 3 => Err(OpenPathError::TargetMissing),
+            5 => Err(OpenPathError::PermissionDenied),
+            31 => Err(OpenPathError::AssociationMissing),
+            code => Err(OpenPathError::Platform(format!(
+                "Windows shell error {code}"
+            ))),
+        }
     }
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn open_path(path: &Path) -> Result<(), String> {
+pub(crate) fn open_path(path: &Path) -> Result<(), OpenPathError> {
+    if !path.exists() {
+        return Err(OpenPathError::TargetMissing);
+    }
     std::process::Command::new("xdg-open")
         .arg(path)
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+        .status()
+        .map_err(spawn_open_error)
+        .and_then(|status| {
+            if status.success() {
+                Ok(())
+            } else if status.code() == Some(3) {
+                Err(OpenPathError::AssociationMissing)
+            } else {
+                Err(OpenPathError::Platform(format!(
+                    "xdg-open exited with {status}"
+                )))
+            }
+        })
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn open_path(path: &Path) -> Result<(), String> {
+pub(crate) fn open_path(path: &Path) -> Result<(), OpenPathError> {
+    if !path.exists() {
+        return Err(OpenPathError::TargetMissing);
+    }
     std::process::Command::new("open")
         .arg(path)
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+        .status()
+        .map_err(spawn_open_error)
+        .and_then(|status| {
+            status
+                .success()
+                .then_some(())
+                .ok_or_else(|| OpenPathError::Platform(format!("open exited with {status}")))
+        })
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
-pub(crate) fn open_path(_path: &Path) -> Result<(), String> {
-    Err("opening files is unsupported on this platform".into())
+pub(crate) fn open_path(_path: &Path) -> Result<(), OpenPathError> {
+    Err(OpenPathError::Unsupported)
 }
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
-    use super::user_directories;
+    use super::{OpenPathError, open_path, spawn_open_error, user_directories};
+
+    #[test]
+    fn open_failures_are_typed_for_portable_ui_policy() {
+        let missing = tempfile::tempdir().unwrap().path().join("missing.txt");
+        assert_eq!(open_path(&missing), Err(OpenPathError::TargetMissing));
+        assert_eq!(
+            spawn_open_error(std::io::Error::from(std::io::ErrorKind::NotFound)),
+            OpenPathError::AssociationMissing
+        );
+        assert_eq!(
+            spawn_open_error(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+            OpenPathError::PermissionDenied
+        );
+    }
 
     #[test]
     fn xdg_user_directories_honor_localized_disabled_and_default_paths() {
