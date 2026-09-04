@@ -32,6 +32,14 @@ impl PendingAttachment {
     pub fn turn_image(&self) -> TurnImage {
         self.turn_image.clone()
     }
+
+    /// Memory retained for the decoded preview and the exact encoded payload.
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.preview
+            .as_raw()
+            .len()
+            .saturating_add(self.turn_image.data_url.len())
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -113,10 +121,7 @@ impl PendingAttachment {
             return Err(AttachmentError::UnsupportedFormat);
         }
         let mut reader = ImageReader::with_format(Cursor::new(bytes), format);
-        let max_side = (limits.decoded_pixels_per_image as f64).sqrt().ceil() as u32;
         let mut decoder_limits = Limits::default();
-        decoder_limits.max_image_width = Some(max_side);
-        decoder_limits.max_image_height = Some(max_side);
         decoder_limits.max_alloc = Some(limits.aggregate_decoded_bytes as u64);
         reader.limits(decoder_limits);
         let mut decoder = reader
@@ -137,6 +142,9 @@ impl PendingAttachment {
         image
             .write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
             .map_err(|_| AttachmentError::Malformed)?;
+        if png.len() > limits.encoded_bytes_per_image {
+            return Err(AttachmentError::TooLarge);
+        }
         let data_url = format!("data:image/png;base64,{}", STANDARD.encode(&png));
         Ok(Self {
             id,
@@ -165,14 +173,21 @@ impl PendingAttachment {
         }
         let image =
             RgbaImage::from_raw(width, height, rgba.to_vec()).ok_or(AttachmentError::Malformed)?;
-        Self::from_rgba_image(id, image)
+        Self::from_rgba_image(id, image, limits)
     }
 
-    fn from_rgba_image(id: AttachmentId, image: RgbaImage) -> Result<Self, AttachmentError> {
+    fn from_rgba_image(
+        id: AttachmentId,
+        image: RgbaImage,
+        limits: AttachmentLimits,
+    ) -> Result<Self, AttachmentError> {
         let mut png = Vec::new();
         image
             .write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
             .map_err(|_| AttachmentError::Malformed)?;
+        if png.len() > limits.encoded_bytes_per_image {
+            return Err(AttachmentError::TooLarge);
+        }
         let data_url = format!("data:image/png;base64,{}", STANDARD.encode(&png));
         Ok(Self {
             id,
@@ -188,24 +203,38 @@ impl PendingAttachment {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn normalizes_supported_image_without_debugging_bytes() {
-        let image = RgbaImage::from_pixel(2, 3, image::Rgba([1, 2, 3, 255]));
+
+    fn encoded(format: ImageFormat, width: u32, height: u32) -> Vec<u8> {
+        let image = image::DynamicImage::ImageRgba8(RgbaImage::from_pixel(
+            width,
+            height,
+            image::Rgba([1, 2, 3, 255]),
+        ));
         let mut bytes = Vec::new();
         image
-            .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
+            .write_to(&mut Cursor::new(&mut bytes), format)
             .unwrap();
-        let attachment =
-            PendingAttachment::decode(AttachmentId(7), &bytes, AttachmentLimits::default())
-                .unwrap();
-        assert_eq!((attachment.width, attachment.height), (2, 3));
-        assert!(
-            attachment
-                .turn_image()
-                .data_url
-                .starts_with("data:image/png;base64,")
-        );
-        assert!(!format!("{attachment:?}").contains("AQID"));
+        bytes
+    }
+
+    #[test]
+    fn normalizes_every_supported_format_without_debugging_bytes() {
+        for format in [ImageFormat::Png, ImageFormat::Jpeg, ImageFormat::WebP] {
+            let attachment = PendingAttachment::decode(
+                AttachmentId(7),
+                &encoded(format, 2, 3),
+                AttachmentLimits::default(),
+            )
+            .unwrap();
+            assert_eq!((attachment.width, attachment.height), (2, 3));
+            assert!(
+                attachment
+                    .turn_image()
+                    .data_url
+                    .starts_with("data:image/png;base64,")
+            );
+            assert!(!format!("{attachment:?}").contains("AQID"));
+        }
     }
 
     #[test]
@@ -243,5 +272,53 @@ mod tests {
             .preferred(),
             ClipboardPaste::Text("世界")
         );
+    }
+
+    #[test]
+    fn normalized_payload_and_retained_memory_obey_independent_limits() {
+        let limits = AttachmentLimits {
+            encoded_bytes_per_image: 1,
+            ..AttachmentLimits::default()
+        };
+        assert_eq!(
+            PendingAttachment::from_rgba(AttachmentId(1), 1, 1, &[1, 2, 3, 255], limits)
+                .unwrap_err(),
+            AttachmentError::TooLarge
+        );
+
+        let attachment = PendingAttachment::from_rgba(
+            AttachmentId(2),
+            1,
+            1,
+            &[1, 2, 3, 255],
+            AttachmentLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            attachment.retained_bytes(),
+            attachment.preview.as_raw().len() + attachment.turn_image.data_url.len()
+        );
+    }
+
+    #[test]
+    fn jpeg_exif_orientation_is_applied_before_preview_and_transport() {
+        let jpeg = encoded(ImageFormat::Jpeg, 2, 3);
+        assert_eq!(&jpeg[..2], &[0xff, 0xd8]);
+        // EXIF/TIFF little-endian, one SHORT orientation entry with value 6
+        // (rotate 90 degrees clockwise). The JPEG segment length includes its
+        // own two-byte length field but not the marker.
+        let exif = [
+            0xff, 0xe1, 0x00, 0x22, b'E', b'x', b'i', b'f', 0, 0, b'I', b'I', 0x2a, 0, 8, 0, 0, 0,
+            1, 0, 0x12, 0x01, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        let mut oriented = Vec::with_capacity(jpeg.len() + exif.len());
+        oriented.extend_from_slice(&jpeg[..2]);
+        oriented.extend_from_slice(&exif);
+        oriented.extend_from_slice(&jpeg[2..]);
+
+        let attachment =
+            PendingAttachment::decode(AttachmentId(9), &oriented, AttachmentLimits::default())
+                .unwrap();
+        assert_eq!((attachment.width, attachment.height), (3, 2));
     }
 }

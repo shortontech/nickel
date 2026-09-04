@@ -5740,6 +5740,16 @@ fn emit_element<Message: Clone>(
         } => {
             let header_height = if *overlay { 30.0 } else { 42.0 };
             let option_height = if *overlay { 34.0 } else { 36.0 };
+            let options_height = option_height * options.len() as f32;
+            let options_origin_y = if *overlay
+                && rect.origin.y + header_height + options_height
+                    > tree.viewport.origin.y + tree.viewport.size.height
+                && rect.origin.y - options_height >= tree.viewport.origin.y
+            {
+                rect.origin.y - options_height
+            } else {
+                rect.origin.y + header_height
+            };
             let header = Rect::new(rect.origin.x, rect.origin.y, rect.size.width, header_height);
             tree.commands.push(PaintCommand::Fill {
                 rect: header,
@@ -5785,7 +5795,7 @@ fn emit_element<Message: Clone>(
                             navigation_owner: Some(node.id.clone()),
                             rect: Rect::new(
                                 rect.origin.x,
-                                rect.origin.y + header_height + index as f32 * option_height,
+                                options_origin_y + index as f32 * option_height,
                                 rect.size.width,
                                 option_height,
                             ),
@@ -5799,7 +5809,7 @@ fn emit_element<Message: Clone>(
                 for (index, option) in options.iter().enumerate() {
                     let option_rect = Rect::new(
                         rect.origin.x,
-                        rect.origin.y + header_height + index as f32 * option_height,
+                        options_origin_y + index as f32 * option_height,
                         rect.size.width,
                         option_height,
                     );

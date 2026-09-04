@@ -208,20 +208,25 @@ impl ChatState {
     }
 
     pub fn attach_image(&mut self, bytes: &[u8]) -> Result<AttachmentId, AttachmentError> {
-        let limits = AttachmentLimits::default();
+        self.attach_image_with_limits(bytes, AttachmentLimits::default())
+    }
+
+    fn attach_image_with_limits(
+        &mut self,
+        bytes: &[u8],
+        limits: AttachmentLimits,
+    ) -> Result<AttachmentId, AttachmentError> {
         if self.attachments.len() >= limits.count {
             return Err(AttachmentError::TooMany);
         }
-        let decoded = self
+        let retained = self
             .attachments
             .iter()
-            .map(|item| item.preview.as_raw().len())
+            .map(PendingAttachment::retained_bytes)
             .sum::<usize>();
         let id = AttachmentId(self.next_attachment_id);
         let attachment = PendingAttachment::decode(id, bytes, limits)?;
-        if decoded.saturating_add(attachment.preview.as_raw().len())
-            > limits.aggregate_decoded_bytes
-        {
+        if retained.saturating_add(attachment.retained_bytes()) > limits.aggregate_decoded_bytes {
             return Err(AttachmentError::AggregateLimit);
         }
         self.next_attachment_id = self.next_attachment_id.saturating_add(1);
@@ -235,18 +240,27 @@ impl ChatState {
         height: u32,
         rgba: &[u8],
     ) -> Result<AttachmentId, AttachmentError> {
-        let limits = AttachmentLimits::default();
+        self.attach_rgba_with_limits(width, height, rgba, AttachmentLimits::default())
+    }
+
+    fn attach_rgba_with_limits(
+        &mut self,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+        limits: AttachmentLimits,
+    ) -> Result<AttachmentId, AttachmentError> {
         if self.attachments.len() >= limits.count {
             return Err(AttachmentError::TooMany);
         }
         let used = self
             .attachments
             .iter()
-            .map(|item| item.preview.as_raw().len())
+            .map(PendingAttachment::retained_bytes)
             .sum::<usize>();
         let id = AttachmentId(self.next_attachment_id);
         let attachment = PendingAttachment::from_rgba(id, width, height, rgba, limits)?;
-        if used.saturating_add(attachment.preview.as_raw().len()) > limits.aggregate_decoded_bytes {
+        if used.saturating_add(attachment.retained_bytes()) > limits.aggregate_decoded_bytes {
             return Err(AttachmentError::AggregateLimit);
         }
         self.next_attachment_id = self.next_attachment_id.saturating_add(1);
@@ -372,6 +386,8 @@ impl ChatState {
     }
 
     fn clear_conversation(&mut self) {
+        self.attachments.clear();
+        self.send_pending = false;
         self.active_turn = None;
         self.interrupt_requested = false;
         self.items.clear();
@@ -949,6 +965,39 @@ mod tests {
             }),
         );
         assert!(state.draft.is_empty());
+        assert!(state.attachments.is_empty());
+    }
+
+    #[test]
+    fn attachment_admission_is_count_and_total_resident_memory_bounded() {
+        let mut state = ChatState::default();
+        let tiny_count = AttachmentLimits {
+            count: 1,
+            ..AttachmentLimits::default()
+        };
+        state
+            .attach_rgba_with_limits(1, 1, &[1, 2, 3, 255], tiny_count)
+            .unwrap();
+        assert_eq!(
+            state
+                .attach_rgba_with_limits(1, 1, &[1, 2, 3, 255], tiny_count)
+                .unwrap_err(),
+            AttachmentError::TooMany
+        );
+
+        let first = state.attachments[0].id;
+        assert!(state.remove_attachment(first));
+        assert!(state.attachments.is_empty());
+        let tiny_memory = AttachmentLimits {
+            aggregate_decoded_bytes: 4,
+            ..AttachmentLimits::default()
+        };
+        assert_eq!(
+            state
+                .attach_rgba_with_limits(1, 1, &[1, 2, 3, 255], tiny_memory)
+                .unwrap_err(),
+            AttachmentError::AggregateLimit
+        );
         assert!(state.attachments.is_empty());
     }
 

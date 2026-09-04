@@ -1564,7 +1564,9 @@ fn configured_chat_view(
                         })
                     }}
                 </Column>
-                <Column id={id!(composer)} fill_width shrink={0.0} gap={8.0}>
+                <Container id={id!(composer)} fill_width shrink={0.0}
+                    navigation_scope={NavigationScope::group()}>
+                <Column fill_width gap={8.0}>
                     {state.pending.iter().map(|interaction| ui! {
                         <InteractionCard interaction={interaction} answer={&state.interaction_answer} theme={theme} />
                     })}
@@ -1705,6 +1707,7 @@ fn configured_chat_view(
                         }}
                     </Row>
                 </Column>
+                </Container>
             </Column>
             })} }
         </Column>

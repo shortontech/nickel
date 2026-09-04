@@ -2614,7 +2614,9 @@ impl<Message> Dropdown<Message> {
             option_messages,
             inline_messages: Vec::new(),
             children: Vec::new(),
-            navigation_scope: None,
+            navigation_scope: Some(
+                crate::NavigationScope::group().traversal(crate::NavigationTraversal::Vertical),
+            ),
             adjustment_step: 0.05,
         };
         element.style.height = Length::Px(42.0);

@@ -1283,6 +1283,41 @@ fn expanded_dropdown_exposes_option_actions() {
 }
 
 #[test]
+fn overlay_dropdown_flips_its_complete_option_list_inside_the_viewport() {
+    let mut state = UiStateStore::default();
+    state.set_dropdown_open(UiId::from("root/policy"), true);
+    let tree = UiFrame::layout_with_state(
+        Column::new().child(Container::new().height(150.0)).child(
+            Dropdown::new(
+                TestMessage::Named("policy"),
+                "Current",
+                (0..4).map(|index| (format!("Policy {index}"), TestMessage::Option(index))),
+            )
+            .id("policy")
+            .overlay(true),
+        ),
+        Rect::new(0.0, 0.0, 240.0, 180.0),
+        &mut state,
+    );
+
+    let bounds = (0..4)
+        .map(|index| tree.semantic_targets_for_message(&TestMessage::Option(index))[0].bounds)
+        .collect::<Vec<_>>();
+    assert!(
+        bounds
+            .windows(2)
+            .all(|pair| pair[0].origin.y < pair[1].origin.y)
+    );
+    assert!(bounds.iter().all(|bounds| bounds.origin.y >= 0.0));
+    assert!(
+        bounds
+            .iter()
+            .all(|bounds| bounds.origin.y + bounds.size.height <= 180.0)
+    );
+    assert!(bounds.last().unwrap().origin.y <= 150.0);
+}
+
+#[test]
 fn window_focus_loss_closes_an_open_dropdown() {
     let mut state = UiStateStore::default();
     let dropdown = || {

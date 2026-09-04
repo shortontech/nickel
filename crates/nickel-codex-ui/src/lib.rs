@@ -1063,6 +1063,94 @@ mod tests {
     }
 
     #[test]
+    fn every_approval_policy_transition_is_staged_then_persisted_after_acceptance() {
+        use nickel_codex::ApprovalPolicy::{Never, OnFailure, OnRequest, Untrusted};
+
+        for (index, (from, to)) in [Untrusted, OnFailure, OnRequest, Never]
+            .into_iter()
+            .flat_map(|from| [Untrusted, OnFailure, OnRequest, Never].map(|to| (from, to)))
+            .enumerate()
+        {
+            let directory = tempfile::tempdir().unwrap();
+            let settings_path = directory.path().join(format!("settings-{index}.toml"));
+            let backend = ReplayBackend::from_json(r#"{"name":"policy","events":[]}"#).unwrap();
+            let mut settings = CodexSettings::default();
+            settings.approval_policy = from;
+            let mut app = ChatApplication::with_settings(
+                BackendMode::Replay {
+                    backend,
+                    cwd: directory.path().into(),
+                },
+                settings,
+                Some(settings_path.clone()),
+            );
+
+            app.update(ChatMessage::SelectApprovalPolicy(to));
+            assert_eq!(app.state.effective_approval_policy, from);
+            assert!(!settings_path.exists());
+            app.accept_approval_policy(to);
+            assert_eq!(app.state.effective_approval_policy, to);
+            assert_eq!(
+                CodexSettings::load(&settings_path).unwrap().approval_policy,
+                to
+            );
+        }
+    }
+
+    #[test]
+    fn standalone_and_embedded_hosts_accept_images_and_release_them_on_conversation_change() {
+        for embedded in [false, true] {
+            let backend = ReplayBackend::from_json(r#"{"name":"images","events":[]}"#).unwrap();
+            let app = ChatApplication::new(BackendMode::Replay {
+                backend,
+                cwd: "/projects/nickel".into(),
+            });
+            let mut app = if embedded {
+                app.as_shell_chat(std::path::Path::new("/projects/nickel"))
+            } else {
+                app
+            };
+            assert!(nickel_ui::Application::paste_clipboard_image(
+                &mut app,
+                1,
+                1,
+                &[1, 2, 3, 255]
+            ));
+            assert_eq!(app.state.attachments.len(), 1);
+            let preview = std::sync::Arc::downgrade(&app.state.attachments[0].preview);
+            app.state.new_chat();
+            assert!(app.state.attachments.is_empty());
+            assert!(preview.upgrade().is_none());
+        }
+    }
+
+    #[test]
+    fn attachment_removal_is_pointer_keyboard_controller_and_accessibility_reachable() {
+        for via in [
+            ActivationVia::Pointer,
+            ActivationVia::Keyboard,
+            ActivationVia::Controller,
+            ActivationVia::Accessibility,
+        ] {
+            let backend =
+                ReplayBackend::from_json(r#"{"name":"remove-image","events":[]}"#).unwrap();
+            let mut app = ChatApplication::new(BackendMode::Replay {
+                backend,
+                cwd: "/projects/nickel".into(),
+            });
+            app.state.attach_rgba(1, 1, &[1, 2, 3, 255]).unwrap();
+            let mut scenario = Scenario::new(app, 900, 640);
+            scenario
+                .activate_via(
+                    via,
+                    &Selector::role_name(SemanticRole::Button, "Remove image attachment 1"),
+                )
+                .unwrap();
+            assert!(scenario.host().application().state.attachments.is_empty());
+        }
+    }
+
+    #[test]
     fn blur_rerender_and_outstanding_approval_do_not_apply_a_staged_policy() {
         let backend = ReplayBackend::from_json(r#"{"name":"policy-focus","events":[]}"#).unwrap();
         let mut app = ChatApplication::new(BackendMode::Replay {
@@ -1100,6 +1188,7 @@ mod tests {
             ActivationVia::Keyboard,
             ActivationVia::Touch,
             ActivationVia::Accessibility,
+            ActivationVia::Controller,
         ] {
             let backend =
                 ReplayBackend::from_json(r#"{"name":"policy-input","events":[]}"#).unwrap();
@@ -1114,18 +1203,31 @@ mod tests {
                     &Selector::role_name(SemanticRole::Button, "Approval policy selector"),
                 )
                 .unwrap();
-            scenario
-                .activate_via(
-                    via,
-                    &Selector::role_name(
-                        SemanticRole::MenuItem,
-                        "Never ask automatically — Codex cannot pause to request approval",
-                    ),
-                )
-                .unwrap();
+            if via == ActivationVia::Controller {
+                scenario
+                    .host_mut()
+                    .handle_controller_action(nickel_ui::ControllerAction::Down);
+                scenario
+                    .host_mut()
+                    .handle_controller_action(nickel_ui::ControllerAction::Confirm);
+            } else {
+                scenario
+                    .activate_via(
+                        via,
+                        &Selector::role_name(
+                            SemanticRole::MenuItem,
+                            "Never ask automatically — Codex cannot pause to request approval",
+                        ),
+                    )
+                    .unwrap();
+            }
             assert_eq!(
                 scenario.host().application().state.selected_approval_policy,
-                nickel_codex::ApprovalPolicy::Never
+                if via == ActivationVia::Controller {
+                    nickel_codex::ApprovalPolicy::OnFailure
+                } else {
+                    nickel_codex::ApprovalPolicy::Never
+                }
             );
         }
     }
