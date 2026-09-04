@@ -53,7 +53,7 @@ use nickel_ui::{
     ResponsiveNavigationDestination, SelectField, SemanticControllerAction, SemanticRole,
     SemanticSelector, SemanticTheme, SettingsCard, SettingsNavigation, SettingsRow,
     SettingsSearchEntry, SettingsSearchField, SettingsStatus, SettingsStatusKind, SliderField,
-    Surface, SurfaceRole, Switch, SwitchState, TextAlign, TextField, UiHost, UiId, ViewContext,
+    Surface, SurfaceRole, Switch, SwitchState, TextAlign, UiHost, UiId, ViewContext,
     search_settings, ui,
 };
 use winit::{dpi::LogicalSize, event::WindowEvent};
