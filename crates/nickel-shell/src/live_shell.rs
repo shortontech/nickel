@@ -28,9 +28,9 @@ use nickel_session_protocol::{
 use nickel_ui::Rect;
 use nickel_ui::backend::PaintCommand;
 use nickel_ui::{
-    AnyView, Column, Container, ControllerAction, HostBatch, HostChangeToken, HostEvent, Image,
-    ImageFit, Insets, Layer, Point, Row, SemanticRole, Shortcut, Spacer, Text, TextAlign,
-    TextField, UiEvent, ViewContext,
+    AnyView, Column, Container, ControllerAction, FrameOverlay, HostBatch, HostChangeToken,
+    HostEvent, Image, ImageFit, Insets, Layer, OverlayAnchor, OverlayMenu, OverlayMenuItem, Point,
+    Row, SemanticRole, Shortcut, Spacer, Text, TextAlign, TextField, UiEvent, UiId, ViewContext,
 };
 
 use crate::{
@@ -172,6 +172,10 @@ pub struct DesktopApplication {
 pub enum DesktopMessage {
     Activate(DesktopEntryId),
     Context(DesktopEntryId),
+    Cut(DesktopEntryId),
+    Copy(DesktopEntryId),
+    Rename(DesktopEntryId),
+    Properties(DesktopEntryId),
 }
 
 impl DesktopApplication {
@@ -631,24 +635,20 @@ impl DesktopApplication {
                 wrap: true,
             });
         }
-        if let Some((origin, entry)) = self.context_menu {
-            let labels: &[&str] = if entry.is_some() {
-                &["Open", "Cut", "Copy", "Rename", "Properties"]
-            } else {
-                &[
-                    "Name (ascending)",
-                    "Name (descending)",
-                    "Kind (ascending)",
-                    "Kind (descending)",
-                    "Size (ascending)",
-                    "Size (descending)",
-                    "Modified (ascending)",
-                    "Modified (descending)",
-                    "Manual arrangement",
-                    "Align to Grid",
-                    "Clean Up",
-                ]
-            };
+        if let Some((origin, None)) = self.context_menu {
+            let labels: &[&str] = &[
+                "Name (ascending)",
+                "Name (descending)",
+                "Kind (ascending)",
+                "Kind (descending)",
+                "Size (ascending)",
+                "Size (descending)",
+                "Modified (ascending)",
+                "Modified (descending)",
+                "Manual arrangement",
+                "Align to Grid",
+                "Clean Up",
+            ];
             commands.push(PaintCommand::RoundedFill {
                 rect: Rect::new(origin.x, origin.y, 190.0, labels.len() as f32 * 30.0),
                 color: self.palette.surface,
@@ -793,7 +793,93 @@ impl nickel_ui::Application for DesktopApplication {
                     ));
                 }
             }
+            DesktopMessage::Cut(id) | DesktopMessage::Copy(id) => {
+                let cut = matches!(message, DesktopMessage::Cut(_));
+                if !self.layout.selected().contains(&id) {
+                    self.layout.select(id, SelectionModifiers::default());
+                }
+                let paths = self
+                    .layout
+                    .items()
+                    .iter()
+                    .filter(|item| self.layout.selected().contains(&item.id))
+                    .map(|item| item.entry.path.clone())
+                    .collect::<Vec<_>>();
+                if let Err(error) = nickel_file::publish_file_clipboard(&paths, cut) {
+                    self.error = Some(format!("Could not update file clipboard: {error}"));
+                }
+                self.context_menu = None;
+            }
+            DesktopMessage::Rename(id) | DesktopMessage::Properties(id) => {
+                let rename = matches!(message, DesktopMessage::Rename(_));
+                if let Some(path) = self
+                    .layout
+                    .items()
+                    .iter()
+                    .find(|item| item.id == id)
+                    .map(|item| item.entry.path.clone())
+                {
+                    let result = if rename {
+                        launch_nickel_file_rename(&path)
+                    } else {
+                        launch_nickel_file_properties(&path)
+                    };
+                    if let Err(error) = result {
+                        self.error = Some(error);
+                    }
+                }
+                self.context_menu = None;
+            }
         }
+    }
+
+    fn frame_overlays(&self, _context: ViewContext) -> Vec<FrameOverlay<Self::Message>> {
+        let Some((_, Some(id))) = self.context_menu else {
+            return Vec::new();
+        };
+        let anchor = UiId::new(format!("desktop-entry-{}-{}", id.0.0, id.0.1));
+        vec![FrameOverlay::Menu(
+            OverlayMenu::new(
+                format!("desktop-entry-{}-{}-context", id.0.0, id.0.1),
+                OverlayAnchor::InvocationTarget(anchor),
+            )
+            .item(
+                OverlayMenuItem::action("open", "Open", DesktopMessage::Activate(id))
+                    .shortcut("Enter"),
+            )
+            .item(
+                OverlayMenuItem::action("cut", "Cut", DesktopMessage::Cut(id))
+                    .shortcut("Ctrl+X")
+                    .separator_before(true),
+            )
+            .item(
+                OverlayMenuItem::action("copy", "Copy", DesktopMessage::Copy(id))
+                    .shortcut("Ctrl+C"),
+            )
+            .item(
+                OverlayMenuItem::action("rename", "Rename", DesktopMessage::Rename(id))
+                    .shortcut("F2")
+                    .separator_before(true),
+            )
+            .item(OverlayMenuItem::disabled_with_reason(
+                "trash",
+                "Move to Trash",
+                "Trash integration is not implemented yet",
+            ))
+            .item(
+                OverlayMenuItem::disabled_with_reason(
+                    "open-terminal",
+                    "Open in Terminal",
+                    "Terminal integration is not implemented yet",
+                )
+                .separator_before(true),
+            )
+            .item(OverlayMenuItem::action(
+                "properties",
+                "Properties",
+                DesktopMessage::Properties(id),
+            )),
+        )]
     }
 
     fn view(&self, context: ViewContext) -> impl nickel_ui::View<Self::Message> {
