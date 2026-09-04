@@ -178,13 +178,13 @@ fn compositor_registrations() -> Vec<Registration<HotkeyAction>> {
         registration(
             KeyCode::AltLeft,
             [],
-            ShortcutTrigger::ModifierReleased(nickel_input::Modifier::AltLeft),
+            ShortcutTrigger::ModifierReleasedAfterChord(nickel_input::Modifier::AltLeft),
             CommitSwitch,
         ),
         registration(
             KeyCode::AltRight,
             [],
-            ShortcutTrigger::ModifierReleased(nickel_input::Modifier::AltRight),
+            ShortcutTrigger::ModifierReleasedAfterChord(nickel_input::Modifier::AltRight),
             CommitSwitch,
         ),
         registration(
@@ -230,6 +230,26 @@ fn compositor_registrations() -> Vec<Registration<HotkeyAction>> {
             CaptureActiveWindowToFile,
         ),
     ]
+}
+
+/// Product bindings consumed by platform-neutral shortcut engines.
+///
+/// Native adapters own translation and lifecycle state; Nickel Core owns what
+/// each shortcut means. Keeping this declaration here prevents platform
+/// backends from growing parallel binding tables.
+pub fn default_bindings() -> Vec<nickel_input::Binding<HotkeyAction>> {
+    compositor_registrations()
+        .into_iter()
+        .map(|registration| nickel_input::Binding {
+            suppress: !matches!(
+                registration.shortcut.trigger,
+                ShortcutTrigger::ModifierReleased(_)
+                    | ShortcutTrigger::ModifierReleasedAfterChord(_)
+            ),
+            shortcut: registration.shortcut,
+            action: registration.action,
+        })
+        .collect()
 }
 
 fn registration(
@@ -572,11 +592,12 @@ mod tests {
     use nickel_input::global::{
         GlobalShortcutAdapter, RegistrationError, ShortcutCapability, ShortcutOwnership,
     };
+    use nickel_input::windows::WindowsInputAdapter;
     use nickel_input::{KeyCode, KeyEdge};
 
     use super::{
         CompositorShortcutAdapter, HotkeyAction, HotkeyController, HotkeyOutcome,
-        compositor_registrations,
+        compositor_registrations, default_bindings,
     };
 
     #[test]
@@ -606,6 +627,32 @@ mod tests {
             adapter.handle(KeyCode::SuperLeft, KeyEdge::Released),
             HotkeyOutcome::default()
         );
+    }
+
+    #[test]
+    fn windows_and_compositor_adapters_replay_the_same_product_actions() {
+        let sequence = [
+            (KeyCode::AltLeft, KeyEdge::Pressed),
+            (KeyCode::Tab, KeyEdge::Pressed),
+            (KeyCode::Tab, KeyEdge::Released),
+            (KeyCode::AltLeft, KeyEdge::Released),
+            (KeyCode::SuperLeft, KeyEdge::Pressed),
+            (KeyCode::KeyL, KeyEdge::Pressed),
+            (KeyCode::KeyL, KeyEdge::Released),
+            (KeyCode::SuperLeft, KeyEdge::Released),
+        ];
+        let mut compositor = CompositorShortcutAdapter::default();
+        let compositor_actions = sequence
+            .iter()
+            .filter_map(|(key, edge)| compositor.handle(*key, *edge).action)
+            .collect::<Vec<_>>();
+        let mut windows = WindowsInputAdapter::new(default_bindings());
+        let windows_actions = sequence
+            .iter()
+            .flat_map(|(key, edge)| windows.handle_key_code(*key, *edge).outcomes)
+            .map(|outcome| outcome.action)
+            .collect::<Vec<_>>();
+        assert_eq!(windows_actions, compositor_actions);
     }
 
     #[test]

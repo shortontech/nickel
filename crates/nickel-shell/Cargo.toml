@@ -19,7 +19,7 @@ nickel-core = { path = "../nickel-core" }
 nickel-codex = { path = "../nickel-codex" }
 nickel-codex-ui = { path = "../nickel-codex-ui" }
 nickel-i18n = { path = "../nickel-i18n" }
-nickel-input = { path = "../nickel-input", features = ["winit"] }
+nickel-input = { path = "../nickel-input", features = ["winit", "windows"] }
 nickel-logging = { path = "../nickel-logging" }
 nickel-session-protocol = { path = "../nickel-session-protocol" }
 nucleo-matcher.workspace = true

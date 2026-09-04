@@ -10,6 +10,7 @@ description = "Backend-neutral input vocabulary and shortcut recognition for Nic
 default = []
 winit = ["dep:winit"]
 gilrs = ["dep:gilrs"]
+windows = []
 
 [dependencies]
 winit = { workspace = true, optional = true }

@@ -9,7 +9,7 @@ rust-version.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
-nickel-input = { path = "../nickel-input" }
+nickel-input = { path = "../nickel-input", features = ["windows"] }
 
 [dev-dependencies]
 tempfile = "3.25.0"

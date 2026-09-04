@@ -44,10 +44,9 @@ use windows::{
                 CoTaskMemFree, CoUninitialize,
             },
             DataExchange::{
-                COPYDATASTRUCT, CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard,
-                SetClipboardData,
+                COPYDATASTRUCT, CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
             },
-            Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock},
+            Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock},
         },
         UI::{
             HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext},
@@ -93,12 +92,11 @@ use windows::{
     core::{BOOL, PCWSTR, PWSTR, w},
 };
 
-use nickel_core::hotkeys::{
-    HotkeyAction, HotkeyController, HotkeyOutcome, HotkeySnapshot, KeyCode, KeyEdge,
-};
+use nickel_core::hotkeys::{HotkeyAction, HotkeyOutcome, HotkeySnapshot, KeyCode, KeyEdge};
 use nickel_input::{
     AggregateModifier, PhysicalKey, Shortcut, ShortcutKey, ShortcutTrigger,
     global::{GlobalShortcutEdge, Registration, RegistrationError, RegistrationTable},
+    windows::{NativeKeyboardEvent, WindowsInputAdapter, physical_key},
 };
 
 use crate::{
@@ -882,11 +880,21 @@ pub fn launcher_hotkey_receiver() -> super::GlobalShortcutFeed {
 }
 
 pub fn handle_focused_shortcut(key: KeyCode, edge: KeyEdge) {
-    let action = hotkey_controller()
-        .lock()
-        .ok()
-        .and_then(|mut controller| controller.handle_reconciled(key, edge).action);
-    send_hotkey_action(action);
+    let actions = windows_input_adapter().lock().ok().map(|mut adapter| {
+        if key == KeyCode::PrintScreen
+            && edge == KeyEdge::Released
+            && !adapter.key_held(KeyCode::PrintScreen)
+        {
+            let pressed = adapter.handle_key_code(key, KeyEdge::Pressed).outcomes;
+            let _ = adapter.handle_key_code(key, KeyEdge::Released);
+            pressed
+        } else {
+            adapter.handle_key_code(key, edge).outcomes
+        }
+    });
+    if let Some(actions) = actions {
+        send_hotkey_outcomes(actions);
+    }
 }
 
 fn run_super_key_hook(
@@ -1024,7 +1032,8 @@ fn deliver_registered_hotkey(
 }
 
 static SHORTCUT_SENDER: std::sync::OnceLock<Sender<GlobalShortcut>> = std::sync::OnceLock::new();
-static HOTKEY_CONTROLLER: std::sync::OnceLock<Mutex<HotkeyController>> = std::sync::OnceLock::new();
+static WINDOWS_INPUT_ADAPTER: std::sync::OnceLock<Mutex<WindowsInputAdapter<HotkeyAction>>> =
+    std::sync::OnceLock::new();
 static RUN_HOTKEY_REGISTERED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 const SUPER_RELEASE_TIMER: usize = 0x4e04;
@@ -1120,8 +1129,11 @@ unsafe extern "system" fn super_key_hook(code: i32, wparam: WPARAM, lparam: LPAR
     };
     // Alt changes the layout-translated virtual key for the physical grave key on some layouts
     // (for example to VK_HANJA). Preserve the physical shortcut using its stable scan code.
-    let key = key_code_from_windows_vk(event.vkCode)
-        .or_else(|| (event.scanCode == 0x29).then_some(KeyCode::Backquote));
+    let translated = physical_key(event.vkCode, event.scanCode, event.flags.0 & 1 != 0);
+    let key = match translated {
+        PhysicalKey::Code(key) => Some(key),
+        PhysicalKey::Native(_) => None,
+    };
     if edge == KeyEdge::Released {
         let release_timer = match key {
             Some(KeyCode::SuperLeft | KeyCode::SuperRight) => {
@@ -1146,11 +1158,11 @@ unsafe extern "system" fn super_key_hook(code: i32, wparam: WPARAM, lparam: LPAR
         && RUN_HOTKEY_REGISTERED.load(std::sync::atomic::Ordering::Acquire)
     {
         if edge == KeyEdge::Pressed
-            && let Ok(mut controller) = hotkey_controller().lock()
+            && let Ok(mut adapter) = windows_input_adapter().lock()
         {
             // RegisterHotKey owns Super+R dispatch. The hook only records that another key joined
             // the Super press, preventing the later release from toggling the launcher.
-            controller.handle_unmapped(KeyEdge::Pressed);
+            adapter.observe_key_code(KeyCode::KeyR, KeyEdge::Pressed);
         }
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
     }
@@ -1159,26 +1171,40 @@ unsafe extern "system" fn super_key_hook(code: i32, wparam: WPARAM, lparam: LPAR
         Some(KeyCode::Tab | KeyCode::Backquote | KeyCode::PrintScreen)
     ) && edge == KeyEdge::Pressed
         && unsafe { GetAsyncKeyState(VK_MENU as i32) < 0 }
-        && let Ok(mut controller) = hotkey_controller().lock()
-        && !controller.snapshot().alt_held
+        && let Ok(mut adapter) = windows_input_adapter().lock()
+        && !adapter.modifier_held(AggregateModifier::Alt)
     {
-        controller.handle(KeyCode::AltLeft, KeyEdge::Pressed);
+        adapter.observe_key_code(KeyCode::AltLeft, KeyEdge::Pressed);
     }
-    let (outcome, snapshot) = hotkey_controller()
+    let (outcomes, snapshot) = windows_input_adapter()
         .lock()
-        .map(|mut controller| {
-            let outcome = match key {
-                Some(key) => controller.handle(key, edge),
-                None => controller.handle_unmapped(edge),
-            };
-            (outcome, controller.snapshot())
+        .map(|mut adapter| {
+            let dispatch = adapter.handle_native(NativeKeyboardEvent {
+                virtual_key: event.vkCode,
+                scan_code: event.scanCode,
+                extended: event.flags.0 & 1 != 0,
+                edge,
+                injected: event.flags.0 & 0x10 != 0,
+            });
+            let outcomes = dispatch
+                .map(|dispatch| dispatch.outcomes)
+                .unwrap_or_default();
+            let snapshot = windows_input_snapshot(&adapter);
+            (outcomes, snapshot)
         })
         .unwrap_or_default();
+    let outcome = outcomes
+        .first()
+        .map_or(HotkeyOutcome::default(), |item| HotkeyOutcome {
+            action: Some(item.action),
+            suppress: item.suppress,
+        });
     if key != Some(KeyCode::KeyR) {
         trace_input("key", key, Some(edge), outcome, snapshot);
     }
-    send_hotkey_action(outcome.action);
-    if outcome.suppress {
+    let suppress = outcomes.iter().any(|outcome| outcome.suppress);
+    send_hotkey_outcomes(outcomes);
+    if suppress {
         LRESULT(1)
     } else {
         unsafe { CallNextHookEx(None, code, wparam, lparam) }
@@ -1207,45 +1233,47 @@ fn reconcile_modifier_release(timer: usize) {
     unsafe {
         let _ = KillTimer(None, timer);
     }
-    let key = if timer == super_timer {
+    let keys = if timer == super_timer {
         SUPER_RELEASE_TIMER_ID.store(0, Ordering::Release);
-        KeyCode::SuperLeft
+        [KeyCode::SuperLeft, KeyCode::SuperRight]
     } else {
         ALT_RELEASE_TIMER_ID.store(0, Ordering::Release);
-        KeyCode::AltLeft
+        [KeyCode::AltLeft, KeyCode::AltRight]
     };
-    let action = hotkey_controller()
+    let actions = windows_input_adapter()
         .lock()
         .ok()
-        .and_then(|mut controller| controller.handle(key, KeyEdge::Released).action);
-    send_hotkey_action(action);
+        .map(|mut adapter| {
+            keys.into_iter()
+                .flat_map(|key| adapter.handle_key_code(key, KeyEdge::Released).outcomes)
+                .collect()
+        })
+        .unwrap_or_default();
+    send_hotkey_outcomes(actions);
 }
 
-fn key_code_from_windows_vk(vk: u32) -> Option<KeyCode> {
-    Some(match vk {
-        0x5b => KeyCode::SuperLeft,
-        0x5c => KeyCode::SuperRight,
-        0xa4 => KeyCode::AltLeft,
-        0xa5 => KeyCode::AltRight,
-        0x12 => KeyCode::AltLeft,
-        0xa0 => KeyCode::ShiftLeft,
-        0xa1 => KeyCode::ShiftRight,
-        0x10 => KeyCode::ShiftLeft,
-        0xa2 => KeyCode::ControlLeft,
-        0xa3 => KeyCode::ControlRight,
-        0x11 => KeyCode::ControlLeft,
-        0x09 => KeyCode::Tab,
-        0x25 => KeyCode::ArrowLeft,
-        0x27 => KeyCode::ArrowRight,
-        0xc0 => KeyCode::Backquote,
-        0x52 => KeyCode::KeyR,
-        0x2c => KeyCode::PrintScreen,
-        _ => return None,
+fn windows_input_adapter() -> &'static Mutex<WindowsInputAdapter<HotkeyAction>> {
+    WINDOWS_INPUT_ADAPTER.get_or_init(|| {
+        Mutex::new(WindowsInputAdapter::new(
+            nickel_core::hotkeys::default_bindings(),
+        ))
     })
 }
 
-fn hotkey_controller() -> &'static Mutex<HotkeyController> {
-    HOTKEY_CONTROLLER.get_or_init(|| Mutex::new(HotkeyController::default()))
+fn windows_input_snapshot(adapter: &WindowsInputAdapter<HotkeyAction>) -> HotkeySnapshot {
+    HotkeySnapshot {
+        super_held: adapter.modifier_held(AggregateModifier::Super),
+        alt_held: adapter.modifier_held(AggregateModifier::Alt),
+        shift_held: adapter.modifier_held(AggregateModifier::Shift),
+        control_held: adapter.modifier_held(AggregateModifier::Control),
+        tab_held: adapter.key_held(KeyCode::Tab),
+        grave_held: adapter.key_held(KeyCode::Backquote),
+        run_held: adapter.key_held(KeyCode::KeyR),
+        print_screen_held: adapter.key_held(KeyCode::PrintScreen),
+        left_held: adapter.key_held(KeyCode::ArrowLeft),
+        right_held: adapter.key_held(KeyCode::ArrowRight),
+        ..HotkeySnapshot::default()
+    }
 }
 
 fn input_trace_enabled() -> bool {
@@ -1345,6 +1373,12 @@ fn send_hotkey_action(action: Option<HotkeyAction>) {
     }
 }
 
+fn send_hotkey_outcomes(outcomes: Vec<nickel_input::ShortcutOutcome<HotkeyAction>>) {
+    for outcome in outcomes {
+        send_hotkey_action(Some(outcome.action));
+    }
+}
+
 unsafe extern "system" fn windows_mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code < 0 {
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
@@ -1373,9 +1407,9 @@ unsafe extern "system" fn windows_mouse_hook(code: i32, wparam: WPARAM, lparam: 
             }
             if release {
                 *drag = None;
-                let snapshot = hotkey_controller()
+                let snapshot = windows_input_adapter()
                     .lock()
-                    .map(|controller| controller.snapshot())
+                    .map(|adapter| windows_input_snapshot(&adapter))
                     .unwrap_or_default();
                 trace_input(
                     "mouse-release",
@@ -1397,19 +1431,17 @@ unsafe extern "system" fn windows_mouse_hook(code: i32, wparam: WPARAM, lparam: 
     const VK_LWIN: i32 = 0x5b;
     const VK_RWIN: i32 = 0x5c;
     let physical_super = unsafe { GetAsyncKeyState(VK_LWIN) < 0 || GetAsyncKeyState(VK_RWIN) < 0 };
-    let (super_held, chord_started) = hotkey_controller()
+    let (super_held, chord_started) = windows_input_adapter()
         .lock()
-        .map(|mut controller| {
+        .map(|mut adapter| {
             // Mouse and keyboard low-level hooks are delivered independently. A mouse-down can
             // win the startup/event-order race before Nickel observes Super-down, so reconcile
             // from Windows' physical state at the gesture boundary.
-            if physical_super && !controller.snapshot().super_held {
-                controller.handle(KeyCode::SuperLeft, KeyEdge::Pressed);
-            } else {
-                controller.reconcile_super(physical_super);
+            if physical_super && !adapter.modifier_held(AggregateModifier::Super) {
+                adapter.observe_key_code(KeyCode::SuperLeft, KeyEdge::Pressed);
             }
-            let super_held = controller.snapshot().super_held;
-            let chord_started = controller.begin_pointer_chord();
+            let super_held = adapter.modifier_held(AggregateModifier::Super);
+            let chord_started = adapter.begin_pointer_chord();
             (super_held, chord_started)
         })
         .unwrap_or_default();
@@ -1427,9 +1459,9 @@ unsafe extern "system" fn windows_mouse_hook(code: i32, wparam: WPARAM, lparam: 
     if !chord_started {
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
     }
-    let snapshot = hotkey_controller()
+    let snapshot = windows_input_adapter()
         .lock()
-        .map(|controller| controller.snapshot())
+        .map(|adapter| windows_input_snapshot(&adapter))
         .unwrap_or_default();
     trace_input(
         if message == WM_LBUTTONDOWN {
@@ -1681,44 +1713,11 @@ fn quote_windows_argument(argument: &str) -> String {
     format!("\"{}\"", argument.replace('"', "\\\""))
 }
 
-pub fn paste_text_if_requested(character: &str) -> Option<String> {
-    const VK_CONTROL: i32 = 0x11;
-    if !character.eq_ignore_ascii_case("v") || unsafe { GetAsyncKeyState(VK_CONTROL) >= 0 } {
-        return None;
-    }
-
-    // Returning Some even when the clipboard cannot be read consumes Ctrl+V instead of inserting
-    // a literal "v" into the Run command.
-    Some(read_clipboard_text().unwrap_or_default())
-}
-
-fn read_clipboard_text() -> Option<String> {
-    use windows::Win32::Foundation::HGLOBAL;
-
-    unsafe { OpenClipboard(None).ok()? };
-    let result = (|| {
-        // CF_UNICODETEXT is the standard UTF-16 clipboard format.
-        let handle = unsafe { GetClipboardData(13).ok()? };
-        let global = HGLOBAL(handle.0);
-        let byte_len = unsafe { GlobalSize(global) };
-        if byte_len < 2 {
-            return None;
-        }
-        let pointer = unsafe { GlobalLock(global) }.cast::<u16>();
-        if pointer.is_null() {
-            return None;
-        }
-        let units = unsafe { std::slice::from_raw_parts(pointer, byte_len / 2) };
-        let text_len = units
-            .iter()
-            .position(|unit| *unit == 0)
-            .unwrap_or(units.len());
-        let text = String::from_utf16_lossy(&units[..text_len]);
-        let _ = unsafe { GlobalUnlock(global) };
-        Some(text.replace(['\r', '\n'], " "))
-    })();
-    let _ = unsafe { CloseClipboard() };
-    result
+pub fn paste_text_if_requested(_: &str) -> Option<String> {
+    // Command recognition and its associated text suppression are one
+    // normalized nickel-ui transaction. Character inspection plus
+    // GetAsyncKeyState here could leak the command's literal `v`.
+    None
 }
 
 fn launch_uri(uri: &str) -> windows::core::Result<bool> {
@@ -3105,9 +3104,6 @@ fn clear_dwm_thumbnails() {
 pub fn launcher_visibility_applied(visible: bool) {
     use std::sync::atomic::Ordering;
 
-    if let Ok(mut controller) = hotkey_controller().lock() {
-        controller.launcher_visibility_applied(visible);
-    }
     if visible {
         let foreground = unsafe { GetForegroundWindow() };
         LAUNCHER_FOREGROUND_WINDOW.store(foreground.0 as isize, Ordering::Relaxed);

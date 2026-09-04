@@ -12,6 +12,8 @@ pub mod controller;
 #[cfg(feature = "gilrs")]
 pub mod gilrs;
 pub mod global;
+#[cfg(feature = "windows")]
+pub mod windows;
 #[cfg(feature = "winit")]
 pub mod winit;
 
@@ -492,6 +494,8 @@ pub struct Shortcut {
 pub enum ShortcutTrigger {
     Pressed,
     ModifierReleased(Modifier),
+    /// Fires only when the modifier participated in a chord before release.
+    ModifierReleasedAfterChord(Modifier),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -563,6 +567,28 @@ impl<A: Clone> ShortcutEngine<A> {
 
     pub fn reset(&mut self) {
         self.devices.clear();
+    }
+
+    /// Records that a non-key gesture used the currently held modifiers.
+    ///
+    /// Backends use this for gestures such as Super+pointer move/resize so a
+    /// later modifier release cannot also trigger a bare-modifier shortcut.
+    pub fn chord_held_modifiers(&mut self) {
+        for state in self.devices.values_mut() {
+            state.chorded_modifiers.extend(state.modifiers.sides());
+        }
+    }
+    /// Corrects native modifier state without manufacturing a shortcut edge.
+    pub fn reconcile_modifier(&mut self, device: DeviceId, modifier: Modifier, held: bool) {
+        let state = self.devices.entry(device).or_default();
+        state.modifiers.set(modifier, held);
+        let physical = PhysicalKey::Code(key_for_modifier(modifier));
+        if held {
+            state.pressed.insert(physical);
+        } else {
+            state.pressed.remove(&physical);
+            state.chorded_modifiers.remove(&modifier);
+        }
     }
     pub fn pressed_keys(&self, device: DeviceId) -> impl Iterator<Item = &PhysicalKey> {
         self.devices
@@ -646,6 +672,13 @@ impl<A: Clone> ShortcutEngine<A> {
                         && exact_modifiers(&binding.shortcut.modifiers, &modifiers_after_release)
                         && shortcut_key_matches(&binding.shortcut.key, event)
                 }
+                ShortcutTrigger::ModifierReleasedAfterChord(side) => {
+                    event.edge == KeyEdge::Released
+                        && modifier == Some(side)
+                        && modifier_was_chorded
+                        && exact_modifiers(&binding.shortcut.modifiers, &modifiers_after_release)
+                        && shortcut_key_matches(&binding.shortcut.key, event)
+                }
             };
             if triggered {
                 outcomes.push(ShortcutOutcome {
@@ -700,6 +733,19 @@ pub fn modifier_for(key: &PhysicalKey) -> Option<Modifier> {
         KeyCode::SuperRight => Modifier::SuperRight,
         _ => return None,
     })
+}
+
+fn key_for_modifier(modifier: Modifier) -> KeyCode {
+    match modifier {
+        Modifier::ShiftLeft => KeyCode::ShiftLeft,
+        Modifier::ShiftRight => KeyCode::ShiftRight,
+        Modifier::ControlLeft => KeyCode::ControlLeft,
+        Modifier::ControlRight => KeyCode::ControlRight,
+        Modifier::AltLeft => KeyCode::AltLeft,
+        Modifier::AltRight => KeyCode::AltRight,
+        Modifier::SuperLeft => KeyCode::SuperLeft,
+        Modifier::SuperRight => KeyCode::SuperRight,
+    }
 }
 
 #[cfg(test)]
