@@ -93,6 +93,7 @@ pub enum OperationEffect {
     },
     Transfer {
         intent: TransferIntent,
+        delete_after_verified_copy: bool,
         sources: Vec<TransferSource>,
         destination: PathBuf,
         conflicts: ConflictPolicy,
@@ -268,22 +269,109 @@ pub fn plan_paste(
             return Err(OperationError::RecursiveDirectory(source.path.clone()));
         }
     }
-    let intent = if offer.intent == TransferIntent::Move
+    let same_provider_move = offer.intent == TransferIntent::Move
         && offer
             .sources
             .iter()
-            .all(|source| source.provider == destination_provider && source.capabilities.removable)
-    {
+            .all(|source| source.provider == destination_provider && source.capabilities.removable);
+    let intent = if same_provider_move {
         TransferIntent::Move
     } else {
         TransferIntent::Copy
     };
     Ok(OperationEffect::Transfer {
         intent,
+        delete_after_verified_copy: offer.intent == TransferIntent::Move && !same_provider_move,
         sources: offer.sources.clone(),
         destination: destination.to_path_buf(),
         conflicts,
     })
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct TransferReport {
+    pub affected: Vec<PathBuf>,
+    pub failed: Vec<(PathBuf, String)>,
+    pub cancelled: bool,
+}
+
+pub fn execute_local_transfer(
+    effect: &OperationEffect,
+    cancelled: &std::sync::atomic::AtomicBool,
+    mut progress: impl FnMut(usize, usize),
+) -> TransferReport {
+    use std::sync::atomic::Ordering;
+    let OperationEffect::Transfer {
+        intent,
+        delete_after_verified_copy,
+        sources,
+        destination,
+        ..
+    } = effect
+    else {
+        return TransferReport::default();
+    };
+    let mut report = TransferReport::default();
+    for (index, source) in sources.iter().enumerate() {
+        if cancelled.load(Ordering::Relaxed) {
+            report.cancelled = true;
+            break;
+        }
+        let Some(name) = source.path.file_name() else {
+            continue;
+        };
+        let target = destination.join(name);
+        let result = if target.exists() {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "destination exists",
+            ))
+        } else if *intent == TransferIntent::Move {
+            std::fs::rename(&source.path, &target)
+        } else {
+            let copied = if source.path.is_dir() {
+                copy_directory(&source.path, &target)
+            } else {
+                std::fs::copy(&source.path, &target).map(|_| ())
+            };
+            copied.and_then(|()| {
+                verify_copy(&source.path, &target)?;
+                if *delete_after_verified_copy {
+                    if source.path.is_dir() {
+                        std::fs::remove_dir_all(&source.path)
+                    } else {
+                        std::fs::remove_file(&source.path)
+                    }
+                } else {
+                    Ok(())
+                }
+            })
+        };
+        match result {
+            Ok(()) => report.affected.push(target),
+            Err(error) => report.failed.push((source.path.clone(), error.to_string())),
+        }
+        progress(index + 1, sources.len());
+    }
+    report
+}
+
+fn verify_copy(source: &Path, destination: &Path) -> std::io::Result<()> {
+    let source_meta = std::fs::metadata(source)?;
+    let destination_meta = std::fs::metadata(destination)?;
+    if source_meta.is_file() && source_meta.len() != destination_meta.len() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "copied length differs",
+        ));
+    }
+    if source_meta.is_dir() {
+        for entry in std::fs::read_dir(source)? {
+            let entry = entry?;
+            verify_copy(&entry.path(), &destination.join(entry.file_name()))?;
+        }
+    }
+    Ok(())
 }
 
 pub fn validate_name(text: &str) -> Result<OsString, OperationError> {
@@ -502,5 +590,34 @@ mod tests {
         queue.request_cancel();
         queue.finish(Vec::new(), Vec::new());
         assert_eq!(queue.state, OperationState::Cancelled);
+    }
+
+    #[test]
+    fn cross_provider_move_deletes_only_after_verified_copy() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        let source_path = source_dir.path().join("payload");
+        std::fs::write(&source_path, b"verified bytes").unwrap();
+        let offer = ClipboardOffer::new(
+            TransferIntent::Move,
+            vec![source(source_path.to_str().unwrap(), "remote", true)],
+        )
+        .unwrap();
+        let effect = plan_paste(
+            &offer,
+            "local",
+            destination.path(),
+            true,
+            ConflictPolicy::Ask,
+        )
+        .unwrap();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let report = execute_local_transfer(&effect, &cancel, |_, _| {});
+        assert!(report.failed.is_empty());
+        assert!(!source_path.exists());
+        assert_eq!(
+            std::fs::read(destination.path().join("payload")).unwrap(),
+            b"verified bytes"
+        );
     }
 }

@@ -13,8 +13,8 @@ use crate::{
     icons, layout,
     layout::{rect_between, visible_file_range},
     operations::{
-        ClipboardOffer, ItemCapabilities, OperationEffect, RenameEditor, TransferIntent,
-        TransferSource,
+        ClipboardOffer, ConflictPolicy, ItemCapabilities, OperationEffect, RenameEditor,
+        TransferIntent, TransferReport, TransferSource,
     },
     platform::{LocationGroup, OpenPathError, home_directory, location_groups, open_path},
     watch::DirectoryWatch,
@@ -162,6 +162,7 @@ pub struct FileApp {
     pub(crate) rename_editor: Option<RenameEditor>,
     pub(crate) file_clipboard: Option<ClipboardOffer>,
     pub(crate) drag_hover: Option<PathBuf>,
+    transfer_rx: Option<Receiver<(TransferIntent, usize, TransferReport)>>,
     pub(crate) selection_anchor: Option<usize>,
     pub(crate) active_tab_id: u64,
     pub(crate) next_tab_id: u64,
@@ -883,6 +884,7 @@ impl FileApp {
             rename_editor: None,
             file_clipboard: None,
             drag_hover: None,
+            transfer_rx: None,
             selection_anchor: None,
             active_tab_id: 0,
             next_tab_id: 1,
@@ -2471,31 +2473,51 @@ impl FileApp {
             self.status = "The file clipboard is empty".into();
             return;
         };
-        let mut completed = 0;
-        for source in &offer.sources {
-            let Some(name) = source.path.file_name() else {
-                continue;
-            };
-            let destination = self.browser.current().join(name);
-            if destination.exists() || destination.starts_with(&source.path) {
-                continue;
-            }
-            let result = if offer.intent == TransferIntent::Move {
-                std::fs::rename(&source.path, &destination)
-            } else if source.path.is_dir() {
-                crate::operations::copy_directory(&source.path, &destination)
-            } else {
-                std::fs::copy(&source.path, &destination).map(|_| ())
-            };
-            if result.is_ok() {
-                completed += 1;
-            }
-        }
-        if offer.intent == TransferIntent::Move && completed == offer.sources.len() {
+        let total = offer.sources.len();
+        let Ok(effect) = crate::operations::plan_paste(
+            &offer,
+            "local",
+            self.browser.current(),
+            true,
+            ConflictPolicy::Ask,
+        ) else {
+            self.status = "Paste target is not valid".into();
+            return;
+        };
+        let (sender, receiver) = mpsc::channel();
+        self.transfer_rx = Some(receiver);
+        self.status = format!("Transferring 0 of {total} items…");
+        std::thread::spawn(move || {
+            let cancelled = std::sync::atomic::AtomicBool::new(false);
+            let report = crate::operations::execute_local_transfer(&effect, &cancelled, |_, _| {});
+            let _ = sender.send((offer.intent, total, report));
+        });
+    }
+
+    fn poll_transfer(&mut self) -> bool {
+        let Some(receiver) = &self.transfer_rx else {
+            return false;
+        };
+        let Ok((intent, total, report)) = receiver.try_recv() else {
+            return false;
+        };
+        let completed = report.affected.len();
+        if intent == TransferIntent::Move && completed == total && report.failed.is_empty() {
             self.file_clipboard = None;
         }
+        self.status = if report.cancelled {
+            "Transfer cancelled".into()
+        } else if report.failed.is_empty() {
+            format!("Transferred {completed} items")
+        } else {
+            format!(
+                "Transferred {completed} of {total} items; {} failed",
+                report.failed.len()
+            )
+        };
+        self.transfer_rx = None;
         self.refresh_directory(self.browser.show_hidden());
-        self.status = format!("Transferred {completed} of {} items", offer.sources.len());
+        true
     }
 }
 
@@ -2855,6 +2877,7 @@ impl Application for FileApp {
             || properties_changed
             || association_changed
             || self.poll_activation()
+            || self.poll_transfer()
             || self.poll_navigation()
             || self.poll_directory_watch()
             || self.poll_sidebar_children()
@@ -2874,6 +2897,7 @@ impl Application for FileApp {
             self.activation_rx
                 .as_ref()
                 .map(|_| Duration::from_millis(16)),
+            self.transfer_rx.as_ref().map(|_| Duration::from_millis(16)),
             (!self.sidebar_loading.is_empty()).then_some(Duration::from_millis(16)),
             self.location_groups_rx
                 .as_ref()
@@ -3039,6 +3063,10 @@ mod live_reconciliation_tests {
         let destination = tempfile::tempdir().unwrap();
         app.browser = DirectoryBrowser::open(destination.path()).unwrap();
         app.update_message(FileMessage::Paste);
+        while app.transfer_rx.is_some() {
+            app.poll_transfer();
+            thread::sleep(Duration::from_millis(1));
+        }
         assert!(destination.path().join("renamed.txt").exists());
         assert!(destination.path().join("b.txt").exists());
     }
