@@ -4050,6 +4050,10 @@ impl NickelSession {
             return;
         }
         self.locked = true;
+        // The focus transition to the compositor-owned lock surface terminates any
+        // in-flight desktop chord. Do not let a missing physical release retain Alt,
+        // Super, or the lock key across the secure-session boundary.
+        self.hotkeys.reset_chord_state_preserving_owned_releases();
         self.cancel_consumer_control_repeats();
         let shell_ids = self
             .shell_windows()
@@ -4097,6 +4101,7 @@ impl NickelSession {
             return;
         }
         self.locked = false;
+        self.hotkeys.reset_pressed_state();
         self.note_input_activity();
         self.relayout_lock_surfaces();
         if let Some(window) = self.lock_restore_window.take() {

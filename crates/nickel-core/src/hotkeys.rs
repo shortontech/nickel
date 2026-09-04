@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use nickel_input::{
     AggregateModifier, Binding, DeviceId, EventOrder, InputEvent, KeyEvent, KeyLocation,
@@ -37,6 +37,7 @@ pub struct CompositorShortcutAdapter {
     registrations: RegistrationTable<HotkeyAction>,
     actions: BTreeMap<HotkeyAction, RegistrationId>,
     bindings: BTreeMap<RegistrationId, Binding<RegistrationId>>,
+    owned_keys: BTreeSet<KeyCode>,
     switch_active: bool,
     launcher_visible: bool,
 }
@@ -49,6 +50,7 @@ impl Default for CompositorShortcutAdapter {
             registrations: RegistrationTable::default(),
             actions: BTreeMap::new(),
             bindings: BTreeMap::new(),
+            owned_keys: BTreeSet::new(),
             switch_active: false,
             launcher_visible: false,
         };
@@ -65,7 +67,7 @@ impl Default for CompositorShortcutAdapter {
 
 impl CompositorShortcutAdapter {
     pub fn handle(&mut self, key: KeyCode, edge: KeyEdge) -> HotkeyOutcome {
-        let suppress_owned = self.event_is_owned(key);
+        let suppress_owned = self.event_is_owned(key) || self.owned_keys.contains(&key);
         self.next_order = self.next_order.saturating_add(1);
         let event = InputEvent::Key(shared_key_event(
             key,
@@ -108,6 +110,15 @@ impl CompositorShortcutAdapter {
                 .reconcile_modifier(COMPOSITOR_KEYBOARD, Modifier::SuperLeft, false);
             self.engine
                 .reconcile_modifier(COMPOSITOR_KEYBOARD, Modifier::SuperRight, false);
+        }
+        match edge {
+            KeyEdge::Pressed if suppress => {
+                self.owned_keys.insert(key);
+            }
+            KeyEdge::Released => {
+                self.owned_keys.remove(&key);
+            }
+            KeyEdge::Pressed => {}
         }
         HotkeyOutcome { action, suppress }
     }
@@ -198,6 +209,15 @@ impl CompositorShortcutAdapter {
     pub fn reset_pressed_state(&mut self) {
         self.engine.reset();
         self.switch_active = false;
+        self.owned_keys.clear();
+        self.registrations.reset_edges();
+    }
+
+    /// Clears modifier/chord state at a secure focus boundary while retaining
+    /// ownership of release edges for keys whose presses were intercepted.
+    pub fn reset_chord_state_preserving_owned_releases(&mut self) {
+        self.engine.reset();
+        self.switch_active = false;
         self.registrations.reset_edges();
     }
 
@@ -279,6 +299,7 @@ impl GlobalShortcutAdapter<HotkeyAction> for CompositorShortcutAdapter {
     fn reset(&mut self) {
         self.engine.reset();
         self.switch_active = false;
+        self.owned_keys.clear();
         self.registrations.reset_edges();
     }
 }
@@ -341,6 +362,18 @@ fn compositor_registrations() -> Vec<Registration<HotkeyAction>> {
         registration(
             KeyCode::AltRight,
             [],
+            ShortcutTrigger::ModifierReleasedAfterChord(nickel_input::Modifier::AltRight),
+            CommitSwitch,
+        ),
+        registration(
+            KeyCode::AltLeft,
+            [Shift],
+            ShortcutTrigger::ModifierReleasedAfterChord(nickel_input::Modifier::AltLeft),
+            CommitSwitch,
+        ),
+        registration(
+            KeyCode::AltRight,
+            [Shift],
             ShortcutTrigger::ModifierReleasedAfterChord(nickel_input::Modifier::AltRight),
             CommitSwitch,
         ),
@@ -517,6 +550,34 @@ mod tests {
     }
 
     #[test]
+    fn windows_and_compositor_share_reverse_switch_and_shift_held_commit_actions() {
+        let sequence = [
+            (KeyCode::ShiftRight, KeyEdge::Pressed),
+            (KeyCode::AltRight, KeyEdge::Pressed),
+            (KeyCode::Tab, KeyEdge::Pressed),
+            (KeyCode::Tab, KeyEdge::Released),
+            (KeyCode::AltRight, KeyEdge::Released),
+            (KeyCode::ShiftRight, KeyEdge::Released),
+        ];
+        let mut compositor = CompositorShortcutAdapter::default();
+        let compositor_actions = sequence
+            .iter()
+            .filter_map(|(key, edge)| compositor.handle(*key, *edge).action)
+            .collect::<Vec<_>>();
+        let mut windows = WindowsInputAdapter::new(default_bindings());
+        let windows_actions = sequence
+            .iter()
+            .flat_map(|(key, edge)| windows.handle_key_code(*key, *edge).outcomes)
+            .map(|outcome| outcome.action)
+            .collect::<Vec<_>>();
+        assert_eq!(windows_actions, compositor_actions);
+        assert_eq!(
+            compositor_actions,
+            vec![HotkeyAction::SwitchPrevious, HotkeyAction::CommitSwitch]
+        );
+    }
+
+    #[test]
     fn compositor_adapter_delivers_each_print_screen_binding() {
         let mut adapter = CompositorShortcutAdapter::default();
         assert_eq!(
@@ -660,6 +721,57 @@ mod tests {
             controller.handle(KeyCode::Tab, KeyEdge::Pressed).action,
             Some(HotkeyAction::SwitchNext)
         );
+    }
+
+    #[test]
+    fn owned_tab_release_stays_suppressed_after_alt_commits_first() {
+        for alt in [KeyCode::AltLeft, KeyCode::AltRight] {
+            let mut controller = CompositorShortcutAdapter::default();
+            controller.handle(alt, KeyEdge::Pressed);
+            assert!(controller.handle(KeyCode::Tab, KeyEdge::Pressed).suppress);
+            assert_eq!(
+                controller.handle(alt, KeyEdge::Released).action,
+                Some(HotkeyAction::CommitSwitch)
+            );
+            assert_eq!(
+                controller.handle(KeyCode::Tab, KeyEdge::Released),
+                HotkeyOutcome {
+                    action: None,
+                    suppress: true,
+                }
+            );
+            assert_eq!(
+                controller.handle(KeyCode::Tab, KeyEdge::Released),
+                HotkeyOutcome::default(),
+                "ownership ends on the physical release edge"
+            );
+        }
+    }
+
+    #[test]
+    fn reverse_switch_accepts_every_modifier_side_and_press_order() {
+        for alt in [KeyCode::AltLeft, KeyCode::AltRight] {
+            for shift in [KeyCode::ShiftLeft, KeyCode::ShiftRight] {
+                for modifiers in [[alt, shift], [shift, alt]] {
+                    let mut controller = CompositorShortcutAdapter::default();
+                    for modifier in modifiers {
+                        controller.handle(modifier, KeyEdge::Pressed);
+                    }
+                    assert_eq!(
+                        controller.handle(KeyCode::Tab, KeyEdge::Pressed),
+                        HotkeyOutcome {
+                            action: Some(HotkeyAction::SwitchPrevious),
+                            suppress: true,
+                        }
+                    );
+                    assert!(controller.handle(KeyCode::Tab, KeyEdge::Released).suppress);
+                    assert_eq!(
+                        controller.handle(alt, KeyEdge::Released).action,
+                        Some(HotkeyAction::CommitSwitch)
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -817,6 +929,56 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn owned_lock_release_stays_suppressed_after_modifiers_release_first() {
+        for modifiers in [
+            vec![KeyCode::SuperRight],
+            vec![KeyCode::ControlLeft, KeyCode::AltRight],
+        ] {
+            let mut controller = CompositorShortcutAdapter::default();
+            for modifier in &modifiers {
+                controller.handle(*modifier, KeyEdge::Pressed);
+            }
+            assert_eq!(
+                controller.handle(KeyCode::KeyL, KeyEdge::Pressed).action,
+                Some(HotkeyAction::LockSession)
+            );
+            for modifier in modifiers.into_iter().rev() {
+                controller.handle(modifier, KeyEdge::Released);
+            }
+            assert_eq!(
+                controller.handle(KeyCode::KeyL, KeyEdge::Released),
+                HotkeyOutcome {
+                    action: None,
+                    suppress: true,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn secure_focus_reset_retains_only_intercepted_release_ownership() {
+        let mut controller = CompositorShortcutAdapter::default();
+        controller.handle(KeyCode::SuperLeft, KeyEdge::Pressed);
+        assert_eq!(
+            controller.handle(KeyCode::KeyL, KeyEdge::Pressed).action,
+            Some(HotkeyAction::LockSession)
+        );
+        controller.reset_chord_state_preserving_owned_releases();
+        assert!(!controller.snapshot().super_held);
+        assert_eq!(
+            controller.handle(KeyCode::KeyL, KeyEdge::Released),
+            HotkeyOutcome {
+                action: None,
+                suppress: true,
+            }
+        );
+        assert_eq!(
+            controller.handle(KeyCode::SuperLeft, KeyEdge::Released),
+            HotkeyOutcome::default()
+        );
     }
 
     #[test]

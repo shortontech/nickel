@@ -1125,6 +1125,7 @@ pub fn init_udev(
         .handle()
         .insert_source(notifier, move |event, _, data| {
             if matches!(&event, SessionEvent::PauseSession) {
+                data.release_pressed_keys_on_host_focus_loss();
                 data.fail_all_image_copy_frames(
                     smithay::wayland::image_copy_capture::CaptureFailureReason::Stopped,
                 );

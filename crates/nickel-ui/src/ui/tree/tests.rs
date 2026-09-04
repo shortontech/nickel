@@ -457,25 +457,42 @@ fn focused_masked_text_field_never_paints_the_input_value() {
 
 #[test]
 fn single_line_text_field_centers_placeholder_and_masked_text() {
-    for value in ["", "nickel"] {
-        let field = Rect::new(0.0, 0.0, 340.0, 28.0);
-        let frame = UiFrame::layout(
-            TextField::on_change_masked_with_placeholder(value, "Password", '•', map_query)
-                .single_line_height(field.size.height),
-            field,
-        );
-        let bounds = frame
-            .commands()
-            .iter()
-            .find_map(|command| match command {
-                PaintCommand::Text { bounds, .. } => Some(*bounds),
-                _ => None,
-            })
-            .expect("single-line text paint");
+    for scale in [12.0, 18.0, 27.0] {
+        let line_height = scale * 1.3;
+        for height in [line_height, line_height + 18.0, line_height + 44.0] {
+            for value in [
+                "".to_owned(),
+                "nickel".to_owned(),
+                "very-long-password".repeat(24),
+            ] {
+                let field = Rect::new(0.0, 0.0, 340.0, height);
+                let frame = UiFrame::layout(
+                    TextField::on_change_masked_with_placeholder(
+                        &value,
+                        "密码 Password العربية",
+                        '•',
+                        map_query,
+                    )
+                    .scale(scale)
+                    .single_line_height(field.size.height),
+                    field,
+                );
+                let bounds = frame
+                    .commands()
+                    .iter()
+                    .find_map(|command| match command {
+                        PaintCommand::Text { bounds, .. } => Some(*bounds),
+                        _ => None,
+                    })
+                    .expect("single-line text paint");
 
-        let field_center = field.origin.y + field.size.height / 2.0;
-        let text_center = bounds.origin.y + bounds.size.height / 2.0;
-        assert!((field_center - text_center).abs() <= 0.5);
+                let field_center = field.origin.y + field.size.height / 2.0;
+                let text_center = bounds.origin.y + bounds.size.height / 2.0;
+                assert!((field_center - text_center).abs() <= 0.5);
+                assert!(bounds.origin.y >= field.origin.y);
+                assert!(bounds.origin.y + bounds.size.height <= field.origin.y + height);
+            }
+        }
     }
 }
 
