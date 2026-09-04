@@ -1056,6 +1056,19 @@ pub fn init_udev(
     for (node, path) in &devices {
         data.discover_drm_device(*node, path);
     }
+    // Initial udev enumeration happens while the display manager is handing
+    // the seat over to us. A secondary device can therefore remain busy for
+    // a few milliseconds after the render-primary GPU has opened. Mark those
+    // dependencies pending before activating anything so an output-less
+    // primary is retained long enough for the secondary open/retry path.
+    if let Some(native) = data.native.as_mut() {
+        native.pending_primary_dependents.extend(
+            devices
+                .iter()
+                .map(|(node, _)| *node)
+                .filter(|node| *node != primary_gpu),
+        );
+    }
     let mut devices = devices;
     devices.sort_by_key(|(node, _)| device_activation_priority(*node, primary_gpu));
     for (node, path) in devices {
