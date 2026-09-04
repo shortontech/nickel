@@ -21,9 +21,21 @@ pub mod operations;
 pub(crate) mod platform;
 pub mod properties;
 pub mod selection_summary;
-pub(crate) mod watch;
+pub mod watch;
 
 pub use app::{FileApp, FileFixtureProvider, FileMessage, FileViewMode, run};
+pub use watch::DirectoryWatch;
+
+pub fn desktop_directory() -> PathBuf {
+    platform::places()
+        .into_iter()
+        .find_map(|(label, path)| (label == "Desktop").then_some(path))
+        .unwrap_or_else(|| platform::home_directory().join("Desktop"))
+}
+
+pub fn open_path(path: &Path) -> Result<(), String> {
+    platform::open_path(path).map_err(|error| error.to_string())
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FileEntry {

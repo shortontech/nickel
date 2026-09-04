@@ -16,6 +16,7 @@ image.workspace = true
 jiff.workspace = true
 nickel-ui = { path = "../nickel-ui" }
 nickel-core = { path = "../nickel-core" }
+nickel-file = { path = "../nickel-file" }
 nickel-codex = { path = "../nickel-codex" }
 nickel-codex-ui = { path = "../nickel-codex-ui" }
 nickel-i18n = { path = "../nickel-i18n" }

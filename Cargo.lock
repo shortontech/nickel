@@ -2897,6 +2897,7 @@ dependencies = [
  "nickel-codex",
  "nickel-codex-ui",
  "nickel-core",
+ "nickel-file",
  "nickel-i18n",
  "nickel-input",
  "nickel-logging",

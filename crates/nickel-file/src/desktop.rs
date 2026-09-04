@@ -215,6 +215,11 @@ impl DesktopLayout {
         self.selection = self.items.iter().map(|item| item.id).collect();
     }
 
+    pub fn clear_selection(&mut self) {
+        self.selection.clear();
+        self.anchor = None;
+    }
+
     pub fn select_region(&mut self, region: Rect, additive: bool) {
         if !additive {
             self.selection.clear();
@@ -302,10 +307,17 @@ impl DesktopLayout {
 
     /// Reconciles output topology without discarding affinity for disconnected displays.
     pub fn set_outputs(&mut self, outputs: Vec<DesktopOutput>) {
+        let previously_valid = self
+            .outputs
+            .iter()
+            .map(|output| output.id.as_str())
+            .collect::<HashSet<_>>();
         for item in &self.items {
-            self.remembered_outputs
-                .entry(item.id)
-                .or_insert_with(|| item.output.clone());
+            if previously_valid.contains(item.output.as_str()) {
+                self.remembered_outputs
+                    .entry(item.id)
+                    .or_insert_with(|| item.output.clone());
+            }
         }
         self.outputs = outputs;
         let fallback = self.outputs.first().map(|output| output.id.clone());
@@ -322,6 +334,9 @@ impl DesktopLayout {
                     item.output.clone_from(affinity);
                 } else if !valid.contains(item.output.as_str()) {
                     item.output.clone_from(&fallback);
+                    self.remembered_outputs
+                        .entry(item.id)
+                        .or_insert_with(|| fallback.clone());
                 }
             }
             self.constrain_all();

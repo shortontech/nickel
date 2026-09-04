@@ -13,6 +13,14 @@ use nickel_core::{
     theme::{Appearance, ThemePalette},
     wallpaper_settings::WallpaperSettings,
 };
+use nickel_file::{
+    DirectoryBrowser, DirectoryWatch,
+    desktop::{
+        Arrangement as DesktopArrangement, DesktopEntryId, DesktopFileAction, DesktopLayout,
+        DesktopOutput, FolderGrouping, Point as DesktopPoint, Rect as DesktopRect,
+        SelectionModifiers, SortDirection as DesktopSortDirection, SortKey as DesktopSortKey,
+    },
+};
 use nickel_session_protocol::{
     AnchorSide, Geometry, PointerInteraction, PreviewTargetAction, ResolvedShellTarget,
     ShellPopoverAnchor, ShellRole, ShellSemanticTarget, WindowMenuTargetAction,
@@ -139,10 +147,538 @@ struct PendingPopoverAnchor {
     bounds: Rect,
 }
 
-#[derive(Clone)]
 pub struct DesktopApplication {
     wallpaper: Option<Arc<image::RgbaImage>>,
     palette: ThemePalette,
+    browser: Option<DirectoryBrowser>,
+    watch: Option<DirectoryWatch>,
+    layout: DesktopLayout,
+    active_output: String,
+    output_origin: DesktopPoint,
+    active_scale: f32,
+    icon_cache: HashMap<std::path::PathBuf, Arc<image::RgbaImage>>,
+    pointer_down: Option<(DesktopEntryId, DesktopPoint)>,
+    selection_start: Option<DesktopPoint>,
+    pointer_position: DesktopPoint,
+    pointer_seen: bool,
+    pointer_dragged: bool,
+    last_click: Option<(DesktopEntryId, Instant)>,
+    modifiers: SelectionModifiers,
+    context_menu: Option<(DesktopPoint, Option<DesktopEntryId>)>,
+    error: Option<String>,
+}
+
+impl DesktopApplication {
+    fn new(wallpaper: Option<Arc<image::RgbaImage>>, palette: ThemePalette) -> Self {
+        let path = nickel_file::desktop_directory();
+        let browser = DirectoryBrowser::open(&path).ok();
+        let watch = DirectoryWatch::start(&path).ok();
+        let mut layout = DesktopLayout::new(Vec::new());
+        if let Some(browser) = &browser {
+            layout.reconcile(desktop_snapshot(browser));
+            let _ = layout.restore(desktop_layout_path());
+        }
+        Self {
+            wallpaper,
+            palette,
+            browser,
+            watch,
+            layout,
+            active_output: "primary".into(),
+            output_origin: DesktopPoint::default(),
+            active_scale: 1.0,
+            icon_cache: HashMap::new(),
+            pointer_down: None,
+            selection_start: None,
+            pointer_position: DesktopPoint::default(),
+            pointer_seen: false,
+            pointer_dragged: false,
+            last_click: None,
+            modifiers: SelectionModifiers::default(),
+            context_menu: None,
+            error: None,
+        }
+    }
+
+    fn refresh_directory(&mut self, force: bool) -> bool {
+        let invalidated = force
+            || self
+                .watch
+                .as_ref()
+                .is_some_and(DirectoryWatch::take_invalidation);
+        if !invalidated {
+            return false;
+        }
+        let Some(browser) = &mut self.browser else {
+            return false;
+        };
+        match browser.refresh() {
+            Ok(()) => {
+                let snapshot = desktop_snapshot(browser);
+                self.layout.reconcile(snapshot);
+                self.icon_cache.retain(|path, _| {
+                    self.layout
+                        .items()
+                        .iter()
+                        .any(|item| &item.entry.path == path)
+                });
+                self.error = None;
+                true
+            }
+            Err(error) => {
+                self.error = Some(format!("Desktop could not be refreshed: {error}"));
+                true
+            }
+        }
+    }
+
+    fn set_outputs(&mut self, outputs: Vec<DesktopOutput>) {
+        self.layout.set_outputs(outputs);
+    }
+
+    fn set_active_output(&mut self, id: String, origin: DesktopPoint, scale: f32) {
+        self.active_output = id;
+        self.output_origin = origin;
+        self.active_scale = scale.max(1.0);
+    }
+
+    fn save_layout(&mut self) {
+        if let Err(error) = self.layout.save(desktop_layout_path()) {
+            self.error = Some(format!("Desktop arrangement could not be saved: {error}"));
+        }
+    }
+
+    fn hit(&self, local: DesktopPoint) -> Option<DesktopEntryId> {
+        let global = DesktopPoint {
+            x: local.x + self.output_origin.x,
+            y: local.y + self.output_origin.y,
+        };
+        self.layout
+            .items()
+            .iter()
+            .rev()
+            .find(|item| {
+                item.output == self.active_output
+                    && global.x >= item.position.x
+                    && global.x < item.position.x + 96.0
+                    && global.y >= item.position.y
+                    && global.y < item.position.y + 112.0
+            })
+            .map(|item| item.id)
+    }
+
+    fn pointer_press(
+        &mut self,
+        local: DesktopPoint,
+        secondary: bool,
+        modifiers: SelectionModifiers,
+    ) -> bool {
+        self.pointer_position = local;
+        self.pointer_seen = true;
+        let hit = self.hit(local);
+        if secondary {
+            if let Some(id) = hit
+                && !self.layout.selected().contains(&id)
+            {
+                self.layout.select(id, SelectionModifiers::default());
+            }
+            self.context_menu = Some((local, hit));
+            return true;
+        }
+        self.context_menu = None;
+        if let Some(id) = hit {
+            self.layout.select(id, modifiers);
+            self.pointer_down = Some((id, local));
+            self.selection_start = None;
+            self.pointer_dragged = false;
+        } else {
+            if !modifiers.toggle {
+                self.layout.clear_selection();
+            }
+            self.pointer_down = None;
+            self.selection_start = Some(local);
+        }
+        true
+    }
+
+    fn pointer_motion(&mut self, local: DesktopPoint) -> bool {
+        self.pointer_position = local;
+        self.pointer_seen = true;
+        let Some((id, previous)) = self.pointer_down else {
+            let Some(start) = self.selection_start else {
+                return false;
+            };
+            let x = start.x.min(local.x) + self.output_origin.x;
+            let y = start.y.min(local.y) + self.output_origin.y;
+            self.layout.select_region(
+                DesktopRect {
+                    x,
+                    y,
+                    width: (local.x - start.x).abs(),
+                    height: (local.y - start.y).abs(),
+                },
+                self.modifiers.toggle,
+            );
+            return true;
+        };
+        let delta = DesktopPoint {
+            x: local.x - previous.x,
+            y: local.y - previous.y,
+        };
+        if delta.x.abs() < 2.0 && delta.y.abs() < 2.0 {
+            return false;
+        }
+        self.layout.move_group(id, delta, &self.active_output);
+        self.pointer_down = Some((id, local));
+        self.pointer_dragged = true;
+        true
+    }
+
+    fn pointer_release(&mut self, local: DesktopPoint, now: Instant) -> bool {
+        if self.selection_start.take().is_some() {
+            return true;
+        }
+        let Some((id, pressed)) = self.pointer_down.take() else {
+            return false;
+        };
+        let moved = self.pointer_dragged
+            || (local.x - pressed.x).abs() >= 2.0
+            || (local.y - pressed.y).abs() >= 2.0;
+        self.pointer_dragged = false;
+        if moved {
+            self.save_layout();
+        } else if self.last_click.is_some_and(|(last, at)| {
+            last == id && now.duration_since(at) <= Duration::from_millis(500)
+        }) {
+            self.last_click = None;
+            self.activate(id);
+        } else {
+            self.last_click = Some((id, now));
+        }
+        true
+    }
+
+    fn activate(&mut self, id: DesktopEntryId) {
+        if let Some(action) = self.layout.activate(id) {
+            let result = match action {
+                DesktopFileAction::Browse(path) => launch_nickel_file(&path),
+                DesktopFileAction::Open(path) => nickel_file::open_path(&path),
+            };
+            if let Err(error) = result {
+                let path = self
+                    .layout
+                    .items()
+                    .iter()
+                    .find(|item| item.id == id)
+                    .map(|item| item.entry.path.as_path())
+                    .unwrap_or_else(|| std::path::Path::new("Desktop item"));
+                self.error = Some(format!("Could not open {}: {error}", path.display()));
+            }
+        }
+    }
+
+    fn context_click(&mut self, local: DesktopPoint) -> bool {
+        let Some((origin, entry)) = self.context_menu else {
+            return false;
+        };
+        if local.x < origin.x || local.x > origin.x + 190.0 || local.y < origin.y {
+            self.context_menu = None;
+            return true;
+        }
+        let row = ((local.y - origin.y) / 30.0) as usize;
+        if let Some(id) = entry {
+            if row == 0 {
+                self.activate(id);
+            }
+        } else {
+            match row {
+                0 => self.layout.set_arrangement(
+                    DesktopArrangement::Sorted {
+                        key: DesktopSortKey::Name,
+                        direction: DesktopSortDirection::Ascending,
+                    },
+                    FolderGrouping::FoldersFirst,
+                ),
+                1 => self.layout.set_arrangement(
+                    DesktopArrangement::Sorted {
+                        key: DesktopSortKey::Name,
+                        direction: DesktopSortDirection::Descending,
+                    },
+                    FolderGrouping::FoldersFirst,
+                ),
+                2 => self.layout.set_arrangement(
+                    DesktopArrangement::Sorted {
+                        key: DesktopSortKey::Kind,
+                        direction: DesktopSortDirection::Ascending,
+                    },
+                    FolderGrouping::FoldersFirst,
+                ),
+                3 => self.layout.set_arrangement(
+                    DesktopArrangement::Sorted {
+                        key: DesktopSortKey::Kind,
+                        direction: DesktopSortDirection::Descending,
+                    },
+                    FolderGrouping::FoldersFirst,
+                ),
+                4 => self.layout.set_arrangement(
+                    DesktopArrangement::Sorted {
+                        key: DesktopSortKey::Size,
+                        direction: DesktopSortDirection::Ascending,
+                    },
+                    FolderGrouping::FoldersFirst,
+                ),
+                5 => self.layout.set_arrangement(
+                    DesktopArrangement::Sorted {
+                        key: DesktopSortKey::Size,
+                        direction: DesktopSortDirection::Descending,
+                    },
+                    FolderGrouping::FoldersFirst,
+                ),
+                6 => self.layout.set_arrangement(
+                    DesktopArrangement::Sorted {
+                        key: DesktopSortKey::Modified,
+                        direction: DesktopSortDirection::Ascending,
+                    },
+                    FolderGrouping::FoldersFirst,
+                ),
+                7 => self.layout.set_arrangement(
+                    DesktopArrangement::Sorted {
+                        key: DesktopSortKey::Modified,
+                        direction: DesktopSortDirection::Descending,
+                    },
+                    FolderGrouping::FoldersFirst,
+                ),
+                8 => self
+                    .layout
+                    .set_arrangement(DesktopArrangement::Manual, FolderGrouping::FoldersFirst),
+                9 => self.layout.align_to_grid(),
+                10 => self.layout.clean_up(),
+                _ => {}
+            }
+            self.save_layout();
+        }
+        self.context_menu = None;
+        true
+    }
+
+    fn key(&mut self, key: &nickel_input::KeyEvent) -> bool {
+        use nickel_input::{AggregateModifier, PhysicalKey};
+        self.modifiers = SelectionModifiers {
+            toggle: key.modifiers.aggregate(AggregateModifier::Control),
+            range: key.modifiers.aggregate(AggregateModifier::Shift),
+            additive_range: key.modifiers.aggregate(AggregateModifier::Control)
+                && key.modifiers.aggregate(AggregateModifier::Shift),
+        };
+        if key.edge != nickel_input::KeyEdge::Pressed {
+            return false;
+        }
+        let PhysicalKey::Code(code) = key.physical else {
+            return false;
+        };
+        match code {
+            KeyCode::KeyA if self.modifiers.toggle => self.layout.select_all(),
+            KeyCode::ArrowLeft => self.layout.select_direction(-1, 0, self.modifiers.range),
+            KeyCode::ArrowRight => self.layout.select_direction(1, 0, self.modifiers.range),
+            KeyCode::ArrowUp => self.layout.select_direction(0, -1, self.modifiers.range),
+            KeyCode::ArrowDown => self.layout.select_direction(0, 1, self.modifiers.range),
+            KeyCode::Enter | KeyCode::NumpadEnter => {
+                if let Some(id) = self.layout.selected().iter().copied().next() {
+                    self.activate(id);
+                }
+            }
+            KeyCode::Escape => {
+                self.context_menu = None;
+                self.layout.clear_selection();
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    fn paint_icons(&mut self) -> Vec<PaintCommand> {
+        let mut commands = Vec::new();
+        let hovered = self
+            .pointer_seen
+            .then(|| self.hit(self.pointer_position))
+            .flatten();
+        for (index, item) in self
+            .layout
+            .items()
+            .iter()
+            .filter(|item| item.output == self.active_output)
+            .enumerate()
+        {
+            let x = item.position.x - self.output_origin.x;
+            let y = item.position.y - self.output_origin.y;
+            if self.layout.selected().contains(&item.id) || hovered == Some(item.id) {
+                commands.push(PaintCommand::RoundedFill {
+                    rect: Rect::new(x, y, 96.0, 108.0),
+                    color: if self.layout.selected().contains(&item.id) {
+                        self.palette.accent_soft
+                    } else {
+                        self.palette.surface_hover
+                    },
+                    radius: 8.0,
+                });
+            }
+            let pixels = self
+                .icon_cache
+                .entry(item.entry.path.clone())
+                .or_insert_with(|| {
+                    let preference = ShellSettings::load_default().file_icon_provider;
+                    let appearance = if self.palette.background & 0xff > 0x80 {
+                        nickel_file::icons::ArtworkAppearance::Light
+                    } else {
+                        nickel_file::icons::ArtworkAppearance::Dark
+                    };
+                    nickel_file::icons::resolve_artwork(
+                        preference,
+                        &nickel_file::icons::ArtworkRequest {
+                            path: &item.entry.path,
+                            kind: nickel_file::icons::semantic_kind(
+                                &item.entry.path,
+                                item.entry.is_directory,
+                            ),
+                            logical_size: 48,
+                            scale_milli: (self.active_scale * 1000.0).round() as u16,
+                            appearance,
+                        },
+                    )
+                    .pixels
+                });
+            commands.push(PaintCommand::Image {
+                bounds: Rect::new(x + 24.0, y + 6.0, 48.0, 48.0),
+                id: 10_000_u16.saturating_add(index as u16),
+                generation: 0,
+                image: Arc::clone(pixels),
+                high_density: None,
+            });
+            commands.push(PaintCommand::RoundedFill {
+                rect: Rect::new(x + 3.0, y + 62.0, 90.0, 38.0),
+                color: self.palette.panel,
+                radius: 5.0,
+            });
+            commands.push(PaintCommand::Text {
+                bounds: Rect::new(x + 5.0, y + 64.0, 86.0, 34.0),
+                text: item.entry.display_name(),
+                scale: 0.85,
+                color: self.palette.text,
+                align: TextAlign::Center,
+                bold: false,
+                wrap: true,
+            });
+        }
+        if let Some((origin, entry)) = self.context_menu {
+            let labels: &[&str] = if entry.is_some() {
+                &["Open", "Properties"]
+            } else {
+                &[
+                    "Name (ascending)",
+                    "Name (descending)",
+                    "Kind (ascending)",
+                    "Kind (descending)",
+                    "Size (ascending)",
+                    "Size (descending)",
+                    "Modified (ascending)",
+                    "Modified (descending)",
+                    "Manual arrangement",
+                    "Align to Grid",
+                    "Clean Up",
+                ]
+            };
+            commands.push(PaintCommand::RoundedFill {
+                rect: Rect::new(origin.x, origin.y, 190.0, labels.len() as f32 * 30.0),
+                color: self.palette.surface,
+                radius: 8.0,
+            });
+            commands.push(PaintCommand::Stroke {
+                rect: Rect::new(origin.x, origin.y, 190.0, labels.len() as f32 * 30.0),
+                color: self.palette.muted,
+                width: 1.0,
+            });
+            for (index, label) in labels.iter().enumerate() {
+                commands.push(PaintCommand::Text {
+                    bounds: Rect::new(origin.x + 12.0, origin.y + index as f32 * 30.0, 166.0, 30.0),
+                    text: (*label).into(),
+                    scale: 0.9,
+                    color: self.palette.text,
+                    align: TextAlign::Start,
+                    bold: false,
+                    wrap: false,
+                });
+            }
+        }
+        if let Some(start) = self.selection_start {
+            let current = self.pointer_position;
+            commands.push(PaintCommand::OverlayFill {
+                rect: Rect::new(
+                    start.x.min(current.x),
+                    start.y.min(current.y),
+                    (current.x - start.x).abs(),
+                    (current.y - start.y).abs(),
+                ),
+                color: self.palette.accent_soft,
+            });
+        }
+        if let Some(error) = &self.error {
+            commands.push(PaintCommand::RoundedFill {
+                rect: Rect::new(20.0, 20.0, 500.0, 42.0),
+                color: self.palette.surface,
+                radius: 8.0,
+            });
+            commands.push(PaintCommand::Text {
+                bounds: Rect::new(32.0, 25.0, 476.0, 32.0),
+                text: error.clone(),
+                scale: 0.9,
+                color: self.palette.text,
+                align: TextAlign::Start,
+                bold: false,
+                wrap: false,
+            });
+        }
+        commands
+    }
+}
+
+fn desktop_snapshot(
+    browser: &DirectoryBrowser,
+) -> Vec<(nickel_file::FileIdentity, nickel_file::FileEntry)> {
+    browser
+        .entries()
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            browser
+                .identity_at(index)
+                .map(|identity| (identity, entry.clone()))
+        })
+        .collect()
+}
+
+fn desktop_layout_path() -> std::path::PathBuf {
+    let root = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from))
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".config"))
+        })
+        .unwrap_or_else(|| ".".into());
+    root.join("nickel").join("desktop-layout")
+}
+
+fn launch_nickel_file(path: &std::path::Path) -> Result<(), String> {
+    let executable = std::env::current_exe()
+        .map_err(|error| error.to_string())?
+        .with_file_name(if cfg!(target_os = "windows") {
+            "nickel-file.exe"
+        } else {
+            "nickel-file"
+        });
+    std::process::Command::new(executable)
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 impl nickel_ui::Application for DesktopApplication {
@@ -175,6 +711,14 @@ impl nickel_ui::Application for DesktopApplication {
 
     fn title(&self) -> &str {
         "Nickel Desktop"
+    }
+
+    fn poll(&mut self) -> bool {
+        self.refresh_directory(false)
+    }
+
+    fn poll_interval(&self) -> Option<Duration> {
+        Some(Duration::from_millis(250))
     }
 }
 
@@ -245,7 +789,35 @@ impl nickel_ui::Application for PanelApplication {
 impl DesktopApplication {
     #[allow(dead_code)] // Binary and fixture library compile this shared module separately.
     pub fn fixture(wallpaper: Option<Arc<image::RgbaImage>>, palette: ThemePalette) -> Self {
-        Self { wallpaper, palette }
+        Self {
+            wallpaper,
+            palette,
+            browser: None,
+            watch: None,
+            layout: DesktopLayout::new(vec![DesktopOutput {
+                id: "primary".into(),
+                work_area: DesktopRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 1920.0,
+                    height: 1024.0,
+                },
+                scale: 1.0,
+            }]),
+            active_output: "primary".into(),
+            output_origin: DesktopPoint::default(),
+            active_scale: 1.0,
+            icon_cache: HashMap::new(),
+            pointer_down: None,
+            selection_start: None,
+            pointer_position: DesktopPoint::default(),
+            pointer_seen: false,
+            pointer_dragged: false,
+            last_click: None,
+            modifiers: SelectionModifiers::default(),
+            context_menu: None,
+            error: None,
+        }
     }
 }
 
@@ -729,14 +1301,8 @@ impl LiveShell {
             650,
         );
         let notification_host = NotificationHost::new(NotificationApp::new(palette), 420, 180);
-        let desktop_host = nickel_ui::UiHost::new(
-            DesktopApplication {
-                wallpaper: None,
-                palette,
-            },
-            1920,
-            1080,
-        );
+        let desktop_host =
+            nickel_ui::UiHost::new(DesktopApplication::new(None, palette), 1920, 1080);
         let lock_host = nickel_ui::UiHost::new(
             LockApplication {
                 password: Zeroizing::new(String::new()),
@@ -1118,6 +1684,59 @@ impl LiveShell {
             SurfaceRole::Lock => self.lock_scene(width, height),
             SurfaceRole::Screenshot => self.screenshot.scene(width, height, self.palette),
             SurfaceRole::CodexProjectMenu | SurfaceRole::CodexChat => Vec::new(),
+        }
+    }
+
+    pub fn set_desktop_outputs(&mut self, outputs: Vec<DesktopOutput>) {
+        self.desktop_host.application_mut().set_outputs(outputs);
+    }
+
+    pub fn set_desktop_output(&mut self, output: String, x: f32, y: f32, scale: f32) {
+        self.desktop_host
+            .application_mut()
+            .set_active_output(output, DesktopPoint { x, y }, scale);
+    }
+
+    pub fn desktop_input(&mut self, event: nickel_input::InputEvent) -> bool {
+        let application = self.desktop_host.application_mut();
+        match event {
+            nickel_input::InputEvent::Key(key) => application.key(&key),
+            nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Button {
+                button,
+                edge,
+                position: Some(position),
+                ..
+            }) => {
+                let point = DesktopPoint {
+                    x: position.x as f32,
+                    y: position.y as f32,
+                };
+                if edge == nickel_input::KeyEdge::Pressed {
+                    if application.context_menu.is_some()
+                        && button == nickel_input::PointerButton::Primary
+                    {
+                        application.context_click(point)
+                    } else {
+                        application.pointer_press(
+                            point,
+                            button == nickel_input::PointerButton::Secondary,
+                            application.modifiers,
+                        )
+                    }
+                } else if button == nickel_input::PointerButton::Primary {
+                    application.pointer_release(point, Instant::now())
+                } else {
+                    false
+                }
+            }
+            nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Motion {
+                position,
+                ..
+            }) => application.pointer_motion(DesktopPoint {
+                x: position.x as f32,
+                y: position.y as f32,
+            }),
+            _ => false,
         }
     }
 
@@ -2811,7 +3430,9 @@ impl LiveShell {
         });
         self.desktop_change_token = outcome.change_token;
         self.desktop_deadline = outcome.next_deadline;
-        self.desktop_host.commands().to_vec()
+        let mut commands = self.desktop_host.commands().to_vec();
+        commands.extend(self.desktop_host.application_mut().paint_icons());
+        commands
     }
 
     fn volume_osd_scene(&self, width: u32, height: u32) -> Vec<PaintCommand> {
@@ -5412,5 +6033,67 @@ mod tests {
         let outcome = shell.poll_deadlines(Instant::now() + Duration::from_secs(2));
         assert!(outcome.visibility_changed);
         assert!(!shell.surface_visible(SurfaceRole::VolumeOsd));
+    }
+
+    #[test]
+    fn desktop_surface_projects_only_its_output_and_has_no_idle_tile_backgrounds() {
+        use std::{ffi::OsString, path::PathBuf};
+        let palette = nickel_core::theme::ThemePalette::from_appearance(Default::default());
+        let mut desktop = super::DesktopApplication::fixture(None, palette);
+        desktop.set_outputs(vec![
+            nickel_file::desktop::DesktopOutput {
+                id: "left".into(),
+                work_area: nickel_file::desktop::Rect {
+                    x: -400.0,
+                    y: 0.0,
+                    width: 400.0,
+                    height: 600.0,
+                },
+                scale: 1.0,
+            },
+            nickel_file::desktop::DesktopOutput {
+                id: "right".into(),
+                work_area: nickel_file::desktop::Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 400.0,
+                    height: 600.0,
+                },
+                scale: 1.5,
+            },
+        ]);
+        desktop.layout.reconcile(vec![(
+            nickel_file::FileIdentity(1, 2),
+            nickel_file::FileEntry {
+                name: OsString::from("document.txt"),
+                path: PathBuf::from("/desktop/document.txt"),
+                is_directory: false,
+                size: Some(12),
+                modified: None,
+            },
+        )]);
+        desktop.set_active_output(
+            "left".into(),
+            nickel_file::desktop::Point { x: -400.0, y: 0.0 },
+            1.0,
+        );
+        let commands = desktop.paint_icons();
+        assert!(commands.iter().any(
+            |command| matches!(command, PaintCommand::Text { text, .. } if text == "document.txt")
+        ));
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|command| matches!(command, PaintCommand::RoundedFill { .. }))
+                .count(),
+            1,
+            "label treatment only; idle tile and icon have no background fill"
+        );
+        desktop.set_active_output(
+            "right".into(),
+            nickel_file::desktop::Point { x: 0.0, y: 0.0 },
+            1.5,
+        );
+        assert!(desktop.paint_icons().is_empty());
     }
 }

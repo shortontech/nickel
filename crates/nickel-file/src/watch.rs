@@ -10,7 +10,7 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 /// A narrow provider-watch boundary. Native records are deliberately collapsed into an
 /// invalidation: the directory snapshot remains the source of truth on every platform.
-pub(crate) struct DirectoryWatch {
+pub struct DirectoryWatch {
     path: PathBuf,
     dirty: Arc<AtomicBool>,
     failure: Arc<Mutex<Option<String>>>,
@@ -18,7 +18,7 @@ pub(crate) struct DirectoryWatch {
 }
 
 impl DirectoryWatch {
-    pub(crate) fn start(path: &Path) -> Result<Self, String> {
+    pub fn start(path: &Path) -> Result<Self, String> {
         let path = path.canonicalize().map_err(|error| error.to_string())?;
         let dirty = Arc::new(AtomicBool::new(true));
         let callback_dirty = Arc::clone(&dirty);
@@ -47,15 +47,15 @@ impl DirectoryWatch {
         })
     }
 
-    pub(crate) fn watches(&self, path: &Path) -> bool {
+    pub fn watches(&self, path: &Path) -> bool {
         path.canonicalize().is_ok_and(|path| path == self.path)
     }
 
-    pub(crate) fn take_invalidation(&self) -> bool {
+    pub fn take_invalidation(&self) -> bool {
         self.dirty.swap(false, Ordering::AcqRel)
     }
 
-    pub(crate) fn take_failure(&self) -> Option<String> {
+    pub fn take_failure(&self) -> Option<String> {
         self.failure.lock().ok()?.take()
     }
 }

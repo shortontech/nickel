@@ -935,6 +935,7 @@ impl DomainSubscriptionSchedule {
 }
 
 fn render_all(shell: &mut WinitShell, state: &mut LiveShell) -> Result<(), String> {
+    sync_desktop_outputs(shell, state);
     let surfaces = shell
         .surfaces()
         .map(|surface| {
@@ -957,6 +958,15 @@ fn render_all(shell: &mut WinitShell, state: &mut LiveShell) -> Result<(), Strin
         }
         if role == SurfaceRole::Panel {
             state.set_panel_output(output);
+        } else if role == SurfaceRole::Desktop
+            && let Some(display) = shell.surface_display_geometry(id)
+        {
+            state.set_desktop_output(
+                output,
+                display.x as f32 / display.scale,
+                display.y as f32 / display.scale,
+                display.scale,
+            );
         }
         let commands = state.scene(role, logical_width, logical_height);
         if let Some(token) = state.scene_change_token(role) {
@@ -973,6 +983,9 @@ fn render_role(
     state: &mut LiveShell,
     wanted: SurfaceRole,
 ) -> Result<(), String> {
+    if wanted == SurfaceRole::Desktop {
+        sync_desktop_outputs(shell, state);
+    }
     let surfaces = shell
         .surfaces()
         .filter(|surface| surface.role() == wanted)
@@ -993,6 +1006,15 @@ fn render_role(
         }
         if role == SurfaceRole::Panel {
             state.set_panel_output(output);
+        } else if role == SurfaceRole::Desktop
+            && let Some(display) = shell.surface_display_geometry(id)
+        {
+            state.set_desktop_output(
+                output,
+                display.x as f32 / display.scale,
+                display.y as f32 / display.scale,
+                display.scale,
+            );
         }
         let commands = state.scene(role, logical_width, logical_height);
         if let Some(token) = state.scene_change_token(role) {
@@ -1002,6 +1024,27 @@ fn render_role(
         }
     }
     Ok(())
+}
+
+fn sync_desktop_outputs(shell: &WinitShell, state: &mut LiveShell) {
+    let outputs = shell
+        .surfaces()
+        .filter(|surface| surface.role() == SurfaceRole::Desktop)
+        .filter_map(|surface| {
+            let geometry = shell.surface_display_geometry(surface.id())?;
+            Some(nickel_file::desktop::DesktopOutput {
+                id: surface.output_name().to_owned(),
+                work_area: nickel_file::desktop::Rect {
+                    x: geometry.x as f32 / geometry.scale,
+                    y: geometry.y as f32 / geometry.scale,
+                    width: geometry.width as f32 / geometry.scale,
+                    height: (geometry.height as f32 / geometry.scale - 56.0).max(1.0),
+                },
+                scale: geometry.scale,
+            })
+        })
+        .collect();
+    state.set_desktop_outputs(outputs);
 }
 
 fn prewarm_role(
@@ -1304,6 +1347,23 @@ fn handle_shell_input(
             .map(|entry| entry.output_name().to_owned())
     {
         state.set_panel_output(output);
+    }
+    if role == SurfaceRole::Desktop {
+        if let Some(entry) = shell.surface(surface) {
+            let output = entry.output_name().to_owned();
+            if let Some(display) = shell.surface_display_geometry(surface) {
+                state.set_desktop_output(
+                    output,
+                    display.x as f32 / display.scale,
+                    display.y as f32 / display.scale,
+                    display.scale,
+                );
+            }
+        }
+        if state.desktop_input(event) {
+            render_role(shell, state, SurfaceRole::Desktop)?;
+        }
+        return Ok(());
     }
     if role == SurfaceRole::Lock {
         let (width, height) = shell
