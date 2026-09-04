@@ -737,6 +737,13 @@ impl<Message> Switch<Message> {
         self.0 = self.0.id(id);
         self
     }
+
+    /// Names the represented setting rather than exposing the generic control
+    /// type to assistive technology.
+    pub fn accessibility_label(mut self, label: impl Into<String>) -> Self {
+        self.0 = self.0.accessibility_label(label);
+        self
+    }
 }
 
 impl<Message> Component<Message> for Switch<Message> {

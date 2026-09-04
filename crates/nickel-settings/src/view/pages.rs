@@ -19,17 +19,11 @@ impl SettingsApp {
             ButtonPresentation::Secondary,
         )
         .width(145.0);
-        let enabled = Button::semantic(
-            theme,
-            SettingsMessage::DisplayEnabled(!selected.enabled),
-            if selected.enabled {
-                "Disable"
-            } else {
-                "Enable"
-            },
-            ButtonPresentation::Secondary,
-        )
-        .width(105.0);
+        let enabled = SettingsRow::new(theme, "Display enabled", "").trailing(
+            Switch::new(selected.enabled, SettingsMessage::DisplayEnabled, theme)
+                .id("display-enabled")
+                .accessibility_label("Display enabled"),
+        );
         let apply = Button::semantic(
             theme,
             SettingsMessage::DisplayApply,
@@ -102,8 +96,9 @@ impl SettingsApp {
                                 } else { String::new() }}
                             </Text>
                         </Row>
+                        {enabled}
                         <Row height={42.0} gap={12.0}>
-                            {identify}{make_primary}{enabled}{apply}
+                            {identify}{make_primary}{apply}
                         </Row>
                     </Column>
                 </Container>
@@ -116,6 +111,7 @@ impl SettingsApp {
 
     pub(super) fn network_components(&self) -> impl nickel_ui::Component<SettingsMessage> {
         let palette = self.palette();
+        let theme = self.ui_theme();
         let wifi_cards = self
             .wifi_networks
             .iter()
@@ -203,28 +199,37 @@ impl SettingsApp {
         } else {
             ui! { <Column gap={12.0} children={adapter_cards} /> }
         };
+        let wifi_power_available = self.network_available && cfg!(target_os = "linux");
+        let wifi_switch_state = if !wifi_power_available && self.wifi_enabled {
+            SwitchState::DisabledOn
+        } else if !wifi_power_available {
+            SwitchState::DisabledOff
+        } else if self.wifi_power_rx.is_some() && self.wifi_enabled {
+            SwitchState::DisabledOn
+        } else if self.wifi_power_rx.is_some() {
+            SwitchState::DisabledOff
+        } else if self.wifi_enabled {
+            SwitchState::On
+        } else {
+            SwitchState::Off
+        };
+        let wifi_label = self.localizer.text("settings-network-wifi");
+        let wifi_power = SettingsRow::new(theme, wifi_label.clone(), self.wifi_status.clone())
+            .trailing(
+                Switch::with_state(
+                    wifi_switch_state,
+                    (wifi_power_available && self.wifi_power_rx.is_none())
+                        .then_some(wifi_power_message as fn(bool) -> SettingsMessage),
+                    theme,
+                )
+                .id("network-wifi-power")
+                .accessibility_label(wifi_label),
+            );
         let content = ui! {
             <Column gap={12.0}>
-                <Container height={58.0} background={palette.surface}
-                    border={(if self.wifi_enabled { palette.accent } else { palette.muted }, 2.0)}
-                    on_press={SettingsMessage::WifiPower}
-                    padding={Insets { top: 10.0, right: 14.0, bottom: 10.0, left: 14.0 }}>
-                    <Row>
-                        <Text width={500.0} color={palette.text}>{self.localizer.text("settings-network-wifi")}</Text>
-                        <Text bold={true} color={if self.wifi_enabled { palette.accent } else { palette.muted }}>
-                            {if self.wifi_enabled {
-                                self.localizer.text("settings-network-wifi-on")
-                            } else if !self.network_available {
-                                self.localizer.text("settings-network-wifi-unavailable")
-                            } else {
-                                self.localizer.text("settings-network-wifi-off")
-                            }}
-                        </Text>
-                    </Row>
-                </Container>
+                {wifi_power}
                 <Row height={26.0}>
                     <Text color={palette.text} width={308.0}>{self.localizer.text("settings-network-visible-wifi")}</Text>
-                    <Text scale={1.0} color={palette.muted}>{&self.wifi_status}</Text>
                 </Row>
                 {wifi_list}
                 <Text color={palette.text} height={18.0}>{self.localizer.text("settings-network-adapters")}</Text>
@@ -244,6 +249,7 @@ impl SettingsApp {
 
     pub(super) fn bluetooth_components(&self) -> impl nickel_ui::Component<SettingsMessage> {
         let palette = self.palette();
+        let theme = self.ui_theme();
         let device_cards = self
             .bluetooth
             .devices
@@ -313,25 +319,38 @@ impl SettingsApp {
         } else {
             ui! { <Column gap={10.0} children={device_cards} /> }
         };
+        let bluetooth_switch_state = if !self.bluetooth.available {
+            SwitchState::DisabledOff
+        } else if self.bluetooth.powered {
+            SwitchState::On
+        } else {
+            SwitchState::Off
+        };
+        let bluetooth_label = self.localizer.text("settings-bluetooth-enabled");
+        let bluetooth_power = SettingsRow::new(
+            theme,
+            bluetooth_label.clone(),
+            if self.bluetooth.adapter_name.is_empty() {
+                self.localizer.text("settings-bluetooth-adapter-unnamed")
+            } else {
+                self.bluetooth.adapter_name.clone()
+            },
+        )
+        .trailing(
+            Switch::with_state(
+                bluetooth_switch_state,
+                self.bluetooth
+                    .available
+                    .then_some(bluetooth_power_message as fn(bool) -> SettingsMessage),
+                theme,
+            )
+            .id("bluetooth-power")
+            .accessibility_label(bluetooth_label),
+        );
         let content = ui! {
             <Column gap={12.0}>
-                <Container height={58.0} background={palette.surface} border={(palette.accent, 2.0)}
-                    on_press={SettingsMessage::BluetoothPower}
-                    padding={Insets { top: 10.0, right: 14.0, bottom: 10.0, left: 14.0 }}>
-                    <Row>
-                        <Column grow={1.0} gap={5.0}>
-                            <Text color={palette.text}>{self.localizer.text("settings-bluetooth-enabled")}</Text>
-                            <Text scale={1.0} color={palette.muted}>{if self.bluetooth.adapter_name.is_empty() {
-                                self.localizer.text("settings-bluetooth-adapter-unnamed")
-                            } else {
-                                self.bluetooth.adapter_name.clone()
-                            }}</Text>
-                        </Column>
-                        <Text bold={true} color={if self.bluetooth.powered { palette.accent } else { palette.muted }}>
-                            {adapter_status}
-                        </Text>
-                    </Row>
-                </Container>
+                {bluetooth_power}
+                <Text scale={1.0} color={palette.muted}>{adapter_status}</Text>
                 <Row height={36.0}>
                     <Text width={390.0} color={palette.text}>{self.localizer.text("settings-bluetooth-devices")}</Text>
                     {discovery_button}

@@ -46,7 +46,8 @@ use nickel_ui::{
     ResponsiveNavigationDestination, SelectField, SemanticControllerAction, SemanticRole,
     SemanticSelector, SemanticTheme, SettingsCard, SettingsNavigation, SettingsRow,
     SettingsSearchEntry, SettingsSearchField, SettingsStatus, SettingsStatusKind, SliderField,
-    Surface, SurfaceRole, Switch, TextAlign, UiHost, UiId, ViewContext, search_settings, ui,
+    Surface, SurfaceRole, Switch, SwitchState, TextAlign, UiHost, UiId, ViewContext,
+    search_settings, ui,
 };
 use winit::{dpi::LogicalSize, event::WindowEvent};
 
@@ -289,11 +290,11 @@ enum SettingsMessage {
     NavigateTarget(SettingsPage, String),
     ShowNavigation,
     SidebarSearchChanged(String),
-    BluetoothPower,
+    SetBluetoothPower(bool),
     BluetoothDiscovery,
     BluetoothDevice(usize),
     BluetoothScroll,
-    WifiPower,
+    SetWifiPower(bool),
     WifiNetwork(usize),
     NetworkScroll,
     AppearanceLight,
@@ -365,6 +366,14 @@ fn reduce_transparency_message(value: bool) -> SettingsMessage {
     SettingsMessage::SetReduceTransparency(value)
 }
 
+fn wifi_power_message(value: bool) -> SettingsMessage {
+    SettingsMessage::SetWifiPower(value)
+}
+
+fn bluetooth_power_message(value: bool) -> SettingsMessage {
+    SettingsMessage::SetBluetoothPower(value)
+}
+
 fn sidebar_search_message(value: String) -> SettingsMessage {
     SettingsMessage::SidebarSearchChanged(value)
 }
@@ -410,20 +419,32 @@ impl SettingsApp {
             }
             SettingsMessage::SidebarSearchChanged(value) => self.sidebar_query = value,
             SettingsMessage::ShowNavigation => self.active_destination = None,
-            SettingsMessage::BluetoothPower => {
-                let _ = set_bluetooth_adapter_property("Powered", !self.bluetooth.powered);
+            SettingsMessage::SetBluetoothPower(enabled) => {
+                if !self.bluetooth.available || enabled == self.bluetooth.powered {
+                    return;
+                }
+                let _ = set_bluetooth_adapter_property("Powered", enabled);
                 self.next_bluetooth_refresh = Instant::now();
             }
             SettingsMessage::BluetoothDiscovery => {
                 let _ = set_bluetooth_adapter_property("Discovering", !self.bluetooth.discovering);
                 self.next_bluetooth_refresh = Instant::now();
             }
-            SettingsMessage::WifiPower => {
+            SettingsMessage::SetWifiPower(enabled) => {
+                if !self.network_available
+                    || !cfg!(target_os = "linux")
+                    || self.wifi_power_rx.is_some()
+                    || enabled == self.wifi_enabled
+                {
+                    return;
+                }
                 #[cfg(target_os = "linux")]
-                if let Err(error) = set_linux_wifi_enabled(!self.wifi_enabled) {
-                    self.wifi_status =
-                        self.localizer
-                            .value("settings-network-connection-failed", "error", &error);
+                {
+                    let (sender, receiver) = mpsc::channel();
+                    std::thread::spawn(move || {
+                        let _ = sender.send(set_linux_wifi_enabled(enabled));
+                    });
+                    self.wifi_power_rx = Some(receiver);
                 }
                 self.next_network_refresh = Instant::now();
             }
@@ -788,6 +809,7 @@ impl SettingsApp {
 impl SettingsApp {
     fn tick(&mut self) {
         self.poll_wallpaper_dialog();
+        self.poll_wifi_power();
         let now = Instant::now();
         if self
             .appearance_save_deadline
@@ -839,6 +861,27 @@ impl SettingsApp {
             self.wifi_refreshes_left = 0;
         }
         self.request_redraw();
+    }
+
+    fn poll_wifi_power(&mut self) {
+        let Some(receiver) = self.wifi_power_rx.as_ref() else {
+            return;
+        };
+        let result = match receiver.try_recv() {
+            Ok(result) => result,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => Err("Wi-Fi request stopped".to_owned()),
+        };
+        self.wifi_power_rx = None;
+        match result {
+            Ok(()) => self.load_linux_network(),
+            Err(error) => {
+                self.wifi_status =
+                    self.localizer
+                        .value("settings-network-connection-failed", "error", &error);
+                self.request_redraw();
+            }
+        }
     }
 }
 
@@ -1116,6 +1159,9 @@ impl Application for SettingsApp {
         if self.wallpaper_dialog_rx.is_some() {
             deadlines.push(now + self.wallpaper_poll_delay);
         }
+        if self.wifi_power_rx.is_some() {
+            deadlines.push(now + Duration::from_millis(16));
+        }
         deadlines
             .into_iter()
             .min()
@@ -1263,7 +1309,7 @@ mod tests {
         DeviceId, EventOrder, InputEvent, KeyCode, KeyEdge, KeyEvent, KeyLocation, LogicalKey,
         ModifierState, NamedKey, PhysicalKey, Point, PointerButton, PointerEvent,
     };
-    use nickel_ui::Application;
+    use nickel_ui::{Application, SemanticRole};
 
     use super::{
         BluetoothDevice, ControllerAction, FileIconPreference, NetworkAdapter, Rect, SIDEBAR_WIDTH,
@@ -1514,6 +1560,125 @@ mod tests {
                 "missing Appearance control for {message:?}"
             );
         }
+    }
+
+    #[test]
+    fn wifi_power_uses_one_truthful_semantic_switch() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Network);
+        app.network_available = true;
+        app.wifi_enabled = false;
+        app.wifi_status = "Wi-Fi is disabled".to_owned();
+        let tree = app.build_ui(850.0, 900.0);
+
+        assert_eq!(
+            tree.semantic_targets_for_message(&SettingsMessage::SetWifiPower(true))
+                .len(),
+            1,
+            "one activation must issue exactly one typed power request"
+        );
+        assert!(
+            tree.semantic_targets_for_message(&SettingsMessage::SetWifiPower(false))
+                .is_empty(),
+            "the rendered switch must request the opposite confirmed state"
+        );
+        let wifi = tree
+            .accessibility_nodes()
+            .iter()
+            .find(|node| node.id.as_str().ends_with("network-wifi-power"))
+            .expect("Wi-Fi power switch");
+        assert_eq!(wifi.semantic_role, Some(SemanticRole::Switch));
+        assert_eq!(wifi.label.as_deref(), Some("Wi-Fi"));
+        assert_eq!(wifi.state.as_deref(), Some("off"));
+        assert!(wifi.enabled);
+    }
+
+    #[test]
+    fn unavailable_wifi_power_is_disabled_and_cannot_request_a_change() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Network);
+        app.network_available = false;
+        app.wifi_enabled = false;
+        let tree = app.build_ui(850.0, 900.0);
+
+        assert!(
+            tree.semantic_targets_for_message(&SettingsMessage::SetWifiPower(true))
+                .is_empty()
+        );
+        let wifi = tree
+            .accessibility_nodes()
+            .iter()
+            .find(|node| node.id.as_str().ends_with("network-wifi-power"))
+            .expect("unavailable Wi-Fi power switch remains represented");
+        assert_eq!(wifi.semantic_role, Some(SemanticRole::Switch));
+        assert_eq!(wifi.state.as_deref(), Some("off disabled"));
+        assert!(!wifi.enabled);
+    }
+
+    #[test]
+    fn pending_wifi_power_keeps_confirmed_value_and_rejects_repeat_activation() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Network);
+        app.network_available = true;
+        app.wifi_enabled = true;
+        let (_sender, receiver) = std::sync::mpsc::channel();
+        app.wifi_power_rx = Some(receiver);
+        let tree = app.build_ui(850.0, 900.0);
+
+        assert!(
+            tree.semantic_targets_for_message(&SettingsMessage::SetWifiPower(false))
+                .is_empty(),
+            "pending requests must disable repeat activation"
+        );
+        let wifi = tree
+            .accessibility_nodes()
+            .iter()
+            .find(|node| node.id.as_str().ends_with("network-wifi-power"))
+            .expect("pending Wi-Fi power switch");
+        assert_eq!(wifi.state.as_deref(), Some("on disabled"));
+        assert!(!wifi.enabled);
+    }
+
+    #[test]
+    fn failed_wifi_power_request_restores_the_confirmed_state_and_reports_error() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Network);
+        app.network_available = true;
+        app.wifi_enabled = false;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        sender.send(Err("permission denied".to_owned())).unwrap();
+        app.wifi_power_rx = Some(receiver);
+
+        app.poll_wifi_power();
+
+        assert!(!app.wifi_enabled, "failure must not mutate confirmed state");
+        assert!(app.wifi_power_rx.is_none());
+        assert!(app.wifi_status.contains("permission denied"));
+        let tree = app.build_ui(850.0, 900.0);
+        assert_eq!(
+            tree.semantic_targets_for_message(&SettingsMessage::SetWifiPower(true))
+                .len(),
+            1,
+            "rollback leaves the confirmed opposite request available"
+        );
+    }
+
+    #[test]
+    fn bluetooth_power_uses_the_same_semantic_switch_pattern() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Bluetooth);
+        app.bluetooth.available = true;
+        app.bluetooth.powered = true;
+        app.bluetooth.adapter_name = "Test adapter".to_owned();
+        let tree = app.build_ui(850.0, 900.0);
+
+        assert_eq!(
+            tree.semantic_targets_for_message(&SettingsMessage::SetBluetoothPower(false))
+                .len(),
+            1
+        );
+        let bluetooth = tree
+            .accessibility_nodes()
+            .iter()
+            .find(|node| node.id.as_str().ends_with("bluetooth-power"))
+            .expect("Bluetooth power switch");
+        assert_eq!(bluetooth.semantic_role, Some(SemanticRole::Switch));
+        assert_eq!(bluetooth.state.as_deref(), Some("on"));
     }
 
     #[test]
