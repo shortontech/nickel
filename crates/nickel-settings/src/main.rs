@@ -13,7 +13,7 @@ use nickel_session_protocol::{
     OutputPlacement as SessionOutputPlacement, Query as SessionQuery, Request as SessionRequest,
     ServerEnvelope, ServerMessage,
 };
-use persistence::{save_shell_settings, try_save_shell_settings, try_save_wallpaper_settings};
+use persistence::{try_save_shell_settings, try_save_wallpaper_settings};
 use platform::*;
 
 use std::{
@@ -515,20 +515,24 @@ impl SettingsApp {
                 self.persist_appearance();
             }
             SettingsMessage::BarPrimaryDisplay => {
+                let previous = self.shell_settings.clone();
                 self.shell_settings.bar_on_all_displays = false;
-                save_shell_settings(&self.shell_settings);
+                self.persist_shell_behavior(previous);
             }
             SettingsMessage::BarAllDisplays => {
+                let previous = self.shell_settings.clone();
                 self.shell_settings.bar_on_all_displays = true;
-                save_shell_settings(&self.shell_settings);
+                self.persist_shell_behavior(previous);
             }
             SettingsMessage::BarDisplayWindows => {
+                let previous = self.shell_settings.clone();
                 self.shell_settings.all_windows_on_every_bar = false;
-                save_shell_settings(&self.shell_settings);
+                self.persist_shell_behavior(previous);
             }
             SettingsMessage::BarAllWindows => {
+                let previous = self.shell_settings.clone();
                 self.shell_settings.all_windows_on_every_bar = true;
-                save_shell_settings(&self.shell_settings);
+                self.persist_shell_behavior(previous);
             }
             SettingsMessage::DisplayIdentify => {
                 match session_request(SessionRequest::Command(SessionCommand::IdentifyOutputs)) {
@@ -674,12 +678,31 @@ impl SettingsApp {
         if count == self.shell_settings.desktop_count {
             return;
         }
-        self.shell_settings.desktop_count = count;
+        let previous = self.shell_settings.clone();
+        self.shell_settings.desktop_count = count.clamp(1, 8);
         self.shell_settings.active_desktop = self
             .shell_settings
             .active_desktop
             .min(count.saturating_sub(1));
-        save_shell_settings(&self.shell_settings);
+        self.persist_shell_behavior(previous);
+    }
+
+    fn persist_shell_behavior(&mut self, previous: ShellSettings) {
+        if !self.persistence_enabled {
+            return;
+        }
+        let result = try_save_shell_settings(&self.shell_settings).and_then(|()| {
+            match session_request(SessionRequest::Command(SessionCommand::ReloadShellSettings)) {
+                Ok(ServerMessage::Ack) => Ok(()),
+                Ok(_) => Err("the session returned an unexpected response".to_owned()),
+                Err(error) => Err(error.to_string()),
+            }
+        });
+        if let Err(error) = result {
+            self.shell_settings = previous.clone();
+            let _ = try_save_shell_settings(&previous);
+            self.status = format!("Could not apply shell setting: {error}");
+        }
     }
 
     fn set_appearance_hue(&mut self, hue: u16) {

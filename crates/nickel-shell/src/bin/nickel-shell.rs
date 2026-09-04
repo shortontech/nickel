@@ -121,6 +121,7 @@ impl CommandLineOptions {
             } else {
                 PanelEdge::Bottom
             },
+            bar_on_all_displays: true,
         }
     }
 }
@@ -147,6 +148,7 @@ mod command_line_tests {
             ShellOptions {
                 create_desktop_surfaces: false,
                 panel_edge: PanelEdge::Bottom,
+                bar_on_all_displays: true,
             }
         );
         assert_eq!(
@@ -154,6 +156,7 @@ mod command_line_tests {
             ShellOptions {
                 create_desktop_surfaces: true,
                 panel_edge: PanelEdge::Top,
+                bar_on_all_displays: true,
             }
         );
         assert_eq!(
@@ -163,6 +166,7 @@ mod command_line_tests {
             ShellOptions {
                 create_desktop_surfaces: false,
                 panel_edge: PanelEdge::Top,
+                bar_on_all_displays: true,
             }
         );
     }
@@ -763,15 +767,24 @@ fn render_all(shell: &mut WinitShell, state: &mut LiveShell) -> Result<(), Strin
         .surfaces()
         .map(|surface| {
             let (logical_width, logical_height) = surface.window().size();
-            (surface.id(), surface.role(), logical_width, logical_height)
+            (
+                surface.id(),
+                surface.role(),
+                surface.output_name().to_owned(),
+                logical_width,
+                logical_height,
+            )
         })
         .collect::<Vec<_>>();
-    for (id, role, logical_width, logical_height) in surfaces {
+    for (id, role, output, logical_width, logical_height) in surfaces {
         if matches!(role, SurfaceRole::CodexProjectMenu | SurfaceRole::CodexChat) {
             continue;
         }
         if !state.surface_visible(role) {
             continue;
+        }
+        if role == SurfaceRole::Panel {
+            state.set_panel_output(output);
         }
         let commands = state.scene(role, logical_width, logical_height);
         if let Some(token) = state.scene_change_token(role) {
@@ -793,12 +806,21 @@ fn render_role(
         .filter(|surface| surface.role() == wanted)
         .map(|surface| {
             let (logical_width, logical_height) = surface.window().size();
-            (surface.id(), surface.role(), logical_width, logical_height)
+            (
+                surface.id(),
+                surface.role(),
+                surface.output_name().to_owned(),
+                logical_width,
+                logical_height,
+            )
         })
         .collect::<Vec<_>>();
-    for (id, role, logical_width, logical_height) in surfaces {
+    for (id, role, output, logical_width, logical_height) in surfaces {
         if !state.surface_visible(role) {
             continue;
+        }
+        if role == SurfaceRole::Panel {
+            state.set_panel_output(output);
         }
         let commands = state.scene(role, logical_width, logical_height);
         if let Some(token) = state.scene_change_token(role) {
@@ -1064,6 +1086,13 @@ fn handle_shell_input(
     let Some(role) = shell.surface(surface).map(|entry| entry.role()) else {
         return Ok(());
     };
+    if role == SurfaceRole::Panel
+        && let Some(output) = shell
+            .surface(surface)
+            .map(|entry| entry.output_name().to_owned())
+    {
+        state.set_panel_output(output);
+    }
     if role == SurfaceRole::Lock {
         let (width, height) = shell
             .surface(surface)
@@ -1178,6 +1207,12 @@ fn handle_shell_input(
                     render_role(shell, state, SurfaceRole::WindowContextMenu)?;
                 }
             } else if edge == KeyEdge::Pressed && role == SurfaceRole::Panel {
+                if let Some(output) = shell
+                    .surface(surface)
+                    .map(|entry| entry.output_name().to_owned())
+                {
+                    state.set_panel_output(output);
+                }
                 if let Some(display) = shell.surface_display_geometry(surface) {
                     state.set_panel_origin_x(display.x);
                 }
@@ -1232,6 +1267,12 @@ fn handle_shell_input(
                     render_role(shell, state, SurfaceRole::Screenshot)?;
                 }
             } else if role == SurfaceRole::Panel {
+                if let Some(output) = shell
+                    .surface(surface)
+                    .map(|entry| entry.output_name().to_owned())
+                {
+                    state.set_panel_output(output);
+                }
                 if let Some(display) = shell.surface_display_geometry(surface) {
                     state.set_panel_origin_x(display.x);
                 }
@@ -1448,9 +1489,15 @@ fn validate_shell_readiness(
         readiness.output_roles_ready,
         readiness.reserved_ordinary_windows,
     );
+    let expected_panels =
+        if nickel_core::shell_settings::ShellSettings::load_default().bar_on_all_displays {
+            readiness.outputs
+        } else {
+            1
+        };
     let roles_are_complete = readiness.outputs > 0
         && readiness.desktops == readiness.outputs
-        && readiness.panels == readiness.outputs
+        && readiness.panels == expected_panels
         && readiness.locks == readiness.outputs
         && readiness.launchers == 1
         && readiness.required_singletons_ready
@@ -1556,7 +1603,10 @@ fn main() -> Result<(), String> {
         format!("Nickel shell could not authenticate with the session protocol: {error}")
     })?;
     let started = Instant::now();
-    let mut shell = WinitShell::new_with_options(started, command_line.shell_options())?;
+    let mut shell_options = command_line.shell_options();
+    shell_options.bar_on_all_displays =
+        nickel_core::shell_settings::ShellSettings::load_default().bar_on_all_displays;
+    let mut shell = WinitShell::new_with_options(started, shell_options)?;
     wait_for_initial_display(&mut shell)?;
     shell.create_shell_surfaces()?;
     #[cfg(target_os = "linux")]
@@ -1813,6 +1863,12 @@ fn main() -> Result<(), String> {
             Some(ShellEvent::GlobalShortcut(shortcut)) => {
                 tracing::debug!(?shortcut, "handling global shortcut");
                 shell.begin_input_observation(Instant::now());
+                if shortcut == platform::GlobalShortcut::ReloadShellSettings {
+                    let settings = nickel_core::shell_settings::ShellSettings::load_default();
+                    if shell.set_bar_on_all_displays(settings.bar_on_all_displays)? {
+                        sync_visibility(&mut shell, &state);
+                    }
+                }
                 if state.global_shortcut(shortcut) {
                     sync_visibility(&mut shell, &state);
                     state.sync_transient_overlays();

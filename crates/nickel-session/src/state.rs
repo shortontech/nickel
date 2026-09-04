@@ -1314,6 +1314,9 @@ impl NickelSession {
 
         // Get the loop signal, used to stop the event loop
         let loop_signal = event_loop.get_signal();
+        let mut workspaces = Workspaces::default();
+        let configured_desktops = ShellSettings::load_default().desktop_count;
+        let _ = workspaces.set_count(usize::from(configured_desktops));
 
         Self {
             start_time,
@@ -1411,7 +1414,7 @@ impl NickelSession {
             preview_counters: PreviewCacheCounters::default(),
             hotkeys: CompositorShortcutAdapter::default(),
             task_switcher: TaskSwitcher::default(),
-            workspaces: Workspaces::default(),
+            workspaces,
             workspace_hidden_windows: HashMap::new(),
             displaced_output_windows: HashMap::new(),
             preview_highlight: None,
@@ -1836,6 +1839,7 @@ impl NickelSession {
     ) -> ServerMessage {
         match command {
             SessionCommand::ReloadShellSettings => {
+                self.apply_configured_workspace_count();
                 self.notify_shell_settings_changed();
             }
             SessionCommand::ToggleLauncher => self.toggle_launcher(),
@@ -2498,6 +2502,17 @@ impl NickelSession {
             .outputs()
             .map(|output| output.name())
             .collect::<HashSet<_>>();
+        let settings = ShellSettings::load_default();
+        let expected_panel_outputs = if settings.bar_on_all_displays {
+            output_names.clone()
+        } else {
+            self.primary_output_name
+                .clone()
+                .or_else(|| output_names.iter().min().cloned())
+                .into_iter()
+                .collect::<HashSet<_>>()
+        };
+        let expected_panels = u16::try_from(expected_panel_outputs.len()).unwrap_or(u16::MAX);
         let registered_role_outputs = |role| {
             self.registered_shell_role_slots
                 .iter()
@@ -2506,12 +2521,12 @@ impl NickelSession {
                 .collect::<HashSet<_>>()
         };
         let output_roles_ready = registered_role_outputs(ShellRole::Desktop) == output_names
-            && registered_role_outputs(ShellRole::Panel) == output_names
+            && registered_role_outputs(ShellRole::Panel) == expected_panel_outputs
             && registered_role_outputs(ShellRole::Lock) == output_names;
         let ready = expected_shell_pid.is_some()
             && expected_shell_pid == authenticated_shell_pid
             && desktops == outputs
-            && panels == outputs
+            && panels == expected_panels
             && locks == outputs
             && launchers == 1
             && required_singletons_ready
@@ -3018,6 +3033,17 @@ impl NickelSession {
         self.request_output_redraw();
         self.notify_workspace_state();
         self.notify_protocol_snapshot();
+    }
+
+    fn apply_configured_workspace_count(&mut self) {
+        let requested = usize::from(ShellSettings::load_default().desktop_count);
+        let Ok(transitions) = self.workspaces.set_count(requested) else {
+            return;
+        };
+        for transition in transitions {
+            self.apply_workspace_transition(transition);
+        }
+        self.notify_workspace_state();
     }
 
     pub fn switch_workspace_direction(

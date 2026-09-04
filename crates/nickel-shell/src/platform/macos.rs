@@ -307,6 +307,10 @@ impl WindowFeed {
         )
     }
 
+    pub fn window_output(&self, _: WindowId) -> Option<String> {
+        None
+    }
+
     pub fn workspaces(&self) -> FeedState<Vec<super::WorkspaceSummary>> {
         FeedState::Ready(Vec::new())
     }

@@ -125,6 +125,26 @@ impl<WindowId: Clone + Eq + Hash> Workspaces<WindowId> {
         Ok(id)
     }
 
+    pub fn set_count(
+        &mut self,
+        requested: usize,
+    ) -> Result<Vec<WorkspaceTransition<WindowId>>, WorkspaceError> {
+        let requested = requested.clamp(1, MAX_WORKSPACES);
+        while self.ordered.len() < requested {
+            self.create()?;
+        }
+        let mut transitions = Vec::new();
+        while self.ordered.len() > requested {
+            let workspace = self
+                .ordered
+                .last()
+                .map(|workspace| workspace.id)
+                .expect("a workspace collection is never empty");
+            transitions.push(self.remove(workspace)?);
+        }
+        Ok(transitions)
+    }
+
     pub fn add_window(&mut self, window: WindowId) {
         self.remove_window(&window);
         self.focus_excluded.remove(&window);
@@ -434,6 +454,36 @@ mod tests {
         assert_eq!(workspaces.active_output(), Some("DP-1"));
         workspaces.output_disconnected("missing", None);
         assert_eq!(workspaces.active_output(), Some("DP-1"));
+    }
+
+    #[test]
+    fn configured_count_expands_stably_and_reduction_migrates_windows() {
+        let mut workspaces = Workspaces::default();
+        workspaces.set_count(4).unwrap();
+        let ids = workspaces
+            .ordered()
+            .iter()
+            .map(|workspace| workspace.id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            vec![
+                WorkspaceId(1),
+                WorkspaceId(2),
+                WorkspaceId(3),
+                WorkspaceId(4)
+            ]
+        );
+
+        workspaces.switch_to(WorkspaceId(4), None).unwrap();
+        workspaces.add_window("editor");
+        let transitions = workspaces.set_count(2).unwrap();
+
+        assert_eq!(workspaces.ordered().len(), 2);
+        assert_eq!(workspaces.active(), WorkspaceId(2));
+        assert_eq!(workspaces.workspace_for(&"editor"), Some(WorkspaceId(2)));
+        assert_eq!(transitions.len(), 2);
+        assert_eq!(transitions[0].focus, Some("editor"));
     }
 
     #[test]

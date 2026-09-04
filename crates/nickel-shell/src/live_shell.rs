@@ -515,6 +515,8 @@ pub struct LiveShell {
     panel_host: nickel_ui::UiHost<PanelApplication>,
     panel_change_token: HostChangeToken,
     panel_deadline: Option<Instant>,
+    panel_output: Option<String>,
+    all_windows_on_every_bar: bool,
     preview_group: Option<usize>,
     preview_pending: Option<(usize, Instant)>,
     preview_focus_requested: bool,
@@ -802,6 +804,8 @@ impl LiveShell {
             panel_host,
             panel_change_token: HostChangeToken::default(),
             panel_deadline: None,
+            panel_output: None,
+            all_windows_on_every_bar: shell_settings.all_windows_on_every_bar,
             preview_group: None,
             preview_pending: None,
             preview_focus_requested: false,
@@ -924,8 +928,9 @@ impl LiveShell {
             changed = true;
         }
         let preview_group = self.preview_group.and_then(|index| {
+            let panel_windows = self.panel_windows();
             self.launcher
-                .group_windows(&self.windows)
+                .group_windows(&panel_windows)
                 .get(index)
                 .cloned()
         });
@@ -1012,9 +1017,14 @@ impl LiveShell {
                 changed = true;
             }
         }
-        let palette = ThemePalette::from_appearance(
-            ShellSettings::load_default().resolve_appearance(Appearance::default()),
-        );
+        let shell_settings = ShellSettings::load_default();
+        if self.all_windows_on_every_bar != shell_settings.all_windows_on_every_bar {
+            self.all_windows_on_every_bar = shell_settings.all_windows_on_every_bar;
+            self.close_window_preview();
+            changed = true;
+        }
+        let palette =
+            ThemePalette::from_appearance(shell_settings.resolve_appearance(Appearance::default()));
         if palette != self.palette {
             self.palette = palette;
             self.launcher_icons.begin_visual_generation();
@@ -1428,7 +1438,8 @@ impl LiveShell {
         match action {
             PanelAction::Launcher => self.set_launcher_visible(!self.launcher_visible),
             PanelAction::Task(index) => {
-                let groups = self.launcher.group_windows(&self.windows);
+                let panel_windows = self.panel_windows();
+                let groups = self.launcher.group_windows(&panel_windows);
                 if groups
                     .get(index)
                     .is_some_and(|group| group.windows.len() > 1)
@@ -1631,6 +1642,30 @@ impl LiveShell {
 
     pub fn set_panel_origin_x(&mut self, origin_x: i32) {
         self.panel_origin_x = origin_x;
+    }
+
+    pub fn set_panel_output(&mut self, output: impl Into<String>) {
+        self.panel_output = Some(output.into());
+    }
+
+    fn panel_windows(&self) -> Vec<OpenWindow> {
+        if self.all_windows_on_every_bar {
+            return self.windows.clone();
+        }
+        let Some(output) = self.panel_output.as_deref() else {
+            return self.windows.clone();
+        };
+        self.windows
+            .iter()
+            .filter(|window| {
+                window_belongs_to_panel(
+                    false,
+                    Some(output),
+                    self.window_feed.window_output(window.id).as_deref(),
+                )
+            })
+            .cloned()
+            .collect()
     }
 
     pub fn panel_pointer_left(&mut self) -> bool {
@@ -1976,7 +2011,8 @@ impl LiveShell {
                 },
             );
         } else if let Some(index) = self.preview_group {
-            let groups = self.launcher.group_windows(&self.windows);
+            let panel_windows = self.panel_windows();
+            let groups = self.launcher.group_windows(&panel_windows);
             if let Some(group) = groups.get(index) {
                 let windows = group
                     .windows
@@ -2040,7 +2076,8 @@ impl LiveShell {
             self.preview_pending = None;
             return;
         }
-        let groups = self.launcher.group_windows(&self.windows);
+        let panel_windows = self.panel_windows();
+        let groups = self.launcher.group_windows(&panel_windows);
         if groups.get(index).is_none() {
             return;
         }
@@ -2803,8 +2840,9 @@ impl LiveShell {
     fn window_preview_scene(&mut self) -> Vec<PaintCommand> {
         let group = self.task_switcher_group.clone().or_else(|| {
             self.preview_group.and_then(|index| {
+                let panel_windows = self.panel_windows();
                 self.launcher
-                    .group_windows(&self.windows)
+                    .group_windows(&panel_windows)
                     .get(index)
                     .cloned()
             })
@@ -2897,7 +2935,8 @@ impl LiveShell {
     }
 
     fn sync_panel_host(&mut self) -> bool {
-        let groups = self.launcher.group_windows(&self.windows);
+        let panel_windows = self.panel_windows();
+        let groups = self.launcher.group_windows(&panel_windows);
         let task_icons: Vec<Option<(u16, Arc<image::RgbaImage>)>> = groups
             .iter()
             .take(12)
@@ -2950,7 +2989,7 @@ impl LiveShell {
             || application.launcher.codex_available() != self.launcher.codex_available()
             || task_icons_changed;
         application.launcher.clone_from(&self.launcher);
-        application.windows.clone_from(&self.windows);
+        application.windows = panel_windows;
         application.tray.clone_from(&self.tray);
         application.tray_icons.clone_from(&self.tray_icons);
         application.panel_icon = Arc::clone(&self.panel_icon);
@@ -2972,6 +3011,17 @@ impl LiveShell {
         }
         changed
     }
+}
+
+fn window_belongs_to_panel(
+    all_windows: bool,
+    panel_output: Option<&str>,
+    window_output: Option<&str>,
+) -> bool {
+    all_windows
+        || panel_output.is_none()
+        || window_output.is_none()
+        || panel_output == window_output
 }
 
 impl PanelApplication {
@@ -3617,8 +3667,24 @@ mod tests {
         HostRuntimeSamples, LiveShell, panel_status_layout, panel_tray_icons,
         platform::{FeedState, FeedStatus, GlobalShortcut, SecureStorageState},
         preview_refresh_due, secure_storage_status_label, session_feed_status_label,
-        visible_tray_item,
+        visible_tray_item, window_belongs_to_panel,
     };
+
+    #[test]
+    fn per_display_panel_projection_keeps_owned_and_unresolved_windows_only() {
+        assert!(window_belongs_to_panel(false, Some("DP-1"), Some("DP-1")));
+        assert!(!window_belongs_to_panel(
+            false,
+            Some("DP-1"),
+            Some("HDMI-A-1")
+        ));
+        assert!(window_belongs_to_panel(false, Some("DP-1"), None));
+        assert!(window_belongs_to_panel(
+            true,
+            Some("DP-1"),
+            Some("HDMI-A-1")
+        ));
+    }
 
     #[test]
     fn host_runtime_phase_samples_are_bounded() {

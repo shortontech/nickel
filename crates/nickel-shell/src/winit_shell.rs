@@ -70,6 +70,7 @@ pub enum PanelEdge {
 pub struct ShellOptions {
     pub create_desktop_surfaces: bool,
     pub panel_edge: PanelEdge,
+    pub bar_on_all_displays: bool,
 }
 
 impl Default for ShellOptions {
@@ -77,6 +78,7 @@ impl Default for ShellOptions {
         Self {
             create_desktop_surfaces: true,
             panel_edge: PanelEdge::Bottom,
+            bar_on_all_displays: true,
         }
     }
 }
@@ -432,7 +434,9 @@ impl WinitShell {
             {
                 self.create_surface(SurfaceRole::Desktop, display_index, geometry, output_name)?;
             }
-            self.create_surface(SurfaceRole::Panel, display_index, geometry, output_name)?;
+            if self.options.bar_on_all_displays || display_index == 0 {
+                self.create_surface(SurfaceRole::Panel, display_index, geometry, output_name)?;
+            }
             self.create_surface(SurfaceRole::Lock, display_index, geometry, output_name)?;
         }
         let primary = displays[0];
@@ -469,7 +473,13 @@ impl WinitShell {
             tracing::info!("winit shell is dormant while no displays are available");
             return Ok(());
         }
-        let panels_match_outputs = output_names.iter().all(|output_name| {
+        let wanted_panel_outputs = panel_outputs(&output_names, self.options.bar_on_all_displays);
+        self.surfaces.retain(|surface| {
+            surface.role != SurfaceRole::Panel
+                || wanted_panel_outputs.contains(&surface.output_name)
+        });
+        self.rebuild_surface_indices();
+        let panels_match_outputs = wanted_panel_outputs.iter().all(|output_name| {
             self.surfaces.iter().any(|surface| {
                 surface.display_connected
                     && surface.role == SurfaceRole::Panel
@@ -481,7 +491,9 @@ impl WinitShell {
                 if matches!(
                     surface.role,
                     SurfaceRole::Desktop | SurfaceRole::Panel | SurfaceRole::Lock
-                ) && !output_names.iter().any(|name| name == &surface.output_name)
+                ) && (!output_names.iter().any(|name| name == &surface.output_name)
+                    || (surface.role == SurfaceRole::Panel
+                        && !wanted_panel_outputs.contains(&surface.output_name)))
                 {
                     surface.display_connected = false;
                     surface.presenter = None;
@@ -493,19 +505,21 @@ impl WinitShell {
                 let output_name = output_names.get(display_index).ok_or_else(|| {
                     "winit output identity count changed during shell sync".to_string()
                 })?;
-                let has_panel = self.surfaces.iter().any(|surface| {
-                    surface.display_connected
-                        && surface.role == SurfaceRole::Panel
-                        && surface.output_name == *output_name
-                });
-                if has_panel {
-                    continue;
-                }
                 for role in [SurfaceRole::Desktop, SurfaceRole::Panel, SurfaceRole::Lock] {
                     if role == SurfaceRole::Desktop
                         && (!self.options.create_desktop_surfaces
                             || !crate::platform::renders_desktop_background())
                     {
+                        continue;
+                    }
+                    if role == SurfaceRole::Panel && !wanted_panel_outputs.contains(output_name) {
+                        continue;
+                    }
+                    if self.surfaces.iter().any(|surface| {
+                        surface.display_connected
+                            && surface.role == role
+                            && surface.output_name == *output_name
+                    }) {
                         continue;
                     }
                     if let Some(surface) = self.surfaces.iter_mut().find(|surface| {
@@ -589,6 +603,15 @@ impl WinitShell {
                 .request_inner_size(LogicalSize::new(width, height));
         }
         Ok(())
+    }
+
+    pub fn set_bar_on_all_displays(&mut self, enabled: bool) -> Result<bool, String> {
+        if self.options.bar_on_all_displays == enabled {
+            return Ok(false);
+        }
+        self.options.bar_on_all_displays = enabled;
+        self.sync_display_geometry()?;
+        Ok(true)
     }
 
     fn retire_settled_output_surfaces(&mut self, output_names: &[String], now: Instant) {
@@ -1304,6 +1327,14 @@ impl WinitShell {
     }
 }
 
+fn panel_outputs(output_names: &[String], all_displays: bool) -> Vec<String> {
+    if all_displays {
+        output_names.to_vec()
+    } else {
+        output_names.first().cloned().into_iter().collect()
+    }
+}
+
 fn window_event_device(event: &WindowEvent) -> Option<winit::event::DeviceId> {
     match event {
         WindowEvent::KeyboardInput { device_id, .. }
@@ -1539,8 +1570,8 @@ mod tests {
     use super::{
         DESKTOP_TITLE, DisplayGeometry, LAUNCHER_TITLE, OUTPUT_RETIREMENT_SETTLE,
         OutputRetirementTracker, PANEL_TITLE, PanelEdge, SurfaceRole, durable_presenter_peak,
-        output_role_is_retired, parse_proc_status_rss, require_displays, shell_surface_title,
-        surface_geometry, surface_is_borderless,
+        output_role_is_retired, panel_outputs, parse_proc_status_rss, require_displays,
+        shell_surface_title, surface_geometry, surface_is_borderless,
     };
 
     use nickel_ui::AggregatePresenterCacheDiagnostics;
@@ -1619,6 +1650,14 @@ mod tests {
             scale: 1.0,
         };
         assert_eq!(require_displays(vec![display]).unwrap(), vec![display]);
+    }
+
+    #[test]
+    fn panel_scope_reconciles_primary_and_all_display_topologies() {
+        let outputs = vec!["DP-1".to_owned(), "HDMI-A-1".to_owned()];
+        assert_eq!(panel_outputs(&outputs, false), vec!["DP-1"]);
+        assert_eq!(panel_outputs(&outputs, true), outputs);
+        assert_eq!(panel_outputs(&[], false), Vec::<String>::new());
     }
 
     #[test]

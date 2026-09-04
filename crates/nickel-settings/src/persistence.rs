@@ -4,10 +4,6 @@ pub(super) fn load_shell_settings() -> ShellSettings {
     ShellSettings::load_default()
 }
 
-pub(super) fn save_shell_settings(settings: &ShellSettings) {
-    let _ = try_save_shell_settings(settings);
-}
-
 pub(super) fn try_save_shell_settings(settings: &ShellSettings) -> Result<(), String> {
     settings.save_default().map_err(|error| error.to_string())
 }

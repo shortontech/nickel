@@ -7,6 +7,7 @@ use nickel_session_protocol::{
 };
 use std::{
     borrow::Cow,
+    cell::RefCell,
     collections::HashMap,
     env,
     hash::{DefaultHasher, Hash, Hasher},
@@ -1327,6 +1328,7 @@ fn shell_command_payload(command: ShellCommand) -> SessionCommand {
 pub struct WindowFeed {
     socket: Option<std::os::unix::net::UnixDatagram>,
     path: PathBuf,
+    outputs: RefCell<HashMap<WindowId, String>>,
 }
 
 pub fn show_window_system_menu(_: WindowId) -> bool {
@@ -1341,28 +1343,49 @@ impl WindowFeed {
         if let Some(socket) = &socket {
             let _ = socket.set_read_timeout(Some(Duration::from_millis(100)));
         }
-        Self { socket, path }
+        Self {
+            socket,
+            path,
+            outputs: RefCell::new(HashMap::new()),
+        }
     }
 
     pub fn snapshot(&self, launcher: &Launcher) -> FeedState<Vec<OpenWindow>> {
         let Some(socket) = self.socket.as_ref() else {
             return FeedState::Disconnected;
         };
-        match session_request_on(socket, SessionRequest::Query(SessionQuery::Windows)) {
-            Ok(ServerMessage::Windows(windows)) => FeedState::Ready(
-                windows
-                    .into_iter()
-                    .map(|window| OpenWindow {
-                        id: WindowId(window.id.0),
-                        application_id: resolve_application_id(&window.application_id, launcher),
-                        active: window.active,
-                        title: window.title,
-                    })
-                    .collect(),
-            ),
+        match session_request_on(socket, SessionRequest::Query(SessionQuery::Snapshot)) {
+            Ok(ServerMessage::Snapshot(snapshot)) => {
+                let mut outputs = self.outputs.borrow_mut();
+                outputs.clear();
+                for window in &snapshot.windows {
+                    if let Some(output) = owning_output(window.geometry, &snapshot.outputs) {
+                        outputs.insert(WindowId(window.id.0), output);
+                    }
+                }
+                FeedState::Ready(
+                    snapshot
+                        .windows
+                        .into_iter()
+                        .map(|window| OpenWindow {
+                            id: WindowId(window.id.0),
+                            application_id: resolve_application_id(
+                                &window.application_id,
+                                launcher,
+                            ),
+                            active: window.active,
+                            title: window.title,
+                        })
+                        .collect(),
+                )
+            }
             Ok(_) => FeedState::Failed,
             Err(error) => session_error_feed_state(error),
         }
+    }
+
+    pub fn window_output(&self, window: WindowId) -> Option<String> {
+        self.outputs.borrow().get(&window).cloned()
     }
 
     pub fn workspaces(&self) -> FeedState<Vec<super::WorkspaceSummary>> {
@@ -1412,6 +1435,34 @@ impl WindowFeed {
     pub fn icon(&self, _: WindowId) -> Option<image::RgbaImage> {
         None
     }
+}
+
+fn owning_output(
+    geometry: Option<SessionGeometry>,
+    outputs: &[nickel_session_protocol::OutputSnapshot],
+) -> Option<String> {
+    let geometry = geometry?;
+    outputs
+        .iter()
+        .filter(|output| output.enabled)
+        .map(|output| {
+            let left = geometry.x.max(output.geometry.x);
+            let top = geometry.y.max(output.geometry.y);
+            let right =
+                (geometry.x + geometry.width).min(output.geometry.x + output.geometry.width);
+            let bottom =
+                (geometry.y + geometry.height).min(output.geometry.y + output.geometry.height);
+            let area = i64::from((right - left).max(0)) * i64::from((bottom - top).max(0));
+            (area, output.primary, output.name.as_str())
+        })
+        .filter(|(area, _, _)| *area > 0)
+        .max_by(|left, right| {
+            left.0
+                .cmp(&right.0)
+                .then_with(|| left.1.cmp(&right.1))
+                .then_with(|| right.2.cmp(left.2))
+        })
+        .map(|(_, _, name)| name.to_owned())
 }
 
 fn session_error_feed_state<T>(error: SessionRequestError) -> FeedState<T> {
@@ -1835,10 +1886,59 @@ mod tests {
         MAX_PROTOCOL_ERROR_MESSAGE_CHARS, SubscriptionState, bounded_notification_text,
         capture_active_window, capture_active_window_to_file, command_response,
         crop_output_geometry, intersection_area, notification_actions, notification_name_owned,
-        parse_window, pixmap_to_rgba, resolve_application_id, response_for_request,
+        owning_output, parse_window, pixmap_to_rgba, resolve_application_id, response_for_request,
         response_message, secure_storage_response, secure_storage_retry_response,
         session_receive_error, shell_command_payload, subscription_shortcut, tray_retry_delay,
     };
+
+    #[test]
+    fn window_output_uses_largest_intersection_and_primary_tie_break() {
+        use nickel_session_protocol::{Geometry, OutputSnapshot, OutputTransform};
+
+        let output = |name: &str, x: i32, primary: bool| OutputSnapshot {
+            name: name.to_owned(),
+            model: name.to_owned(),
+            geometry: Geometry {
+                x,
+                y: 0,
+                width: 100,
+                height: 100,
+            },
+            work_area: Geometry {
+                x,
+                y: 0,
+                width: 100,
+                height: 100,
+            },
+            scale_120: 120,
+            transform: OutputTransform::Normal,
+            physical_width_mm: 1,
+            physical_height_mm: 1,
+            primary,
+            enabled: true,
+        };
+        let outputs = vec![output("left", 0, false), output("right", 100, true)];
+        let spanning = Geometry {
+            x: 50,
+            y: 0,
+            width: 100,
+            height: 100,
+        };
+        assert_eq!(
+            owning_output(Some(spanning), &outputs).as_deref(),
+            Some("right")
+        );
+        let mostly_left = Geometry {
+            x: 10,
+            y: 0,
+            width: 100,
+            height: 100,
+        };
+        assert_eq!(
+            owning_output(Some(mostly_left), &outputs).as_deref(),
+            Some("left")
+        );
+    }
 
     #[test]
     #[ignore = "requires an explicitly selected live Nickel Wayland session"]
