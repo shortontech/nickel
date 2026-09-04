@@ -106,6 +106,29 @@ fn keyboard_selection_moves_focus_without_destroying_selection() {
 }
 
 #[test]
+fn grid_and_details_views_share_the_same_selection_reducer() {
+    for mode in [FileViewMode::Grid, FileViewMode::Details] {
+        let (_directory, mut app) = selection_app(12);
+        app.view_mode = mode;
+        app.update_message(FileMessage::Entry(2));
+        app.control_down = true;
+        app.update_message(FileMessage::Entry(8));
+        app.control_down = false;
+        app.shift_down = true;
+        app.update_message(FileMessage::Entry(5));
+        assert_eq!(app.selected, Some(5), "active item in {mode:?}");
+        assert_eq!(
+            app.selected_entries,
+            HashSet::from([5, 6, 7, 8]),
+            "range selection in {mode:?}"
+        );
+        app.shift_down = false;
+        app.update_message(FileMessage::SelectionSurface);
+        assert!(app.selected_entries.is_empty(), "empty click in {mode:?}");
+    }
+}
+
+#[test]
 fn selection_snapshot_is_stable_visual_order_for_every_consumer() {
     let (_directory, mut app) = selection_app(6);
     app.selected_entries = HashSet::from([4, 1, 3]);
@@ -116,6 +139,35 @@ fn selection_snapshot_is_stable_visual_order_for_every_consumer() {
 
     app.update_message(FileMessage::ContextEntry(3));
     assert_eq!(app.ordered_selection_snapshot(), expected);
+    assert_eq!(app.context_selection, expected);
+    app.update_message(FileMessage::CopySelection);
+    assert_eq!(
+        app.file_clipboard
+            .as_ref()
+            .unwrap()
+            .sources
+            .iter()
+            .map(|source| source.path.clone())
+            .collect::<Vec<_>>(),
+        expected
+    );
+    app.primary_down = true;
+    app.last_click = Some(FileClick {
+        path: expected[1].clone(),
+        position: nickel_ui::Point { x: 0.0, y: 0.0 },
+        when: std::time::Instant::now(),
+    });
+    app.begin_file_drag_if_threshold(nickel_ui::Point { x: 10.0, y: 0.0 });
+    assert_eq!(
+        app.outbound_drag
+            .as_ref()
+            .unwrap()
+            .sources
+            .iter()
+            .map(|source| source.path.clone())
+            .collect::<Vec<_>>(),
+        expected
+    );
     app.update_message(FileMessage::ContextEntry(0));
     assert_eq!(
         app.ordered_selection_snapshot(),

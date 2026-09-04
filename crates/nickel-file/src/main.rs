@@ -2126,12 +2126,7 @@ impl FileApp {
                     self.selected = Some(index);
                     self.selection_anchor = Some(index);
                 }
-                self.context_selection = self
-                    .selected_entries
-                    .iter()
-                    .filter_map(|index| self.browser.entries().get(*index))
-                    .map(|entry| entry.path.clone())
-                    .collect();
+                self.context_selection = self.ordered_selection_snapshot();
                 self.selection_drag = None;
             }
             FileMessage::ContextBackground => {
@@ -2534,12 +2529,7 @@ impl FileApp {
     }
 
     fn capture_file_clipboard(&mut self, intent: TransferIntent) {
-        let paths = self
-            .selected_entries
-            .iter()
-            .filter_map(|index| self.browser.entries().get(*index))
-            .map(|entry| entry.path.clone())
-            .collect();
+        let paths = self.ordered_selection_snapshot();
         self.capture_paths_for_clipboard(intent, paths);
     }
 
@@ -2611,14 +2601,18 @@ impl FileApp {
             return;
         }
         let sources = self
-            .selected_entries
-            .iter()
-            .copied()
-            .filter_map(|index| {
+            .ordered_selection_snapshot()
+            .into_iter()
+            .filter_map(|path| {
+                let index = self
+                    .browser
+                    .entries()
+                    .iter()
+                    .position(|entry| entry.path == path)?;
                 Some(TransferSource {
                     provider: "local".into(),
                     identity: self.browser.identity_at(index)?,
-                    path: self.browser.entries().get(index)?.path.clone(),
+                    path,
                     capabilities: ItemCapabilities {
                         readable: true,
                         removable: true,
