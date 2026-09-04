@@ -1353,7 +1353,7 @@ fn closing_active_tab_selects_nearest_survivor_without_mutating_it() {
 }
 
 #[test]
-fn refresh_keeps_usable_contents_until_async_enumeration_publishes() {
+fn refresh_keeps_usable_contents_and_unaffected_artwork_until_snapshot_publishes() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("existing.txt"), b"existing").unwrap();
     let mut app = FileApp::new(directory.path().to_path_buf());
@@ -1376,7 +1376,7 @@ fn refresh_keeps_usable_contents_until_async_enumeration_publishes() {
             .iter()
             .any(|entry| entry.name == std::ffi::OsStr::new("new.txt"))
     );
-    assert_ne!(app.icons.get(&existing_path).unwrap().0, artwork_id_before);
+    assert_eq!(app.icons.get(&existing_path).unwrap().0, artwork_id_before);
 }
 
 #[test]

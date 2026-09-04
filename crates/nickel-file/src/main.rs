@@ -1424,6 +1424,35 @@ impl FileApp {
                 self.navigation_rx = None;
                 match result {
                     Ok(Some(browser)) => {
+                        let changed_icon_paths = if self.navigation_invalidates_icons {
+                            self.browser
+                                .entries()
+                                .iter()
+                                .filter(|old| {
+                                    browser
+                                        .entries()
+                                        .iter()
+                                        .find(|new| new.path == old.path)
+                                        .is_none_or(|new| new != *old)
+                                })
+                                .map(|entry| entry.path.clone())
+                                .chain(
+                                    browser
+                                        .entries()
+                                        .iter()
+                                        .filter(|new| {
+                                            !self
+                                                .browser
+                                                .entries()
+                                                .iter()
+                                                .any(|old| old.path == new.path)
+                                        })
+                                        .map(|new| new.path.clone()),
+                                )
+                                .collect::<HashSet<_>>()
+                        } else {
+                            HashSet::new()
+                        };
                         let focused = self.selected.and_then(|index| {
                             self.browser
                                 .entries()
@@ -1447,8 +1476,9 @@ impl FileApp {
                         });
                         self.browser = browser;
                         if self.navigation_invalidates_icons {
-                            self.icons.clear();
-                            self.tab_icon = None;
+                            for path in changed_icon_paths {
+                                self.icons.remove(&path);
+                            }
                         }
                         self.navigation_invalidates_icons = false;
                         if self.navigation_closes_address {
@@ -1473,9 +1503,13 @@ impl FileApp {
                             self.directory_watch = None;
                             self.directory_watch_retry_at =
                                 Some(Instant::now() + DIRECTORY_WATCH_RETRY_INTERVAL);
+                            self.status = format!(
+                                "Live updates are unavailable: {error}. Retrying automatically; Refresh remains available."
+                            );
+                        } else {
+                            self.status = error;
                         }
                         self.navigation_preserves_selection = false;
-                        self.status = error;
                     }
                 }
                 true
@@ -1520,14 +1554,18 @@ impl FileApp {
     ) {
         self.browser.sort(self.sort_key, self.sort_direction);
         let resolve = |candidate: &(Option<nickel_file::FileIdentity>, PathBuf)| {
-            self.browser
-                .entries()
-                .iter()
-                .position(|entry| entry.path == candidate.1)
+            candidate
+                .0
+                .and_then(|identity| self.browser.index_of_identity(identity))
                 .or_else(|| {
-                    candidate
-                        .0
-                        .and_then(|identity| self.browser.index_of_identity(identity))
+                    if candidate.0.is_none() {
+                        self.browser
+                            .entries()
+                            .iter()
+                            .position(|entry| entry.path == candidate.1)
+                    } else {
+                        None
+                    }
                 })
         };
         self.selected_entries = selected.iter().filter_map(resolve).collect();
@@ -3252,6 +3290,16 @@ mod live_reconciliation_tests {
         }
     }
 
+    fn wait_for_listing(app: &mut FileApp, matches: impl Fn(&DirectoryBrowser) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !matches(&app.browser) || app.navigation_rx.is_some() {
+            app.poll_directory_watch();
+            app.poll_navigation();
+            assert!(Instant::now() < deadline, "live listing did not settle");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     #[test]
     fn native_invalidation_reconciles_the_visible_directory() {
         let directory = tempfile::tempdir().unwrap();
@@ -3271,6 +3319,37 @@ mod live_reconciliation_tests {
             assert!(Instant::now() < deadline, "created file did not appear");
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn live_reconciliation_tracks_move_in_metadata_move_out_and_delete() {
+        let directory = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let mut app = FileApp::new(directory.path().to_path_buf());
+        settle_live_change(&mut app);
+
+        let source = outside.path().join("moving.txt");
+        let inside = directory.path().join("moving.txt");
+        fs::write(&source, b"one").unwrap();
+        fs::rename(&source, &inside).unwrap();
+        wait_for_listing(&mut app, |browser| browser.entries().len() == 1);
+        assert_eq!(app.browser.entries()[0].size, Some(3));
+
+        fs::write(&inside, b"expanded").unwrap();
+        wait_for_listing(&mut app, |browser| {
+            browser.entries().first().and_then(|entry| entry.size) == Some(8)
+        });
+        assert_eq!(app.browser.entries()[0].size, Some(8));
+
+        fs::rename(&inside, &source).unwrap();
+        wait_for_listing(&mut app, |browser| browser.entries().is_empty());
+        assert!(app.browser.entries().is_empty());
+
+        fs::write(directory.path().join("deleted.txt"), b"gone").unwrap();
+        wait_for_listing(&mut app, |browser| browser.entries().len() == 1);
+        fs::remove_file(directory.path().join("deleted.txt")).unwrap();
+        wait_for_listing(&mut app, |browser| browser.entries().is_empty());
+        assert!(app.browser.entries().is_empty());
     }
 
     #[test]
@@ -3320,6 +3399,50 @@ mod live_reconciliation_tests {
         assert_eq!(app.selected, None);
         assert!(app.selected_entries.is_empty());
         assert_eq!(app.selection_anchor, None);
+    }
+
+    #[test]
+    fn atomic_replacement_does_not_transfer_selection_to_a_new_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("document.txt");
+        let replacement = directory.path().join("replacement.tmp");
+        fs::write(&target, b"old").unwrap();
+        let mut app = FileApp::new(directory.path().to_path_buf());
+        app.selected = Some(0);
+        app.selected_entries = HashSet::from([0]);
+        app.selection_anchor = Some(0);
+        let identity = app.browser.identity_at(0).unwrap();
+
+        fs::write(&replacement, b"new").unwrap();
+        fs::remove_file(&target).unwrap();
+        fs::rename(&replacement, &target).unwrap();
+        app.browser = DirectoryBrowser::open(directory.path()).unwrap();
+        app.reconciliation_changed(
+            Some((Some(identity), target.clone())),
+            vec![(Some(identity), target.clone())],
+            Some((Some(identity), target)),
+        );
+
+        assert_eq!(app.selected, None);
+        assert!(app.selected_entries.is_empty());
+        assert_eq!(app.selection_anchor, None);
+    }
+
+    #[test]
+    fn watcher_failure_keeps_listing_and_exposes_retry_state() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("visible.txt"), b"visible").unwrap();
+        let mut app = FileApp::new(directory.path().to_path_buf());
+        let watch = crate::watch::DirectoryWatch::fixture(directory.path().to_path_buf());
+        watch.inject_failure("queue overflow");
+        app.directory_watch = Some(watch);
+
+        assert!(app.poll_directory_watch());
+        assert_eq!(app.browser.entries().len(), 1);
+        assert!(app.directory_watch.is_none());
+        assert!(app.directory_watch_retry_at.is_some());
+        assert!(app.status.contains("queue overflow"));
+        assert!(app.status.contains("Refresh remains available"));
     }
 
     #[test]

@@ -189,7 +189,7 @@ impl ArtworkCache {
         self.entries.insert(path, value);
     }
 
-    fn remove(&mut self, path: &Path) {
+    pub(crate) fn remove(&mut self, path: &Path) {
         if let Some((_, image)) = self.entries.remove(path) {
             self.retained_bytes = self.retained_bytes.saturating_sub(image.as_raw().len());
         }
