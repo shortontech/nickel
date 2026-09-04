@@ -989,6 +989,139 @@ fn scrollbar_hit_target_is_wider_than_its_visible_thumb() {
 }
 
 #[test]
+fn scrollbar_thumb_uses_the_full_acquisition_width() {
+    let mut state = UiStateStore::default();
+    let build = |state: &mut UiStateStore| {
+        UiFrame::layout_with_state(
+            VerticalScroll::new(TestMessage::Named("scroll"), 0.0)
+                .on_scroll(|_| TestMessage::Named("dragged"))
+                .child(Spacer::vertical(400.0)),
+            Rect::new(0.0, 0.0, 200.0, 100.0),
+            state,
+        )
+    };
+    let tree = build(&mut state);
+    let scroll = tree.scrolls.first().expect("vertical scroll region");
+    let (_, thumb) = scrollbar_geometry(scroll, ScrollbarAxis::Vertical).unwrap();
+    let point = Point {
+        x: scroll.rect.origin.x + scroll.rect.size.width - SCROLLBAR_HIT_THICKNESS + 1.0,
+        y: thumb.origin.y + 4.0,
+    };
+
+    let pressed = tree.handle_event(&mut state, UiEvent::PointerPressed(point));
+    assert!(
+        pressed.messages.is_empty(),
+        "thumb acquisition must not page"
+    );
+    assert!(state.captured().is_some(), "wide thumb target must drag");
+}
+
+#[test]
+fn scrollbar_chrome_reflects_hover_press_and_keyboard_focus() {
+    let root = || VerticalScroll::new((), 0.0).child(Spacer::vertical(400.0));
+    let bounds = Rect::new(0.0, 0.0, 200.0, 100.0);
+    let mut state = UiStateStore::default();
+    let tree = UiFrame::layout_with_state(root(), bounds, &mut state);
+    let scroll = tree.scrolls.first().unwrap();
+    let id = scrollbar_id(&scroll.id, ScrollbarAxis::Vertical);
+    state.set_hovered(Some(id.clone()));
+    let hovered = UiFrame::layout_with_state(root(), bounds, &mut state);
+    assert!(hovered.commands().iter().any(|command| matches!(
+        command,
+        PaintCommand::RoundedFill { color, .. } if *color == SCROLLBAR_HOVERED.thumb
+    )));
+
+    state.set_pressed(Some(id));
+    let pressed = UiFrame::layout_with_state(root(), bounds, &mut state);
+    assert!(pressed.commands().iter().any(|command| matches!(
+        command,
+        PaintCommand::RoundedFill { color, .. } if *color == SCROLLBAR_PRESSED.thumb
+    )));
+
+    state.set_pressed(None);
+    state.set_hovered(None);
+    state.set_focus(Some(UiId::from("root")));
+    let focused = UiFrame::layout_with_state(root(), bounds, &mut state);
+    assert!(focused.commands().iter().any(|command| matches!(
+        command,
+        PaintCommand::RoundedFill { color, .. } if *color == SCROLLBAR_FOCUSED.thumb
+    )));
+}
+
+#[test]
+fn scroll_viewport_exposes_and_performs_accessible_scroll_actions() {
+    let mut state = UiStateStore::default();
+    let tree = UiFrame::layout_with_state(
+        VerticalScroll::new(TestMessage::Named("scroll"), 0.0)
+            .on_scroll(|_| TestMessage::Named("changed"))
+            .child(Spacer::vertical(400.0)),
+        Rect::new(0.0, 0.0, 200.0, 100.0),
+        &mut state,
+    );
+    let node = tree
+        .semantic_nodes()
+        .into_iter()
+        .find(|node| node.id == UiId::from("root"))
+        .expect("scrollbar semantic node");
+    assert_eq!(node.role, Some(SemanticRole::ScrollBar));
+    assert!(node.actions.contains(&ActionKind::Increment));
+    assert!(!node.actions.contains(&ActionKind::Decrement));
+    assert!(node.actions.contains(&ActionKind::Scroll));
+
+    let outcome = tree
+        .transition(
+            &mut state,
+            InputSource::Accessibility,
+            InteractionIntent::Invoke {
+                target: UiId::from("root"),
+                action: SemanticAction::Invoke(ActionKind::Increment),
+            },
+        )
+        .unwrap();
+    assert_eq!(outcome.messages, vec![TestMessage::Named("changed")]);
+    assert_eq!(
+        state.state(&UiId::from("root")).unwrap().scroll_offset,
+        80.0
+    );
+    let rebuilt = UiFrame::layout_with_state(
+        VerticalScroll::new(TestMessage::Named("scroll"), 0.0)
+            .on_scroll(|_| TestMessage::Named("changed"))
+            .child(Spacer::vertical(400.0)),
+        Rect::new(0.0, 0.0, 200.0, 100.0),
+        &mut state,
+    );
+    assert!(
+        rebuilt
+            .semantic_nodes()
+            .into_iter()
+            .find(|node| node.id == UiId::from("root"))
+            .unwrap()
+            .actions
+            .contains(&ActionKind::Decrement)
+    );
+}
+
+#[test]
+fn page_keys_scroll_the_focused_viewport_through_shared_state() {
+    let mut state = UiStateStore::default();
+    state.set_focus(Some(UiId::from("root")));
+    let tree = UiFrame::layout_with_state(
+        VerticalScroll::new(TestMessage::Named("scroll"), 0.0)
+            .on_scroll(|_| TestMessage::Named("changed"))
+            .child(Spacer::vertical(400.0)),
+        Rect::new(0.0, 0.0, 200.0, 100.0),
+        &mut state,
+    );
+
+    let outcome = tree.handle_event(&mut state, UiEvent::KeyboardNavigatePageDown);
+    assert_eq!(outcome.messages, vec![TestMessage::Named("changed")]);
+    assert_eq!(
+        state.state(&UiId::from("root")).unwrap().scroll_offset,
+        80.0
+    );
+}
+
+#[test]
 fn scrollbar_track_click_pages_without_starting_a_drag() {
     let mut state = UiStateStore::default();
     let tree = UiFrame::layout_with_state(

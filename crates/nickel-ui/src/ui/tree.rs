@@ -240,6 +240,29 @@ const SCROLLBAR_INSET: f32 = 3.0;
 const SCROLLBAR_MIN_THUMB: f32 = 32.0;
 const SCROLLBAR_GUTTER: f32 = SCROLLBAR_THICKNESS + SCROLLBAR_INSET * 2.0;
 
+#[derive(Clone, Copy)]
+struct ScrollbarColors {
+    track: Color,
+    thumb: Color,
+}
+
+const SCROLLBAR_IDLE: ScrollbarColors = ScrollbarColors {
+    track: 0x66343b48,
+    thumb: 0xd0aeb8c7,
+};
+const SCROLLBAR_HOVERED: ScrollbarColors = ScrollbarColors {
+    track: 0x88434c5b,
+    thumb: 0xffd3dae5,
+};
+const SCROLLBAR_PRESSED: ScrollbarColors = ScrollbarColors {
+    track: 0xaa465262,
+    thumb: 0xffeef3fa,
+};
+const SCROLLBAR_FOCUSED: ScrollbarColors = ScrollbarColors {
+    track: 0xcc176b87,
+    thumb: 0xff6fd7f7,
+};
+
 fn scrollbar_id(id: &UiId, axis: ScrollbarAxis) -> UiId {
     id.scoped(match axis {
         ScrollbarAxis::Horizontal => "$scrollbar-x",
@@ -332,6 +355,64 @@ fn scrollbar_hit_rect<Message>(
         ),
     };
     intersection(hit, scroll.rect).and_then(|hit| intersection(hit, scroll.clip))
+}
+
+fn scrollbar_thumb_hit_rect<Message>(
+    scroll: &ScrollRegion<Message>,
+    axis: ScrollbarAxis,
+) -> Option<Rect> {
+    let (_, thumb) = scrollbar_geometry(scroll, axis)?;
+    let hit = match axis {
+        ScrollbarAxis::Horizontal => Rect::new(
+            thumb.origin.x,
+            scroll.rect.origin.y + scroll.rect.size.height - SCROLLBAR_HIT_THICKNESS,
+            thumb.size.width,
+            SCROLLBAR_HIT_THICKNESS,
+        ),
+        ScrollbarAxis::Vertical => Rect::new(
+            scroll.rect.origin.x + scroll.rect.size.width - SCROLLBAR_HIT_THICKNESS,
+            thumb.origin.y,
+            SCROLLBAR_HIT_THICKNESS,
+            thumb.size.height,
+        ),
+    };
+    intersection(hit, scroll.rect).and_then(|hit| intersection(hit, scroll.clip))
+}
+
+fn configure_scroll_semantics(node: &mut ResolvedNode, extent: ScrollExtent) {
+    let vertical_maximum = (extent.content.height - extent.viewport.height).max(0.0);
+    let horizontal_maximum = (extent.content.width - extent.viewport.width).max(0.0);
+    let (value, maximum) = if vertical_maximum > 0.0 {
+        (extent.offset, vertical_maximum)
+    } else {
+        (extent.offset_x, horizontal_maximum)
+    };
+    if maximum <= 0.0 {
+        return;
+    }
+    node.interaction.interactive = true;
+    node.semantic_role.get_or_insert(SemanticRole::ScrollBar);
+    node.accessibility_hidden = false;
+    node.accessibility_label
+        .get_or_insert_with(|| "Scrollable content".to_owned());
+    let mut actions = vec![ActionKind::Scroll];
+    if value < maximum {
+        actions.push(ActionKind::Increment);
+    }
+    if value > 0.0 {
+        actions.push(ActionKind::Decrement);
+    }
+    for action in actions {
+        if !node.semantic_actions.contains(&action) {
+            node.semantic_actions.push(action);
+        }
+    }
+    node.semantic_value = Some(SemanticValueSnapshot::Number {
+        value: f64::from(value),
+        minimum: 0.0,
+        maximum: f64::from(maximum),
+        step: f64::from((maximum * 0.1).max(1.0)),
+    });
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1318,7 +1399,7 @@ impl<Message: Clone> UiFrame<Message> {
         tree.reset_emission();
         emit_element(&root, 0, None, &mut tree);
         tree.present_text_context(state);
-        tree.append_scrollbars();
+        tree.append_scrollbars(Some(state));
         tree.commands.append(&mut tree.overlay_commands);
         tree.hits.append(&mut tree.overlay_hits);
         for hit in &tree.hits {
@@ -1362,7 +1443,7 @@ impl<Message: Clone> UiFrame<Message> {
         tree.selection_regions = collect_selection_regions(&root, &tree.resolved);
         tree.reset_emission();
         emit_element(&root, 0, None, &mut tree);
-        tree.append_scrollbars();
+        tree.append_scrollbars(None);
         tree.commands.append(&mut tree.overlay_commands);
         tree.hits.append(&mut tree.overlay_hits);
         tree.emit_accessibility_geometry();
@@ -1601,7 +1682,15 @@ impl<Message: Clone> UiFrame<Message> {
                             self.is_descendant_or_self(overlay.as_ui_id(), &target)
                         });
                     let mut outcome = EventOutcome::default();
-                    if matches!(action, SemanticAction::Invoke(ActionKind::Activate))
+                    if matches!(
+                        action,
+                        SemanticAction::Invoke(
+                            ActionKind::Increment | ActionKind::Decrement | ActionKind::Scroll
+                        )
+                    ) && self.scrolls.iter().any(|scroll| scroll.id == target)
+                    {
+                        outcome = self.perform_scroll_action(state, &target, action)?;
+                    } else if matches!(action, SemanticAction::Invoke(ActionKind::Activate))
                         && let Some(invalidation) =
                             self.activate_text_command(state, &target, &mut outcome)
                     {
@@ -1620,6 +1709,76 @@ impl<Message: Clone> UiFrame<Message> {
         };
         outcome.invalidation = outcome.invalidation.merge(modality_invalidation);
         Ok(outcome)
+    }
+
+    fn perform_scroll_action(
+        &self,
+        state: &mut UiStateStore,
+        id: &UiId,
+        action: SemanticAction,
+    ) -> Result<EventOutcome<Message>, SemanticActionError> {
+        let scroll = self
+            .scrolls
+            .iter()
+            .rev()
+            .find(|scroll| &scroll.id == id)
+            .ok_or(SemanticActionError::MissingTarget)?;
+        let direction = match action {
+            SemanticAction::Invoke(ActionKind::Decrement) => -1.0,
+            SemanticAction::Invoke(ActionKind::Increment | ActionKind::Scroll) => 1.0,
+            _ => return Err(SemanticActionError::ActionUnavailable),
+        };
+        let vertical_maximum =
+            (scroll.extent.content.height - scroll.extent.viewport.height).max(0.0);
+        let horizontal_maximum =
+            (scroll.extent.content.width - scroll.extent.viewport.width).max(0.0);
+        let mut messages = Vec::new();
+        let invalidation = if vertical_maximum > 0.0 {
+            let step = (scroll.extent.viewport.height * 0.8).max(1.0) * direction;
+            let invalidation = state.scroll_by(scroll.id.clone(), step, vertical_maximum);
+            if invalidation != Invalidation::None
+                && let Some(map) = scroll.offset_mapper
+                && let Some(offset) = state.state(&scroll.id).map(|entry| entry.scroll_offset)
+            {
+                messages.push(map(offset));
+            }
+            invalidation
+        } else if horizontal_maximum > 0.0 {
+            let step = (scroll.extent.viewport.width * 0.8).max(1.0) * direction;
+            state.scroll_by_x(scroll.id.clone(), step, horizontal_maximum)
+        } else {
+            return Err(SemanticActionError::ActionUnavailable);
+        };
+        Ok(EventOutcome {
+            messages,
+            clipboard_text: None,
+            invalidation,
+        })
+    }
+
+    fn operate_navigation_scroll(
+        &self,
+        state: &mut UiStateStore,
+        direction: f32,
+        messages: &mut Vec<Message>,
+    ) -> Option<Invalidation> {
+        let selected = state
+            .navigation()
+            .controller_selected()
+            .or_else(|| state.focused())?;
+        let scroll = self.scrolls.iter().rev().find(|scroll| {
+            scroll.id == *selected || self.is_descendant_or_self(&scroll.id, selected)
+        })?;
+        let action = if direction < 0.0 {
+            ActionKind::Decrement
+        } else {
+            ActionKind::Increment
+        };
+        let outcome = self
+            .perform_scroll_action(state, &scroll.id, SemanticAction::Invoke(action))
+            .ok()?;
+        messages.extend(outcome.messages);
+        Some(outcome.invalidation)
     }
 
     pub fn perform_semantic_action(
@@ -2010,7 +2169,7 @@ impl<Message: Clone> UiFrame<Message> {
         state.end_frame();
     }
 
-    fn append_scrollbars(&mut self) {
+    fn append_scrollbars(&mut self, state: Option<&UiStateStore>) {
         for scroll in &self.scrolls {
             for axis in [ScrollbarAxis::Horizontal, ScrollbarAxis::Vertical] {
                 let Some((track, thumb)) = scrollbar_geometry(scroll, axis) else {
@@ -2019,15 +2178,29 @@ impl<Message: Clone> UiFrame<Message> {
                 if intersection(track, scroll.clip).is_none() {
                     continue;
                 }
+                let id = scrollbar_id(&scroll.id, axis);
+                let colors = state.map_or(SCROLLBAR_IDLE, |state| {
+                    if state.pressed() == Some(&id) || state.captured() == Some(&id) {
+                        SCROLLBAR_PRESSED
+                    } else if state.hovered() == Some(&id) {
+                        SCROLLBAR_HOVERED
+                    } else if state.focused() == Some(&scroll.id)
+                        || state.navigation().controller_selected() == Some(&scroll.id)
+                    {
+                        SCROLLBAR_FOCUSED
+                    } else {
+                        SCROLLBAR_IDLE
+                    }
+                });
                 self.commands.push(PaintCommand::PushClip(scroll.clip));
                 self.commands.push(PaintCommand::RoundedFill {
                     rect: track,
-                    color: 0x66343b48,
+                    color: colors.track,
                     radius: SCROLLBAR_THICKNESS / 2.0,
                 });
                 self.commands.push(PaintCommand::RoundedFill {
                     rect: thumb,
-                    color: 0xd0aeb8c7,
+                    color: colors.thumb,
                     radius: SCROLLBAR_THICKNESS / 2.0,
                 });
                 self.commands.push(PaintCommand::PopClip);
@@ -2362,14 +2535,16 @@ impl<Message: Clone> UiFrame<Message> {
                     let id = scrollbar_id(&scroll.id, axis);
                     let (_, thumb) = scrollbar_geometry(scroll, axis)
                         .expect("a hit-tested scrollbar has geometry");
-                    let invalidation = if contains(thumb, point) {
+                    let invalidation = if scrollbar_thumb_hit_rect(scroll, axis)
+                        .is_some_and(|hit| contains(hit, point))
+                    {
                         let grab_offset = match axis {
                             ScrollbarAxis::Horizontal => point.x - thumb.origin.x,
                             ScrollbarAxis::Vertical => point.y - thumb.origin.y,
                         };
                         state.set_scrollbar_grab_offset(grab_offset);
                         state
-                            .set_focus(None)
+                            .set_focus(Some(scroll.id.clone()))
                             .merge(state.set_pressed(Some(id.clone())))
                             .merge(state.set_capture(Some(id)))
                             .merge(Invalidation::Paint)
@@ -2598,8 +2773,12 @@ impl<Message: Clone> UiFrame<Message> {
             }
             UiEvent::ControllerDown | UiEvent::KeyboardNavigateDown => self
                 .move_controller_spatial(state, ControllerDirection::Down, &mut outcome.messages),
-            UiEvent::KeyboardNavigatePageUp => self.move_controller_page(state, -1),
-            UiEvent::KeyboardNavigatePageDown => self.move_controller_page(state, 1),
+            UiEvent::KeyboardNavigatePageUp => self
+                .operate_navigation_scroll(state, -1.0, &mut outcome.messages)
+                .unwrap_or_else(|| self.move_controller_page(state, -1)),
+            UiEvent::KeyboardNavigatePageDown => self
+                .operate_navigation_scroll(state, 1.0, &mut outcome.messages)
+                .unwrap_or_else(|| self.move_controller_page(state, 1)),
             UiEvent::KeyboardNavigateStart => self.move_controller_boundary(state, false),
             UiEvent::KeyboardNavigateEnd => self.move_controller_boundary(state, true),
             UiEvent::ControllerLeft | UiEvent::KeyboardNavigateLeft => {
@@ -2657,6 +2836,10 @@ impl<Message: Clone> UiFrame<Message> {
             UiEvent::ControllerAdjust(direction) => {
                 if !state.navigation().controller_editing() {
                     Invalidation::None
+                } else if let Some(invalidation) =
+                    self.operate_navigation_scroll(state, direction, &mut outcome.messages)
+                {
+                    invalidation
                 } else if let Some((value, step, map)) =
                     state.navigation().controller_selected().and_then(|id| {
                         let node = self.resolved.nodes.iter().find(|node| &node.id == id)?;
@@ -6116,6 +6299,7 @@ fn layout_element<Message: Clone>(
                     offset: clamped,
                 };
                 tree.resolved.nodes[node_index].scroll = Some(extent);
+                configure_scroll_semantics(&mut tree.resolved.nodes[node_index], extent);
                 tree.scrolls.push(ScrollRegion {
                     id: id.clone(),
                     message: element.message.clone(),
@@ -6136,6 +6320,7 @@ fn layout_element<Message: Clone>(
                     offset: scroll_offset,
                 };
                 tree.resolved.nodes[node_index].scroll = Some(extent);
+                configure_scroll_semantics(&mut tree.resolved.nodes[node_index], extent);
                 tree.scrolls.push(ScrollRegion {
                     id: id.clone(),
                     message: element.message.clone(),
@@ -6203,6 +6388,7 @@ fn layout_element<Message: Clone>(
                     offset,
                 };
                 tree.resolved.nodes[node_index].scroll = Some(extent);
+                configure_scroll_semantics(&mut tree.resolved.nodes[node_index], extent);
                 if let Some(message) = &element.message {
                     tree.scrolls.push(ScrollRegion {
                         id: id.clone(),
