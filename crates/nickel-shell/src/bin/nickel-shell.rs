@@ -351,6 +351,7 @@ struct CodexSurfaces {
     chats: Vec<CodexChatSurface>,
     writer_leases: WriterLeases,
     installation: FeatureInstallation,
+    theme: nickel_ui::SemanticTheme,
 }
 
 struct CodexChatSurface {
@@ -594,6 +595,30 @@ fn codex_project_application_id(project_id: Option<&str>, root: &Path) -> String
 }
 
 impl CodexSurfaces {
+    fn set_theme(&mut self, theme: nickel_ui::SemanticTheme) -> bool {
+        if self.theme == theme {
+            return false;
+        }
+        self.theme = theme;
+        if let Some(host) = self.project_menu_host.as_mut()
+            && host.application_mut().set_theme(theme)
+        {
+            host.step(HostBatch {
+                events: vec![HostEvent::Poll],
+                ..HostBatch::default()
+            });
+        }
+        for chat in &mut self.chats {
+            if chat.host.application_mut().set_theme(theme) {
+                chat.host.step(HostBatch {
+                    events: vec![HostEvent::Poll],
+                    ..HostBatch::default()
+                });
+            }
+        }
+        true
+    }
+
     fn next_deadline(&self) -> Option<Instant> {
         self.project_menu_host
             .as_ref()
@@ -615,7 +640,11 @@ impl CodexSurfaces {
         (project_menu_changed, redraw)
     }
 
-    fn new(shell: &WinitShell, settings: &OptionalFeatureSettings) -> Result<Self, String> {
+    fn new(
+        shell: &WinitShell,
+        settings: &OptionalFeatureSettings,
+        theme: nickel_ui::SemanticTheme,
+    ) -> Result<Self, String> {
         let project_menu = shell
             .surfaces()
             .find(|surface| surface.role() == SurfaceRole::CodexProjectMenu)
@@ -632,6 +661,7 @@ impl CodexSurfaces {
             // installation probes. The canonical selector will classify this
             // source through its first connection snapshot.
             installation: FeatureInstallation::Missing,
+            theme,
         })
     }
 
@@ -646,13 +676,14 @@ impl CodexSurfaces {
             .surface(self.project_menu)
             .map(|surface| surface.window().size())
             .ok_or_else(|| "Codex project_menu surface is missing".to_owned())?;
-        let application = shell_application_with_backend(
+        let mut application = shell_application_with_backend(
             self.project_menu_cwd.clone(),
             true,
             None,
             None,
             self.backend_choice(),
         )?;
+        application.set_theme(self.theme);
         self.project_menu_host = Some(EmbeddedUiSurface::new(
             application,
             width,
@@ -911,18 +942,15 @@ impl CodexSurfaces {
                 .surface(id)
                 .map(|surface| surface.window().size())
                 .unwrap_or((1120, 760));
-            let host = EmbeddedUiSurface::new(
-                shell_application_with_backend(
-                    cwd,
-                    false,
-                    initial_thread.clone(),
-                    Some(project_id.clone()),
-                    self.backend_choice(),
-                )?,
-                width,
-                height,
-                Instant::now(),
-            );
+            let mut application = shell_application_with_backend(
+                cwd,
+                false,
+                initial_thread.clone(),
+                Some(project_id.clone()),
+                self.backend_choice(),
+            )?;
+            application.set_theme(self.theme);
+            let host = EmbeddedUiSurface::new(application, width, height, Instant::now());
             self.chats.push(CodexChatSurface {
                 id,
                 project_id,
@@ -2015,7 +2043,7 @@ fn main() -> Result<(), String> {
     let mut state = LiveShell::new()?;
     let mut feature_settings = OptionalFeatureSettings::load_default();
     feature_settings.codex_enabled = feature_settings.effective_codex_enabled();
-    let mut codex = CodexSurfaces::new(&shell, &feature_settings)?;
+    let mut codex = CodexSurfaces::new(&shell, &feature_settings, state.semantic_theme())?;
     state.apply_codex_projection(CodexAvailabilityProjection::new(
         FeatureSupport::Supported,
         codex.installation,
@@ -2662,11 +2690,21 @@ fn main() -> Result<(), String> {
                 .runtime_snapshot(feature_settings.codex_generation)
                 .save_default();
             let system_changed = state.refresh_system();
+            let codex_theme_changed = codex.set_theme(state.semantic_theme());
             let primary_output_changed =
                 shell.set_primary_output_name(state.primary_output_name())?;
-            if system_changed || primary_output_changed {
+            if system_changed || primary_output_changed || codex_theme_changed {
                 sync_visibility(&mut shell, &state);
                 render_all(&mut shell, &mut state)?;
+                if codex_theme_changed {
+                    let mut surfaces = vec![codex.project_menu];
+                    surfaces.extend(codex.chats.iter().map(|chat| chat.id));
+                    for surface in surfaces {
+                        codex.present(&mut shell, surface).map_err(|error| {
+                            format!("could not redraw Codex surface after theme change: {error:?}")
+                        })?;
+                    }
+                }
             }
             system_subscription.observed(refresh_now, system_changed);
         }

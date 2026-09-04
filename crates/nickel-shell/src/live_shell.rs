@@ -52,7 +52,7 @@ use crate::{
     window_preview::{
         MENU_WIDTH, MenuAction, PreviewAction, WindowMenuApp, WindowPreviewFrame,
         build_preview_frame, menu_height, menu_height_for_rows, preview_dimensions,
-        window_menu_max_rows,
+        semantic_theme_from_palette, window_menu_max_rows,
     },
     winit_shell::SurfaceRole,
 };
@@ -1987,6 +1987,10 @@ impl LiveShell {
             changed = true;
         }
         changed
+    }
+
+    pub fn semantic_theme(&self) -> nickel_ui::SemanticTheme {
+        semantic_theme_from_palette(self.palette)
     }
 
     pub fn scene(&mut self, role: SurfaceRole, width: u32, height: u32) -> Vec<PaintCommand> {
@@ -4107,19 +4111,15 @@ impl LiveShell {
             self.preview_frame = None;
             return Vec::new();
         };
+        let theme = self.semantic_theme();
         if let Some(frame) = self.preview_frame.as_mut() {
-            frame.sync(
-                &group,
-                &self.preview_images,
-                self.preview_hovered,
-                self.palette,
-            );
+            frame.sync(&group, &self.preview_images, self.preview_hovered, theme);
         } else {
             self.preview_frame = Some(build_preview_frame(
                 &group,
                 &self.preview_images,
                 self.preview_hovered,
-                self.palette,
+                theme,
             ));
         }
         self.preview_frame.as_ref().map_or_else(Vec::new, |frame| {
@@ -4982,8 +4982,8 @@ mod tests {
     use super::{
         HostRuntimeSamples, LiveShell, panel_status_layout, panel_tray_icons,
         platform::{FeedState, FeedStatus, GlobalShortcut, SecureStorageState},
-        preview_refresh_due, secure_storage_status_label, session_feed_status_label,
-        visible_tray_item, window_belongs_to_panel,
+        preview_refresh_due, secure_storage_status_label, semantic_theme_from_palette,
+        session_feed_status_label, visible_tray_item, window_belongs_to_panel,
     };
 
     #[test]
@@ -5485,7 +5485,7 @@ mod tests {
             &group,
             &HashMap::new(),
             None,
-            shell.palette,
+            shell.semantic_theme(),
         ));
         let preview = shell
             .resolve_semantic_target(&ShellSemanticTarget::PreviewWindow {
@@ -5770,7 +5770,12 @@ mod tests {
             ],
         };
         shell.preview_group = Some(0);
-        shell.preview_frame = Some(build_preview_frame(&group, &HashMap::new(), None, palette));
+        shell.preview_frame = Some(build_preview_frame(
+            &group,
+            &HashMap::new(),
+            None,
+            semantic_theme_from_palette(palette),
+        ));
 
         assert!(shell.preview_key(Some(KeyCode::ArrowRight)));
         assert_eq!(shell.preview_hovered, Some(WindowId(9)));

@@ -14,22 +14,16 @@ use crate::{
     ControllerCommand, ControllerEvent, PendingInteraction, create_managed_workspace,
 };
 
-const BACKGROUND: Color = 0x101318;
-const SIDEBAR: Color = 0x171b22;
-const PANEL: Color = 0x202630;
-const BORDER: Color = 0x343d4b;
-const TEXT: Color = 0xe8edf4;
-const MUTED: Color = 0x9ca8b8;
-const ACCENT: Color = 0x70a5ff;
-const USER: Color = 0x1d3557;
-const ERROR: Color = 0x542a2a;
 const TRANSCRIPT_GAP: f32 = 10.0;
 const TRANSCRIPT_VIEWPORT_ESTIMATE: f32 = 600.0;
 const TRANSCRIPT_OVERSCAN: f32 = 900.0;
 
 fn semantic_theme() -> SemanticTheme {
+    // Standalone fallback only. Embedded surfaces receive the shell's resolved
+    // semantic theme through `ChatApplication::set_theme`.
     SemanticTheme::from_tokens(nickel_ui::SemanticTokenSet::standard(
-        BACKGROUND, SIDEBAR, PANEL, BORDER, BORDER, TEXT, MUTED, ACCENT, USER, 0x63d69a, 0x63d69a,
+        0x101318, 0x171b22, 0x202630, 0x343d4b, 0x343d4b, 0xe8edf4, 0x9ca8b8, 0x70a5ff, 0x1d3557,
+        0x63d69a, 0x63d69a,
     ))
 }
 #[cfg(test)]
@@ -195,6 +189,7 @@ pub struct ChatApplication {
     pub(crate) resume_picker_loading: bool,
     pub(crate) resume_picker_pending: Option<nickel_codex::ThreadId>,
     pub(crate) command_picker_open: bool,
+    theme: SemanticTheme,
 }
 
 #[derive(Clone, Debug)]
@@ -338,7 +333,16 @@ impl ChatApplication {
             resume_picker_loading: false,
             resume_picker_pending: None,
             command_picker_open: false,
+            theme: semantic_theme(),
         }
+    }
+
+    pub fn set_theme(&mut self, theme: SemanticTheme) -> bool {
+        if self.theme == theme {
+            return false;
+        }
+        self.theme = theme;
+        true
     }
 
     pub fn as_shell_project_menu(mut self) -> Self {
@@ -1009,6 +1013,7 @@ impl Application for ChatApplication {
             AnyView::new(project_menu_view(
                 &self.state,
                 self.settings_error.as_deref(),
+                self.theme,
             ))
         } else {
             AnyView::new(configured_chat_view(
@@ -1032,6 +1037,7 @@ impl Application for ChatApplication {
                         .as_ref()
                         .and_then(|(_, id)| id.as_deref()),
                 },
+                self.theme,
             ))
         }
     }
@@ -1046,17 +1052,17 @@ impl Application for ChatApplication {
 }
 
 #[component]
-fn ItemCard(item: &ChatItem) -> impl View<ChatMessage> {
+fn ItemCard(item: &ChatItem, theme: SemanticTheme) -> impl View<ChatMessage> {
     let (background, color) = match &item.kind {
-        ChatItemKind::User => (USER, TEXT),
-        ChatItemKind::Agent => (PANEL, TEXT),
-        ChatItemKind::Reasoning => (0x252331, MUTED),
-        ChatItemKind::Command => (0x242a24, TEXT),
-        ChatItemKind::Activity => (PANEL, MUTED),
-        ChatItemKind::FileChange => (0x2c2920, TEXT),
-        ChatItemKind::Plan => (0x202a35, TEXT),
-        ChatItemKind::Error => (ERROR, TEXT),
-        ChatItemKind::Unknown(_) => (PANEL, MUTED),
+        ChatItemKind::User => (theme.surfaces.selected, theme.text.primary),
+        ChatItemKind::Agent => (theme.surfaces.card, theme.text.primary),
+        ChatItemKind::Reasoning => (theme.surfaces.sidebar, theme.text.secondary),
+        ChatItemKind::Command => (theme.surfaces.hover, theme.text.primary),
+        ChatItemKind::Activity => (theme.surfaces.card, theme.text.secondary),
+        ChatItemKind::FileChange => (theme.surfaces.raised, theme.text.primary),
+        ChatItemKind::Plan => (theme.surfaces.selected, theme.text.primary),
+        ChatItemKind::Error => (theme.surfaces.raised, theme.text.danger),
+        ChatItemKind::Unknown(_) => (theme.surfaces.card, theme.text.secondary),
     };
     let label = item_label(&item.kind);
     let document = item_markdown_document(item);
@@ -1069,18 +1075,18 @@ fn ItemCard(item: &ChatItem) -> impl View<ChatMessage> {
     ui! {
         <Container fill_width max_width={maximum_width} align_self={alignment}
             padding={Insets::all(14.0)} gap={7.0}
-            background={background} border={Border::new(BORDER, 1.0)} radius={10.0}>
+            background={background} border={Border::new(theme.borders.ordinary, 1.0)} radius={10.0}>
             <Text color={color} scale={0.9} selection_run_id={label_run_id}
                 selection_boundary={TextBoundary::Block}>{label}</Text>
             {markdown_content_view(
                 &document,
                 MarkdownPalette {
                     foreground: color,
-                    muted: MUTED,
-                    accent: ACCENT,
-                    surface: 0x11151b,
-                    border: BORDER,
-                    code: 0xc8d6e5,
+                    muted: theme.text.secondary,
+                    accent: theme.accent.ordinary,
+                    surface: theme.surfaces.sidebar,
+                    border: theme.borders.ordinary,
+                    code: theme.text.primary,
                 },
                 &format!("{}/body", item.id),
                 |destination| ChatMessage::OpenMarkdownLink(destination.to_owned()),
@@ -1090,7 +1096,11 @@ fn ItemCard(item: &ChatItem) -> impl View<ChatMessage> {
 }
 
 #[component]
-fn InteractionCard(interaction: &PendingInteraction, answer: &str) -> impl View<ChatMessage> {
+fn InteractionCard(
+    interaction: &PendingInteraction,
+    answer: &str,
+    theme: SemanticTheme,
+) -> impl View<ChatMessage> {
     match interaction {
         PendingInteraction::Approval {
             request_id,
@@ -1098,14 +1108,14 @@ fn InteractionCard(interaction: &PendingInteraction, answer: &str) -> impl View<
             summary,
         } => ui! {
             <Container fill_width padding={Insets::all(12.0)} gap={8.0}
-                background={0x332b1f} border={Border::new(0x8b6f35, 1.0)} radius={8.0}>
-                <Text color={TEXT}>{"Approval requested"}</Text>
-                <Text color={MUTED}>{summary}</Text>
+                background={theme.surfaces.raised} border={Border::new(theme.text.warning, 1.0)} radius={8.0}>
+                <Text color={theme.text.primary}>{"Approval requested"}</Text>
+                <Text color={theme.text.secondary}>{summary}</Text>
                 <Row gap={8.0}>
                     <Button on_press={ChatMessage::Decline(request_id.clone(), approval_type.clone())}
-                        background={0x4a3030} color={TEXT}>{"Decline"}</Button>
+                        background={theme.surfaces.hover} color={theme.text.danger}>{"Decline"}</Button>
                     <Button on_press={ChatMessage::Approve(request_id.clone(), approval_type.clone())}
-                        background={0x27452f} color={TEXT}>{"Approve"}</Button>
+                        background={theme.surfaces.hover} color={theme.text.success}>{"Approve"}</Button>
                 </Row>
             </Container>
         },
@@ -1114,18 +1124,18 @@ fn InteractionCard(interaction: &PendingInteraction, answer: &str) -> impl View<
             question_ids,
         } => ui! {
             <Container fill_width padding={Insets::all(12.0)} gap={8.0}
-                background={0x262b38} border={Border::new(BORDER, 1.0)} radius={8.0}>
-                <Text color={TEXT}>{"Codex requested input"}</Text>
-                <Text color={MUTED}>{format!("Questions: {}", question_ids.join(", "))}</Text>
-                <Text color={MUTED}>{"Enter one answer per line"}</Text>
-                <Container fill_width padding={Insets::all(8.0)} background={PANEL} radius={6.0}>
-                    <TextField value={answer} on_change={interaction_answer_changed} color={TEXT} />
+                background={theme.surfaces.raised} border={Border::new(theme.borders.ordinary, 1.0)} radius={8.0}>
+                <Text color={theme.text.primary}>{"Codex requested input"}</Text>
+                <Text color={theme.text.secondary}>{format!("Questions: {}", question_ids.join(", "))}</Text>
+                <Text color={theme.text.secondary}>{"Enter one answer per line"}</Text>
+                <Container fill_width padding={Insets::all(8.0)} background={theme.surfaces.card} radius={6.0}>
+                    <TextField value={answer} on_change={interaction_answer_changed} color={theme.text.primary} />
                 </Container>
                 <Row gap={8.0}>
                     <Button on_press={ChatMessage::DismissInput(request_id.clone())}
-                        background={0x4a3030} color={TEXT}>{"Cancel"}</Button>
+                        background={theme.surfaces.hover} color={theme.text.danger}>{"Cancel"}</Button>
                     <Button on_press={ChatMessage::SubmitInput(request_id.clone(), question_ids.clone())}
-                        background={0x27452f} color={TEXT}>{"Submit"}</Button>
+                        background={theme.surfaces.hover} color={theme.text.success}>{"Submit"}</Button>
                 </Row>
             </Container>
         },
@@ -1136,41 +1146,42 @@ fn remote_hosts_panel(
     settings: &CodexSettings,
     editor: Option<&RemoteHostEditor>,
     settings_error: Option<&str>,
+    theme: SemanticTheme,
 ) -> AnyView<ChatMessage> {
     if let Some(editor) = editor {
         return AnyView::new(ui! {
             <Column fill_width grow={1.0} min_height={0.0} padding={Insets::all(24.0)} gap={12.0}
-                background={BACKGROUND} overflow_y={Overflow::Auto}>
-                <Text scale={1.6} color={TEXT}>{if editor.original_id.is_some() { "Edit remote host" } else { "Add remote host" }}</Text>
-                <Text color={MUTED}>{"Nickel stores only the environment-variable name, never its secret value."}</Text>
-                <Text color={TEXT}>{"Identifier"}</Text>
-                <Container fill_width padding={Insets::all(10.0)} background={PANEL} radius={6.0}>
-                    <TextField value={&editor.id} on_change={remote_host_id_changed} color={TEXT} />
+                background={theme.surfaces.window} overflow_y={Overflow::Auto}>
+                <Text scale={1.6} color={theme.text.primary}>{if editor.original_id.is_some() { "Edit remote host" } else { "Add remote host" }}</Text>
+                <Text color={theme.text.secondary}>{"Nickel stores only the environment-variable name, never its secret value."}</Text>
+                <Text color={theme.text.primary}>{"Identifier"}</Text>
+                <Container fill_width padding={Insets::all(10.0)} background={theme.surfaces.card} radius={6.0}>
+                    <TextField value={&editor.id} on_change={remote_host_id_changed} color={theme.text.primary} />
                 </Container>
-                <Text color={TEXT}>{"Display name"}</Text>
-                <Container fill_width padding={Insets::all(10.0)} background={PANEL} radius={6.0}>
-                    <TextField value={&editor.name} on_change={remote_host_name_changed} color={TEXT} />
+                <Text color={theme.text.primary}>{"Display name"}</Text>
+                <Container fill_width padding={Insets::all(10.0)} background={theme.surfaces.card} radius={6.0}>
+                    <TextField value={&editor.name} on_change={remote_host_name_changed} color={theme.text.primary} />
                 </Container>
-                <Text color={TEXT}>{"WebSocket endpoint"}</Text>
-                <Container fill_width padding={Insets::all(10.0)} background={PANEL} radius={6.0}>
-                    <TextField value={&editor.endpoint} on_change={remote_host_endpoint_changed} color={TEXT} />
+                <Text color={theme.text.primary}>{"WebSocket endpoint"}</Text>
+                <Container fill_width padding={Insets::all(10.0)} background={theme.surfaces.card} radius={6.0}>
+                    <TextField value={&editor.endpoint} on_change={remote_host_endpoint_changed} color={theme.text.primary} />
                 </Container>
-                <Text color={TEXT}>{"Bearer-token environment variable (optional)"}</Text>
-                <Container fill_width padding={Insets::all(10.0)} background={PANEL} radius={6.0}>
-                    <TextField value={&editor.token_env} on_change={remote_host_token_env_changed} color={TEXT} />
+                <Text color={theme.text.primary}>{"Bearer-token environment variable (optional)"}</Text>
+                <Container fill_width padding={Insets::all(10.0)} background={theme.surfaces.card} radius={6.0}>
+                    <TextField value={&editor.token_env} on_change={remote_host_token_env_changed} color={theme.text.primary} />
                 </Container>
-                <Text color={TEXT}>{"Default working directory on the remote host"}</Text>
-                <Container fill_width padding={Insets::all(10.0)} background={PANEL} radius={6.0}>
-                    <TextField value={&editor.default_cwd} on_change={remote_host_cwd_changed} color={TEXT} />
+                <Text color={theme.text.primary}>{"Default working directory on the remote host"}</Text>
+                <Container fill_width padding={Insets::all(10.0)} background={theme.surfaces.card} radius={6.0}>
+                    <TextField value={&editor.default_cwd} on_change={remote_host_cwd_changed} color={theme.text.primary} />
                 </Container>
                 {settings_error.map(|error| ui! {
-                    <Container fill_width padding={Insets::all(10.0)} background={ERROR} radius={6.0}>
-                        <Text color={TEXT}>{error}</Text>
+                    <Container fill_width padding={Insets::all(10.0)} background={theme.surfaces.raised} radius={6.0}>
+                        <Text color={theme.text.danger}>{error}</Text>
                     </Container>
                 })}
                 <Row gap={8.0}>
-                    <Button on_press={ChatMessage::ManageRemoteHosts} background={PANEL} color={TEXT}>{"Cancel"}</Button>
-                    <Button on_press={ChatMessage::SaveRemoteHost} background={0x245b91} color={TEXT}>{"Save host"}</Button>
+                    <Button on_press={ChatMessage::ManageRemoteHosts} background={theme.surfaces.card} color={theme.text.primary}>{"Cancel"}</Button>
+                    <Button on_press={ChatMessage::SaveRemoteHost} background={theme.accent.ordinary} color={theme.accent.on_accent}>{"Save host"}</Button>
                 </Row>
             </Column>
         });
@@ -1178,33 +1189,33 @@ fn remote_hosts_panel(
 
     AnyView::new(ui! {
         <Column fill_width grow={1.0} min_height={0.0} padding={Insets::all(24.0)} gap={12.0}
-            background={BACKGROUND} overflow_y={Overflow::Auto}>
-            <Text scale={1.6} color={TEXT}>{"Remote Codex hosts"}</Text>
-            <Text color={MUTED}>{"These are Nickel settings. Nickel does not read or modify Codex Desktop configuration."}</Text>
-            <Container fill_width padding={Insets::all(12.0)} background={PANEL} radius={8.0}>
-                <Text color={TEXT}>{"Local"}</Text>
-                <Text color={MUTED}>{if settings.selected == "local" { "Selected" } else { "Uses the installed or bundled Codex CLI" }}</Text>
+            background={theme.surfaces.window} overflow_y={Overflow::Auto}>
+            <Text scale={1.6} color={theme.text.primary}>{"Remote Codex hosts"}</Text>
+            <Text color={theme.text.secondary}>{"These are Nickel settings. Nickel does not read or modify Codex Desktop configuration."}</Text>
+            <Container fill_width padding={Insets::all(12.0)} background={theme.surfaces.card} radius={8.0}>
+                <Text color={theme.text.primary}>{"Local"}</Text>
+                <Text color={theme.text.secondary}>{if settings.selected == "local" { "Selected" } else { "Uses the installed or bundled Codex CLI" }}</Text>
             </Container>
             {settings.hosts.iter().map(|host| ui! {
                 <Container key={host.id.clone()} fill_width padding={Insets::all(12.0)} gap={6.0}
-                    background={PANEL} radius={8.0}>
-                    <Text color={TEXT}>{if settings.selected == host.id { format!("{} · Selected", host.name) } else { host.name.clone() }}</Text>
-                    <Text color={MUTED}>{&host.endpoint}</Text>
-                    <Text color={MUTED}>{format!("Remote cwd: {}", host.default_cwd)}</Text>
+                    background={theme.surfaces.card} radius={8.0}>
+                    <Text color={theme.text.primary}>{if settings.selected == host.id { format!("{} · Selected", host.name) } else { host.name.clone() }}</Text>
+                    <Text color={theme.text.secondary}>{&host.endpoint}</Text>
+                    <Text color={theme.text.secondary}>{format!("Remote cwd: {}", host.default_cwd)}</Text>
                     <Row gap={8.0}>
-                        <Button on_press={ChatMessage::EditRemoteHost(host.id.clone())} background={SIDEBAR} color={TEXT}>{"Edit"}</Button>
-                        <Button on_press={ChatMessage::RemoveRemoteHost(host.id.clone())} background={0x4a3030} color={TEXT}>{"Remove"}</Button>
+                        <Button on_press={ChatMessage::EditRemoteHost(host.id.clone())} background={theme.surfaces.sidebar} color={theme.text.primary}>{"Edit"}</Button>
+                        <Button on_press={ChatMessage::RemoveRemoteHost(host.id.clone())} background={theme.surfaces.hover} color={theme.text.danger}>{"Remove"}</Button>
                     </Row>
                 </Container>
             })}
             {settings_error.map(|error| ui! {
-                <Container fill_width padding={Insets::all(10.0)} background={ERROR} radius={6.0}>
-                    <Text color={TEXT}>{error}</Text>
+                <Container fill_width padding={Insets::all(10.0)} background={theme.surfaces.raised} radius={6.0}>
+                    <Text color={theme.text.danger}>{error}</Text>
                 </Container>
             })}
             <Row gap={8.0}>
-                <Button on_press={ChatMessage::CloseRemoteHosts} background={PANEL} color={TEXT}>{"Done"}</Button>
-                <Button on_press={ChatMessage::AddRemoteHost} background={0x245b91} color={TEXT}>{"Add remote host"}</Button>
+                <Button on_press={ChatMessage::CloseRemoteHosts} background={theme.surfaces.card} color={theme.text.primary}>{"Done"}</Button>
+                <Button on_press={ChatMessage::AddRemoteHost} background={theme.accent.ordinary} color={theme.accent.on_accent}>{"Add remote host"}</Button>
             </Row>
         </Column>
     })
@@ -1219,12 +1230,13 @@ pub fn chat_view(state: &ChatState) -> impl View<ChatMessage> {
         None,
         None,
         ChatOverlays::default(),
+        semantic_theme(),
     )
 }
 
 #[cfg(test)]
 pub fn shell_project_menu_view(state: &ChatState) -> impl View<ChatMessage> {
-    project_menu_view(state, None)
+    project_menu_view(state, None, semantic_theme())
 }
 
 fn connection_menu(settings: &CodexSettings) -> Menu<ChatMessage> {
@@ -1253,8 +1265,12 @@ fn connection_menu(settings: &CodexSettings) -> Menu<ChatMessage> {
     Menu::new(ChatMessage::ToggleFileMenu, "Connection", items).id(id!(connection_menu))
 }
 
-fn project_menu_view(state: &ChatState, settings_error: Option<&str>) -> impl View<ChatMessage> {
-    let controller_focus = semantic_theme().borders.controller_focus;
+fn project_menu_view(
+    state: &ChatState,
+    settings_error: Option<&str>,
+    theme: SemanticTheme,
+) -> impl View<ChatMessage> {
+    let controller_focus = theme.borders.controller_focus;
     let project_query = state.draft.trim().to_lowercase();
     let matching_projects = state
         .projects
@@ -1282,28 +1298,28 @@ fn project_menu_view(state: &ChatState, settings_error: Option<&str>) -> impl Vi
     };
     ui! {
         <Column fill_width fill_height padding={Insets::all(14.0)} gap={10.0}
-            background={BACKGROUND} border={Border::new(BORDER, 1.0)}>
+            background={theme.surfaces.window} border={Border::new(theme.borders.ordinary, 1.0)}>
             <Row fill_width shrink={0.0} gap={8.0}>
-                <Text scale={1.25} color={TEXT} grow={1.0}>{"Codex projects"}</Text>
-                <Button on_press={ChatMessage::Refresh} background={PANEL} color={TEXT}
+                <Text scale={1.25} color={theme.text.primary} grow={1.0}>{"Codex projects"}</Text>
+                <Button on_press={ChatMessage::Refresh} background={theme.surfaces.card} color={theme.text.primary}
                     controller_focus_background_tint={controller_focus}>{"Retry"}</Button>
             </Row>
-            <Text color={MUTED} shrink={0.0}>{status}</Text>
+            <Text color={theme.text.secondary} shrink={0.0}>{status}</Text>
             <Container id={id!(project_search_container)} accessibility_label={"Search projects"}
                 semantic_role={SemanticRole::Group} fill_width shrink={0.0}
-                padding={Insets::symmetric(10.0, 8.0)} background={PANEL}
-                border={Border::new(BORDER, 1.0)} radius={6.0}>
+                padding={Insets::symmetric(10.0, 8.0)} background={theme.surfaces.card}
+                border={Border::new(theme.borders.ordinary, 1.0)} radius={6.0}>
                 <TextField id={id!(project_search)} value={&state.draft}
-                    on_change={draft_changed} color={TEXT} />
+                    on_change={draft_changed} color={theme.text.primary} />
             </Container>
             {state.diagnostics.back().map(|diagnostic| ui! {
-                <Container fill_width padding={Insets::all(8.0)} background={ERROR} radius={6.0}>
-                    <Text color={TEXT} max_lines={3}>{diagnostic}</Text>
+                <Container fill_width padding={Insets::all(8.0)} background={theme.surfaces.raised} radius={6.0}>
+                    <Text color={theme.text.primary} max_lines={3}>{diagnostic}</Text>
                 </Container>
             })}
             {settings_error.map(|error| ui! {
-                <Container fill_width padding={Insets::all(8.0)} background={ERROR} radius={6.0}>
-                    <Text color={TEXT}>{error}</Text>
+                <Container fill_width padding={Insets::all(8.0)} background={theme.surfaces.raised} radius={6.0}>
+                    <Text color={theme.text.primary}>{error}</Text>
                 </Container>
             })}
             <Column id={id!(project_menu_list)} grow={1.0} min_height={0.0}
@@ -1313,7 +1329,7 @@ fn project_menu_view(state: &ChatState, settings_error: Option<&str>) -> impl Vi
                     ui! {
                         <Button key={project.id.clone()} height={42.0}
                             on_press={ChatMessage::NewChatIn(root, project.id.clone())}
-                            background={PANEL} color={TEXT} label_align={TextAlign::Start}
+                            background={theme.surfaces.card} color={theme.text.primary} label_align={TextAlign::Start}
                             controller_focus_background_tint={controller_focus}
                             padding={Insets::symmetric(12.0, 8.0)} fill_width>{&project.name}</Button>
                     }
@@ -1393,6 +1409,7 @@ fn resume_picker(
     project_id: Option<&str>,
     loading: bool,
     pending: Option<&nickel_codex::ThreadId>,
+    theme: SemanticTheme,
 ) -> AnyView<ChatMessage> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1409,24 +1426,24 @@ fn resume_picker(
     let has_threads = !threads.is_empty();
     AnyView::new(ui! {
         <Column id={id!(resume_picker)} fill_width grow={1.0} min_height={0.0}
-            padding={Insets::all(8.0)} gap={6.0} background={PANEL}
-            border={Border::new(BORDER, 1.0)} radius={8.0}>
+            padding={Insets::all(8.0)} gap={6.0} background={theme.surfaces.card}
+            border={Border::new(theme.borders.ordinary, 1.0)} radius={8.0}>
             <Row fill_width gap={8.0}>
-                <Text color={TEXT} grow={1.0}>{"Resume conversation"}</Text>
-                <Button on_press={ChatMessage::NewChat}>{"New"}</Button>
-                <Button on_press={ChatMessage::CloseResumePicker}>{"Back"}</Button>
+                <Text color={theme.text.primary} grow={1.0}>{"Resume conversation"}</Text>
+                <Button on_press={ChatMessage::NewChat} background={theme.surfaces.hover} color={theme.text.primary}>{"New"}</Button>
+                <Button on_press={ChatMessage::CloseResumePicker} background={theme.surfaces.hover} color={theme.text.primary}>{"Back"}</Button>
             </Row>
             {[()].into_iter().filter(|_| loading).map(|_| ui! {
-                <Text color={MUTED}>{"Loading recent conversations…"}</Text>
+                <Text color={theme.text.secondary}>{"Loading recent conversations…"}</Text>
             })}
             {[()].into_iter().filter(|_| !loading && state.thread_error.is_some()).map(|_| ui! {
                 <Row fill_width gap={8.0}>
-                    <Text color={TEXT} grow={1.0}>{format!("Could not load conversations: {}", state.thread_error.as_deref().unwrap_or("Unknown error"))}</Text>
-                    <Button on_press={ChatMessage::RefreshResumePicker}>{"Retry"}</Button>
+                    <Text color={theme.text.primary} grow={1.0}>{format!("Could not load conversations: {}", state.thread_error.as_deref().unwrap_or("Unknown error"))}</Text>
+                    <Button on_press={ChatMessage::RefreshResumePicker} background={theme.surfaces.hover} color={theme.text.primary}>{"Retry"}</Button>
                 </Row>
             })}
             {[()].into_iter().filter(|_| !loading && state.thread_error.is_none() && !has_threads).map(|_| ui! {
-                <Text color={MUTED}>{"No conversations yet for this project."}</Text>
+                <Text color={theme.text.secondary}>{"No conversations yet for this project."}</Text>
             })}
             <Column id={id!(resume_conversation_list)} fill_width grow={1.0} min_height={0.0}
                 overflow_y={Overflow::Auto} gap={4.0}>
@@ -1441,16 +1458,17 @@ fn resume_picker(
                     let waiting = pending == Some(&thread.id);
                     if resumable && pending.is_none() {
                         AnyView::new(ui! {
-                            <Button key={thread.id.0.clone()} label_align={TextAlign::Start} fill_width
-                                accessibility_label={title.clone()}
-                                on_press={ChatMessage::SelectThread(thread.id.clone())}>{label}</Button>
+                            <Button key={thread.id.0.clone()} label_align={TextAlign::Start}
+                                on_press={ChatMessage::SelectThread(thread.id.clone())}
+                                background={theme.surfaces.hover} color={theme.text.primary}
+                                accessibility_label={title.clone()} fill_width>{label}</Button>
                         })
                     } else {
                         let status = if waiting { "Resuming…" } else if active { "Already active" } else { "Unavailable" };
                         AnyView::new(ui! {
-                            <Column key={thread.id.0.clone()} fill_width padding={Insets::all(10.0)} background={SIDEBAR} radius={6.0}>
-                                <Text color={MUTED}>{label}</Text>
-                                <Text color={MUTED}>{status}</Text>
+                            <Column key={thread.id.0.clone()} fill_width padding={Insets::all(10.0)} background={theme.surfaces.sidebar} radius={6.0}>
+                                <Text color={theme.text.secondary}>{label}</Text>
+                                <Text color={theme.text.secondary}>{status}</Text>
                             </Column>
                         })
                     }
@@ -1467,6 +1485,7 @@ fn configured_chat_view(
     editor: Option<&RemoteHostEditor>,
     settings_error: Option<&str>,
     overlays: ChatOverlays<'_>,
+    theme: SemanticTheme,
 ) -> impl View<ChatMessage> {
     let ChatOverlays {
         pending_shell_command,
@@ -1496,7 +1515,7 @@ fn configured_chat_view(
     let transcript_range = transcript_window.range.clone();
     let transcript_document = state.transcript_selection_document();
     ui! {
-        <Column fill_width fill_height background={BACKGROUND}>
+        <Column fill_width fill_height background={theme.surfaces.window}>
             <MenuBar id={id!(menu_bar)}>
                 <Menu id={id!(file_menu)} on_toggle={ChatMessage::ToggleFileMenu} label={"File"}>
                     <MenuItem label={"New conversation"} on_press={ChatMessage::NewChat} />
@@ -1505,7 +1524,7 @@ fn configured_chat_view(
                 {connection_menu(settings)}
             </MenuBar>
             {if managing_hosts {
-                remote_hosts_panel(settings, editor, settings_error)
+                remote_hosts_panel(settings, editor, settings_error, theme)
             } else { AnyView::new(ui! {
             <Column grow={1.0} min_width={0.0} fill_height padding={Insets::all(18.0)} gap={12.0}>
                 <Column id={id!(conversation)} grow={1.0} fill_width gap={10.0}
@@ -1519,12 +1538,13 @@ fn configured_chat_view(
                             project_id,
                             resume_picker_loading,
                             resume_picker_pending,
+                            theme,
                         )
                     } else if state.items.is_empty() {
                         AnyView::new(ui! {
                             <Container grow={1.0} fill_width padding={Insets::all(28.0)}>
-                                <Text scale={2.0} color={TEXT}>{"What are we building?"}</Text>
-                                <Text color={MUTED}>{"Start a conversation with Codex. Tool requests always require an explicit decision."}</Text>
+                                <Text scale={2.0} color={theme.text.primary}>{"What are we building?"}</Text>
+                                <Text color={theme.text.secondary}>{"Start a conversation with Codex. Tool requests always require an explicit decision."}</Text>
                             </Container>
                         })
                     } else {
@@ -1540,54 +1560,55 @@ fn configured_chat_view(
                                     .children(state.items.iter().enumerate()
                                         .skip(transcript_range.start)
                                         .take(transcript_range.len())
-                                        .map(|(_, item)| ui! { <ItemCard key={item.id.clone()} item={item} /> })))}
+                                        .map(|(_, item)| ui! { <ItemCard key={item.id.clone()} item={item} theme={theme} /> })))}
                         })
                     }}
                 </Column>
                 <Column id={id!(composer)} fill_width shrink={0.0} gap={8.0}>
                     {state.pending.iter().map(|interaction| ui! {
-                        <InteractionCard interaction={interaction} answer={&state.interaction_answer} />
+                        <InteractionCard interaction={interaction} answer={&state.interaction_answer} theme={theme} />
                     })}
                     {pending_shell_command.map(|command| ui! {
                         <Column fill_width padding={Insets::all(10.0)} gap={8.0}
-                            background={0x3b3020} radius={6.0}>
-                            <Text color={TEXT}>{"Run this command outside the Codex sandbox?"}</Text>
-                            <Text color={MUTED}>{format!("!{command}")}</Text>
+                            background={theme.surfaces.raised} radius={6.0}>
+                            <Text color={theme.text.primary}>{"Run this command outside the Codex sandbox?"}</Text>
+                            <Text color={theme.text.secondary}>{format!("!{command}")}</Text>
                             <Row gap={8.0}>
-                                <Button on_press={ChatMessage::CancelShell}>{"Cancel"}</Button>
-                                <Button on_press={ChatMessage::ConfirmShell} background={0x7a5220} color={TEXT}>{"Run unsandboxed"}</Button>
+                                <Button on_press={ChatMessage::CancelShell} background={theme.surfaces.hover} color={theme.text.primary}>{"Cancel"}</Button>
+                                <Button on_press={ChatMessage::ConfirmShell} background={theme.surfaces.hover} color={theme.text.warning}>{"Run unsandboxed"}</Button>
                             </Row>
                         </Column>
                     })}
                     {state.diagnostics.back().map(|diagnostic| ui! {
-                        <Container fill_width padding={Insets::all(10.0)} background={ERROR} radius={6.0}>
-                            <Text color={TEXT}>{diagnostic}</Text>
+                        <Container fill_width padding={Insets::all(10.0)} background={theme.surfaces.raised} radius={6.0}>
+                            <Text color={theme.text.primary}>{diagnostic}</Text>
                         </Container>
                     })}
                     {state.thread_error.as_ref().map(|diagnostic| ui! {
                         <Row fill_width padding={Insets::all(10.0)} gap={10.0}
-                            background={ERROR} radius={6.0}>
-                            <Text color={TEXT} grow={1.0}>{format!("Conversations unavailable: {diagnostic}")}</Text>
-                            <Button on_press={ChatMessage::Refresh}>{"Retry"}</Button>
+                            background={theme.surfaces.raised} radius={6.0}>
+                            <Text color={theme.text.primary} grow={1.0}>{format!("Conversations unavailable: {diagnostic}")}</Text>
+                            <Button on_press={ChatMessage::Refresh} background={theme.surfaces.hover} color={theme.text.primary}>{"Retry"}</Button>
                         </Row>
                     })}
                     {state.attachments.iter().map(|attachment| ui! {
-                        <Row padding={Insets::all(8.0)} gap={8.0} background={SIDEBAR} radius={6.0}>
+                        <Row padding={Insets::all(8.0)} gap={8.0} background={theme.surfaces.sidebar} radius={6.0}>
                             <Image asset_id={attachment.id.0 as u16} image={attachment.preview.clone()} generation={attachment.id.0}
                                 width={48.0} height={48.0} fit={ImageFit::Contain} decorative />
-                            <Text color={MUTED}>{format!("{} × {} · {} KiB", attachment.width, attachment.height, attachment.encoded_size.div_ceil(1024))}</Text>
+                            <Text color={theme.text.secondary}>{format!("{} × {} · {} KiB", attachment.width, attachment.height, attachment.encoded_size.div_ceil(1024))}</Text>
                             <Button on_press={ChatMessage::RemoveAttachment(attachment.id)}
+                                background={theme.surfaces.hover} color={theme.text.danger}
                                 accessibility_label={format!("Remove image attachment {}", attachment.id.0)}>{"Remove"}</Button>
                         </Row>
                     })}
                     <Container id={id!(composer_viewport)} accessibility_label={"Message composer"}
                         semantic_role={SemanticRole::Group}
                         fill_width min_height={52.0} max_height={140.0} shrink={0.0}
-                        padding={Insets::all(12.0)} background={PANEL}
-                        border={Border::new(BORDER, 1.0)} radius={10.0}
+                        padding={Insets::all(12.0)} background={theme.surfaces.card}
+                        border={Border::new(theme.borders.ordinary, 1.0)} radius={10.0}
                         overflow_y={Overflow::Auto} follow_scroll_end={true}>
                         <TextField id={id!(chat_draft)} value={&state.draft} on_change={draft_changed}
-                            color={TEXT} wrap={true} />
+                            color={theme.text.primary} wrap={true} />
                     </Container>
                     <Row shrink={0.0} gap={8.0}>
                         {Menu::new(
@@ -1610,8 +1631,8 @@ fn configured_chat_view(
                             ],
                         ).id(id!(command_picker)).width(460.0).expanded(command_picker_open)
                             .accessibility_label("Commands")
-                            .colors(PANEL, SIDEBAR, TEXT)}
-                        <Button on_press={ChatMessage::ToggleResumePicker}>{"Resume"}</Button>
+                            .colors(theme.surfaces.card, theme.surfaces.sidebar, theme.text.primary)}
+                        <Button on_press={ChatMessage::ToggleResumePicker} background={theme.surfaces.hover} color={theme.text.primary}>{"Resume"}</Button>
                         {Dropdown::new(
                             ChatMessage::ToggleModelPicker,
                             state.models.iter()
@@ -1627,7 +1648,7 @@ fn configured_chat_view(
                             .semantic_role(SemanticRole::Button)
                             .overlay(true)
                             .open_generation(model_picker_generation)
-                            .colors(PANEL, SIDEBAR, TEXT)}
+                            .colors(theme.surfaces.card, theme.surfaces.sidebar, theme.text.primary)}
                         {state.models.iter()
                             .find(|model| Some(model.id.as_str()) == state.selected_model.as_deref())
                             .filter(|model| !model.supported_reasoning_efforts.is_empty())
@@ -1643,7 +1664,7 @@ fn configured_chat_view(
                                 .semantic_role(SemanticRole::Button)
                                 .overlay(true)
                                 .open_generation(reasoning_picker_generation)
-                                .colors(PANEL, SIDEBAR, TEXT))}
+                                .colors(theme.surfaces.card, theme.surfaces.sidebar, theme.text.primary))}
                         {Dropdown::new(
                             ChatMessage::ToggleApprovalPicker,
                             approval_policy_label(state.selected_approval_policy),
@@ -1654,7 +1675,7 @@ fn configured_chat_view(
                         ).id(id!(approval_policy_selector))
                             .overlay(true)
                             .open_generation(approval_picker_generation)
-                            .colors(PANEL, SIDEBAR, TEXT)
+                            .colors(theme.surfaces.card, theme.surfaces.sidebar, theme.text.primary)
                             .accessibility_label("Approval policy selector")
                             .accessibility_description(format!(
                                 "Effective: {}. This does not change sandbox or filesystem access.",
@@ -1662,25 +1683,25 @@ fn configured_chat_view(
                             ))
                             .semantic_role(SemanticRole::Button)}
                         <Column gap={2.0} grow={1.0}>
-                            <Text color={MUTED}>{if state.active_turn.is_some() {
+                            <Text color={theme.text.secondary}>{if state.active_turn.is_some() {
                                 "Codex is working…".to_owned()
                             } else if state.selected_approval_policy != state.effective_approval_policy {
                                 format!("Applies to the next turn; effective now: {}", approval_policy_label(state.effective_approval_policy))
                             } else {
                                 format!("Approval policy: {}", approval_policy_label(state.effective_approval_policy))
                             }}</Text>
-                            <Text color={MUTED} scale={0.72}>{"Approval only; sandbox and filesystem access are unchanged"}</Text>
-                            <Text color={MUTED} scale={0.72}>{&state.provenance}</Text>
+                            <Text color={theme.text.secondary} scale={0.72}>{"Approval only; sandbox and filesystem access are unchanged"}</Text>
+                            <Text color={theme.text.secondary} scale={0.72}>{&state.provenance}</Text>
                         </Column>
                         <Spacer fill />
                         {if state.interrupt_requested {
-                            ui! { <Text color={MUTED}>{"Interrupting…"}</Text> }
+                            ui! { <Text color={theme.text.secondary}>{"Interrupting…"}</Text> }
                         } else if state.active_turn.is_some() {
-                            ui! { <Button on_press={ChatMessage::Interrupt} background={0x663333} color={TEXT}>{"Interrupt"}</Button> }
+                            ui! { <Button on_press={ChatMessage::Interrupt} background={theme.surfaces.hover} color={theme.text.danger}>{"Interrupt"}</Button> }
                         } else if state.can_send() {
-                            ui! { <Button on_press={ChatMessage::Send} background={0x245b91} color={TEXT}>{"Send"}</Button> }
+                            ui! { <Button on_press={ChatMessage::Send} background={theme.accent.ordinary} color={theme.accent.on_accent}>{"Send"}</Button> }
                         } else {
-                            ui! { <Text color={MUTED}>{"Enter a message"}</Text> }
+                            ui! { <Text color={theme.text.secondary}>{"Enter a message"}</Text> }
                         }}
                     </Row>
                 </Column>
@@ -1693,10 +1714,86 @@ fn configured_chat_view(
 #[cfg(test)]
 mod tests {
     use nickel_codex::{ReplayBackend, Thread, ThreadId};
-    use nickel_ui::{Rect, UiFrame};
+    use nickel_ui::{HostBatch, HostEvent, Rect, UiFrame};
     use nickel_ui_testkit::Scenario;
 
     use super::*;
+
+    fn alternate_theme() -> SemanticTheme {
+        SemanticTheme::from_tokens(nickel_ui::SemanticTokenSet::standard(
+            0xf4f6f8, 0xe8edf4, 0xffffff, 0xd6dce5, 0xcbd2dc, 0x171a20, 0x4d5664, 0x075ca8,
+            0xc9e5ff, 0x6c3fa0, 0xefe4ff,
+        ))
+    }
+
+    #[test]
+    fn embedded_theme_contract_is_live_and_idempotent() {
+        let backend = ReplayBackend::from_json(r#"{"name":"theme","events":[]}"#).unwrap();
+        let app = ChatApplication::new(BackendMode::Replay {
+            backend,
+            cwd: "/projects/nickel".into(),
+        });
+        let light = alternate_theme();
+
+        let mut scenario = Scenario::new(app, 900, 640);
+        let dark_commands = scenario.host().commands().to_vec();
+        assert!(scenario.host_mut().application_mut().set_theme(light));
+        scenario.host_mut().step(HostBatch {
+            events: vec![HostEvent::Poll],
+            ..HostBatch::default()
+        });
+
+        assert_eq!(scenario.host().application().theme, light);
+        assert_ne!(scenario.host().commands(), dark_commands);
+        assert!(!scenario.host_mut().application_mut().set_theme(light));
+    }
+
+    #[test]
+    fn production_codex_and_task_switcher_views_reject_literal_colors() {
+        fn assert_no_literal_colors(source: &str, label: &str) {
+            let offenders = source
+                .lines()
+                .enumerate()
+                .filter(|(_, line)| {
+                    let color_sink = [
+                        "background=",
+                        "color=",
+                        "Border::new(",
+                        "foreground:",
+                        "muted:",
+                        "accent:",
+                        "surface:",
+                        "border:",
+                        "code:",
+                    ]
+                    .iter()
+                    .any(|sink| line.contains(sink));
+                    color_sink
+                        && line.as_bytes().windows(2).any(|prefix| prefix == b"0x")
+                        && !line.trim_start().starts_with("//")
+                })
+                .map(|(line, text)| format!("{}: {}", line + 1, text.trim()))
+                .collect::<Vec<_>>();
+            assert!(offenders.is_empty(), "{label}: {offenders:?}");
+        }
+
+        let codex = include_str!("view.rs");
+        let fallback_start = codex.find("fn semantic_theme()").unwrap();
+        let fallback_end = codex[fallback_start..]
+            .find("\n}\n\n")
+            .map(|offset| fallback_start + offset + 3)
+            .unwrap();
+        let mut production = codex[..fallback_start].to_owned();
+        production.push_str(&codex[fallback_end..codex.find("#[cfg(test)]\nmod tests").unwrap()]);
+        assert_no_literal_colors(&production, "Codex UI");
+        assert_no_literal_colors(
+            include_str!("../../nickel-shell/src/window_preview.rs")
+                .split("#[cfg(test)]")
+                .next()
+                .unwrap(),
+            "task switcher",
+        );
+    }
 
     fn has_accessible_text<Message: Clone>(frame: &UiFrame<Message>, needle: &str) -> bool {
         frame.accessibility_nodes().iter().any(|node| {
@@ -1761,7 +1858,7 @@ mod tests {
         assert!(!document.diagnostics.is_empty());
 
         let tree = UiFrame::layout(
-            ui! { <ItemCard item={&item} /> },
+            ui! { <ItemCard item={&item} theme={semantic_theme()} /> },
             Rect::new(0.0, 0.0, 600.0, 400.0),
         );
         assert!(has_accessible_text(&tree, "Heading"));
@@ -1777,7 +1874,7 @@ mod tests {
             complete: true,
         };
         let tree = UiFrame::layout(
-            ui! { <ItemCard item={&item} /> },
+            ui! { <ItemCard item={&item} theme={semantic_theme()} /> },
             Rect::new(0.0, 0.0, 600.0, 200.0),
         );
         let nodes = tree.resolved_layout().nodes();

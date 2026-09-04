@@ -5,8 +5,8 @@ use nickel_ui::backend::PaintCommand;
 use nickel_ui::{
     ActionKind, Align, AnyView, Application, Button, Collection, CollectionPresentation,
     CollectionState, ComponentBuilderExt, Container, HostBatch, HostChangeToken, HostEvent,
-    HostEventOutcome, Image, Insets, Point, Rect, Row, SemanticAction, SemanticRole, Text,
-    TextAlign, UiEvent, UiHost, UiId, ViewContext,
+    HostEventOutcome, Image, Insets, Point, Rect, Row, SemanticAction, SemanticRole, SemanticTheme,
+    Text, TextAlign, UiEvent, UiHost, UiId, ViewContext,
 };
 
 use crate::{
@@ -26,6 +26,22 @@ pub const MENU_WIDTH: f32 = 220.0;
 const MENU_ROW_HEIGHT: f32 = 40.0;
 const MENU_ROW_GAP: f32 = 4.0;
 const MENU_PADDING: f32 = 8.0;
+
+pub(crate) fn semantic_theme_from_palette(palette: ThemePalette) -> SemanticTheme {
+    SemanticTheme::from_tokens(nickel_ui::SemanticTokenSet::standard(
+        palette.background,
+        palette.panel,
+        palette.surface,
+        palette.surface_hover,
+        palette.surface_hover,
+        palette.text,
+        palette.muted,
+        palette.accent,
+        palette.accent_soft,
+        palette.complement,
+        palette.complement,
+    ))
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PreviewAction {
@@ -346,7 +362,7 @@ pub struct WindowPreviewApp {
     group: WindowGroup,
     previews: HashMap<WindowId, Arc<image::RgbaImage>>,
     hovered: Option<WindowId>,
-    palette: ThemePalette,
+    theme: SemanticTheme,
     effects: Vec<PreviewAction>,
     dirty: bool,
 }
@@ -359,7 +375,7 @@ impl Application for WindowPreviewApp {
     }
 
     fn view(&self, _context: ViewContext) -> impl nickel_ui::View<Self::Message> {
-        preview_view(&self.group, &self.previews, self.hovered, self.palette)
+        preview_view(&self.group, &self.previews, self.hovered, self.theme)
     }
 
     fn poll(&mut self) -> bool {
@@ -388,7 +404,7 @@ impl WindowPreviewApp {
             group,
             previews,
             hovered: None,
-            palette,
+            theme: semantic_theme_from_palette(palette),
             effects: Vec::new(),
             dirty: false,
         }
@@ -500,14 +516,14 @@ impl WindowPreviewFrame {
         group: &WindowGroup,
         previews: &HashMap<WindowId, Arc<image::RgbaImage>>,
         hovered: Option<WindowId>,
-        palette: ThemePalette,
+        theme: SemanticTheme,
     ) -> HostEventOutcome {
         let (width, height) = preview_dimensions(group.windows.len());
         let app = self.host.application_mut();
         app.group = group.clone();
         app.previews = previews.clone();
         app.hovered = hovered;
-        app.palette = palette;
+        app.theme = theme;
         app.dirty = true;
         self.step(HostBatch {
             surface_size: Some((width, height)),
@@ -560,7 +576,7 @@ pub fn build_preview_frame(
     group: &WindowGroup,
     previews: &HashMap<WindowId, Arc<image::RgbaImage>>,
     hovered: Option<WindowId>,
-    palette: ThemePalette,
+    theme: SemanticTheme,
 ) -> WindowPreviewFrame {
     let (width, height) = preview_dimensions(group.windows.len());
     WindowPreviewFrame {
@@ -569,7 +585,7 @@ pub fn build_preview_frame(
                 group: group.clone(),
                 previews: previews.clone(),
                 hovered,
-                palette,
+                theme,
                 effects: Vec::new(),
                 dirty: false,
             },
@@ -585,7 +601,7 @@ fn preview_view(
     group: &WindowGroup,
     previews: &HashMap<WindowId, Arc<image::RgbaImage>>,
     hovered: Option<WindowId>,
-    palette: ThemePalette,
+    theme: SemanticTheme,
 ) -> impl nickel_ui::View<PreviewAction> {
     let (width, height) = preview_dimensions(group.windows.len());
     let windows = group.windows.iter().collect::<Vec<_>>();
@@ -611,7 +627,7 @@ fn preview_view(
                         Container::new()
                             .width(CARD_WIDTH - CARD_PADDING * 2.0)
                             .height(THUMBNAIL_HEIGHT)
-                            .background(palette.background)
+                            .background(theme.surfaces.window)
                             .radius(6.0),
                     )
                 },
@@ -629,15 +645,15 @@ fn preview_view(
                 .padding(Insets::all(CARD_PADDING))
                 .gap(CARD_GAP)
                 .background(if hovered == Some(window) {
-                    palette.surface_hover
+                    theme.surfaces.hover
                 } else {
-                    palette.surface
+                    theme.surfaces.card
                 })
                 .border(
                     if hovered == Some(window) {
-                        palette.accent
+                        theme.borders.selected
                     } else {
-                        palette.surface
+                        theme.surfaces.card
                     },
                     if hovered == Some(window) { 3.0 } else { 1.0 },
                 )
@@ -649,7 +665,7 @@ fn preview_view(
                         .child(
                             Text::new(title.clone())
                                 .scale(0.85)
-                                .color(palette.text)
+                                .color(theme.text.primary)
                                 .align(TextAlign::Center)
                                 .grow(1.0),
                         )
@@ -657,7 +673,7 @@ fn preview_view(
                             Container::new()
                                 .width(CLOSE_SIZE)
                                 .height(CLOSE_SIZE)
-                                .background(palette.surface_hover)
+                                .background(theme.surfaces.hover)
                                 .radius(CLOSE_SIZE / 2.0)
                                 .message(PreviewAction::Close(window))
                                 .semantic_role(SemanticRole::Button)
@@ -665,7 +681,7 @@ fn preview_view(
                                 .child(
                                     Text::new("×")
                                         .scale(1.1)
-                                        .color(palette.text)
+                                        .color(theme.text.primary)
                                         .align(TextAlign::Center),
                                 ),
                         ),
@@ -691,7 +707,7 @@ fn preview_view(
         .width(width as f32)
         .height(height as f32)
         .padding(Insets::all(PADDING))
-        .background(palette.panel)
+        .background(theme.surfaces.sidebar)
         .radius(14.0)
         .child(collection)
 }
@@ -737,9 +753,12 @@ fn preview_image_id(window: WindowId) -> u16 {
 mod tests {
     use super::*;
     use crate::model::OpenWindow;
-    use nickel_core::theme::Appearance;
+    use nickel_core::theme::{Appearance, ThemeMode};
     use nickel_ui::backend::PaintCommand;
-    use nickel_ui::{ActionKind, ImagePresentation, SemanticAction, Size};
+    use nickel_ui::{
+        ActionKind, ImagePresentation, ResolvedAppearance, ResolvedThemePreferences,
+        SemanticAction, Size,
+    };
 
     #[test]
     fn native_thumbnails_follow_card_geometry() {
@@ -748,11 +767,79 @@ mod tests {
     }
 
     #[test]
+    fn task_switcher_resolves_every_paint_from_the_active_theme() {
+        let dark = ThemePalette::from_appearance(Appearance::default());
+        let light = ThemePalette::from_appearance(Appearance {
+            mode: ThemeMode::Light,
+            accent: [0x91, 0x32, 0xa8],
+            intensity: 100,
+        });
+        let dark_theme = semantic_theme_from_palette(dark);
+        let light_theme = semantic_theme_from_palette(light);
+        let high_contrast = SemanticTheme::resolve(
+            light_theme.tokens(),
+            dark_theme.tokens(),
+            ResolvedThemePreferences {
+                appearance: ResolvedAppearance::Dark,
+                high_contrast: true,
+                reduced_transparency: false,
+                reduced_motion: false,
+            },
+        );
+        let dark_frame = build_preview_frame(&group(), &HashMap::new(), None, dark_theme);
+        let light_frame = build_preview_frame(&group(), &HashMap::new(), None, light_theme);
+
+        assert_ne!(dark_frame.commands(), light_frame.commands());
+        for theme in [dark_theme, light_theme, high_contrast] {
+            let frame = build_preview_frame(&group(), &HashMap::new(), None, theme);
+            assert!(frame.commands().iter().any(|command| matches!(command,
+                    PaintCommand::Fill { color, .. }
+                    | PaintCommand::RoundedFill { color, .. }
+                    | PaintCommand::TopRoundedFill { color, .. }
+                    if *color == theme.surfaces.sidebar)));
+            assert!(frame.commands().iter().any(
+                |command| matches!(command, PaintCommand::Text { color, .. } if *color == theme.text.primary)
+            ));
+        }
+    }
+
+    #[test]
+    fn theme_changes_preserve_native_preview_pixels() {
+        let mut image = image::RgbaImage::new(2, 1);
+        image.put_pixel(0, 0, image::Rgba([12, 34, 56, 255]));
+        image.put_pixel(1, 0, image::Rgba([78, 90, 123, 255]));
+        let image = Arc::new(image);
+        let previews = HashMap::from([(WindowId(4), Arc::clone(&image))]);
+        let mut frame = build_preview_frame(
+            &group(),
+            &previews,
+            None,
+            semantic_theme_from_palette(ThemePalette::from_appearance(Appearance::default())),
+        );
+        let light = semantic_theme_from_palette(ThemePalette::from_appearance(Appearance {
+            mode: ThemeMode::Light,
+            accent: [0x91, 0x32, 0xa8],
+            intensity: 100,
+        }));
+
+        frame.sync(&group(), &previews, None, light);
+
+        let retained = frame.host.application().previews.get(&WindowId(4)).unwrap();
+        assert!(Arc::ptr_eq(retained, &image));
+        assert_eq!(retained.as_raw(), image.as_raw());
+    }
+
+    #[test]
     fn grouped_preview_source_shapes_do_not_change_card_interaction_geometry() {
         let palette = ThemePalette::from_appearance(Appearance::default());
-        let expected_activation = build_preview_frame(&group(), &HashMap::new(), None, palette)
-            .semantic_bounds(PreviewAction::Activate(WindowId(4)))
-            .expect("activation target exists");
+        let expected_activation = build_preview_frame(
+            &group(),
+            &HashMap::new(),
+            None,
+            semantic_theme_from_palette(palette),
+        )
+        .semantic_bounds(PreviewAction::Activate(WindowId(4)))
+        .expect("activation target exists");
 
         for source in [(3440, 1440), (1920, 1080), (1200, 1200), (900, 1600)] {
             let mut previews = HashMap::new();
@@ -760,7 +847,12 @@ mod tests {
                 WindowId(4),
                 Arc::new(image::RgbaImage::new(source.0, source.1)),
             );
-            let frame = build_preview_frame(&group(), &previews, None, palette);
+            let frame = build_preview_frame(
+                &group(),
+                &previews,
+                None,
+                semantic_theme_from_palette(palette),
+            );
             assert_eq!(
                 frame.semantic_bounds(PreviewAction::Activate(WindowId(4))),
                 Some(expected_activation),
@@ -791,7 +883,12 @@ mod tests {
                 WindowId(4),
                 Arc::new(image::RgbaImage::new(source.0, source.1)),
             );
-            let frame = build_preview_frame(&group(), &previews, None, palette);
+            let frame = build_preview_frame(
+                &group(),
+                &previews,
+                None,
+                semantic_theme_from_palette(palette),
+            );
             let actual = frame
                 .commands()
                 .iter()
@@ -846,7 +943,7 @@ mod tests {
             &group(),
             &HashMap::new(),
             None,
-            ThemePalette::from_appearance(Appearance::default()),
+            semantic_theme_from_palette(ThemePalette::from_appearance(Appearance::default())),
         );
         for action in [
             PreviewAction::Activate(WindowId(4)),
@@ -872,7 +969,7 @@ mod tests {
             &group(),
             &HashMap::new(),
             None,
-            ThemePalette::from_appearance(Appearance::default()),
+            semantic_theme_from_palette(ThemePalette::from_appearance(Appearance::default())),
         );
         let second = center(
             frame
@@ -926,8 +1023,18 @@ mod tests {
         let original = group();
         let mut reordered = original.clone();
         reordered.windows.reverse();
-        let first = build_preview_frame(&original, &HashMap::new(), None, palette);
-        let second = build_preview_frame(&reordered, &HashMap::new(), None, palette);
+        let first = build_preview_frame(
+            &original,
+            &HashMap::new(),
+            None,
+            semantic_theme_from_palette(palette),
+        );
+        let second = build_preview_frame(
+            &reordered,
+            &HashMap::new(),
+            None,
+            semantic_theme_from_palette(palette),
+        );
 
         assert_eq!(
             first.semantic_bounds(PreviewAction::Close(WindowId(4))),
