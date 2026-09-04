@@ -1,10 +1,13 @@
 settings-appearance-title = المظهر
 settings-appearance-subtitle = فاتح وداكن ودرجة لون ابتدائية واحدة
+settings-default-apps-title = التطبيقات الافتراضية
+settings-default-apps-subtitle = معالجات النظام للملفات والروابط
 settings-nav-display = العرض
 settings-nav-bar = شريط Nickel
 settings-nav-appearance = المظهر
 settings-nav-network = الشبكة
 settings-nav-bluetooth = بلوتوث
+settings-nav-default-apps = التطبيقات الافتراضية
 settings-nav-keyboard = اختصارات لوحة المفاتيح
 settings-nav-about = حول Nickel
 settings-nav-section-support = الدعم

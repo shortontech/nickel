@@ -1,6 +1,42 @@
 use super::*;
 
 impl SettingsApp {
+    pub(super) fn default_apps_components(&self) -> impl nickel_ui::Component<SettingsMessage> {
+        let theme = self.ui_theme();
+        let palette = self.palette();
+        let rows = self.default_apps.iter().enumerate().map(|(index, row)| {
+            let current = row.snapshot.as_ref().and_then(|snapshot| snapshot.effective.as_ref())
+                .map(|handler| handler.name.clone()).unwrap_or_else(|| "No effective handler reported".into());
+            let options: Vec<(String, SettingsMessage)> = row.snapshot.as_ref().map(|snapshot| snapshot.handlers.iter().map(|handler| {
+                (handler.name.clone(), SettingsMessage::SetDefaultApp { row: index, handler_id: handler.id.clone() })
+            }).collect()).unwrap_or_default();
+            let detail = row.status.clone().or_else(|| row.snapshot.as_ref().map(|snapshot| snapshot.detail.clone())).unwrap_or_else(|| "Not loaded".into());
+            let mutable = row.snapshot.as_ref().is_some_and(|snapshot| snapshot.capability == nickel_platform::AssociationCapability::DirectUserChange);
+            let selector = SelectField::new(theme, row.label.clone(), detail.clone(),
+                SettingsMessage::ToggleDefaultAppSelect(index), current.clone(), options,
+                self.default_app_select_expanded == Some(index)).id(format!("default-app-{index}"));
+            ui! {
+                <Container background={palette.surface} border={(palette.muted, 1.0)} padding={Insets::all(4.0)}>
+                    {if mutable { AnyView::new(selector) } else {
+                        AnyView::new(SettingsRow::new(theme, format!("{} — {}", row.label, detail), current))
+                    }}
+                </Container>
+            }
+        });
+        let note = SettingsStatus::<SettingsMessage>::new(
+            theme,
+            SettingsStatusKind::Validation,
+            "These are operating-system associations. Terminal and file-manager preferences are separate Nickel-owned settings.",
+        );
+        ui! {
+            <Column grow={1.0} padding={Insets { top: 16.0, right: 24.0, bottom: 20.0, left: 20.0 }} gap={10.0}>
+                <VerticalScroll id={"default-apps-list"} on_scroll={SettingsMessage::DefaultAppsScroll} offset={0.0}>
+                    <Column gap={10.0}>{note}<Column gap={8.0} children={rows} /></Column>
+                </VerticalScroll>
+            </Column>
+        }
+    }
+
     pub(super) fn display_components(&self) -> impl nickel_ui::Component<SettingsMessage> {
         let palette = self.palette();
         let theme = self.ui_theme();

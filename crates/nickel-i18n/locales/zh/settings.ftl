@@ -1,10 +1,13 @@
 settings-appearance-title = 外观
 settings-appearance-subtitle = 浅色、深色和一个起始色相
+settings-default-apps-title = 默认应用
+settings-default-apps-subtitle = 文件和链接的系统处理程序
 settings-nav-display = 显示器
 settings-nav-bar = Nickel 栏
 settings-nav-appearance = 外观
 settings-nav-network = 网络
 settings-nav-bluetooth = 蓝牙
+settings-nav-default-apps = 默认应用
 settings-nav-keyboard = 键盘快捷键
 settings-nav-about = 关于 Nickel
 settings-nav-section-support = 支持

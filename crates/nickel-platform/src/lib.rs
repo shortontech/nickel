@@ -1,7 +1,13 @@
 //! Shared native platform adapters used by Nickel applications.
 
+mod default_apps;
 mod media;
 mod platform_contract;
+
+pub use default_apps::{
+    ApplicationHandler, AssociationBackend, AssociationCapability, AssociationError,
+    AssociationSnapshot, AssociationTarget, ChangeOutcome, association_backend, change_and_verify,
+};
 
 pub use media::{DecodedPreview, PreviewDecodeError, decode_image_preview};
 pub use platform_contract::{

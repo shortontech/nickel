@@ -104,18 +104,20 @@ enum SidebarIconKind {
     Appearance,
     Network,
     Bluetooth,
+    DefaultApps,
     Keyboard,
     About,
 }
 
 impl SidebarIconKind {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::Search,
         Self::Display,
         Self::Bar,
         Self::Appearance,
         Self::Network,
         Self::Bluetooth,
+        Self::DefaultApps,
         Self::Keyboard,
         Self::About,
     ];
@@ -132,6 +134,7 @@ impl SidebarIconKind {
             Self::Appearance => '\u{f1fc}',
             Self::Network => '\u{f0ac}',
             Self::Bluetooth => '\u{f294}',
+            Self::DefaultApps => '\u{f2d0}',
             Self::Keyboard => '\u{f11c}',
             Self::About => '\u{f05a}',
         }
@@ -145,6 +148,7 @@ impl SidebarIconKind {
             Self::Appearance => include_bytes!("../../../assets/icons/settings/appearance.svg"),
             Self::Network => include_bytes!("../../../assets/icons/settings/network.svg"),
             Self::Bluetooth => include_bytes!("../../../assets/icons/settings/bluetooth.svg"),
+            Self::DefaultApps => include_bytes!("../../../assets/icons/start-menu/about.svg"),
             Self::Keyboard => include_bytes!("../../../assets/icons/start-menu/keyboard.svg"),
             Self::About => include_bytes!("../../../assets/icons/start-menu/about.svg"),
         }
@@ -185,7 +189,7 @@ fn rasterize_sidebar_icon(kind: SidebarIconKind) -> Arc<image::RgbaImage> {
 }
 
 fn sidebar_icon<Message>(kind: SidebarIconKind) -> Image<Message> {
-    static ICONS: OnceLock<[Arc<image::RgbaImage>; 8]> = OnceLock::new();
+    static ICONS: OnceLock<[Arc<image::RgbaImage>; 9]> = OnceLock::new();
     let icons = ICONS.get_or_init(|| SidebarIconKind::ALL.map(rasterize_sidebar_icon));
     Image::new(400 + kind.index() as u16, icons[kind.index()].clone())
         .fit(ImageFit::Contain)
@@ -242,6 +246,7 @@ enum SettingsPage {
     Appearance,
     Network,
     Bluetooth,
+    DefaultApps,
     KeyboardShortcuts,
     About,
 }
@@ -254,6 +259,7 @@ impl std::fmt::Display for SettingsPage {
             Self::Appearance => "appearance",
             Self::Network => "network",
             Self::Bluetooth => "bluetooth",
+            Self::DefaultApps => "default-apps",
             Self::KeyboardShortcuts => "keyboard-shortcuts",
             Self::About => "about",
         })
@@ -284,6 +290,14 @@ struct WifiNetwork {
     interface: u128,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DefaultAppRow {
+    label: String,
+    target: nickel_platform::AssociationTarget,
+    snapshot: Option<nickel_platform::AssociationSnapshot>,
+    status: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum SettingsMessage {
     Navigate(SettingsPage),
@@ -297,6 +311,12 @@ enum SettingsMessage {
     SetWifiPower(bool),
     WifiNetwork(usize),
     NetworkScroll,
+    DefaultAppsScroll,
+    ToggleDefaultAppSelect(usize),
+    SetDefaultApp {
+        row: usize,
+        handler_id: String,
+    },
     AppearanceLight,
     AppearanceDark,
     AppearanceSystem,
@@ -378,7 +398,84 @@ fn sidebar_search_message(value: String) -> SettingsMessage {
     SettingsMessage::SidebarSearchChanged(value)
 }
 
+fn default_app_categories() -> Vec<DefaultAppRow> {
+    [
+        (
+            "Web browser",
+            nickel_platform::AssociationTarget::scheme("https"),
+        ),
+        ("Mail", nickel_platform::AssociationTarget::scheme("mailto")),
+        (
+            "Text editor",
+            nickel_platform::AssociationTarget::mime("text/plain"),
+        ),
+        (
+            "Image viewer",
+            nickel_platform::AssociationTarget::mime("image/png"),
+        ),
+        (
+            "Audio player",
+            nickel_platform::AssociationTarget::mime("audio/mpeg"),
+        ),
+        (
+            "Video player",
+            nickel_platform::AssociationTarget::mime("video/mp4"),
+        ),
+        (
+            "PDF viewer",
+            nickel_platform::AssociationTarget::mime("application/pdf"),
+        ),
+    ]
+    .into_iter()
+    .map(|(label, target)| DefaultAppRow {
+        label: label.into(),
+        target,
+        snapshot: None,
+        status: None,
+    })
+    .collect()
+}
+
 impl SettingsApp {
+    fn load_default_apps(&mut self) {
+        let backend = nickel_platform::association_backend();
+        for row in &mut self.default_apps {
+            match backend.inspect(&row.target) {
+                Ok(snapshot) => {
+                    row.snapshot = Some(snapshot);
+                    row.status = None;
+                }
+                Err(error) => {
+                    row.status = Some(error.to_string());
+                }
+            }
+        }
+    }
+
+    fn change_default_app(&mut self, row_index: usize, handler_id: &str) {
+        let Some(row) = self.default_apps.get_mut(row_index) else {
+            return;
+        };
+        let previous = row.snapshot.clone();
+        let backend = nickel_platform::association_backend();
+        match nickel_platform::change_and_verify(backend.as_ref(), &row.target, handler_id) {
+            Ok(nickel_platform::ChangeOutcome::Confirmed(snapshot)) => {
+                row.snapshot = Some(snapshot);
+                row.status = Some("Default confirmed by the operating system".into());
+            }
+            Ok(nickel_platform::ChangeOutcome::NativeConsentRequired { detail })
+            | Ok(nickel_platform::ChangeOutcome::Rejected { detail }) => {
+                row.snapshot = previous;
+                row.status = Some(detail);
+            }
+            Err(error) => {
+                row.snapshot = previous;
+                row.status = Some(error.to_string());
+            }
+        }
+        self.default_app_select_expanded = None;
+    }
+
     fn request_redraw(&self) {
         self.redraw_requested.set(true);
     }
@@ -402,6 +499,7 @@ impl SettingsApp {
                 match page {
                     SettingsPage::Network => self.load_linux_network(),
                     SettingsPage::Bluetooth => self.load_bluetooth(),
+                    SettingsPage::DefaultApps => self.load_default_apps(),
                     _ => {}
                 }
             }
@@ -414,6 +512,7 @@ impl SettingsApp {
                 match page {
                     SettingsPage::Network => self.load_linux_network(),
                     SettingsPage::Bluetooth => self.load_bluetooth(),
+                    SettingsPage::DefaultApps => self.load_default_apps(),
                     _ => {}
                 }
             }
@@ -613,7 +712,15 @@ impl SettingsApp {
             SettingsMessage::WifiNetwork(index) => self.connect_windows_wifi(index),
             SettingsMessage::BluetoothScroll
             | SettingsMessage::NetworkScroll
+            | SettingsMessage::DefaultAppsScroll
             | SettingsMessage::AppearanceScroll => {}
+            SettingsMessage::ToggleDefaultAppSelect(index) => {
+                self.default_app_select_expanded =
+                    (self.default_app_select_expanded != Some(index)).then_some(index);
+            }
+            SettingsMessage::SetDefaultApp { row, handler_id } => {
+                self.change_default_app(row, &handler_id);
+            }
         }
         self.request_redraw();
     }
@@ -1228,6 +1335,9 @@ impl HostAdapter<SettingsApp> for SettingsHostAdapter {
         app.load_outputs();
         app.load_bluetooth();
         app.load_linux_network();
+        if app.page == SettingsPage::DefaultApps {
+            app.load_default_apps();
+        }
         #[cfg(target_os = "windows")]
         {
             app.load_windows_outputs(services.window());
@@ -1534,6 +1644,44 @@ mod tests {
                 .is_some_and(|extent| extent.can_scroll()),
             "Bluetooth device rows must determine the scroll extent"
         );
+    }
+
+    #[test]
+    fn default_apps_page_exposes_confirmed_os_handlers_without_conflating_nickel_preferences() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::DefaultApps);
+        app.default_apps[0].snapshot = Some(nickel_platform::AssociationSnapshot {
+            target: nickel_platform::AssociationTarget::scheme("https"),
+            effective: Some(nickel_platform::ApplicationHandler {
+                id: "current.desktop".into(),
+                name: "Current Browser".into(),
+            }),
+            handlers: vec![nickel_platform::ApplicationHandler {
+                id: "other.desktop".into(),
+                name: "Other Browser".into(),
+            }],
+            capability: nickel_platform::AssociationCapability::DirectUserChange,
+            detail: "User-level association".into(),
+        });
+        let tree = app.build_ui(850.0, 900.0);
+        assert!(
+            !tree
+                .semantic_targets_for_message(&SettingsMessage::ToggleDefaultAppSelect(0))
+                .is_empty()
+        );
+
+        app.default_app_select_expanded = Some(0);
+        let expanded = app.build_ui(850.0, 900.0);
+        assert!(
+            !expanded
+                .semantic_targets_for_message(&SettingsMessage::SetDefaultApp {
+                    row: 0,
+                    handler_id: "other.desktop".into(),
+                })
+                .is_empty()
+        );
+        assert!(!app.default_apps.iter().any(|row| {
+            matches!(row.target, nickel_platform::AssociationTarget::Mime(ref mime) if mime == "inode/directory")
+        }));
     }
 
     #[test]

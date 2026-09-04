@@ -8,12 +8,15 @@ settings-network-title = Configuración de red
 settings-network-subtitle = Conexiones disponibles
 settings-bluetooth-title = Configuración de Bluetooth
 settings-bluetooth-subtitle = Conecta y administra dispositivos cercanos
+settings-default-apps-title = Aplicaciones predeterminadas
+settings-default-apps-subtitle = Aplicaciones del sistema para archivos y enlaces
 
 settings-nav-display = Pantallas
 settings-nav-bar = Barra de Nickel
 settings-nav-appearance = Apariencia
 settings-nav-network = Red
 settings-nav-bluetooth = Bluetooth
+settings-nav-default-apps = Aplicaciones predeterminadas
 settings-nav-keyboard = Atajos de teclado
 settings-nav-about = Acerca de Nickel
 settings-nav-section-support = Soporte

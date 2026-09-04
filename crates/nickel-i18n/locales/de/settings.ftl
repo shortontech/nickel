@@ -1,10 +1,13 @@
 settings-appearance-title = Darstellung
 settings-appearance-subtitle = Hell, dunkel und ein Ausgangsfarbton
+settings-default-apps-title = Standardanwendungen
+settings-default-apps-subtitle = Systemanwendungen für Dateien und Links
 settings-nav-display = Anzeige
 settings-nav-bar = Nickel-Leiste
 settings-nav-appearance = Darstellung
 settings-nav-network = Netzwerk
 settings-nav-bluetooth = Bluetooth
+settings-nav-default-apps = Standardanwendungen
 settings-nav-keyboard = Tastenkürzel
 settings-nav-about = Über Nickel
 settings-nav-section-support = Unterstützung

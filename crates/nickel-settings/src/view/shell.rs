@@ -44,6 +44,10 @@ impl SettingsApp {
                     self.localizer.text("settings-bluetooth-title"),
                     self.localizer.text("settings-bluetooth-subtitle"),
                 ),
+                SettingsPage::DefaultApps => (
+                    self.localizer.text("settings-default-apps-title"),
+                    self.localizer.text("settings-default-apps-subtitle"),
+                ),
                 SettingsPage::KeyboardShortcuts => (
                     self.localizer.text("settings-keyboard-title"),
                     self.localizer.text("settings-keyboard-subtitle"),
@@ -80,6 +84,7 @@ impl SettingsApp {
         let appearance_label = self.localizer.text("settings-nav-appearance");
         let network_label = self.localizer.text("settings-nav-network");
         let bluetooth_label = self.localizer.text("settings-nav-bluetooth");
+        let default_apps_label = self.localizer.text("settings-nav-default-apps");
         let keyboard_label = self.localizer.text("settings-nav-keyboard");
         let about_label = self.localizer.text("settings-nav-about");
         let palette = self.palette();
@@ -333,6 +338,16 @@ impl SettingsApp {
             )
             .header(destination_header(SettingsPage::Bluetooth))
             .leading(sidebar_icon(SidebarIconKind::Bluetooth))
+            .visible(query.is_empty()),
+            ResponsiveNavigationDestination::new(
+                SettingsPage::DefaultApps,
+                default_apps_label,
+                SettingsMessage::Navigate(SettingsPage::DefaultApps),
+                self.default_apps_components(),
+            )
+            .header(destination_header(SettingsPage::DefaultApps))
+            .leading(sidebar_icon(SidebarIconKind::DefaultApps))
+            .section(self.localizer.text("settings-nav-section-system"))
             .visible(query.is_empty()),
             ResponsiveNavigationDestination::new(
                 SettingsPage::KeyboardShortcuts,
