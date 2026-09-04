@@ -127,6 +127,64 @@ pub struct FeatureState {
     pub capability: FeatureCapability,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CodexPresentation {
+    Hidden,
+    Recoverable,
+    Projects,
+}
+
+/// Generation-bearing shell projection which keeps support, installation,
+/// preference, and runtime health as independent facts.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CodexAvailabilityProjection {
+    pub support: FeatureSupport,
+    pub installation: FeatureInstallation,
+    pub enabled: bool,
+    pub health: FeatureHealth,
+    pub generation: u64,
+    pub reason: Option<String>,
+}
+
+impl CodexAvailabilityProjection {
+    pub fn new(
+        support: FeatureSupport,
+        installation: FeatureInstallation,
+        enabled: bool,
+        health: FeatureHealth,
+        generation: u64,
+        reason: Option<String>,
+    ) -> Self {
+        Self {
+            support,
+            installation,
+            enabled,
+            health,
+            generation,
+            reason: reason.map(|reason| reason.chars().take(256).collect()),
+        }
+    }
+
+    pub fn presentation(&self) -> CodexPresentation {
+        if !self.enabled
+            || self.support == FeatureSupport::Unsupported
+            || self.installation == FeatureInstallation::Missing
+        {
+            CodexPresentation::Hidden
+        } else if self.installation == FeatureInstallation::Installed
+            && self.health == FeatureHealth::Ready
+        {
+            CodexPresentation::Projects
+        } else {
+            CodexPresentation::Recoverable
+        }
+    }
+
+    pub fn accepts_after(&self, current_generation: u64) -> bool {
+        self.generation >= current_generation
+    }
+}
+
 impl FeatureState {
     pub fn resolve(
         requested_enabled: bool,
@@ -148,7 +206,10 @@ impl FeatureState {
         } else if acknowledged_generation > generation {
             FeatureEffectiveState::Stale
         } else if generation > acknowledged_generation
-            || capability.health == FeatureHealth::Loading
+            || matches!(
+                capability.health,
+                FeatureHealth::Unknown | FeatureHealth::Loading
+            )
         {
             FeatureEffectiveState::Enabling
         } else if matches!(capability.health, FeatureHealth::Failed) {
@@ -329,6 +390,8 @@ pub struct OptionalFeatureRuntime {
     pub codex_generation: u64,
     pub codex_effective: FeatureEffectiveState,
     pub codex_health: FeatureHealth,
+    pub codex_support: FeatureSupport,
+    pub codex_installation: FeatureInstallation,
     pub active_windows: u32,
     pub background_workers: u32,
     pub subscriptions: u32,
@@ -345,6 +408,8 @@ impl Default for OptionalFeatureRuntime {
             codex_generation: 0,
             codex_effective: FeatureEffectiveState::Disabled,
             codex_health: FeatureHealth::Unknown,
+            codex_support: FeatureSupport::Supported,
+            codex_installation: FeatureInstallation::Missing,
             active_windows: 0,
             background_workers: 0,
             subscriptions: 0,
@@ -378,6 +443,8 @@ impl OptionalFeatureRuntime {
                 "codex.generation" => runtime.codex_generation = value.parse().unwrap_or(0),
                 "codex.effective" => runtime.codex_effective = parse_effective(value),
                 "codex.health" => runtime.codex_health = parse_health(value),
+                "codex.support" => runtime.codex_support = parse_support(value),
+                "codex.installation" => runtime.codex_installation = parse_installation(value),
                 "codex.active_windows" => runtime.active_windows = value.parse().unwrap_or(0),
                 "codex.background_workers" => {
                     runtime.background_workers = value.parse().unwrap_or(0)
@@ -404,10 +471,12 @@ impl OptionalFeatureRuntime {
         fs::write(
             path,
             format!(
-                "version=1\ncodex.generation={}\ncodex.effective={}\ncodex.health={}\ncodex.active_windows={}\ncodex.background_workers={}\ncodex.subscriptions={}\ncodex.warm_surfaces={}\ncodex.cache_entries={}\ncodex.source={}\ncodex.diagnostic={}\n",
+                "version=1\ncodex.generation={}\ncodex.effective={}\ncodex.health={}\ncodex.support={}\ncodex.installation={}\ncodex.active_windows={}\ncodex.background_workers={}\ncodex.subscriptions={}\ncodex.warm_surfaces={}\ncodex.cache_entries={}\ncodex.source={}\ncodex.diagnostic={}\n",
                 self.codex_generation,
                 format_effective(self.codex_effective),
                 format_health(self.codex_health),
+                format_support(self.codex_support),
+                format_installation(self.codex_installation),
                 self.active_windows,
                 self.background_workers,
                 self.subscriptions,
@@ -468,6 +537,32 @@ fn parse_health(value: &str) -> FeatureHealth {
         "ready" => FeatureHealth::Ready,
         "failed" => FeatureHealth::Failed,
         _ => FeatureHealth::Unknown,
+    }
+}
+fn format_support(value: FeatureSupport) -> &'static str {
+    match value {
+        FeatureSupport::Supported => "supported",
+        FeatureSupport::Unsupported => "unsupported",
+    }
+}
+fn parse_support(value: &str) -> FeatureSupport {
+    match value {
+        "unsupported" => FeatureSupport::Unsupported,
+        _ => FeatureSupport::Supported,
+    }
+}
+fn format_installation(value: FeatureInstallation) -> &'static str {
+    match value {
+        FeatureInstallation::Installed => "installed",
+        FeatureInstallation::Missing => "missing",
+        FeatureInstallation::Incompatible => "incompatible",
+    }
+}
+fn parse_installation(value: &str) -> FeatureInstallation {
+    match value {
+        "installed" => FeatureInstallation::Installed,
+        "incompatible" => FeatureInstallation::Incompatible,
+        _ => FeatureInstallation::Missing,
     }
 }
 
@@ -626,6 +721,68 @@ mod tests {
             FeatureEffectiveState::Enabled
         );
     }
+
+    #[test]
+    fn codex_presentation_matrix_keeps_only_recoverable_installations_visible() {
+        for support in [FeatureSupport::Supported, FeatureSupport::Unsupported] {
+            for installation in [
+                FeatureInstallation::Installed,
+                FeatureInstallation::Missing,
+                FeatureInstallation::Incompatible,
+            ] {
+                for enabled in [false, true] {
+                    for health in [
+                        FeatureHealth::Unknown,
+                        FeatureHealth::Loading,
+                        FeatureHealth::SignedOut,
+                        FeatureHealth::Ready,
+                        FeatureHealth::Failed,
+                    ] {
+                        let projection = CodexAvailabilityProjection::new(
+                            support,
+                            installation,
+                            enabled,
+                            health,
+                            7,
+                            None,
+                        );
+                        let expected = if !enabled
+                            || support == FeatureSupport::Unsupported
+                            || installation == FeatureInstallation::Missing
+                        {
+                            CodexPresentation::Hidden
+                        } else if installation == FeatureInstallation::Installed
+                            && health == FeatureHealth::Ready
+                        {
+                            CodexPresentation::Projects
+                        } else {
+                            CodexPresentation::Recoverable
+                        };
+                        assert_eq!(
+                            projection.presentation(),
+                            expected,
+                            "{support:?} {installation:?} {enabled} {health:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn codex_projection_bounds_reasons_and_rejects_older_generations() {
+        let projection = CodexAvailabilityProjection::new(
+            FeatureSupport::Supported,
+            FeatureInstallation::Installed,
+            true,
+            FeatureHealth::Failed,
+            12,
+            Some("x".repeat(400)),
+        );
+        assert_eq!(projection.reason.as_ref().unwrap().chars().count(), 256);
+        assert!(!projection.accepts_after(13));
+        assert!(projection.accepts_after(12));
+    }
     #[test]
     fn every_application_requirement_is_truthful() {
         let mut state = FeatureState::resolve(
@@ -776,6 +933,7 @@ mod tests {
             std::env::temp_dir().join(format!("nickel-optional-runtime-{}", std::process::id()));
         let disabled = OptionalFeatureRuntime {
             codex_generation: 17,
+            codex_installation: FeatureInstallation::Installed,
             ..Default::default()
         };
         disabled.save(&path).unwrap();

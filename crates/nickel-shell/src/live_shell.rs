@@ -1420,18 +1420,24 @@ impl LiveShell {
         self.launcher.set_dashboard_projects(projects)
     }
 
-    pub fn set_codex_availability(
+    pub fn apply_codex_projection(
         &mut self,
-        availability: crate::launcher::CodexAvailability,
+        projection: nickel_core::optional_features::CodexAvailabilityProjection,
     ) -> bool {
-        if !availability.shell_entry_visible() {
+        if projection.presentation() == nickel_core::optional_features::CodexPresentation::Hidden {
             self.codex_project_menu_visible = false;
+            self.requested_codex_project = None;
         }
-        self.launcher.set_codex_availability(availability)
+        self.launcher.apply_codex_projection(projection)
     }
 
     pub fn take_requested_codex_project(&mut self) -> Option<String> {
-        self.requested_codex_project.take()
+        if self.launcher.codex_available() {
+            self.requested_codex_project.take()
+        } else {
+            self.requested_codex_project = None;
+            None
+        }
     }
     pub fn new() -> Result<Self, String> {
         let shell_settings = ShellSettings::load_default();
@@ -2443,6 +2449,10 @@ impl LiveShell {
                 let _ = send_session_command("focus-context-menu", ShellCommand::FocusContextMenu);
             }
             PanelAction::Codex => {
+                if !self.launcher.codex_available() {
+                    self.codex_project_menu_visible = false;
+                    return;
+                }
                 if self.launcher_visible {
                     self.set_launcher_visible(false);
                 }
@@ -5878,6 +5888,27 @@ mod tests {
     fn right_panel_omits_codex_space_until_codex_is_available() {
         let layout = panel_status_layout(1920, 3, false);
         assert_eq!(layout.codex_start, layout.tray_start);
+    }
+
+    #[test]
+    fn stale_codex_actions_cannot_restore_hidden_chrome_or_project_requests() {
+        use nickel_core::optional_features::{
+            CodexAvailabilityProjection, FeatureHealth, FeatureInstallation, FeatureSupport,
+        };
+        let mut shell = LiveShell::new().unwrap();
+        shell.requested_codex_project = Some("stale-private-project".into());
+        shell.codex_project_menu_visible = true;
+        shell.apply_codex_projection(CodexAvailabilityProjection::new(
+            FeatureSupport::Supported,
+            FeatureInstallation::Installed,
+            false,
+            FeatureHealth::Unknown,
+            9,
+            None,
+        ));
+        assert_eq!(shell.take_requested_codex_project(), None);
+        shell.apply_panel_action(super::PanelAction::Codex);
+        assert!(!shell.codex_project_menu_visible);
     }
 
     #[test]

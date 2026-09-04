@@ -114,12 +114,8 @@ fn codex_feature_state(
         preference.codex_generation,
         runtime.codex_generation,
         FeatureCapability {
-            support: FeatureSupport::Supported,
-            installation: if runtime.codex_effective == FeatureEffectiveState::Unavailable {
-                FeatureInstallation::Missing
-            } else {
-                FeatureInstallation::Installed
-            },
+            support: runtime.codex_support,
+            installation: runtime.codex_installation,
             health: runtime.codex_health,
             policy,
             policy_source,
@@ -1148,18 +1144,18 @@ impl SettingsApp {
             self.codex_feature.generation = self.optional_features.codex_generation;
             self.codex_feature.acknowledged_generation =
                 self.optional_feature_runtime.codex_generation;
+            self.codex_feature.capability.support = self.optional_feature_runtime.codex_support;
+            self.codex_feature.capability.installation =
+                self.optional_feature_runtime.codex_installation;
             self.codex_feature.capability.health = self.optional_feature_runtime.codex_health;
-            self.codex_feature.effective = if self.codex_feature.acknowledged_generation
-                > self.codex_feature.generation
-            {
-                FeatureEffectiveState::Stale
-            } else if self.codex_feature.generation > self.codex_feature.acknowledged_generation {
-                FeatureEffectiveState::Enabling
-            } else {
-                self.optional_feature_runtime.codex_effective
-            };
             self.codex_feature.capability.diagnostic =
                 self.optional_feature_runtime.diagnostic.clone();
+            self.codex_feature = FeatureState::resolve(
+                self.optional_features.codex_enabled,
+                self.optional_features.codex_generation,
+                self.optional_feature_runtime.codex_generation,
+                self.codex_feature.capability.clone(),
+            );
         }
     }
 
@@ -1913,10 +1909,11 @@ mod tests {
     use nickel_ui::{Application, SemanticRole};
 
     use super::{
-        BluetoothDevice, CodexSource, ControllerAction, FeatureEffectiveState, FeatureInstallation,
-        FeaturePolicy, FeatureSupport, FileIconPreference, NetworkAdapter, Rect, SIDEBAR_WIDTH,
-        SettingsApp, SettingsHostAdapter, SettingsMessage, SettingsPage, ThemePreference, UiHost,
-        WallpaperSettings, attach_rect_centered, constrain_center, snap_rect,
+        BluetoothDevice, CodexSource, ControllerAction, FeatureEffectiveState, FeatureHealth,
+        FeatureInstallation, FeaturePolicy, FeatureSupport, FileIconPreference, NetworkAdapter,
+        OptionalFeatureRuntime, OptionalFeatureSettings, Rect, SIDEBAR_WIDTH, SettingsApp,
+        SettingsHostAdapter, SettingsMessage, SettingsPage, ThemePreference, UiHost,
+        WallpaperSettings, attach_rect_centered, codex_feature_state, constrain_center, snap_rect,
     };
 
     #[test]
@@ -3079,6 +3076,29 @@ mod tests {
                 ))
                 .len()
                 == 1
+        );
+    }
+
+    #[test]
+    fn runtime_projection_does_not_confuse_disabled_with_missing_installation() {
+        let settings = OptionalFeatureSettings {
+            codex_enabled: false,
+            codex_generation: 5,
+            ..Default::default()
+        };
+        let runtime = OptionalFeatureRuntime {
+            codex_generation: 5,
+            codex_effective: FeatureEffectiveState::Disabled,
+            codex_health: FeatureHealth::Unknown,
+            codex_installation: FeatureInstallation::Installed,
+            codex_support: FeatureSupport::Supported,
+            ..Default::default()
+        };
+        let state = codex_feature_state(&settings, &runtime);
+        assert_eq!(state.effective, FeatureEffectiveState::Disabled);
+        assert_eq!(
+            state.capability.installation,
+            FeatureInstallation::Installed
         );
     }
 

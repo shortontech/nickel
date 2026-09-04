@@ -3,8 +3,8 @@ use nickel_codex_ui::{
     ChatApplication, ConnectionStatus, ShellRequest, shell_application_with_backend,
 };
 use nickel_core::optional_features::{
-    CodexSource, FeatureEffectiveState, FeatureHealth, OptionalFeatureRuntime,
-    OptionalFeatureSettings,
+    CodexAvailabilityProjection, CodexSource, FeatureEffectiveState, FeatureHealth,
+    FeatureInstallation, FeatureSupport, OptionalFeatureRuntime, OptionalFeatureSettings,
 };
 use nickel_input::{
     AggregateModifier, InputEvent, KeyEdge, LogicalKey, NamedKey, PointerButton, PointerEvent,
@@ -209,23 +209,49 @@ fn p95_u64(samples: &[u64]) -> Option<u64> {
 fn codex_availability(
     status: ConnectionStatus,
     authenticated: bool,
-) -> Option<crate::launcher::CodexAvailability> {
+) -> Option<(FeatureInstallation, FeatureHealth)> {
     match status {
         ConnectionStatus::Loading => None,
-        ConnectionStatus::Unavailable => Some(crate::launcher::CodexAvailability::Unavailable),
-        ConnectionStatus::Ready if authenticated => Some(crate::launcher::CodexAvailability::Ready),
-        ConnectionStatus::Ready => Some(crate::launcher::CodexAvailability::Recoverable),
-        ConnectionStatus::Disconnected | ConnectionStatus::Incompatible => {
-            Some(crate::launcher::CodexAvailability::Recoverable)
+        ConnectionStatus::Unavailable => {
+            Some((FeatureInstallation::Missing, FeatureHealth::Failed))
         }
+        ConnectionStatus::Incompatible => {
+            Some((FeatureInstallation::Incompatible, FeatureHealth::Failed))
+        }
+        ConnectionStatus::Disconnected => {
+            Some((FeatureInstallation::Installed, FeatureHealth::Failed))
+        }
+        ConnectionStatus::Ready if authenticated => {
+            Some((FeatureInstallation::Installed, FeatureHealth::Ready))
+        }
+        ConnectionStatus::Ready => Some((FeatureInstallation::Installed, FeatureHealth::SignedOut)),
     }
+}
+
+fn codex_projection(
+    settings: &OptionalFeatureSettings,
+    known_installation: FeatureInstallation,
+    status: ConnectionStatus,
+    authenticated: bool,
+    reason: Option<String>,
+) -> CodexAvailabilityProjection {
+    let (installation, health) = codex_availability(status, authenticated)
+        .unwrap_or((known_installation, FeatureHealth::Loading));
+    CodexAvailabilityProjection::new(
+        FeatureSupport::Supported,
+        installation,
+        settings.codex_enabled,
+        health,
+        settings.codex_generation,
+        reason,
+    )
 }
 
 #[cfg(test)]
 mod allocation_summary_tests {
     use nickel_codex_ui::ConnectionStatus;
 
-    use crate::launcher::CodexAvailability;
+    use nickel_core::optional_features::{FeatureHealth, FeatureInstallation};
 
     #[test]
     fn allocation_p95_requires_samples_and_uses_nearest_rank() {
@@ -242,19 +268,71 @@ mod allocation_summary_tests {
         );
         assert_eq!(
             super::codex_availability(ConnectionStatus::Unavailable, false),
-            Some(CodexAvailability::Unavailable)
+            Some((FeatureInstallation::Missing, FeatureHealth::Failed))
         );
         assert_eq!(
             super::codex_availability(ConnectionStatus::Incompatible, false),
-            Some(CodexAvailability::Recoverable)
+            Some((FeatureInstallation::Incompatible, FeatureHealth::Failed))
         );
         assert_eq!(
             super::codex_availability(ConnectionStatus::Ready, false),
-            Some(CodexAvailability::Recoverable)
+            Some((FeatureInstallation::Installed, FeatureHealth::SignedOut))
         );
         assert_eq!(
             super::codex_availability(ConnectionStatus::Ready, true),
-            Some(CodexAvailability::Ready)
+            Some((FeatureInstallation::Installed, FeatureHealth::Ready))
+        );
+        assert_eq!(
+            super::codex_availability(ConnectionStatus::Disconnected, true),
+            Some((FeatureInstallation::Installed, FeatureHealth::Failed))
+        );
+    }
+
+    #[test]
+    fn preference_and_backend_state_remain_separate_in_shell_projection() {
+        let mut settings = nickel_core::optional_features::OptionalFeatureSettings {
+            codex_enabled: false,
+            codex_generation: 44,
+            ..Default::default()
+        };
+        let disabled = super::codex_projection(
+            &settings,
+            FeatureInstallation::Missing,
+            ConnectionStatus::Ready,
+            true,
+            None,
+        );
+        assert_eq!(disabled.installation, FeatureInstallation::Installed);
+        assert_eq!(
+            disabled.presentation(),
+            nickel_core::optional_features::CodexPresentation::Hidden
+        );
+        settings.codex_enabled = true;
+        let signed_out = super::codex_projection(
+            &settings,
+            FeatureInstallation::Installed,
+            ConnectionStatus::Ready,
+            false,
+            Some("Sign in".into()),
+        );
+        assert_eq!(signed_out.generation, 44);
+        assert_eq!(signed_out.health, FeatureHealth::SignedOut);
+        assert_eq!(
+            signed_out.presentation(),
+            nickel_core::optional_features::CodexPresentation::Recoverable
+        );
+        let loading = super::codex_projection(
+            &settings,
+            FeatureInstallation::Installed,
+            ConnectionStatus::Loading,
+            false,
+            None,
+        );
+        assert_eq!(loading.installation, FeatureInstallation::Installed);
+        assert_eq!(loading.health, FeatureHealth::Loading);
+        assert_eq!(
+            loading.presentation(),
+            nickel_core::optional_features::CodexPresentation::Recoverable
         );
     }
 }
@@ -272,6 +350,7 @@ struct CodexSurfaces {
     project_menu_host: Option<EmbeddedUiSurface<ChatApplication>>,
     chats: Vec<CodexChatSurface>,
     writer_leases: WriterLeases,
+    installation: FeatureInstallation,
 }
 
 struct CodexChatSurface {
@@ -290,12 +369,16 @@ struct CodexRuntimeInput {
     cache_entries: u32,
     source_label: String,
     diagnostic: Option<String>,
+    installation: FeatureInstallation,
 }
 
 fn codex_runtime_from(input: CodexRuntimeInput) -> OptionalFeatureRuntime {
     if !input.enabled {
         return OptionalFeatureRuntime {
             codex_generation: input.generation,
+            codex_support: FeatureSupport::Supported,
+            codex_installation: input.installation,
+            source_label: input.source_label,
             ..Default::default()
         };
     }
@@ -318,6 +401,8 @@ fn codex_runtime_from(input: CodexRuntimeInput) -> OptionalFeatureRuntime {
         codex_generation: input.generation,
         codex_effective: effective,
         codex_health: health,
+        codex_support: FeatureSupport::Supported,
+        codex_installation: input.installation,
         active_windows: input.active_windows,
         background_workers: owned,
         subscriptions: owned + input.active_windows,
@@ -543,6 +628,10 @@ impl CodexSurfaces {
             project_menu_host: None,
             chats: Vec::new(),
             writer_leases: WriterLeases::default(),
+            // UI-host construction and a previous successful connection are not
+            // installation probes. The canonical selector will classify this
+            // source through its first connection snapshot.
+            installation: FeatureInstallation::Missing,
         })
     }
 
@@ -603,6 +692,9 @@ impl CodexSurfaces {
             self.set_enabled(shell, false);
         }
         self.source = settings.codex_source.clone();
+        if source_changed {
+            self.installation = FeatureInstallation::Missing;
+        }
         if settings.codex_enabled {
             self.set_enabled(shell, true);
         }
@@ -637,6 +729,11 @@ impl CodexSurfaces {
                     .then(|| state.provenance.clone()),
                 )
             });
+        if let Some(status) = status.as_ref()
+            && let Some((installation, _)) = codex_availability(status.clone(), authenticated)
+        {
+            self.installation = installation;
+        }
         codex_runtime_from(CodexRuntimeInput {
             enabled: self.enabled,
             generation,
@@ -646,6 +743,7 @@ impl CodexSurfaces {
             cache_entries,
             source_label: format!("{:?}", self.source),
             diagnostic,
+            installation: self.installation,
         })
     }
 
@@ -1918,6 +2016,14 @@ fn main() -> Result<(), String> {
     let mut feature_settings = OptionalFeatureSettings::load_default();
     feature_settings.codex_enabled = feature_settings.effective_codex_enabled();
     let mut codex = CodexSurfaces::new(&shell, &feature_settings)?;
+    state.apply_codex_projection(CodexAvailabilityProjection::new(
+        FeatureSupport::Supported,
+        codex.installation,
+        feature_settings.codex_enabled,
+        FeatureHealth::Loading,
+        feature_settings.codex_generation,
+        Some("Checking the selected Codex backend…".into()),
+    ));
     codex.ensure_project_menu(&shell)?;
     let _ = codex
         .runtime_snapshot(feature_settings.codex_generation)
@@ -2425,9 +2531,13 @@ fn main() -> Result<(), String> {
                 // The panel entry represents the installed integration, not only a healthy,
                 // authenticated connection. Keep it reachable so its UI can explain and recover
                 // from disconnected, incompatible, or signed-out states.
-                let availability_changed =
-                    codex_availability(snapshot.status.clone(), snapshot.account.authenticated)
-                        .is_some_and(|availability| state.set_codex_availability(availability));
+                let availability_changed = state.apply_codex_projection(codex_projection(
+                    &feature_settings,
+                    codex.installation,
+                    snapshot.status.clone(),
+                    snapshot.account.authenticated,
+                    (!snapshot.provenance.is_empty()).then(|| snapshot.provenance.clone()),
+                ));
                 let projects = match snapshot.status {
                     ConnectionStatus::Loading => DashboardSection::Loading,
                     ConnectionStatus::Ready if !snapshot.account.authenticated => {
@@ -2523,15 +2633,25 @@ fn main() -> Result<(), String> {
                 feature_settings = requested;
                 if codex.apply_settings(&mut shell, &feature_settings) {
                     if feature_settings.codex_enabled {
+                        state.apply_codex_projection(CodexAvailabilityProjection::new(
+                            FeatureSupport::Supported,
+                            codex.installation,
+                            true,
+                            FeatureHealth::Loading,
+                            feature_settings.codex_generation,
+                            Some("Checking the selected Codex backend…".into()),
+                        ));
                         if let Err(error) = codex.ensure_project_menu(&shell) {
                             tracing::warn!(%error, "Codex integration could not be enabled");
                         }
                     } else {
-                        state.set_codex_availability(
-                            crate::launcher::CodexAvailability::Unavailable,
-                        );
-                        state.set_dashboard_projects(DashboardSection::Unavailable(
-                            "Codex integration is disabled".into(),
+                        state.apply_codex_projection(CodexAvailabilityProjection::new(
+                            FeatureSupport::Supported,
+                            codex.installation,
+                            false,
+                            FeatureHealth::Unknown,
+                            feature_settings.codex_generation,
+                            Some("Codex integration is disabled".into()),
                         ));
                     }
                     sync_visibility(&mut shell, &state);
@@ -2556,7 +2676,10 @@ fn main() -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{CodexRuntimeInput, FeatureEffectiveState, FeatureHealth, codex_runtime_from};
+    use crate::{
+        CodexRuntimeInput, FeatureEffectiveState, FeatureHealth, FeatureInstallation,
+        codex_runtime_from,
+    };
     use nickel_ui::ControllerAction;
     use std::time::{Duration, Instant};
 
@@ -3187,8 +3310,11 @@ mod tests {
             cache_entries: 99,
             source_label: "ignored".into(),
             diagnostic: None,
+            installation: FeatureInstallation::Installed,
         });
         assert_eq!(runtime.codex_generation, 4);
+        assert_eq!(runtime.codex_installation, FeatureInstallation::Installed);
+        assert_eq!(runtime.source_label, "ignored");
         assert!(runtime.disabled_is_quiescent());
     }
 
@@ -3204,6 +3330,7 @@ mod tests {
                 cache_entries: 3,
                 source_label: "fixture".into(),
                 diagnostic: None,
+                installation: FeatureInstallation::Installed,
             })
         };
         assert_eq!(

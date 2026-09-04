@@ -4,7 +4,10 @@ use std::{
 };
 
 use nickel_codex::{Project, Thread, ThreadId, ThreadRuntime, ThreadRuntimeStatus};
-use nickel_core::launcher_preferences::LauncherPreferences;
+use nickel_core::{
+    launcher_preferences::LauncherPreferences,
+    optional_features::{CodexAvailabilityProjection, CodexPresentation},
+};
 
 use nucleo_matcher::{
     Config, Matcher,
@@ -42,6 +45,7 @@ pub struct Launcher {
     dashboard_projects: DashboardSection<Vec<DashboardProject>>,
     dashboard_account: DashboardSection<DashboardAccount>,
     codex_availability: CodexAvailability,
+    codex_projection: Option<CodexAvailabilityProjection>,
     logout_available: bool,
 }
 
@@ -254,6 +258,7 @@ impl Launcher {
             dashboard_projects: DashboardSection::Loading,
             dashboard_account: DashboardSection::Loading,
             codex_availability: CodexAvailability::Unavailable,
+            codex_projection: None,
             logout_available: true,
         };
         launcher.refresh();
@@ -393,6 +398,48 @@ impl Launcher {
         true
     }
 
+    pub fn apply_codex_projection(&mut self, projection: CodexAvailabilityProjection) -> bool {
+        if self
+            .codex_projection
+            .as_ref()
+            .is_some_and(|current| !projection.accepts_after(current.generation))
+        {
+            return false;
+        }
+        if self.codex_projection.as_ref() == Some(&projection) {
+            return false;
+        }
+        let availability = match projection.presentation() {
+            CodexPresentation::Hidden => CodexAvailability::Unavailable,
+            CodexPresentation::Recoverable => CodexAvailability::Recoverable,
+            CodexPresentation::Projects => CodexAvailability::Ready,
+        };
+        self.codex_projection = Some(projection.clone());
+        self.codex_availability = availability;
+        match projection.presentation() {
+            CodexPresentation::Hidden => {
+                self.dashboard_projects =
+                    DashboardSection::Unavailable(projection.reason.unwrap_or_else(|| {
+                        "Codex is not installed or the integration is disabled".into()
+                    }));
+            }
+            CodexPresentation::Recoverable => {
+                self.dashboard_projects = DashboardSection::Failed {
+                    message: projection
+                        .reason
+                        .unwrap_or_else(|| "Codex needs attention".into()),
+                    recoverable: true,
+                };
+            }
+            CodexPresentation::Projects => {}
+        }
+        true
+    }
+
+    pub fn codex_projection(&self) -> Option<&CodexAvailabilityProjection> {
+        self.codex_projection.as_ref()
+    }
+
     #[cfg(any(test, feature = "workbench-fixtures"))]
     pub fn set_codex_available(&mut self, available: bool) -> bool {
         self.set_codex_availability(if available {
@@ -406,6 +453,15 @@ impl Launcher {
         &mut self,
         projects: DashboardSection<Vec<DashboardProject>>,
     ) -> bool {
+        if self.codex_projection.as_ref().is_some_and(|projection| {
+            projection.presentation() != CodexPresentation::Projects
+                && matches!(
+                    projects,
+                    DashboardSection::Ready(_) | DashboardSection::Empty
+                )
+        }) {
+            return false;
+        }
         if self.dashboard_projects == projects {
             return false;
         }
@@ -690,6 +746,9 @@ mod tests {
     use std::{collections::HashMap, path::PathBuf};
 
     use nickel_codex::{Project, Thread, ThreadId, ThreadRuntime, ThreadRuntimeStatus};
+    use nickel_core::optional_features::{
+        CodexAvailabilityProjection, FeatureHealth, FeatureInstallation, FeatureSupport,
+    };
 
     use super::{
         Application, CodexAvailability, DashboardProject, DashboardSection, Launcher, LauncherMode,
@@ -1085,6 +1144,171 @@ mod tests {
             launcher.codex_availability(),
             CodexAvailability::Recoverable
         );
+    }
+
+    fn projection(
+        installation: FeatureInstallation,
+        enabled: bool,
+        health: FeatureHealth,
+        generation: u64,
+    ) -> CodexAvailabilityProjection {
+        CodexAvailabilityProjection::new(
+            FeatureSupport::Supported,
+            installation,
+            enabled,
+            health,
+            generation,
+            Some("fixture status".into()),
+        )
+    }
+
+    #[test]
+    fn feature_projection_clears_private_rows_and_rejects_stale_generations() {
+        let mut launcher = Launcher::new(Vec::new());
+        launcher.apply_codex_projection(projection(
+            FeatureInstallation::Installed,
+            true,
+            FeatureHealth::Ready,
+            10,
+        ));
+        launcher.set_dashboard_projects(DashboardSection::Ready(vec![DashboardProject {
+            id: "private".into(),
+            name: "Private".into(),
+            roots: vec![PathBuf::from("/private")],
+            chat_count: Some(1),
+            activity: ProjectActivity::Idle,
+            last_used_at: None,
+        }]));
+        assert!(launcher.apply_codex_projection(projection(
+            FeatureInstallation::Installed,
+            false,
+            FeatureHealth::Unknown,
+            11,
+        )));
+        assert!(!launcher.codex_available());
+        assert!(matches!(
+            launcher.dashboard_projects(),
+            DashboardSection::Unavailable(_)
+        ));
+        assert!(!launcher.apply_codex_projection(projection(
+            FeatureInstallation::Installed,
+            true,
+            FeatureHealth::Ready,
+            10,
+        )));
+        assert!(!launcher.codex_available());
+        assert!(!launcher.set_dashboard_projects(DashboardSection::Empty));
+        assert!(matches!(
+            launcher.dashboard_projects(),
+            DashboardSection::Unavailable(_)
+        ));
+    }
+
+    #[test]
+    fn installed_failures_stay_recoverable_without_fictional_projects() {
+        let mut launcher = Launcher::new(Vec::new());
+        for (installation, health) in [
+            (FeatureInstallation::Installed, FeatureHealth::Loading),
+            (FeatureInstallation::Installed, FeatureHealth::SignedOut),
+            (FeatureInstallation::Installed, FeatureHealth::Failed),
+            (FeatureInstallation::Incompatible, FeatureHealth::Failed),
+        ] {
+            launcher.apply_codex_projection(projection(installation, true, health, 20));
+            assert!(launcher.codex_available());
+            assert!(matches!(
+                launcher.dashboard_projects(),
+                DashboardSection::Failed {
+                    recoverable: true,
+                    ..
+                }
+            ));
+        }
+        launcher.apply_codex_projection(projection(
+            FeatureInstallation::Missing,
+            true,
+            FeatureHealth::Failed,
+            21,
+        ));
+        assert!(!launcher.codex_available());
+    }
+
+    #[test]
+    fn every_feature_dimension_drives_exact_launcher_visibility() {
+        for support in [FeatureSupport::Supported, FeatureSupport::Unsupported] {
+            for installation in [
+                FeatureInstallation::Installed,
+                FeatureInstallation::Missing,
+                FeatureInstallation::Incompatible,
+            ] {
+                for enabled in [false, true] {
+                    for health in [
+                        FeatureHealth::Unknown,
+                        FeatureHealth::Loading,
+                        FeatureHealth::SignedOut,
+                        FeatureHealth::Ready,
+                        FeatureHealth::Failed,
+                    ] {
+                        let mut launcher = Launcher::new(Vec::new());
+                        launcher.apply_codex_projection(CodexAvailabilityProjection::new(
+                            support,
+                            installation,
+                            enabled,
+                            health,
+                            1,
+                            Some("bounded status".into()),
+                        ));
+                        let presentation = launcher
+                            .codex_projection()
+                            .expect("projection was retained")
+                            .presentation();
+                        assert_eq!(
+                            launcher.codex_available(),
+                            presentation
+                                != nickel_core::optional_features::CodexPresentation::Hidden,
+                            "{support:?} {installation:?} {enabled} {health:?}",
+                        );
+                        match presentation {
+                            nickel_core::optional_features::CodexPresentation::Hidden => {
+                                assert!(matches!(
+                                    launcher.dashboard_projects(),
+                                    DashboardSection::Unavailable(_)
+                                ))
+                            }
+                            nickel_core::optional_features::CodexPresentation::Recoverable => {
+                                assert!(matches!(
+                                    launcher.dashboard_projects(),
+                                    DashboardSection::Failed {
+                                        recoverable: true,
+                                        ..
+                                    }
+                                ));
+                            }
+                            nickel_core::optional_features::CodexPresentation::Projects => {
+                                assert_eq!(launcher.codex_availability(), CodexAvailability::Ready);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ready_empty_projects_is_distinct_from_unavailable() {
+        let mut launcher = Launcher::new(Vec::new());
+        launcher.apply_codex_projection(projection(
+            FeatureInstallation::Installed,
+            true,
+            FeatureHealth::Ready,
+            30,
+        ));
+        assert!(launcher.set_dashboard_projects(DashboardSection::Empty));
+        assert!(launcher.codex_available());
+        assert_eq!(launcher.codex_availability(), CodexAvailability::Ready);
+        assert!(matches!(
+            launcher.dashboard_projects(),
+            DashboardSection::Empty
+        ));
     }
 
     #[cfg(unix)]
