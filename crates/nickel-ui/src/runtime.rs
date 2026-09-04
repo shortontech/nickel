@@ -3830,12 +3830,14 @@ mod tests {
             2
         );
         let first = host.inspect().controller_target.unwrap();
+        let selected_background =
+            crate::focused_surface_with_foreground(0x202630, 0x334455, 0xe8edf4);
         let first_selected_rect = host
             .commands()
             .iter()
             .find_map(|command| match command {
                 crate::backend::PaintCommand::RoundedFill { rect, color, .. }
-                    if *color == 0x334455 =>
+                    if *color == selected_background =>
                 {
                     Some(*rect)
                 }
@@ -3863,7 +3865,7 @@ mod tests {
             .iter()
             .find_map(|command| match command {
                 crate::backend::PaintCommand::RoundedFill { rect, color, .. }
-                    if *color == 0x334455 =>
+                    if *color == selected_background =>
                 {
                     Some(*rect)
                 }

@@ -428,7 +428,11 @@ impl<Message> OverlayMenu<Message> {
     pub fn semantic_style(mut self, style: OverlayStyle) -> Self {
         self.background = style.background;
         self.foreground = style.foreground;
-        self.item_selected = Some(style.selected);
+        self.item_selected = Some(crate::focused_surface_with_foreground(
+            style.background,
+            style.selected,
+            style.foreground,
+        ));
         self.radius = f32::from(style.radius);
         self
     }
@@ -913,7 +917,14 @@ mod tests {
             .semantic_style(style);
         assert_eq!(menu.kind, TransientKind::Tooltip);
         assert_eq!(menu.background, theme.surfaces.raised);
-        assert_eq!(menu.item_selected, Some(theme.surfaces.selected));
+        assert_eq!(
+            menu.item_selected,
+            Some(crate::focused_surface_with_foreground(
+                theme.surfaces.raised,
+                theme.surfaces.selected,
+                theme.text.primary,
+            ))
+        );
         let tooltip = TransientSurface::tooltip(
             "help",
             OverlayAnchor::Node("anchor".into()),

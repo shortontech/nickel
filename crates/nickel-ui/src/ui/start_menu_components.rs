@@ -267,6 +267,9 @@ impl<Message> ActionLegend<Message> {
         available_width: f32,
         glyphs_available: bool,
     ) -> Self {
+        // This colors a controller-button legend glyph; it is foreground
+        // instruction chrome, not focus presentation.
+        let controller_glyph = theme.borders.controller_focus;
         let density = if available_width < ACTION_LEGEND_COMPACT_BREAKPOINT {
             ActionLegendDensity::Compact
         } else {
@@ -310,12 +313,12 @@ impl<Message> ActionLegend<Message> {
                             .min_height(26.0)
                             .shrink(0.0)
                             .radius(theme.radii.control)
-                            .border(theme.borders.controller_focus, 1.5)
+                            .border(controller_glyph, 1.5)
                             .align_items(Align::Center)
                             .justify_content(Justify::Center)
                             .child(
                                 Text::new(visual_control)
-                                    .color(theme.borders.controller_focus)
+                                    .color(controller_glyph)
                                     .scale(0.82),
                             ),
                     );
@@ -517,7 +520,10 @@ impl<Message> Component<Message> for StartMenuShell<Message> {
                         .id("start-menu-primary-pane")
                         .width(280.0)
                         .navigation_scope(crate::NavigationScope::pane(false))
-                        .navigation_scope_highlight(theme.borders.controller_focus)
+                        .controller_scope_background(crate::focused_surface(
+                            theme.surfaces.card,
+                            theme.borders.controller_focus,
+                        ))
                         .child(primary),
                 )
                 .child(
@@ -525,7 +531,10 @@ impl<Message> Component<Message> for StartMenuShell<Message> {
                         .id("start-menu-detail-pane")
                         .grow(1.0)
                         .navigation_scope(crate::NavigationScope::pane(true))
-                        .navigation_scope_highlight(theme.borders.controller_focus)
+                        .controller_scope_background(crate::focused_surface(
+                            theme.surfaces.card,
+                            theme.borders.controller_focus,
+                        ))
                         .border(theme.borders.subtle, theme.sizing.border)
                         .child(detail_pane),
                 );
@@ -712,6 +721,11 @@ impl<Message> ShortcutRow<Message> {
         } else {
             "available"
         };
+        let background = if state.focused {
+            crate::focused_surface(background, theme.borders.focus)
+        } else {
+            background
+        };
         let mut row = Container::new()
             .fill_width()
             .min_height(52.0)
@@ -722,10 +736,11 @@ impl<Message> ShortcutRow<Message> {
             .accessibility_description(&supporting)
             .accessibility_state(semantic_state)
             .enabled(state.enabled)
-            .controller_focus_background_tint(theme.borders.controller_focus)
             .child(content);
-        if state.focused {
-            row = row.border(theme.borders.focus, 2.0);
+        if !state.focused {
+            row = row
+                .focus_background_tint(theme.borders.focus)
+                .controller_focus_background_tint(theme.borders.controller_focus);
         }
         if state.enabled
             && let Some(message) = message
@@ -1802,7 +1817,8 @@ mod tests {
         assert!(focused.commands().iter().any(|command| matches!(
             command,
             PaintCommand::RoundedFill { color, radius, .. }
-                if *color == theme().borders.focus && *radius == theme().radii.control
+                if *color == crate::focused_surface(theme().surfaces.window, theme().borders.focus)
+                    && *radius == theme().radii.control
         )));
         assert!(focused.accessibility_nodes().iter().any(|node| {
             node.label.as_deref() == Some("Focused") && node.state.as_deref() == Some("focused")

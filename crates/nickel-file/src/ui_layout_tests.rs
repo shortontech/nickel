@@ -2293,7 +2293,7 @@ fn controller_context_uses_target_geometry_not_stale_pointer_position() {
 }
 
 #[test]
-fn ordinary_controller_target_has_a_distinct_visible_focus_ring() {
+fn ordinary_controller_target_has_a_distinct_visible_focus_background() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("report.txt"), b"x").unwrap();
     let mut host = UiHost::new(FileApp::new(directory.path().to_path_buf()), 860, 620);
@@ -2518,6 +2518,9 @@ fn focused_selection_is_visually_distinct_and_survives_window_focus_loss() {
     let mut scenario = Scenario::new(FileApp::fixture(), 820, 620);
     let entry = entry_selector(&scenario, "/file-entry-0");
     scenario.pointer_activate(&entry).unwrap();
+    // Enter keyboard modality explicitly; pointer focus alone must not acquire
+    // keyboard focus presentation.
+    scenario.keyboard_focus(FocusDirection::Next).unwrap();
     for _ in 0..64 {
         if scenario.host().inspect().keyboard_focus.as_ref()
             == match &entry {

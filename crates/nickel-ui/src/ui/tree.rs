@@ -6564,6 +6564,12 @@ fn apply_transient_state<Message>(
     id: &UiId,
     state: &mut UiStateStore,
 ) {
+    let focus_foreground = element.style.foreground.or_else(|| {
+        element
+            .children
+            .iter()
+            .find_map(|child| focus_participating_foreground(child))
+    });
     let owns_state = element.message.is_some()
         || element.navigation_scope.is_some()
         || element.text_mapper.is_some()
@@ -6574,9 +6580,17 @@ fn apply_transient_state<Message>(
             Kind::VerticalScroll { .. } | Kind::Dropdown { .. }
         );
     if owns_state {
-        if element.navigation_scope.is_some()
+        let scope_background_active = state.window_focused()
+            && element.navigation_scope.is_some()
             && (state.navigation().controller_selected() == Some(id)
-                || state.navigation().controller_scope() == Some(id))
+                || state.navigation().controller_scope() == Some(id)
+                || (element
+                    .navigation_scope
+                    .as_ref()
+                    .is_some_and(|scope| scope.pane)
+                    && state.navigation().controller_pane() == Some(id)))
+            && element.style.controller_scope_background.is_some();
+        if scope_background_active
             && let Some(background) = element.style.controller_scope_background
         {
             element.style.background = Some(background);
@@ -6602,25 +6616,33 @@ fn apply_transient_state<Message>(
         {
             element.style.background = Some(background);
         }
-        let active_focus_tint =
+        let active_focus_tint = if scope_background_active {
+            None
+        } else {
             if state.window_focused() && state.navigation().controller_selected() == Some(id) {
                 element
                     .style
                     .controller_focus_background_tint
                     .or(element.style.focus_background_tint)
-            } else if state.focused() == Some(id)
+                    .or(Some(crate::theme::FALLBACK_CONTROLLER_FOCUS_CUE))
+            } else if state.window_focused()
+                && state.focused() == Some(id)
                 && matches!(
                     state.input_modality(),
                     InputModality::Keyboard | InputModality::Accessibility
                 )
             {
-                element.style.focus_background_tint
+                element
+                    .style
+                    .focus_background_tint
+                    .or(Some(crate::theme::FALLBACK_KEYBOARD_FOCUS_CUE))
             } else {
                 None
-            };
+            }
+        };
         if let Some(tint) = active_focus_tint {
             let transform = |color| {
-                element.style.foreground.map_or_else(
+                focus_foreground.map_or_else(
                     || crate::focused_surface(color, tint),
                     |foreground| crate::focused_surface_with_foreground(color, tint, foreground),
                 )
@@ -6632,19 +6654,8 @@ fn apply_transient_state<Message>(
                     gradient.end = transform(gradient.end);
                     Background::LinearGradient(gradient)
                 }
-                None => Background::Solid(transform(0x202020)),
+                None => Background::Solid(transform(crate::theme::FALLBACK_FOCUS_SURFACE)),
             });
-        }
-        if state.window_focused()
-            && element
-                .navigation_scope
-                .as_ref()
-                .is_some_and(|scope| scope.pane)
-            && state.navigation().controller_pane() == Some(id)
-            && let Some(border) = element.style.controller_pane_border
-        {
-            element.style.border = Some(border);
-            element.style.border_width = element.style.border_width.max(3.0);
         }
         let requested_open_generation = match &element.kind {
             Kind::Dropdown {
@@ -6778,6 +6789,15 @@ fn apply_transient_state<Message>(
         );
         apply_transient_state(child, &child_id, state);
     }
+}
+
+fn focus_participating_foreground<Message>(element: &Element<Message>) -> Option<Color> {
+    element.style.foreground.or_else(|| {
+        element
+            .children
+            .iter()
+            .find_map(focus_participating_foreground)
+    })
 }
 
 fn resolve_grid_columns(

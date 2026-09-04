@@ -190,11 +190,11 @@ mod declarative_tests {
         let view = ui! {
             <Row>
                 <Container id={"sidebar"} navigation_scope={NavigationScope::pane(false)}
-                    navigation_scope_highlight={0x8b5cf6}>
+                    controller_scope_background={0x24203a}>
                     <Button on_press={Message::Save}>{"Save"}</Button>
                 </Container>
                 <Container id={"content"} navigation_scope={NavigationScope::pane(true)}
-                    navigation_scope_highlight={0x8b5cf6}>
+                    controller_scope_background={0x24203a}>
                     <Container id={"audio"} navigation_scope={NavigationScope::group()}
                         controller_focus_background_tint={0x55d98b}>
                         <Slider id={"volume"} value={0.5} on_change={volume}

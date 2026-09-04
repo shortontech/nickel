@@ -1,5 +1,12 @@
 use crate::Color;
 
+/// Canonical semantic surface used only when a generic focusable control has
+/// no painted background of its own and therefore cannot supply a theme role.
+pub const FALLBACK_FOCUS_SURFACE: Color = 0x202630;
+/// Canonical cues for generic controls that predate semantic theme injection.
+pub const FALLBACK_KEYBOARD_FOCUS_CUE: Color = 0x8b5cf6;
+pub const FALLBACK_CONTROLLER_FOCUS_CUE: Color = 0x55d98b;
+
 /// Resolve a keyboard/controller focus cue into a child-surface color.
 ///
 /// Saturated surfaces borrow the semantic cue's hue. As the surface becomes

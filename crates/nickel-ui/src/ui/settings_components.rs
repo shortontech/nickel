@@ -432,7 +432,10 @@ impl<Message> SettingsNavigation<Message> {
                 .border(theme.borders.subtle, 1.0)
                 .overflow_y(Overflow::Auto)
                 .navigation_scope(NavigationScope::pane(false))
-                .navigation_scope_highlight(theme.borders.controller_focus);
+                .controller_scope_background(crate::focused_surface(
+                    theme.surfaces.sidebar,
+                    theme.borders.controller_focus,
+                ));
         }
         Self(navigation)
     }
@@ -509,7 +512,10 @@ impl<Message> SettingsShell<Message> {
             .fill_height()
             .border(theme.borders.subtle, 1.0)
             .navigation_scope(NavigationScope::pane(true))
-            .navigation_scope_highlight(theme.borders.controller_focus)
+            .controller_scope_background(crate::focused_surface(
+                theme.surfaces.window,
+                theme.borders.controller_focus,
+            ))
             .child(content);
         let root = if viewport_width < SETTINGS_SHELL_NARROW_BREAKPOINT {
             Container::new().child(
@@ -769,8 +775,8 @@ impl<Message> SettingsCard<Message> {
                     NavigationScope::group().traversal(crate::NavigationTraversal::Vertical),
                 )
                 // A card is a navigation waypoint, not an activated choice. Keep
-                // its scope cue to a quiet hue shift; leaf controls retain the
-                // high-contrast controller focus outline.
+                // its scope cue to a quiet background shift; leaf controls use
+                // their own focused child surfaces.
                 .controller_scope_background(theme.surfaces.hover),
         )
     }
@@ -1852,9 +1858,10 @@ mod tests {
         )));
         let _ = hovered.handle_event(&mut state, UiEvent::FocusNext);
         let focused = UiFrame::layout_with_state(view(), bounds, &mut state);
+        let focus_background = crate::focused_surface(theme.surfaces.card, theme.borders.focus);
         assert!(focused.commands().iter().any(|command| matches!(
             command,
-            PaintCommand::Stroke { color, .. } if *color == theme.borders.focus
+            PaintCommand::RoundedFill { color, .. } if *color == focus_background
         )));
         assert!(focused.accessibility_nodes().iter().any(|node| {
             node.role.as_deref() == Some("option") && node.state.as_deref() == Some("selected")
@@ -2674,7 +2681,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_navigation_owns_its_controller_pane_glow() {
+    fn settings_navigation_owns_its_controller_pane_background() {
         let theme = theme();
         let build = || {
             SettingsNavigation::new(theme, 220.0).item(NavigationItem::new(
@@ -2702,10 +2709,11 @@ mod tests {
         state.navigation_mut().set_controller_pane(Some(sidebar));
 
         let selected = UiFrame::layout_with_state(build(), bounds, &mut state);
+        let focused_sidebar =
+            crate::focused_surface(theme.surfaces.sidebar, theme.borders.controller_focus);
         assert!(selected.commands().iter().any(|command| matches!(
             command,
-            PaintCommand::Stroke { color, width, .. }
-                if *color == theme.borders.controller_focus && *width == 3.0
+            PaintCommand::Fill { color, .. } if *color == focused_sidebar
         )));
     }
 

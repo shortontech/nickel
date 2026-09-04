@@ -861,7 +861,6 @@ pub struct Style {
     pub focus_background_tint: Option<Color>,
     /// Semantic hue/lightness cue applied to the current controller target.
     pub controller_focus_background_tint: Option<Color>,
-    pub controller_pane_border: Option<Color>,
     /// Semantic background applied to a selected or entered controller scope.
     pub controller_scope_background: Option<Background>,
     pub text_align: TextAlign,
@@ -926,7 +925,6 @@ impl Default for Style {
             pressed_background: None,
             focus_background_tint: None,
             controller_focus_background_tint: None,
-            controller_pane_border: None,
             controller_scope_background: None,
             text_align: TextAlign::Start,
             padding: Insets::default(),
@@ -1223,11 +1221,6 @@ impl<Message> Element<Message> {
 
     pub fn navigation_scope(mut self, scope: NavigationScope) -> Self {
         self.navigation_scope = Some(scope);
-        self
-    }
-
-    pub fn navigation_scope_highlight(mut self, highlight: Color) -> Self {
-        self.style.controller_pane_border = Some(highlight);
         self
     }
 

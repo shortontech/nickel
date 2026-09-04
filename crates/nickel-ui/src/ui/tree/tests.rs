@@ -2953,7 +2953,7 @@ fn controller_selected_value_uses_child_background_without_a_focus_stroke() {
         slider_state.navigation().controller_selected(),
         Some(&UiId::from("root/volume"))
     );
-    let expected = crate::focused_surface(0x202020, CONTROLLER_FOCUS);
+    let expected = crate::focused_surface(crate::theme::FALLBACK_FOCUS_SURFACE, CONTROLLER_FOCUS);
     assert!(
         selected_slider.commands().iter().any(
             |command| matches!(command, PaintCommand::Fill { color, .. } if *color == expected)

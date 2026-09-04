@@ -244,7 +244,10 @@ where
             .background(self.theme.surfaces.sidebar)
             .semantic_role(SemanticRole::List)
             .navigation_scope(NavigationScope::pane(active.is_none()))
-            .navigation_scope_highlight(self.theme.borders.controller_focus);
+            .controller_scope_background(crate::focused_surface(
+                self.theme.surfaces.sidebar,
+                self.theme.borders.controller_focus,
+            ));
         if let Some(header) = self.navigation_header {
             navigation = navigation.child(header);
         }
@@ -296,7 +299,10 @@ where
                 .background(self.theme.surfaces.window)
                 .semantic_role(SemanticRole::TabPanel)
                 .navigation_scope(NavigationScope::pane(true))
-                .navigation_scope_highlight(self.theme.borders.controller_focus);
+                .controller_scope_background(crate::focused_surface(
+                    self.theme.surfaces.window,
+                    self.theme.borders.controller_focus,
+                ));
             if let Some(header) = header {
                 content = content.child(header);
             }

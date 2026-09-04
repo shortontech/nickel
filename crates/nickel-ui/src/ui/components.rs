@@ -1384,11 +1384,6 @@ impl<Message> Container<Message> {
         self
     }
 
-    pub fn navigation_scope_highlight(mut self, highlight: Color) -> Self {
-        self.0 = self.0.navigation_scope_highlight(highlight);
-        self
-    }
-
     pub fn controller_scope_background(mut self, background: impl Into<Background>) -> Self {
         self.0 = self.0.controller_scope_background(background);
         self
