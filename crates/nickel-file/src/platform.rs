@@ -1,7 +1,11 @@
 use std::{
     collections::HashSet,
+    fmt,
     path::{Path, PathBuf},
 };
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::io;
 
 pub(crate) fn publish_text_clipboard(text: &str) -> Result<(), String> {
     let mut clipboard = arboard::Clipboard::new().map_err(|error| error.to_string())?;
@@ -204,6 +208,40 @@ pub(crate) fn publish_file_clipboard(_paths: &[PathBuf], _cut: bool) -> Result<(
 #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 pub(crate) fn read_file_clipboard() -> Result<(bool, Vec<PathBuf>), String> {
     Err("native file clipboard adapter unavailable".into())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum OpenPathError {
+    AssociationMissing,
+    PermissionDenied,
+    TargetMissing,
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+    Unsupported,
+    Platform(String),
+}
+
+impl fmt::Display for OpenPathError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AssociationMissing => formatter.write_str("no default application is available"),
+            Self::PermissionDenied => formatter.write_str("permission was denied"),
+            Self::TargetMissing => formatter.write_str("the target no longer exists"),
+            #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+            Self::Unsupported => {
+                formatter.write_str("opening files is unsupported on this platform")
+            }
+            Self::Platform(error) => formatter.write_str(error),
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn spawn_open_error(error: io::Error) -> OpenPathError {
+    match error.kind() {
+        io::ErrorKind::NotFound => OpenPathError::AssociationMissing,
+        io::ErrorKind::PermissionDenied => OpenPathError::PermissionDenied,
+        _ => OpenPathError::Platform(error.to_string()),
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
