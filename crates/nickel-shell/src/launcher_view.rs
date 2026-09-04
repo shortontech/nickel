@@ -1491,18 +1491,19 @@ mod tests {
             target.as_str().contains("launcher-applications/"),
             "{target:?}"
         );
-        let bounds = host
-            .accessibility_nodes()
-            .iter()
-            .find(|node| node.id == target)
-            .expect("selected tile remains in accessibility tree")
-            .rect;
-        let focus = launcher_semantic_theme(palette()).borders.controller_focus;
+        assert!(
+            host.accessibility_nodes()
+                .iter()
+                .any(|node| node.id == target)
+        );
+        let theme = launcher_semantic_theme(palette());
+        let focused_background =
+            nickel_ui::focused_surface(0x202020, theme.borders.controller_focus);
         assert!(host.commands().iter().any(|command| {
             matches!(
                 command,
-                nickel_ui::backend::PaintCommand::Stroke { rect, color, width }
-                    if *rect == bounds && *color == focus && *width >= 2.0
+                nickel_ui::backend::PaintCommand::Fill { color, .. }
+                    if *color == focused_background
             )
         }));
         let labels = accessibility_labels(&host);
