@@ -1819,6 +1819,7 @@ impl NickelSession {
         );
         self.restore_output_windows(&output);
         self.relayout_shell_surfaces();
+        self.reconstrain_all_reactive_popups();
         self.schedule_render(node, Duration::ZERO);
         tracing::info!(output = %name, "DRM output connected");
         Ok(())
@@ -1866,6 +1867,7 @@ impl NickelSession {
         self.relayout_maximized_windows();
         self.relayout_fullscreen_windows();
         self.relayout_shell_surfaces();
+        self.reconstrain_all_reactive_popups();
         tracing::info!(output = %name, "DRM output disconnected");
     }
 
@@ -1980,6 +1982,7 @@ impl NickelSession {
         self.relayout_maximized_windows();
         self.relayout_fullscreen_windows();
         self.relayout_shell_surfaces();
+        self.reconstrain_all_reactive_popups();
         self.retire_inactive_renderers();
         tracing::info!(output = %name, "DRM output disabled by user");
         Ok(())
@@ -2077,6 +2080,7 @@ impl NickelSession {
         self.relayout_maximized_windows();
         self.relayout_fullscreen_windows();
         self.relayout_shell_surfaces();
+        self.reconstrain_all_reactive_popups();
         self.retire_inactive_renderers();
         tracing::info!(%node, forget_discovery, "DRM device resources retired");
     }

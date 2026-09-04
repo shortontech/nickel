@@ -2316,6 +2316,7 @@ impl NickelSession {
             }
         }
         self.relayout_shell_surfaces();
+        self.reconstrain_all_reactive_popups();
         self.request_output_redraw();
         self.notify_protocol_snapshot();
         Ok(())
@@ -2802,6 +2803,7 @@ impl NickelSession {
         }
         self.rescue_stranded_windows();
         self.relayout_shell_surfaces();
+        self.reconstrain_all_reactive_popups();
         self.notify_protocol_snapshot();
         Ok(())
     }
@@ -3835,7 +3837,13 @@ impl NickelSession {
             };
             let _ = surface.configure(Rectangle::new(location, size));
         }
+        let popup_root = window
+            .toplevel()
+            .map(|surface| surface.wl_surface().clone());
         self.map_buffered_window(window, location, activate);
+        if let Some(root) = popup_root {
+            self.reconstrain_reactive_popups(&root);
+        }
     }
 
     pub fn shell_windows(&self) -> impl Iterator<Item = &Window> {

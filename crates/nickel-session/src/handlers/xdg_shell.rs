@@ -15,7 +15,7 @@ use smithay::{
             protocol::{wl_seat, wl_surface::WlSurface},
         },
     },
-    utils::{Rectangle, Serial},
+    utils::{Logical, Point, Rectangle, Serial},
     wayland::{
         compositor::with_states,
         seat::WaylandFocus,
@@ -51,6 +51,33 @@ fn is_codex_project_chat(app_id: Option<&str>) -> bool {
 
 fn shell_owned_window_is_application(app_id: &str, shell_role: Option<ShellRole>) -> bool {
     !app_id.is_empty() && shell_role.is_none() && ShellRole::from_application_id(app_id).is_none()
+}
+
+fn popup_output_for_anchor(
+    outputs: impl IntoIterator<Item = Rectangle<i32, Logical>>,
+    anchor: Point<i32, Logical>,
+) -> Option<Rectangle<i32, Logical>> {
+    outputs
+        .into_iter()
+        .filter(|geometry| geometry.contains(anchor))
+        .min_by_key(|geometry| {
+            (
+                geometry.loc.x,
+                geometry.loc.y,
+                geometry.size.w,
+                geometry.size.h,
+            )
+        })
+}
+
+fn popup_constraint_area(output: Rectangle<i32, Logical>) -> Rectangle<i32, Logical> {
+    let area = shell_layout::work_area(shell_layout::Geometry {
+        x: output.loc.x,
+        y: output.loc.y,
+        width: output.size.w,
+        height: output.size.h,
+    });
+    Rectangle::new((area.x, area.y).into(), (area.width, area.height).into())
 }
 
 fn unauthenticated_reserved_shell_role(
@@ -191,8 +218,9 @@ impl XdgShellHandler for NickelSession {
     }
 
     fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {
-        self.unconstrain_popup(&surface);
-        let _ = self.popups.track_popup(PopupKind::Xdg(surface));
+        if self.unconstrain_popup(&surface) {
+            let _ = self.popups.track_popup(PopupKind::Xdg(surface));
+        }
     }
 
     fn reposition_request(
@@ -206,8 +234,9 @@ impl XdgShellHandler for NickelSession {
             state.geometry = geometry;
             state.positioner = positioner;
         });
-        self.unconstrain_popup(&surface);
-        surface.send_repositioned(token);
+        if self.unconstrain_popup(&surface) {
+            surface.send_repositioned(token);
+        }
     }
 
     fn move_request(&mut self, surface: ToplevelSurface, seat: wl_seat::WlSeat, serial: Serial) {
@@ -796,41 +825,152 @@ impl NickelSession {
         }
     }
 
-    fn unconstrain_popup(&self, popup: &PopupSurface) {
+    pub(crate) fn reconstrain_reactive_popups(&self, root: &WlSurface) {
+        let popups = PopupManager::popups_for_surface(root)
+            .filter_map(|(popup, _)| match popup {
+                PopupKind::Xdg(popup)
+                    if popup.with_pending_state(|state| state.positioner.reactive) =>
+                {
+                    Some(popup)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for popup in popups {
+            if self.unconstrain_popup(&popup)
+                && let Err(error) = popup.send_pending_configure()
+            {
+                tracing::debug!(?error, "could not reconfigure reactive xdg popup");
+            }
+        }
+    }
+
+    pub(crate) fn reconstrain_all_reactive_popups(&self) {
+        let roots = self
+            .space
+            .elements()
+            .filter_map(|window| {
+                window
+                    .toplevel()
+                    .map(|surface| surface.wl_surface().clone())
+            })
+            .collect::<Vec<_>>();
+        for root in roots {
+            self.reconstrain_reactive_popups(&root);
+        }
+    }
+
+    fn unconstrain_popup(&self, popup: &PopupSurface) -> bool {
         let Ok(root) = find_popup_root_surface(&PopupKind::Xdg(popup.clone())) else {
-            return;
+            popup.send_popup_done();
+            return false;
         };
         let Some(window) = self.space.elements().find(|window| {
             window
                 .toplevel()
                 .is_some_and(|toplevel| toplevel.wl_surface() == &root)
         }) else {
-            return;
+            popup.send_popup_done();
+            return false;
         };
 
-        let output = self.space.outputs().next().unwrap();
-        let output_geo = self.space.output_geometry(output).unwrap();
-        let window_geo = self.space.element_geometry(window).unwrap();
+        let Some(window_geo) = self.space.element_geometry(window) else {
+            popup.send_popup_done();
+            return false;
+        };
+        let popup_from_toplevel = get_popup_toplevel_coords(&PopupKind::Xdg(popup.clone()));
+        let anchor = popup.with_pending_state(|state| {
+            window_geo.loc + popup_from_toplevel + state.positioner.get_anchor_point()
+        });
+        let Some(output_geo) = popup_output_for_anchor(
+            self.space
+                .outputs()
+                .filter_map(|output| self.space.output_geometry(output)),
+            anchor,
+        ) else {
+            tracing::debug!(
+                popup = ?popup.wl_surface().id(),
+                parent = ?root.id(),
+                ?anchor,
+                "dismissing xdg popup whose parent anchor is outside enabled outputs"
+            );
+            popup.send_popup_done();
+            return false;
+        };
+        let output_work_area = popup_constraint_area(output_geo);
 
         // The target geometry for the positioner should be relative to its parent's geometry, so
         // we will compute that here.
-        let mut target = output_geo;
-        target.loc -= get_popup_toplevel_coords(&PopupKind::Xdg(popup.clone()));
+        let mut target = output_work_area;
+        target.loc -= popup_from_toplevel;
         target.loc -= window_geo.loc;
 
         popup.with_pending_state(|state| {
             state.geometry = state.positioner.get_unconstrained_geometry(target);
+            tracing::debug!(
+                popup = ?popup.wl_surface().id(),
+                parent = ?root.id(),
+                ?anchor,
+                selected_output = ?output_geo,
+                requested_geometry = ?state.positioner.get_geometry(),
+                final_geometry = ?state.geometry,
+                "positioned xdg popup from its parent-local anchor"
+            );
         });
+        true
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        admit_xdg_toplevel, is_codex_project_chat, new_toplevel_may_focus,
-        shell_owned_window_is_application, unauthenticated_reserved_shell_role,
+        admit_xdg_toplevel, is_codex_project_chat, new_toplevel_may_focus, popup_constraint_area,
+        popup_output_for_anchor, shell_owned_window_is_application,
+        unauthenticated_reserved_shell_role,
     };
     use nickel_session_protocol::ShellRole;
+    use smithay::utils::Rectangle;
+
+    #[test]
+    fn popup_anchor_selects_its_parent_output_with_negative_and_reordered_origins() {
+        let left = Rectangle::new((-1920, 0).into(), (1920, 1080).into());
+        let right = Rectangle::new((0, 0).into(), (2560, 1440).into());
+
+        assert_eq!(
+            popup_output_for_anchor([right, left], (-220, 400).into()),
+            Some(left)
+        );
+        assert_eq!(
+            popup_output_for_anchor([left, right], (2100, 700).into()),
+            Some(right)
+        );
+    }
+
+    #[test]
+    fn popup_anchor_on_boundary_has_a_stable_half_open_owner() {
+        let left = Rectangle::new((-1920, 0).into(), (1920, 1080).into());
+        let right = Rectangle::new((0, 0).into(), (2560, 1440).into());
+
+        assert_eq!(
+            popup_output_for_anchor([right, left], (0, 500).into()),
+            Some(right)
+        );
+    }
+
+    #[test]
+    fn popup_anchor_outside_enabled_outputs_is_rejected() {
+        let output = Rectangle::new((100, 200).into(), (800, 600).into());
+        assert_eq!(popup_output_for_anchor([output], (99, 200).into()), None);
+    }
+
+    #[test]
+    fn popup_constraints_reserve_the_panel_on_the_selected_output() {
+        let output = Rectangle::new((-1600, 240).into(), (1600, 900).into());
+        assert_eq!(
+            popup_constraint_area(output),
+            Rectangle::new((-1600, 240).into(), (1600, 844).into())
+        );
+    }
 
     #[test]
     fn ordinary_exhaustion_preserves_critical_authenticated_shell_admission() {
