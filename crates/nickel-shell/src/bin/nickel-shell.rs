@@ -249,6 +249,7 @@ const SHELL_STARTUP_BARRIER_ENV: &str = "NICKEL_SHELL_STARTUP_BARRIER";
 const SHELL_STARTUP_BARRIER_MAGIC: &[u8; 8] = b"NIKREADY";
 
 struct CodexSurfaces {
+    enabled: bool,
     project_menu: SurfaceId,
     project_menu_cwd: std::path::PathBuf,
     project_menu_host: Option<EmbeddedUiSurface<ChatApplication>>,
@@ -449,6 +450,9 @@ impl CodexSurfaces {
     }
 
     fn poll_due(&mut self, now: Instant) -> (bool, Vec<SurfaceId>) {
+        if !self.enabled {
+            return (false, Vec::new());
+        }
         let (project_menu_changed, mut redraw) =
             poll_due_codex_hosts(self.project_menu_host.as_mut(), &mut self.chats, now);
         if project_menu_changed {
@@ -457,12 +461,13 @@ impl CodexSurfaces {
         (project_menu_changed, redraw)
     }
 
-    fn new(shell: &WinitShell) -> Result<Self, String> {
+    fn new(shell: &WinitShell, enabled: bool) -> Result<Self, String> {
         let project_menu = shell
             .surfaces()
             .find(|surface| surface.role() == SurfaceRole::CodexProjectMenu)
             .ok_or_else(|| "Codex project_menu surface is missing".to_owned())?;
         Ok(Self {
+            enabled,
             project_menu: project_menu.id(),
             project_menu_cwd: std::env::current_dir().map_err(|error| error.to_string())?,
             project_menu_host: None,
@@ -472,6 +477,9 @@ impl CodexSurfaces {
     }
 
     fn ensure_project_menu(&mut self, shell: &WinitShell) -> Result<(), String> {
+        if !self.enabled {
+            return Ok(());
+        }
         if self.project_menu_host.is_some() {
             return Ok(());
         }
@@ -487,6 +495,22 @@ impl CodexSurfaces {
             Instant::now(),
         ));
         Ok(())
+    }
+
+    fn set_enabled(&mut self, shell: &mut WinitShell, enabled: bool) -> bool {
+        if self.enabled == enabled {
+            return false;
+        }
+        self.enabled = enabled;
+        if !enabled {
+            self.project_menu_host = None;
+            self.writer_leases.0.clear();
+            for chat in self.chats.drain(..) {
+                shell.destroy_surface(chat.id);
+            }
+            shell.hide(self.project_menu);
+        }
+        true
     }
 
     fn present(&mut self, shell: &mut WinitShell, surface: SurfaceId) -> Result<(), HostFailure> {
@@ -625,6 +649,9 @@ impl CodexSurfaces {
         name: String,
         initial_thread: Option<ThreadId>,
     ) -> Result<(), String> {
+        if !self.enabled {
+            return Err("Codex integration is disabled".into());
+        }
         if let Some(chat) = self.chats.iter().find(|chat| {
             chat.project_id == project_id
                 && (initial_thread.is_some() && chat.thread_id == initial_thread
@@ -1612,7 +1639,9 @@ fn main() -> Result<(), String> {
     #[cfg(target_os = "linux")]
     wait_for_shell_readiness()?;
     let mut state = LiveShell::new()?;
-    let mut codex = CodexSurfaces::new(&shell)?;
+    let mut codex_enabled =
+        nickel_core::optional_features::OptionalFeatureSettings::load_default().codex_enabled;
+    let mut codex = CodexSurfaces::new(&shell, codex_enabled)?;
     codex.ensure_project_menu(&shell)?;
     let hotkey_feed = platform::launcher_hotkey_receiver();
     tracing::info!(
@@ -2191,6 +2220,28 @@ fn main() -> Result<(), String> {
         }
         if system_subscription.is_due(Instant::now()) {
             let refresh_now = Instant::now();
+            let requested_codex_enabled =
+                nickel_core::optional_features::OptionalFeatureSettings::load_default()
+                    .codex_enabled;
+            if requested_codex_enabled != codex_enabled {
+                codex_enabled = requested_codex_enabled;
+                if codex.set_enabled(&mut shell, codex_enabled) {
+                    if codex_enabled {
+                        if let Err(error) = codex.ensure_project_menu(&shell) {
+                            tracing::warn!(%error, "Codex integration could not be enabled");
+                        }
+                    } else {
+                        state.set_codex_availability(
+                            crate::launcher::CodexAvailability::Unavailable,
+                        );
+                        state.set_dashboard_projects(DashboardSection::Unavailable(
+                            "Codex integration is disabled".into(),
+                        ));
+                    }
+                    sync_visibility(&mut shell, &state);
+                    render_all(&mut shell, &mut state)?;
+                }
+            }
             let system_changed = state.refresh_system();
             if system_changed {
                 sync_visibility(&mut shell, &state);

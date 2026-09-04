@@ -13,7 +13,9 @@ use nickel_session_protocol::{
     OutputPlacement as SessionOutputPlacement, Query as SessionQuery, Request as SessionRequest,
     ServerEnvelope, ServerMessage,
 };
-use persistence::{try_save_shell_settings, try_save_wallpaper_settings};
+use persistence::{
+    try_save_optional_feature_settings, try_save_shell_settings, try_save_wallpaper_settings,
+};
 use platform::*;
 
 use std::{
@@ -32,6 +34,10 @@ use zbus::{
 };
 
 use nickel_core::{
+    optional_features::{
+        ApplyRequirement, FeatureCapability, FeatureEffectiveState, FeatureHealth,
+        FeatureInstallation, FeaturePolicy, FeatureState, FeatureSupport, OptionalFeatureSettings,
+    },
     shell_settings::{AnimationLevel, FileIconPreference, ShellSettings, ThemePreference},
     theme::{Appearance, ThemeMode, ThemePalette, accent_from_hue},
     wallpaper_settings::{WallpaperPosition, WallpaperSettings},
@@ -96,6 +102,47 @@ fn load_wallpaper_preview(
         .transpose()
 }
 
+fn codex_feature_state() -> FeatureState {
+    let preference = OptionalFeatureSettings::load_default();
+    let candidate = std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path)
+            .map(|directory| {
+                directory.join(if cfg!(target_os = "windows") {
+                    "codex.exe"
+                } else {
+                    "codex"
+                })
+            })
+            .find(|path| path.is_file())
+    });
+    let installation = if candidate.is_some() {
+        FeatureInstallation::Installed
+    } else {
+        FeatureInstallation::Missing
+    };
+    FeatureState::resolve(
+        preference.codex_enabled,
+        0,
+        0,
+        FeatureCapability {
+            support: FeatureSupport::Supported,
+            installation,
+            health: if installation == FeatureInstallation::Installed {
+                FeatureHealth::Unknown
+            } else {
+                FeatureHealth::Failed
+            },
+            policy: FeaturePolicy::Editable,
+            apply_requirement: ApplyRequirement::Live,
+            source_label: candidate.map_or_else(
+                || "Compatible Codex executable not found".into(),
+                |path| path.display().to_string(),
+            ),
+            diagnostic: None,
+        },
+    )
+}
+
 #[derive(Clone, Copy)]
 enum SidebarIconKind {
     Search,
@@ -105,12 +152,13 @@ enum SidebarIconKind {
     Network,
     Bluetooth,
     DefaultApps,
+    OptionalFeatures,
     Keyboard,
     About,
 }
 
 impl SidebarIconKind {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::Search,
         Self::Display,
         Self::Bar,
@@ -118,6 +166,7 @@ impl SidebarIconKind {
         Self::Network,
         Self::Bluetooth,
         Self::DefaultApps,
+        Self::OptionalFeatures,
         Self::Keyboard,
         Self::About,
     ];
@@ -135,6 +184,7 @@ impl SidebarIconKind {
             Self::Network => '\u{f0ac}',
             Self::Bluetooth => '\u{f294}',
             Self::DefaultApps => '\u{f2d0}',
+            Self::OptionalFeatures => '\u{f12e}',
             Self::Keyboard => '\u{f11c}',
             Self::About => '\u{f05a}',
         }
@@ -149,6 +199,7 @@ impl SidebarIconKind {
             Self::Network => include_bytes!("../../../assets/icons/settings/network.svg"),
             Self::Bluetooth => include_bytes!("../../../assets/icons/settings/bluetooth.svg"),
             Self::DefaultApps => include_bytes!("../../../assets/icons/start-menu/about.svg"),
+            Self::OptionalFeatures => include_bytes!("../../../assets/icons/start-menu/about.svg"),
             Self::Keyboard => include_bytes!("../../../assets/icons/start-menu/keyboard.svg"),
             Self::About => include_bytes!("../../../assets/icons/start-menu/about.svg"),
         }
@@ -189,7 +240,7 @@ fn rasterize_sidebar_icon(kind: SidebarIconKind) -> Arc<image::RgbaImage> {
 }
 
 fn sidebar_icon<Message>(kind: SidebarIconKind) -> Image<Message> {
-    static ICONS: OnceLock<[Arc<image::RgbaImage>; 9]> = OnceLock::new();
+    static ICONS: OnceLock<[Arc<image::RgbaImage>; 10]> = OnceLock::new();
     let icons = ICONS.get_or_init(|| SidebarIconKind::ALL.map(rasterize_sidebar_icon));
     Image::new(400 + kind.index() as u16, icons[kind.index()].clone())
         .fit(ImageFit::Contain)
@@ -247,6 +298,7 @@ enum SettingsPage {
     Network,
     Bluetooth,
     DefaultApps,
+    OptionalFeatures,
     KeyboardShortcuts,
     About,
 }
@@ -260,6 +312,7 @@ impl std::fmt::Display for SettingsPage {
             Self::Network => "network",
             Self::Bluetooth => "bluetooth",
             Self::DefaultApps => "default-apps",
+            Self::OptionalFeatures => "optional-features",
             Self::KeyboardShortcuts => "keyboard-shortcuts",
             Self::About => "about",
         })
@@ -317,6 +370,7 @@ enum SettingsMessage {
         row: usize,
         handler_id: String,
     },
+    SetCodexEnabled(bool),
     AppearanceLight,
     AppearanceDark,
     AppearanceSystem,
@@ -500,6 +554,9 @@ impl SettingsApp {
                     SettingsPage::Network => self.load_linux_network(),
                     SettingsPage::Bluetooth => self.load_bluetooth(),
                     SettingsPage::DefaultApps => self.load_default_apps(),
+                    SettingsPage::OptionalFeatures => {
+                        self.codex_feature = codex_feature_state();
+                    }
                     _ => {}
                 }
             }
@@ -513,6 +570,9 @@ impl SettingsApp {
                     SettingsPage::Network => self.load_linux_network(),
                     SettingsPage::Bluetooth => self.load_bluetooth(),
                     SettingsPage::DefaultApps => self.load_default_apps(),
+                    SettingsPage::OptionalFeatures => {
+                        self.codex_feature = codex_feature_state();
+                    }
                     _ => {}
                 }
             }
@@ -546,6 +606,55 @@ impl SettingsApp {
                     self.wifi_power_rx = Some(receiver);
                 }
                 self.next_network_refresh = Instant::now();
+            }
+            SettingsMessage::SetCodexEnabled(enabled) => {
+                if !self.codex_feature.editable() || self.optional_features.codex_enabled == enabled
+                {
+                    return;
+                }
+                let previous = self.optional_features.clone();
+                self.optional_features.codex_enabled = enabled;
+                self.codex_feature.generation = self.codex_feature.generation.saturating_add(1);
+                self.codex_feature.requested_enabled = enabled;
+                self.codex_feature.effective = if enabled {
+                    FeatureEffectiveState::Enabling
+                } else {
+                    FeatureEffectiveState::Disabled
+                };
+                if self.persistence_enabled {
+                    if let Err(error) = try_save_optional_feature_settings(&self.optional_features)
+                    {
+                        self.optional_features = previous;
+                        self.codex_feature.requested_enabled = self.optional_features.codex_enabled;
+                        self.codex_feature.effective = FeatureEffectiveState::Rejected;
+                        self.codex_feature.capability.diagnostic = Some(error);
+                        return;
+                    }
+                    match session_request(SessionRequest::Command(
+                        SessionCommand::ReloadShellSettings,
+                    )) {
+                        Ok(ServerMessage::Ack) => {
+                            self.codex_feature.acknowledged_generation =
+                                self.codex_feature.generation;
+                            self.codex_feature.effective = if enabled {
+                                FeatureEffectiveState::Enabled
+                            } else {
+                                FeatureEffectiveState::Disabled
+                            };
+                        }
+                        result => {
+                            self.optional_features = previous;
+                            let _ = try_save_optional_feature_settings(&self.optional_features);
+                            self.codex_feature.requested_enabled =
+                                self.optional_features.codex_enabled;
+                            self.codex_feature.effective = FeatureEffectiveState::Rejected;
+                            self.codex_feature.capability.diagnostic = Some(match result {
+                                Ok(_) => "the session returned an unexpected response".into(),
+                                Err(error) => error.to_string(),
+                            });
+                        }
+                    }
+                }
             }
             SettingsMessage::BluetoothDevice(index) => {
                 if let Some(device) = self.bluetooth.devices.get(index) {
@@ -1422,8 +1531,9 @@ mod tests {
     use nickel_ui::{Application, SemanticRole};
 
     use super::{
-        BluetoothDevice, ControllerAction, FileIconPreference, NetworkAdapter, Rect, SIDEBAR_WIDTH,
-        SettingsApp, SettingsHostAdapter, SettingsMessage, SettingsPage, ThemePreference, UiHost,
+        BluetoothDevice, ControllerAction, FeatureEffectiveState, FeatureInstallation,
+        FeatureSupport, FileIconPreference, NetworkAdapter, Rect, SIDEBAR_WIDTH, SettingsApp,
+        SettingsHostAdapter, SettingsMessage, SettingsPage, ThemePreference, UiHost,
         WallpaperSettings, attach_rect_centered, constrain_center, snap_rect,
     };
 
@@ -2549,5 +2659,41 @@ mod tests {
         assert_eq!(host.application().displays[0].rect, settled);
         assert!(host.application().drag_offset.is_none());
         assert!(host.application().drag_origin.is_none());
+    }
+
+    #[test]
+    fn optional_features_exposes_a_semantic_codex_switch() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
+        app.codex_feature.capability.installation = FeatureInstallation::Installed;
+        app.codex_feature.capability.support = FeatureSupport::Supported;
+        let frame = app.build_ui(1100.0, 720.0);
+        assert!(
+            frame
+                .semantic_targets_for_message(&SettingsMessage::SetCodexEnabled(
+                    !app.optional_features.codex_enabled,
+                ))
+                .len()
+                == 1
+        );
+    }
+
+    #[test]
+    fn codex_preference_and_effective_state_are_not_conflated() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
+        app.persistence_enabled = false;
+        app.codex_feature.capability.installation = FeatureInstallation::Installed;
+        app.codex_feature.capability.support = FeatureSupport::Supported;
+        let enabled = app.optional_features.codex_enabled;
+        app.handle_settings_message(SettingsMessage::SetCodexEnabled(!enabled));
+        assert_eq!(app.optional_features.codex_enabled, !enabled);
+        assert_eq!(app.codex_feature.requested_enabled, !enabled);
+        assert_eq!(
+            app.codex_feature.effective,
+            if enabled {
+                FeatureEffectiveState::Disabled
+            } else {
+                FeatureEffectiveState::Enabling
+            }
+        );
     }
 }

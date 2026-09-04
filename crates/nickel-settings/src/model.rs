@@ -1,5 +1,7 @@
 use super::*;
-use crate::persistence::{load_shell_settings, load_wallpaper_settings};
+use crate::persistence::{
+    load_optional_feature_settings, load_shell_settings, load_wallpaper_settings,
+};
 
 pub(super) struct SettingsApp {
     pub(super) controller_family: nickel_ui::ControllerFamily,
@@ -25,6 +27,8 @@ pub(super) struct SettingsApp {
     pub(super) file_icon_provider_select_expanded: bool,
     pub(super) default_app_select_expanded: Option<usize>,
     pub(super) default_apps: Vec<DefaultAppRow>,
+    pub(super) optional_features: OptionalFeatureSettings,
+    pub(super) codex_feature: FeatureState,
     pub(super) shell_settings: ShellSettings,
     pub(super) wallpaper_settings: WallpaperSettings,
     pub(super) wallpaper_preview: Option<Arc<image::RgbaImage>>,
@@ -118,6 +122,8 @@ impl Default for SettingsApp {
             file_icon_provider_select_expanded: false,
             default_app_select_expanded: None,
             default_apps: default_app_categories(),
+            optional_features: load_optional_feature_settings(),
+            codex_feature: codex_feature_state(),
             shell_settings: load_shell_settings(),
             wallpaper_settings,
             wallpaper_preview,

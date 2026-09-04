@@ -1,6 +1,60 @@
 use super::*;
 
 impl SettingsApp {
+    pub(super) fn optional_features_components(
+        &self,
+    ) -> impl nickel_ui::Component<SettingsMessage> {
+        let theme = self.ui_theme();
+        let state = &self.codex_feature;
+        let available = state.capability.support == FeatureSupport::Supported
+            && state.capability.installation == FeatureInstallation::Installed;
+        let switch_state = match (state.requested_enabled, available, state.editable()) {
+            (true, true, true) => SwitchState::On,
+            (false, true, true) => SwitchState::Off,
+            (true, _, _) => SwitchState::DisabledOn,
+            (false, _, _) => SwitchState::DisabledOff,
+        };
+        let status = match state.effective {
+            FeatureEffectiveState::Disabled => "Disabled",
+            FeatureEffectiveState::Enabling => "Applying…",
+            FeatureEffectiveState::Enabled => "Enabled · applies live",
+            FeatureEffectiveState::Unavailable => "Unavailable",
+            FeatureEffectiveState::Rejected => "Change rejected",
+        };
+        let detail = state
+            .capability
+            .diagnostic
+            .as_deref()
+            .unwrap_or(&state.capability.source_label);
+        SettingsCard::titled(
+            theme,
+            "Codex integration",
+            "Projects, conversations, and the built-in Codex client",
+        )
+        .child(
+            SettingsRow::new(theme, "Enable Codex", status).trailing(
+                Switch::with_state(
+                    switch_state,
+                    (available && state.editable())
+                        .then_some(SettingsMessage::SetCodexEnabled as fn(bool) -> SettingsMessage),
+                    theme,
+                )
+                .id("optional-feature-codex-enabled")
+                .accessibility_label("Enable Codex integration"),
+            ),
+        )
+        .child(SettingsRow::new(theme, "Source", detail))
+        .child(SettingsRow::new(
+            theme,
+            "Resource and privacy impact",
+            if state.requested_enabled {
+                "May run an app-server and poll project and conversation metadata"
+            } else {
+                "No background workers, subscriptions, or warm Codex surfaces"
+            },
+        ))
+    }
+
     pub(super) fn default_apps_components(&self) -> impl nickel_ui::Component<SettingsMessage> {
         let theme = self.ui_theme();
         let palette = self.palette();

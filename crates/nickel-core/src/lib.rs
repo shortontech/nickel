@@ -3,6 +3,7 @@ pub mod hotkeys;
 pub mod idle;
 pub mod launcher;
 pub mod launcher_preferences;
+pub mod optional_features;
 pub mod output_layout;
 pub mod quick_settings;
 pub mod resource_owner;

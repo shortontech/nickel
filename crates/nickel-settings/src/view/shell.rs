@@ -48,6 +48,10 @@ impl SettingsApp {
                     self.localizer.text("settings-default-apps-title"),
                     self.localizer.text("settings-default-apps-subtitle"),
                 ),
+                SettingsPage::OptionalFeatures => (
+                    "Optional Features".into(),
+                    "Enable integrations and inspect their availability".into(),
+                ),
                 SettingsPage::KeyboardShortcuts => (
                     self.localizer.text("settings-keyboard-title"),
                     self.localizer.text("settings-keyboard-subtitle"),
@@ -85,6 +89,7 @@ impl SettingsApp {
         let network_label = self.localizer.text("settings-nav-network");
         let bluetooth_label = self.localizer.text("settings-nav-bluetooth");
         let default_apps_label = self.localizer.text("settings-nav-default-apps");
+        let optional_features_label = "Optional Features".to_owned();
         let keyboard_label = self.localizer.text("settings-nav-keyboard");
         let about_label = self.localizer.text("settings-nav-about");
         let palette = self.palette();
@@ -200,6 +205,16 @@ impl SettingsApp {
                     SettingsMessage::NavigateTarget(
                         SettingsPage::Appearance,
                         "appearance-animations".into(),
+                    ),
+                ),
+                SettingsSearchEntry::new(
+                    &optional_features_label,
+                    "Codex integration",
+                    "Enable Codex projects and conversations",
+                    "optional-feature-codex-enabled",
+                    SettingsMessage::NavigateTarget(
+                        SettingsPage::OptionalFeatures,
+                        "optional-feature-codex-enabled".into(),
                     ),
                 ),
             ];
@@ -347,6 +362,16 @@ impl SettingsApp {
             )
             .header(destination_header(SettingsPage::DefaultApps))
             .leading(sidebar_icon(SidebarIconKind::DefaultApps))
+            .section(self.localizer.text("settings-nav-section-system"))
+            .visible(query.is_empty()),
+            ResponsiveNavigationDestination::new(
+                SettingsPage::OptionalFeatures,
+                optional_features_label,
+                SettingsMessage::Navigate(SettingsPage::OptionalFeatures),
+                self.optional_features_components(),
+            )
+            .header(destination_header(SettingsPage::OptionalFeatures))
+            .leading(sidebar_icon(SidebarIconKind::OptionalFeatures))
             .section(self.localizer.text("settings-nav-section-system"))
             .visible(query.is_empty()),
             ResponsiveNavigationDestination::new(
