@@ -46,6 +46,7 @@ windows = { workspace = true, features = [
 
 [target.'cfg(target_os = "linux")'.dependencies]
 wl-clipboard-rs = "0.9"
+url.workspace = true
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 ico.workspace = true

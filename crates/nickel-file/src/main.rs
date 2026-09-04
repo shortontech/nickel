@@ -59,6 +59,7 @@ type NavigationResult = (u64, Result<Option<DirectoryBrowser>, String>);
 type SidebarResult = (PathBuf, Result<Vec<(String, PathBuf)>, String>);
 type ActivationResult = (u64, String, Result<(), OpenPathError>);
 type TransferUpdate = (TransferIntent, usize, usize, Option<TransferReport>);
+type RenameResult = (crate::FileIdentity, PathBuf, Result<(), String>);
 
 #[derive(Clone, Debug)]
 pub(crate) struct FileClick {
@@ -177,8 +178,11 @@ pub struct FileApp {
     pub(crate) selected: Option<usize>,
     pub(crate) selected_entries: HashSet<usize>,
     pub(crate) rename_editor: Option<RenameEditor>,
+    rename_rx: Option<Receiver<RenameResult>>,
     pub(crate) file_clipboard: Option<ClipboardOffer>,
     pub(crate) drag_hover: Option<PathBuf>,
+    native_drop_batch: Vec<PathBuf>,
+    native_drop_deadline: Option<Instant>,
     pub(crate) outbound_drag: Option<DragOffer>,
     pub(crate) primary_down: bool,
     pub(crate) transfer_rx: Option<Receiver<TransferUpdate>>,
@@ -934,8 +938,11 @@ impl FileApp {
             selected: None,
             selected_entries: HashSet::new(),
             rename_editor: None,
+            rename_rx: None,
             file_clipboard: None,
             drag_hover: None,
+            native_drop_batch: Vec::new(),
+            native_drop_deadline: None,
             outbound_drag: None,
             primary_down: false,
             transfer_rx: None,
@@ -2662,6 +2669,9 @@ impl FileApp {
     }
 
     fn commit_rename(&mut self) {
+        if self.rename_rx.is_some() {
+            return;
+        }
         let names = self
             .browser
             .entries()
@@ -2684,17 +2694,13 @@ impl FileApp {
                     self.status = "Rename cancelled because the file changed".into();
                     return;
                 }
-                match std::fs::rename(&from, &to) {
-                    Ok(()) => {
-                        self.rename_editor = None;
-                        self.refresh_directory(self.browser.show_hidden());
-                        self.status = format!(
-                            "Renamed to {}",
-                            to.file_name().unwrap_or_default().to_string_lossy()
-                        );
-                    }
-                    Err(error) => self.status = format!("Could not rename: {error}"),
-                }
+                let (sender, receiver) = mpsc::channel();
+                self.rename_rx = Some(receiver);
+                self.status = "Renaming…".into();
+                std::thread::spawn(move || {
+                    let result = std::fs::rename(&from, &to).map_err(|error| error.to_string());
+                    let _ = sender.send((identity, to, result));
+                });
             }
             Ok(Some(_)) => {}
             Err(error) => self.status = format!("Invalid name: {error:?}"),
@@ -2738,6 +2744,14 @@ impl FileApp {
             self.status = "The file clipboard is empty".into();
             return;
         };
+        self.start_transfer(offer, destination);
+    }
+
+    fn start_transfer(&mut self, offer: ClipboardOffer, destination: PathBuf) {
+        if self.transfer_rx.is_some() {
+            self.status = "Wait for the current file operation to finish".into();
+            return;
+        }
         let total = offer.sources.len();
         let Ok(effect) =
             crate::operations::plan_paste(&offer, "local", &destination, true, ConflictPolicy::Ask)
@@ -2813,6 +2827,81 @@ impl FileApp {
         self.refresh_directory(self.browser.show_hidden());
         true
     }
+
+    fn poll_rename(&mut self) -> bool {
+        let Some(receiver) = &self.rename_rx else {
+            return false;
+        };
+        let (identity, to, result) = match receiver.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return false,
+            Err(TryRecvError::Disconnected) => {
+                self.rename_rx = None;
+                self.status = "Rename worker stopped unexpectedly".into();
+                return true;
+            }
+        };
+        self.rename_rx = None;
+        match result {
+            Ok(()) => {
+                self.rename_editor = None;
+                self.refresh_directory(self.browser.show_hidden());
+                if let Some(index) = self
+                    .browser
+                    .entries()
+                    .iter()
+                    .position(|entry| entry.path == to)
+                {
+                    self.selected = Some(index);
+                    self.selected_entries.clear();
+                    self.selected_entries.insert(index);
+                    self.selection_anchor = Some(index);
+                }
+                self.status = format!(
+                    "Renamed to {}",
+                    to.file_name().unwrap_or_default().to_string_lossy()
+                );
+            }
+            Err(error) => {
+                if self
+                    .rename_editor
+                    .as_ref()
+                    .is_some_and(|editor| editor.identity == identity)
+                {
+                    self.status = format!("Could not rename: {error}");
+                }
+            }
+        }
+        true
+    }
+
+    fn poll_native_drop(&mut self) -> bool {
+        if self
+            .native_drop_deadline
+            .is_none_or(|deadline| Instant::now() < deadline)
+        {
+            return false;
+        }
+        self.native_drop_deadline = None;
+        let sources = std::mem::take(&mut self.native_drop_batch)
+            .into_iter()
+            .enumerate()
+            .map(|(index, path)| TransferSource {
+                provider: "native-drag".into(),
+                identity: crate::FileIdentity(0, index as u64),
+                path,
+                capabilities: ItemCapabilities {
+                    readable: true,
+                    removable: false,
+                },
+            })
+            .collect();
+        match ClipboardOffer::new(TransferIntent::Copy, sources) {
+            Ok(offer) => self.start_transfer(offer, self.browser.current().to_path_buf()),
+            Err(error) => self.status = format!("Could not accept drop: {error:?}"),
+        }
+        true
+    }
 }
 
 impl Application for FileApp {
@@ -2844,24 +2933,13 @@ impl Application for FileApp {
             nickel_ui::FileDragEvent::HoverCancelled => self.drag_hover = None,
             nickel_ui::FileDragEvent::Dropped(path) => {
                 self.drag_hover = None;
-                let Some(name) = path.file_name() else {
+                if path.file_name().is_none() {
                     return false;
-                };
-                let destination = self.browser.current().join(name);
-                if destination.exists() || destination == path {
-                    self.status = "Drop rejected: destination exists".into();
-                    return true;
                 }
-                let result = if path.is_dir() {
-                    crate::operations::copy_directory(&path, &destination)
-                } else {
-                    std::fs::copy(path, destination).map(|_| ())
-                };
-                self.status = match result {
-                    Ok(()) => "Dropped file copied".into(),
-                    Err(error) => format!("Could not accept drop: {error}"),
-                };
-                self.refresh_directory(self.browser.show_hidden());
+                self.native_drop_batch.push(path);
+                // Winit reports one DroppedFile event per path. Coalesce the
+                // burst so a native multi-file drag becomes one bounded operation.
+                self.native_drop_deadline = Some(Instant::now() + Duration::from_millis(25));
             }
         }
         true
@@ -3178,6 +3256,8 @@ impl Application for FileApp {
             || properties_changed
             || association_changed
             || self.poll_activation()
+            || self.poll_rename()
+            || self.poll_native_drop()
             || self.poll_transfer()
             || self.poll_navigation()
             || self.poll_directory_watch()
@@ -3199,6 +3279,9 @@ impl Application for FileApp {
                 .as_ref()
                 .map(|_| Duration::from_millis(16)),
             self.transfer_rx.as_ref().map(|_| Duration::from_millis(16)),
+            self.rename_rx.as_ref().map(|_| Duration::from_millis(16)),
+            self.native_drop_deadline
+                .map(|deadline| deadline.saturating_duration_since(Instant::now())),
             (!self.sidebar_loading.is_empty()).then_some(Duration::from_millis(16)),
             self.location_groups_rx
                 .as_ref()
@@ -3456,6 +3539,10 @@ mod live_reconciliation_tests {
         app.update_message(FileMessage::BeginRename);
         app.update_message(FileMessage::RenameChanged("renamed.txt".into()));
         app.update_message(FileMessage::CommitRename);
+        while app.rename_rx.is_some() {
+            app.poll_rename();
+            thread::sleep(Duration::from_millis(1));
+        }
         assert!(source.path().join("renamed.txt").exists());
 
         app.browser = DirectoryBrowser::open(source.path()).unwrap();
@@ -3469,6 +3556,31 @@ mod live_reconciliation_tests {
             thread::sleep(Duration::from_millis(1));
         }
         assert!(destination.path().join("renamed.txt").exists());
+        assert!(destination.path().join("b.txt").exists());
+    }
+
+    #[test]
+    fn native_drop_burst_is_coalesced_into_one_async_multi_item_transfer() {
+        let source = tempfile::tempdir().unwrap();
+        fs::write(source.path().join("a.txt"), b"a").unwrap();
+        fs::write(source.path().join("b.txt"), b"b").unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        let mut app = FileApp::new(destination.path().to_path_buf());
+        <FileApp as nickel_ui::Application>::file_drag_event(
+            &mut app,
+            nickel_ui::FileDragEvent::Dropped(source.path().join("a.txt")),
+        );
+        <FileApp as nickel_ui::Application>::file_drag_event(
+            &mut app,
+            nickel_ui::FileDragEvent::Dropped(source.path().join("b.txt")),
+        );
+        app.native_drop_deadline = Some(Instant::now());
+        assert!(app.poll_native_drop());
+        while app.transfer_rx.is_some() {
+            app.poll_transfer();
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(destination.path().join("a.txt").exists());
         assert!(destination.path().join("b.txt").exists());
     }
 }

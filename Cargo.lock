@@ -2775,6 +2775,7 @@ dependencies = [
  "sys-locale",
  "tempfile",
  "tracing",
+ "url",
  "windows",
  "winit 0.30.13",
  "winresource",

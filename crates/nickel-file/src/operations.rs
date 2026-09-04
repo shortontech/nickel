@@ -391,25 +391,15 @@ pub fn execute_local_transfer(
             }
         }
         let result = if *intent == TransferIntent::Move {
-            std::fs::rename(&source.path, &target)
-        } else {
-            let copied = if source.path.is_dir() {
-                copy_directory(&source.path, &target)
-            } else {
-                std::fs::copy(&source.path, &target).map(|_| ())
-            };
-            copied.and_then(|()| {
-                verify_copy(&source.path, &target)?;
-                if *delete_after_verified_copy {
-                    if source.path.is_dir() {
-                        std::fs::remove_dir_all(&source.path)
-                    } else {
-                        std::fs::remove_file(&source.path)
-                    }
-                } else {
-                    Ok(())
+            match std::fs::rename(&source.path, &target) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {
+                    copy_verify_and_maybe_delete(&source.path, &target, true)
                 }
-            })
+                Err(error) => Err(error),
+            }
+        } else {
+            copy_verify_and_maybe_delete(&source.path, &target, *delete_after_verified_copy)
         };
         match result {
             Ok(()) => report.affected.push(target),
@@ -418,6 +408,28 @@ pub fn execute_local_transfer(
         progress(index + 1, sources.len());
     }
     report
+}
+
+fn copy_verify_and_maybe_delete(
+    source: &Path,
+    target: &Path,
+    delete_after_verified_copy: bool,
+) -> std::io::Result<()> {
+    if source.is_dir() {
+        copy_directory(source, target)?;
+    } else {
+        std::fs::copy(source, target)?;
+    }
+    verify_copy(source, target)?;
+    if delete_after_verified_copy {
+        if source.is_dir() {
+            std::fs::remove_dir_all(source)
+        } else {
+            std::fs::remove_file(source)
+        }
+    } else {
+        Ok(())
+    }
 }
 
 fn unused_copy_name(original: &Path) -> PathBuf {

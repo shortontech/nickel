@@ -56,11 +56,28 @@ pub fn apply_edits(properties: &EntryProperties, edits: PropertyEdits) -> Proper
     }
     let readonly =
         set_readonly(&properties.path, edits.readonly).map_err(|error| error.to_string());
-    let mut path = properties.path.clone();
+    let path = properties.path.clone();
     let hidden = if properties.hidden == edits.hidden {
-        Ok(())
-    } else if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
-        let next_name = if edits.hidden {
+        Ok(None)
+    } else {
+        set_hidden(&path, edits.hidden)
+    };
+    let path = hidden
+        .as_ref()
+        .ok()
+        .and_then(|updated| updated.clone())
+        .unwrap_or(path);
+    PropertyApplyOutcome {
+        path,
+        readonly,
+        hidden: hidden.map(|_| ()),
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn set_hidden(path: &Path, hidden: bool) -> Result<Option<PathBuf>, String> {
+    if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
+        let next_name = if hidden {
             format!(".{name}")
         } else {
             name.trim_start_matches('.').to_owned()
@@ -69,18 +86,48 @@ pub fn apply_edits(properties: &EntryProperties, edits: PropertyEdits) -> Proper
             Err("the hidden-state change would produce an empty name".into())
         } else {
             let next = path.with_file_name(next_name);
-            fs::rename(&path, &next)
-                .map(|()| path = next)
-                .map_err(|error| error.to_string())
+            if next != path && next.exists() {
+                Err(format!("{} already exists", next.display()))
+            } else {
+                fs::rename(path, &next)
+                    .map(|()| Some(next))
+                    .map_err(|error| error.to_string())
+            }
         }
     } else {
         Err("hidden-state editing is unavailable for this filename".into())
-    };
-    PropertyApplyOutcome {
-        path,
-        readonly,
-        hidden,
     }
+}
+
+#[cfg(target_os = "windows")]
+fn set_hidden(path: &Path, hidden: bool) -> Result<Option<PathBuf>, String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::{
+        Win32::Storage::FileSystem::{
+            FILE_ATTRIBUTE_HIDDEN, FILE_FLAGS_AND_ATTRIBUTES, GetFileAttributesW,
+            INVALID_FILE_ATTRIBUTES, SetFileAttributesW,
+        },
+        core::PCWSTR,
+    };
+    let wide = path
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    unsafe {
+        let attributes = GetFileAttributesW(PCWSTR(wide.as_ptr()));
+        if attributes == INVALID_FILE_ATTRIBUTES {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        let updated = if hidden {
+            attributes | FILE_ATTRIBUTE_HIDDEN.0
+        } else {
+            attributes & !FILE_ATTRIBUTE_HIDDEN.0
+        };
+        SetFileAttributesW(PCWSTR(wide.as_ptr()), FILE_FLAGS_AND_ATTRIBUTES(updated))
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(None)
 }
 
 #[cfg(unix)]
@@ -192,7 +239,7 @@ impl EntryProperties {
             readonly: metadata.permissions().readonly(),
             permissions: permission_label(&metadata),
             owner: owner_label(&metadata),
-            hidden: entry.name.to_string_lossy().starts_with('.'),
+            hidden: hidden_state(&entry.path, &metadata),
             symlink_target: file_type
                 .is_symlink()
                 .then(|| fs::read_link(&entry.path).ok())
@@ -212,6 +259,19 @@ impl EntryProperties {
             _ => metadata.len() != self.confirmed_metadata_len,
         }
     }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn hidden_state(path: &Path, _: &fs::Metadata) -> bool {
+    path.file_name()
+        .is_some_and(|name| name.to_string_lossy().starts_with('.'))
+}
+
+#[cfg(target_os = "windows")]
+fn hidden_state(_: &Path, metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_HIDDEN;
+    metadata.file_attributes() & FILE_ATTRIBUTE_HIDDEN.0 != 0
 }
 
 #[cfg(unix)]
@@ -336,5 +396,32 @@ mod tests {
         assert!(outcome.hidden.is_ok(), "{:?}", outcome.hidden);
         assert_eq!(outcome.path.file_name().unwrap(), ".visible.txt");
         assert!(fs::metadata(outcome.path).unwrap().permissions().readonly());
+    }
+
+    #[test]
+    fn hidden_edit_never_replaces_an_existing_entry() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("visible.txt");
+        let hidden = directory.path().join(".visible.txt");
+        fs::write(&path, b"source").unwrap();
+        fs::write(&hidden, b"keep me").unwrap();
+        let entry = FileEntry {
+            name: "visible.txt".into(),
+            path: path.clone(),
+            is_directory: false,
+            size: Some(6),
+            modified: None,
+        };
+        let properties = EntryProperties::load(&entry, None).unwrap();
+        let outcome = apply_edits(
+            &properties,
+            PropertyEdits {
+                readonly: properties.readonly,
+                hidden: true,
+            },
+        );
+        assert!(outcome.hidden.is_err());
+        assert_eq!(fs::read(path).unwrap(), b"source");
+        assert_eq!(fs::read(hidden).unwrap(), b"keep me");
     }
 }

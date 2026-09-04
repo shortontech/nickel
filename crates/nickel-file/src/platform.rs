@@ -15,6 +15,32 @@ pub(crate) fn publish_text_clipboard(text: &str) -> Result<(), String> {
 }
 
 #[cfg(target_os = "linux")]
+fn file_uri_list(paths: &[PathBuf]) -> Result<String, String> {
+    paths
+        .iter()
+        .map(|path| {
+            url::Url::from_file_path(path)
+                .map(|url| format!("{url}\r\n"))
+                .map_err(|()| format!("cannot represent {} as a file URI", path.display()))
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn paths_from_uri_list(text: &str) -> Vec<PathBuf> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(|line| url::Url::parse(line).ok())
+        .filter_map(|url| {
+            (url.scheme() == "file")
+                .then(|| url.to_file_path().ok())
+                .flatten()
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
 pub(crate) fn publish_file_clipboard(paths: &[PathBuf], cut: bool) -> Result<(), String> {
     use wl_clipboard_rs::copy::{MimeSource, MimeType, Options, Source};
     let mut payload = if cut {
@@ -22,10 +48,7 @@ pub(crate) fn publish_file_clipboard(paths: &[PathBuf], cut: bool) -> Result<(),
     } else {
         "copy\n".to_owned()
     };
-    let uris = paths
-        .iter()
-        .map(|path| format!("file://{}\r\n", path.display()))
-        .collect::<String>();
+    let uris = file_uri_list(paths)?;
     payload.push_str(&uris.replace("\r\n", "\n"));
     Options::new()
         .copy_multi(vec![
@@ -89,24 +112,25 @@ pub(crate) fn read_file_clipboard() -> Result<(bool, Vec<PathBuf>), String> {
     let cut = kde_cut || mime == "x-special/gnome-copied-files" && lines.next() == Some("cut");
     Ok((
         cut,
-        lines
-            .filter_map(|line| line.strip_prefix("file://"))
-            .map(PathBuf::from)
-            .collect(),
+        paths_from_uri_list(&lines.collect::<Vec<_>>().join("\n")),
     ))
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) fn publish_file_clipboard(paths: &[PathBuf], _cut: bool) -> Result<(), String> {
+pub(crate) fn publish_file_clipboard(paths: &[PathBuf], cut: bool) -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::{
         Foundation::HANDLE,
         System::{
-            DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData},
+            DataExchange::{
+                CloseClipboard, EmptyClipboard, OpenClipboard, RegisterClipboardFormatW,
+                SetClipboardData,
+            },
             Memory::{GHND, GlobalAlloc, GlobalLock, GlobalUnlock},
         },
         UI::Shell::DROPFILES,
     };
+    use windows::core::w;
     const CF_HDROP: u32 = 15;
     let names = paths
         .iter()
@@ -141,6 +165,20 @@ pub(crate) fn publish_file_clipboard(paths: &[PathBuf], _cut: bool) -> Result<()
         );
         let _ = GlobalUnlock(memory);
         SetClipboardData(CF_HDROP, Some(HANDLE(memory.0))).map_err(|error| error.to_string())?;
+        let effect_format = RegisterClipboardFormatW(w!("Preferred DropEffect"));
+        if effect_format == 0 {
+            return Err("could not register Preferred DropEffect clipboard format".into());
+        }
+        let effect_memory =
+            GlobalAlloc(GHND, std::mem::size_of::<u32>()).map_err(|error| error.to_string())?;
+        let effect_pointer = GlobalLock(effect_memory).cast::<u32>();
+        if effect_pointer.is_null() {
+            return Err("GlobalLock failed for Preferred DropEffect".into());
+        }
+        effect_pointer.write(if cut { 2 } else { 1 });
+        let _ = GlobalUnlock(effect_memory);
+        SetClipboardData(effect_format, Some(HANDLE(effect_memory.0)))
+            .map_err(|error| error.to_string())?;
     }
     Ok(())
 }
@@ -148,9 +186,15 @@ pub(crate) fn publish_file_clipboard(paths: &[PathBuf], _cut: bool) -> Result<()
 #[cfg(target_os = "windows")]
 pub(crate) fn read_file_clipboard() -> Result<(bool, Vec<PathBuf>), String> {
     use windows::Win32::{
-        System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard},
+        System::{
+            DataExchange::{
+                CloseClipboard, GetClipboardData, OpenClipboard, RegisterClipboardFormatW,
+            },
+            Memory::{GlobalLock, GlobalUnlock},
+        },
         UI::Shell::DragQueryFileW,
     };
+    use windows::core::w;
     const CF_HDROP: u32 = 15;
     unsafe {
         OpenClipboard(None).map_err(|error| error.to_string())?;
@@ -178,7 +222,43 @@ pub(crate) fn read_file_clipboard() -> Result<(bool, Vec<PathBuf>), String> {
                 &buffer[..length as usize],
             )));
         }
-        Ok((false, paths))
+        let effect_format = RegisterClipboardFormatW(w!("Preferred DropEffect"));
+        let cut = if effect_format == 0 {
+            false
+        } else {
+            GetClipboardData(effect_format).ok().is_some_and(|memory| {
+                let pointer =
+                    GlobalLock(windows::Win32::Foundation::HGLOBAL(memory.0)).cast::<u32>();
+                if pointer.is_null() {
+                    return false;
+                }
+                let effect = pointer.read();
+                let _ = GlobalUnlock(windows::Win32::Foundation::HGLOBAL(memory.0));
+                effect & 2 != 0
+            })
+        };
+        Ok((cut, paths))
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod clipboard_contract_tests {
+    use super::*;
+
+    #[test]
+    fn file_uri_round_trip_preserves_reserved_and_unicode_characters() {
+        let paths = vec![PathBuf::from("/tmp/a b#c.txt"), PathBuf::from("/tmp/café")];
+        let payload = file_uri_list(&paths).unwrap();
+        assert!(payload.contains("a%20b%23c.txt"));
+        assert_eq!(paths_from_uri_list(&payload), paths);
+    }
+
+    #[test]
+    fn uri_list_ignores_comments_and_non_file_urls() {
+        assert_eq!(
+            paths_from_uri_list("# copied files\r\nhttps://example.test/x\r\nfile:///tmp/x\r\n"),
+            vec![PathBuf::from("/tmp/x")]
+        );
     }
 }
 
