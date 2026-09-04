@@ -801,23 +801,26 @@ fn sync_visibility(shell: &mut WinitShell, state: &LiveShell) {
         if role == SurfaceRole::Launcher {
             continue;
         }
-        let visible = state.surface_visible(role);
-        let changed = if visible {
-            shell.show(id)
-        } else {
-            shell.hide(id)
-        };
-        #[cfg(target_os = "linux")]
-        if changed
-            && let Some(role) = session_visibility_role(role)
-            && let Err(error) =
-                platform::send_shell_command(platform::ShellCommand::SetShellRoleVisible {
-                    role,
-                    visible,
-                })
-        {
-            tracing::warn!(?role, visible, %error, "failed to reconcile compositor shell visibility");
-        }
+        set_surface_visibility(shell, id, role, state.surface_visible(role));
+    }
+}
+
+fn set_surface_visibility(shell: &mut WinitShell, id: SurfaceId, role: SurfaceRole, visible: bool) {
+    let changed = if visible {
+        shell.show(id)
+    } else {
+        shell.hide(id)
+    };
+    #[cfg(target_os = "linux")]
+    if changed
+        && let Some(role) = session_visibility_role(role)
+        && let Err(error) =
+            platform::send_shell_command(platform::ShellCommand::SetShellRoleVisible {
+                role,
+                visible,
+            })
+    {
+        tracing::warn!(?role, visible, %error, "failed to reconcile compositor shell visibility");
     }
 }
 
@@ -898,7 +901,7 @@ fn handle_codex_event(
         shell.stop_text_input(surface);
         if surface == codex.project_menu {
             state.hide_overlay(SurfaceRole::CodexProjectMenu);
-            shell.hide(surface);
+            set_surface_visibility(shell, surface, SurfaceRole::CodexProjectMenu, false);
         } else {
             codex.remove(shell, surface);
         }
@@ -913,7 +916,7 @@ fn handle_codex_event(
     }
     if matches!(event, ShellEvent::Shown(_)) {
         if surface == codex.project_menu && !state.surface_visible(SurfaceRole::CodexProjectMenu) {
-            shell.hide(surface);
+            set_surface_visibility(shell, surface, SurfaceRole::CodexProjectMenu, false);
             return Ok(true);
         }
         codex
@@ -933,7 +936,7 @@ fn handle_codex_event(
             ))
     {
         state.hide_overlay(SurfaceRole::CodexProjectMenu);
-        shell.hide(surface);
+        set_surface_visibility(shell, surface, SurfaceRole::CodexProjectMenu, false);
         return Ok(true);
     }
     if matches!(
@@ -995,7 +998,12 @@ fn handle_codex_event(
     }
     if codex.open_requests(shell)? {
         state.hide_overlay(SurfaceRole::CodexProjectMenu);
-        shell.hide(codex.project_menu);
+        set_surface_visibility(
+            shell,
+            codex.project_menu,
+            SurfaceRole::CodexProjectMenu,
+            false,
+        );
     }
     codex.resume_requests();
     codex.release_failed_resumes();
@@ -1324,7 +1332,7 @@ fn handle_controller_action(
         }
         if transition.dismiss_surface {
             state.hide_overlay(SurfaceRole::CodexProjectMenu);
-            shell.hide(surface);
+            set_surface_visibility(shell, surface, SurfaceRole::CodexProjectMenu, false);
         }
         return Ok(());
     }
@@ -2058,7 +2066,12 @@ fn main() -> Result<(), String> {
             let opened_codex = codex.open_requests(&mut shell)?;
             if opened_codex {
                 state.hide_overlay(SurfaceRole::CodexProjectMenu);
-                shell.hide(codex.project_menu);
+                set_surface_visibility(
+                    &mut shell,
+                    codex.project_menu,
+                    SurfaceRole::CodexProjectMenu,
+                    false,
+                );
             }
             let fast_changed = state.refresh_fast();
             if fast_changed {

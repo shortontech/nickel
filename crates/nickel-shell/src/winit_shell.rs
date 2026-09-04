@@ -874,6 +874,7 @@ impl WinitShell {
                 return false;
             }
             surface.visible = true;
+            surface.initial_exposed = false;
             surface.last_host_change_token = None;
             surface.window.set_visible(true);
             surface.window.request_redraw();
