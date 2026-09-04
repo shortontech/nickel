@@ -28,7 +28,14 @@ pub(super) struct SettingsApp {
     pub(super) default_app_select_expanded: Option<usize>,
     pub(super) default_apps: Vec<DefaultAppRow>,
     pub(super) optional_features: OptionalFeatureSettings,
+    pub(super) optional_feature_runtime: OptionalFeatureRuntime,
     pub(super) codex_feature: FeatureState,
+    pub(super) codex_probe_rx:
+        Option<std::sync::mpsc::Receiver<(u64, CodexSource, FeatureCapability)>>,
+    pub(super) codex_source_select_expanded: bool,
+    pub(super) codex_executable_path: String,
+    pub(super) codex_disable_confirmation: bool,
+    pub(super) next_optional_feature_refresh: Instant,
     pub(super) shell_settings: ShellSettings,
     pub(super) wallpaper_settings: WallpaperSettings,
     pub(super) wallpaper_preview: Option<Arc<image::RgbaImage>>,
@@ -57,6 +64,13 @@ impl Default for SettingsApp {
         let localizer = Localizer::system();
         let status = localizer.text("settings-status-changes-not-applied");
         let wallpaper_settings = load_wallpaper_settings();
+        let optional_features = load_optional_feature_settings();
+        let optional_feature_runtime = OptionalFeatureRuntime::load_default();
+        let codex_feature = codex_feature_state(&optional_features, &optional_feature_runtime);
+        let codex_executable_path = match &optional_features.codex_source {
+            CodexSource::Executable(path) => path.display().to_string(),
+            _ => String::new(),
+        };
         let (wallpaper_preview, wallpaper_dimensions, wallpaper_status) =
             match load_wallpaper_preview(&wallpaper_settings) {
                 Ok(Some(preview)) => (
@@ -122,8 +136,14 @@ impl Default for SettingsApp {
             file_icon_provider_select_expanded: false,
             default_app_select_expanded: None,
             default_apps: default_app_categories(),
-            optional_features: load_optional_feature_settings(),
-            codex_feature: codex_feature_state(),
+            optional_features,
+            optional_feature_runtime,
+            codex_feature,
+            codex_probe_rx: None,
+            codex_source_select_expanded: false,
+            codex_executable_path,
+            codex_disable_confirmation: false,
+            next_optional_feature_refresh: Instant::now(),
             shell_settings: load_shell_settings(),
             wallpaper_settings,
             wallpaper_preview,
@@ -150,11 +170,15 @@ impl Default for SettingsApp {
 
 impl SettingsApp {
     pub(super) fn with_initial_page(page: SettingsPage) -> Self {
-        Self {
+        let mut app = Self {
             page,
             active_destination: Some(page),
             ..Self::default()
+        };
+        if page == SettingsPage::OptionalFeatures {
+            app.start_codex_probe();
         }
+        app
     }
 
     pub(super) fn poll_wallpaper_dialog(&mut self) {

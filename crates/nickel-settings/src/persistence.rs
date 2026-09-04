@@ -7,10 +7,10 @@ pub(super) fn load_optional_feature_settings() -> OptionalFeatureSettings {
     OptionalFeatureSettings::load_default()
 }
 
-pub(super) fn try_save_optional_feature_settings(
-    settings: &OptionalFeatureSettings,
-) -> Result<(), String> {
-    settings.save_default().map_err(|error| error.to_string())
+pub(super) fn try_update_optional_feature_settings(
+    update: impl FnOnce(&mut OptionalFeatureSettings),
+) -> Result<OptionalFeatureSettings, String> {
+    OptionalFeatureSettings::update_default(update).map_err(|error| error.to_string())
 }
 
 pub(super) fn load_shell_settings() -> ShellSettings {

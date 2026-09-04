@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 nickel-ui = { path = "../nickel-ui" }
 nickel-core = { path = "../nickel-core" }
+nickel-codex = { path = "../nickel-codex" }
 nickel-i18n = { path = "../nickel-i18n" }
 nickel-input = { path = "../nickel-input", features = ["winit"] }
 nickel-logging = { path = "../nickel-logging" }

@@ -1,5 +1,11 @@
 use nickel_codex::ThreadId;
-use nickel_codex_ui::{ChatApplication, ConnectionStatus, ShellRequest, shell_application};
+use nickel_codex_ui::{
+    ChatApplication, ConnectionStatus, ShellRequest, shell_application_with_backend,
+};
+use nickel_core::optional_features::{
+    CodexSource, FeatureEffectiveState, FeatureHealth, OptionalFeatureRuntime,
+    OptionalFeatureSettings,
+};
 use nickel_input::{
     AggregateModifier, InputEvent, KeyEdge, LogicalKey, NamedKey, PointerButton, PointerEvent,
 };
@@ -260,6 +266,7 @@ const SHELL_STARTUP_BARRIER_MAGIC: &[u8; 8] = b"NIKREADY";
 
 struct CodexSurfaces {
     enabled: bool,
+    source: CodexSource,
     project_menu: SurfaceId,
     project_menu_cwd: std::path::PathBuf,
     project_menu_host: Option<EmbeddedUiSurface<ChatApplication>>,
@@ -272,6 +279,54 @@ struct CodexChatSurface {
     project_id: String,
     host: EmbeddedUiSurface<ChatApplication>,
     thread_id: Option<ThreadId>,
+}
+
+struct CodexRuntimeInput {
+    enabled: bool,
+    generation: u64,
+    status: Option<ConnectionStatus>,
+    authenticated: bool,
+    active_windows: u32,
+    cache_entries: u32,
+    source_label: String,
+    diagnostic: Option<String>,
+}
+
+fn codex_runtime_from(input: CodexRuntimeInput) -> OptionalFeatureRuntime {
+    if !input.enabled {
+        return OptionalFeatureRuntime {
+            codex_generation: input.generation,
+            ..Default::default()
+        };
+    }
+    let (effective, health) = match input.status {
+        None | Some(ConnectionStatus::Loading) => {
+            (FeatureEffectiveState::Enabling, FeatureHealth::Loading)
+        }
+        Some(ConnectionStatus::Ready) if !input.authenticated => {
+            (FeatureEffectiveState::Enabled, FeatureHealth::SignedOut)
+        }
+        Some(ConnectionStatus::Ready) => (FeatureEffectiveState::Enabled, FeatureHealth::Ready),
+        Some(
+            ConnectionStatus::Unavailable
+            | ConnectionStatus::Disconnected
+            | ConnectionStatus::Incompatible,
+        ) => (FeatureEffectiveState::Rejected, FeatureHealth::Failed),
+    };
+    let owned = u32::from(input.status.is_some());
+    OptionalFeatureRuntime {
+        codex_generation: input.generation,
+        codex_effective: effective,
+        codex_health: health,
+        active_windows: input.active_windows,
+        background_workers: owned,
+        subscriptions: owned + input.active_windows,
+        warm_surfaces: owned + input.active_windows,
+        cache_entries: input.cache_entries,
+        source_label: input.source_label,
+        diagnostic: input.diagnostic,
+        ..Default::default()
+    }
 }
 
 struct EmbeddedUiSurface<A: Application> {
@@ -475,13 +530,14 @@ impl CodexSurfaces {
         (project_menu_changed, redraw)
     }
 
-    fn new(shell: &WinitShell, enabled: bool) -> Result<Self, String> {
+    fn new(shell: &WinitShell, settings: &OptionalFeatureSettings) -> Result<Self, String> {
         let project_menu = shell
             .surfaces()
             .find(|surface| surface.role() == SurfaceRole::CodexProjectMenu)
             .ok_or_else(|| "Codex project_menu surface is missing".to_owned())?;
         Ok(Self {
-            enabled,
+            enabled: settings.codex_enabled,
+            source: settings.codex_source.clone(),
             project_menu: project_menu.id(),
             project_menu_cwd: std::env::current_dir().map_err(|error| error.to_string())?,
             project_menu_host: None,
@@ -501,7 +557,13 @@ impl CodexSurfaces {
             .surface(self.project_menu)
             .map(|surface| surface.window().size())
             .ok_or_else(|| "Codex project_menu surface is missing".to_owned())?;
-        let application = shell_application(self.project_menu_cwd.clone(), true, None, None)?;
+        let application = shell_application_with_backend(
+            self.project_menu_cwd.clone(),
+            true,
+            None,
+            None,
+            self.backend_choice(),
+        )?;
         self.project_menu_host = Some(EmbeddedUiSurface::new(
             application,
             width,
@@ -527,7 +589,70 @@ impl CodexSurfaces {
         true
     }
 
+    fn apply_settings(
+        &mut self,
+        shell: &mut WinitShell,
+        settings: &OptionalFeatureSettings,
+    ) -> bool {
+        let source_changed = self.source != settings.codex_source;
+        let enabled_changed = self.enabled != settings.codex_enabled;
+        if !source_changed && !enabled_changed {
+            return false;
+        }
+        if self.enabled {
+            self.set_enabled(shell, false);
+        }
+        self.source = settings.codex_source.clone();
+        if settings.codex_enabled {
+            self.set_enabled(shell, true);
+        }
+        true
+    }
+
+    fn backend_choice(&self) -> Option<nickel_codex::BackendChoice> {
+        match &self.source {
+            CodexSource::CompatibleInstalled => Some(nickel_codex::BackendChoice::Installed),
+            CodexSource::Bundled => Some(nickel_codex::BackendChoice::Bundled),
+            CodexSource::ApprovedRemote => None,
+            CodexSource::Executable(path) => Some(nickel_codex::BackendChoice::Path(path.clone())),
+        }
+    }
+
+    fn runtime_snapshot(&mut self, generation: u64) -> OptionalFeatureRuntime {
+        let (status, authenticated, cache_entries, diagnostic) = self
+            .project_menu_host
+            .as_mut()
+            .map_or((None, false, 0, None), |host| {
+                let state = &host.application_mut().state;
+                (
+                    Some(state.status.clone()),
+                    state.account.authenticated,
+                    state.projects.len().saturating_add(state.threads.len()) as u32,
+                    matches!(
+                        state.status,
+                        ConnectionStatus::Unavailable
+                            | ConnectionStatus::Disconnected
+                            | ConnectionStatus::Incompatible
+                    )
+                    .then(|| state.provenance.clone()),
+                )
+            });
+        codex_runtime_from(CodexRuntimeInput {
+            enabled: self.enabled,
+            generation,
+            status,
+            authenticated,
+            active_windows: self.chats.len() as u32,
+            cache_entries,
+            source_label: format!("{:?}", self.source),
+            diagnostic,
+        })
+    }
+
     fn present(&mut self, shell: &mut WinitShell, surface: SurfaceId) -> Result<(), HostFailure> {
+        if !self.enabled {
+            return Ok(());
+        }
         if surface == self.project_menu {
             self.ensure_project_menu(shell)
                 .map_err(|detail| HostFailure {
@@ -689,7 +814,13 @@ impl CodexSurfaces {
                 .map(|surface| surface.window().size())
                 .unwrap_or((1120, 760));
             let host = EmbeddedUiSurface::new(
-                shell_application(cwd, false, initial_thread.clone(), Some(project_id.clone()))?,
+                shell_application_with_backend(
+                    cwd,
+                    false,
+                    initial_thread.clone(),
+                    Some(project_id.clone()),
+                    self.backend_choice(),
+                )?,
                 width,
                 height,
                 Instant::now(),
@@ -1716,10 +1847,13 @@ fn main() -> Result<(), String> {
     #[cfg(target_os = "linux")]
     wait_for_shell_readiness()?;
     let mut state = LiveShell::new()?;
-    let mut codex_enabled =
-        nickel_core::optional_features::OptionalFeatureSettings::load_default().codex_enabled;
-    let mut codex = CodexSurfaces::new(&shell, codex_enabled)?;
+    let mut feature_settings = OptionalFeatureSettings::load_default();
+    feature_settings.codex_enabled = feature_settings.effective_codex_enabled();
+    let mut codex = CodexSurfaces::new(&shell, &feature_settings)?;
     codex.ensure_project_menu(&shell)?;
+    let _ = codex
+        .runtime_snapshot(feature_settings.codex_generation)
+        .save_default();
     let hotkey_feed = platform::launcher_hotkey_receiver();
     tracing::info!(
         ownership = ?hotkey_feed.ownership,
@@ -2299,17 +2433,19 @@ fn main() -> Result<(), String> {
                 sync_visibility(&mut shell, &state);
                 render_all(&mut shell, &mut state)?;
             }
+            let _ = codex
+                .runtime_snapshot(feature_settings.codex_generation)
+                .save_default();
             fast_subscription.observed(refresh_now, fast_changed || codex_changed || opened_codex);
         }
         if system_subscription.is_due(Instant::now()) {
             let refresh_now = Instant::now();
-            let requested_codex_enabled =
-                nickel_core::optional_features::OptionalFeatureSettings::load_default()
-                    .codex_enabled;
-            if requested_codex_enabled != codex_enabled {
-                codex_enabled = requested_codex_enabled;
-                if codex.set_enabled(&mut shell, codex_enabled) {
-                    if codex_enabled {
+            let mut requested = OptionalFeatureSettings::load_default();
+            requested.codex_enabled = requested.effective_codex_enabled();
+            if requested != feature_settings {
+                feature_settings = requested;
+                if codex.apply_settings(&mut shell, &feature_settings) {
+                    if feature_settings.codex_enabled {
                         if let Err(error) = codex.ensure_project_menu(&shell) {
                             tracing::warn!(%error, "Codex integration could not be enabled");
                         }
@@ -2325,6 +2461,9 @@ fn main() -> Result<(), String> {
                     render_all(&mut shell, &mut state)?;
                 }
             }
+            let _ = codex
+                .runtime_snapshot(feature_settings.codex_generation)
+                .save_default();
             let system_changed = state.refresh_system();
             if system_changed {
                 sync_visibility(&mut shell, &state);
@@ -2338,6 +2477,7 @@ fn main() -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use crate::{CodexRuntimeInput, FeatureEffectiveState, FeatureHealth, codex_runtime_from};
     use nickel_ui::ControllerAction;
     use std::time::{Duration, Instant};
 
@@ -2955,5 +3095,55 @@ mod tests {
         assert!(leases.release(&thread));
         assert!(!leases.contains(&thread));
         assert!(leases.acquire(&thread));
+    }
+
+    #[test]
+    fn disabled_codex_runtime_has_no_owned_resources() {
+        let runtime = codex_runtime_from(CodexRuntimeInput {
+            enabled: false,
+            generation: 4,
+            status: Some(ConnectionStatus::Ready),
+            authenticated: true,
+            active_windows: 7,
+            cache_entries: 99,
+            source_label: "ignored".into(),
+            diagnostic: None,
+        });
+        assert_eq!(runtime.codex_generation, 4);
+        assert!(runtime.disabled_is_quiescent());
+    }
+
+    #[test]
+    fn codex_runtime_reports_loading_signed_out_failed_and_ready() {
+        let snapshot = |status, authenticated| {
+            codex_runtime_from(CodexRuntimeInput {
+                enabled: true,
+                generation: 8,
+                status,
+                authenticated,
+                active_windows: 1,
+                cache_entries: 3,
+                source_label: "fixture".into(),
+                diagnostic: None,
+            })
+        };
+        assert_eq!(
+            snapshot(Some(ConnectionStatus::Loading), false).codex_effective,
+            FeatureEffectiveState::Enabling
+        );
+        assert_eq!(
+            snapshot(Some(ConnectionStatus::Ready), false).codex_health,
+            FeatureHealth::SignedOut
+        );
+        assert_eq!(
+            snapshot(Some(ConnectionStatus::Unavailable), false).codex_effective,
+            FeatureEffectiveState::Rejected
+        );
+        let ready = snapshot(Some(ConnectionStatus::Ready), true);
+        assert_eq!(ready.codex_health, FeatureHealth::Ready);
+        assert_eq!(ready.background_workers, 1);
+        assert_eq!(ready.subscriptions, 2);
+        assert_eq!(ready.warm_surfaces, 2);
+        assert_eq!(ready.cache_entries, 3);
     }
 }

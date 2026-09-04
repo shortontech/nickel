@@ -2852,6 +2852,7 @@ version = "0.1.0"
 dependencies = [
  "ico",
  "image",
+ "nickel-codex",
  "nickel-core",
  "nickel-i18n",
  "nickel-input",

@@ -19,16 +19,34 @@ pub fn shell_application(
     thread: Option<nickel_codex::ThreadId>,
     project_id: Option<String>,
 ) -> Result<ChatApplication, String> {
+    shell_application_with_backend(cwd, project_menu, thread, project_id, None)
+}
+
+pub fn shell_application_with_backend(
+    cwd: std::path::PathBuf,
+    project_menu: bool,
+    thread: Option<nickel_codex::ThreadId>,
+    project_id: Option<String>,
+    backend: Option<nickel_codex::BackendChoice>,
+) -> Result<ChatApplication, String> {
     let settings_path =
         nickel_codex::CodexSettings::default_path().map_err(|error| error.to_string())?;
     let settings =
         nickel_codex::CodexSettings::load(&settings_path).map_err(|error| error.to_string())?;
-    let mode = settings.selected_host().map_or_else(
-        || BackendMode::Live {
-            choice: nickel_codex::BackendChoice::Automatic,
+    let mode = backend.map_or_else(
+        || {
+            settings.selected_host().map_or_else(
+                || BackendMode::Live {
+                    choice: nickel_codex::BackendChoice::Automatic,
+                    cwd: cwd.clone(),
+                },
+                |host| BackendMode::Remote { host: host.clone() },
+            )
+        },
+        |choice| BackendMode::Live {
+            choice,
             cwd: cwd.clone(),
         },
-        |host| BackendMode::Remote { host: host.clone() },
     );
     let mut application = ChatApplication::with_settings(mode, settings, Some(settings_path));
     application = if project_menu {

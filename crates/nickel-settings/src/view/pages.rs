@@ -17,15 +17,89 @@ impl SettingsApp {
         let status = match state.effective {
             FeatureEffectiveState::Disabled => "Disabled",
             FeatureEffectiveState::Enabling => "Applying…",
-            FeatureEffectiveState::Enabled => "Enabled · applies live",
+            FeatureEffectiveState::Enabled => state.apply_label(),
             FeatureEffectiveState::Unavailable => "Unavailable",
             FeatureEffectiveState::Rejected => "Change rejected",
+            FeatureEffectiveState::Stale => "Ignoring stale runtime state",
         };
         let detail = state
             .capability
             .diagnostic
             .as_deref()
             .unwrap_or(&state.capability.source_label);
+        let selected_source = match &self.optional_features.codex_source {
+            CodexSource::CompatibleInstalled => "Compatible installed Codex".to_owned(),
+            CodexSource::Bundled => "Bundled Codex".to_owned(),
+            CodexSource::ApprovedRemote => "Approved remote host".to_owned(),
+            CodexSource::Executable(path) => format!("Executable — {}", path.display()),
+        };
+        let source_options: Vec<(String, SettingsMessage)> = vec![
+            (
+                "Compatible installed Codex".into(),
+                SettingsMessage::SetCodexSource(CodexSource::CompatibleInstalled),
+            ),
+            (
+                "Bundled Codex".into(),
+                SettingsMessage::SetCodexSource(CodexSource::Bundled),
+            ),
+            (
+                "Approved remote host".into(),
+                SettingsMessage::SetCodexSource(CodexSource::ApprovedRemote),
+            ),
+        ];
+        let source = SelectField::new(
+            theme,
+            "Backend source",
+            "Choose an installed, bundled, remote, or explicit compatible executable.",
+            SettingsMessage::ToggleCodexSourceSelect,
+            selected_source,
+            source_options,
+            self.codex_source_select_expanded,
+        )
+        .id("optional-feature-codex-source");
+        let executable = SettingsRow::new(theme, "Explicit executable", "Absolute path").trailing(
+            ui! { <Row width={420.0} gap={8.0}>
+                <Container width={310.0} padding={Insets::all(6.0)}>
+                    {TextField::on_change_with_placeholder(&self.codex_executable_path,
+                        "/path/to/codex", SettingsMessage::CodexExecutablePathChanged)
+                        .id("optional-feature-codex-executable")}
+                </Container>
+                {Button::semantic(theme, SettingsMessage::ApplyCodexExecutable,
+                    "Use", ButtonPresentation::Secondary).width(76.0)}
+            </Row> },
+        );
+        let retry = Button::semantic(
+            theme,
+            SettingsMessage::RetryCodexProbe,
+            "Retry probe",
+            ButtonPresentation::Secondary,
+        )
+        .width(130.0);
+        let policy = state
+            .capability
+            .policy_source
+            .as_deref()
+            .unwrap_or("User preference");
+        let confirmation = if self.codex_disable_confirmation {
+            AnyView::new(
+                SettingsRow::new(
+                    theme,
+                    format!(
+                        "Close {} built-in Codex window(s) and disable?",
+                        self.optional_feature_runtime.active_windows
+                    ),
+                    "External Codex clients and upstream conversation history are not affected.",
+                )
+                .trailing(ui! { <Row width={190.0} gap={8.0}>
+                    {Button::semantic(theme, SettingsMessage::ConfirmDisableCodex,
+                        "Close & disable", ButtonPresentation::Primary).width(118.0)}
+                    {Button::semantic(theme, SettingsMessage::CancelDisableCodex,
+                        "Cancel", ButtonPresentation::Quiet).width(64.0)}
+                </Row> }),
+            )
+        } else {
+            AnyView::new(ui! { <Column /> })
+        };
         SettingsCard::titled(
             theme,
             "Codex integration",
@@ -43,7 +117,36 @@ impl SettingsApp {
                 .accessibility_label("Enable Codex integration"),
             ),
         )
+        .child(confirmation)
+        .child(source)
+        .child(executable)
         .child(SettingsRow::new(theme, "Source", detail))
+        .child(SettingsRow::new(theme, "Policy", policy))
+        .child(SettingsRow::new(
+            theme,
+            "Health",
+            format!("{:?}", state.capability.health),
+        ))
+        .child(SettingsRow::new(
+            theme,
+            "Required permissions",
+            if state.capability.required_permissions.is_empty() {
+                "None".into()
+            } else {
+                state.capability.required_permissions.join(" · ")
+            },
+        ))
+        .child(SettingsRow::new(
+            theme,
+            "Diagnostics",
+            format!(
+                "workers {} · subscriptions {} · warm surfaces {} · cache entries {}",
+                self.optional_feature_runtime.background_workers,
+                self.optional_feature_runtime.subscriptions,
+                self.optional_feature_runtime.warm_surfaces,
+                self.optional_feature_runtime.cache_entries
+            ),
+        ))
         .child(SettingsRow::new(
             theme,
             "Resource and privacy impact",
@@ -53,6 +156,7 @@ impl SettingsApp {
                 "No background workers, subscriptions, or warm Codex surfaces"
             },
         ))
+        .child(retry)
     }
 
     pub(super) fn default_apps_components(&self) -> impl nickel_ui::Component<SettingsMessage> {

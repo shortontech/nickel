@@ -14,7 +14,7 @@ use nickel_session_protocol::{
     ServerEnvelope, ServerMessage,
 };
 use persistence::{
-    try_save_optional_feature_settings, try_save_shell_settings, try_save_wallpaper_settings,
+    try_save_shell_settings, try_save_wallpaper_settings, try_update_optional_feature_settings,
 };
 use platform::*;
 
@@ -35,8 +35,9 @@ use zbus::{
 
 use nickel_core::{
     optional_features::{
-        ApplyRequirement, FeatureCapability, FeatureEffectiveState, FeatureHealth,
-        FeatureInstallation, FeaturePolicy, FeatureState, FeatureSupport, OptionalFeatureSettings,
+        ApplyRequirement, CodexSource, FeatureCapability, FeatureEffectiveState, FeatureHealth,
+        FeatureInstallation, FeaturePolicy, FeatureState, FeatureSupport, OptionalFeatureRuntime,
+        OptionalFeatureSettings, codex_policy,
     },
     shell_settings::{AnimationLevel, FileIconPreference, ShellSettings, ThemePreference},
     theme::{Appearance, ThemeMode, ThemePalette, accent_from_hue},
@@ -52,7 +53,7 @@ use nickel_ui::{
     ResponsiveNavigationDestination, SelectField, SemanticControllerAction, SemanticRole,
     SemanticSelector, SemanticTheme, SettingsCard, SettingsNavigation, SettingsRow,
     SettingsSearchEntry, SettingsSearchField, SettingsStatus, SettingsStatusKind, SliderField,
-    Surface, SurfaceRole, Switch, SwitchState, TextAlign, UiHost, UiId, ViewContext,
+    Surface, SurfaceRole, Switch, SwitchState, TextAlign, TextField, UiHost, UiId, ViewContext,
     search_settings, ui,
 };
 use winit::{dpi::LogicalSize, event::WindowEvent};
@@ -102,45 +103,111 @@ fn load_wallpaper_preview(
         .transpose()
 }
 
-fn codex_feature_state() -> FeatureState {
-    let preference = OptionalFeatureSettings::load_default();
-    let candidate = std::env::var_os("PATH").and_then(|path| {
-        std::env::split_paths(&path)
-            .map(|directory| {
-                directory.join(if cfg!(target_os = "windows") {
-                    "codex.exe"
-                } else {
-                    "codex"
-                })
-            })
-            .find(|path| path.is_file())
-    });
-    let installation = if candidate.is_some() {
-        FeatureInstallation::Installed
-    } else {
-        FeatureInstallation::Missing
-    };
+fn codex_feature_state(
+    preference: &OptionalFeatureSettings,
+    runtime: &OptionalFeatureRuntime,
+) -> FeatureState {
+    let (policy, policy_source) = codex_policy();
     FeatureState::resolve(
         preference.codex_enabled,
-        0,
-        0,
+        preference.codex_generation,
+        runtime.codex_generation,
         FeatureCapability {
             support: FeatureSupport::Supported,
-            installation,
-            health: if installation == FeatureInstallation::Installed {
-                FeatureHealth::Unknown
+            installation: if runtime.codex_effective == FeatureEffectiveState::Unavailable {
+                FeatureInstallation::Missing
             } else {
-                FeatureHealth::Failed
+                FeatureInstallation::Installed
             },
-            policy: FeaturePolicy::Editable,
+            health: runtime.codex_health,
+            policy,
+            policy_source,
+            required_permissions: Vec::new(),
+            configuration_destination: Some("optional-features/codex".into()),
             apply_requirement: ApplyRequirement::Live,
-            source_label: candidate.map_or_else(
-                || "Compatible Codex executable not found".into(),
-                |path| path.display().to_string(),
-            ),
-            diagnostic: None,
+            source_label: runtime.source_label.clone(),
+            diagnostic: runtime.diagnostic.clone(),
         },
     )
+}
+
+fn probe_codex_capability(settings: &OptionalFeatureSettings) -> FeatureCapability {
+    let (policy, policy_source) = codex_policy();
+    let (installation, health, source_label, diagnostic) = match &settings.codex_source {
+        CodexSource::ApprovedRemote => match nickel_codex::CodexSettings::load_default() {
+            Ok(hosts) if hosts.selected_host().is_some() => (
+                FeatureInstallation::Installed,
+                FeatureHealth::Unknown,
+                hosts
+                    .selected_host()
+                    .map(|host| host.name.clone())
+                    .unwrap_or_default(),
+                None,
+            ),
+            Ok(_) => (
+                FeatureInstallation::Missing,
+                FeatureHealth::Failed,
+                "Approved remote host".into(),
+                Some("No remote Codex host is selected".into()),
+            ),
+            Err(error) => (
+                FeatureInstallation::Missing,
+                FeatureHealth::Failed,
+                "Approved remote host".into(),
+                Some(error.to_string()),
+            ),
+        },
+        source => {
+            let choice = match source {
+                CodexSource::CompatibleInstalled => nickel_codex::BackendChoice::Installed,
+                CodexSource::Bundled => nickel_codex::BackendChoice::Bundled,
+                CodexSource::Executable(path) => nickel_codex::BackendChoice::Path(path.clone()),
+                CodexSource::ApprovedRemote => unreachable!(),
+            };
+            let selection = nickel_codex::Selector::platform_default().select(choice);
+            if let Some(selected) = selection.selected {
+                (
+                    FeatureInstallation::Installed,
+                    FeatureHealth::Unknown,
+                    selected.path.display().to_string(),
+                    None,
+                )
+            } else {
+                let incompatible = selection.probes.iter().any(|probe| !probe.compatible);
+                let diagnostic = selection
+                    .probes
+                    .last()
+                    .map(|probe| probe.reason.clone())
+                    .or_else(|| Some("Configured Codex source was not found".into()));
+                (
+                    if incompatible {
+                        FeatureInstallation::Incompatible
+                    } else {
+                        FeatureInstallation::Missing
+                    },
+                    FeatureHealth::Failed,
+                    format!("{:?}", source),
+                    diagnostic,
+                )
+            }
+        }
+    };
+    let required_permissions = match &settings.codex_source {
+        CodexSource::ApprovedRemote => vec!["Network access to the configured Codex host".into()],
+        _ => vec!["Permission to start the configured Codex app-server".into()],
+    };
+    FeatureCapability {
+        support: FeatureSupport::Supported,
+        installation,
+        health,
+        policy,
+        policy_source,
+        required_permissions,
+        configuration_destination: Some("optional-features/codex".into()),
+        apply_requirement: ApplyRequirement::Live,
+        source_label,
+        diagnostic,
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -371,6 +438,13 @@ enum SettingsMessage {
         handler_id: String,
     },
     SetCodexEnabled(bool),
+    ConfirmDisableCodex,
+    CancelDisableCodex,
+    ToggleCodexSourceSelect,
+    SetCodexSource(CodexSource),
+    CodexExecutablePathChanged(String),
+    ApplyCodexExecutable,
+    RetryCodexProbe,
     AppearanceLight,
     AppearanceDark,
     AppearanceSystem,
@@ -555,7 +629,8 @@ impl SettingsApp {
                     SettingsPage::Bluetooth => self.load_bluetooth(),
                     SettingsPage::DefaultApps => self.load_default_apps(),
                     SettingsPage::OptionalFeatures => {
-                        self.codex_feature = codex_feature_state();
+                        self.refresh_optional_feature_state();
+                        self.start_codex_probe();
                     }
                     _ => {}
                 }
@@ -571,7 +646,8 @@ impl SettingsApp {
                     SettingsPage::Bluetooth => self.load_bluetooth(),
                     SettingsPage::DefaultApps => self.load_default_apps(),
                     SettingsPage::OptionalFeatures => {
-                        self.codex_feature = codex_feature_state();
+                        self.refresh_optional_feature_state();
+                        self.start_codex_probe();
                     }
                     _ => {}
                 }
@@ -608,54 +684,29 @@ impl SettingsApp {
                 self.next_network_refresh = Instant::now();
             }
             SettingsMessage::SetCodexEnabled(enabled) => {
-                if !self.codex_feature.editable() || self.optional_features.codex_enabled == enabled
-                {
-                    return;
-                }
-                let previous = self.optional_features.clone();
-                self.optional_features.codex_enabled = enabled;
-                self.codex_feature.generation = self.codex_feature.generation.saturating_add(1);
-                self.codex_feature.requested_enabled = enabled;
-                self.codex_feature.effective = if enabled {
-                    FeatureEffectiveState::Enabling
+                self.request_codex_enabled(enabled, false);
+            }
+            SettingsMessage::ConfirmDisableCodex => self.request_codex_enabled(false, true),
+            SettingsMessage::CancelDisableCodex => self.codex_disable_confirmation = false,
+            SettingsMessage::ToggleCodexSourceSelect => {
+                self.codex_source_select_expanded = !self.codex_source_select_expanded;
+            }
+            SettingsMessage::SetCodexSource(source) => {
+                self.codex_source_select_expanded = false;
+                self.update_codex_source(source);
+            }
+            SettingsMessage::CodexExecutablePathChanged(path) => self.codex_executable_path = path,
+            SettingsMessage::ApplyCodexExecutable => {
+                let path = std::path::PathBuf::from(self.codex_executable_path.trim());
+                if path.is_absolute() {
+                    self.update_codex_source(CodexSource::Executable(path));
                 } else {
-                    FeatureEffectiveState::Disabled
-                };
-                if self.persistence_enabled {
-                    if let Err(error) = try_save_optional_feature_settings(&self.optional_features)
-                    {
-                        self.optional_features = previous;
-                        self.codex_feature.requested_enabled = self.optional_features.codex_enabled;
-                        self.codex_feature.effective = FeatureEffectiveState::Rejected;
-                        self.codex_feature.capability.diagnostic = Some(error);
-                        return;
-                    }
-                    match session_request(SessionRequest::Command(
-                        SessionCommand::ReloadShellSettings,
-                    )) {
-                        Ok(ServerMessage::Ack) => {
-                            self.codex_feature.acknowledged_generation =
-                                self.codex_feature.generation;
-                            self.codex_feature.effective = if enabled {
-                                FeatureEffectiveState::Enabled
-                            } else {
-                                FeatureEffectiveState::Disabled
-                            };
-                        }
-                        result => {
-                            self.optional_features = previous;
-                            let _ = try_save_optional_feature_settings(&self.optional_features);
-                            self.codex_feature.requested_enabled =
-                                self.optional_features.codex_enabled;
-                            self.codex_feature.effective = FeatureEffectiveState::Rejected;
-                            self.codex_feature.capability.diagnostic = Some(match result {
-                                Ok(_) => "the session returned an unexpected response".into(),
-                                Err(error) => error.to_string(),
-                            });
-                        }
-                    }
+                    self.codex_feature.effective = FeatureEffectiveState::Rejected;
+                    self.codex_feature.capability.diagnostic =
+                        Some("Select an absolute executable path".into());
                 }
             }
+            SettingsMessage::RetryCodexProbe => self.start_codex_probe(),
             SettingsMessage::BluetoothDevice(index) => {
                 if let Some(device) = self.bluetooth.devices.get(index) {
                     let _ = toggle_bluetooth_device(device);
@@ -942,6 +993,175 @@ impl SettingsApp {
         }
     }
 
+    fn start_codex_probe(&mut self) {
+        let settings = self.optional_features.clone();
+        let generation = settings.codex_generation;
+        let source = settings.codex_source.clone();
+        let (sender, receiver) = mpsc::channel();
+        std::thread::Builder::new()
+            .name("nickel-codex-feature-probe".into())
+            .spawn(move || {
+                let capability = probe_codex_capability(&settings);
+                let _ = sender.send((generation, source, capability));
+            })
+            .ok();
+        self.codex_probe_rx = Some(receiver);
+        self.codex_feature.capability.health = FeatureHealth::Loading;
+    }
+
+    fn poll_codex_probe(&mut self) {
+        let Some(receiver) = self.codex_probe_rx.as_ref() else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok((generation, source, capability)) => {
+                self.codex_probe_rx = None;
+                if generation != self.optional_features.codex_generation
+                    || source != self.optional_features.codex_source
+                {
+                    self.start_codex_probe();
+                    return;
+                }
+                self.codex_feature.capability = capability;
+                self.codex_feature = FeatureState::resolve(
+                    self.optional_features.codex_enabled,
+                    self.optional_features.codex_generation,
+                    self.optional_feature_runtime.codex_generation,
+                    self.codex_feature.capability.clone(),
+                );
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.codex_probe_rx = None;
+                self.codex_feature.effective = FeatureEffectiveState::Rejected;
+                self.codex_feature.capability.health = FeatureHealth::Failed;
+                self.codex_feature.capability.diagnostic = Some("Codex probe stopped".into());
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+    }
+
+    fn refresh_optional_feature_state(&mut self) {
+        let disk = OptionalFeatureSettings::load_default();
+        let runtime = OptionalFeatureRuntime::load_default();
+        let external_change = self.persistence_enabled && disk != self.optional_features;
+        if external_change {
+            self.optional_features = disk;
+        }
+        let runtime_change = runtime != self.optional_feature_runtime;
+        self.optional_feature_runtime = runtime;
+        let (policy, policy_source) = codex_policy();
+        let policy_change = policy != self.codex_feature.capability.policy
+            || policy_source != self.codex_feature.capability.policy_source;
+        self.codex_feature.capability.policy = policy;
+        self.codex_feature.capability.policy_source = policy_source;
+        if external_change {
+            self.start_codex_probe();
+        }
+        if external_change || runtime_change || policy_change {
+            self.codex_feature.requested_enabled = match self.codex_feature.capability.policy {
+                FeaturePolicy::ForceEnabled => true,
+                FeaturePolicy::ForceDisabled => false,
+                FeaturePolicy::Editable => self.optional_features.codex_enabled,
+            };
+            self.codex_feature.generation = self.optional_features.codex_generation;
+            self.codex_feature.acknowledged_generation =
+                self.optional_feature_runtime.codex_generation;
+            self.codex_feature.capability.health = self.optional_feature_runtime.codex_health;
+            self.codex_feature.effective = if self.codex_feature.acknowledged_generation
+                > self.codex_feature.generation
+            {
+                FeatureEffectiveState::Stale
+            } else if self.codex_feature.generation > self.codex_feature.acknowledged_generation {
+                FeatureEffectiveState::Enabling
+            } else {
+                self.optional_feature_runtime.codex_effective
+            };
+            self.codex_feature.capability.diagnostic =
+                self.optional_feature_runtime.diagnostic.clone();
+        }
+    }
+
+    fn request_codex_enabled(&mut self, enabled: bool, confirmed: bool) {
+        if !self.codex_feature.editable() || self.optional_features.codex_enabled == enabled {
+            return;
+        }
+        if !enabled && self.optional_feature_runtime.active_windows > 0 && !confirmed {
+            self.codex_disable_confirmation = true;
+            return;
+        }
+        self.codex_disable_confirmation = false;
+        if self.persistence_enabled {
+            match try_update_optional_feature_settings(|settings| {
+                settings.codex_enabled = enabled;
+                settings.codex_generation = settings.codex_generation.saturating_add(1);
+            }) {
+                Ok(settings) => self.optional_features = settings,
+                Err(error) => {
+                    self.codex_feature.effective = FeatureEffectiveState::Rejected;
+                    self.codex_feature.capability.diagnostic = Some(error);
+                    return;
+                }
+            }
+        } else {
+            self.optional_features.codex_enabled = enabled;
+            self.optional_features.codex_generation =
+                self.optional_features.codex_generation.saturating_add(1);
+        }
+        self.codex_feature = FeatureState::resolve(
+            enabled,
+            self.optional_features.codex_generation,
+            self.optional_feature_runtime.codex_generation,
+            self.codex_feature.capability.clone(),
+        );
+        if self.persistence_enabled
+            && let Err(error) =
+                session_request(SessionRequest::Command(SessionCommand::ReloadShellSettings))
+        {
+            self.codex_feature.capability.diagnostic = Some(format!(
+                "Saved; waiting for the shell to observe the change: {error}"
+            ));
+        }
+    }
+
+    fn update_codex_source(&mut self, source: CodexSource) {
+        if !self.codex_feature.editable() || self.optional_features.codex_source == source {
+            return;
+        }
+        if self.optional_feature_runtime.active_windows > 0 {
+            self.codex_feature.effective = FeatureEffectiveState::Rejected;
+            self.codex_feature.capability.diagnostic =
+                Some("Close built-in Codex windows before changing the backend source".into());
+            return;
+        }
+        if self.persistence_enabled {
+            match try_update_optional_feature_settings(|settings| {
+                settings.codex_source = source.clone();
+                settings.codex_generation = settings.codex_generation.saturating_add(1);
+            }) {
+                Ok(settings) => self.optional_features = settings,
+                Err(error) => {
+                    self.codex_feature.effective = FeatureEffectiveState::Rejected;
+                    self.codex_feature.capability.diagnostic = Some(error);
+                    return;
+                }
+            }
+            if let Err(error) =
+                session_request(SessionRequest::Command(SessionCommand::ReloadShellSettings))
+            {
+                self.codex_feature.capability.diagnostic = Some(format!(
+                    "Saved; waiting for the shell to observe the change: {error}"
+                ));
+            }
+        } else {
+            self.optional_features.codex_source = source;
+            self.optional_features.codex_generation =
+                self.optional_features.codex_generation.saturating_add(1);
+        }
+        self.codex_feature.generation = self.optional_features.codex_generation;
+        self.codex_feature.effective = FeatureEffectiveState::Enabling;
+        self.start_codex_probe();
+    }
+
     fn set_appearance_hue(&mut self, hue: u16) {
         if self.shell_settings.accent_hue == Some(hue) {
             return;
@@ -1026,7 +1246,13 @@ impl SettingsApp {
     fn tick(&mut self) {
         self.poll_wallpaper_dialog();
         self.poll_wifi_power();
+        self.poll_codex_probe();
         let now = Instant::now();
+        if self.page == SettingsPage::OptionalFeatures && now >= self.next_optional_feature_refresh
+        {
+            self.refresh_optional_feature_state();
+            self.next_optional_feature_refresh = now + Duration::from_millis(250);
+        }
         if self
             .appearance_save_deadline
             .is_some_and(|deadline| now >= deadline)
@@ -1378,6 +1604,12 @@ impl Application for SettingsApp {
         if self.wifi_power_rx.is_some() {
             deadlines.push(now + Duration::from_millis(16));
         }
+        if self.page == SettingsPage::OptionalFeatures {
+            deadlines.push(self.next_optional_feature_refresh);
+        }
+        if self.codex_probe_rx.is_some() {
+            deadlines.push(now + Duration::from_millis(16));
+        }
         deadlines
             .into_iter()
             .min()
@@ -1531,9 +1763,9 @@ mod tests {
     use nickel_ui::{Application, SemanticRole};
 
     use super::{
-        BluetoothDevice, ControllerAction, FeatureEffectiveState, FeatureInstallation,
-        FeatureSupport, FileIconPreference, NetworkAdapter, Rect, SIDEBAR_WIDTH, SettingsApp,
-        SettingsHostAdapter, SettingsMessage, SettingsPage, ThemePreference, UiHost,
+        BluetoothDevice, CodexSource, ControllerAction, FeatureEffectiveState, FeatureInstallation,
+        FeaturePolicy, FeatureSupport, FileIconPreference, NetworkAdapter, Rect, SIDEBAR_WIDTH,
+        SettingsApp, SettingsHostAdapter, SettingsMessage, SettingsPage, ThemePreference, UiHost,
         WallpaperSettings, attach_rect_centered, constrain_center, snap_rect,
     };
 
@@ -2699,5 +2931,48 @@ mod tests {
                 FeatureEffectiveState::Enabling
             }
         );
+    }
+
+    #[test]
+    fn active_codex_windows_require_explicit_disable_confirmation() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
+        app.persistence_enabled = false;
+        app.optional_features.codex_enabled = true;
+        app.codex_feature.requested_enabled = true;
+        app.codex_feature.capability.policy = FeaturePolicy::Editable;
+        app.optional_feature_runtime.active_windows = 2;
+        let generation = app.optional_features.codex_generation;
+        app.handle_settings_message(SettingsMessage::SetCodexEnabled(false));
+        assert!(app.codex_disable_confirmation);
+        assert!(app.optional_features.codex_enabled);
+        assert_eq!(app.optional_features.codex_generation, generation);
+        app.handle_settings_message(SettingsMessage::ConfirmDisableCodex);
+        assert!(!app.codex_disable_confirmation);
+        assert!(!app.optional_features.codex_enabled);
+        assert_eq!(app.optional_features.codex_generation, generation + 1);
+    }
+
+    #[test]
+    fn policy_locked_feature_rejects_user_changes() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
+        app.persistence_enabled = false;
+        app.codex_feature.capability.policy = FeaturePolicy::ForceEnabled;
+        let before = app.optional_features.clone();
+        app.handle_settings_message(SettingsMessage::SetCodexEnabled(false));
+        assert_eq!(app.optional_features, before);
+    }
+
+    #[test]
+    fn changing_source_creates_one_new_pending_generation() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
+        app.persistence_enabled = false;
+        app.codex_probe_rx = None;
+        let generation = app.optional_features.codex_generation;
+        app.handle_settings_message(SettingsMessage::SetCodexSource(CodexSource::Bundled));
+        assert_eq!(app.optional_features.codex_source, CodexSource::Bundled);
+        assert_eq!(app.optional_features.codex_generation, generation + 1);
+        assert_eq!(app.codex_feature.effective, FeatureEffectiveState::Enabling);
+        app.handle_settings_message(SettingsMessage::SetCodexSource(CodexSource::Bundled));
+        assert_eq!(app.optional_features.codex_generation, generation + 1);
     }
 }
