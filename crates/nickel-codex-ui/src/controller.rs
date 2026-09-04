@@ -38,10 +38,10 @@ fn create_managed_workspace_at(documents: &Path, now: &jiff::Zoned) -> Result<Pa
 }
 
 use nickel_codex::{
-    AccountState, BackendChoice, CodexBackend, CodexClient, CodexEvent, CommandDecision,
-    FileChangeDecision, ImportProject, InteractionResponse, Model, Project, ProjectPage,
-    RemoteHost, ReplayBackend, Selector, ServerRequestId, StartThread, StartTurn, Thread, ThreadId,
-    ThreadPage, ThreadPageResult, UserInputAnswer,
+    AccountState, ApprovalPolicy, BackendChoice, CodexBackend, CodexClient, CodexEvent,
+    CommandDecision, FileChangeDecision, ImportProject, InteractionResponse, Model, Project,
+    ProjectPage, RemoteHost, ReplayBackend, Selector, ServerRequestId, StartThread, StartTurn,
+    Thread, ThreadId, ThreadPage, ThreadPageResult, UserInputAnswer,
 };
 
 #[derive(Clone)]
@@ -71,6 +71,7 @@ pub enum ControllerCommand {
         images: Vec<nickel_codex::TurnImage>,
         model: Option<String>,
         reasoning_effort: Option<String>,
+        approval_policy: ApprovalPolicy,
     },
     Shell(String),
     Interrupt,
@@ -103,6 +104,7 @@ pub enum ControllerEvent {
     ThreadCreated(Thread),
     ThreadSelected(Thread),
     TurnAccepted,
+    ApprovalPolicyAccepted(ApprovalPolicy),
     Protocol(CodexEvent),
     Incompatible(String),
     Unavailable(String),
@@ -345,6 +347,7 @@ fn run_worker(
                 images,
                 model,
                 reasoning_effort,
+                approval_policy,
             } => {
                 let thread = match selected_thread.clone() {
                     Some(id) => Ok(id),
@@ -354,6 +357,7 @@ fn run_worker(
                             model: model.clone(),
                             project_id: new_thread_project_id.clone(),
                             reasoning_effort: reasoning_effort.clone(),
+                            approval_policy,
                         })
                         .map(|thread| {
                             selected_thread = Some(thread.id.clone());
@@ -369,11 +373,13 @@ fn run_worker(
                             images,
                             model,
                             reasoning_effort,
+                            approval_policy,
                         })
                     })
                     .map(|turn| {
                         active_turn = Some(turn.id);
                         let _ = send(ControllerEvent::TurnAccepted);
+                        let _ = send(ControllerEvent::ApprovalPolicyAccepted(approval_policy));
                     })
                     .map_err(|error| error.to_string())
             }
@@ -386,6 +392,7 @@ fn run_worker(
                             model: None,
                             project_id: new_thread_project_id.clone(),
                             reasoning_effort: None,
+                            approval_policy: ApprovalPolicy::default(),
                         })
                         .map(|thread| {
                             selected_thread = Some(thread.id.clone());

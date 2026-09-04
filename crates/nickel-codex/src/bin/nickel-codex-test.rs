@@ -11,8 +11,8 @@ use std::{
 };
 
 use nickel_codex::{
-    BackendChoice, CodexBackend, CodexClient, EventKind, InteractionResponse, ProjectPage,
-    ReplayBackend, Selector, StartThread, StartTurn, ThreadId, ThreadPage, TurnId,
+    ApprovalPolicy, BackendChoice, CodexBackend, CodexClient, EventKind, InteractionResponse,
+    ProjectPage, ReplayBackend, Selector, StartThread, StartTurn, ThreadId, ThreadPage, TurnId,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -215,6 +215,7 @@ fn backend_operation(
                 model: option(args, "--model").map(Into::into),
                 project_id: None,
                 reasoning_effort: None,
+                approval_policy: ApprovalPolicy::OnRequest,
             })?;
             if option(args, "--text").is_some() {
                 let text = turn_text(args)?;
@@ -224,6 +225,7 @@ fn backend_operation(
                     images: Vec::new(),
                     model: None,
                     reasoning_effort: None,
+                    approval_policy: ApprovalPolicy::OnRequest,
                 })?;
                 json_value(json!({"thread": thread, "turn": turn}))
             } else {
@@ -251,6 +253,7 @@ fn backend_operation(
                         images: Vec::new(),
                         model: None,
                         reasoning_effort: None,
+                        approval_policy: ApprovalPolicy::OnRequest,
                     })
                 })
                 .and_then(json_value)

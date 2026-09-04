@@ -1,8 +1,9 @@
 use std::{path::Path, time::Duration};
 
 use nickel_codex::{
-    BackendChoice, CandidateSource, CodexBackend, CodexClient, EventKind, InteractionResponse,
-    ProbeLimits, Selector, ServerRequestId, StartThread, StartTurn, ThreadId, ThreadPage,
+    ApprovalPolicy, BackendChoice, CandidateSource, CodexBackend, CodexClient, EventKind,
+    InteractionResponse, ProbeLimits, Selector, ServerRequestId, StartThread, StartTurn, ThreadId,
+    ThreadPage,
 };
 
 fn install_fixture(source: &Path, destination: &Path) {
@@ -40,6 +41,7 @@ fn real_stdio_process_supports_typed_lifecycle_and_streaming() {
             model: None,
             project_id: None,
             reasoning_effort: None,
+            approval_policy: ApprovalPolicy::OnRequest,
         })
         .unwrap();
     assert_eq!(
@@ -53,6 +55,7 @@ fn real_stdio_process_supports_typed_lifecycle_and_streaming() {
             images: Vec::new(),
             model: None,
             reasoning_effort: None,
+            approval_policy: ApprovalPolicy::OnRequest,
         })
         .unwrap();
     assert_eq!(turn.id.0, "fixture-turn");
@@ -316,6 +319,7 @@ fn duplicate_terminal_notifications_are_idempotent() {
             images: Vec::new(),
             model: None,
             reasoning_effort: None,
+            approval_policy: ApprovalPolicy::OnRequest,
         })
         .unwrap();
     for _ in 0..20 {
@@ -354,6 +358,7 @@ fn explicit_interrupt_reaches_terminal_interrupted_state() {
             images: Vec::new(),
             model: None,
             reasoning_effort: None,
+            approval_policy: ApprovalPolicy::OnRequest,
         })
         .unwrap();
     client
@@ -417,6 +422,7 @@ fn slow_consumer_is_bounded_and_projected_state_remains_complete() {
             images: Vec::new(),
             model: None,
             reasoning_effort: None,
+            approval_policy: ApprovalPolicy::OnRequest,
         })
         .unwrap();
     for _ in 0..50 {

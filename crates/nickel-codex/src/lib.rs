@@ -8,12 +8,12 @@ mod settings;
 
 pub use client::{CodexClient, ConnectionState};
 pub use protocol::{
-    AccountState, CodexBackend, CodexError, CodexEvent, CommandAction, CommandDecision, EventKind,
-    FileChangeDecision, ImportProject, InteractionResponse, Model, NetworkPolicyAction,
-    NetworkPolicyAmendment, Project, ProjectPage, ProjectPageResult, ProjectedItem,
-    ProjectedThread, Projection, ReasoningEffortOption, ServerRequestId, StartThread, StartTurn,
-    Thread, ThreadHistoryItem, ThreadHistoryTurn, ThreadId, ThreadPage, ThreadPageResult,
-    ThreadRuntime, ThreadRuntimeStatus, Turn, TurnId, TurnImage, UserInputAnswer,
+    AccountState, ApprovalPolicy, CodexBackend, CodexError, CodexEvent, CommandAction,
+    CommandDecision, EventKind, FileChangeDecision, ImportProject, InteractionResponse, Model,
+    NetworkPolicyAction, NetworkPolicyAmendment, Project, ProjectPage, ProjectPageResult,
+    ProjectedItem, ProjectedThread, Projection, ReasoningEffortOption, ServerRequestId,
+    StartThread, StartTurn, Thread, ThreadHistoryItem, ThreadHistoryTurn, ThreadId, ThreadPage,
+    ThreadPageResult, ThreadRuntime, ThreadRuntimeStatus, Turn, TurnId, TurnImage, UserInputAnswer,
 };
 pub use replay::{ReplayBackend, ReplayScenario};
 pub use selection::{

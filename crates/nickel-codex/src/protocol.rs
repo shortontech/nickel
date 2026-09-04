@@ -191,12 +191,24 @@ pub struct ImportProject {
     pub threads: Vec<ThreadId>,
 }
 
+/// Stable app-server values controlling when Codex asks before taking an action.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ApprovalPolicy {
+    Untrusted,
+    OnFailure,
+    #[default]
+    OnRequest,
+    Never,
+}
+
 #[derive(Clone, Debug)]
 pub struct StartThread {
     pub cwd: PathBuf,
     pub model: Option<String>,
     pub project_id: Option<String>,
     pub reasoning_effort: Option<String>,
+    pub approval_policy: ApprovalPolicy,
 }
 
 #[derive(Clone, Debug)]
@@ -208,6 +220,7 @@ pub struct StartTurn {
     pub images: Vec<TurnImage>,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
+    pub approval_policy: ApprovalPolicy,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -417,5 +430,23 @@ mod tests {
         ] {
             assert!(serde_json::to_value(decision).unwrap().is_string());
         }
+    }
+
+    #[test]
+    fn approval_policy_values_match_the_app_server_schema() {
+        let values = [
+            (ApprovalPolicy::Untrusted, "untrusted"),
+            (ApprovalPolicy::OnFailure, "on-failure"),
+            (ApprovalPolicy::OnRequest, "on-request"),
+            (ApprovalPolicy::Never, "never"),
+        ];
+        for (policy, expected) in values {
+            assert_eq!(serde_json::to_value(policy).unwrap(), expected);
+            assert_eq!(
+                serde_json::from_value::<ApprovalPolicy>(expected.into()).unwrap(),
+                policy
+            );
+        }
+        assert!(serde_json::from_value::<ApprovalPolicy>("sometimes".into()).is_err());
     }
 }

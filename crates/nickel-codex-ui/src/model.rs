@@ -5,8 +5,8 @@ use std::{
 };
 
 use nickel_codex::{
-    AccountState, CodexEvent, CommandAction, EventKind, Model, Project, ServerRequestId, Thread,
-    ThreadId, TurnId,
+    AccountState, ApprovalPolicy, CodexEvent, CommandAction, EventKind, Model, Project,
+    ServerRequestId, Thread, ThreadId, TurnId,
 };
 use nickel_markdown::{MarkdownDocument, markdown_selection_runs};
 use nickel_ui::{SelectionDocument, SelectionRun};
@@ -72,6 +72,8 @@ pub struct ChatState {
     pub models: Vec<Model>,
     pub selected_model: Option<String>,
     pub selected_reasoning_effort: Option<String>,
+    pub effective_approval_policy: ApprovalPolicy,
+    pub selected_approval_policy: ApprovalPolicy,
     pub projects: Vec<Project>,
     pub threads: Vec<Thread>,
     pub thread_runtime: HashMap<ThreadId, nickel_codex::ThreadRuntime>,
@@ -117,6 +119,8 @@ impl Default for ChatState {
             models: Vec::new(),
             selected_model: None,
             selected_reasoning_effort: None,
+            effective_approval_policy: ApprovalPolicy::default(),
+            selected_approval_policy: ApprovalPolicy::default(),
             projects: Vec::new(),
             threads: Vec::new(),
             thread_runtime: HashMap::new(),
@@ -311,6 +315,9 @@ impl ChatState {
                     self.attachments.clear();
                     self.send_pending = false;
                 }
+            }
+            ControllerEvent::ApprovalPolicyAccepted(policy) => {
+                self.effective_approval_policy = policy;
             }
             ControllerEvent::Protocol(event) => self.apply_protocol(event),
             ControllerEvent::Incompatible(message) => {

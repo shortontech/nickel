@@ -948,6 +948,7 @@ impl CodexBackend for CodexClient {
         let value = self.request(
             "thread/start",
             json!({"cwd": request.cwd, "model": request.model, "projectId": request.project_id,
+                "approvalPolicy": request.approval_policy,
                 "config": {"model_reasoning_effort": request.reasoning_effort}}),
         )?;
         parse_thread(value.get("thread").unwrap_or(&value))
@@ -961,7 +962,7 @@ impl CodexBackend for CodexClient {
     fn start_turn(&self, request: StartTurn) -> Result<Turn, CodexError> {
         let thread_id = request.thread_id.clone();
         let input = turn_input(request.text, request.images);
-        let value = self.request("turn/start", json!({"threadId": request.thread_id.0, "input": input, "model": request.model, "effort": request.reasoning_effort}))?;
+        let value = self.request("turn/start", json!({"threadId": request.thread_id.0, "input": input, "model": request.model, "effort": request.reasoning_effort, "approvalPolicy": request.approval_policy}))?;
         let turn = value.get("turn").unwrap_or(&value);
         Ok(Turn {
             id: TurnId(
@@ -1312,6 +1313,8 @@ mod tests {
             let mut saw_shell = false;
             let mut saw_interrupt = false;
             let mut saw_reasoning = false;
+            let mut saw_thread_policy = false;
+            let mut saw_turn_policy = false;
             while !saw_interrupt {
                 let Message::Text(text) = socket.read().unwrap() else {
                     continue;
@@ -1340,10 +1343,12 @@ mod tests {
                         saw_remote_cwd = value["params"]["cwd"] == "/srv/code/nickel"
                             && value["params"]["projectId"] == "remote-project"
                             && value["params"]["config"]["model_reasoning_effort"] == "high";
+                        saw_thread_policy = value["params"]["approvalPolicy"] == "on-request";
                         json!({"thread":{"id":"remote-thread","cwd":"/srv/code/nickel"}})
                     }
                     "turn/start" => {
                         saw_reasoning = value["params"]["effort"] == "high";
+                        saw_turn_policy = value["params"]["approvalPolicy"] == "never";
                         json!({"turn":{"id":"remote-turn","status":"inProgress"}})
                     }
                     "thread/shellCommand" => {
@@ -1425,6 +1430,8 @@ mod tests {
                 saw_shell,
                 saw_interrupt,
                 saw_reasoning,
+                saw_thread_policy,
+                saw_turn_policy,
             )
         });
 
@@ -1458,6 +1465,7 @@ mod tests {
                 model: None,
                 project_id: Some("remote-project".into()),
                 reasoning_effort: Some("high".into()),
+                approval_policy: ApprovalPolicy::OnRequest,
             })
             .unwrap();
         let turn = client
@@ -1467,6 +1475,7 @@ mod tests {
                 images: Vec::new(),
                 model: None,
                 reasoning_effort: Some("high".into()),
+                approval_policy: ApprovalPolicy::Never,
             })
             .unwrap();
         assert_eq!(turn.id.0, "remote-turn");
@@ -1507,7 +1516,10 @@ mod tests {
             .interrupt_turn(ThreadId("remote-thread".into()), turn.id)
             .unwrap();
         client.shutdown();
-        assert_eq!(server.join().unwrap(), (true, true, true, true, true));
+        assert_eq!(
+            server.join().unwrap(),
+            (true, true, true, true, true, true, true)
+        );
         assert!(authenticated.load(Ordering::Relaxed));
     }
 

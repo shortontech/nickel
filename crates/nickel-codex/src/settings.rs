@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
 
+use crate::ApprovalPolicy;
+
 const SETTINGS_VERSION: u32 = 1;
 const MAX_HOSTS: usize = 64;
 const MAX_ID: usize = 64;
@@ -33,6 +35,8 @@ pub struct CodexSettings {
     pub selected: String,
     #[serde(default)]
     pub hosts: Vec<RemoteHost>,
+    #[serde(default)]
+    pub approval_policy: ApprovalPolicy,
 }
 
 impl Default for CodexSettings {
@@ -41,6 +45,7 @@ impl Default for CodexSettings {
             version: SETTINGS_VERSION,
             selected: "local".into(),
             hosts: Vec::new(),
+            approval_policy: ApprovalPolicy::default(),
         }
     }
 }
@@ -319,16 +324,29 @@ mod tests {
             version: SETTINGS_VERSION,
             selected: "workstation".into(),
             hosts: vec![host()],
+            approval_policy: ApprovalPolicy::Never,
         };
         settings.save(&path).unwrap();
         assert_eq!(CodexSettings::load(&path).unwrap(), settings);
         let stored = fs::read_to_string(&path).unwrap();
         assert!(stored.contains("NICKEL_CODEX_TOKEN"));
+        assert!(stored.contains("approval_policy = \"never\""));
         assert!(!stored.contains("actual-secret-value"));
         #[cfg(unix)]
         assert_eq!(
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
+        );
+    }
+
+    #[test]
+    fn old_settings_default_to_the_safe_on_request_policy() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("hosts.toml");
+        fs::write(&path, "version = 1\nselected = \"local\"\nhosts = []\n").unwrap();
+        assert_eq!(
+            CodexSettings::load(&path).unwrap().approval_policy,
+            ApprovalPolicy::OnRequest
         );
     }
 
@@ -364,6 +382,7 @@ mod tests {
             version: SETTINGS_VERSION,
             selected: "local".into(),
             hosts: vec![host(), host()],
+            approval_policy: ApprovalPolicy::default(),
         };
         assert_eq!(
             duplicate.validate().unwrap_err().to_string(),
@@ -377,6 +396,7 @@ mod tests {
             version: SETTINGS_VERSION,
             selected: "workstation".into(),
             hosts: vec![host()],
+            approval_policy: ApprovalPolicy::default(),
         };
         assert!(settings.remove_host("workstation"));
         assert_eq!(settings.selected, "local");

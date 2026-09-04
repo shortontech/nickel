@@ -983,6 +983,118 @@ mod tests {
     }
 
     #[test]
+    fn approval_policy_requires_selection_and_only_persists_after_acceptance() {
+        let directory = tempfile::tempdir().unwrap();
+        let settings_path = directory.path().join("nickel").join("codex-hosts.toml");
+        let backend = ReplayBackend::from_json(r#"{"name":"policy","events":[]}"#).unwrap();
+        let mut settings = CodexSettings::default();
+        settings.approval_policy = nickel_codex::ApprovalPolicy::Untrusted;
+        let mut app = ChatApplication::with_settings(
+            BackendMode::Replay {
+                backend,
+                cwd: directory.path().into(),
+            },
+            settings,
+            Some(settings_path.clone()),
+        );
+
+        assert_eq!(
+            app.state.effective_approval_policy,
+            nickel_codex::ApprovalPolicy::Untrusted
+        );
+        app.update(ChatMessage::SelectApprovalPolicy(
+            nickel_codex::ApprovalPolicy::Never,
+        ));
+        assert_eq!(
+            app.state.selected_approval_policy,
+            nickel_codex::ApprovalPolicy::Never
+        );
+        assert_eq!(
+            app.state.effective_approval_policy,
+            nickel_codex::ApprovalPolicy::Untrusted
+        );
+        assert!(!settings_path.exists());
+
+        app.accept_approval_policy(nickel_codex::ApprovalPolicy::Never);
+        assert_eq!(
+            app.state.effective_approval_policy,
+            nickel_codex::ApprovalPolicy::Never
+        );
+        assert_eq!(
+            CodexSettings::load(&settings_path).unwrap().approval_policy,
+            nickel_codex::ApprovalPolicy::Never
+        );
+    }
+
+    #[test]
+    fn blur_rerender_and_outstanding_approval_do_not_apply_a_staged_policy() {
+        let backend = ReplayBackend::from_json(r#"{"name":"policy-focus","events":[]}"#).unwrap();
+        let mut app = ChatApplication::new(BackendMode::Replay {
+            backend,
+            cwd: "/projects/nickel".into(),
+        });
+        app.state.effective_approval_policy = nickel_codex::ApprovalPolicy::Untrusted;
+        app.state.selected_approval_policy = nickel_codex::ApprovalPolicy::Untrusted;
+        app.state.pending.push(PendingInteraction::Approval {
+            request_id: ServerRequestId("pending".into()),
+            approval_type: "commandExecution".into(),
+            summary: "Existing request".into(),
+        });
+        app.update(ChatMessage::SelectApprovalPolicy(
+            nickel_codex::ApprovalPolicy::Never,
+        ));
+        let mut scenario = Scenario::new(app, 900, 640);
+        scenario.host_mut().handle_event(UiEvent::FocusLost);
+        let app = scenario.host().application();
+        assert_eq!(
+            app.state.effective_approval_policy,
+            nickel_codex::ApprovalPolicy::Untrusted
+        );
+        assert_eq!(
+            app.state.selected_approval_policy,
+            nickel_codex::ApprovalPolicy::Never
+        );
+        assert_eq!(app.state.pending.len(), 1);
+    }
+
+    #[test]
+    fn approval_policy_control_works_through_direct_activation_modalities() {
+        for via in [
+            ActivationVia::Pointer,
+            ActivationVia::Keyboard,
+            ActivationVia::Touch,
+            ActivationVia::Accessibility,
+        ] {
+            let backend =
+                ReplayBackend::from_json(r#"{"name":"policy-input","events":[]}"#).unwrap();
+            let app = ChatApplication::new(BackendMode::Replay {
+                backend,
+                cwd: "/projects/nickel".into(),
+            });
+            let mut scenario = Scenario::new(app, 1200, 700);
+            scenario
+                .activate_via(
+                    via,
+                    &Selector::role_name(SemanticRole::Button, "Approval policy selector"),
+                )
+                .unwrap();
+            scenario
+                .activate_via(
+                    via,
+                    &Selector::role_name(
+                        SemanticRole::MenuItem,
+                        "Never ask automatically — Codex cannot pause to request approval",
+                    ),
+                )
+                .unwrap();
+            assert_eq!(
+                scenario.host().application().state.selected_approval_policy,
+                nickel_codex::ApprovalPolicy::Never
+            );
+        }
+    }
+
+    #[test]
     fn shell_hosted_resume_requests_the_shell_lease_before_controller_resume() {
         let backend = ReplayBackend::from_json(r#"{"name":"resume","events":[]}"#).unwrap();
         let mut app = ChatApplication::new(BackendMode::Replay {

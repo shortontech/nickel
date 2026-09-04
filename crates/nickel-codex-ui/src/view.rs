@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 use nickel_codex::{
-    BackendChoice, CodexSettings, CommandDecision, FileChangeDecision, RemoteHost, ServerRequestId,
+    ApprovalPolicy, BackendChoice, CodexSettings, CommandDecision, FileChangeDecision, RemoteHost,
+    ServerRequestId,
 };
 use nickel_markdown::{MarkdownPalette, markdown_content_view};
 use nickel_ui::SemanticRole;
@@ -49,8 +50,10 @@ pub enum ChatMessage {
     Reconnect,
     SelectThread(nickel_codex::ThreadId),
     ToggleModelPicker,
+    ToggleApprovalPicker,
     SelectModel(String),
     SelectReasoningEffort(String),
+    SelectApprovalPolicy(ApprovalPolicy),
     ToggleCommandPicker,
     SelectCommand(String),
     ToggleResumePicker,
@@ -141,6 +144,31 @@ fn project_window_name(path: &std::path::Path) -> String {
         .to_owned()
 }
 
+fn approval_policy_label(policy: ApprovalPolicy) -> &'static str {
+    match policy {
+        ApprovalPolicy::Untrusted => "Ask for untrusted commands",
+        ApprovalPolicy::OnFailure => "Ask after sandbox failure",
+        ApprovalPolicy::OnRequest => "Ask when Codex requests",
+        ApprovalPolicy::Never => "Never ask automatically",
+    }
+}
+
+fn approval_policy_description(policy: ApprovalPolicy) -> &'static str {
+    match policy {
+        ApprovalPolicy::Untrusted => "Only known-safe commands run without confirmation",
+        ApprovalPolicy::OnFailure => "Sandboxed actions may request a retry outside the sandbox",
+        ApprovalPolicy::OnRequest => "Codex decides when an action needs confirmation",
+        ApprovalPolicy::Never => "Codex cannot pause to request approval",
+    }
+}
+
+const APPROVAL_POLICIES: [ApprovalPolicy; 4] = [
+    ApprovalPolicy::Untrusted,
+    ApprovalPolicy::OnFailure,
+    ApprovalPolicy::OnRequest,
+    ApprovalPolicy::Never,
+];
+
 pub struct ChatApplication {
     pub state: ChatState,
     controller: ChatController,
@@ -161,6 +189,7 @@ pub struct ChatApplication {
     pub(crate) shell_warning_acknowledged: bool,
     pub(crate) model_picker_open: bool,
     model_picker_generation: u64,
+    approval_picker_generation: u64,
     pub(crate) resume_picker_open: bool,
     pub(crate) resume_picker_loading: bool,
     pub(crate) resume_picker_pending: Option<nickel_codex::ThreadId>,
@@ -181,6 +210,7 @@ struct RemoteHostEditor {
 struct ChatOverlays<'a> {
     pending_shell_command: Option<&'a str>,
     model_picker_generation: u64,
+    approval_picker_generation: u64,
     resume_picker_open: bool,
     resume_picker_loading: bool,
     resume_picker_pending: Option<&'a nickel_codex::ThreadId>,
@@ -278,8 +308,11 @@ impl ChatApplication {
         settings: CodexSettings,
         settings_path: Option<PathBuf>,
     ) -> Self {
+        let mut state = ChatState::default();
+        state.effective_approval_policy = settings.approval_policy;
+        state.selected_approval_policy = settings.approval_policy;
         Self {
-            state: ChatState::default(),
+            state,
             controller: ChatController::spawn(mode.clone()),
             mode,
             settings,
@@ -298,6 +331,7 @@ impl ChatApplication {
             shell_warning_acknowledged: false,
             model_picker_open: false,
             model_picker_generation: 0,
+            approval_picker_generation: 0,
             resume_picker_open: false,
             resume_picker_loading: false,
             resume_picker_pending: None,
@@ -381,6 +415,9 @@ impl ChatApplication {
                             self.shell_requests.push(ShellRequest::ResumeFailed(thread));
                         }
                     }
+                    ControllerEvent::ApprovalPolicyAccepted(policy) => {
+                        self.accept_approval_policy(*policy);
+                    }
                     ControllerEvent::Failure(_)
                     | ControllerEvent::Incompatible(_)
                     | ControllerEvent::Unavailable(_) => {
@@ -438,6 +475,17 @@ impl ChatApplication {
         }
     }
 
+    pub(crate) fn accept_approval_policy(&mut self, policy: ApprovalPolicy) {
+        self.state.effective_approval_policy = policy;
+        let mut settings = self.settings.clone();
+        settings.approval_policy = policy;
+        if !self.save_settings(settings) {
+            self.state.report_diagnostic(
+                "Codex accepted the approval policy, but Nickel could not save it",
+            );
+        }
+    }
+
     fn select_connection(&mut self, id: String) {
         let mode = if id == "local" {
             match create_managed_workspace() {
@@ -464,6 +512,8 @@ impl ChatApplication {
         }
         let generation = self.state.generation.saturating_add(1);
         let mut state = ChatState::default();
+        state.effective_approval_policy = self.settings.approval_policy;
+        state.selected_approval_policy = self.settings.approval_policy;
         state.generation = generation;
         self.state = state;
         self.controller = if self.project_menu_mode {
@@ -523,6 +573,7 @@ impl Application for ChatApplication {
                         images,
                         model: self.state.selected_model.clone(),
                         reasoning_effort: self.state.selected_reasoning_effort.clone(),
+                        approval_policy: self.state.selected_approval_policy,
                     });
                 }
             }
@@ -536,6 +587,12 @@ impl Application for ChatApplication {
             ChatMessage::ToggleModelPicker => {
                 self.model_picker_open = !self.model_picker_open;
                 self.model_picker_generation = self.model_picker_generation.saturating_add(1);
+                self.resume_picker_open = false;
+                self.command_picker_open = false;
+            }
+            ChatMessage::ToggleApprovalPicker => {
+                self.approval_picker_generation = self.approval_picker_generation.saturating_add(1);
+                self.model_picker_open = false;
                 self.resume_picker_open = false;
                 self.command_picker_open = false;
             }
@@ -554,6 +611,9 @@ impl Application for ChatApplication {
             ChatMessage::SelectReasoningEffort(effort) => {
                 self.state.selected_reasoning_effort = Some(effort);
                 self.model_picker_open = false;
+            }
+            ChatMessage::SelectApprovalPolicy(policy) => {
+                self.state.selected_approval_policy = policy;
             }
             ChatMessage::ToggleCommandPicker => {
                 self.command_picker_open = !self.command_picker_open;
@@ -958,6 +1018,7 @@ impl Application for ChatApplication {
                 ChatOverlays {
                     pending_shell_command: self.pending_shell_command.as_deref(),
                     model_picker_generation: self.model_picker_generation,
+                    approval_picker_generation: self.approval_picker_generation,
                     resume_picker_open: self.resume_picker_open,
                     resume_picker_loading: self.resume_picker_loading,
                     resume_picker_pending: self.resume_picker_pending.as_ref(),
@@ -1409,6 +1470,7 @@ fn configured_chat_view(
     let ChatOverlays {
         pending_shell_command,
         model_picker_generation,
+        approval_picker_generation,
         resume_picker_open,
         resume_picker_loading,
         resume_picker_pending,
@@ -1583,8 +1645,32 @@ fn configured_chat_view(
                                 .semantic_role(SemanticRole::Button)
                                 .overlay(true)
                                 .colors(PANEL, SIDEBAR, TEXT))}
+                        {Dropdown::new(
+                            ChatMessage::ToggleApprovalPicker,
+                            approval_policy_label(state.selected_approval_policy),
+                            APPROVAL_POLICIES.into_iter().map(|policy| (
+                                format!("{} — {}", approval_policy_label(policy), approval_policy_description(policy)),
+                                ChatMessage::SelectApprovalPolicy(policy),
+                            )),
+                        ).id(id!(approval_policy_selector))
+                            .overlay(true)
+                            .open_generation(approval_picker_generation)
+                            .colors(PANEL, SIDEBAR, TEXT)
+                            .accessibility_label("Approval policy selector")
+                            .accessibility_description(format!(
+                                "Effective: {}. This does not change sandbox or filesystem access.",
+                                approval_policy_label(state.effective_approval_policy),
+                            ))
+                            .semantic_role(SemanticRole::Button)}
                         <Column gap={2.0} grow={1.0}>
-                            <Text color={MUTED}>{if state.active_turn.is_some() { "Codex is working…" } else { "Explicit approval is always required" }}</Text>
+                            <Text color={MUTED}>{if state.active_turn.is_some() {
+                                "Codex is working…".to_owned()
+                            } else if state.selected_approval_policy != state.effective_approval_policy {
+                                format!("Applies to the next turn; effective now: {}", approval_policy_label(state.effective_approval_policy))
+                            } else {
+                                format!("Approval policy: {}", approval_policy_label(state.effective_approval_policy))
+                            }}</Text>
+                            <Text color={MUTED} scale={0.72}>{"Approval only; sandbox and filesystem access are unchanged"}</Text>
                             <Text color={MUTED} scale={0.72}>{&state.provenance}</Text>
                         </Column>
                         <Spacer fill />
