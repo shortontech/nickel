@@ -37,41 +37,47 @@ pub fn open_path(path: &Path) -> Result<(), String> {
     platform::open_path(path).map_err(|error| error.to_string())
 }
 
-/// Copies one external drag/clipboard source into a provider directory without overwriting.
-pub fn copy_into(source: &Path, destination: &Path) -> io::Result<PathBuf> {
-    let name = source
-        .file_name()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "source has no file name"))?;
-    let mut target = destination.join(name);
-    if target.exists() {
-        let stem = source.file_stem().unwrap_or(name).to_string_lossy();
-        let extension = source.extension().map(|value| value.to_string_lossy());
-        target = (2_u32..)
-            .map(|number| {
-                let name = extension.as_ref().map_or_else(
-                    || format!("{stem} ({number})"),
-                    |extension| format!("{stem} ({number}).{extension}"),
-                );
-                destination.join(name)
-            })
-            .find(|candidate| !candidate.exists())
-            .expect("an unused collision suffix exists");
-    }
-    copy_recursively(source, &target)?;
-    Ok(target)
+pub fn file_identity(path: &Path) -> io::Result<FileIdentity> {
+    let metadata = fs::metadata(path)?;
+    metadata_identity(path, &metadata).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::Unsupported,
+            "stable file identities are unavailable on this platform",
+        )
+    })
 }
 
-fn copy_recursively(source: &Path, target: &Path) -> io::Result<()> {
-    if source.is_dir() {
-        fs::create_dir(target)?;
-        for entry in fs::read_dir(source)? {
-            let entry = entry?;
-            copy_recursively(&entry.path(), &target.join(entry.file_name()))?;
-        }
-    } else {
-        fs::copy(source, target)?;
-    }
-    Ok(())
+/// Copies one external drag/clipboard source into a provider directory without overwriting.
+pub fn copy_into(source: &Path, destination: &Path) -> io::Result<PathBuf> {
+    use operations::{
+        ClipboardOffer, ConflictPolicy, ItemCapabilities, TransferIntent, TransferSource,
+        execute_local_transfer, plan_paste,
+    };
+    let offer = ClipboardOffer::new(
+        TransferIntent::Copy,
+        vec![TransferSource {
+            provider: "local".into(),
+            identity: file_identity(source)?,
+            path: source.to_path_buf(),
+            capabilities: ItemCapabilities {
+                readable: true,
+                removable: false,
+            },
+        }],
+    )
+    .map_err(|error| io::Error::other(format!("{error:?}")))?;
+    let effect = plan_paste(&offer, "local", destination, true, ConflictPolicy::KeepBoth)
+        .map_err(|error| io::Error::other(format!("{error:?}")))?;
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    let report = execute_local_transfer(&effect, &cancelled, |_, _| {});
+    report.affected.into_iter().next().ok_or_else(|| {
+        let detail = report
+            .failed
+            .into_iter()
+            .next()
+            .map_or_else(|| "copy produced no output".into(), |(_, error)| error);
+        io::Error::other(detail)
+    })
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

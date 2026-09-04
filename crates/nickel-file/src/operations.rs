@@ -354,7 +354,7 @@ pub fn execute_local_transfer(
         delete_after_verified_copy,
         sources,
         destination,
-        ..
+        conflicts,
     } = effect
     else {
         return TransferReport::default();
@@ -368,13 +368,29 @@ pub fn execute_local_transfer(
         let Some(name) = source.path.file_name() else {
             continue;
         };
-        let target = destination.join(name);
-        let result = if target.exists() {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                "destination exists",
-            ))
-        } else if *intent == TransferIntent::Move {
+        let mut target = destination.join(name);
+        if target.exists() {
+            match conflicts {
+                ConflictPolicy::Ask => {
+                    report.failed.push((
+                        source.path.clone(),
+                        std::io::Error::new(
+                            std::io::ErrorKind::AlreadyExists,
+                            "destination exists",
+                        )
+                        .to_string(),
+                    ));
+                    progress(index + 1, sources.len());
+                    continue;
+                }
+                ConflictPolicy::Skip => {
+                    progress(index + 1, sources.len());
+                    continue;
+                }
+                ConflictPolicy::KeepBoth => target = unused_copy_name(&target),
+            }
+        }
+        let result = if *intent == TransferIntent::Move {
             std::fs::rename(&source.path, &target)
         } else {
             let copied = if source.path.is_dir() {
@@ -402,6 +418,25 @@ pub fn execute_local_transfer(
         progress(index + 1, sources.len());
     }
     report
+}
+
+fn unused_copy_name(original: &Path) -> PathBuf {
+    let parent = original.parent().unwrap_or_else(|| Path::new(""));
+    let name = original
+        .file_name()
+        .expect("a transfer target always has a file name");
+    let stem = original.file_stem().unwrap_or(name).to_string_lossy();
+    let extension = original.extension().map(|value| value.to_string_lossy());
+    (2_u32..)
+        .map(|number| {
+            let name = extension.as_ref().map_or_else(
+                || format!("{stem} ({number})"),
+                |extension| format!("{stem} ({number}).{extension}"),
+            );
+            parent.join(name)
+        })
+        .find(|candidate| !candidate.exists())
+        .expect("an unused collision suffix exists")
 }
 
 fn verify_copy(source: &Path, destination: &Path) -> std::io::Result<()> {
@@ -667,6 +702,49 @@ mod tests {
             std::fs::read(destination.path().join("payload")).unwrap(),
             b"verified bytes"
         );
+    }
+
+    #[test]
+    fn local_transfer_applies_keep_both_and_skip_conflict_policies() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        let source_path = source_dir.path().join("report.txt");
+        std::fs::write(&source_path, b"new").unwrap();
+        std::fs::write(destination.path().join("report.txt"), b"old").unwrap();
+        let offer = ClipboardOffer::new(
+            TransferIntent::Copy,
+            vec![source(source_path.to_str().unwrap(), "local", false)],
+        )
+        .unwrap();
+        let keep_both = plan_paste(
+            &offer,
+            "local",
+            destination.path(),
+            true,
+            ConflictPolicy::KeepBoth,
+        )
+        .unwrap();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let report = execute_local_transfer(&keep_both, &cancel, |_, _| {});
+        assert_eq!(report.affected, [destination.path().join("report (2).txt")]);
+        assert!(report.failed.is_empty());
+        assert_eq!(
+            std::fs::read(destination.path().join("report.txt")).unwrap(),
+            b"old"
+        );
+
+        let skip = plan_paste(
+            &offer,
+            "local",
+            destination.path(),
+            true,
+            ConflictPolicy::Skip,
+        )
+        .unwrap();
+        let report = execute_local_transfer(&skip, &cancel, |_, _| {});
+        assert!(report.affected.is_empty());
+        assert!(report.failed.is_empty());
+        assert!(!destination.path().join("report (3).txt").exists());
     }
 
     #[test]

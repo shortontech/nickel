@@ -440,8 +440,14 @@ impl DesktopLayout {
             Arrangement::Sorted { key, direction } => {
                 let grouping = self.grouping;
                 let locale = self.locale.clone();
+                let collator = locale
+                    .parse::<icu_locale::Locale>()
+                    .ok()
+                    .and_then(|locale| {
+                        icu_collator::Collator::try_new(locale.into(), Default::default()).ok()
+                    });
                 self.items.sort_by(|left, right| {
-                    compare_items(left, right, key, grouping, direction, &locale)
+                    compare_items(left, right, key, grouping, direction, collator.as_ref())
                 });
                 self.place_in_visual_order();
             }
@@ -502,27 +508,27 @@ fn compare_items(
     key: SortKey,
     grouping: FolderGrouping,
     direction: SortDirection,
-    locale: &str,
+    collator: Option<&icu_collator::CollatorBorrowed<'_>>,
 ) -> Ordering {
     let folder_order = match grouping {
         FolderGrouping::Mixed => Ordering::Equal,
         FolderGrouping::FoldersFirst => right.entry.is_directory.cmp(&left.entry.is_directory),
     };
     let value_order = match key {
-        SortKey::Name => names(left, right, locale),
+        SortKey::Name => names(left, right, collator),
         SortKey::Kind => extension(&left.entry)
             .cmp(&extension(&right.entry))
-            .then_with(|| names(left, right, locale)),
+            .then_with(|| names(left, right, collator)),
         SortKey::Size => left
             .entry
             .size
             .cmp(&right.entry.size)
-            .then_with(|| names(left, right, locale)),
+            .then_with(|| names(left, right, collator)),
         SortKey::Modified => left
             .entry
             .modified
             .cmp(&right.entry.modified)
-            .then_with(|| names(left, right, locale)),
+            .then_with(|| names(left, right, collator)),
     };
     let value_order = match direction {
         SortDirection::Ascending => value_order,
@@ -533,31 +539,16 @@ fn compare_items(
         .then_with(|| left.id.cmp(&right.id))
 }
 
-fn names(left: &DesktopItem, right: &DesktopItem, locale: &str) -> Ordering {
-    locale_sort_key(&left.entry.display_name(), locale)
-        .cmp(&locale_sort_key(&right.entry.display_name(), locale))
-}
-
-fn locale_sort_key(value: &str, locale: &str) -> String {
-    let language = locale.split(['-', '_']).next().unwrap_or(locale);
-    let value = if matches!(language, "tr" | "az") {
-        value.replace('I', "ı").replace('İ', "i")
-    } else {
-        value.to_owned()
-    };
-    let folded = value.to_lowercase();
-    match language {
-        "de" => folded
-            .replace('ä', "ae")
-            .replace('ö', "oe")
-            .replace('ü', "ue")
-            .replace('ß', "ss"),
-        "sv" => folded
-            .replace('å', "{a")
-            .replace('ä', "{b")
-            .replace('ö', "{c"),
-        _ => folded,
-    }
+fn names(
+    left: &DesktopItem,
+    right: &DesktopItem,
+    collator: Option<&icu_collator::CollatorBorrowed<'_>>,
+) -> Ordering {
+    let left = left.entry.display_name();
+    let right = right.entry.display_name();
+    collator
+        .map(|collator| collator.compare(&left, &right))
+        .unwrap_or_else(|| left.to_lowercase().cmp(&right.to_lowercase()))
 }
 
 fn extension(entry: &FileEntry) -> String {
@@ -845,9 +836,9 @@ mod tests {
 
     #[test]
     fn locale_collation_handles_turkish_german_and_swedish_primary_order() {
-        assert_eq!(locale_sort_key("İSTANBUL", "tr-TR"), "istanbul");
-        assert_eq!(locale_sort_key("Ähre", "de-DE"), "aehre");
-        assert!(locale_sort_key("Örebro", "sv-SE") > locale_sort_key("Zebra", "sv-SE"));
+        let locale: icu_locale::Locale = "sv-SE".parse().unwrap();
+        let collator = icu_collator::Collator::try_new(locale.into(), Default::default()).unwrap();
+        assert_eq!(collator.compare("Zebra", "Örebro"), Ordering::Less);
     }
 
     #[test]
