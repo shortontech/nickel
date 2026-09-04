@@ -2351,6 +2351,10 @@ impl<Message: Clone> UiFrame<Message> {
             }
             UiEvent::ControllerDown | UiEvent::KeyboardNavigateDown => self
                 .move_controller_spatial(state, ControllerDirection::Down, &mut outcome.messages),
+            UiEvent::KeyboardNavigatePageUp => self.move_controller_page(state, -1),
+            UiEvent::KeyboardNavigatePageDown => self.move_controller_page(state, 1),
+            UiEvent::KeyboardNavigateStart => self.move_controller_boundary(state, false),
+            UiEvent::KeyboardNavigateEnd => self.move_controller_boundary(state, true),
             UiEvent::ControllerLeft | UiEvent::KeyboardNavigateLeft => {
                 let vertical_scope = state
                     .navigation()
@@ -3023,6 +3027,74 @@ impl<Message: Clone> UiFrame<Message> {
         self.select_controller_from(state, direction, ids)
     }
 
+    fn move_controller_boundary(&self, state: &mut UiStateStore, end: bool) -> Invalidation {
+        let ids = self.controller_targets(state);
+        let target = if end { ids.last() } else { ids.first() };
+        target.cloned().map_or(Invalidation::None, |target| {
+            self.select_controller_id(state, target)
+        })
+    }
+
+    fn move_controller_page(&self, state: &mut UiStateStore, direction: isize) -> Invalidation {
+        let ids = self.controller_targets(state);
+        if ids.is_empty() {
+            return Invalidation::None;
+        }
+        let Some(current) = state
+            .navigation()
+            .controller_selected()
+            .filter(|selected| ids.contains(selected))
+            .cloned()
+        else {
+            let target = if direction.is_negative() {
+                ids.last().cloned()
+            } else {
+                ids.first().cloned()
+            };
+            return target.map_or(Invalidation::None, |target| {
+                self.select_controller_id(state, target)
+            });
+        };
+        let Some(current_index) = ids.iter().position(|id| id == &current) else {
+            return Invalidation::None;
+        };
+        let Some(current_rect) = self.controller_rect(&current) else {
+            return Invalidation::None;
+        };
+        let viewport_height = self
+            .scrolls
+            .iter()
+            .rev()
+            .find(|scroll| {
+                current_rect.origin.x < scroll.rect.origin.x + scroll.rect.size.width
+                    && current_rect.origin.x + current_rect.size.width > scroll.rect.origin.x
+            })
+            .map_or(current_rect.size.height.max(1.0), |scroll| {
+                scroll.rect.size.height.max(current_rect.size.height)
+            });
+        let desired_y = current_rect.origin.y + direction as f32 * viewport_height;
+        let candidates: Box<dyn Iterator<Item = (usize, &UiId)>> = if direction.is_negative() {
+            Box::new(ids[..current_index].iter().enumerate())
+        } else {
+            Box::new(ids.iter().enumerate().skip(current_index + 1))
+        };
+        let target = candidates
+            .filter_map(|(index, id)| {
+                let rect = self.controller_rect(id)?;
+                Some((index, id, (rect.origin.y - desired_y).abs()))
+            })
+            .min_by(|left, right| left.2.total_cmp(&right.2))
+            .map(|(_, id, _)| id.clone())
+            .unwrap_or_else(|| {
+                if direction.is_negative() {
+                    ids[0].clone()
+                } else {
+                    ids[ids.len() - 1].clone()
+                }
+            });
+        self.select_controller_id(state, target)
+    }
+
     fn context_message_for_id(&self, id: &UiId) -> Option<&Message> {
         self.context_messages
             .iter()
@@ -3515,12 +3587,16 @@ impl<Message: Clone> UiFrame<Message> {
             .or_else(|| state.navigation().controller_pane())
             .and_then(|scope| self.scope_policy(scope))
             .and_then(|scope| scope.scroll_owner.as_ref());
-        for scroll in self
-            .scrolls
-            .iter()
-            .rev()
-            .filter(|scroll| declared_owner.is_none_or(|owner| &scroll.id == owner))
-        {
+        for scroll in self.scrolls.iter().rev().filter(|scroll| {
+            declared_owner.is_none_or(|owner| {
+                &scroll.id == owner
+                    || scroll
+                        .id
+                        .as_str()
+                        .strip_suffix(owner.as_str())
+                        .is_some_and(|prefix| prefix.ends_with('/'))
+            })
+        }) {
             let overlaps_horizontally = target.origin.x
                 < scroll.rect.origin.x + scroll.rect.size.width
                 && target.origin.x + target.size.width > scroll.rect.origin.x;

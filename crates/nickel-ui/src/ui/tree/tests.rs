@@ -2106,9 +2106,7 @@ fn declared_scroll_owner_is_the_only_surface_revealed_for_scope_focus() {
         .child(
             Container::new()
                 .id("scope")
-                .navigation_scope(
-                    crate::NavigationScope::group().scroll_owner(UiId::from("root/owner")),
-                )
+                .navigation_scope(crate::NavigationScope::group().scroll_owner(UiId::from("owner")))
                 .child(
                     Column::new().children([
                         Button::new(TestMessage::Option(1), "First")

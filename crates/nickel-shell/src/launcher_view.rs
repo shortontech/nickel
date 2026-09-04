@@ -713,7 +713,11 @@ fn build_launcher_view_directional(
     .gap(GRID_GAP)
     .item_focus_border(theme.borders.focus)
     .item_controller_focus_border(theme.borders.controller_focus)
-    .navigation_scope(NavigationScope::group().traversal(NavigationTraversal::Grid))
+    .navigation_scope(
+        NavigationScope::group()
+            .traversal(NavigationTraversal::Grid)
+            .scroll_owner(UiId::new("launcher-search-scroll")),
+    )
     .controller_scope_background(theme.surfaces.selected)
     .on_activate(move |id| {
         LauncherAction::ActivateResult(
@@ -1251,7 +1255,7 @@ mod tests {
     use super::*;
     use nickel_input::{
         DeviceId, EventOrder, InputEvent, KeyCode, KeyEdge, KeyEvent, KeyLocation, LogicalKey,
-        ModifierState, NamedKey, PhysicalKey, TextEvent,
+        ModifierState, NamedKey, PhysicalKey, PointerEvent, TextEvent, Vector,
     };
     use nickel_ui::{
         ActionKind, ControllerAction, HostBatch, HostEvent, Point, SemanticAction,
@@ -1659,6 +1663,101 @@ mod tests {
             scenario.host_mut().application_mut().take_effects(),
             [LauncherAction::ActivateResult(29)]
         );
+    }
+
+    #[test]
+    fn keyboard_boundary_and_page_navigation_reveal_and_activate_results() {
+        let mut scenario = populated_search_scenario();
+        for (order, physical, logical) in [
+            (1, KeyCode::ArrowDown, NamedKey::ArrowDown),
+            (2, KeyCode::ArrowDown, NamedKey::ArrowDown),
+            (3, KeyCode::ArrowRight, NamedKey::ArrowRight),
+            (4, KeyCode::PageDown, NamedKey::PageDown),
+        ] {
+            scenario
+                .host_mut()
+                .handle_input(&navigation_key(order, physical, logical), None);
+        }
+        let page_target = controller_target(&scenario);
+        assert!(
+            !page_target.contains("application-00"),
+            "PageDown did not advance the application viewport: {page_target}"
+        );
+
+        scenario
+            .host_mut()
+            .handle_input(&navigation_key(5, KeyCode::End, NamedKey::End), None);
+        assert!(controller_target(&scenario).contains("application-29"));
+        let last = scenario
+            .semantic_nodes()
+            .into_iter()
+            .find(|node| node.id.as_str().contains("application-29"))
+            .expect("End retains the last application semantically");
+        assert!(last.bounds.origin.y >= 0.0);
+        assert!(last.bounds.origin.y + last.bounds.size.height <= 680.0);
+        scenario
+            .host_mut()
+            .handle_input(&navigation_key(6, KeyCode::Enter, NamedKey::Enter), None);
+        assert_eq!(
+            scenario.host_mut().application_mut().take_effects(),
+            [LauncherAction::ActivateResult(29)]
+        );
+
+        scenario
+            .host_mut()
+            .handle_input(&navigation_key(7, KeyCode::Home, NamedKey::Home), None);
+        assert!(controller_target(&scenario).contains("application-00"));
+    }
+
+    #[test]
+    fn launcher_wheel_accepts_line_and_pixel_deltas_inside_its_viewport() {
+        let mut scenario = populated_search_scenario();
+        let scroll = scenario
+            .host()
+            .semantic_targets_for_message(&LauncherAction::SearchScroll)
+            .into_iter()
+            .next()
+            .expect("application results expose a scroll viewport");
+        let point = nickel_input::Point {
+            x: f64::from(scroll.bounds.origin.x + scroll.bounds.size.width / 2.0),
+            y: f64::from(scroll.bounds.origin.y + scroll.bounds.size.height / 2.0),
+        };
+        let first_y = |scenario: &Scenario<LauncherApplication>| {
+            scenario
+                .semantic_nodes()
+                .into_iter()
+                .find(|node| node.id.as_str().contains("application-00"))
+                .expect("first application remains in the authoritative collection")
+                .bounds
+                .origin
+                .y
+        };
+        let before = first_y(&scenario);
+        scenario.host_mut().handle_input(
+            &InputEvent::Pointer(PointerEvent::Axis {
+                device: DeviceId(1),
+                order: EventOrder(1),
+                delta: Vector { x: 0.0, y: -2.0 },
+                discrete: Some((0, -2)),
+                position: Some(point),
+            }),
+            None,
+        );
+        let after_lines = first_y(&scenario);
+        assert!(after_lines < before);
+        scenario.host_mut().handle_input(
+            &InputEvent::Pointer(PointerEvent::Axis {
+                device: DeviceId(1),
+                order: EventOrder(2),
+                delta: Vector { x: 0.0, y: -2.5 },
+                discrete: None,
+                position: Some(point),
+            }),
+            None,
+        );
+        let after_pixels = first_y(&scenario);
+        assert!(after_pixels < after_lines);
+        assert!((after_lines - after_pixels - 2.5).abs() < 0.01);
     }
 
     #[test]

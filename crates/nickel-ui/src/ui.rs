@@ -186,6 +186,10 @@ pub enum UiEvent {
     KeyboardNavigateDown,
     KeyboardNavigateLeft,
     KeyboardNavigateRight,
+    KeyboardNavigatePageUp,
+    KeyboardNavigatePageDown,
+    KeyboardNavigateStart,
+    KeyboardNavigateEnd,
     KeyboardNavigateBack,
     KeyboardNavigateActivate,
     ControllerUp,
@@ -660,6 +664,10 @@ impl UiEvent {
             | Self::KeyboardNavigateDown
             | Self::KeyboardNavigateLeft
             | Self::KeyboardNavigateRight
+            | Self::KeyboardNavigatePageUp
+            | Self::KeyboardNavigatePageDown
+            | Self::KeyboardNavigateStart
+            | Self::KeyboardNavigateEnd
             | Self::KeyboardNavigateBack
             | Self::KeyboardNavigateActivate
             | Self::ActivateFocused

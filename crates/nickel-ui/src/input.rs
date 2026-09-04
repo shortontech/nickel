@@ -148,7 +148,10 @@ impl FocusedInputDispatcher {
                 vec![InputCommand::Ui(UiEvent::PointerContext(self.pointer))]
             }
             InputEvent::Pointer(PointerEvent::Axis {
-                delta, position, ..
+                delta,
+                discrete,
+                position,
+                ..
             }) => {
                 if let Some(position) = position {
                     self.pointer = Point {
@@ -157,16 +160,17 @@ impl FocusedInputDispatcher {
                     };
                 }
                 let mut commands = Vec::new();
+                let multiplier = if discrete.is_some() { 42.0 } else { 1.0 };
                 if delta.x != 0.0 {
                     commands.push(InputCommand::Ui(UiEvent::ScrollHorizontal {
                         point: self.pointer,
-                        delta_x: -(delta.x as f32) * 42.0,
+                        delta_x: -(delta.x as f32) * multiplier,
                     }));
                 }
                 if delta.y != 0.0 {
                     commands.push(InputCommand::Ui(UiEvent::Scroll {
                         point: self.pointer,
-                        delta_y: -(delta.y as f32) * 42.0,
+                        delta_y: -(delta.y as f32) * multiplier,
                     }));
                 }
                 commands
@@ -244,6 +248,11 @@ impl FocusedInputDispatcher {
                             fallback: Some(UiEvent::KeyboardActivate),
                         }
                     }
+                    (LogicalKey::Named(NamedKey::Enter), _)
+                        if context.navigation_active && !event.repeat =>
+                    {
+                        InputCommand::Ui(UiEvent::KeyboardNavigateActivate)
+                    }
                     (LogicalKey::Named(NamedKey::Enter), _) if !event.repeat => {
                         InputCommand::Application {
                             shortcut: Shortcut::Submit,
@@ -265,6 +274,18 @@ impl FocusedInputDispatcher {
                             shortcut: Shortcut::Escape,
                             fallback: Some(UiEvent::Dismiss),
                         }
+                    }
+                    (LogicalKey::Named(NamedKey::Home), _) if context.navigation_active => {
+                        InputCommand::Ui(UiEvent::KeyboardNavigateStart)
+                    }
+                    (LogicalKey::Named(NamedKey::End), _) if context.navigation_active => {
+                        InputCommand::Ui(UiEvent::KeyboardNavigateEnd)
+                    }
+                    (LogicalKey::Named(NamedKey::PageUp), _) if context.navigation_active => {
+                        InputCommand::Ui(UiEvent::KeyboardNavigatePageUp)
+                    }
+                    (LogicalKey::Named(NamedKey::PageDown), _) if context.navigation_active => {
+                        InputCommand::Ui(UiEvent::KeyboardNavigatePageDown)
                     }
                     (LogicalKey::Named(NamedKey::Home), _) => InputCommand::Application {
                         shortcut: Shortcut::DocumentStart,
@@ -290,6 +311,12 @@ impl FocusedInputDispatcher {
                             }
                         }),
                     },
+                    (LogicalKey::Named(NamedKey::PageUp), _) => {
+                        InputCommand::Ui(UiEvent::KeyboardNavigatePageUp)
+                    }
+                    (LogicalKey::Named(NamedKey::PageDown), _) => {
+                        InputCommand::Ui(UiEvent::KeyboardNavigatePageDown)
+                    }
                     (LogicalKey::Named(NamedKey::Tab), _) if shift => {
                         InputCommand::Ui(UiEvent::FocusPrevious)
                     }
@@ -564,10 +591,70 @@ mod tests {
                 &key(LogicalKey::Named(NamedKey::Enter), KeyCode::Enter, &[]),
                 context,
             ),
-            [InputCommand::Application {
-                shortcut: Shortcut::Submit,
-                fallback: Some(UiEvent::KeyboardNavigateActivate),
-            }]
+            [InputCommand::Ui(UiEvent::KeyboardNavigateActivate)]
+        );
+    }
+
+    #[test]
+    fn navigation_page_and_boundary_keys_remain_semantic() {
+        let context = InputContext {
+            text_focused: true,
+            navigation_active: true,
+            selection_owned: false,
+        };
+        let cases = [
+            (
+                NamedKey::PageUp,
+                KeyCode::PageUp,
+                UiEvent::KeyboardNavigatePageUp,
+            ),
+            (
+                NamedKey::PageDown,
+                KeyCode::PageDown,
+                UiEvent::KeyboardNavigatePageDown,
+            ),
+            (
+                NamedKey::Home,
+                KeyCode::Home,
+                UiEvent::KeyboardNavigateStart,
+            ),
+            (NamedKey::End, KeyCode::End, UiEvent::KeyboardNavigateEnd),
+        ];
+        for (logical, physical, expected) in cases {
+            assert_eq!(
+                FocusedInputDispatcher::default().dispatch_with_context(
+                    &key(LogicalKey::Named(logical), physical, &[]),
+                    context,
+                ),
+                [InputCommand::Ui(expected)]
+            );
+        }
+    }
+
+    #[test]
+    fn wheel_lines_are_normalized_but_trackpad_pixels_are_preserved() {
+        let axis = |delta_y, discrete| {
+            InputEvent::Pointer(PointerEvent::Axis {
+                device: DeviceId(1),
+                order: EventOrder(1),
+                delta: nickel_input::Vector { x: 0.0, y: delta_y },
+                discrete,
+                position: Some(nickel_input::Point { x: 8.0, y: 9.0 }),
+            })
+        };
+        assert_eq!(
+            FocusedInputDispatcher::default().dispatch(&axis(2.0, Some((0, 2)))),
+            [InputCommand::Ui(UiEvent::Scroll {
+                point: Point { x: 8.0, y: 9.0 },
+                delta_y: -84.0,
+            })]
+        );
+        assert_eq!(
+            FocusedInputDispatcher::default().dispatch(&axis(2.5, None)),
+            [InputCommand::Ui(UiEvent::Scroll {
+                point: Point { x: 8.0, y: 9.0 },
+                delta_y: -2.5,
+            })]
         );
     }
 
