@@ -38,6 +38,9 @@ freedesktop-icons.workspace = true
 shlex.workspace = true
 zbus.workspace = true
 libloading.workspace = true
+pipewire-native.workspace = true
+pipewire-native-spa.workspace = true
+serde_json.workspace = true
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 arboard = "3.6.1"

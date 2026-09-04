@@ -344,6 +344,17 @@ pub enum TestKey {
     Delete,
     F11,
     PrintScreen,
+    VolumeUp,
+    VolumeDown,
+    VolumeMute,
+    MediaPlayPause,
+    MediaPlay,
+    MediaPause,
+    MediaStop,
+    MediaNext,
+    MediaPrevious,
+    MediaFastForward,
+    MediaRewind,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -635,6 +646,7 @@ pub enum Event {
     Workspaces(WorkspaceState),
     LockState { locked: bool },
     GlobalShortcut { action: ShortcutAction },
+    ConsumerControl { control: ConsumerControl },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -644,6 +656,22 @@ pub enum ShortcutAction {
     ShowScreenshotTool,
     CaptureActiveWindow,
     CaptureActiveWindowToFile,
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConsumerControl {
+    VolumeUp,
+    VolumeDown,
+    VolumeMute,
+    PlayPause,
+    Play,
+    Pause,
+    Stop,
+    Next,
+    Previous,
+    FastForward,
+    Rewind,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -787,6 +815,7 @@ pub enum ShellRole {
     ContextMenu,
     Preview,
     Notification,
+    VolumeOsd,
     ProjectMenu,
     Lock,
     Screenshot,
@@ -803,6 +832,7 @@ impl ShellRole {
             Self::ContextMenu => "io.nickel.shell.context-menu",
             Self::Preview => "io.nickel.shell.preview",
             Self::Notification => "io.nickel.shell.notification",
+            Self::VolumeOsd => "io.nickel.shell.volume-osd",
             Self::ProjectMenu => "io.nickel.shell.project-menu",
             Self::Lock => "io.nickel.shell.lock",
             Self::Screenshot => "io.nickel.shell.screenshot",
@@ -819,6 +849,7 @@ impl ShellRole {
             Self::ContextMenu,
             Self::Preview,
             Self::Notification,
+            Self::VolumeOsd,
             Self::ProjectMenu,
             Self::Lock,
             Self::Screenshot,

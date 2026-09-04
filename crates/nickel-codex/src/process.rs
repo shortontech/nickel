@@ -1,4 +1,4 @@
-use std::{env, path::Path, process::Command};
+use std::{path::Path, process::Command};
 
 pub(crate) fn command(executable: &Path) -> Command {
     #[cfg(windows)]
@@ -6,7 +6,7 @@ pub(crate) fn command(executable: &Path) -> Command {
         executable.extension().and_then(|extension| extension.to_str()),
         Some(extension) if extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
     ) {
-        let interpreter = env::var_os("COMSPEC").unwrap_or_else(|| "cmd.exe".into());
+        let interpreter = std::env::var_os("COMSPEC").unwrap_or_else(|| "cmd.exe".into());
         let mut command = Command::new(interpreter);
         command.args(["/D", "/S", "/C", "CALL"]).arg(executable);
         return command;

@@ -316,6 +316,7 @@ fn shell_role_accepts_ordinary_focus(role: ShellRole) -> bool {
             | ShellRole::ProjectMenu
             | ShellRole::Preview
             | ShellRole::ContextMenu
+            | ShellRole::VolumeOsd
             | ShellRole::Screenshot
     )
 }
@@ -422,6 +423,8 @@ pub struct NickelSession {
     pub panel_windows: Vec<Window>,
     pub lock_windows: Vec<Window>,
     pub locked: bool,
+    pub(crate) held_consumer_controls: HashSet<nickel_session_protocol::ConsumerControl>,
+    pub(crate) consumer_repeat_epoch: u64,
     lock_restore_window: Option<WindowId>,
     shell_focus_restore_window: Option<WindowId>,
     pub(crate) pending_shell_focus_role: Option<ShellRole>,
@@ -1376,6 +1379,8 @@ impl NickelSession {
             panel_windows: Vec::new(),
             lock_windows: Vec::new(),
             locked: false,
+            held_consumer_controls: HashSet::new(),
+            consumer_repeat_epoch: 0,
             lock_restore_window: None,
             shell_focus_restore_window: None,
             pending_shell_focus_role: None,
@@ -2475,6 +2480,7 @@ impl NickelSession {
             ShellRole::ContextMenu,
             ShellRole::Preview,
             ShellRole::Notification,
+            ShellRole::VolumeOsd,
             ShellRole::ProjectMenu,
             ShellRole::Screenshot,
         ]
@@ -3162,6 +3168,28 @@ impl NickelSession {
         let Ok(event) = encode(&ServerEnvelope {
             request_id: 0,
             message: ServerMessage::Event(SessionEvent::GlobalShortcut { action }),
+        }) else {
+            return;
+        };
+        let Ok(socket) = UnixDatagram::unbound() else {
+            return;
+        };
+        self.launcher_subscribers
+            .retain(|path| socket.send_to(&event, path).is_ok());
+    }
+
+    pub(crate) fn notify_consumer_control(
+        &mut self,
+        control: nickel_session_protocol::ConsumerControl,
+    ) {
+        tracing::info!(
+            ?control,
+            subscribers = self.launcher_subscribers.len(),
+            "consumer control activated"
+        );
+        let Ok(event) = encode(&ServerEnvelope {
+            request_id: 0,
+            message: ServerMessage::Event(SessionEvent::ConsumerControl { control }),
         }) else {
             return;
         };
@@ -3881,6 +3909,7 @@ impl NickelSession {
             return;
         }
         self.locked = true;
+        self.cancel_consumer_control_repeats();
         let shell_ids = self
             .shell_windows()
             .filter_map(|window| self.surface_windows.get(&window.wl_surface()?.id()))

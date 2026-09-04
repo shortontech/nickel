@@ -46,7 +46,7 @@ Usage:
   nickel-test-input move-relative DX DY
   nickel-test-input wheel HORIZONTAL_V120 VERTICAL_V120
   nickel-test-input button left|right pressed|released
-  nickel-test-input key a|c|p|v|x|enter|escape|tab|alt|shift|control|meta|left|right|up|down|space|backspace|delete|f11|print-screen pressed|released
+  nickel-test-input key a|c|p|v|x|enter|escape|tab|alt|shift|control|meta|left|right|up|down|space|backspace|delete|f11|print-screen|volume-up|volume-down|volume-mute|media-play-pause|media-play|media-pause|media-stop|media-next|media-previous|media-fast-forward|media-rewind pressed|released
 ";
 
 enum Parsed {
@@ -361,6 +361,17 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, String> {
                 "delete" => TestKey::Delete,
                 "f11" => TestKey::F11,
                 "print-screen" => TestKey::PrintScreen,
+                "volume-up" => TestKey::VolumeUp,
+                "volume-down" => TestKey::VolumeDown,
+                "volume-mute" => TestKey::VolumeMute,
+                "media-play-pause" => TestKey::MediaPlayPause,
+                "media-play" => TestKey::MediaPlay,
+                "media-pause" => TestKey::MediaPause,
+                "media-stop" => TestKey::MediaStop,
+                "media-next" => TestKey::MediaNext,
+                "media-previous" => TestKey::MediaPrevious,
+                "media-fast-forward" => TestKey::MediaFastForward,
+                "media-rewind" => TestKey::MediaRewind,
                 _ => return Err(format!("unknown key {key:?}")),
             },
             state: parse_state(state)?,

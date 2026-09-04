@@ -97,3 +97,5 @@ winresource = "0.1.31"
 xcursor = "0.3.10"
 yaml_serde = "0.10.4"
 zbus = { version = "5.12.0", default-features = false, features = ["blocking-api", "async-io"] }
+pipewire-native = "0.1.4"
+pipewire-native-spa = "0.1.4"

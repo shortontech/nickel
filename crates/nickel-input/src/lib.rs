@@ -162,6 +162,17 @@ pub enum KeyCode {
     NumpadDivide,
     NumpadDecimal,
     NumpadEnter,
+    AudioVolumeUp,
+    AudioVolumeDown,
+    AudioVolumeMute,
+    MediaPlayPause,
+    MediaPlay,
+    MediaPause,
+    MediaStop,
+    MediaTrackNext,
+    MediaTrackPrevious,
+    MediaFastForward,
+    MediaRewind,
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -209,6 +220,56 @@ pub enum NamedKey {
     F10,
     F11,
     F12,
+    AudioVolumeUp,
+    AudioVolumeDown,
+    AudioVolumeMute,
+    MediaPlayPause,
+    MediaPlay,
+    MediaPause,
+    MediaStop,
+    MediaTrackNext,
+    MediaTrackPrevious,
+    MediaFastForward,
+    MediaRewind,
+}
+
+/// A normalized consumer-control action, independent of the native input backend.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum ConsumerControl {
+    VolumeUp,
+    VolumeDown,
+    VolumeMute,
+    PlayPause,
+    Play,
+    Pause,
+    Stop,
+    Next,
+    Previous,
+    FastForward,
+    Rewind,
+}
+
+impl ConsumerControl {
+    pub fn from_key_code(key: KeyCode) -> Option<Self> {
+        Some(match key {
+            KeyCode::AudioVolumeUp => Self::VolumeUp,
+            KeyCode::AudioVolumeDown => Self::VolumeDown,
+            KeyCode::AudioVolumeMute => Self::VolumeMute,
+            KeyCode::MediaPlayPause => Self::PlayPause,
+            KeyCode::MediaPlay => Self::Play,
+            KeyCode::MediaPause => Self::Pause,
+            KeyCode::MediaStop => Self::Stop,
+            KeyCode::MediaTrackNext => Self::Next,
+            KeyCode::MediaTrackPrevious => Self::Previous,
+            KeyCode::MediaFastForward => Self::FastForward,
+            KeyCode::MediaRewind => Self::Rewind,
+            _ => return None,
+        })
+    }
+
+    pub fn repeats(self) -> bool {
+        matches!(self, Self::VolumeUp | Self::VolumeDown)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]

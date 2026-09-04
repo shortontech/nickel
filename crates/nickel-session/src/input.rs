@@ -77,6 +77,53 @@ impl NickelSession {
         }
         self.hotkeys.reconcile_super(false);
         let _ = self.hotkeys.reconcile_alt(false);
+        self.cancel_consumer_control_repeats();
+    }
+
+    fn consumer_control_key(
+        &mut self,
+        control: nickel_session_protocol::ConsumerControl,
+        state: KeyState,
+    ) {
+        use smithay::reexports::calloop::{timer::TimeoutAction, timer::Timer};
+
+        if state == KeyState::Released {
+            self.held_consumer_controls.remove(&control);
+            return;
+        }
+        if !self.held_consumer_controls.insert(control) {
+            return;
+        }
+        self.notify_consumer_control(control);
+        if !matches!(
+            control,
+            nickel_session_protocol::ConsumerControl::VolumeUp
+                | nickel_session_protocol::ConsumerControl::VolumeDown
+        ) {
+            return;
+        }
+        let epoch = self.consumer_repeat_epoch;
+        let timer = Timer::from_duration(std::time::Duration::from_millis(600));
+        if let Err(error) = self
+            .event_loop_handle
+            .insert_source(timer, move |_, _, session| {
+                if session.consumer_repeat_epoch != epoch
+                    || session.locked
+                    || !session.held_consumer_controls.contains(&control)
+                {
+                    return TimeoutAction::Drop;
+                }
+                session.notify_consumer_control(control);
+                TimeoutAction::ToDuration(std::time::Duration::from_millis(40))
+            })
+        {
+            tracing::warn!(?error, "failed to schedule consumer-control repeat");
+        }
+    }
+
+    pub(crate) fn cancel_consumer_control_repeats(&mut self) {
+        self.held_consumer_controls.clear();
+        self.consumer_repeat_epoch = self.consumer_repeat_epoch.wrapping_add(1);
     }
 
     fn update_frame_cursor(&mut self, position: smithay::utils::Point<f64, Logical>) {
@@ -263,10 +310,14 @@ impl NickelSession {
                         serial,
                         time,
                         move |session, modifiers, handle| {
+                            let sym = handle.modified_sym();
+                            if let Some(control) = consumer_control_from_keysym(sym) {
+                                session.consumer_control_key(control, state);
+                                return FilterResult::Intercept(None);
+                            }
                             if session.locked {
                                 return FilterResult::Forward;
                             }
-                            let sym = handle.modified_sym();
                             if modifiers.ctrl
                                 && modifiers.alt
                                 && let Some(vt) = vt_from_keysym(sym)
@@ -1069,6 +1120,23 @@ fn key_code_from_keysym(sym: Keysym) -> Option<KeyCode> {
     }
 }
 
+fn consumer_control_from_keysym(sym: Keysym) -> Option<nickel_session_protocol::ConsumerControl> {
+    use nickel_session_protocol::ConsumerControl;
+    Some(match sym.raw() {
+        keysyms::KEY_XF86AudioRaiseVolume => ConsumerControl::VolumeUp,
+        keysyms::KEY_XF86AudioLowerVolume => ConsumerControl::VolumeDown,
+        keysyms::KEY_XF86AudioMute => ConsumerControl::VolumeMute,
+        keysyms::KEY_XF86AudioPlay => ConsumerControl::PlayPause,
+        keysyms::KEY_XF86AudioPause => ConsumerControl::Pause,
+        keysyms::KEY_XF86AudioStop => ConsumerControl::Stop,
+        keysyms::KEY_XF86AudioNext => ConsumerControl::Next,
+        keysyms::KEY_XF86AudioPrev => ConsumerControl::Previous,
+        keysyms::KEY_XF86AudioForward => ConsumerControl::FastForward,
+        keysyms::KEY_XF86AudioRewind => ConsumerControl::Rewind,
+        _ => return None,
+    })
+}
+
 fn vt_from_keysym(sym: Keysym) -> Option<i32> {
     match sym.raw() {
         keysyms::KEY_F1 => Some(1),
@@ -1114,8 +1182,8 @@ mod tests {
     use smithay::input::keyboard::{Keysym, keysyms};
 
     use super::{
-        ResizeEdge, axis_amount, pointer_focus_needs_refresh, recovery_shortcut_from_keysym,
-        resize_edges_at, vt_from_keysym,
+        ResizeEdge, axis_amount, consumer_control_from_keysym, pointer_focus_needs_refresh,
+        recovery_shortcut_from_keysym, resize_edges_at, vt_from_keysym,
     };
 
     #[test]
@@ -1187,6 +1255,27 @@ mod tests {
         assert_eq!(
             super::key_code_from_keysym(Keysym::new(keysyms::KEY_Sys_Req)),
             Some(nickel_core::hotkeys::KeyCode::PrintScreen)
+        );
+    }
+
+    #[test]
+    fn xkb_consumer_keysyms_map_without_collapsing_unrelated_keys() {
+        use nickel_session_protocol::ConsumerControl;
+        assert_eq!(
+            consumer_control_from_keysym(Keysym::new(keysyms::KEY_XF86AudioRaiseVolume)),
+            Some(ConsumerControl::VolumeUp)
+        );
+        assert_eq!(
+            consumer_control_from_keysym(Keysym::new(keysyms::KEY_XF86AudioMute)),
+            Some(ConsumerControl::VolumeMute)
+        );
+        assert_eq!(
+            consumer_control_from_keysym(Keysym::new(keysyms::KEY_XF86AudioNext)),
+            Some(ConsumerControl::Next)
+        );
+        assert_eq!(
+            consumer_control_from_keysym(Keysym::new(keysyms::KEY_XF86MonBrightnessUp)),
+            None
         );
     }
 

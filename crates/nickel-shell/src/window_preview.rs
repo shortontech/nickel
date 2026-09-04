@@ -345,6 +345,7 @@ pub fn preview_dimensions(window_count: usize) -> (u32, u32) {
     )
 }
 
+#[cfg(any(test, target_os = "windows"))]
 pub fn native_thumbnail_bounds(index: usize) -> (i32, i32, i32, i32) {
     let left = PADDING + index as f32 * (CARD_WIDTH + GAP) + CARD_PADDING;
     let top = PADDING + CARD_PADDING + CLOSE_SIZE + CARD_GAP;

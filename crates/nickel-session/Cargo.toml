@@ -6,6 +6,10 @@ license.workspace = true
 rust-version.workspace = true
 default-run = "nickel-session"
 
+[[example]]
+name = "pointer_constraints"
+required-features = ["backend-winit"]
+
 [dependencies]
 bitflags.workspace = true
 image.workspace = true

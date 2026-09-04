@@ -1454,6 +1454,8 @@ fn shell_event_ends_process(event: &ShellEvent) -> bool {
 }
 
 fn main() -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    platform::prepare_audio_environment();
     let command_line = CommandLineOptions::parse(std::env::args_os().skip(1))?;
     nickel_logging::init("nickel-shell").map_err(|error| error.to_string())?;
     // The supervisor publishes its expected child PID and releases this
@@ -1737,6 +1739,7 @@ fn main() -> Result<(), String> {
                     render_role(&mut shell, &mut state, SurfaceRole::Panel)?;
                     render_role(&mut shell, &mut state, SurfaceRole::Launcher)?;
                     render_role(&mut shell, &mut state, SurfaceRole::ControlCenter)?;
+                    render_role(&mut shell, &mut state, SurfaceRole::VolumeOsd)?;
                     render_role(&mut shell, &mut state, SurfaceRole::WindowPreview)?;
                     render_role(&mut shell, &mut state, SurfaceRole::Lock)?;
                     render_role(&mut shell, &mut state, SurfaceRole::Screenshot)?;

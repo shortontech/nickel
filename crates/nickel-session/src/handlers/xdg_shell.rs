@@ -635,6 +635,7 @@ impl NickelSession {
             Some(
                 ShellRole::ControlCenter
                     | ShellRole::Notification
+                    | ShellRole::VolumeOsd
                     | ShellRole::ProjectMenu
                     | ShellRole::Screenshot
                     | ShellRole::Recovery

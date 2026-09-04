@@ -690,6 +690,17 @@ fn linux_key_code(key: TestKey) -> u32 {
         TestKey::Delete => 111,
         TestKey::F11 => 87,
         TestKey::PrintScreen => 99,
+        TestKey::VolumeMute => 113,
+        TestKey::VolumeDown => 114,
+        TestKey::VolumeUp => 115,
+        TestKey::MediaNext => 163,
+        TestKey::MediaPlayPause => 164,
+        TestKey::MediaPrevious => 165,
+        TestKey::MediaStop => 166,
+        TestKey::MediaRewind => 168,
+        TestKey::MediaPause => 201,
+        TestKey::MediaPlay => 207,
+        TestKey::MediaFastForward => 208,
     }
 }
 

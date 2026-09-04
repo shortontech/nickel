@@ -41,6 +41,7 @@ pub const PANEL_TITLE: &str = "Nickel Panel";
 pub const LAUNCHER_TITLE: &str = "Nickel Launcher";
 pub const CONTROL_CENTER_TITLE: &str = "Nickel Control Center";
 pub const NOTIFICATION_TITLE: &str = "Nickel Notification";
+pub const VOLUME_OSD_TITLE: &str = "Nickel Volume";
 pub const WINDOW_PREVIEW_TITLE: &str = "Nickel Window Preview";
 pub const WINDOW_CONTEXT_MENU_TITLE: &str = "Nickel Window Menu";
 pub const CODEX_PROJECT_MENU_TITLE: &str = "Nickel Codex Projects";
@@ -234,6 +235,7 @@ pub enum SurfaceRole {
     Launcher,
     ControlCenter,
     Notification,
+    VolumeOsd,
     WindowPreview,
     WindowContextMenu,
     CodexProjectMenu,
@@ -423,6 +425,7 @@ impl WinitShell {
         self.create_surface(SurfaceRole::Launcher, 0, primary, primary_name)?;
         self.create_surface(SurfaceRole::ControlCenter, 0, primary, primary_name)?;
         self.create_surface(SurfaceRole::Notification, 0, primary, primary_name)?;
+        self.create_surface(SurfaceRole::VolumeOsd, 0, primary, primary_name)?;
         self.create_surface(SurfaceRole::WindowPreview, 0, primary, primary_name)?;
         self.create_surface(SurfaceRole::WindowContextMenu, 0, primary, primary_name)?;
         self.create_surface(SurfaceRole::CodexProjectMenu, 0, primary, primary_name)?;
@@ -1098,6 +1101,7 @@ impl WinitShell {
             SurfaceRole::Launcher => SessionShellRole::Launcher.application_id(),
             SurfaceRole::ControlCenter => SessionShellRole::ControlCenter.application_id(),
             SurfaceRole::Notification => SessionShellRole::Notification.application_id(),
+            SurfaceRole::VolumeOsd => SessionShellRole::VolumeOsd.application_id(),
             SurfaceRole::WindowPreview => SessionShellRole::Preview.application_id(),
             SurfaceRole::WindowContextMenu => SessionShellRole::ContextMenu.application_id(),
             SurfaceRole::CodexProjectMenu => SessionShellRole::ProjectMenu.application_id(),
@@ -1152,6 +1156,11 @@ impl WinitShell {
             }
             SurfaceRole::WindowContextMenu => {
                 if !crate::platform::configure_context_menu_window(&window) {
+                    tracing::warn!(?role, "failed to configure Windows shell window");
+                }
+            }
+            SurfaceRole::VolumeOsd => {
+                if !crate::platform::configure_volume_osd_window(&window) {
                     tracing::warn!(?role, "failed to configure Windows shell window");
                 }
             }
@@ -1302,6 +1311,14 @@ fn surface_geometry(
             geometry.y + 24,
             420.min(geometry.width),
             180.min(geometry.height),
+            true,
+        ),
+        SurfaceRole::VolumeOsd => (
+            VOLUME_OSD_TITLE,
+            geometry.x + (geometry.width.saturating_sub(320) / 2) as i32,
+            geometry.y + geometry.height.saturating_sub(170) as i32,
+            320.min(geometry.width),
+            88.min(geometry.height),
             true,
         ),
         SurfaceRole::WindowPreview => (

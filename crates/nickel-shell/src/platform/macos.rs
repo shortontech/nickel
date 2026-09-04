@@ -13,7 +13,7 @@ use std::{
 
 pub use super::unsupported::{
     NotificationFeed, TrayFeed, activate_wifi_network, audio_status, bluetooth_status,
-    capture_pointer, configure_volume_osd_window, execute_run_command,
+    capture_pointer, configure_volume_osd_window, execute_run_command, handle_consumer_control,
     launcher_has_foreground_focus, network_status, release_pointer, select_audio_device,
     set_audio_volume, set_bluetooth_discovery, set_bluetooth_powered, set_wifi_enabled,
     show_window_system_menu, toggle_bluetooth_device, update_panel_fullscreen_state, wallpaper,

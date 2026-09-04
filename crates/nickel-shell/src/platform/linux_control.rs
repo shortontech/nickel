@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, OnceLock, RwLock, mpsc},
+    sync::{Arc, Mutex, OnceLock, RwLock, mpsc},
     thread,
     time::{Duration, Instant},
 };
@@ -11,6 +11,7 @@ use zbus::{
 };
 
 use super::super::{BluetoothDeviceStatus, BluetoothStatus, NetworkStatus, WifiNetworkStatus};
+use nickel_session_protocol::ConsumerControl;
 
 const NETWORK_MANAGER: &str = "org.freedesktop.NetworkManager";
 const NETWORK_MANAGER_PATH: &str = "/org/freedesktop/NetworkManager";
@@ -36,6 +37,116 @@ struct ControlBackend {
 }
 
 static BACKEND: OnceLock<ControlBackend> = OnceLock::new();
+static MPRIS_ACTIVITY: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+static MPRIS_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+pub fn handle_consumer_control(control: ConsumerControl) {
+    match control {
+        ConsumerControl::VolumeUp | ConsumerControl::VolumeDown | ConsumerControl::VolumeMute => {
+            tracing::warn!(?control, "PipeWire audio control is not initialized");
+        }
+        _ => {
+            let _ = thread::Builder::new()
+                .name("nickel-mpris-command".into())
+                .spawn(move || {
+                    if let Err(error) = dispatch_mpris(control) {
+                        tracing::debug!(?control, %error, "MPRIS command was not delivered");
+                    }
+                });
+        }
+    }
+}
+
+fn dispatch_mpris(control: ConsumerControl) -> Result<(), String> {
+    let connection = Connection::session().map_err(|error| error.to_string())?;
+    let dbus =
+        zbus::blocking::fdo::DBusProxy::new(&connection).map_err(|error| error.to_string())?;
+    let mut players = dbus
+        .list_names()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|name| name.as_str().starts_with("org.mpris.MediaPlayer2."))
+        .filter_map(|name| {
+            let name = name.to_string();
+            let proxy = Proxy::new(
+                &connection,
+                name.as_str(),
+                "/org/mpris/MediaPlayer2",
+                "org.mpris.MediaPlayer2.Player",
+            )
+            .ok()?;
+            let can_control = proxy.get_property::<bool>("CanControl").unwrap_or(false);
+            let status = proxy
+                .get_property::<String>("PlaybackStatus")
+                .unwrap_or_else(|_| "Stopped".into());
+            let capable = can_control && mpris_capable(&proxy, control);
+            drop(proxy);
+            let recent = MPRIS_ACTIVITY
+                .get_or_init(Default::default)
+                .lock()
+                .ok()
+                .and_then(|activity| activity.get(&name).copied())
+                .unwrap_or(0);
+            capable.then_some((name, status, recent))
+        })
+        .collect::<Vec<_>>();
+    players.sort_by(|left, right| {
+        (right.1 == "Playing")
+            .cmp(&(left.1 == "Playing"))
+            .then_with(|| right.2.cmp(&left.2))
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    let (name, _, _) = players
+        .first()
+        .ok_or_else(|| "no capable MPRIS player is available".to_owned())?;
+    let proxy = Proxy::new(
+        &connection,
+        name.as_str(),
+        "/org/mpris/MediaPlayer2",
+        "org.mpris.MediaPlayer2.Player",
+    )
+    .map_err(|error| error.to_string())?;
+    let result = match control {
+        ConsumerControl::PlayPause => proxy.call_method("PlayPause", &()),
+        ConsumerControl::Play => proxy.call_method("Play", &()),
+        ConsumerControl::Pause => proxy.call_method("Pause", &()),
+        ConsumerControl::Stop => proxy.call_method("Stop", &()),
+        ConsumerControl::Next => proxy.call_method("Next", &()),
+        ConsumerControl::Previous => proxy.call_method("Previous", &()),
+        ConsumerControl::FastForward => proxy.call_method("Seek", &(10_000_000_i64,)),
+        ConsumerControl::Rewind => proxy.call_method("Seek", &(-10_000_000_i64,)),
+        ConsumerControl::VolumeUp | ConsumerControl::VolumeDown | ConsumerControl::VolumeMute => {
+            return Err("not an MPRIS command".into());
+        }
+    };
+    result
+        .map(|_| {
+            let sequence = MPRIS_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if let Ok(mut activity) = MPRIS_ACTIVITY.get_or_init(Default::default).lock() {
+                activity.insert(name.clone(), sequence);
+            }
+        })
+        .map_err(|error| error.to_string())
+}
+
+fn mpris_capable(proxy: &Proxy<'_>, control: ConsumerControl) -> bool {
+    let property = match control {
+        ConsumerControl::PlayPause => {
+            return proxy.get_property::<bool>("CanPlay").unwrap_or(false)
+                || proxy.get_property::<bool>("CanPause").unwrap_or(false);
+        }
+        ConsumerControl::Play => "CanPlay",
+        ConsumerControl::Pause => "CanPause",
+        ConsumerControl::Stop => "CanControl",
+        ConsumerControl::Next => "CanGoNext",
+        ConsumerControl::Previous => "CanGoPrevious",
+        ConsumerControl::FastForward | ConsumerControl::Rewind => "CanSeek",
+        ConsumerControl::VolumeUp | ConsumerControl::VolumeDown | ConsumerControl::VolumeMute => {
+            return false;
+        }
+    };
+    proxy.get_property::<bool>(property).unwrap_or(false)
+}
 
 pub fn network_status() -> NetworkStatus {
     let backend = backend();

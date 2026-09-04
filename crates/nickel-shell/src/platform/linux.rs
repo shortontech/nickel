@@ -39,6 +39,8 @@ use crate::{
     },
 };
 
+#[path = "linux_audio.rs"]
+mod linux_audio;
 #[path = "linux_control.rs"]
 mod linux_control;
 
@@ -335,11 +337,47 @@ pub fn toggle_bluetooth_device(id: &str) -> bool {
 }
 
 pub fn audio_status() -> super::AudioStatus {
-    super::AudioStatus::default()
+    linux_audio::status()
 }
 
 pub fn set_audio_volume(_volume_percent: u8) -> bool {
-    false
+    linux_audio::set_volume(_volume_percent)
+}
+
+pub fn prepare_audio_environment() {
+    if std::env::var_os("SPA_PLUGIN_DIR").is_some() {
+        return;
+    }
+    let candidates = [
+        "/usr/lib/x86_64-linux-gnu/spa-0.2",
+        "/usr/lib/aarch64-linux-gnu/spa-0.2",
+        "/usr/lib64/spa-0.2",
+        "/usr/lib/spa-0.2",
+    ];
+    if let Some(path) = candidates
+        .into_iter()
+        .find(|path| std::path::Path::new(path).is_dir())
+    {
+        // SAFETY: called at the beginning of main, before Nickel starts worker threads.
+        unsafe { std::env::set_var("SPA_PLUGIN_DIR", path) };
+    }
+}
+
+pub fn handle_consumer_control(control: nickel_session_protocol::ConsumerControl) {
+    use nickel_session_protocol::ConsumerControl;
+    tracing::info!(?control, "handling Linux consumer control");
+    match control {
+        ConsumerControl::VolumeUp => {
+            let _ = linux_audio::adjust_volume(5);
+        }
+        ConsumerControl::VolumeDown => {
+            let _ = linux_audio::adjust_volume(-5);
+        }
+        ConsumerControl::VolumeMute => {
+            let _ = linux_audio::toggle_mute();
+        }
+        _ => linux_control::handle_consumer_control(control),
+    }
 }
 
 pub fn capture_pointer(_window: &impl raw_window_handle::HasWindowHandle) -> bool {
@@ -349,7 +387,7 @@ pub fn capture_pointer(_window: &impl raw_window_handle::HasWindowHandle) -> boo
 pub fn release_pointer() {}
 
 pub fn select_audio_device(_id: &str) -> bool {
-    false
+    linux_audio::select_output(_id)
 }
 
 pub fn update_panel_fullscreen_state() {}
@@ -1393,6 +1431,24 @@ pub fn launcher_hotkey_receiver() -> super::GlobalShortcutFeed {
     use std::os::unix::net::UnixDatagram;
 
     let (sender, receiver) = mpsc::channel();
+    let audio_sender = sender.clone();
+    thread::Builder::new()
+        .name("nickel-audio-events".into())
+        .spawn(move || {
+            let updates = linux_audio::subscribe();
+            while let Ok(status) = updates.recv() {
+                if audio_sender
+                    .send(GlobalShortcut::AudioChanged {
+                        volume_percent: status.volume_percent,
+                        muted: status.muted,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .expect("failed to start Nickel audio event listener");
     let Some(session) = env::var_os(SESSION_CONTROL_ENV) else {
         return super::GlobalShortcutFeed {
             receiver,
@@ -1661,6 +1717,9 @@ fn subscription_shortcut(
                 GlobalShortcut::Screenshot(ScreenshotAction::ActiveWindowToFile)
             }
         }),
+        ServerMessage::Event(SessionEvent::ConsumerControl { control }) => {
+            Some(GlobalShortcut::ConsumerControl(control))
+        }
         ServerMessage::Event(SessionEvent::Snapshot(snapshot)) => {
             let lock_changed = state.locked.replace(snapshot.locked) != Some(snapshot.locked);
             let launcher_changed = state.launcher_visible.replace(snapshot.launcher_visible)

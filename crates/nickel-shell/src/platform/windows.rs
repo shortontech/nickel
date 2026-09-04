@@ -758,6 +758,11 @@ pub fn set_audio_volume(volume_percent: u8) -> bool {
     }
 }
 
+pub fn handle_consumer_control(_control: nickel_session_protocol::ConsumerControl) {
+    // Windows owns consumer controls through WM_APPCOMMAND. Winit delivery must not
+    // apply the same physical action a second time.
+}
+
 pub fn capture_pointer(window: &impl raw_window_handle::HasWindowHandle) -> bool {
     let Some(hwnd) = window_hwnd(window) else {
         return false;

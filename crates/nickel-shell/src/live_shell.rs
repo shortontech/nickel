@@ -17,7 +17,6 @@ use nickel_session_protocol::{
     PointerInteraction, PreviewTargetAction, ResolvedShellTarget, ShellRole, ShellSemanticTarget,
     WindowMenuTargetAction,
 };
-#[cfg(test)]
 use nickel_ui::Rect;
 use nickel_ui::backend::PaintCommand;
 use nickel_ui::{
@@ -283,6 +282,7 @@ impl PanelApplication {
         }
     }
 
+    #[allow(dead_code)] // Used by the library workbench fixture, not the shell binary.
     pub fn populated_fixture(mut launcher: Launcher, palette: ThemePalette) -> Self {
         launcher.set_codex_available(true);
         let mut application = Self::fixture(launcher, palette);
@@ -502,6 +502,7 @@ pub struct LiveShell {
     network: NetworkStatus,
     bluetooth: BluetoothStatus,
     audio: AudioStatus,
+    volume_osd_until: Option<Instant>,
     launcher_visible: bool,
     locked: bool,
     lock_host: nickel_ui::UiHost<LockApplication>,
@@ -785,6 +786,7 @@ impl LiveShell {
             network,
             bluetooth,
             audio,
+            volume_osd_until: None,
             launcher_visible: false,
             locked: false,
             lock_host,
@@ -1057,6 +1059,7 @@ impl LiveShell {
                 self.sync_notification_host(width, height);
                 self.notification_host.commands().to_vec()
             }
+            SurfaceRole::VolumeOsd => self.volume_osd_scene(width, height),
             SurfaceRole::WindowPreview => self.window_preview_scene(),
             SurfaceRole::WindowContextMenu => self.window_menu_scene(),
             SurfaceRole::Lock => self.lock_scene(width, height),
@@ -1071,6 +1074,7 @@ impl LiveShell {
             SurfaceRole::Launcher => self.launcher_visible,
             SurfaceRole::ControlCenter => self.control_visible,
             SurfaceRole::Notification => self.notification.is_some(),
+            SurfaceRole::VolumeOsd => self.volume_osd_until.is_some(),
             SurfaceRole::WindowPreview => {
                 self.preview_group.is_some() || self.task_switcher_group.is_some()
             }
@@ -1112,6 +1116,7 @@ impl LiveShell {
             self.preview_pending.map(|(_, deadline)| deadline),
         );
         push("window-preview-close", self.preview_leave_deadline);
+        push("volume-osd", self.volume_osd_until);
         sources
     }
 
@@ -1127,6 +1132,7 @@ impl LiveShell {
             SurfaceRole::Launcher => Some(host_token(self.launcher_host.inspect())),
             SurfaceRole::ControlCenter => Some(self.control_change_token),
             SurfaceRole::Notification => Some(host_token(self.notification_host.inspect())),
+            SurfaceRole::VolumeOsd => None,
             SurfaceRole::WindowPreview => {
                 self.preview_frame.as_ref().map(|host| host.change_token())
             }
@@ -1307,6 +1313,13 @@ impl LiveShell {
         outcome.capture_screenshot = self.screenshot.capture_ready_at(now);
         if self.screenshot.poll_pointer_deadline(now) {
             outcome.redraw.push(SurfaceRole::Screenshot);
+        }
+        if self
+            .volume_osd_until
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.volume_osd_until = None;
+            outcome.visibility_changed = true;
         }
         outcome
     }
@@ -2098,6 +2111,19 @@ impl LiveShell {
                 tracing::warn!("Nickel Run is not implemented in the shell yet");
                 false
             }
+            platform::GlobalShortcut::ConsumerControl(control) => {
+                platform::handle_consumer_control(control);
+                true
+            }
+            platform::GlobalShortcut::AudioChanged {
+                volume_percent,
+                muted,
+            } => {
+                self.audio.volume_percent = volume_percent;
+                self.audio.muted = muted;
+                self.volume_osd_until = Some(Instant::now() + Duration::from_millis(1500));
+                true
+            }
             platform::GlobalShortcut::Screenshot(platform::ScreenshotAction::ActiveWindow) => {
                 if let Err(error) = platform::capture_active_window() {
                     tracing::warn!(%error, "failed to copy active window screenshot");
@@ -2136,7 +2162,6 @@ impl LiveShell {
                 }
                 true
             }
-            _ => false,
         }
     }
 
@@ -2555,6 +2580,50 @@ impl LiveShell {
         self.desktop_change_token = outcome.change_token;
         self.desktop_deadline = outcome.next_deadline;
         self.desktop_host.commands().to_vec()
+    }
+
+    fn volume_osd_scene(&self, width: u32, height: u32) -> Vec<PaintCommand> {
+        let width = width as f32;
+        let height = height as f32;
+        let percent = self.audio.volume_percent.min(100);
+        let label = if self.audio.muted {
+            "Muted".to_owned()
+        } else {
+            format!("Volume {percent}%")
+        };
+        let track = Rect::new(24.0, height - 28.0, (width - 48.0).max(0.0), 8.0);
+        let fill = Rect::new(
+            track.origin.x,
+            track.origin.y,
+            track.size.width * f32::from(percent) / 100.0,
+            track.size.height,
+        );
+        vec![
+            PaintCommand::RoundedFill {
+                rect: Rect::new(0.0, 0.0, width, height),
+                color: 0xee171a20,
+                radius: 14.0,
+            },
+            PaintCommand::Text {
+                bounds: Rect::new(24.0, 14.0, width - 48.0, 32.0),
+                text: label,
+                scale: 1.15,
+                color: 0xfff4f6f8,
+                align: TextAlign::Center,
+                bold: true,
+                wrap: false,
+            },
+            PaintCommand::RoundedFill {
+                rect: track,
+                color: 0xff3b414b,
+                radius: 4.0,
+            },
+            PaintCommand::RoundedFill {
+                rect: fill,
+                color: 0xff23a8f2,
+                radius: 4.0,
+            },
+        ]
     }
 
     fn lock_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
@@ -3520,7 +3589,11 @@ fn tint_panel_icon(mut icon: image::RgbaImage, color: u32) -> image::RgbaImage {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, sync::Arc, time::Duration};
+    use std::{
+        collections::HashMap,
+        sync::Arc,
+        time::{Duration, Instant},
+    };
 
     use image::{Rgba, RgbaImage};
     use nickel_input::KeyCode;
@@ -3528,6 +3601,7 @@ mod tests {
         PointerInteraction, PreviewTargetAction, ScreenshotTargetAction, ShellRole,
         ShellSemanticTarget, WindowMenuTargetAction,
     };
+    use nickel_ui::backend::PaintCommand;
     use nickel_ui::{
         ActionKind, ControllerAction, HostBatch, HostEvent, HostTelemetry, Point, Rect,
         SemanticAction, SemanticRole, SemanticSelector, SemanticValueInput, SemanticValueSnapshot,
@@ -3537,7 +3611,7 @@ mod tests {
 
     use super::{
         HostRuntimeSamples, LiveShell, panel_status_layout, panel_tray_icons,
-        platform::{FeedState, FeedStatus, SecureStorageState},
+        platform::{FeedState, FeedStatus, GlobalShortcut, SecureStorageState},
         preview_refresh_due, secure_storage_status_label, session_feed_status_label,
         visible_tray_item,
     };
@@ -3568,7 +3642,6 @@ mod tests {
     };
     use nickel_core::launcher_preferences::LauncherPreferences;
     use nickel_core::theme::{Appearance, ThemeMode, ThemePalette};
-    use std::time::Instant;
 
     #[test]
     fn launcher_open_focuses_search_and_sequential_input_survives_mode_change() {
@@ -4867,5 +4940,36 @@ mod tests {
         assert_eq!(visible_tray_item(&items, 0).unwrap().id, "1");
         assert_eq!(visible_tray_item(&items, 3).unwrap().id, "4");
         assert!(visible_tray_item(&items, 4).is_none());
+    }
+
+    #[test]
+    fn confirmed_audio_changes_coalesce_one_bounded_volume_osd() {
+        let mut shell = LiveShell::new().unwrap();
+        assert!(!shell.surface_visible(SurfaceRole::VolumeOsd));
+
+        shell.global_shortcut(GlobalShortcut::AudioChanged {
+            volume_percent: 47,
+            muted: false,
+        });
+        let first_deadline = shell.volume_osd_until.unwrap();
+        assert!(shell.surface_visible(SurfaceRole::VolumeOsd));
+        assert!(shell.volume_osd_scene(320, 88).iter().any(
+            |command| matches!(command, PaintCommand::Text { text, .. } if text == "Volume 47%")
+        ));
+
+        shell.global_shortcut(GlobalShortcut::AudioChanged {
+            volume_percent: 47,
+            muted: true,
+        });
+        assert!(shell.volume_osd_until.unwrap() >= first_deadline);
+        assert!(
+            shell.volume_osd_scene(320, 88).iter().any(
+                |command| matches!(command, PaintCommand::Text { text, .. } if text == "Muted")
+            )
+        );
+
+        let outcome = shell.poll_deadlines(Instant::now() + Duration::from_secs(2));
+        assert!(outcome.visibility_changed);
+        assert!(!shell.surface_visible(SurfaceRole::VolumeOsd));
     }
 }

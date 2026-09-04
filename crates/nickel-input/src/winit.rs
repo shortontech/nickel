@@ -492,6 +492,13 @@ pub fn physical_key(key: WinitPhysicalKey) -> PhysicalKey {
         WinitKeyCode::SuperLeft => KeyCode::SuperLeft,
         WinitKeyCode::SuperRight => KeyCode::SuperRight,
         WinitKeyCode::PrintScreen => KeyCode::PrintScreen,
+        WinitKeyCode::AudioVolumeUp => KeyCode::AudioVolumeUp,
+        WinitKeyCode::AudioVolumeDown => KeyCode::AudioVolumeDown,
+        WinitKeyCode::AudioVolumeMute => KeyCode::AudioVolumeMute,
+        WinitKeyCode::MediaPlayPause => KeyCode::MediaPlayPause,
+        WinitKeyCode::MediaStop => KeyCode::MediaStop,
+        WinitKeyCode::MediaTrackNext => KeyCode::MediaTrackNext,
+        WinitKeyCode::MediaTrackPrevious => KeyCode::MediaTrackPrevious,
         other => {
             return PhysicalKey::Native(NativeKey {
                 namespace: "winit-keycode".into(),
@@ -540,6 +547,17 @@ fn named_key(key: WinitNamedKey) -> Option<NamedKey> {
         WinitNamedKey::ArrowRight => NamedKey::ArrowRight,
         WinitNamedKey::ArrowUp => NamedKey::ArrowUp,
         WinitNamedKey::PrintScreen => NamedKey::PrintScreen,
+        WinitNamedKey::AudioVolumeUp => NamedKey::AudioVolumeUp,
+        WinitNamedKey::AudioVolumeDown => NamedKey::AudioVolumeDown,
+        WinitNamedKey::AudioVolumeMute => NamedKey::AudioVolumeMute,
+        WinitNamedKey::MediaPlayPause => NamedKey::MediaPlayPause,
+        WinitNamedKey::MediaPlay => NamedKey::MediaPlay,
+        WinitNamedKey::MediaPause => NamedKey::MediaPause,
+        WinitNamedKey::MediaStop => NamedKey::MediaStop,
+        WinitNamedKey::MediaTrackNext => NamedKey::MediaTrackNext,
+        WinitNamedKey::MediaTrackPrevious => NamedKey::MediaTrackPrevious,
+        WinitNamedKey::MediaFastForward => NamedKey::MediaFastForward,
+        WinitNamedKey::MediaRewind => NamedKey::MediaRewind,
         _ => return None,
     })
 }
