@@ -2789,6 +2789,20 @@ impl<Message: Clone> UiFrame<Message> {
                     Invalidation::Layout
                 })
                 .unwrap_or(Invalidation::None),
+            UiEvent::TextUndo => self
+                .edit_focused_text(state, TextEditor::undo)
+                .map(|message| {
+                    outcome.messages.push(message);
+                    Invalidation::Layout
+                })
+                .unwrap_or(Invalidation::None),
+            UiEvent::TextRedo => self
+                .edit_focused_text(state, TextEditor::redo)
+                .map(|message| {
+                    outcome.messages.push(message);
+                    Invalidation::Layout
+                })
+                .unwrap_or(Invalidation::None),
             UiEvent::TextMoveLeft { extend_selection } => {
                 if let Some(message) =
                     self.edit_focused_text(state, |editor| editor.move_left(extend_selection))

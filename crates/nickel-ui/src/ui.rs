@@ -218,6 +218,8 @@ pub enum UiEvent {
     TextBackspace,
     TextBackspaceWord,
     TextDelete,
+    TextUndo,
+    TextRedo,
     TextMoveLeft {
         extend_selection: bool,
     },
@@ -678,6 +680,8 @@ impl UiEvent {
             | Self::TextBackspace
             | Self::TextBackspaceWord
             | Self::TextDelete
+            | Self::TextUndo
+            | Self::TextRedo
             | Self::TextMoveLeft { .. }
             | Self::TextMoveRight { .. }
             | Self::TextMoveWordLeft { .. }

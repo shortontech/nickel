@@ -369,6 +369,22 @@ impl FocusedInputDispatcher {
                         InputCommand::Ui(UiEvent::KeyboardNavigateDown)
                     }
                     (LogicalKey::Character(value), _)
+                        if command && text_editing && value.eq_ignore_ascii_case("z") =>
+                    {
+                        InputCommand::Ui(if shift {
+                            UiEvent::TextRedo
+                        } else {
+                            UiEvent::TextUndo
+                        })
+                    }
+                    (_, PhysicalKey::Code(KeyCode::KeyZ)) if command && text_editing => {
+                        InputCommand::Ui(if shift {
+                            UiEvent::TextRedo
+                        } else {
+                            UiEvent::TextUndo
+                        })
+                    }
+                    (LogicalKey::Character(value), _)
                         if command && value.eq_ignore_ascii_case("a") =>
                     {
                         InputCommand::Ui(UiEvent::TextSelectAll)
@@ -552,6 +568,37 @@ mod tests {
                 &[Modifier::ShiftLeft]
             )),
             [InputCommand::Ui(UiEvent::KeyboardContextMenu)]
+        );
+    }
+
+    #[test]
+    fn command_z_routes_undo_and_redo_only_for_an_editor() {
+        let mut dispatch = FocusedInputDispatcher::default();
+        let editor = InputContext {
+            text_focused: true,
+            ..InputContext::default()
+        };
+        assert_eq!(
+            dispatch.dispatch_with_context(
+                &key(
+                    LogicalKey::Character("z".into()),
+                    KeyCode::KeyZ,
+                    &[Modifier::ControlLeft]
+                ),
+                editor,
+            ),
+            [InputCommand::Ui(UiEvent::TextUndo)]
+        );
+        assert_eq!(
+            dispatch.dispatch_with_context(
+                &key(
+                    LogicalKey::Character("z".into()),
+                    KeyCode::KeyZ,
+                    &[Modifier::ControlLeft, Modifier::ShiftLeft],
+                ),
+                editor,
+            ),
+            [InputCommand::Ui(UiEvent::TextRedo)]
         );
     }
 

@@ -8,7 +8,18 @@ pub struct TextEditor {
     anchor: usize,
     preedit: String,
     preedit_cursor: Option<Range<usize>>,
+    undo: Vec<EditorSnapshot>,
+    redo: Vec<EditorSnapshot>,
 }
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct EditorSnapshot {
+    text: String,
+    cursor: usize,
+    anchor: usize,
+}
+
+const HISTORY_LIMIT: usize = 100;
 
 impl TextEditor {
     pub fn new(text: impl Into<String>) -> Self {
@@ -20,6 +31,8 @@ impl TextEditor {
             anchor: cursor,
             preedit: String::new(),
             preedit_cursor: None,
+            undo: Vec::new(),
+            redo: Vec::new(),
         }
     }
 
@@ -42,6 +55,7 @@ impl TextEditor {
 
     pub fn cut_selection(&mut self) -> Option<String> {
         let selected = self.selected_text()?.to_owned();
+        self.record_edit();
         self.delete_selection();
         Some(selected)
     }
@@ -51,9 +65,15 @@ impl TextEditor {
         self.cursor = self.text.len();
         self.anchor = self.cursor;
         self.cancel_preedit();
+        self.undo.clear();
+        self.redo.clear();
     }
 
     pub fn clear(&mut self) {
+        if self.text.is_empty() {
+            return;
+        }
+        self.record_edit();
         self.text.clear();
         self.cursor = 0;
         self.anchor = 0;
@@ -127,6 +147,10 @@ impl TextEditor {
 
     pub fn replace_selection(&mut self, replacement: &str) {
         let range = self.selection().unwrap_or(self.cursor..self.cursor);
+        if &self.text[range.clone()] == replacement {
+            return;
+        }
+        self.record_edit();
         let start = range.start;
         self.text.replace_range(range, replacement);
         self.cursor = start + replacement.len();
@@ -134,9 +158,15 @@ impl TextEditor {
     }
 
     pub fn backspace(&mut self) {
-        if self.delete_selection() || self.cursor == 0 {
+        if self.selection().is_some() {
+            self.record_edit();
+            self.delete_selection();
             return;
         }
+        if self.cursor == 0 {
+            return;
+        }
+        self.record_edit();
         let previous = previous_boundary(&self.text, self.cursor);
         self.text.replace_range(previous..self.cursor, "");
         self.cursor = previous;
@@ -144,9 +174,15 @@ impl TextEditor {
     }
 
     pub fn backspace_word(&mut self) {
-        if self.delete_selection() || self.cursor == 0 {
+        if self.selection().is_some() {
+            self.record_edit();
+            self.delete_selection();
             return;
         }
+        if self.cursor == 0 {
+            return;
+        }
+        self.record_edit();
         let previous = previous_word_boundary(&self.text, self.cursor);
         self.text.replace_range(previous..self.cursor, "");
         self.cursor = previous;
@@ -154,9 +190,15 @@ impl TextEditor {
     }
 
     pub fn delete(&mut self) {
-        if self.delete_selection() || self.cursor == self.text.len() {
+        if self.selection().is_some() {
+            self.record_edit();
+            self.delete_selection();
             return;
         }
+        if self.cursor == self.text.len() {
+            return;
+        }
+        self.record_edit();
         let next = next_boundary(&self.text, self.cursor);
         self.text.replace_range(self.cursor..next, "");
         self.anchor = self.cursor;
@@ -215,6 +257,39 @@ impl TextEditor {
         self.cursor = self.text.len();
     }
 
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
+
+    pub fn undo(&mut self) {
+        let Some(snapshot) = self.undo.pop() else {
+            return;
+        };
+        let current = self.snapshot();
+        self.restore(snapshot);
+        self.redo.push(current);
+    }
+
+    pub fn redo(&mut self) {
+        let Some(snapshot) = self.redo.pop() else {
+            return;
+        };
+        let current = self.snapshot();
+        self.restore(snapshot);
+        self.undo.push(current);
+    }
+
+    pub fn delete_selected(&mut self) {
+        if self.selection().is_some() {
+            self.record_edit();
+            self.delete_selection();
+        }
+    }
+
     pub fn place_cursor(&mut self, cursor: usize) {
         self.cursor = clamp_grapheme_boundary(&self.text, cursor);
         self.anchor = self.cursor;
@@ -240,6 +315,30 @@ impl TextEditor {
         self.cursor = start;
         self.anchor = start;
         true
+    }
+
+    fn snapshot(&self) -> EditorSnapshot {
+        EditorSnapshot {
+            text: self.text.clone(),
+            cursor: self.cursor,
+            anchor: self.anchor,
+        }
+    }
+
+    fn record_edit(&mut self) {
+        self.cancel_preedit();
+        self.undo.push(self.snapshot());
+        if self.undo.len() > HISTORY_LIMIT {
+            self.undo.remove(0);
+        }
+        self.redo.clear();
+    }
+
+    fn restore(&mut self, snapshot: EditorSnapshot) {
+        self.text = snapshot.text;
+        self.cursor = snapshot.cursor;
+        self.anchor = snapshot.anchor;
+        self.cancel_preedit();
     }
 }
 
@@ -417,5 +516,20 @@ mod tests {
         editor.insert("世界");
         assert_eq!(editor.text(), "copy 世界 here");
         assert_eq!(editor.cut_selection(), None);
+    }
+
+    #[test]
+    fn history_restores_text_and_selection_across_multiline_unicode() {
+        let mut editor = TextEditor::new("aé🦀\nsecond");
+        editor.move_home(false);
+        editor.move_right(true);
+        editor.insert("z");
+        assert_eq!(editor.text(), "zé🦀\nsecond");
+        editor.undo();
+        assert_eq!(editor.text(), "aé🦀\nsecond");
+        assert_eq!(editor.selection(), Some(0..1));
+        editor.redo();
+        assert_eq!(editor.text(), "zé🦀\nsecond");
+        assert_eq!(editor.selection(), None);
     }
 }

@@ -11,6 +11,7 @@ pub mod overlay;
 pub mod primitives;
 mod runtime;
 pub mod state;
+pub mod text_context_menu;
 pub mod text_editor;
 pub mod theme;
 mod ui;
@@ -49,6 +50,10 @@ pub use runtime::{
     ViewContext, run, run_with_adapter,
 };
 pub use state::{InputModality, Invalidation, NavigationState, TransientState, UiId, UiStateStore};
+pub use text_context_menu::{
+    TextCommandEffect, TextContextAction, TextContextPolicy, TextEditCommand, execute_text_command,
+    text_context_actions, text_context_menu,
+};
 pub use text_editor::TextEditor;
 pub use theme::{
     AccentColors, AccessibilityPreferences, AppearancePreference, BorderColors, ContrastPreference,
