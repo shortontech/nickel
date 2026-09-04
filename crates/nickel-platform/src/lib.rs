@@ -7,8 +7,9 @@ mod platform_contract;
 pub use default_apps::{
     ApplicationHandler, AssociationBackend, AssociationCapability, AssociationError,
     AssociationScope, AssociationService, AssociationSnapshot, AssociationTarget, ChangeOutcome,
-    association_backend, association_service, association_target_for_file, change_and_verify,
-    open_default_application_settings, open_once_supported, open_once_with,
+    DefaultLaunchError, association_backend, association_service, association_target_for_file,
+    change_and_verify, open_default_application_settings, open_once_supported, open_once_with,
+    open_with_default,
 };
 
 pub use media::{DecodedPreview, PreviewDecodeError, decode_image_preview};

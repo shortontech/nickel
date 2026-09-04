@@ -308,6 +308,98 @@ pub fn open_once_with(path: &Path, handler: &ApplicationHandler) -> Result<(), A
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DefaultLaunchError {
+    AssociationMissing,
+    PermissionDenied,
+    TargetMissing,
+    Platform(String),
+}
+
+impl fmt::Display for DefaultLaunchError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AssociationMissing => formatter.write_str("no default application is available"),
+            Self::PermissionDenied => formatter.write_str("permission was denied"),
+            Self::TargetMissing => formatter.write_str("the target no longer exists"),
+            Self::Platform(error) => formatter.write_str(error),
+        }
+    }
+}
+
+/// Opens a validated filesystem target through the operating system's default
+/// association authority. Portable applications receive only typed outcomes.
+pub fn open_with_default(path: &Path) -> Result<(), DefaultLaunchError> {
+    if !path.exists() {
+        return Err(DefaultLaunchError::TargetMissing);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::{
+            Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
+            core::PCWSTR,
+        };
+        let path = path
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect::<Vec<_>>();
+        let verb = "open\0".encode_utf16().collect::<Vec<_>>();
+        // SAFETY: both strings are terminated and live for this synchronous call.
+        let result = unsafe {
+            ShellExecuteW(
+                None,
+                PCWSTR(verb.as_ptr()),
+                PCWSTR(path.as_ptr()),
+                None,
+                None,
+                SW_SHOWNORMAL,
+            )
+        };
+        match result.0 as isize {
+            code if code > 32 => Ok(()),
+            2 | 3 => Err(DefaultLaunchError::TargetMissing),
+            5 => Err(DefaultLaunchError::PermissionDenied),
+            31 => Err(DefaultLaunchError::AssociationMissing),
+            code => Err(DefaultLaunchError::Platform(format!(
+                "Windows shell error {code}"
+            ))),
+        }
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let program = if cfg!(target_os = "linux") {
+            "xdg-open"
+        } else {
+            "/usr/bin/open"
+        };
+        let status = std::process::Command::new(program)
+            .arg(path)
+            .status()
+            .map_err(|error| match error.kind() {
+                std::io::ErrorKind::NotFound => DefaultLaunchError::AssociationMissing,
+                std::io::ErrorKind::PermissionDenied => DefaultLaunchError::PermissionDenied,
+                _ => DefaultLaunchError::Platform(error.to_string()),
+            })?;
+        if status.success() {
+            Ok(())
+        } else if cfg!(target_os = "linux") && status.code() == Some(3) {
+            Err(DefaultLaunchError::AssociationMissing)
+        } else {
+            Err(DefaultLaunchError::Platform(format!(
+                "{program} exited with {status}"
+            )))
+        }
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+    {
+        Err(DefaultLaunchError::Platform(
+            "default application launch is unavailable on this platform".into(),
+        ))
+    }
+}
+
 pub const fn open_once_supported() -> bool {
     cfg!(any(target_os = "linux", target_os = "macos"))
 }
@@ -716,6 +808,15 @@ mod tests {
             Some("text/plain")
         );
         assert_eq!(infer_portable_mime(Path::new("archive.unknown")), None);
+    }
+
+    #[test]
+    fn default_launch_rejects_a_missing_target_before_native_dispatch() {
+        let missing = tempfile::tempdir().unwrap().path().join("missing.txt");
+        assert_eq!(
+            open_with_default(&missing),
+            Err(DefaultLaunchError::TargetMissing)
+        );
     }
 
     #[test]

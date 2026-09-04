@@ -1,10 +1,14 @@
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-use std::io;
 use std::{
     collections::HashSet,
-    fmt,
     path::{Path, PathBuf},
 };
+
+pub(crate) fn publish_text_clipboard(text: &str) -> Result<(), String> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|error| error.to_string())?;
+    clipboard
+        .set_text(text.to_owned())
+        .map_err(|error| error.to_string())
+}
 
 #[cfg(target_os = "linux")]
 pub(crate) fn publish_file_clipboard(paths: &[PathBuf], cut: bool) -> Result<(), String> {
@@ -200,40 +204,6 @@ pub(crate) fn publish_file_clipboard(_paths: &[PathBuf], _cut: bool) -> Result<(
 #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 pub(crate) fn read_file_clipboard() -> Result<(bool, Vec<PathBuf>), String> {
     Err("native file clipboard adapter unavailable".into())
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum OpenPathError {
-    AssociationMissing,
-    PermissionDenied,
-    TargetMissing,
-    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
-    Unsupported,
-    Platform(String),
-}
-
-impl fmt::Display for OpenPathError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::AssociationMissing => formatter.write_str("no default application is available"),
-            Self::PermissionDenied => formatter.write_str("permission was denied"),
-            Self::TargetMissing => formatter.write_str("the target no longer exists"),
-            #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
-            Self::Unsupported => {
-                formatter.write_str("opening files is unsupported on this platform")
-            }
-            Self::Platform(error) => formatter.write_str(error),
-        }
-    }
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn spawn_open_error(error: io::Error) -> OpenPathError {
-    match error.kind() {
-        io::ErrorKind::NotFound => OpenPathError::AssociationMissing,
-        io::ErrorKind::PermissionDenied => OpenPathError::PermissionDenied,
-        _ => OpenPathError::Platform(error.to_string()),
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -595,21 +565,7 @@ pub(crate) fn open_with_launcher(_launcher: &Path, _source: &Path) -> Result<(),
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
-    use super::{OpenPathError, open_path, spawn_open_error, user_directories};
-
-    #[test]
-    fn open_failures_are_typed_for_portable_ui_policy() {
-        let missing = tempfile::tempdir().unwrap().path().join("missing.txt");
-        assert_eq!(open_path(&missing), Err(OpenPathError::TargetMissing));
-        assert_eq!(
-            spawn_open_error(std::io::Error::from(std::io::ErrorKind::NotFound)),
-            OpenPathError::AssociationMissing
-        );
-        assert_eq!(
-            spawn_open_error(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
-            OpenPathError::PermissionDenied
-        );
-    }
+    use super::user_directories;
 
     #[test]
     fn xdg_user_directories_honor_localized_disabled_and_default_paths() {

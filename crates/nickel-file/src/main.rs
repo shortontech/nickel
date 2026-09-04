@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    hash::{DefaultHasher, Hash, Hasher},
     path::PathBuf,
     sync::{
         Arc,
@@ -16,7 +17,7 @@ use crate::{
         ClipboardOffer, ConflictPolicy, DragOffer, ItemCapabilities, OperationEffect, RenameEditor,
         TransferIntent, TransferReport, TransferSource,
     },
-    platform::{LocationGroup, OpenPathError, home_directory, location_groups, open_path},
+    platform::{LocationGroup, home_directory, location_groups},
     watch::DirectoryWatch,
 };
 use nickel_core::{
@@ -25,6 +26,7 @@ use nickel_core::{
 };
 use nickel_file::{DirectoryBrowser, EntrySortKey, FileEntry, SortDirection};
 use nickel_i18n::Localizer;
+use nickel_platform::{DefaultLaunchError as OpenPathError, open_with_default};
 use nickel_ui::{
     AnyView, Application, FrameOverlay, Insets, OverlayAnchor, OverlayMenu, OverlayMenuItem,
     OverlayStyle, Point, ReadingDirection, Size, TextField, TransientSurface, UiId, ViewContext,
@@ -47,6 +49,12 @@ const DIRECTORY_WATCH_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const DIRECTORY_WATCH_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
 const DOUBLE_CLICK_DISTANCE: f32 = 6.0;
+
+fn entry_context_menu_id(path: &std::path::Path) -> String {
+    let mut hasher = DefaultHasher::new();
+    path.hash(&mut hasher);
+    format!("file-entry-context-{:016x}", hasher.finish())
+}
 type NavigationResult = (u64, Result<Option<DirectoryBrowser>, String>);
 type SidebarResult = (PathBuf, Result<Vec<(String, PathBuf)>, String>);
 type ActivationResult = (u64, String, Result<(), OpenPathError>);
@@ -65,6 +73,12 @@ pub enum FileMessage {
     ContextBackground,
     ContextOpen,
     ContextOpenNewTab,
+    ContextCut,
+    ContextCopy,
+    ContextPasteInto,
+    ContextNewFolder,
+    ContextCopyPath,
+    ContextRename,
     ContextProperties,
     CloseProperties,
     DiscardProperties,
@@ -178,6 +192,7 @@ pub struct FileApp {
     /// invocation. They deliberately do not follow later pointer or model motion.
     pub(crate) context_anchor: Option<Point>,
     pub(crate) context_target: Option<PathBuf>,
+    pub(crate) context_selection: Vec<PathBuf>,
     pub(crate) properties: Option<crate::properties::EntryProperties>,
     pub(crate) properties_association: Option<nickel_platform::AssociationSnapshot>,
     properties_association_rx:
@@ -191,6 +206,7 @@ pub struct FileApp {
     pub(crate) properties_scroll: f32,
     pub(crate) properties_confirm_close: bool,
     activation_rx: Option<Receiver<ActivationResult>>,
+    activation_op: fn(&std::path::Path) -> Result<(), OpenPathError>,
     pub(crate) icons: icons::ArtworkCache,
     pub(crate) icon_rx:
         Option<Receiver<(u64, PathBuf, icons::ArtworkCacheKey, icons::ResolvedArtwork)>>,
@@ -931,6 +947,7 @@ impl FileApp {
             last_click: None,
             context_anchor: None,
             context_target: None,
+            context_selection: Vec::new(),
             properties: None,
             properties_association: None,
             properties_association_rx: None,
@@ -943,6 +960,7 @@ impl FileApp {
             properties_scroll: 0.0,
             properties_confirm_close: false,
             activation_rx: None,
+            activation_op: open_with_default,
             icons: icons::ArtworkCache::default(),
             icon_rx: None,
             icon_poll_delay: std::time::Duration::from_millis(16),
@@ -1215,16 +1233,21 @@ impl FileApp {
         if is_directory {
             self.navigate_to(entry.path);
         } else {
+            if self.activation_rx.is_some() {
+                self.status = "Another file is still opening…".into();
+                return;
+            }
             let label = entry.display_name().to_owned();
             self.status = format!("Opening {label}…");
             let path = entry.path;
             let tab_id = self.active_tab_id;
+            let activation_op = self.activation_op;
             let (sender, receiver) = mpsc::channel();
             self.activation_rx = Some(receiver);
             let _ = std::thread::Builder::new()
                 .name("nickel-file-activation".into())
                 .spawn(move || {
-                    let result = open_path(&path);
+                    let result = activation_op(&path);
                     let _ = sender.send((tab_id, label, result));
                 });
         }
@@ -1314,6 +1337,9 @@ impl FileApp {
         closes_address: bool,
         operation: impl FnOnce(&mut DirectoryBrowser) -> Result<bool, String> + Send + 'static,
     ) {
+        // A refreshed/replaced model cannot complete a click transaction that
+        // began against the previous generation.
+        self.last_click = None;
         self.navigation_generation = self.navigation_generation.wrapping_add(1);
         let generation = self.navigation_generation;
         let mut browser = self.browser.clone();
@@ -1477,6 +1503,9 @@ impl FileApp {
         self.selected = None;
         self.selected_entries.clear();
         self.selection_anchor = None;
+        self.context_target = None;
+        self.context_anchor = None;
+        self.context_selection.clear();
         self.set_scroll_offset(0.0);
         self.status.clear();
         self.ensure_directory_watch();
@@ -1507,6 +1536,17 @@ impl FileApp {
             .and_then(resolve)
             .or_else(|| self.selected_entries.iter().copied().min());
         self.selection_anchor = anchor.as_ref().and_then(resolve).or(self.selected);
+        if self.context_target.as_ref().is_some_and(|target| {
+            !self
+                .browser
+                .entries()
+                .iter()
+                .any(|entry| &entry.path == target)
+        }) {
+            self.context_target = None;
+            self.context_anchor = None;
+            self.context_selection.clear();
+        }
         self.status.clear();
         self.ensure_directory_watch();
         self.refresh_icons();
@@ -2042,6 +2082,21 @@ impl FileApp {
                     }
                 }
             }
+            FileMessage::ContextRename => {
+                if let Some(path) = self.context_target.clone()
+                    && let Some(index) = self
+                        .browser
+                        .entries()
+                        .iter()
+                        .position(|entry| entry.path == path)
+                    && let Some(identity) = self.browser.identity_at(index)
+                {
+                    self.rename_editor = Some(RenameEditor::begin(identity, path));
+                    self.pending_focus = Some(UiId::from("file-rename-field"));
+                } else {
+                    self.status = "The selected item is no longer available".into();
+                }
+            }
             FileMessage::RenameChanged(text) => {
                 if let Some(editor) = &mut self.rename_editor {
                     editor.text = text
@@ -2071,11 +2126,18 @@ impl FileApp {
                     self.selected = Some(index);
                     self.selection_anchor = Some(index);
                 }
+                self.context_selection = self
+                    .selected_entries
+                    .iter()
+                    .filter_map(|index| self.browser.entries().get(*index))
+                    .map(|entry| entry.path.clone())
+                    .collect();
                 self.selection_drag = None;
             }
             FileMessage::ContextBackground => {
                 self.context_anchor = Some(self.cursor);
                 self.context_target = None;
+                self.context_selection.clear();
                 self.selection_drag = None;
             }
             FileMessage::ContextOpen => {
@@ -2098,6 +2160,34 @@ impl FileApp {
                     && (entry.is_directory || entry.path.is_dir())
                 {
                     self.new_tab_at(entry.path);
+                } else {
+                    self.status = "The selected folder is no longer available".into();
+                }
+            }
+            FileMessage::ContextCut => self
+                .capture_paths_for_clipboard(TransferIntent::Move, self.context_selection.clone()),
+            FileMessage::ContextCopy => self
+                .capture_paths_for_clipboard(TransferIntent::Copy, self.context_selection.clone()),
+            FileMessage::ContextPasteInto => {
+                let destination = self
+                    .context_target
+                    .clone()
+                    .unwrap_or_else(|| self.browser.current().to_path_buf());
+                self.paste_file_clipboard_into(destination);
+            }
+            FileMessage::ContextNewFolder => {
+                let parent = self
+                    .context_target
+                    .clone()
+                    .unwrap_or_else(|| self.browser.current().to_path_buf());
+                self.create_new_folder(&parent);
+            }
+            FileMessage::ContextCopyPath => {
+                if let Some(path) = &self.context_target {
+                    match crate::platform::publish_text_clipboard(&path.display().to_string()) {
+                        Ok(()) => self.status = "Copied path".into(),
+                        Err(error) => self.status = format!("Could not copy path: {error}"),
+                    }
                 }
             }
             FileMessage::ContextProperties => {
@@ -2105,28 +2195,24 @@ impl FileApp {
                     return;
                 }
                 self.status.clear();
-                let target = self
-                    .context_target
-                    .as_ref()
-                    .and_then(|path| {
-                        self.browser
-                            .entries()
-                            .iter()
-                            .enumerate()
-                            .find(|(_, entry)| &entry.path == path)
-                    })
-                    .or_else(|| {
-                        (self.selected_entries.len() == 1)
-                            .then(|| {
-                                self.selected.and_then(|index| {
-                                    self.browser
-                                        .entries()
-                                        .get(index)
-                                        .map(|entry| (index, entry))
-                                })
+                let target = if let Some(path) = self.context_target.as_ref() {
+                    self.browser
+                        .entries()
+                        .iter()
+                        .enumerate()
+                        .find(|(_, entry)| &entry.path == path)
+                } else {
+                    (self.selected_entries.len() == 1)
+                        .then(|| {
+                            self.selected.and_then(|index| {
+                                self.browser
+                                    .entries()
+                                    .get(index)
+                                    .map(|entry| (index, entry))
                             })
-                            .flatten()
-                    });
+                        })
+                        .flatten()
+                };
                 if let Some((index, entry)) = target {
                     match crate::properties::EntryProperties::load(
                         entry,
@@ -2141,6 +2227,8 @@ impl FileApp {
                         }
                         Err(error) => self.status = format!("Could not read properties: {error}"),
                     }
+                } else {
+                    self.status = "The selected item is no longer available".into();
                 }
                 if let Some(path) = self.properties.as_ref().map(|value| value.path.clone()) {
                     let (sender, receiver) = mpsc::channel();
@@ -2446,15 +2534,28 @@ impl FileApp {
     }
 
     fn capture_file_clipboard(&mut self, intent: TransferIntent) {
-        let sources = self.selected_entries.iter().copied().collect::<Vec<_>>();
-        let sources = sources
+        let paths = self
+            .selected_entries
+            .iter()
+            .filter_map(|index| self.browser.entries().get(*index))
+            .map(|entry| entry.path.clone())
+            .collect();
+        self.capture_paths_for_clipboard(intent, paths);
+    }
+
+    fn capture_paths_for_clipboard(&mut self, intent: TransferIntent, paths: Vec<PathBuf>) {
+        let sources = paths
             .into_iter()
-            .filter_map(|index| {
-                let entry = self.browser.entries().get(index)?;
+            .filter_map(|path| {
+                let index = self
+                    .browser
+                    .entries()
+                    .iter()
+                    .position(|entry| entry.path == path)?;
                 Some(TransferSource {
                     provider: "local".into(),
                     identity: self.browser.identity_at(index)?,
-                    path: entry.path.clone(),
+                    path,
                     capabilities: ItemCapabilities {
                         readable: true,
                         removable: true,
@@ -2569,6 +2670,10 @@ impl FileApp {
     }
 
     fn paste_file_clipboard(&mut self) {
+        self.paste_file_clipboard_into(self.browser.current().to_path_buf());
+    }
+
+    fn paste_file_clipboard_into(&mut self, destination: PathBuf) {
         let offer = self.file_clipboard.clone().or_else(|| {
             crate::platform::read_file_clipboard()
                 .ok()
@@ -2602,13 +2707,9 @@ impl FileApp {
             return;
         };
         let total = offer.sources.len();
-        let Ok(effect) = crate::operations::plan_paste(
-            &offer,
-            "local",
-            self.browser.current(),
-            true,
-            ConflictPolicy::Ask,
-        ) else {
+        let Ok(effect) =
+            crate::operations::plan_paste(&offer, "local", &destination, true, ConflictPolicy::Ask)
+        else {
             self.status = "Paste target is not valid".into();
             return;
         };
@@ -2625,6 +2726,29 @@ impl FileApp {
                 });
             let _ = sender.send((offer.intent, total, total, Some(report)));
         });
+    }
+
+    fn create_new_folder(&mut self, parent: &std::path::Path) {
+        for suffix in 0..10_000 {
+            let name = if suffix == 0 {
+                "New folder".to_owned()
+            } else {
+                format!("New folder ({suffix})")
+            };
+            let path = parent.join(&name);
+            if path.exists() {
+                continue;
+            }
+            match std::fs::create_dir(&path) {
+                Ok(()) => {
+                    self.status = format!("Created {name}");
+                    self.refresh_directory(self.browser.show_hidden());
+                }
+                Err(error) => self.status = format!("Could not create folder: {error}"),
+            }
+            return;
+        }
+        self.status = "Could not choose an unused folder name".into();
     }
 
     fn poll_transfer(&mut self) -> bool {
@@ -2769,7 +2893,7 @@ impl Application for FileApp {
             .filter(|(index, _)| visible_entries.contains(index))
             .map(|(index, entry)| {
                 let menu = OverlayMenu::new(
-                    format!("file-entry-{index}-context"),
+                    entry_context_menu_id(&entry.path),
                     invocation_anchor(UiId::new(format!("file-entry-{index}"))),
                 )
                 .item(
@@ -2804,12 +2928,12 @@ impl Application for FileApp {
                 };
                 let menu = menu
                     .item(
-                        OverlayMenuItem::action("cut", "Cut", FileMessage::CutSelection)
+                        OverlayMenuItem::action("cut", "Cut", FileMessage::ContextCut)
                             .shortcut("Ctrl+X")
                             .separator_before(true),
                     )
                     .item(
-                        OverlayMenuItem::action("copy", "Copy", FileMessage::CopySelection)
+                        OverlayMenuItem::action("copy", "Copy", FileMessage::ContextCopy)
                             .shortcut("Ctrl+C"),
                     );
                 let menu = if entry.is_directory {
@@ -2817,21 +2941,21 @@ impl Application for FileApp {
                         OverlayMenuItem::action(
                             "paste-into",
                             "Paste into Folder",
-                            FileMessage::Paste,
+                            FileMessage::ContextPasteInto,
                         )
                         .shortcut("Ctrl+V"),
                     )
-                    .item(OverlayMenuItem::disabled_with_reason(
+                    .item(OverlayMenuItem::action(
                         "new-folder",
                         "New Folder",
-                        "Folder creation is not implemented yet",
+                        FileMessage::ContextNewFolder,
                     ))
                 } else {
                     menu
                 };
                 FrameOverlay::Menu(configure(
                     menu.item(
-                        OverlayMenuItem::action("rename", "Rename", FileMessage::BeginRename)
+                        OverlayMenuItem::action("rename", "Rename", FileMessage::ContextRename)
                             .shortcut("F2")
                             .separator_before(true),
                     )
@@ -2841,10 +2965,10 @@ impl Application for FileApp {
                         "Trash integration is not implemented yet",
                     ))
                     .item(
-                        OverlayMenuItem::disabled_with_reason(
+                        OverlayMenuItem::action(
                             "copy-path",
                             "Copy Path",
-                            "Clipboard integration is not implemented yet",
+                            FileMessage::ContextCopyPath,
                         )
                         .separator_before(true),
                     )
@@ -2907,18 +3031,14 @@ impl Application for FileApp {
                 .shortcut("Ctrl+A"),
             )
             .item(
-                OverlayMenuItem::disabled_with_reason(
-                    "paste",
-                    "Paste",
-                    "File operations are not implemented yet",
-                )
-                .shortcut("Ctrl+V")
-                .separator_before(true),
+                OverlayMenuItem::action("paste", "Paste", FileMessage::ContextPasteInto)
+                    .shortcut("Ctrl+V")
+                    .separator_before(true),
             )
-            .item(OverlayMenuItem::disabled_with_reason(
+            .item(OverlayMenuItem::action(
                 "new-folder",
                 "New Folder",
-                "Folder creation is not implemented yet",
+                FileMessage::ContextNewFolder,
             ))
             .item(OverlayMenuItem::disabled_with_reason(
                 "properties",

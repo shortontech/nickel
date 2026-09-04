@@ -1930,6 +1930,14 @@ fn double_click_requires_stable_path_time_and_pointer_distance() {
         "a second target must not inherit the first target's click"
     );
 
+    let mut replaced = FileApp::new(directory.path().to_path_buf());
+    replaced.update_message(FileMessage::Entry(0));
+    replaced.start_navigation("Refreshing".into(), "refresh failed", false, |_| Ok(false));
+    assert!(
+        replaced.last_click.is_none(),
+        "model replacement cancels the click transaction"
+    );
+
     let mut activated = FileApp::new(directory.path().to_path_buf());
     activated.cursor = Point { x: 80.0, y: 80.0 };
     activated.update_message(FileMessage::Entry(0));
@@ -1940,6 +1948,51 @@ fn double_click_requires_stable_path_time_and_pointer_distance() {
         activated.status,
         format!("Opening {}…", directory.path().join("alpha").display())
     );
+}
+
+#[test]
+fn activation_reports_every_typed_result_and_coalesces_pending_requests() {
+    fn success(_: &std::path::Path) -> Result<(), OpenPathError> {
+        Ok(())
+    }
+    fn association(_: &std::path::Path) -> Result<(), OpenPathError> {
+        Err(OpenPathError::AssociationMissing)
+    }
+    fn permission(_: &std::path::Path) -> Result<(), OpenPathError> {
+        Err(OpenPathError::PermissionDenied)
+    }
+    fn missing(_: &std::path::Path) -> Result<(), OpenPathError> {
+        Err(OpenPathError::TargetMissing)
+    }
+    fn platform(_: &std::path::Path) -> Result<(), OpenPathError> {
+        Err(OpenPathError::Platform("adapter failed".into()))
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("report.txt"), b"x").unwrap();
+    for (operation, expected) in [
+        (success as fn(&std::path::Path) -> _, "Opened report.txt"),
+        (association, "no default application is available"),
+        (permission, "permission was denied"),
+        (missing, "target no longer exists"),
+        (platform, "adapter failed"),
+    ] {
+        let mut app = FileApp::new(directory.path().to_path_buf());
+        app.selected = Some(0);
+        app.selected_entries.insert(0);
+        app.activation_op = operation;
+        app.activate_selected();
+        assert_eq!(app.status, "Opening report.txt…");
+        app.activate_selected();
+        assert_eq!(app.status, "Another file is still opening…");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !app.poll_activation() {
+            assert!(Instant::now() < deadline, "activation worker timed out");
+            std::thread::yield_now();
+        }
+        assert!(app.status.contains(expected), "{}", app.status);
+        assert!(app.activation_rx.is_none());
+    }
 }
 
 #[test]
@@ -1973,7 +2026,8 @@ fn context_invocation_captures_anchor_and_target_identity() {
         .into_iter()
         .find_map(|overlay| match overlay {
             nickel_ui::FrameOverlay::Menu(menu)
-                if menu.id.as_ui_id().as_str() == "file-entry-0-context" =>
+                if menu.id.as_ui_id().as_str()
+                    == entry_context_menu_id(&directory.path().join("alpha.txt")) =>
             {
                 Some(menu)
             }
@@ -1984,6 +2038,79 @@ fn context_invocation_captures_anchor_and_target_identity() {
         menu.anchor,
         nickel_ui::OverlayAnchor::Point { point, .. } if point == anchor
     ));
+}
+
+#[test]
+fn context_actions_use_the_captured_selection_and_implemented_folder_capabilities() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("alpha.txt"), b"a").unwrap();
+    std::fs::write(directory.path().join("beta.txt"), b"b").unwrap();
+    std::fs::create_dir(directory.path().join("folder")).unwrap();
+    let mut app = FileApp::new(directory.path().to_path_buf());
+    let alpha = app
+        .browser
+        .entries()
+        .iter()
+        .position(|entry| entry.display_name() == "alpha.txt")
+        .unwrap();
+    let beta = app
+        .browser
+        .entries()
+        .iter()
+        .position(|entry| entry.display_name() == "beta.txt")
+        .unwrap();
+    let folder = app
+        .browser
+        .entries()
+        .iter()
+        .position(|entry| entry.display_name() == "folder")
+        .unwrap();
+
+    app.selected_entries = HashSet::from([alpha]);
+    app.selected = Some(alpha);
+    app.update_message(FileMessage::ContextEntry(alpha));
+    app.selected_entries = HashSet::from([beta]);
+    app.selected = Some(beta);
+    app.update_message(FileMessage::ContextCopy);
+    assert_eq!(
+        app.file_clipboard.as_ref().unwrap().sources[0].path,
+        directory.path().join("alpha.txt")
+    );
+
+    app.update_message(FileMessage::ContextEntry(folder));
+    app.update_message(FileMessage::ContextNewFolder);
+    assert!(directory.path().join("folder/New folder").is_dir());
+}
+
+#[test]
+fn removed_context_target_cannot_reuse_a_neighbor_menu_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let alpha_path = directory.path().join("alpha.txt");
+    std::fs::write(&alpha_path, b"a").unwrap();
+    std::fs::write(directory.path().join("beta.txt"), b"b").unwrap();
+    let mut app = FileApp::new(directory.path().to_path_buf());
+    let alpha = app
+        .browser
+        .entries()
+        .iter()
+        .position(|entry| entry.path == alpha_path)
+        .unwrap();
+    app.update_message(FileMessage::ContextEntry(alpha));
+    let removed_menu = entry_context_menu_id(&alpha_path);
+
+    std::fs::remove_file(&alpha_path).unwrap();
+    app.browser = DirectoryBrowser::open(directory.path()).unwrap();
+    app.reconciliation_changed(None, Vec::new(), None);
+    assert!(app.context_target.is_none());
+    assert!(Application::frame_overlays(
+        &app,
+        nickel_ui::ViewContext::new(
+            Rect::new(0.0, 0.0, 860.0, 620.0),
+            nickel_ui::InputModality::Pointer,
+        ),
+    )
+    .into_iter()
+    .all(|overlay| !matches!(overlay, nickel_ui::FrameOverlay::Menu(menu) if menu.id.as_ui_id().as_str() == removed_menu)));
 }
 
 #[test]
@@ -2021,6 +2148,34 @@ fn context_menu_discloses_unimplemented_common_capabilities() {
         "Properties",
     ] {
         assert!(labels.contains(expected), "missing {expected}: {labels:?}");
+    }
+    let actionable = host
+        .query(&nickel_ui::SemanticSelector::Role(
+            nickel_ui::SemanticRole::MenuItem,
+        ))
+        .into_iter()
+        .filter(|node| node.actions.contains(&ActionKind::Activate))
+        .filter_map(|node| node.name)
+        .collect::<HashSet<_>>();
+    for implemented in [
+        "Open",
+        "Open With",
+        "Open in new tab",
+        "Cut",
+        "Copy",
+        "Paste into Folder",
+        "New Folder",
+        "Rename",
+        "Copy Path",
+        "Properties",
+    ] {
+        assert!(
+            actionable.contains(implemented),
+            "implemented capability is disabled: {implemented}: {actionable:?}"
+        );
+    }
+    for unavailable in ["Add to Bookmarks", "Move to Trash", "Open in Terminal"] {
+        assert!(!actionable.contains(unavailable));
     }
 }
 
