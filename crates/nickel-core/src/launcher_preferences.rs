@@ -1,3 +1,4 @@
+use crate::persistence::{atomic_write, config_path};
 use std::{
     fs, io,
     path::{Path, PathBuf},
@@ -44,13 +45,6 @@ impl LauncherPreferences {
 
     pub fn save(&self, path: impl AsRef<Path>) -> io::Result<()> {
         let path = path.as_ref();
-        let Some(parent) = path.parent() else {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "launcher preferences path has no parent",
-            ));
-        };
-        fs::create_dir_all(parent)?;
         let mut contents = String::new();
         for favorite in self.favorites.iter().take(MAX_ENTRIES) {
             contents.push_str("favorite=");
@@ -62,15 +56,7 @@ impl LauncherPreferences {
             contents.push_str(&encode(recent));
             contents.push('\n');
         }
-        let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
-        fs::write(&temporary, contents)?;
-        match fs::rename(&temporary, path) {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                let _ = fs::remove_file(&temporary);
-                Err(error)
-            }
-        }
+        atomic_write(path, contents)
     }
 
     pub fn favorites(&self) -> &[String] {
@@ -147,38 +133,7 @@ fn decode(value: &str) -> Option<String> {
 }
 
 fn preferences_path() -> io::Result<PathBuf> {
-    #[cfg(target_os = "windows")]
-    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-        return Ok(PathBuf::from(local)
-            .join("Nickel")
-            .join("launcher-preferences"));
-    }
-    #[cfg(target_os = "windows")]
-    return Err(io::Error::new(
-        io::ErrorKind::NotFound,
-        "LOCALAPPDATA is not set",
-    ));
-    #[cfg(target_os = "macos")]
-    {
-        let home = std::env::var_os("HOME")
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "HOME is not set"))?;
-        return Ok(PathBuf::from(home)
-            .join("Library/Application Support/Nickel")
-            .join("launcher-preferences"));
-    }
-    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-    {
-        let config = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "XDG_CONFIG_HOME and HOME are not set",
-                )
-            })?;
-        Ok(config.join("nickel").join("launcher-preferences"))
-    }
+    config_path("launcher-preferences")
 }
 
 #[cfg(test)]

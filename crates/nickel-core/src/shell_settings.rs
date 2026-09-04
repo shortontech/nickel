@@ -1,3 +1,4 @@
+use crate::persistence::{atomic_write, config_path};
 use std::{
     fs, io,
     path::{Path, PathBuf},
@@ -162,10 +163,7 @@ impl ShellSettings {
 
     pub fn save(&self, path: impl AsRef<Path>) -> io::Result<()> {
         let path = path.as_ref();
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(
+        atomic_write(
             path,
             format!(
                 "bar_on_all_displays={}\nall_windows_on_every_bar={}\ndesktop_count={}\nactive_desktop={}\ntheme={}\naccent_hue={}\naccent_intensity={}\nreduce_transparency={}\nanimations={}\nfile_icon_provider={}\nfile_icon_theme={}\npreferred_terminal={}\npreferred_file_manager={}\nidle_dim_seconds={}\nidle_lock_seconds={}\nidle_suspend_seconds={}\n",
@@ -251,28 +249,7 @@ fn format_timeout(timeout: Option<u32>) -> String {
 }
 
 fn settings_path() -> io::Result<PathBuf> {
-    #[cfg(target_os = "windows")]
-    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-        return Ok(PathBuf::from(local).join("Nickel").join("shell-settings"));
-    }
-    #[cfg(target_os = "windows")]
-    return Err(io::Error::new(
-        io::ErrorKind::NotFound,
-        "LOCALAPPDATA is not set",
-    ));
-    #[cfg(not(target_os = "windows"))]
-    {
-        let config = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "XDG_CONFIG_HOME and HOME are not set",
-                )
-            })?;
-        Ok(config.join("nickel").join("shell-settings"))
-    }
+    config_path("shell-settings")
 }
 
 #[cfg(test)]

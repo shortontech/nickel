@@ -6,6 +6,7 @@ pub mod launcher;
 pub mod launcher_preferences;
 pub mod optional_features;
 pub mod output_layout;
+mod persistence;
 pub mod quick_settings;
 pub mod resource_owner;
 pub mod run;

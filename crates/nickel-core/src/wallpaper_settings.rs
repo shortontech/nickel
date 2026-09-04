@@ -1,3 +1,4 @@
+use crate::persistence::{atomic_write, config_path};
 use std::{
     fs, io,
     path::{Path, PathBuf},
@@ -55,9 +56,6 @@ impl WallpaperSettings {
 
     pub fn save(&self, path: impl AsRef<Path>) -> io::Result<()> {
         let path = path.as_ref();
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
         let position = match self.position {
             WallpaperPosition::Center => "center",
             WallpaperPosition::Tile => "tile",
@@ -66,7 +64,7 @@ impl WallpaperSettings {
             WallpaperPosition::Span => "span",
             WallpaperPosition::Fill => "fill",
         };
-        fs::write(
+        atomic_write(
             path,
             format!(
                 "image={}\nposition={position}\n",
@@ -80,30 +78,7 @@ impl WallpaperSettings {
 }
 
 fn settings_path() -> io::Result<PathBuf> {
-    #[cfg(target_os = "windows")]
-    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-        return Ok(PathBuf::from(local)
-            .join("Nickel")
-            .join("wallpaper-settings"));
-    }
-    #[cfg(target_os = "windows")]
-    return Err(io::Error::new(
-        io::ErrorKind::NotFound,
-        "LOCALAPPDATA is not set",
-    ));
-    #[cfg(not(target_os = "windows"))]
-    {
-        let config = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "XDG_CONFIG_HOME and HOME are not set",
-                )
-            })?;
-        Ok(config.join("nickel").join("wallpaper-settings"))
-    }
+    config_path("wallpaper-settings")
 }
 
 #[cfg(test)]

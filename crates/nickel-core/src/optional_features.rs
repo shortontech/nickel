@@ -1,5 +1,6 @@
 //! Portable policy and persistence for optional Nickel features.
 
+use crate::persistence::{atomic_write, config_path};
 use std::{
     fs, io,
     path::{Path, PathBuf},
@@ -365,16 +366,13 @@ impl OptionalFeatureSettings {
 
     pub fn save(&self, path: impl AsRef<Path>) -> io::Result<()> {
         let path = path.as_ref();
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
         let source = match &self.codex_source {
             CodexSource::CompatibleInstalled => "installed".to_owned(),
             CodexSource::Bundled => "bundled".to_owned(),
             CodexSource::ApprovedRemote => "remote".to_owned(),
             CodexSource::Executable(path) => format!("executable:{}", path.to_string_lossy()),
         };
-        fs::write(
+        atomic_write(
             path,
             format!(
                 "version=1\ncodex.enabled={}\ncodex.generation={}\ncodex.source={source}\n",
@@ -465,10 +463,7 @@ impl OptionalFeatureRuntime {
 
     pub fn save(&self, path: impl AsRef<Path>) -> io::Result<()> {
         let path = path.as_ref();
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(
+        atomic_write(
             path,
             format!(
                 "version=1\ncodex.generation={}\ncodex.effective={}\ncodex.health={}\ncodex.support={}\ncodex.installation={}\ncodex.active_windows={}\ncodex.background_workers={}\ncodex.subscriptions={}\ncodex.warm_surfaces={}\ncodex.cache_entries={}\ncodex.source={}\ncodex.diagnostic={}\n",
@@ -585,36 +580,7 @@ fn parse_source(value: &str) -> CodexSource {
 }
 
 fn settings_path() -> io::Result<PathBuf> {
-    #[cfg(target_os = "windows")]
-    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-        return Ok(PathBuf::from(local)
-            .join("Nickel")
-            .join("optional-features"));
-    }
-    #[cfg(target_os = "windows")]
-    return Err(io::Error::new(
-        io::ErrorKind::NotFound,
-        "LOCALAPPDATA is not set",
-    ));
-    #[cfg(target_os = "macos")]
-    if let Some(home) = std::env::var_os("HOME") {
-        return Ok(PathBuf::from(home).join("Library/Application Support/Nickel/optional-features"));
-    }
-    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-    {
-        let config = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "XDG_CONFIG_HOME and HOME are not set",
-                )
-            })?;
-        Ok(config.join("nickel").join("optional-features"))
-    }
-    #[cfg(target_os = "macos")]
-    Err(io::Error::new(io::ErrorKind::NotFound, "HOME is not set"))
+    config_path("optional-features")
 }
 
 fn runtime_path() -> io::Result<PathBuf> {
