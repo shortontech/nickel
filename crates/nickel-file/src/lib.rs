@@ -34,7 +34,7 @@ pub fn desktop_directory() -> PathBuf {
 }
 
 pub fn open_path(path: &Path) -> Result<(), String> {
-    platform::open_path(path).map_err(|error| error.to_string())
+    nickel_platform::open_with_default(path).map_err(|error| error.to_string())
 }
 
 pub fn is_application_launcher(path: &Path) -> bool {
