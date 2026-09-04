@@ -2376,6 +2376,36 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn every_nonpersistent_wayland_shell_role_has_compositor_visibility_authority() {
+        use nickel_session_protocol::ShellRole;
+
+        for (surface, session) in [
+            (super::SurfaceRole::ControlCenter, ShellRole::ControlCenter),
+            (super::SurfaceRole::Notification, ShellRole::Notification),
+            (super::SurfaceRole::VolumeOsd, ShellRole::VolumeOsd),
+            (super::SurfaceRole::WindowPreview, ShellRole::Preview),
+            (
+                super::SurfaceRole::WindowContextMenu,
+                ShellRole::ContextMenu,
+            ),
+            (super::SurfaceRole::CodexProjectMenu, ShellRole::ProjectMenu),
+            (super::SurfaceRole::Screenshot, ShellRole::Screenshot),
+        ] {
+            assert_eq!(super::session_visibility_role(surface), Some(session));
+        }
+        for persistent in [
+            super::SurfaceRole::Desktop,
+            super::SurfaceRole::Panel,
+            super::SurfaceRole::Launcher,
+            super::SurfaceRole::Lock,
+            super::SurfaceRole::CodexChat,
+        ] {
+            assert_eq!(super::session_visibility_role(persistent), None);
+        }
+    }
+
     #[test]
     fn ordinary_controller_surfaces_do_not_translate_actions_to_keys() {
         let source = include_str!("nickel-shell.rs");
