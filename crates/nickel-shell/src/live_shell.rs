@@ -1003,8 +1003,25 @@ impl nickel_ui::Application for DesktopApplication {
     }
 
     fn frame_overlays(&self, view_context: ViewContext) -> Vec<FrameOverlay<Self::Message>> {
+        let selection_marquee = self.selection_start.map(|start| {
+            let current = self.pointer_position;
+            FrameOverlay::SelectionMarquee {
+                rect: Rect::new(
+                    start.x.min(current.x),
+                    start.y.min(current.y),
+                    (current.x - start.x).abs(),
+                    (current.y - start.y).abs(),
+                ),
+                // A marquee is an overlay over the desktop artwork, not an
+                // opaque content tile. Preserve the wallpaper and icons below
+                // it while keeping the boundary fully legible.
+                fill: Some((0x38_u32 << 24) | (self.palette.accent_soft & 0x00ff_ffff)),
+                stroke: self.palette.accent,
+                width: 1.0,
+            }
+        });
         let Some(context) = &self.context_menu else {
-            return Vec::new();
+            return selection_marquee.into_iter().collect();
         };
         if context.entry.is_none() {
             let anchor = context.anchor.map_or_else(
@@ -1315,11 +1332,14 @@ impl nickel_ui::Application for DesktopApplication {
             menu.item_selected = Some(self.palette.accent_soft);
             menu.row_height = ((view_context.viewport.size.height - 8.0) / menu.items.len() as f32)
                 .clamp(18.0, menu.row_height);
-            return vec![FrameOverlay::Menu(menu)];
+            let mut overlays: Vec<_> = selection_marquee.into_iter().collect();
+            overlays.push(FrameOverlay::Menu(menu));
+            return overlays;
         }
         let id = context.entry.unwrap();
         let anchor = UiId::new(format!("desktop-entry-{}-{}", id.0.0, id.0.1));
-        vec![FrameOverlay::Menu(
+        let mut overlays: Vec<_> = selection_marquee.into_iter().collect();
+        overlays.push(FrameOverlay::Menu(
             OverlayMenu::new(
                 format!("desktop-entry-{}-{}-context", id.0.0, id.0.1),
                 OverlayAnchor::InvocationTarget(anchor),
@@ -1360,7 +1380,8 @@ impl nickel_ui::Application for DesktopApplication {
                 "Properties",
                 DesktopMessage::Properties(id),
             )),
-        )]
+        ));
+        overlays
     }
 
     fn view(&self, context: ViewContext) -> impl nickel_ui::View<Self::Message> {
@@ -1450,19 +1471,6 @@ impl nickel_ui::Application for DesktopApplication {
                 tile = tile.border(self.palette.accent, 2.0);
             }
             layer = layer.child(tile);
-        }
-        if let Some(start) = self.selection_start {
-            let current = self.pointer_position;
-            layer = layer.child(
-                Container::new()
-                    .position(Point {
-                        x: start.x.min(current.x),
-                        y: start.y.min(current.y),
-                    })
-                    .width((current.x - start.x).abs())
-                    .height((current.y - start.y).abs())
-                    .background(self.palette.accent_soft),
-            );
         }
         if let Some(error) = &self.error {
             layer = layer.child(
@@ -8160,6 +8168,147 @@ mod tests {
             ))
         );
         assert_ne!(shell.desktop_change_token, pointer_token);
+    }
+
+    #[test]
+    fn desktop_selection_marquee_preserves_icons_through_delayed_refresh_poll_and_release() {
+        use std::{ffi::OsString, path::PathBuf};
+
+        let mut shell = LiveShell::new().unwrap();
+        let path = PathBuf::from("/desktop/visible-through-selection.txt");
+        let entry = nickel_file::FileEntry {
+            display_name_override: None,
+            name: OsString::from("visible-through-selection.txt"),
+            path: path.clone(),
+            is_directory: false,
+            size: Some(17),
+            modified: None,
+        };
+        let identity = nickel_file::FileIdentity(51, 1);
+        let artwork = Arc::new(image::RgbaImage::from_pixel(
+            3,
+            3,
+            image::Rgba([24, 96, 220, 255]),
+        ));
+        let application = shell.desktop_host.application_mut();
+        application.browser = None;
+        application.watch = None;
+        application.set_outputs(vec![nickel_file::desktop::DesktopOutput {
+            id: "primary".into(),
+            work_area: nickel_file::desktop::Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 400.0,
+                height: 600.0,
+            },
+            scale: 1.0,
+        }]);
+        application.set_active_output(
+            "primary".into(),
+            nickel_file::desktop::Point::default(),
+            1.0,
+        );
+        application
+            .layout
+            .reconcile(vec![(identity, entry.clone())]);
+        application
+            .icon_cache
+            .insert(path.clone(), Arc::clone(&artwork));
+        let initial = shell.scene(SurfaceRole::Desktop, 400, 600);
+        assert!(nickel_ui::backend::contains_image_pixels(
+            &initial, &artwork
+        ));
+
+        let press = nickel_input::Point { x: 300.0, y: 300.0 };
+        let drag = nickel_input::Point { x: 0.0, y: 0.0 };
+        assert!(shell.desktop_input(nickel_input::InputEvent::Pointer(
+            nickel_input::PointerEvent::Button {
+                device: nickel_input::DeviceId(1),
+                order: nickel_input::EventOrder(1),
+                button: nickel_input::PointerButton::Primary,
+                edge: nickel_input::KeyEdge::Pressed,
+                position: Some(press),
+            },
+        )));
+        assert!(shell.desktop_input(nickel_input::InputEvent::Pointer(
+            nickel_input::PointerEvent::Motion {
+                device: nickel_input::DeviceId(1),
+                order: nickel_input::EventOrder(2),
+                position: drag,
+                delta: Some(nickel_input::Vector {
+                    x: -300.0,
+                    y: -300.0,
+                }),
+            },
+        )));
+        let dragging = shell.scene(SurfaceRole::Desktop, 400, 600);
+        assert!(nickel_ui::backend::contains_image_pixels(
+            &dragging, &artwork
+        ));
+        let dragging_overlays = shell
+            .desktop_host
+            .application()
+            .frame_overlays(ViewContext::new(
+                Rect::new(0.0, 0.0, 400.0, 600.0),
+                InputModality::Pointer,
+            ));
+        assert!(dragging_overlays.iter().any(|overlay| matches!(
+            overlay,
+            FrameOverlay::SelectionMarquee { fill: Some(color), .. }
+                if (*color >> 24) > 0 && (*color >> 24) < 0xff
+        )));
+
+        // Model the successful watcher reconciliation which follows icon
+        // metadata access, then run the actual scheduled host poll path.
+        let application = shell.desktop_host.application_mut();
+        application.layout.reconcile(vec![(identity, entry)]);
+        application.directory_generation = application.directory_generation.wrapping_add(1);
+        shell.desktop_deadline = Some(Instant::now());
+        let due = Instant::now() + Duration::from_millis(300);
+        let _ = shell.poll_host_deadlines(due);
+        let after_poll = shell.scene(SurfaceRole::Desktop, 400, 600);
+        assert!(nickel_ui::backend::contains_image_pixels(
+            &after_poll,
+            &artwork
+        ));
+        let after_poll_overlays =
+            shell
+                .desktop_host
+                .application()
+                .frame_overlays(ViewContext::new(
+                    Rect::new(0.0, 0.0, 400.0, 600.0),
+                    InputModality::Pointer,
+                ));
+        assert!(after_poll_overlays.iter().any(|overlay| matches!(
+            overlay,
+            FrameOverlay::SelectionMarquee { fill: Some(color), .. }
+                if (*color >> 24) > 0 && (*color >> 24) < 0xff
+        )));
+
+        assert!(shell.desktop_input(nickel_input::InputEvent::Pointer(
+            nickel_input::PointerEvent::Button {
+                device: nickel_input::DeviceId(1),
+                order: nickel_input::EventOrder(3),
+                button: nickel_input::PointerButton::Primary,
+                edge: nickel_input::KeyEdge::Released,
+                position: Some(drag),
+            },
+        )));
+        let released = shell.scene(SurfaceRole::Desktop, 400, 600);
+        assert!(nickel_ui::backend::contains_image_pixels(
+            &released, &artwork
+        ));
+        assert!(
+            shell
+                .desktop_host
+                .application()
+                .frame_overlays(ViewContext::new(
+                    Rect::new(0.0, 0.0, 400.0, 600.0),
+                    InputModality::Pointer,
+                ))
+                .iter()
+                .all(|overlay| !matches!(overlay, FrameOverlay::SelectionMarquee { .. }))
+        );
     }
 
     #[test]
