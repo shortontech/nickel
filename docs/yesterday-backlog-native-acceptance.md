@@ -219,6 +219,16 @@ class followed by a successful 1920 by 1200 `TranscodedWallpaper` fallback. Temp
 registration was removed and the user's dirty primary Windows checkout was not modified. Wallpaper,
 label containment, and icon selection/navigation still require direct visual observation.
 
+On 2026-09-05, an isolated native Windows checkout of `5a26957` plus the source-equivalent launcher
+portability corrections integrated as `2f40bbf` and `f288fea` passed all 142 Nickel File tests, all
+239 Shell tests with two ignored live checks, the 20 shared overlay tests, the production-input
+desktop View Hide/Show regression, and the dedicated `Super+P` projection regression. Strict
+all-target/all-feature Clippy passed for Nickel UI, File, and Shell with warnings denied. The
+Windows projection assertion confirms that unsupported native projection modes remain unavailable
+rather than being simulated. This is native build/contract evidence; attached-display visual and
+interactive acceptance below remains open. The disposable checkout and artifacts were removed, and
+the user's pre-existing dirty Windows checkout was not changed.
+
 - **0136:** test every owned non-terminal shortcut and conflict/failure path, including controller
   equivalents and exact focus restoration. Unsupported virtual-desktop operations must remain
   truthful no-ops.
